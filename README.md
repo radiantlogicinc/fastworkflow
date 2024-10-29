@@ -1,2 +1,2 @@
 # fastworkflow
-A framework for building large-scale, deterministic, interactive workflows with a fault-tolerant, conversational UX
+A framework for rapidly building large-scale, deterministic, interactive workflows with a fault-tolerant, conversational UX. Built on the principle on "Convention over configuration", ALA Ruby on Rails
