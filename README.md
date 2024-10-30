@@ -18,7 +18,7 @@ A framework for rapidly building large-scale, deterministic, interactive workflo
   - Special constrained workflows are used to handle routing and parameter extraction errors
  
 # Future Roadmap
-- Training pipeline for fine-tuning routing and parameter extraction models
+- Training pipeline for prompt-tuning/fine-tuning the models - routing, parameter extraction, response generation, and recommendations
 - Connectors to email, slack, databases etc.
 - A chat assistant for generating workflow application code
 - A chat assistant for generating natural language to SQL mappings
