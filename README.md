@@ -18,6 +18,7 @@ A framework for rapidly building large-scale, deterministic, interactive workflo
   - Special constrained workflows are used to handle routing and parameter extraction errors
  
 # Future Roadmap
+- Connectors to email, slack, databases etc.
 - A chat assistant for generating workflow application code
-- A chat assistant for generating natural language to SQL command dictionaries for database query support
+- A chat assistant for generating natural language to SQL mappings
 - An AI engine to guide users at every step of the workflow with command recommendations
