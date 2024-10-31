@@ -1,0 +1,45 @@
+from typing import Optional
+from pydantic import BaseModel
+
+from fastworkflow.session import Session
+from ..parameter_extraction.signatures import CommandParameters
+
+
+class CommandProcessorOutput(BaseModel):
+    help_info: dict
+
+def process_command(session: Session, input: CommandParameters, payload: Optional[dict] = None) -> CommandProcessorOutput:
+    """
+        Provides helpful information about this type of work-item.
+        If the workitem_type is not provided, it provides information about the current work-item.
+        
+        :param input: The input parameters for the function.
+        """
+
+    workitem_type = input.workitem_type
+    if not workitem_type:
+        workitem = session.get_active_workitem()
+        workitem_type = workitem.type
+
+    help_info = {
+        "workitem_type": workitem_type,
+        "allowable_child_types": {}
+    }
+
+    for child_type, child_size_metadata in session.workflow_definition.allowable_child_types[workitem_type].items():
+        help_info["allowable_child_types"][child_type] = {
+        "min_size": child_size_metadata.min,
+        "max_size": child_size_metadata.max
+        }
+
+    return CommandProcessorOutput(help_info=help_info)
+
+
+if __name__ == "__main__":
+    # create a session id
+    session_id = 1234
+    session = Session(session_id, "shared/tests/lighthouse/workflows/accessreview")
+
+    tool_input = CommandParameters(workitem_type=session.workflow_definition.types)
+    tool_output = process_command(session, tool_input)
+    print(tool_output)

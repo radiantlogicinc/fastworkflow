@@ -1,0 +1,43 @@
+{
+    "encoder_type": "huggingface",
+    "encoder_name": "sentence-transformers/all-MiniLM-L6-v2",
+    "routes": [
+        {
+            "name": "abort",
+            "utterances": [
+                "abort",
+                "abort command",
+                "cancel",
+                "cancel command",
+                "stop",
+                "stop command",
+                "exit",
+                "exit command",
+                "quit",
+                "quit command",
+                "terminate",
+                "terminate command",
+                "end",
+                "end command",
+                "stop extraction",
+                "stop extraction command"
+            ],
+            "description": null,
+            "function_schemas": null,
+            "llm": null,
+            "score_threshold": 0.5,
+            "metadata": {}
+        },
+        {
+            "name": "extract_parameters",
+            "utterances": [
+                "extract parameters"
+            ],
+            "description": null,
+            "function_schemas": null,
+            "llm": null,
+            "score_threshold": 0.5,
+            "metadata": {}
+        }
+    ]
+}
