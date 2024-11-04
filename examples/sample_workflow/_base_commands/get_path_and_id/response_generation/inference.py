@@ -1,4 +1,5 @@
 from typing import Optional
+
 from fastworkflow.command_executor import CommandOutput
 from fastworkflow.session import Session
 
@@ -7,11 +8,13 @@ from .command_implementation import process_command
 
 
 class ResponseGenerator:
-    def __call__(self,
-                 session: Session,
-                 command: str, 
-                 command_parameters: CommandParameters,
-                 payload: Optional[dict] = None) -> CommandOutput:
+    def __call__(
+        self,
+        session: Session,
+        command: str,
+        command_parameters: CommandParameters,
+        payload: Optional[dict] = None,
+    ) -> CommandOutput:
         output = process_command(session, command_parameters, payload)
         return CommandOutput(
             response=f"path: {output.workitem_path}, id: {output.workitem_id}"

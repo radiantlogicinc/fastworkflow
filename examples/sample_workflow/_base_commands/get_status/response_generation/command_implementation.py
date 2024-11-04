@@ -1,15 +1,20 @@
 from typing import Optional
+
 from pydantic import BaseModel
 
 from fastworkflow.session import Session
 from fastworkflow.workflow_definition import NodeType
+
 from ..parameter_extraction.signatures import CommandParameters
 
 
 class CommandProcessorOutput(BaseModel):
     status: str
 
-def process_command(session: Session, input: CommandParameters, payload: Optional[dict] = None) -> CommandProcessorOutput:
+
+def process_command(
+    session: Session, input: CommandParameters, payload: Optional[dict] = None
+) -> CommandProcessorOutput:
     """
     get the review status of the entitlements in this workitem.
 
@@ -20,12 +25,12 @@ def process_command(session: Session, input: CommandParameters, payload: Optiona
     """
     workitem = session.get_active_workitem()
     if workitem.node_type == NodeType.Workflow:
-        status=(
+        status = (
             f"workitem_path: {workitem.path}, workitem_id: {workitem.id}\n"
             f"started: {workitem.has_started}, Complete: {workitem.is_complete}"
         )
     else:
-        status=(
+        status = (
             f"workitem_path: {workitem.path}, workitem_id: {workitem.id}\n"
             f"Complete: {workitem.is_complete}"
         )

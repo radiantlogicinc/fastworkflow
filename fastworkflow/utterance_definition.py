@@ -1,9 +1,11 @@
 import importlib
 import json
 import os
+
 from pydantic import BaseModel, field_validator
 
 from fastworkflow.command_source import CommandSource
+
 
 class Utterances(BaseModel):
     command_source: CommandSource
@@ -15,49 +17,62 @@ class Utterances(BaseModel):
 
     def get_generated_utterances_func(self, workflow_folderpath: str) -> list[str]:
         # Import the module with parent package information
-        module_name = os.path.splitext(os.path.basename(self.generated_utterances_module_filepath))[0]
-        relative_module_filepath = os.path.relpath(self.generated_utterances_module_filepath, workflow_folderpath)
-        package_name = os.path.dirname(relative_module_filepath).replace('/', '.').replace('\\', '.')
+        module_name = os.path.splitext(
+            os.path.basename(self.generated_utterances_module_filepath)
+        )[0]
+        relative_module_filepath = os.path.relpath(
+            self.generated_utterances_module_filepath, workflow_folderpath
+        )
+        package_name = (
+            os.path.dirname(relative_module_filepath)
+            .replace("/", ".")
+            .replace("\\", ".")
+        )
         full_module_name = f"{package_name}.{module_name}"
         spec = importlib.util.find_spec(full_module_name)
         if spec is None:
             raise ImportError(f"Module {full_module_name} not found")
         module = importlib.import_module(full_module_name)
-        
+
         # Get the function from the module and execute it
         return getattr(module, self.generated_utterances_func_name)
 
-    @field_validator('plain_utterances', mode='before')
+    @field_validator("plain_utterances", mode="before")
     def parse_plain_utterances(cls, plain_utterances: list[str]):
         for str in plain_utterances:
             if not str:
-                raise ValueError(f"Plain utterance string cannot be empty")
+                raise ValueError("Plain utterance string cannot be empty")
         return plain_utterances
 
-    @field_validator('template_utterances', mode='before')
+    @field_validator("template_utterances", mode="before")
     def parse_template_utterances(cls, template_utterances: list[str]):
         for str in template_utterances:
             if not str:
-                raise ValueError(f"Plain utterance string cannot be empty")
+                raise ValueError("Plain utterance string cannot be empty")
         return template_utterances
-    
-    @field_validator('generated_utterances_module_filepath', mode='before')
-    def parse_generated_utterances_module_path(cls, generated_utterances_module_filepath: str):
+
+    @field_validator("generated_utterances_module_filepath", mode="before")
+    def parse_generated_utterances_module_path(
+        cls, generated_utterances_module_filepath: str
+    ):
         if not generated_utterances_module_filepath:
-            raise ValueError(f"Generated utterances module path cannot be empty")
+            raise ValueError("Generated utterances module path cannot be empty")
         return generated_utterances_module_filepath
-    
-    @field_validator('generated_utterances_func_name', mode='before')
+
+    @field_validator("generated_utterances_func_name", mode="before")
     def parse_generatd_utterances_func_name(cls, generated_utterances_func_name: str):
         if not generated_utterances_func_name:
-            raise ValueError(f"Generated utterances function name cannot be empty")
+            raise ValueError("Generated utterances function name cannot be empty")
         return generated_utterances_func_name
+
 
 class CommandUtterances(BaseModel):
     map_command_2_utterances: dict[str, Utterances]
 
-    @field_validator('map_command_2_utterances', mode='before')
-    def parse_map_command_2_utterances(cls, map_command_2_utterances: dict[str, Utterances]):
+    @field_validator("map_command_2_utterances", mode="before")
+    def parse_map_command_2_utterances(
+        cls, map_command_2_utterances: dict[str, Utterances]
+    ):
         for key, value in map_command_2_utterances.items():
             if isinstance(value, dict):
                 map_command_2_utterances[key] = Utterances(**value)
@@ -65,22 +80,29 @@ class CommandUtterances(BaseModel):
                 raise ValueError(f"Invalid value for type metadata '{key}'")
         return map_command_2_utterances
 
+
 class UtteranceDefinition(BaseModel):
     workitem_type_2_commandutterances: dict[str, CommandUtterances]
 
-    @field_validator('workitem_type_2_commandutterances', mode='before')
-    def parse_workitem_type_2_commandutterances(cls, workitem_type_2_commandutterances: dict[str, CommandUtterances]):
+    @field_validator("workitem_type_2_commandutterances", mode="before")
+    def parse_workitem_type_2_commandutterances(
+        cls, workitem_type_2_commandutterances: dict[str, CommandUtterances]
+    ):
         for key, value in workitem_type_2_commandutterances.items():
             if isinstance(value, dict):
                 workitem_type_2_commandutterances[key] = CommandUtterances(**value)
-            elif not isinstance(workitem_type_2_commandutterances[key], CommandUtterances):
+            elif not isinstance(
+                workitem_type_2_commandutterances[key], CommandUtterances
+            ):
                 raise ValueError(f"Invalid value for type metadata '{key}'")
         return workitem_type_2_commandutterances
 
     @classmethod
-    def create(cls, workflow_folderpath: str) -> 'UtteranceDefinition':
+    def create(cls, workflow_folderpath: str) -> "UtteranceDefinition":
         workitem_type_2_commandutterances: dict[str, CommandUtterances] = {}
-        cls._populate_utterance_definition("", workflow_folderpath, workitem_type_2_commandutterances)
+        cls._populate_utterance_definition(
+            "", workflow_folderpath, workitem_type_2_commandutterances
+        )
 
         utterance_definition = UtteranceDefinition(
             workitem_type_2_commandutterances=workitem_type_2_commandutterances
@@ -90,79 +112,97 @@ class UtteranceDefinition(BaseModel):
 
     def get_command_names(self, workitem_type: str) -> list[str]:
         if workitem_type in self.workitem_type_2_commandutterances:
-            return list(self.workitem_type_2_commandutterances[workitem_type].map_command_2_utterances.keys())
+            return list(
+                self.workitem_type_2_commandutterances[
+                    workitem_type
+                ].map_command_2_utterances.keys()
+            )
         else:
-            raise ValueError(f"Utterance definition not found for workitem type '{workitem_type}'")
+            raise ValueError(
+                f"Utterance definition not found for workitem type '{workitem_type}'"
+            )
 
-    def get_command_utterances(self, workitem_type: str, command_name: str) -> Utterances:
+    def get_command_utterances(
+        self, workitem_type: str, command_name: str
+    ) -> Utterances:
         if workitem_type in self.workitem_type_2_commandutterances:
             command_utterances = self.workitem_type_2_commandutterances[workitem_type]
             if command_name in command_utterances.map_command_2_utterances:
                 return command_utterances.map_command_2_utterances[command_name]
             else:
-                raise ValueError(f"Utterance definition not found for command '{command_name}'")
+                raise ValueError(
+                    f"Utterance definition not found for command '{command_name}'"
+                )
         else:
-            raise ValueError(f"Utterance definition not found for workitem type '{workitem_type}'")
+            raise ValueError(
+                f"Utterance definition not found for workitem type '{workitem_type}'"
+            )
 
     def write(self, filename: str):
-        with open (filename, 'w') as f:
+        with open(filename, "w") as f:
             f.write(self.model_dump_json(indent=4))
-
 
     @classmethod
     def _populate_utterance_definition(
         cls,
         parent_workitem_type: str,
         workflow_folderpath: str,
-        workitem_type_2_commandutterances: dict[str, CommandUtterances]
+        workitem_type_2_commandutterances: dict[str, CommandUtterances],
     ):
         if not os.path.isdir(workflow_folderpath):
             raise ValueError(f"{workflow_folderpath} must be a directory")
 
-        workitem_type = os.path.basename(workflow_folderpath.rstrip('/'))
+        workitem_type = os.path.basename(workflow_folderpath.rstrip("/"))
         # if workitem_type.startswith("_"):
         #     raise ValueError(f"{workitem_type} starts with an '_'. Names starting with an _ are reserved")
 
         # read the _base_commands folder if it exists
         cls._populate_command_utterances(
             parent_workitem_type,
-            workflow_folderpath, 
-            workitem_type_2_commandutterances, 
-            workitem_type, 
-            CommandSource.BASE_COMMANDS)
+            workflow_folderpath,
+            workitem_type_2_commandutterances,
+            workitem_type,
+            CommandSource.BASE_COMMANDS,
+        )
 
         # read the _commands folder if it exists
         cls._populate_command_utterances(
             parent_workitem_type,
-            workflow_folderpath, 
-            workitem_type_2_commandutterances, 
-            workitem_type, 
-            CommandSource.COMMANDS)
+            workflow_folderpath,
+            workitem_type_2_commandutterances,
+            workitem_type,
+            CommandSource.COMMANDS,
+        )
 
         # Recursively process subfolders
         for command in os.listdir(workflow_folderpath):
             subfolder_path = os.path.join(workflow_folderpath, command)
             if os.path.isdir(subfolder_path) and not command.startswith("_"):
-                cls._populate_utterance_definition(workitem_type, subfolder_path, workitem_type_2_commandutterances)
+                cls._populate_utterance_definition(
+                    workitem_type, subfolder_path, workitem_type_2_commandutterances
+                )
 
     @classmethod
     def _populate_command_utterances(
         cls,
-        parent_workitem_type: str, 
-        workflow_folderpath: str, 
-        workitem_type_2_commandutterances: dict[str, CommandUtterances], 
-        workitem_type: str, 
-        command_source: CommandSource
-        ):
+        parent_workitem_type: str,
+        workflow_folderpath: str,
+        workitem_type_2_commandutterances: dict[str, CommandUtterances],
+        workitem_type: str,
+        command_source: CommandSource,
+    ):
         map_command_2_utterances: dict[str, Utterances] = {}
         # copy the base commands
         if parent_workitem_type:
             command_utterances = workitem_type_2_commandutterances[parent_workitem_type]
-            for command, utterances in command_utterances.map_command_2_utterances.items():
+            for (
+                command,
+                utterances,
+            ) in command_utterances.map_command_2_utterances.items():
                 if utterances.command_source == CommandSource.BASE_COMMANDS:
                     map_command_2_utterances[command] = utterances
 
-        commands_folder = os.path.join(workflow_folderpath, command_source.value)        
+        commands_folder = os.path.join(workflow_folderpath, command_source.value)
         if os.path.exists(commands_folder):
             for command in os.listdir(commands_folder):
                 subfolder_path = os.path.join(commands_folder, command)
@@ -179,29 +219,38 @@ class UtteranceDefinition(BaseModel):
 
                 utterances_folderpath = os.path.join(subfolder_path, "utterances")
                 if os.path.exists(utterances_folderpath):
-                    plain_utterances_filepath = os.path.join(utterances_folderpath, 'plain_utterances.json')
+                    plain_utterances_filepath = os.path.join(
+                        utterances_folderpath, "plain_utterances.json"
+                    )
                     if os.path.exists(plain_utterances_filepath):
-                        with open(plain_utterances_filepath, 'r') as f:
+                        with open(plain_utterances_filepath, "r") as f:
                             plain_utterances = json.load(f)
-                    
-                    template_utterance_filepath = os.path.join(utterances_folderpath, 'template_utterances.json')
+
+                    template_utterance_filepath = os.path.join(
+                        utterances_folderpath, "template_utterances.json"
+                    )
                     if os.path.exists(template_utterance_filepath):
-                        with open(template_utterance_filepath, 'r') as f:
+                        with open(template_utterance_filepath, "r") as f:
                             template_utterances = json.load(f)
 
-                    generated_utterances_module_filepath = os.path.join(utterances_folderpath, 'generate_utterances.py')
+                    generated_utterances_module_filepath = os.path.join(
+                        utterances_folderpath, "generate_utterances.py"
+                    )
                     if not os.path.exists(generated_utterances_module_filepath):
-                        raise ValueError(f"Generated utterances module filepath '{generated_utterances_module_filepath}' not found")
+                        raise ValueError(
+                            f"Generated utterances module filepath '{generated_utterances_module_filepath}' not found"
+                        )
                     else:
                         generated_utterances_func_name = "generate_utterances"
 
                 map_command_2_utterances[command] = Utterances(
                     command_source=command_source,
-                    plain_utterances=plain_utterances, 
+                    plain_utterances=plain_utterances,
                     template_utterances=template_utterances,
                     generated_utterances_module_filepath=generated_utterances_module_filepath,
-                    generated_utterances_func_name=generated_utterances_func_name) 
-            
+                    generated_utterances_func_name=generated_utterances_func_name,
+                )
+
         if workitem_type in workitem_type_2_commandutterances:
             command_utterances = workitem_type_2_commandutterances[workitem_type]
             for command, utterances in map_command_2_utterances.items():
@@ -212,13 +261,17 @@ class UtteranceDefinition(BaseModel):
                     command_utterances[command].template_utterances.extend(
                         utterances.template_utterances
                     )
-                    command_utterances[command].generated_utterances_module_filepath = utterances.generated_utterances_module_filepath
-                    command_utterances[command].generated_utterances_func_name = utterances.generated_utterances_func_name
+                    command_utterances[command].generated_utterances_module_filepath = (
+                        utterances.generated_utterances_module_filepath
+                    )
+                    command_utterances[command].generated_utterances_func_name = (
+                        utterances.generated_utterances_func_name
+                    )
                 else:
                     command_utterances.map_command_2_utterances[command] = utterances
-        else: 
+        else:
             workitem_type_2_commandutterances[workitem_type] = CommandUtterances(
-                map_command_2_utterances = map_command_2_utterances
+                map_command_2_utterances=map_command_2_utterances
             )
 
     class Config:

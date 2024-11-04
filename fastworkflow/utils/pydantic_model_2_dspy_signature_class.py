@@ -1,21 +1,20 @@
-from typing import Annotated, Type, Union
-from typing import get_origin, get_args, Annotated
-
-from pydantic import BaseModel
-from pydantic_core import PydanticUndefined
-from pydantic.fields import FieldInfo
+from typing import Annotated, Type, Union, get_args, get_origin
 
 import dspy
 from dspy import InputField, OutputField, Signature
+from pydantic import BaseModel
+from pydantic.fields import FieldInfo
+from pydantic_core import PydanticUndefined
 
 
 class TypedPredictorSignature:
     @classmethod
     def create(
-            cls,
-            pydantic_class_for_dspy_input_fields: Type[BaseModel],
-            pydantic_class_for_dspy_output_fields: Type[BaseModel],
-            prefix_instructions: str = "") -> Type[Signature]:
+        cls,
+        pydantic_class_for_dspy_input_fields: Type[BaseModel],
+        pydantic_class_for_dspy_output_fields: Type[BaseModel],
+        prefix_instructions: str = "",
+    ) -> Type[Signature]:
         """
         Return a DSPy Signature class that can be used to extract the output parameters.
 
@@ -24,20 +23,29 @@ class TypedPredictorSignature:
         :param prefix_instructions: Optional text that is prefixed to the instructions.
         :return: A DSPy Signature class optimizedfor use with a TypedPredictor to extract structured information.
         """
-        instructions = "Use only the available information to extract the output fields.\n\n"
+        instructions = (
+            "Use only the available information to extract the output fields.\n\n"
+        )
         if prefix_instructions:
             prefix_instructions += "\n\n"
             instructions = prefix_instructions + instructions
 
         dspy_fields = {}
-        for field_name, field in pydantic_class_for_dspy_input_fields.model_fields.items():
-            if field.default and 'typing.Annotated' in str(field.default):
-                raise ValueError(f"Field '{field_name}' is annotated incorrectly. See 'Constraints on compound types' in https://docs.pydantic.dev/latest/concepts/fields/")
+        for (
+            field_name,
+            field,
+        ) in pydantic_class_for_dspy_input_fields.model_fields.items():
+            if field.default and "typing.Annotated" in str(field.default):
+                raise ValueError(
+                    f"Field '{field_name}' is annotated incorrectly. See 'Constraints on compound types' in https://docs.pydantic.dev/latest/concepts/fields/"
+                )
 
-            is_default_value_specified, is_marked_as_optional, inner_field = cls._process_field(field)
+            is_default_value_specified, is_marked_as_optional, inner_field = (
+                cls._process_field(field)
+            )
             if is_marked_as_optional:
                 if field.default is None or field.default is PydanticUndefined:
-                    field.default = 'null'
+                    field.default = "null"
                 field.description = inner_field.description
                 field.examples = inner_field.examples
                 field.metadata = inner_field.metadata
@@ -48,19 +56,26 @@ class TypedPredictorSignature:
             input_field = InputField(desc=field.description)
             dspy_fields[field_name] = (field.annotation, input_field)
 
-        for field_name, field in pydantic_class_for_dspy_output_fields.model_fields.items():
-            if field.default and 'typing.Annotated' in str(field.default):
-                raise ValueError(f"Field '{field_name}' is annotated incorrectly. See 'Constraints on compound types' in https://docs.pydantic.dev/latest/concepts/fields/")
+        for (
+            field_name,
+            field,
+        ) in pydantic_class_for_dspy_output_fields.model_fields.items():
+            if field.default and "typing.Annotated" in str(field.default):
+                raise ValueError(
+                    f"Field '{field_name}' is annotated incorrectly. See 'Constraints on compound types' in https://docs.pydantic.dev/latest/concepts/fields/"
+                )
 
-            is_default_value_specified, is_marked_as_optional, inner_field = cls._process_field(field)
+            is_default_value_specified, is_marked_as_optional, inner_field = (
+                cls._process_field(field)
+            )
             if is_marked_as_optional:
                 if field.default is None or field.default is PydanticUndefined:
-                    field.default = 'null'
+                    field.default = "null"
                 field.description = inner_field.description
                 field.examples = inner_field.examples
                 field.metadata = inner_field.metadata
                 field.json_schema_extra = inner_field.json_schema_extra
-            else:   
+            else:
                 field.validate_default = False
 
             if field.default is PydanticUndefined:
@@ -68,8 +83,10 @@ class TypedPredictorSignature:
                     f"Field '{field_name}' has no default value. Required fields must have a default value. "
                     "Change the field to be Optional or specify a default value."
                 )
-            
-            output_field = OutputField(desc=field.description if field.description else "")
+
+            output_field = OutputField(
+                desc=field.description if field.description else ""
+            )
             dspy_fields[field_name] = (field.annotation, output_field)
 
             instructions += f"When extracting '{field_name}':\n"
@@ -78,24 +95,35 @@ class TypedPredictorSignature:
             examples = field.examples
             if examples:
                 quoted_examples = [f"'{example}'" for example in examples]
-                instructions += f"Example values are: {', '.join(quoted_examples)} etc. "
+                instructions += (
+                    f"Example values are: {', '.join(quoted_examples)} etc. "
+                )
 
             if field.metadata:
-                constraints = [meta for meta in field.metadata if 'Validator' not in str(meta)]
-                if field.json_schema_extra and 'invalid_value' in field.json_schema_extra:
+                constraints = [
+                    meta for meta in field.metadata if "Validator" not in str(meta)
+                ]
+                if (
+                    field.json_schema_extra
+                    and "invalid_value" in field.json_schema_extra
+                ):
                     instructions += f"If the extracted value does not conform to: {constraints}, return: '{field.json_schema_extra['invalid_value']}'."
                 else:
-                    print(f"WARNING - Field: '{field_name}' is missing an 'invalid_value' attribute. Fields with value constraints should specify an 'invalid_value'.")
+                    print(
+                        f"WARNING - Field: '{field_name}' is missing an 'invalid_value' attribute. Fields with value constraints should specify an 'invalid_value'."
+                    )
                     instructions += f"If the extracted value does not conform to: {constraints}, return: '{field.default}'."
 
-            instructions += '\n\n'
+            instructions += "\n\n"
 
         return dspy.Signature(dspy_fields, instructions.strip())
 
     @classmethod
     def _process_field(cls, field: FieldInfo) -> tuple[bool, bool, FieldInfo]:
         is_default_value_specified = not field.is_required()
-        is_marked_as_optional, inner_type, field_info = cls._analyze_field_annotation(field.annotation)
+        is_marked_as_optional, inner_type, field_info = cls._analyze_field_annotation(
+            field.annotation
+        )
         if field_info:
             field_info.annotation = inner_type
             return is_default_value_specified, is_marked_as_optional, field_info
@@ -165,8 +193,8 @@ class TypedPredictorSignature:
 #             except ValidationError:
 #                 return -8888
 
-#         age: Annotated[int, 
-#                     Field(gt=0, lt=150, default=-999, 
+#         age: Annotated[int,
+#                     Field(gt=0, lt=150, default=-999,
 #                             json_schema_extra={'invalid_value': '-8888'}
 #                             )
 #                     ]
@@ -174,7 +202,7 @@ class TypedPredictorSignature:
 #         CommandExtractionInput, PydanticOutput2)
 
 #     class PydanticOutput3(BaseModel):
-#         age: Annotated[int, 
+#         age: Annotated[int,
 #                     Field(gt=0, lt=150,
 #                             json_schema_extra={'invalid_value': '-8888'}
 #                             )
@@ -183,7 +211,7 @@ class TypedPredictorSignature:
 #         CommandExtractionInput, PydanticOutput3)
 
 #     class PydanticOutput4(BaseModel):
-#         age: Optional[Annotated[int, 
+#         age: Optional[Annotated[int,
 #                     Field(gt=0, lt=150, default="null",
 #                             json_schema_extra={'invalid_value': '-8888'}
 #                             )]]
@@ -199,8 +227,8 @@ class TypedPredictorSignature:
 #             except ValidationError:
 #                 return 'INVALID'
 
-#         email: Annotated[str, 
-#                         Field(default='NOT_FOUND', 
+#         email: Annotated[str,
+#                         Field(default='NOT_FOUND',
 #                             pattern=r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$',
 #                             json_schema_extra={'invalid_value': 'INVALID'}
 #                             )

@@ -2,14 +2,14 @@ from typing import Optional
 
 from fastworkflow.command_executor import CommandOutput
 from fastworkflow.session import Session
+
 from .command_implementation import process_command
 
 
-class ResponseGenerator():
-    def __call__(self,
-                 session: Session,
-                 command: str, 
-                 payload: Optional[dict] = None) -> CommandOutput:
+class ResponseGenerator:
+    def __call__(
+        self, session: Session, command: str, payload: Optional[dict] = None
+    ) -> CommandOutput:
         output = process_command(session, payload)
 
         # Format the list of commands

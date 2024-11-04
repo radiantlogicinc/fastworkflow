@@ -1,14 +1,18 @@
 from typing import Optional, Tuple
+
 from pydantic import BaseModel
 
 from fastworkflow.session import Session
+
 
 class CommandParameters(BaseModel):
     for_next_workitem: bool = False
     skip_completed: bool = True
 
+
 class InputForParamExtraction(BaseModel):
     """Extract the command parameters from the command"""
+
     command: str
 
     @classmethod
@@ -18,7 +22,9 @@ class InputForParamExtraction(BaseModel):
         )
 
     @classmethod
-    def validate_parameters(cls, session: Session, cmd_parameters: CommandParameters) -> Tuple[bool, str]:
+    def validate_parameters(
+        cls, session: Session, cmd_parameters: CommandParameters
+    ) -> Tuple[bool, str]:
         """Nothing to validate"""
         return (True, None)
 

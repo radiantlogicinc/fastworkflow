@@ -1,5 +1,6 @@
 from fastworkflow.session import Session
 from fastworkflow.utils.parameterize_func_decorator import parameterize
+
 from ..parameter_extraction.signatures import CommandParameters
 
 
@@ -7,7 +8,7 @@ def generate_command_inputs(session: Session) -> list[CommandParameters]:
     workitem_paths = []
     for workitem_type in session.workflow_definition.types:
         workitem_paths.append(f"{workitem_type}")
-    
+
     # add full paths
     workitem = session.workflow.next_workitem(skip_completed=False)
     while workitem is not None:
@@ -19,11 +20,13 @@ def generate_command_inputs(session: Session) -> list[CommandParameters]:
         for workitem_path in workitem_paths
     ]
 
+
 @parameterize(command_name=["get_status"])
 def generate_utterances(session: Session, command_name: str) -> list[str]:
     utterances_obj = session.utterance_definition.get_command_utterances(
-                    session.root_workitem_type, command_name)    
-    
+        session.root_workitem_type, command_name
+    )
+
     utterance_list: list[str] = utterances_obj.plain_utterances.copy()
 
     inputs: list[CommandParameters] = generate_command_inputs(session)
@@ -38,20 +41,24 @@ def generate_utterances(session: Session, command_name: str) -> list[str]:
 
     return utterance_list
 
+
 if __name__ == "__main__":
     import os
 
     # create a session
     session_id = 1234
 
-    workflow_folderpath = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../'))
+    workflow_folderpath = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "../../../")
+    )
     if not os.path.isdir(workflow_folderpath):
-        raise ValueError(f"The provided folderpath '{workflow_folderpath}' is not valid. Please provide a valid directory.")
+        raise ValueError(
+            f"The provided folderpath '{workflow_folderpath}' is not valid. Please provide a valid directory."
+        )
 
     session = Session(session_id, workflow_folderpath)
 
     generated_utterances = generate_utterances(session)
-    
+
     for utterance in generated_utterances:
         print(utterance)
-

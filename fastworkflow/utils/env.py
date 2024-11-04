@@ -19,6 +19,7 @@ def get_env_variable(var_name: str, default: Optional[str] = None) -> str:
             from fastworkflow.utils.logging import logger
         except ImportError:
             import logging
+
             logger = logging.getLogger("fastWorkflow")
         logger.critical("%s", error_msg)
 
