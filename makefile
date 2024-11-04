@@ -2,10 +2,12 @@ SHELL = /bin/bash
 
 .EXPORT_ALL_VARIABLES:
 
-.PHONY: _include-env
+.PHONY: _gen-env lint publish-testpypi publish
 
-_include-env:
-    include ./.env
+_gen-env:
+	chmod +x ./gen-env.sh
+	./gen-env.sh
+	include ./.env
 
 lint:
 	py3clean .
