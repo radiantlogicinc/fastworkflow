@@ -1,5 +1,5 @@
 # fastWorkflow
-A framework for rapidly building large-scale, deterministic, interactive workflows with a fault-tolerant, conversational UX. 
+A framework for rapidly building large-scale, deterministic, interactive workflows with a fault-tolerant, conversational UX and AI-powered recommendations.
 
 - Built on the principle on "Convention over configuration", ALA Ruby on Rails
 - Uses:  
@@ -16,6 +16,8 @@ A framework for rapidly building large-scale, deterministic, interactive workflo
 - Users are guided through the workflow but have complete control over navigation
   - Workflow navigation and command execution are exposed via a chat interface
   - Special constrained workflows are used to handle routing and parameter extraction errors
+- AI-powered recommendations after every command interaction
+  - Recommendations are generated AFTER a command has been processed. The user has complete control over the workflow and discretion over whether to follow a recommendation or take a different action.
  
 # Future Roadmap
 - Training pipeline for prompt-tuning/fine-tuning the models - routing, parameter extraction, response generation, and recommendations
