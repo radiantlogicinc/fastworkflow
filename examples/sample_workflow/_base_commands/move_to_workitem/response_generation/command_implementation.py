@@ -19,7 +19,7 @@ class CommandProcessorOutput(BaseModel):
 
 
 def process_command(
-    session: Session, input: CommandParameters, payload: Optional[dict] = None
+    session: Session, input: CommandParameters
 ) -> CommandProcessorOutput:
     """
     Move to the work-item specified by the given path and optional id.

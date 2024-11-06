@@ -12,22 +12,24 @@ class OutputOfProcessCommand(BaseModel):
 
 
 def process_command(
-    session: Session, command: str, payload: Optional[dict] = None
+    caller_session: Session, command: str
 ) -> OutputOfProcessCommand:
     """Extracts the parameter value from the command."""
-    input_for_param_extraction_class = payload["input_for_param_extraction_class"]
+    param_extraction_info = caller_session.parameter_extraction_info
+
+    input_for_param_extraction_class = param_extraction_info["input_for_param_extraction_class"]
     input_for_param_extraction = input_for_param_extraction_class.create(
-        session=session, command=command, payload=payload
+        session=caller_session, command=command
     )
 
-    command_parameters_class = payload["command_parameters_class"]
-    parameter_extraction_func = payload["parameter_extraction_func"]
+    command_parameters_class = param_extraction_info["command_parameters_class"]
+    parameter_extraction_func = param_extraction_info["parameter_extraction_func"]
     _, input_obj = parameter_extraction_func(
-        session, input_for_param_extraction, command_parameters_class
+        caller_session, input_for_param_extraction, command_parameters_class
     )
 
-    parameter_validation_func = payload["parameter_validation_func"]
-    is_valid, error_msg = parameter_validation_func(session, input_obj)
+    parameter_validation_func = param_extraction_info["parameter_validation_func"]
+    is_valid, error_msg = parameter_validation_func(caller_session, input_obj)
     if not is_valid:
         return OutputOfProcessCommand(parameter_is_valid=False, error_msg=error_msg)
 

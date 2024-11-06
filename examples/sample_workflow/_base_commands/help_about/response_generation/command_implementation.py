@@ -12,7 +12,7 @@ class CommandProcessorOutput(BaseModel):
 
 
 def process_command(
-    session: Session, input: CommandParameters, payload: Optional[dict] = None
+    session: Session, input: CommandParameters
 ) -> CommandProcessorOutput:
     """
     Provides helpful information about this type of work-item.

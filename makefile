@@ -2,12 +2,12 @@ SHELL = /bin/bash
 
 .EXPORT_ALL_VARIABLES:
 
-.PHONY: _gen-env lint publish-testpypi publish
+.PHONY: gen-env lint publish-testpypi publish
 
-_gen-env:
+gen-env:
 	chmod +x ./gen-env.sh
 	./gen-env.sh
-	include ./.env
+    include ./.env
 
 lint:
 	py3clean .
@@ -19,13 +19,13 @@ lint:
 	mypy .
 	bandit -c pyproject.toml -r .
 
-publish-testpypi:
+publish-testpypi: gen-env
 	poetry config repositories.testpypi https://test.pypi.org/legacy/
 	poetry config pypi-token.testpypi $(TESTPYPI_ACCESS_TOKEN)
 	poetry build
 	poetry publish --repository testpypi
 
-publish:
+publish: gen-env
 	poetry config pypi-token.pypi $(PYPI_ACCESS_TOKEN)
 	poetry build
 	poetry publish

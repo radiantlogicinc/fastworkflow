@@ -18,7 +18,7 @@ class ResponseGenerator:
         command_parameters: CommandParameters,
         payload: Optional[dict] = None,
     ) -> CommandOutput:
-        output = process_command(session, command_parameters, payload)
+        output = process_command(session, command_parameters)
 
         DSPY_LM_MODEL = get_env_variable("DSPY_LM_MODEL")
         lm = dspy.LM(DSPY_LM_MODEL)

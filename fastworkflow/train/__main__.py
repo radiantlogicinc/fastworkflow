@@ -26,5 +26,5 @@ if __name__ == "__main__":
     session = Session(session_id, args.workflow_folderpath)
 
     encoder = HuggingFaceEncoder()
-    semantic_router_definition = SemanticRouterDefinition(session, encoder)
-    semantic_router_definition.train()
+    semantic_router_definition = SemanticRouterDefinition(encoder, args.workflow_folderpath)
+    semantic_router_definition.train(session)

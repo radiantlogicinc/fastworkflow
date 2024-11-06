@@ -14,7 +14,7 @@ class InputForParamExtraction(BaseModel):
     current_context: str
 
     @classmethod
-    def create(cls, session: Session, command: str, payload: Optional[dict] = None):
+    def create(cls, session: Session, command: str):
         cls.__doc__ = (
             "Given the following list of workitem types: {workitem_types}\n"
             "Infer the workitem type from the command; and failing that, from the current context\n"

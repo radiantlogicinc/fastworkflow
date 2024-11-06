@@ -8,11 +8,10 @@ from fastworkflow.session import Session
 
 
 class SemanticRouterDefinition:
-    def __init__(self, session: Session, encoder: HuggingFaceEncoder):
+    def __init__(self, encoder: HuggingFaceEncoder, workflow_folderpath: str):
         self._encoder = encoder
-        self._session = session
         self._route_layers_folderpath = os.path.join(
-            session.workflow_folderpath, "___route_layers"
+            workflow_folderpath, "___route_layers"
         )
 
     def get_route_layer(self, workitem_type: str) -> RouteLayer:
@@ -21,9 +20,9 @@ class SemanticRouterDefinition:
         )
         return RouteLayer.from_json(route_layer_filepath)
 
-    def train(self):
-        for workitem_type in self._session.workflow_definition.types:
-            command_names = self._session.command_routing_definition.get_command_names(
+    def train(self, session: Session):
+        for workitem_type in session.workflow_definition.types:
+            command_names = session.command_routing_definition.get_command_names(
                 workitem_type
             )
 
@@ -31,13 +30,13 @@ class SemanticRouterDefinition:
 
             routes = []
             for command_name in command_names:
-                utterances = self._session.utterance_definition.get_command_utterances(
+                utterances = session.utterance_definition.get_command_utterances(
                     workitem_type, command_name
                 )
                 utterances_func = utterances.get_generated_utterances_func(
-                    self._session.workflow_folderpath
+                    session.workflow_folderpath
                 )
-                utterance_list = utterances_func(self._session)
+                utterance_list = utterances_func(session)
 
                 utterance_command_tuples.extend(
                     list(zip(utterance_list, [command_name] * len(utterance_list)))

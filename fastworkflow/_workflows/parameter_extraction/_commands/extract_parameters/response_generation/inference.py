@@ -8,16 +8,26 @@ from ..response_generation.command_implementation import process_command
 
 class ResponseGenerator:
     def __call__(
-        self, session: Session, command: str, payload: Optional[dict] = None
+        self, session: Session, command: str
     ) -> CommandOutput:
-        if payload["error_msg"]:
+        caller_session = session.caller_session
+        if not caller_session:
+            raise ValueError("caller_session MUST be set for the parameter extraction workflow")
+        if not caller_session.parameter_extraction_info:
+            raise ValueError("parameter_extraction_info MUST be set in the caller session for the parameter extraction workflow")       
+        if "error_msg" not in caller_session.parameter_extraction_info:
+            raise ValueError("error_msg key MUST be set in the caller session's parameter_extraction_info for the parameter extraction workflow")
+        
+        error_msg = caller_session.parameter_extraction_info["error_msg"]
+        if error_msg:   
+            caller_session.parameter_extraction_info["error_msg"] = None          
             return CommandOutput(
-                response=payload["error_msg"], payload={"abort_command": False}
+                response=error_msg, payload={"abort_command": False}
             )
 
-        # Note that we are passing the calling workflow's session (payload["session"]) to process_command
+        # Note that we are passing the caller workflow's session to process_command
         output_of_process_command = process_command(
-            payload["session"], command, payload
+            caller_session, command
         )
         if output_of_process_command.parameter_is_valid:
             session.workflow.mark_as_complete()

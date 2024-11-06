@@ -13,7 +13,7 @@ class CommandProcessorOutput(BaseModel):
 
 
 def process_command(
-    session: Session, input: CommandParameters, payload: Optional[dict] = None
+    session: Session, input: CommandParameters
 ) -> CommandProcessorOutput:
     """
     Get the path and id of the current or next work-item.

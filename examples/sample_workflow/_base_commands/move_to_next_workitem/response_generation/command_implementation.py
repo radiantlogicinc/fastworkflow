@@ -19,7 +19,7 @@ class CommandProcessorOutput(BaseModel):
 
 
 def process_command(
-    session: Session, input: CommandParameters, payload: Optional[dict] = None
+    session: Session, input: CommandParameters
 ) -> CommandProcessorOutput:
     """
     Move to the next work-item. Skip next work-items that are completed if the skip_completed flag is set to True.

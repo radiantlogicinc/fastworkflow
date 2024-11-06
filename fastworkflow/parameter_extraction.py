@@ -1,4 +1,5 @@
 import os
+import random
 from typing import Optional, Tuple, Type
 
 import dspy
@@ -16,8 +17,15 @@ def extract_command_parameters(
     session: Session,
     input_for_param_extraction: BaseModel,
     command_parameters_class: Type[BaseModel],
-    extraction_failure_workflow: Optional[str] = None,
+    extraction_failure_workflow: Optional[str] = None
 ) -> Tuple[bool, BaseModel]:
+    """
+    This function is called when the command parameters are invalid.
+    It extracts the command parameters from the command using DSPy.
+    If the extraction fails, it starts the extraction failure workflow.
+    Note: this function is called from the regular workflow as well as the extraction failure workflow.
+    If it is called from the extraction failure workflow, the session is the source workflow session which is basically what we want.
+    """
     try:
         dspy_signature_class = TypedPredictorSignature.create(
             input_for_param_extraction,
@@ -52,19 +60,27 @@ def extract_command_parameters(
     parameter_extraction_workflow_folderpath = os.path.join(
         fastworkflow_folder, "_workflows", extraction_failure_workflow
     )
+
+    session.parameter_extraction_info = {
+        "error_msg": error_msg,
+        "input_for_param_extraction_class": type(input_for_param_extraction),
+        "command_parameters_class": command_parameters_class,
+        "parameter_extraction_func": extract_command_parameters,
+        "parameter_validation_func": input_for_param_extraction.validate_parameters,
+    }
+
+    wf_session = Session(-random.randint(1, 100000000), 
+                         parameter_extraction_workflow_folderpath, 
+                         session.env_file_path)
+    
     command_output = start_workflow(
-        parameter_extraction_workflow_folderpath,
+        wf_session,
         startup_command="extract parameter",
-        payload={
-            "error_msg": error_msg,
-            "session": session,
-            "input_for_param_extraction_class": type(input_for_param_extraction),
-            "command_parameters_class": command_parameters_class,
-            "parameter_extraction_func": extract_command_parameters,
-            "parameter_validation_func": input_for_param_extraction.validate_parameters,
-        },
+        caller_session=session,
         keep_alive=False,
     )
+
+    session.parameter_extraction_info = None
 
     abort_command = (
         command_output.payload["abort_command"]

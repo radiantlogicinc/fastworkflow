@@ -1,44 +1,39 @@
 import os
+import random
 from typing import Optional, Tuple, Type
 
 from pydantic import BaseModel
-from semantic_router import RouteLayer
 
+from fastworkflow.session import Session
 from fastworkflow._commands.get_command_name.parameter_extraction import (
     signatures as pes,
 )
-from fastworkflow.session import Session
 
 
-class ExtractCommandNameFromCommandParameters:
-    def __init__(self, map_workitem_type_2_route_layer: dict[str, RouteLayer]):
-        self.map_workitem_type_2_route_layer = map_workitem_type_2_route_layer
-
-    def extract_commmand_name(
-        self,
-        session: Session,
-        input_for_param_extraction: pes.InputForParamExtraction,
-        _: Type[BaseModel],
-    ) -> Tuple[bool, BaseModel]:
-        if not self.map_workitem_type_2_route_layer:
-            raise ValueError("map_workitem_type_2_route_layer is not set")
-
-        active_workitem_type = session.get_active_workitem().type
-        route_layer = self.map_workitem_type_2_route_layer[active_workitem_type]
-        # Use semantic router to decipher the command name
-        command_name = route_layer(input_for_param_extraction.command).name
-        cmd_parameters = pes.CommandParameters(command_name=command_name)
-        return (False, cmd_parameters)
+def extract_commmand_name_from_command_parameters(
+    caller_session: Session,
+    input_for_param_extraction: pes.InputForParamExtraction,
+    _: Type[BaseModel],
+) -> Tuple[bool, BaseModel]:
+    """
+    This function is called when the command parameters are invalid.
+    It extracts the command name from the command using the semantic router.
+    Note: This function is called from the extraction failure workflow, so the source workflow folderpath and active workitem type are needed.
+    """
+    route_layer = caller_session.get_route_layer(caller_session.get_active_workitem().type)
+    # Use semantic router to decipher the command name
+    command_name = route_layer(input_for_param_extraction.command).name
+    cmd_parameters = pes.CommandParameters(command_name=command_name)
+    return (False, cmd_parameters)
 
 
 def extract_command_name(
     session: Session,
-    map_workitem_type_2_route_layer: dict[str, RouteLayer],
     command: str,
     extraction_failure_workflow: Optional[str],
 ) -> Tuple[bool, str]:
     active_workitem_type = session.get_active_workitem().type
-    route_layer = map_workitem_type_2_route_layer[active_workitem_type]
+    route_layer = session.get_route_layer(active_workitem_type)
     # Use semantic router to decipher the command name
     command_name = route_layer(command).name
     if not command_name:
@@ -65,23 +60,26 @@ def extract_command_name(
         fastworkflow_folder, "_workflows", extraction_failure_workflow
     )
 
-    extract_command_name_from_command_parameters = (
-        ExtractCommandNameFromCommandParameters(map_workitem_type_2_route_layer)
-    )
+    session.parameter_extraction_info = {
+        "error_msg": error_msg,
+        "input_for_param_extraction_class": pes.InputForParamExtraction,
+        "command_parameters_class": pes.CommandParameters,
+        "parameter_extraction_func": extract_commmand_name_from_command_parameters,
+        "parameter_validation_func": pes.InputForParamExtraction.validate_parameters,
+    }
+
+    wf_session = Session(-random.randint(1, 100000000), 
+                         parameter_extraction_workflow_folderpath, 
+                         session.env_file_path)
 
     command_output = start_workflow(
-        parameter_extraction_workflow_folderpath,
+        wf_session,
         startup_command="extract parameter",
-        payload={
-            "error_msg": error_msg,
-            "session": session,
-            "input_for_param_extraction_class": pes.InputForParamExtraction,
-            "command_parameters_class": pes.CommandParameters,
-            "parameter_extraction_func": extract_command_name_from_command_parameters.extract_commmand_name,
-            "parameter_validation_func": pes.InputForParamExtraction.validate_parameters,
-        },
+        caller_session=session,
         keep_alive=False,
     )
+
+    session.parameter_extraction_info = None
 
     abort_command = command_output.payload["abort_command"]
     if abort_command:

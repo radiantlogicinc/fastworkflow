@@ -13,7 +13,7 @@ class CommandProcessorOutput(BaseModel):
 
 
 def process_command(
-    session: Session, input: CommandParameters, payload: Optional[dict] = None
+    session: Session, input: CommandParameters
 ) -> CommandProcessorOutput:
     """
     get the review status of the entitlements in this workitem.

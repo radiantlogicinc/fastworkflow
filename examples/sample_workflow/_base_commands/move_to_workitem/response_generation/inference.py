@@ -15,7 +15,7 @@ class ResponseGenerator:
         command_parameters: CommandParameters,
         payload: Optional[dict] = None,
     ) -> CommandOutput:
-        output = process_command(session, command_parameters, payload)
+        output = process_command(session, command_parameters)
 
         return CommandOutput(
             response=(

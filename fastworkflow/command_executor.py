@@ -49,7 +49,6 @@ class CommandExecutor:
         workitem_type: str,
         command_name: str,
         command: str,
-        payload: Optional[dict] = None,
     ) -> CommandOutput:
         if not workitem_type:
             raise ValueError("Workitem type cannot be None.")
@@ -86,7 +85,7 @@ class CommandExecutor:
         )
         if input_for_param_extraction_class and command_parameters_class:
             input_for_parameter_extraction = input_for_param_extraction_class.create(
-                session=self._session, command=command, payload=payload
+                session=self._session, command=command
             )
             abort_command, input_obj = extract_command_parameters(
                 self._session,
@@ -100,7 +99,7 @@ class CommandExecutor:
 
         if input_obj:
             return response_generation_object(
-                self._session, command, input_obj, payload
+                self._session, command, input_obj
             )
         else:
-            return response_generation_object(self._session, command, payload)
+            return response_generation_object(self._session, command)

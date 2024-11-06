@@ -10,7 +10,7 @@ from ...extract_parameters.response_generation.command_implementation import (
 
 class ResponseGenerator:
     def __call__(
-        self, session: Session, command: str, payload: Optional[dict] = None
+        self, session: Session, command: str
     ) -> CommandOutput:
         return CommandOutput(
             success=False, response="Command aborted", payload={"abort_command": True}

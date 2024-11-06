@@ -15,7 +15,7 @@ class InputForParamExtraction(BaseModel):
     command: str
 
     @classmethod
-    def create(cls, session: Session, command: str, payload: Optional[dict] = None):
+    def create(cls, session: Session, command: str):
         return cls(
             command=command,
         )

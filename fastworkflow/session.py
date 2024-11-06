@@ -7,6 +7,9 @@ from typing import Optional, Union
 from dotenv import load_dotenv
 from speedict import Rdict
 
+from semantic_router.encoders import HuggingFaceEncoder
+from semantic_router import RouteLayer
+
 from fastworkflow.command_routing_definition import CommandRoutingDefinition
 from fastworkflow.utils.logging import logger
 from fastworkflow.utterance_definition import UtteranceDefinition
@@ -45,7 +48,8 @@ class Session:
     """Session class"""
 
     # define an init method
-    def __init__(self, session_id: int, workflow_folderpath: str):
+    def __init__(self, session_id: int, workflow_folderpath: str, 
+                 env_file_path: str, context: dict = {}):
         """initialize the Session class"""
         if not os.path.exists(workflow_folderpath):
             raise ValueError(f"The folder path {workflow_folderpath} does not exist")
@@ -56,8 +60,7 @@ class Session:
         # THIS IS IMPORTANT: it allows relative import of modules in the code inside workflow_folderpath
         sys.path.append(workflow_folderpath)
 
-        # Load environment variables from the .env file in the workflow folder path
-        env_file_path = os.path.join(workflow_folderpath, ".env")
+        # Load environment variables from the .env file in the folder path from where this script is run
         load_dotenv(env_file_path)
 
         speedict_folderpath = os.path.join(workflow_folderpath, SPEEDDICT_FOLDERNAME)
@@ -67,12 +70,25 @@ class Session:
 
         self._session_id = session_id
         self._workflow_folderpath = workflow_folderpath
+        self._env_file_path = env_file_path
+
         self._root_workitem_type = root_workitem_type
         self._workflow_definition = WorkflowDefinition.create(workflow_folderpath)
         self._command_routing_definition = CommandRoutingDefinition.create(
             workflow_folderpath
         )
         self._utterance_definition = UtteranceDefinition.create(workflow_folderpath)
+
+        # importing here to avoid circular import
+        from fastworkflow.semantic_router_definition import SemanticRouterDefinition
+
+        encoder = HuggingFaceEncoder()
+        semantic_router = SemanticRouterDefinition(encoder, self.workflow_folderpath)
+        map_workitem_type_2_route_layer: dict[str, RouteLayer] = {}
+        for workitem_type in self._workflow_definition.types:
+            route_layer = semantic_router.get_route_layer(workitem_type)
+            map_workitem_type_2_route_layer[workitem_type] = route_layer
+        self._map_workitem_type_2_route_layer = map_workitem_type_2_route_layer
 
         self._workflow = Workflow(
             workflow_definition=self._workflow_definition,
@@ -81,7 +97,13 @@ class Session:
         )
 
         # let's create the context if it does not exist
-        self.get_context()
+        context_dict = self.get_context()
+        if context:
+            context_dict.update(context)
+            self.set_context(context_dict)
+
+        # set from the workflow
+        self._caller_session = None
 
     @property
     def session_id(self) -> int:
@@ -92,6 +114,11 @@ class Session:
     def workflow_folderpath(self) -> str:
         """get the workflow folderpath"""
         return self._workflow_folderpath
+
+    @property
+    def env_file_path(self) -> str:
+        """get the env file path"""
+        return self._env_file_path
 
     @property
     def root_workitem_type(self) -> str:
@@ -118,6 +145,37 @@ class Session:
         """get the workflow"""
         return self._workflow
 
+    @property
+    def caller_session(self) -> Optional["Session"]:
+        """get the caller session"""
+        return self._caller_session
+
+    @caller_session.setter
+    @property
+    def caller_session(self) -> Optional["Session"]:
+        """get the caller session"""
+        return self._caller_session
+
+    @caller_session.setter
+    def caller_session(self, value: Optional["Session"]) -> None:
+        """set the caller session, can only be set once"""
+        if self._caller_session is None:
+            if not value:
+                raise ValueError("caller_session must be a valid Session object")
+            self._caller_session = value
+        else:
+            raise AttributeError("caller_session can only be set once.")
+
+    @property
+    def parameter_extraction_info(self) -> Optional[dict]:
+        """get the parameter extraction information"""
+        return self._parameter_extraction_info
+
+    @parameter_extraction_info.setter
+    def parameter_extraction_info(self, value: Optional[dict]) -> None:
+        """set the parameter extraction information"""
+        self._parameter_extraction_info = value
+
     def get_active_workitem(self) -> Optional[Union[Workitem, Workflow]]:
         """get the active workitem"""
         context = self.get_context()
@@ -138,11 +196,11 @@ class Session:
         contextdb_folderpath = self.get_contextdb_folderpath(self.session_id)
         keyvalue_db = Rdict(contextdb_folderpath)
 
-        context = keyvalue_db["context"] if "context" in keyvalue_db else None
+        context = keyvalue_db["context"] if "context" in keyvalue_db else {}
         if not context:
             context = {
                 "active_workitem_path": "/",
-                "active_workitem_id": None,
+                "active_workitem_id": None
             }
             keyvalue_db["context"] = context
 
@@ -184,3 +242,7 @@ class Session:
             SPEEDDICT_FOLDERNAME,
             f"/function_cache/{function_name}",
         )
+
+    def get_route_layer(self, workitem_type: str) -> RouteLayer:
+        """get the route layer for a given workitem type"""
+        return self._map_workitem_type_2_route_layer[workitem_type]

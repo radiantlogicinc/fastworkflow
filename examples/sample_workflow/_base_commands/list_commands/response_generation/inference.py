@@ -8,7 +8,7 @@ from .command_implementation import process_command
 
 class ResponseGenerator:
     def __call__(
-        self, session: Session, command: str, payload: Optional[dict] = None
+        self, session: Session, command: str
     ) -> CommandOutput:
         output = process_command(session, payload)
 
