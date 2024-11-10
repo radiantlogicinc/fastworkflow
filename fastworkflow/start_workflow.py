@@ -28,23 +28,23 @@ def start_workflow(
 
     if startup_command:
         command_output: list[CommandResponse] = command_router.route_command(startup_command)
-        for command_response in command_output:
-            if not command_response.response:
-                continue
-            print(
-                f"{Fore.GREEN}{Style.BRIGHT}{session.root_workitem_type.upper()} AI>{Style.RESET_ALL}{Fore.GREEN} {command_response.response}{Style.RESET_ALL}"
-            )
-            for artifact_name, artifact_value in command_response.artifacts.items():
-                if artifact_name == "abort_command":
+        if not session.workflow.is_complete or keep_alive:
+            for command_response in command_output:
+                if not command_response.response:
                     continue
                 print(
-                    f"{Fore.CYAN}{Style.NORMAL}Artifact: {artifact_name}={artifact_value}{Style.RESET_ALL}"
+                    f"{Fore.GREEN}{Style.BRIGHT}{session.root_workitem_type.upper()} AI>{Style.RESET_ALL}{Fore.GREEN} {command_response.response}{Style.RESET_ALL}"
                 )
-            for recommendation in command_response.recommendations:
-                print(
-                    f"{Fore.MAGENTA}{Style.NORMAL}Recommendation: {recommendation}{Style.RESET_ALL}"
-                )
-
+                for artifact_name, artifact_value in command_response.artifacts.items():
+                    if artifact_name == "abort_command":
+                        continue
+                    print(
+                        f"{Fore.CYAN}{Style.NORMAL}Artifact: {artifact_name}={artifact_value}{Style.RESET_ALL}"
+                    )
+                for recommendation in command_response.recommendations:
+                    print(
+                        f"{Fore.MAGENTA}{Style.NORMAL}Recommendation: {recommendation}{Style.RESET_ALL}"
+                    )
 
     while not session.workflow.is_complete or keep_alive:
         user_command = input(
