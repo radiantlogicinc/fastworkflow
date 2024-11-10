@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Any, Optional, Union
 
 from pydantic import BaseModel
 
@@ -12,10 +12,17 @@ from fastworkflow.session import Session
 # from outlines.models import Transformers as outlines_models_Transformers, transformers as outlines_models_transformers
 
 
-class CommandOutput(BaseModel):
-    success: bool = True
+class Recommendation(BaseModel):
+    """Recommendation"""
+    command_name: str
+    description: str
+    parameters: dict[str, Optional[Union[str, bool, int, float]]] = {}
+
+class CommandResponse(BaseModel):
     response: str
-    payload: Optional[dict] = None
+    success: bool = True
+    artifacts: dict[str, Any] = {}
+    recommendations: list[Recommendation] = []
 
 
 class CommandExecutor:
@@ -49,7 +56,7 @@ class CommandExecutor:
         workitem_type: str,
         command_name: str,
         command: str,
-    ) -> CommandOutput:
+    ) -> list[CommandResponse]:
         if not workitem_type:
             raise ValueError("Workitem type cannot be None.")
         if not command_name:
@@ -95,7 +102,9 @@ class CommandExecutor:
             )
 
         if abort_command:
-            return CommandOutput(success=False, response="Command aborted")
+            return [
+                CommandResponse(success=False, response="Command aborted")
+            ]
 
         if input_obj:
             return response_generation_object(

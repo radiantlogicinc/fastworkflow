@@ -1,6 +1,6 @@
 from typing import Optional
 
-from fastworkflow.command_executor import CommandOutput
+from fastworkflow.command_executor import CommandResponse
 from fastworkflow.session import Session
 
 from ..parameter_extraction.signatures import CommandParameters
@@ -12,13 +12,14 @@ class ResponseGenerator:
         self,
         session: Session,
         command: str,
-        command_parameters: CommandParameters,
-        payload: Optional[dict] = None,
-    ) -> CommandOutput:
+        command_parameters: CommandParameters
+    ) -> list[CommandResponse]:
         output = process_command(session, command_parameters)
-        return CommandOutput(
-            response=f"path: {output.workitem_path}, id: {output.workitem_id}"
-        )
+        return [
+            CommandResponse(
+                response=f"path: {output.workitem_path}, id: {output.workitem_id}"
+            )
+        ]
 
 
 # if __name__ == "__main__":

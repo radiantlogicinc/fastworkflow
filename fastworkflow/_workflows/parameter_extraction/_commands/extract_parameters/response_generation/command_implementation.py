@@ -43,5 +43,5 @@ if __name__ == "__main__":
         session_id, "shared/tests/lighthouse/workflows/_parameter_extraction"
     )
 
-    tool_output = process_command(session, "extract_parameters", payload=None)
+    tool_output = process_command(session, "extract_parameters")
     print(tool_output)

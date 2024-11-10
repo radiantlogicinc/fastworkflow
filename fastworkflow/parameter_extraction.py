@@ -80,16 +80,19 @@ def extract_command_parameters(
         keep_alive=False,
     )
 
+    if len(command_output) > 1:
+        raise ValueError("Multiple command responses returned from parameter extraction workflow")
+
     session.parameter_extraction_info = None
 
     abort_command = (
-        command_output.payload["abort_command"]
-        if "abort_command" in command_output.payload
+        command_output[0].artifacts["abort_command"]
+        if "abort_command" in command_output[0].artifacts
         else False
     )
     if abort_command:
         return (abort_command, None)
 
-    command_parameters_obj = command_output.payload["cmd_parameters"]
+    command_parameters_obj = command_output[0].artifacts["cmd_parameters"]
 
     return (False, command_parameters_obj)

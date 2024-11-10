@@ -2,7 +2,7 @@ from typing import Optional
 
 import dspy
 
-from fastworkflow.command_executor import CommandOutput
+from fastworkflow.command_executor import CommandResponse
 from fastworkflow.session import Session
 from fastworkflow.utils.env import get_env_variable
 
@@ -15,9 +15,8 @@ class ResponseGenerator:
         self,
         session: Session,
         command: str,
-        command_parameters: CommandParameters,
-        payload: Optional[dict] = None,
-    ) -> CommandOutput:
+        command_parameters: CommandParameters
+    ) -> list[CommandResponse]:
         output = process_command(session, command_parameters)
 
         DSPY_LM_MODEL = get_env_variable("DSPY_LM_MODEL")
@@ -28,6 +27,8 @@ class ResponseGenerator:
                 context=str(output.help_info), question=command
             )
 
-        return CommandOutput(
-            response=prediction.answer,
-        )
+        return [
+            CommandResponse(
+                response=prediction.answer,
+            )
+        ]

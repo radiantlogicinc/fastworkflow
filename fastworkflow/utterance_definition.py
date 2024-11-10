@@ -138,6 +138,18 @@ class UtteranceDefinition(BaseModel):
                 f"Utterance definition not found for workitem type '{workitem_type}'"
             )
 
+    def get_sample_utterances(self, workitem_type: str) -> list[str]:
+        command_names = self.get_command_names(workitem_type)
+        sample_utterances = []
+        for command_name in command_names:
+            command_utterances = self.get_command_utterances(workitem_type, command_name)
+            if command_utterances.template_utterances:
+                sample_utterances.append(command_utterances.template_utterances[0])
+            else:
+                if command_utterances.plain_utterances:
+                    sample_utterances.append(command_utterances.plain_utterances[0])
+        return sample_utterances
+
     def write(self, filename: str):
         with open(filename, "w") as f:
             f.write(self.model_dump_json(indent=4))

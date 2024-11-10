@@ -1,6 +1,6 @@
 from typing import Optional
 
-from fastworkflow.command_executor import CommandOutput
+from fastworkflow.command_executor import CommandResponse
 from fastworkflow.session import Session
 
 from ..response_generation.command_implementation import process_command
@@ -9,7 +9,7 @@ from ..response_generation.command_implementation import process_command
 class ResponseGenerator:
     def __call__(
         self, session: Session, command: str
-    ) -> CommandOutput:
+    ) -> list[CommandResponse]:
         caller_session = session.caller_session
         if not caller_session:
             raise ValueError("caller_session MUST be set for the parameter extraction workflow")
@@ -21,28 +21,34 @@ class ResponseGenerator:
         error_msg = caller_session.parameter_extraction_info["error_msg"]
         if error_msg:   
             caller_session.parameter_extraction_info["error_msg"] = None          
-            return CommandOutput(
-                response=error_msg, payload={"abort_command": False}
-            )
+            return [
+                CommandResponse(
+                    response=error_msg, 
+                    artifacts={"abort_command": False}
+                )
+            ]
 
         # Note that we are passing the caller workflow's session to process_command
-        output_of_process_command = process_command(
-            caller_session, command
-        )
+        output_of_process_command = process_command(caller_session, command)
+
         if output_of_process_command.parameter_is_valid:
             session.workflow.mark_as_complete()
-            return CommandOutput(
-                response="",
-                payload={
-                    "cmd_parameters": output_of_process_command.cmd_parameters,
-                    "abort_command": False,
-                },
-            )
+            return [
+                CommandResponse(
+                    response="",
+                    artifacts={
+                        "cmd_parameters": output_of_process_command.cmd_parameters,
+                        "abort_command": False,
+                    },
+                )
+            ]
 
-        return CommandOutput(
-            response=output_of_process_command.error_msg,
-            payload={"abort_command": False},
-        )
+        return [
+            CommandResponse(
+                response=output_of_process_command.error_msg,
+                artifacts={"abort_command": False},
+            )
+        ]
 
 
 # if __name__ == "__main__":

@@ -58,7 +58,7 @@ class Session:
             raise ValueError(f"{workflow_folderpath} must be a directory")
 
         # THIS IS IMPORTANT: it allows relative import of modules in the code inside workflow_folderpath
-        sys.path.append(workflow_folderpath)
+        sys.path.insert(0, workflow_folderpath)
 
         # Load environment variables from the .env file in the folder path from where this script is run
         load_dotenv(env_file_path)
@@ -79,16 +79,20 @@ class Session:
         )
         self._utterance_definition = UtteranceDefinition.create(workflow_folderpath)
 
-        # importing here to avoid circular import
-        from fastworkflow.semantic_router_definition import SemanticRouterDefinition
+        try:
+            # importing here to avoid circular import
+            from fastworkflow.semantic_router_definition import SemanticRouterDefinition
 
-        encoder = HuggingFaceEncoder()
-        semantic_router = SemanticRouterDefinition(encoder, self.workflow_folderpath)
-        map_workitem_type_2_route_layer: dict[str, RouteLayer] = {}
-        for workitem_type in self._workflow_definition.types:
-            route_layer = semantic_router.get_route_layer(workitem_type)
-            map_workitem_type_2_route_layer[workitem_type] = route_layer
-        self._map_workitem_type_2_route_layer = map_workitem_type_2_route_layer
+            encoder = HuggingFaceEncoder()
+            semantic_router = SemanticRouterDefinition(encoder, self.workflow_folderpath)
+            map_workitem_type_2_route_layer: dict[str, RouteLayer] = {}
+            for workitem_type in self._workflow_definition.types:
+                route_layer = semantic_router.get_route_layer(workitem_type)
+                map_workitem_type_2_route_layer[workitem_type] = route_layer
+            self._map_workitem_type_2_route_layer = map_workitem_type_2_route_layer
+        except FileNotFoundError:
+            # if session is created for training router, the route layer files may not exist
+            pass
 
         self._workflow = Workflow(
             workflow_definition=self._workflow_definition,
@@ -226,6 +230,8 @@ class Session:
         except OSError as e:
             logger.error(f"Error closing session: {e}")
             return False
+
+        sys.path.remove(self._workflow_folderpath)
         return True
 
     def get_contextdb_folderpath(self, session_id: int) -> str:

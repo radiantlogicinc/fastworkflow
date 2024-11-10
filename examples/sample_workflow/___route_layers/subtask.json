@@ -104,6 +104,26 @@
             "metadata": {}
         },
         {
+            "name": "list_utterances",
+            "utterances": [
+                "what can you do?",
+                "what are my options?",
+                "what are my choices?",
+                "what are my capabilities?",
+                "what can i do?",
+                "what can i use?",
+                "what are my tools?",
+                "now what?",
+                "list commands",
+                "list utterances"
+            ],
+            "description": null,
+            "function_schemas": null,
+            "llm": null,
+            "score_threshold": 0.5,
+            "metadata": {}
+        },
+        {
             "name": "get_path_and_id",
             "utterances": [
                 "what are we working on?",
@@ -242,25 +262,6 @@
                 "skipping completed ones, move to the next workitem",
                 "move to the next workitem including completed ones",
                 "including completed ones, move to the next workitem"
-            ],
-            "description": null,
-            "function_schemas": null,
-            "llm": null,
-            "score_threshold": 0.5,
-            "metadata": {}
-        },
-        {
-            "name": "list_commands",
-            "utterances": [
-                "what can you do?",
-                "what are my options?",
-                "what are my choices?",
-                "what are my capabilities?",
-                "what can i do?",
-                "what can i use?",
-                "what are my tools?",
-                "now what?",
-                "list commands"
             ],
             "description": null,
             "function_schemas": null,

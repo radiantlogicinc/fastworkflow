@@ -7,7 +7,7 @@ from fastworkflow.session import Session
 
 class CommandProcessorOutput(BaseModel):
     workitem_type: str
-    commands: list[str]
+    utterances: list[str]
 
 
 def process_command(
@@ -20,15 +20,12 @@ def process_command(
     :param input: The input parameters for the function.
     """
     # Get the current workitem type
-    current_workitem_type = session.get_active_workitem().type
+    current_workitem = session.get_active_workitem()
 
-    # Get the list of commands for the current workitem type
-    commands = session.command_routing_definition.get_command_names(
-        current_workitem_type
-    )
+    utterances = session.utterance_definition.get_sample_utterances(current_workitem.type)
 
     return CommandProcessorOutput(
-        workitem_type=current_workitem_type, commands=commands
+        workitem_type=current_workitem.type, utterances=utterances
     )
 
 
@@ -37,5 +34,5 @@ if __name__ == "__main__":
     session_id = 1234
     session = Session(session_id, "shared/tests/lighthouse/workflows/accessreview")
 
-    tool_output = process_command(session, payload=None)
+    tool_output = process_command(session)
     print(tool_output)

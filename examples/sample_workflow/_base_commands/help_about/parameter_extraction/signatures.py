@@ -33,7 +33,7 @@ class InputForParamExtraction(BaseModel):
         Check if the parameters are valid in the current context.
         Parameter is a single field pydantic model.
         Return a tuple with a boolean indicating success or failure.
-        And a payload with suggested parameter values that are closest matches to the input.
+        And a message with suggested parameter values that are closest matches to the input.
         """
         if cmd_parameters.workitem_type in session.workflow_definition.types:
             return (True, None)

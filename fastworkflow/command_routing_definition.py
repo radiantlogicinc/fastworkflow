@@ -204,11 +204,18 @@ class CommandRoutingDefinition(BaseModel):
                     .replace("/", ".")
                     .replace("\\", ".")
                 )
-                full_module_name = f"{package_name}.{module_name}"
-                spec = importlib.util.find_spec(full_module_name)
+                full_module_name = f".{package_name}.{module_name}"
+
+                workflow_package_name = (
+                    os.path.dirname(workflow_folder_syspath)
+                    .replace("/", ".")
+                    .replace("\\", ".")
+                ).replace("..", "")
+
+                spec = importlib.util.find_spec(full_module_name, package=workflow_package_name)
                 if spec is None:
                     raise ImportError(f"Module {full_module_name} not found")
-                module = importlib.import_module(full_module_name)
+                module = importlib.import_module(full_module_name, package=workflow_package_name)
 
                 # Get the class from the module
                 return getattr(module, module_class_name)
