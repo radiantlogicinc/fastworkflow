@@ -39,3 +39,7 @@ class CommandRouter:
         )
 
         return command_output
+
+    @property
+    def session(self) -> Session:
+        return self._session

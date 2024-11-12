@@ -1,6 +1,7 @@
 import argparse
 import os
 import random
+from dotenv import dotenv_values
 
 from colorama import Fore, Style
 from semantic_router.encoders import HuggingFaceEncoder
@@ -38,9 +39,10 @@ if __name__ == "__main__":
         semantic_router_definition = SemanticRouterDefinition(encoder, workflow_path)
 
         session_id = -random.randint(1, 10000000)
-        session = Session(session_id, workflow_path, args.env_file_path, 
+        session = Session(session_id, workflow_path, 
+                          env_vars={**dotenv_values(args.env_file_path)}, 
                           for_training_semantic_router=True)
         semantic_router_definition.train(session)
-        session.close_session()
+        session.close()
 
     train_workflow(args.workflow_folderpath, encoder)

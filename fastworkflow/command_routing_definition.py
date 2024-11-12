@@ -206,10 +206,10 @@ class CommandRoutingDefinition(BaseModel):
                 )
                 full_module_name = f".{package_name}.{module_name}"
 
+                parent_folder = os.path.dirname(workflow_folder_syspath)
+                fastworkflow_relpath = parent_folder[parent_folder.rfind("fastworkflow"):] if "fastworkflow" in parent_folder else parent_folder
                 workflow_package_name = (
-                    os.path.dirname(workflow_folder_syspath)
-                    .split("site-packages/", 1)[-1]
-                    .replace("/", ".")
+                    fastworkflow_relpath.replace("/", ".")
                     .replace("\\", ".")
                 ).replace("..", "")
 

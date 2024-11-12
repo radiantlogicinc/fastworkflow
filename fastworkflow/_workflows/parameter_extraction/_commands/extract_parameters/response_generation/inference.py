@@ -32,7 +32,7 @@ class ResponseGenerator:
         output_of_process_command = process_command(caller_session, command)
 
         if output_of_process_command.parameter_is_valid:
-            session.workflow.mark_as_complete()
+            session.workflow.is_complete = True
             return [
                 CommandResponse(
                     response="",

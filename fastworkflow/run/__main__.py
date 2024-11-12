@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import random
+from dotenv import dotenv_values
 
 from colorama import Fore, Style
 
@@ -41,8 +42,8 @@ if args.context_file_path:
 session = Session(
     random.randint(1, 100000000), 
     args.workflow_path, 
-    args.env_file_path, 
-    context
+    env_vars={**dotenv_values(args.env_file_path)}, 
+    context=context
 )
 
 command_output = start_workflow(

@@ -4,7 +4,6 @@ import sys
 from functools import wraps
 from typing import Optional, Union
 
-from dotenv import dotenv_values
 from speedict import Rdict
 
 from semantic_router.encoders import HuggingFaceEncoder
@@ -49,7 +48,7 @@ class Session:
 
     # define an init method
     def __init__(self, session_id: int, workflow_folderpath: str, 
-                 env_file_path: str, context: dict = {},
+                 env_vars: dict = {}, context: dict = {},
                  for_training_semantic_router: bool = False):
         """initialize the Session class"""
         if not os.path.exists(workflow_folderpath):
@@ -57,9 +56,6 @@ class Session:
 
         if not os.path.isdir(workflow_folderpath):
             raise ValueError(f"{workflow_folderpath} must be a directory")
-
-        if not os.path.exists(env_file_path):
-            raise ValueError(f"The env file path {env_file_path} does not exist")
 
         # THIS IS IMPORTANT: it allows relative import of modules in the code inside workflow_folderpath
         sys.path.insert(0, workflow_folderpath)
@@ -71,9 +67,7 @@ class Session:
 
         self._session_id = session_id
         self._workflow_folderpath = workflow_folderpath
-
-        self._env_file_path = env_file_path
-        self._env_variables_dict = {**dotenv_values(env_file_path)}
+        self._env_vars = env_vars
 
         self._root_workitem_type = root_workitem_type
         self._workflow_definition = WorkflowDefinition.create(workflow_folderpath)
@@ -125,9 +119,9 @@ class Session:
         return self._workflow_folderpath
 
     @property
-    def env_file_path(self) -> str:
-        """get the env file path"""
-        return self._env_file_path
+    def env_vars(self) -> dict:
+        """get the env vars"""
+        return self._env_vars
 
     @property
     def root_workitem_type(self) -> str:
@@ -187,7 +181,7 @@ class Session:
 
     def get_env_variable(self, var_name: str, default: Optional[str] = None) -> str:
         """get the environment variable"""
-        return self._env_variables_dict.get(var_name, default)
+        return self._env_vars.get(var_name, default)
 
     def get_active_workitem(self) -> Optional[Union[Workitem, Workflow]]:
         """get the active workitem"""
@@ -231,7 +225,7 @@ class Session:
         """reset the session"""
         self.set_context({})
 
-    def close_session(self) -> bool:
+    def close(self) -> bool:
         """close the session"""
         contextdb_folderpath = self.get_contextdb_folderpath(self.session_id)
         try:

@@ -72,7 +72,7 @@ def extract_command_parameters(
 
     wf_session = Session(-random.randint(1, 100000000), 
                          parameter_extraction_workflow_folderpath, 
-                         session.env_file_path)
+                         env_vars=session.env_vars)
     
     command_output = start_workflow(
         wf_session,

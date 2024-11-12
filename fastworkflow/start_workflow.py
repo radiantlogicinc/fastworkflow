@@ -4,7 +4,7 @@ import random
 from typing import Optional
 
 from colorama import Fore, Style, init
-from semantic_router import RouteLayer
+from dotenv import dotenv_values
 
 from fastworkflow.command_executor import CommandResponse
 from fastworkflow.command_router import CommandRouter
@@ -80,7 +80,7 @@ def start_workflow(
                 )
 
     if not keep_alive:
-        session.close_session()
+        session.close()
 
     return command_output
 
@@ -107,7 +107,7 @@ if __name__ == "__main__":
         f"{Fore.GREEN}{Style.BRIGHT}AI>{Style.RESET_ALL}{Fore.GREEN} Type 'exit' to quit.{Style.RESET_ALL}"
     )
 
-    session = Session(random.randint(1, 100000000), args.workflow_path, args.env_file_path)
+    session = Session(random.randint(1, 100000000), args.workflow_path, env_vars={**dotenv_values(args.env_file_path)})
 
     command_output = start_workflow(
         session,

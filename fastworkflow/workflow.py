@@ -41,10 +41,15 @@ class Workitem(BaseModel):
     def is_complete(self) -> bool:
         return self._is_complete
 
-    def mark_as_complete(self):
-        self._is_complete = True
-        if self._parent_workflow:
-            self._parent_workflow._mark_as_started()
+    @is_complete.setter
+    def is_complete(self, value: bool = True):
+        if value:
+            self._is_complete = True
+            if self._parent_workflow:
+                self._parent_workflow.has_started = True
+        else:
+            if self._parent_workflow:
+                self._parent_workflow._recalculate_started_state()
 
     @property
     def parent_workflow(self) -> "Workflow":
@@ -173,6 +178,25 @@ class Workflow(Workitem):
     @property
     def has_started(self) -> bool:
         return self._has_started
+
+    @has_started.setter
+    def has_started(self, value: bool = True):
+        self._has_started = value
+        if value:
+            # if all workitems are complete, mark this workflow as complete
+            if all([item.is_complete for item in self._workitems]):
+                self.is_complete = True
+            else:
+                if self._parent_workflow:
+                    self._parent_workflow.has_started = True
+        else:
+            self._parent_workflow._recalculate_started_state()
+
+    def _recalculate_started_state(self):
+        # if all workitems under parent's workflow are incomplete and all workflows under parent workflow are not started, mark this workflow as incomplete
+        any_workitem_is_complete = any(item.is_complete for item in self._workitems if item.node_type == NodeType.Workitem)
+        any_workflow_has_started = any(item.has_started for item in self._workitems if item.node_type == NodeType.Workflow)
+        self.has_started = any_workitem_is_complete or any_workflow_has_started
 
     def add_workitem(self, item_type: str, item_id: Optional[str] = None):
         # check if item_type is valid
@@ -313,16 +337,6 @@ class Workflow(Workitem):
                 item.print_tree(indent + 2)
             else:
                 item.print(indent)
-
-    def _mark_as_started(self):
-        self._has_started = True
-
-        # if all workitems are complete, mark this workflow as complete
-        if all([item.is_complete for item in self._workitems]):
-            self.mark_as_complete()
-        else:
-            if self._parent_workflow:
-                self._parent_workflow._mark_as_started()
 
     class Config:
         arbitrary_types_allowed = True
