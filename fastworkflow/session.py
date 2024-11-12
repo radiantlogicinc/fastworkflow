@@ -4,7 +4,7 @@ import sys
 from functools import wraps
 from typing import Optional, Union
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 from speedict import Rdict
 
 from semantic_router.encoders import HuggingFaceEncoder
@@ -49,7 +49,8 @@ class Session:
 
     # define an init method
     def __init__(self, session_id: int, workflow_folderpath: str, 
-                 env_file_path: str, context: dict = {}):
+                 env_file_path: str, context: dict = {},
+                 for_training_semantic_router: bool = False):
         """initialize the Session class"""
         if not os.path.exists(workflow_folderpath):
             raise ValueError(f"The folder path {workflow_folderpath} does not exist")
@@ -57,11 +58,11 @@ class Session:
         if not os.path.isdir(workflow_folderpath):
             raise ValueError(f"{workflow_folderpath} must be a directory")
 
+        if not os.path.exists(env_file_path):
+            raise ValueError(f"The env file path {env_file_path} does not exist")
+
         # THIS IS IMPORTANT: it allows relative import of modules in the code inside workflow_folderpath
         sys.path.insert(0, workflow_folderpath)
-
-        # Load environment variables from the .env file in the folder path from where this script is run
-        load_dotenv(env_file_path)
 
         speedict_folderpath = os.path.join(workflow_folderpath, SPEEDDICT_FOLDERNAME)
         os.makedirs(speedict_folderpath, exist_ok=True)
@@ -70,7 +71,9 @@ class Session:
 
         self._session_id = session_id
         self._workflow_folderpath = workflow_folderpath
+
         self._env_file_path = env_file_path
+        self._env_variables_dict = {**dotenv_values(env_file_path)}
 
         self._root_workitem_type = root_workitem_type
         self._workflow_definition = WorkflowDefinition.create(workflow_folderpath)
@@ -79,7 +82,12 @@ class Session:
         )
         self._utterance_definition = UtteranceDefinition.create(workflow_folderpath)
 
-        try:
+        self._map_workitem_type_2_route_layer = None
+        if not for_training_semantic_router:
+            route_layers_folderpath = os.path.join(self._workflow_folderpath, "___route_layers")
+            if not os.path.exists(route_layers_folderpath):
+                raise ValueError(f"Train the semantic router first. Before running the workflow.")
+            
             # importing here to avoid circular import
             from fastworkflow.semantic_router_definition import SemanticRouterDefinition
 
@@ -90,9 +98,6 @@ class Session:
                 route_layer = semantic_router.get_route_layer(workitem_type)
                 map_workitem_type_2_route_layer[workitem_type] = route_layer
             self._map_workitem_type_2_route_layer = map_workitem_type_2_route_layer
-        except FileNotFoundError:
-            # if session is created for training router, the route layer files may not exist
-            pass
 
         self._workflow = Workflow(
             workflow_definition=self._workflow_definition,
@@ -179,6 +184,10 @@ class Session:
     def parameter_extraction_info(self, value: Optional[dict]) -> None:
         """set the parameter extraction information"""
         self._parameter_extraction_info = value
+
+    def get_env_variable(self, var_name: str, default: Optional[str] = None) -> str:
+        """get the environment variable"""
+        return self._env_variables_dict.get(var_name, default)
 
     def get_active_workitem(self) -> Optional[Union[Workitem, Workflow]]:
         """get the active workitem"""

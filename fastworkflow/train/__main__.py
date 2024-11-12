@@ -1,5 +1,6 @@
 import argparse
 import os
+import random
 
 from colorama import Fore, Style
 from semantic_router.encoders import HuggingFaceEncoder
@@ -22,9 +23,24 @@ if __name__ == "__main__":
         exit(1)
 
     encoder = HuggingFaceEncoder()
-    semantic_router_definition = SemanticRouterDefinition(encoder, args.workflow_folderpath)
 
-    # create a session
-    session_id = 1234
-    session = Session(session_id, args.workflow_folderpath, args.env_file_path)
-    semantic_router_definition.train(session)
+    def train_workflow(workflow_path: str, encoder: HuggingFaceEncoder):
+        #first, recursively train all child workflows
+        workflows_dir = os.path.join(workflow_path, "_workflows")
+        if os.path.isdir(workflows_dir):
+            for child_workflow in os.listdir(workflows_dir):
+                child_workflow_path = os.path.join(workflows_dir, child_workflow)
+                if os.path.isdir(child_workflow_path):
+                    print(f"{Fore.YELLOW}Training child workflow: {child_workflow_path}{Style.RESET_ALL}")
+                    train_workflow(child_workflow_path, encoder)
+
+        # create a session and train the main workflow
+        semantic_router_definition = SemanticRouterDefinition(encoder, workflow_path)
+
+        session_id = -random.randint(1, 10000000)
+        session = Session(session_id, workflow_path, args.env_file_path, 
+                          for_training_semantic_router=True)
+        semantic_router_definition.train(session)
+        session.close_session()
+
+    train_workflow(args.workflow_folderpath, encoder)

@@ -318,7 +318,7 @@ class Workflow(Workitem):
         self._has_started = True
 
         # if all workitems are complete, mark this workflow as complete
-        if all([item.is_complete() for item in self._workitems]):
+        if all([item.is_complete for item in self._workitems]):
             self.mark_as_complete()
         else:
             if self._parent_workflow:

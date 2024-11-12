@@ -5,6 +5,34 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "run_sample_workflow",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "fastworkflow.run",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/"
+            },
+            "args": [
+                "./examples/sample_workflow",
+                "./env/.env"
+            ]
+        },
+        {
+            "name": "train_sample_workflow",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "fastworkflow.train",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/"
+            },
+            "args": [
+                "./examples/sample_workflow",
+                "./env/.env"
+            ]
+        },
+        {
             "name": "Python Debugger: Current File with Arguments",
             "type": "debugpy",
             "request": "launch",

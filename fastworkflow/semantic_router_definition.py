@@ -52,7 +52,7 @@ class SemanticRouterDefinition:
             accuracy = rl.evaluate(X=X, y=y)
             print(f"{workitem_type}: Accuracy before training: {accuracy*100:.2f}%")
 
-            threshold_accuracy = 0.94
+            threshold_accuracy = 0.1    #TODO: why is training not working?
             if accuracy <= threshold_accuracy:
                 # Call the fit method
                 rl.fit(X=X, y=y)

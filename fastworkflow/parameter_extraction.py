@@ -33,8 +33,9 @@ def extract_command_parameters(
             prefix_instructions=input_for_param_extraction.__doc__,
         )
 
-        DSPY_LM_MODEL = get_env_variable("DSPY_LM_MODEL")
-        lm = dspy.LM(DSPY_LM_MODEL)
+        DSPY_LM_MODEL = session.get_env_variable("DSPY_LM_MODEL")
+        OPENAI_API_KEY = session.get_env_variable("OPENAI_API_KEY")
+        lm = dspy.LM(DSPY_LM_MODEL, api_key=OPENAI_API_KEY)
         with dspy.context(lm=lm):
             extract_cmd_params = dspy.TypedChainOfThought(dspy_signature_class)
             prediction = extract_cmd_params(**input_for_param_extraction.model_dump())

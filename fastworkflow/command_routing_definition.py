@@ -208,6 +208,7 @@ class CommandRoutingDefinition(BaseModel):
 
                 workflow_package_name = (
                     os.path.dirname(workflow_folder_syspath)
+                    .split("site-packages/", 1)[-1]
                     .replace("/", ".")
                     .replace("\\", ".")
                 ).replace("..", "")
