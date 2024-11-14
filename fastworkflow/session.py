@@ -103,16 +103,23 @@ class Session:
             parent_workflow=None,
         )
 
-        # let's create the context if it does not exist
         context_dict = self.get_context()
         if context:
-            context_dict.update(context)
-            self.set_context(context_dict)
+            # if there are duplicates, the values already in context_dict
+            # will override the values in provided context
+            context.update(context_dict)
+            context_dict = context
+        self.set_context(context_dict)
 
     @property
     def id(self) -> int:
         """get the session id"""
         return self._session_id
+
+    @property
+    def env_vars(self) -> dict:
+        """get the environment variables"""
+        return self._env_vars
 
     @property
     def workflow_folderpath(self) -> str:

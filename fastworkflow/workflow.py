@@ -317,7 +317,10 @@ class Workflow(Workitem):
             if item._type == parts[0]:
                 if len(parts) == 1:
                     if item_id:
-                        return item if item._id == item_id else None
+                        if item._id == item_id:
+                            return item
+                        else:
+                            continue
                     return item
                 if isinstance(item, Workflow):
                     result = item._find_workitem_recursive(parts[1:], item_id)
