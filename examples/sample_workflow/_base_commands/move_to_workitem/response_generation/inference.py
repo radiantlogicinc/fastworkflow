@@ -1,6 +1,4 @@
-from typing import Optional
-
-from fastworkflow.command_executor import CommandResponse, Recommendation
+from fastworkflow.command_executor import CommandResponse, Action
 from fastworkflow.session import Session
 
 from ..parameter_extraction.signatures import CommandParameters
@@ -22,10 +20,12 @@ class ResponseGenerator:
                     f"move to workitem succeeded: {output.target_workitem_found}\n"
                     f"active workitem status: {output.status_of_target_workitem}"
                 ),
-                recommendations=[
-                    Recommendation(
+                next_actions=[
+                    Action(
+                        session_id=session.id,
+                        workitem_type="sample_workflow",
                         command_name="move_to_workitem",
-                        description="Move to mytask",
+                        command="Move to mytask",
                         parameters={"workitem_path": "mytask", "workitem_id": None},
                     )
                 ],

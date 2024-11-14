@@ -6,7 +6,7 @@ from typing import Optional
 from colorama import Fore, Style, init
 from dotenv import dotenv_values
 
-from fastworkflow.command_executor import CommandResponse
+from fastworkflow.command_executor import CommandExecutor, Action, CommandResponse
 from fastworkflow.command_router import CommandRouter
 
 from fastworkflow.session import Session
@@ -15,19 +15,23 @@ from fastworkflow.session import Session
 def start_workflow(
     session: Session,
     startup_command: str = "",
-    caller_session: Optional[Session] = None,
+    startup_action: Optional[Action] = None,
     keep_alive=True,
 ) -> list[CommandResponse]:
+    if startup_command and startup_action:
+        raise ValueError("Cannot provide both startup_command and startup_action")
+
     # Initialize colorama
     init(autoreset=True)
 
-    if caller_session:
-        session.caller_session = caller_session
-
     command_router = CommandRouter(session)
+    if startup_command or startup_action:
+        if startup_command:
+            command_output: list[CommandResponse] = command_router.route_command(startup_command)
+        elif startup_action:
+            command_executor = CommandExecutor(session)
+            command_output: list[CommandResponse] = command_executor.perform_action(startup_action)
 
-    if startup_command:
-        command_output: list[CommandResponse] = command_router.route_command(startup_command)
         if not session.workflow.is_complete or keep_alive:
             for command_response in command_output:
                 if not command_response.response:
@@ -40,6 +44,10 @@ def start_workflow(
                         continue
                     print(
                         f"{Fore.CYAN}{Style.NORMAL}Artifact: {artifact_name}={artifact_value}{Style.RESET_ALL}"
+                    )
+                for action in command_response.next_actions:
+                    print(
+                        f"{Fore.BLUE}{Style.NORMAL}Next Action: {action}{Style.RESET_ALL}"
                     )
                 for recommendation in command_response.recommendations:
                     print(
@@ -73,6 +81,10 @@ def start_workflow(
                     continue
                 print(
                     f"{Fore.CYAN}{Style.NORMAL}Artifact: {artifact_name}={artifact_value}{Style.RESET_ALL}"
+                )
+            for action in command_response.next_actions:
+                print(
+                    f"{Fore.BLUE}{Style.NORMAL}Next Action: {action}{Style.RESET_ALL}"
                 )
             for recommendation in command_response.recommendations:
                 print(

@@ -12,16 +12,22 @@ from fastworkflow.session import Session
 # from outlines.models import Transformers as outlines_models_Transformers, transformers as outlines_models_transformers
 
 
-class Recommendation(BaseModel):
-    """Recommendation"""
+class Action(BaseModel):
+    session_id: int
+    workitem_type: str
     command_name: str
-    description: str
+    command: str = ""
     parameters: dict[str, Optional[Union[str, bool, int, float]]] = {}
+
+class Recommendation(BaseModel):
+    summary: str
+    suggested_actions: list[Action] = []
 
 class CommandResponse(BaseModel):
     response: str
     success: bool = True
     artifacts: dict[str, Any] = {}
+    next_actions: list[Action] = []
     recommendations: list[Recommendation] = []
 
 
@@ -112,3 +118,53 @@ class CommandExecutor:
             )
         else:
             return response_generation_object(self._session, command)
+
+    def perform_action(
+        self,
+         action: Action,
+    ) -> list[CommandResponse]:
+        session = self._session
+        if session.id != action.session_id:
+            session = Session(action.session_id, 
+                              action.workflow_folderpath, 
+                              env_vars=session.env_vars,
+                              caller_session=session
+                            )
+
+        response_generation_object = (
+            session.command_routing_definition.get_command_class_object(
+                action.workitem_type,
+                action.command_name,
+                CommandModuleType.RESPONSE_GENERATION_INFERENCE,
+            )
+        )
+        if not response_generation_object:
+            raise ValueError(
+                f"Response generation object not found for workitem type '{action.workitem_type}' and command name '{action.command_name}'"
+            )
+
+        command_parameters_class = (
+            session.command_routing_definition.get_command_class(
+                action.workitem_type, action.command_name, CommandModuleType.COMMAND_PARAMETERS_CLASS
+            )
+        )
+        if command_parameters_class:
+            if action.parameters:
+                input_obj = command_parameters_class(**action.parameters)
+
+                input_for_param_extraction_class = (
+                    self._session.command_routing_definition.get_command_class(
+                        action.workitem_type,
+                        action.command_name,
+                        CommandModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS,
+                    )
+                )
+                is_valid, error_msg = input_for_param_extraction_class.validate_parameters(session, input_obj)
+                if not is_valid:
+                    raise ValueError(f"Invalid action parameters: {error_msg}")
+            else:
+                input_obj = command_parameters_class()
+
+            return response_generation_object(session, action.command, input_obj)
+
+        return response_generation_object(session, action.command)

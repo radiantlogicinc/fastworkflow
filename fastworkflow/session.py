@@ -46,9 +46,12 @@ SPEEDDICT_FOLDERNAME = "___workflow_contexts"
 class Session:
     """Session class"""
 
-    # define an init method
-    def __init__(self, session_id: int, workflow_folderpath: str, 
-                 env_vars: dict = {}, context: dict = {},
+    def __init__(self, 
+                 session_id: int, 
+                 workflow_folderpath: str, 
+                 env_vars: dict = {}, 
+                 context: dict = {}, 
+                 caller_session: Optional["Session"] = None,
                  for_training_semantic_router: bool = False):
         """initialize the Session class"""
         if not os.path.exists(workflow_folderpath):
@@ -68,6 +71,7 @@ class Session:
         self._session_id = session_id
         self._workflow_folderpath = workflow_folderpath
         self._env_vars = env_vars
+        self._caller_session = caller_session
 
         self._root_workitem_type = root_workitem_type
         self._workflow_definition = WorkflowDefinition.create(workflow_folderpath)
@@ -105,11 +109,8 @@ class Session:
             context_dict.update(context)
             self.set_context(context_dict)
 
-        # set from the workflow
-        self._caller_session = None
-
     @property
-    def session_id(self) -> int:
+    def id(self) -> int:
         """get the session id"""
         return self._session_id
 
@@ -119,9 +120,9 @@ class Session:
         return self._workflow_folderpath
 
     @property
-    def env_vars(self) -> dict:
-        """get the env vars"""
-        return self._env_vars
+    def caller_session(self) -> Optional["Session"]:
+        """get the caller session"""
+        return self._caller_session
 
     @property
     def root_workitem_type(self) -> str:
@@ -149,27 +150,6 @@ class Session:
         return self._workflow
 
     @property
-    def caller_session(self) -> Optional["Session"]:
-        """get the caller session"""
-        return self._caller_session
-
-    @caller_session.setter
-    @property
-    def caller_session(self) -> Optional["Session"]:
-        """get the caller session"""
-        return self._caller_session
-
-    @caller_session.setter
-    def caller_session(self, value: Optional["Session"]) -> None:
-        """set the caller session, can only be set once"""
-        if self._caller_session is None:
-            if not value:
-                raise ValueError("caller_session must be a valid Session object")
-            self._caller_session = value
-        else:
-            raise AttributeError("caller_session can only be set once.")
-
-    @property
     def parameter_extraction_info(self) -> Optional[dict]:
         """get the parameter extraction information"""
         return self._parameter_extraction_info
@@ -179,9 +159,30 @@ class Session:
         """set the parameter extraction information"""
         self._parameter_extraction_info = value
 
-    def get_env_variable(self, var_name: str, default: Optional[str] = None) -> str:
+    def get_env_var(self, var_name: str, var_type: type = str, default: Optional[Union[str, int, float, bool]] = None) -> Union[str, int, float, bool]:
         """get the environment variable"""
-        return self._env_vars.get(var_name, default)
+        value = self._env_vars.get(var_name)
+        if value is None:
+            if default is None:
+                raise ValueError(f"Environment variable '{var_name}' does not exist and no default value is provided.")
+            else:
+                return default
+        
+        try:
+            if var_type is int:
+                return int(value)
+            elif var_type is float:
+                return float(value)
+            elif var_type is bool:
+                if value.lower() in ('true', '1'):
+                    return True
+                elif value.lower() in ('false', '0'):
+                    return False
+                else:
+                    raise ValueError(f"Cannot convert '{value}' to {var_type.__name__}.")
+            return str(value)  # Default case for str
+        except ValueError:
+            raise ValueError(f"Cannot convert '{value}' to {var_type.__name__}.")
 
     def get_active_workitem(self) -> Optional[Union[Workitem, Workflow]]:
         """get the active workitem"""
@@ -200,7 +201,7 @@ class Session:
 
     def get_context(self) -> dict:
         """get the context"""
-        contextdb_folderpath = self.get_contextdb_folderpath(self.session_id)
+        contextdb_folderpath = self.get_contextdb_folderpath(self.id)
         keyvalue_db = Rdict(contextdb_folderpath)
 
         context = keyvalue_db["context"] if "context" in keyvalue_db else {}
@@ -216,7 +217,7 @@ class Session:
 
     def set_context(self, context: dict) -> None:
         """set the context"""
-        contextdb_folderpath = self.get_contextdb_folderpath(self.session_id)
+        contextdb_folderpath = self.get_contextdb_folderpath(self.id)
         keyvalue_db = Rdict(contextdb_folderpath)
         keyvalue_db["context"] = context
         keyvalue_db.close()
@@ -227,7 +228,7 @@ class Session:
 
     def close(self) -> bool:
         """close the session"""
-        contextdb_folderpath = self.get_contextdb_folderpath(self.session_id)
+        contextdb_folderpath = self.get_contextdb_folderpath(self.id)
         try:
             shutil.rmtree(contextdb_folderpath, ignore_errors=True)
         except OSError as e:

@@ -53,6 +53,7 @@ def extract_command_name(
         return (abort_command, command_name)
 
     # lazy import to avoid circular dependency
+    from fastworkflow.command_executor import Action
     from fastworkflow.start_workflow import start_workflow
 
     fastworkflow_folder = os.path.dirname(os.path.abspath(__file__))
@@ -68,14 +69,22 @@ def extract_command_name(
         "parameter_validation_func": pes.InputForParamExtraction.validate_parameters,
     }
 
-    wf_session = Session(-random.randint(1, 100000000), 
+    pe_session = Session(-random.randint(1, 100000000), 
                          parameter_extraction_workflow_folderpath, 
-                         env_vars=session.env_vars)
+                         env_vars=session.env_vars,
+                         caller_session=session
+                         )
+
+    startup_action = Action(
+        session_id=pe_session.id,
+        workitem_type="parameter_extraction",
+        command_name="extract_parameters",
+        command="na",
+    )
 
     command_output = start_workflow(
-        wf_session,
-        startup_command="extract parameter",
-        caller_session=session,
+        pe_session,
+        startup_action=startup_action,
         keep_alive=False,
     )
 

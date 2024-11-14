@@ -6,7 +6,6 @@ import dspy
 from pydantic import BaseModel
 
 from fastworkflow.session import Session
-from fastworkflow.utils.env import get_env_variable
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils.pydantic_model_2_dspy_signature_class import (
     TypedPredictorSignature,
@@ -33,8 +32,8 @@ def extract_command_parameters(
             prefix_instructions=input_for_param_extraction.__doc__,
         )
 
-        DSPY_LM_MODEL = session.get_env_variable("DSPY_LM_MODEL")
-        OPENAI_API_KEY = session.get_env_variable("OPENAI_API_KEY")
+        DSPY_LM_MODEL = session.get_env_var("DSPY_LM_MODEL")
+        OPENAI_API_KEY = session.get_env_var("OPENAI_API_KEY")
         lm = dspy.LM(DSPY_LM_MODEL, api_key=OPENAI_API_KEY)
         with dspy.context(lm=lm):
             extract_cmd_params = dspy.TypedChainOfThought(dspy_signature_class)
@@ -55,6 +54,7 @@ def extract_command_parameters(
         return (abort_command, command_parameters_obj)
 
     # lazy import to avoid circular dependency
+    from fastworkflow.command_executor import Action
     from fastworkflow.start_workflow import start_workflow
 
     fastworkflow_folder = os.path.dirname(os.path.abspath(__file__))
@@ -70,14 +70,22 @@ def extract_command_parameters(
         "parameter_validation_func": input_for_param_extraction.validate_parameters,
     }
 
-    wf_session = Session(-random.randint(1, 100000000), 
+    pe_session = Session(-random.randint(1, 100000000), 
                          parameter_extraction_workflow_folderpath, 
-                         env_vars=session.env_vars)
-    
+                         env_vars=session.env_vars,
+                         caller_session=session
+                         )
+
+    startup_action = Action(
+        session_id=pe_session.id,
+        workitem_type="parameter_extraction",
+        command_name="extract_parameters",
+        command="na",
+    )
+
     command_output = start_workflow(
-        wf_session,
-        startup_command="extract parameter",
-        caller_session=session,
+        pe_session,
+        startup_action=startup_action,
         keep_alive=False,
     )
 
