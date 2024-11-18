@@ -1,23 +1,14 @@
 import os
 import random
-from typing import Optional, Tuple, Type
 
-import dspy
-from pydantic import BaseModel
-
-from fastworkflow.session import Session
-from fastworkflow.utils.logging import logger
-from fastworkflow.utils.pydantic_model_2_dspy_signature_class import (
-    TypedPredictorSignature,
-)
-
+import fastworkflow
+from fastworkflow.command_executor import CommandExecutor
 
 def extract_command_parameters(
-    session: Session,
-    input_for_param_extraction: BaseModel,
-    command_parameters_class: Type[BaseModel],
-    extraction_failure_workflow: Optional[str] = None
-) -> Tuple[bool, BaseModel]:
+    workflow_session: fastworkflow.WorkflowSession,
+    command_name: str,
+    command: str,
+) -> fastworkflow.CommandOutput:
     """
     This function is called when the command parameters are invalid.
     It extracts the command parameters from the command using DSPy.
@@ -25,83 +16,41 @@ def extract_command_parameters(
     Note: this function is called from the regular workflow as well as the extraction failure workflow.
     If it is called from the extraction failure workflow, the session is the source workflow session which is basically what we want.
     """
-    try:
-        dspy_signature_class = TypedPredictorSignature.create(
-            input_for_param_extraction,
-            command_parameters_class,
-            prefix_instructions=input_for_param_extraction.__doc__,
-        )
-
-        DSPY_LM_MODEL = session.get_env_var("DSPY_LM_MODEL")
-        OPENAI_API_KEY = session.get_env_var("OPENAI_API_KEY")
-        lm = dspy.LM(DSPY_LM_MODEL, api_key=OPENAI_API_KEY)
-        with dspy.context(lm=lm):
-            extract_cmd_params = dspy.TypedChainOfThought(dspy_signature_class)
-            prediction = extract_cmd_params(**input_for_param_extraction.model_dump())
-            command_parameters_obj = command_parameters_class(**prediction)
-    except ValueError as e:
-        logger.error(f"DSPy error extracting command parameters: {e}")
-        command_parameters_obj = command_parameters_class()
-
-    abort_command = False
-    if not extraction_failure_workflow:
-        return (abort_command, command_parameters_obj)
-
-    is_valid, error_msg = input_for_param_extraction.validate_parameters(
-        session, command_parameters_obj
+    startup_action = fastworkflow.Action(
+        workitem_type="parameter_extraction",
+        command_name="extract_parameters",
+        command=command,
     )
-    if is_valid:
-        return (abort_command, command_parameters_obj)
 
-    # lazy import to avoid circular dependency
-    from fastworkflow.command_executor import Action
-    from fastworkflow.start_workflow import start_workflow
+    # if we are already in the parameter extraction workflow, we can just perform the action
+    if workflow_session.session.workflow_snapshot.workflow.type == "parameter_extraction":
+        command_executor = CommandExecutor()
+        command_output = command_executor.perform_action(workflow_session.session, startup_action)
+        if len(command_output.command_responses) > 1:
+            raise ValueError("Multiple command responses returned from parameter extraction workflow")    
+        return command_output
 
     fastworkflow_folder = os.path.dirname(os.path.abspath(__file__))
     parameter_extraction_workflow_folderpath = os.path.join(
-        fastworkflow_folder, "_workflows", extraction_failure_workflow
+        fastworkflow_folder, "_workflows", "parameter_extraction"
     )
 
-    session.parameter_extraction_info = {
-        "error_msg": error_msg,
-        "input_for_param_extraction_class": type(input_for_param_extraction),
-        "command_parameters_class": command_parameters_class,
-        "parameter_extraction_func": extract_command_parameters,
-        "parameter_validation_func": input_for_param_extraction.validate_parameters,
+    context = {
+        "subject_command_name": command_name,
+        "subject_workflow_snapshot": workflow_session.session.workflow_snapshot
     }
 
-    pe_session = Session(-random.randint(1, 100000000), 
-                         parameter_extraction_workflow_folderpath, 
-                         env_vars=session.env_vars,
-                         caller_session=session
-                         )
-
-    startup_action = Action(
-        session_id=pe_session.id,
-        workitem_type="parameter_extraction",
-        command_name="extract_parameters",
-        command="na",
-    )
-
-    command_output = start_workflow(
-        pe_session,
-        startup_action=startup_action,
+    workflow_session = fastworkflow.WorkflowSession(
+        workflow_session.command_router,
+        workflow_session.command_executor,
+        random.randint(1, 100000000), 
+        parameter_extraction_workflow_folderpath, 
+        context=context,
+        startup_action=startup_action, 
         keep_alive=False,
+        user_message_queue=workflow_session.user_message_queue,
+        command_output_queue=workflow_session.command_output_queue,
     )
 
-    if len(command_output) > 1:
-        raise ValueError("Multiple command responses returned from parameter extraction workflow")
-
-    session.parameter_extraction_info = None
-
-    abort_command = (
-        command_output[0].artifacts["abort_command"]
-        if "abort_command" in command_output[0].artifacts
-        else False
-    )
-    if abort_command:
-        return (abort_command, None)
-
-    command_parameters_obj = command_output[0].artifacts["cmd_parameters"]
-
-    return (False, command_parameters_obj)
+    # Run child workflow in current thread (keep_alive=False)
+    return workflow_session.start()

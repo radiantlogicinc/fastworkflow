@@ -7,7 +7,7 @@ from colorama import Fore, Style
 from semantic_router.encoders import HuggingFaceEncoder
 
 from fastworkflow.semantic_router_definition import SemanticRouterDefinition
-from fastworkflow.session import Session
+import fastworkflow
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -23,6 +23,8 @@ if __name__ == "__main__":
         )
         exit(1)
 
+    fastworkflow.init(env_vars={**dotenv_values(args.env_file_path)})
+
     encoder = HuggingFaceEncoder()
 
     def train_workflow(workflow_path: str, encoder: HuggingFaceEncoder):
@@ -30,19 +32,23 @@ if __name__ == "__main__":
         workflows_dir = os.path.join(workflow_path, "_workflows")
         if os.path.isdir(workflows_dir):
             for child_workflow in os.listdir(workflows_dir):
+                if "__pycache__" in child_workflow:
+                    continue
                 child_workflow_path = os.path.join(workflows_dir, child_workflow)
                 if os.path.isdir(child_workflow_path):
                     print(f"{Fore.YELLOW}Training child workflow: {child_workflow_path}{Style.RESET_ALL}")
                     train_workflow(child_workflow_path, encoder)
 
+        if workflow_path.startswith("./fastworkflow") and "_workflows" not in workflow_path:
+            return
+
         # create a session and train the main workflow
         semantic_router_definition = SemanticRouterDefinition(encoder, workflow_path)
 
         session_id = -random.randint(1, 10000000)
-        session = Session(session_id, workflow_path, 
-                          env_vars={**dotenv_values(args.env_file_path)}, 
+        session = fastworkflow.Session.create(session_id, workflow_path, 
                           for_training_semantic_router=True)
-        semantic_router_definition.train(session)
+        semantic_router_definition.train(session.workflow_snapshot.workflow)
         session.close()
 
     train_workflow(args.workflow_folderpath, encoder)

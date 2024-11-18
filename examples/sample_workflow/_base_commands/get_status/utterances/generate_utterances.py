@@ -1,16 +1,18 @@
-from fastworkflow.session import Session
+import fastworkflow
+from fastworkflow.workflow import Workflow
 from fastworkflow.utils.parameterize_func_decorator import parameterize
 
 from ..parameter_extraction.signatures import CommandParameters
 
 
-def generate_command_inputs(session: Session) -> list[CommandParameters]:
+def generate_command_inputs(workflow: Workflow) -> list[CommandParameters]:
+    workflow_definition = fastworkflow.WorkflowRegistry.get_definition(workflow.workflow_folderpath)
     workitem_paths = []
-    for workitem_type in session.workflow_definition.types:
+    for workitem_type in workflow_definition.types:
         workitem_paths.append(f"{workitem_type}")
 
     # add full paths
-    workitem = session.workflow.next_workitem(skip_completed=False)
+    workitem = workflow.next_workitem(skip_completed=False)
     while workitem is not None:
         workitem_paths.append(workitem.path)
         workitem = workitem.next_workitem(skip_completed=False)
@@ -22,14 +24,15 @@ def generate_command_inputs(session: Session) -> list[CommandParameters]:
 
 
 @parameterize(command_name=["get_status"])
-def generate_utterances(session: Session, command_name: str) -> list[str]:
-    utterances_obj = session.utterance_definition.get_command_utterances(
-        session.root_workitem_type, command_name
+def generate_utterances(workflow: Workflow, command_name: str) -> list[str]:
+    utterance_definition = fastworkflow.UtteranceRegistry.get_definition(workflow.workflow_folderpath)
+    utterances_obj = utterance_definition.get_command_utterances(
+        workflow.type, command_name
     )
 
-    utterance_list: list[str] = utterances_obj.plain_utterances.copy()
+    utterance_list: list[str] = utterances_obj.plain_utterances
 
-    inputs: list[CommandParameters] = generate_command_inputs(session)
+    inputs: list[CommandParameters] = generate_command_inputs(workflow)
     for input in inputs:
         kwargs = {}
         for field in input.model_fields:
@@ -40,25 +43,3 @@ def generate_utterances(session: Session, command_name: str) -> list[str]:
             utterance_list.append(utterance)
 
     return utterance_list
-
-
-if __name__ == "__main__":
-    import os
-
-    # create a session
-    session_id = 1234
-
-    workflow_folderpath = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "../../../")
-    )
-    if not os.path.isdir(workflow_folderpath):
-        raise ValueError(
-            f"The provided folderpath '{workflow_folderpath}' is not valid. Please provide a valid directory."
-        )
-
-    session = Session(session_id, workflow_folderpath)
-
-    generated_utterances = generate_utterances(session)
-
-    for utterance in generated_utterances:
-        print(utterance)

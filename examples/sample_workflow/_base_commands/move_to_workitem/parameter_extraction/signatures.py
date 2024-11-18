@@ -2,7 +2,8 @@ from typing import Annotated, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from fastworkflow.session import Session
+import fastworkflow
+from fastworkflow.session import WorkflowSnapshot
 
 
 class CommandParameters(BaseModel):
@@ -42,14 +43,14 @@ class InputForParamExtraction(BaseModel):
     command: str
 
     @classmethod
-    def create(cls, session: Session, command: str):
+    def create(cls, workflow_snapshot: WorkflowSnapshot, command: str):
         return cls(
             command=command,
         )
 
     @classmethod
     def validate_parameters(
-        cls, session: Session, cmd_parameters: CommandParameters
+        cls, workflow_snapshot: WorkflowSnapshot, cmd_parameters: CommandParameters
     ) -> Tuple[bool, str]:
         """
         Check if the parameters are valid in the current context.
@@ -57,7 +58,9 @@ class InputForParamExtraction(BaseModel):
         Return a tuple with a boolean indicating success or failure.
         And a string with helpful information about the error and suggestions for fixing it.
         """
-        workitem_type_list = "\n".join(session.workflow_definition.types.keys())
+        workflow_folderpath = workflow_snapshot.workflow.workflow_folderpath
+        workflow_definition = fastworkflow.WorkflowRegistry.get_definition(workflow_folderpath)
+        workitem_type_list = "\n".join(workflow_definition.types.keys())
         if cmd_parameters.workitem_path in ["NOT_FOUND", "INVALID"]:
             return (
                 False,
@@ -72,7 +75,7 @@ class InputForParamExtraction(BaseModel):
             relative_to_root = True
             workitem_path = f"//{workitem_path}"
 
-        workitem = session.workflow.find_workitem(
+        workitem = workflow_snapshot.workflow.find_workitem(
             workitem_path, cmd_parameters.workitem_id, relative_to_root
         )
         if workitem is None:

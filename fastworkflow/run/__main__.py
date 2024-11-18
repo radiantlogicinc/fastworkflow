@@ -2,23 +2,53 @@ import argparse
 import json
 import os
 import random
+from typing import Optional
 from dotenv import dotenv_values
 
-from colorama import Fore, Style
+from colorama import Fore, Style, init
 
-from fastworkflow.session import Session
-from fastworkflow.start_workflow import start_workflow
+import fastworkflow
+from fastworkflow.command_router import CommandRouter
+from fastworkflow.command_executor import CommandExecutor
+
+# Initialize colorama
+init(autoreset=True)
+
+def print_command_output(command_output):
+    for command_response in command_output.command_responses:
+        session_id = fastworkflow.WorkflowSession.get_active_session_id()
+        if command_response.response:   
+            print(
+                f"{Fore.GREEN}{Style.BRIGHT}{session_id} AI>{Style.RESET_ALL}{Fore.GREEN} {command_response.response}{Style.RESET_ALL}"
+        )
+
+        for artifact_name, artifact_value in command_response.artifacts.items():
+            print(
+                f"{Fore.CYAN}{Style.BRIGHT}{session_id} AI>{Style.RESET_ALL}{Fore.CYAN} Artifact: {artifact_name}={artifact_value}{Style.RESET_ALL}"
+            )
+        for action in command_response.next_actions:
+            print(
+                f"{Fore.BLUE}{Style.BRIGHT}{session_id} AI>{Style.RESET_ALL}{Fore.BLUE} Next Action: {action}{Style.RESET_ALL}"
+            )
+        for recommendation in command_response.recommendations:
+            print(
+                f"{Fore.MAGENTA}{Style.BRIGHT}{session_id} AI>{Style.RESET_ALL}{Fore.MAGENTA} Recommendation: {recommendation}{Style.RESET_ALL}"
+            )
 
 
 parser = argparse.ArgumentParser(description="AI Assistant for workflow processing")
 parser.add_argument("workflow_path", help="Path to the workflow folder")
 parser.add_argument("env_file_path", help="Path to the environment file")
 parser.add_argument(
-    "--context_file_path", help="Path to the context file", default=""
-)
-parser.add_argument(
     "--startup_command", help="Optional startup command", default=""
 )
+parser.add_argument(
+    "--startup_action", help="Optional startup action", default=""
+)
+parser.add_argument(
+    "--keep_alive", help="Optional keep_alive", default=True
+)
+
 args = parser.parse_args()
 
 if not os.path.isdir(args.workflow_path):
@@ -34,18 +64,41 @@ print(
     f"{Fore.GREEN}{Style.BRIGHT}AI>{Style.RESET_ALL}{Fore.GREEN} Type 'exit' to quit.{Style.RESET_ALL}"
 )
 
-context = {}
-if args.context_file_path:
-    with open(args.context_file_path, "r") as f:
-        context = json.load(f)
+if args.startup_command and args.startup_action:
+    raise ValueError("Cannot provide both startup_command and startup_action")
 
-session = Session(
-    random.randint(1, 100000000), 
+fastworkflow.init(env_vars={**dotenv_values(args.env_file_path)})
+
+startup_action: Optional[fastworkflow.Action] = None
+if args.startup_action:
+    with open(args.startup_action, 'r') as file:
+        startup_action_dict = json.load(file)
+    startup_action = fastworkflow.Action(**startup_action_dict)
+
+workflow_session = fastworkflow.WorkflowSession(
+    CommandRouter(),
+    CommandExecutor(),
+    random.randint(1, 100000000),
     args.workflow_path, 
-    env_vars={**dotenv_values(args.env_file_path)}, 
-    context=context
+    startup_command=args.startup_command, 
+    startup_action=startup_action, 
+    keep_alive=args.keep_alive
 )
 
-command_output = start_workflow(
-    session, startup_command=args.startup_command
-)
+workflow_session.start()
+command_output: fastworkflow.CommandOutput = workflow_session.command_output_queue.get()#(timeout=1)
+if command_output:
+    print_command_output(command_output)
+
+while not workflow_session.workflow_is_complete or args.keep_alive:
+    user_command = input(
+        f"{Fore.YELLOW}{Style.BRIGHT}User>{Style.RESET_ALL}{Fore.YELLOW} "
+    )
+    if user_command == "exit":
+        break
+
+    workflow_session.user_message_queue.put(user_command)
+    
+    command_output = workflow_session.command_output_queue.get()
+    if command_output:
+        print_command_output(command_output)

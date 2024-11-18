@@ -1,5 +1,3 @@
-from typing import Optional
-
 from pydantic import BaseModel
 
 from fastworkflow.session import Session
@@ -23,7 +21,7 @@ def process_command(
     return the review status of the entitlements for the current workitem if workitem_path and workitem_id are not provided.
         if workitem_id is specified, the workitem_path must be specified.
     """
-    workitem = session.get_active_workitem()
+    workitem = session.workflow_snapshot.get_active_workitem()
     if workitem.node_type == NodeType.Workflow:
         status = (
             f"workitem_path: {workitem.path}, workitem_id: {workitem.id}\n"

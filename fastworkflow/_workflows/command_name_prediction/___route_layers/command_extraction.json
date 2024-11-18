@@ -1,0 +1,17 @@
+{
+    "encoder_type": "huggingface",
+    "encoder_name": "sentence-transformers/all-MiniLM-L6-v2",
+    "routes": [
+        {
+            "name": "extract_command_name",
+            "utterances": [
+                "extract command"
+            ],
+            "description": null,
+            "function_schemas": null,
+            "llm": null,
+            "score_threshold": 0.5,
+            "metadata": {}
+        }
+    ]
+}

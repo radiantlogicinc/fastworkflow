@@ -1,10 +1,6 @@
-from typing import Any, Optional, Union
-
-from pydantic import BaseModel
-
+import fastworkflow
+from fastworkflow.command_interfaces import CommandExecutorInterface
 from fastworkflow.command_routing_definition import ModuleType as CommandModuleType
-from fastworkflow.parameter_extraction import extract_command_parameters
-from fastworkflow.session import Session
 
 # import torch
 # from transformers import BitsAndBytesConfig
@@ -12,28 +8,9 @@ from fastworkflow.session import Session
 # from outlines.models import Transformers as outlines_models_Transformers, transformers as outlines_models_transformers
 
 
-class Action(BaseModel):
-    session_id: int
-    workitem_type: str
-    command_name: str
-    command: str = ""
-    parameters: dict[str, Optional[Union[str, bool, int, float]]] = {}
-
-class Recommendation(BaseModel):
-    summary: str
-    suggested_actions: list[Action] = []
-
-class CommandResponse(BaseModel):
-    response: str
-    success: bool = True
-    artifacts: dict[str, Any] = {}
-    next_actions: list[Action] = []
-    recommendations: list[Recommendation] = []
-
-
-class CommandExecutor:
-    def __init__(self, session: Session):
-        self._session = session
+class CommandExecutor(CommandExecutorInterface):
+    def __init__(self):
+        pass
 
         # self._model: outlines_models_Transformers = outlines_models_transformers(
         #     "microsoft/Phi-3.5-mini-instruct",
@@ -53,86 +30,79 @@ class CommandExecutor:
         # }
         # )
 
-    @property
-    def session(self):
-        return self._session
-
     def invoke_command(
         self,
-        workitem_type: str,
+        workflow_session: 'fastworkflow.WorkflowSession',
         command_name: str,
         command: str,
-    ) -> list[CommandResponse]:
-        if not workitem_type:
-            raise ValueError("Workitem type cannot be None.")
+    ) -> fastworkflow.CommandOutput:
         if not command_name:
             raise ValueError("Command name cannot be None.")
         if not command:
             raise ValueError("Command cannot be None.")
 
+        workflow_folderpath = workflow_session.session.workflow_snapshot.workflow.workflow_folderpath
+        command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(workflow_folderpath)
+
+        active_workitem_type = workflow_session.session.workflow_snapshot.get_active_workitem().type
         response_generation_object = (
-            self._session.command_routing_definition.get_command_class_object(
-                workitem_type,
+            command_routing_definition.get_command_class_object(
+                active_workitem_type,
                 command_name,
                 CommandModuleType.RESPONSE_GENERATION_INFERENCE,
             )
         )
         if not response_generation_object:
             raise ValueError(
-                f"Response generation object not found for workitem type '{workitem_type}' and command name '{command_name}'"
+                f"Response generation object not found for workitem type '{active_workitem_type}' and command name '{command_name}'"
             )
 
-        abort_command = False
         input_obj = None
         input_for_param_extraction_class = (
-            self._session.command_routing_definition.get_command_class(
-                workitem_type,
+            command_routing_definition.get_command_class(
+                active_workitem_type,
                 command_name,
                 CommandModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS,
             )
         )
         command_parameters_class = (
-            self._session.command_routing_definition.get_command_class(
-                workitem_type, command_name, CommandModuleType.COMMAND_PARAMETERS_CLASS
+            command_routing_definition.get_command_class(
+                active_workitem_type, command_name, CommandModuleType.COMMAND_PARAMETERS_CLASS
             )
         )
         if input_for_param_extraction_class and command_parameters_class:
-            input_for_parameter_extraction = input_for_param_extraction_class.create(
-                session=self._session, command=command
-            )
-            abort_command, input_obj = extract_command_parameters(
-                self._session,
-                input_for_parameter_extraction,
-                command_parameters_class,
-                "parameter_extraction",
-            )
+            # input_for_parameter_extraction = input_for_param_extraction_class.create(
+            #     workflow_snapshot=workflow_session.session.workflow_snapshot, command=command
+            # )
 
-        if abort_command:
-            return [
-                CommandResponse(success=False, response="Command aborted")
-            ]
+            # lazy import to avoid circular dependency
+            from fastworkflow.parameter_extraction import extract_command_parameters
+
+            command_output = extract_command_parameters(
+                workflow_session,
+                command_name,
+                command
+            )
+            if not command_output.command_responses[0].success:
+                return command_output
+
+            input_obj = command_output.command_responses[0].artifacts["cmd_parameters"]
 
         if input_obj:
-            return response_generation_object(
-                self._session, command, input_obj
-            )
+            return response_generation_object(workflow_session.session, command, input_obj)
         else:
-            return response_generation_object(self._session, command)
+            return response_generation_object(workflow_session.session, command)
 
     def perform_action(
         self,
-         action: Action,
-    ) -> list[CommandResponse]:
-        session = self._session
-        if session.id != action.session_id:
-            session = Session(action.session_id, 
-                              action.workflow_folderpath, 
-                              env_vars=session.env_vars,
-                              caller_session=session
-                            )
+        session: fastworkflow.Session,
+        action: fastworkflow.Action,
+    ) -> fastworkflow.CommandOutput:
+        workflow_folderpath = session.workflow_snapshot.workflow.workflow_folderpath
+        command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(workflow_folderpath)
 
         response_generation_object = (
-            session.command_routing_definition.get_command_class_object(
+            command_routing_definition.get_command_class_object(
                 action.workitem_type,
                 action.command_name,
                 CommandModuleType.RESPONSE_GENERATION_INFERENCE,
@@ -144,7 +114,7 @@ class CommandExecutor:
             )
 
         command_parameters_class = (
-            session.command_routing_definition.get_command_class(
+            command_routing_definition.get_command_class(
                 action.workitem_type, action.command_name, CommandModuleType.COMMAND_PARAMETERS_CLASS
             )
         )
@@ -153,18 +123,20 @@ class CommandExecutor:
                 input_obj = command_parameters_class(**action.parameters)
 
                 input_for_param_extraction_class = (
-                    self._session.command_routing_definition.get_command_class(
+                    command_routing_definition.get_command_class(
                         action.workitem_type,
                         action.command_name,
                         CommandModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS,
                     )
                 )
-                is_valid, error_msg = input_for_param_extraction_class.validate_parameters(session, input_obj)
+                is_valid, error_msg = input_for_param_extraction_class.validate_parameters(session.workflow_snapshot, input_obj)
                 if not is_valid:
                     raise ValueError(f"Invalid action parameters: {error_msg}")
             else:
                 input_obj = command_parameters_class()
 
-            return response_generation_object(session, action.command, input_obj)
+            command_output = response_generation_object(session, action.command, input_obj)
+        else:
+            command_output = response_generation_object(session, action.command)
 
-        return response_generation_object(session, action.command)
+        return command_output

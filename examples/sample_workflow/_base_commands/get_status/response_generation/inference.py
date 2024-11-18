@@ -1,6 +1,4 @@
-from typing import Optional
-
-from fastworkflow.command_executor import CommandResponse
+from fastworkflow import CommandOutput, CommandResponse
 from fastworkflow.session import Session
 
 from ..parameter_extraction.signatures import CommandParameters
@@ -13,11 +11,14 @@ class ResponseGenerator:
         session: Session,
         command: str,
         command_parameters: CommandParameters
-    ) -> list[CommandResponse]:
+    ) -> CommandOutput:
         output = process_command(session, command_parameters)
-        return [
-            CommandResponse(response=f"current status is: {output.status}")
-        ]
+        return CommandOutput(
+            session_id=session.id,
+            command_responses=[
+                CommandResponse(response=f"current status is: {output.status}")
+            ]
+        )
 
 
 # if __name__ == "__main__":

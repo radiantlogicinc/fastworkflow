@@ -53,6 +53,7 @@ class SizeMetaData(BaseModel):
 
 
 class WorkflowDefinition(BaseModel):
+    workflow_folderpath: str
     types: dict[str, TypeMetadata]
     allowable_child_types: dict[str, dict[str, SizeMetaData]]
 
@@ -95,21 +96,6 @@ class WorkflowDefinition(BaseModel):
                         f"Child type '{child_type}' is not defined in types"
                     )
         return wfd
-
-    @classmethod
-    def create(cls, workflow_folderpath: str) -> "WorkflowDefinition":
-        types = {}
-        allowable_child_types = {}
-
-        cls._populate_workflow_definition(
-            workflow_folderpath, types, allowable_child_types
-        )
-
-        workflow_definition = WorkflowDefinition(
-            types=types, allowable_child_types=allowable_child_types
-        )
-
-        return workflow_definition
 
     @classmethod
     def _populate_workflow_definition(
@@ -164,3 +150,31 @@ class WorkflowDefinition(BaseModel):
 
     class Config:
         arbitrary_types_allowed = True
+
+class WorkflowRegistry:
+    @classmethod
+    def create_definition(cls, workflow_folderpath: str):
+        if workflow_folderpath in cls._workflow_definitions:
+            return
+
+        types = {}
+        allowable_child_types = {}
+
+        WorkflowDefinition._populate_workflow_definition(
+            workflow_folderpath, types, allowable_child_types
+        )
+
+        workflow_definition = WorkflowDefinition(
+            workflow_folderpath=workflow_folderpath,
+            types=types, allowable_child_types=allowable_child_types
+        )
+
+        cls._workflow_definitions[workflow_folderpath] = workflow_definition
+    
+    @classmethod
+    def get_definition(cls, workflow_folderpath: str) -> WorkflowDefinition:
+        if workflow_folderpath not in cls._workflow_definitions:
+            WorkflowRegistry.create_definition(workflow_folderpath)
+        return cls._workflow_definitions[workflow_folderpath]
+
+    _workflow_definitions: dict[str, WorkflowDefinition] = {}

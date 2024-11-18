@@ -1,7 +1,6 @@
 import dspy
 
-from fastworkflow.command_executor import CommandResponse
-from fastworkflow.session import Session
+import fastworkflow
 from fastworkflow.utils.dspy_logger import DSPyRotatingFileLogger, DSPyForward
 
 from ..parameter_extraction.signatures import CommandParameters
@@ -11,14 +10,14 @@ from .command_implementation import process_command
 class ResponseGenerator:
     def __call__(
         self,
-        session: Session,
+        session: fastworkflow.Session,
         command: str,
         command_parameters: CommandParameters
-    ) -> list[CommandResponse]:
+    ) -> fastworkflow.CommandOutput:
         output = process_command(session, command_parameters)
 
-        DSPY_LM_MODEL = session.get_env_var("DSPY_LM_MODEL")
-        OPENAI_API_KEY = session.get_env_var("OPENAI_API_KEY")
+        DSPY_LM_MODEL = fastworkflow.get_env_var("DSPY_LM_MODEL")
+        OPENAI_API_KEY = fastworkflow.get_env_var("OPENAI_API_KEY")
         lm = dspy.LM(DSPY_LM_MODEL, api_key=OPENAI_API_KEY)
         answer_generator = ResponseGenerator.BasicQA(lm)
 
@@ -27,11 +26,14 @@ class ResponseGenerator:
                 context=str(output.help_info), question=command
             )
 
-        return [
-            CommandResponse(
-                response=prediction.answer,
-            )
-        ]
+        return fastworkflow.CommandOutput(
+            session_id=session.id,
+            command_responses=[
+                fastworkflow.CommandResponse(
+                    response=prediction.answer,
+                )
+            ]
+        )
 
     class BasicQA(dspy.Module):
         """DSPy Module for answering help questions"""

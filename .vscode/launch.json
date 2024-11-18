@@ -15,7 +15,9 @@
             },
             "args": [
                 "./examples/sample_workflow",
-                "./env/.env"
+                "./env/.env",
+                "--startup_action",
+                "./env/startup_action.json"
             ]
         },
         {
@@ -29,6 +31,20 @@
             },
             "args": [
                 "./examples/sample_workflow",
+                "./env/.env"
+            ]
+        },
+        {
+            "name": "train_fastworkflow",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "fastworkflow.train",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/"
+            },
+            "args": [
+                "./fastworkflow",
                 "./env/.env"
             ]
         },

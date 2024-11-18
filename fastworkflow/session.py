@@ -2,18 +2,14 @@ import os
 import shutil
 import sys
 from functools import wraps
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
+from pydantic import BaseModel
 from speedict import Rdict
 
-from semantic_router.encoders import HuggingFaceEncoder
-from semantic_router import RouteLayer
-
-from fastworkflow.command_routing_definition import CommandRoutingDefinition
+import fastworkflow
 from fastworkflow.utils.logging import logger
-from fastworkflow.utterance_definition import UtteranceDefinition
 from fastworkflow.workflow import Workflow, Workitem
-from fastworkflow.workflow_definition import WorkflowDefinition
 
 
 # implements the enablecache decorator
@@ -40,20 +36,38 @@ def enablecache(func):
     return wrapper
 
 
+class WorkflowSnapshot(BaseModel):
+    workflow: Workflow
+    active_workitem_path: str
+    active_workitem_id: Optional[Union[int, str]]
+    context: dict
+
+    def get_active_workitem(self) -> Optional[Union[Workitem, Workflow]]:
+        """get the active workitem"""
+        return self.workflow.find_workitem(
+            self.active_workitem_path,
+            self.active_workitem_id
+        )
+    
+    def set_active_workitem(self, workitem: Workitem):
+        """set the active workitem"""
+        self.active_workitem_path = workitem.path
+        self.active_workitem_id = workitem.id
+
+
 SPEEDDICT_FOLDERNAME = "___workflow_contexts"
 
 
 class Session:
     """Session class"""
-
-    def __init__(self, 
-                 session_id: int, 
-                 workflow_folderpath: str, 
-                 env_vars: dict = {}, 
-                 context: dict = {}, 
-                 caller_session: Optional["Session"] = None,
-                 for_training_semantic_router: bool = False):
-        """initialize the Session class"""
+    @classmethod
+    def create(
+        cls,
+        session_id: int, 
+        workflow_folderpath: str,
+        context: dict = {},
+        for_training_semantic_router: bool = False
+    ) -> "Session":
         if not os.path.exists(workflow_folderpath):
             raise ValueError(f"The folder path {workflow_folderpath} does not exist")
 
@@ -64,52 +78,77 @@ class Session:
         sys.path.insert(0, workflow_folderpath)
 
         speedict_folderpath = os.path.join(workflow_folderpath, SPEEDDICT_FOLDERNAME)
-        os.makedirs(speedict_folderpath, exist_ok=True)
+        os.makedirs(speedict_folderpath, exist_ok=True)       
 
-        root_workitem_type = os.path.basename(workflow_folderpath.rstrip("/"))
+        # fastworkflow.WorkflowRegistry.create_definition(workflow_folderpath)
+        fastworkflow.CommandRoutingRegistry.create_definition(workflow_folderpath)
+        fastworkflow.UtteranceRegistry.create_definition(workflow_folderpath)
+        if not for_training_semantic_router:
+            # importing here to avoid circular import
+            from fastworkflow.semantic_router_definition import RouteLayerRegistry
+            RouteLayerRegistry.build_route_layer_map(workflow_folderpath)
+
+        workflow_snapshot = WorkflowSnapshot(
+            workflow=Workflow(
+                workflow_folderpath=workflow_folderpath,
+                type=os.path.basename(workflow_folderpath).rstrip("/"),
+                parent_workflow=None,
+            ),
+            active_workitem_path="/",
+            active_workitem_id=None,
+            context=context,
+        )
+        session = Session(cls.__create_key, session_id, workflow_snapshot)
+        session.save()  # save the workflow snapshot
+
+        Session._map_session_id_2_session[session_id] = session
+        return session
+
+    @classmethod
+    def load(cls, session_id: int) -> Optional["Session"]:
+        """load the session"""
+        if session_id in cls._map_session_id_2_session:
+            return cls._map_session_id_2_session[session_id]
+
+        sessiondb_folderpath = cls._get_sessiondb_folderpath(session_id)
+        if not os.path.exists(sessiondb_folderpath):
+            return None
+
+        keyvalue_db = Rdict(sessiondb_folderpath)
+        workflow_snapshot: WorkflowSnapshot = keyvalue_db.get["workflow_snapshot"]
+        keyvalue_db.close()
+
+        session = Session(cls.__create_key, session_id, workflow_snapshot)
+        Session._map_session_id_2_session[session_id] = session
+        return session
+
+    @classmethod
+    def get_session(cls, session_id: int) -> "Session":
+        if session_id not in cls._map_session_id_2_session:
+            session = cls.load(session_id)
+            if session is None:
+                raise ValueError(f"Session with id {session_id} does not exist")
+            cls._map_session_id_2_session[session_id] = session
+        return cls._map_session_id_2_session[session_id]
+
+    _map_session_id_2_session: dict[int, "Session"] = {}
+
+    # enforce session creation exclusively using Session.create_session
+    # https://stackoverflow.com/questions/8212053/private-constructor-in-python
+    __create_key = object()
+   
+    def __init__(self,
+                 create_key, 
+                 session_id: int, 
+                 workflow_snapshot: WorkflowSnapshot):
+        """initialize the Session class"""
+        if create_key is Session.__create_key:
+            pass
+        else:
+            raise ValueError("Session objects must be created using Session.create")
 
         self._session_id = session_id
-        self._workflow_folderpath = workflow_folderpath
-        self._env_vars = env_vars
-        self._caller_session = caller_session
-
-        self._root_workitem_type = root_workitem_type
-        self._workflow_definition = WorkflowDefinition.create(workflow_folderpath)
-        self._command_routing_definition = CommandRoutingDefinition.create(
-            workflow_folderpath
-        )
-        self._utterance_definition = UtteranceDefinition.create(workflow_folderpath)
-
-        self._map_workitem_type_2_route_layer = None
-        if not for_training_semantic_router:
-            route_layers_folderpath = os.path.join(self._workflow_folderpath, "___route_layers")
-            if not os.path.exists(route_layers_folderpath):
-                raise ValueError(f"Train the semantic router first. Before running the workflow.")
-            
-            # importing here to avoid circular import
-            from fastworkflow.semantic_router_definition import SemanticRouterDefinition
-
-            encoder = HuggingFaceEncoder()
-            semantic_router = SemanticRouterDefinition(encoder, self.workflow_folderpath)
-            map_workitem_type_2_route_layer: dict[str, RouteLayer] = {}
-            for workitem_type in self._workflow_definition.types:
-                route_layer = semantic_router.get_route_layer(workitem_type)
-                map_workitem_type_2_route_layer[workitem_type] = route_layer
-            self._map_workitem_type_2_route_layer = map_workitem_type_2_route_layer
-
-        self._workflow = Workflow(
-            workflow_definition=self._workflow_definition,
-            type=root_workitem_type,
-            parent_workflow=None,
-        )
-
-        context_dict = self.get_context()
-        if context:
-            # if there are duplicates, the values already in context_dict
-            # will override the values in provided context
-            context.update(context_dict)
-            context_dict = context
-        self.set_context(context_dict)
+        self._workflow_snapshot = workflow_snapshot
 
     @property
     def id(self) -> int:
@@ -117,149 +156,45 @@ class Session:
         return self._session_id
 
     @property
-    def env_vars(self) -> dict:
-        """get the environment variables"""
-        return self._env_vars
-
-    @property
-    def workflow_folderpath(self) -> str:
-        """get the workflow folderpath"""
-        return self._workflow_folderpath
-
-    @property
-    def caller_session(self) -> Optional["Session"]:
-        """get the caller session"""
-        return self._caller_session
-
-    @property
-    def root_workitem_type(self) -> str:
-        """get the root workitem type"""
-        return self._root_workitem_type
-
-    @property
-    def workflow_definition(self) -> WorkflowDefinition:
-        """get the workflow definition"""
-        return self._workflow_definition.model_copy()
-
-    @property
-    def command_routing_definition(self) -> CommandRoutingDefinition:
-        """get the command routing definition"""
-        return self._command_routing_definition.model_copy()
-
-    @property
-    def utterance_definition(self) -> UtteranceDefinition:
-        """get the utterance definition"""
-        return self._utterance_definition.model_copy()
-
-    @property
-    def workflow(self) -> Workflow:
-        """get the workflow"""
-        return self._workflow
-
-    @property
-    def parameter_extraction_info(self) -> Optional[dict]:
-        """get the parameter extraction information"""
-        return self._parameter_extraction_info
-
-    @parameter_extraction_info.setter
-    def parameter_extraction_info(self, value: Optional[dict]) -> None:
-        """set the parameter extraction information"""
-        self._parameter_extraction_info = value
-
-    def get_env_var(self, var_name: str, var_type: type = str, default: Optional[Union[str, int, float, bool]] = None) -> Union[str, int, float, bool]:
-        """get the environment variable"""
-        value = self._env_vars.get(var_name)
-        if value is None:
-            if default is None:
-                raise ValueError(f"Environment variable '{var_name}' does not exist and no default value is provided.")
-            else:
-                return default
-        
-        try:
-            if var_type is int:
-                return int(value)
-            elif var_type is float:
-                return float(value)
-            elif var_type is bool:
-                if value.lower() in ('true', '1'):
-                    return True
-                elif value.lower() in ('false', '0'):
-                    return False
-                else:
-                    raise ValueError(f"Cannot convert '{value}' to {var_type.__name__}.")
-            return str(value)  # Default case for str
-        except ValueError:
-            raise ValueError(f"Cannot convert '{value}' to {var_type.__name__}.")
-
-    def get_active_workitem(self) -> Optional[Union[Workitem, Workflow]]:
-        """get the active workitem"""
-        context = self.get_context()
-        active_workitem_path = context["active_workitem_path"]
-        active_workitem_id = context["active_workitem_id"]
-
-        return self.workflow.find_workitem(active_workitem_path, active_workitem_id)
-
-    def set_active_workitem(self, workitem: Union[Workitem, Workflow]) -> None:
-        """set the active workitem"""
-        context = self.get_context()
-        context["active_workitem_path"] = workitem.path
-        context["active_workitem_id"] = workitem.id
-        self.set_context(context)
-
-    def get_context(self) -> dict:
-        """get the context"""
-        contextdb_folderpath = self.get_contextdb_folderpath(self.id)
-        keyvalue_db = Rdict(contextdb_folderpath)
-
-        context = keyvalue_db["context"] if "context" in keyvalue_db else {}
-        if not context:
-            context = {
-                "active_workitem_path": "/",
-                "active_workitem_id": None
-            }
-            keyvalue_db["context"] = context
-
-        keyvalue_db.close()
-        return context
-
-    def set_context(self, context: dict) -> None:
-        """set the context"""
-        contextdb_folderpath = self.get_contextdb_folderpath(self.id)
-        keyvalue_db = Rdict(contextdb_folderpath)
-        keyvalue_db["context"] = context
-        keyvalue_db.close()
-
-    def reset_session(self) -> None:
-        """reset the session"""
-        self.set_context({})
+    def workflow_snapshot(self) -> WorkflowSnapshot:
+        """get the workflow snapshot"""
+        return self._workflow_snapshot
 
     def close(self) -> bool:
         """close the session"""
-        contextdb_folderpath = self.get_contextdb_folderpath(self.id)
+        sessiondb_folderpath = self._get_sessiondb_folderpath(self.id)
         try:
-            shutil.rmtree(contextdb_folderpath, ignore_errors=True)
+            shutil.rmtree(sessiondb_folderpath, ignore_errors=True)
         except OSError as e:
             logger.error(f"Error closing session: {e}")
             return False
 
-        sys.path.remove(self._workflow_folderpath)
+        sys.path.remove(self.workflow_snapshot.workflow.workflow_folderpath)
+
+        if self.id in Session._map_session_id_2_session:
+            del Session._map_session_id_2_session[self.id]
+
         return True
 
-    def get_contextdb_folderpath(self, session_id: int) -> str:
+    def save(self) -> None:
+        """save the session"""
+        sessiondb_folderpath = self._get_sessiondb_folderpath(self.id)
+        keyvalue_db = Rdict(sessiondb_folderpath)
+        keyvalue_db["workflow_snapshot"] = self._workflow_snapshot
+        keyvalue_db.close()
+
+    @classmethod
+    def _get_sessiondb_folderpath(cls, session_id: int) -> str:
         """get the db folder path"""
         session_id_str = str(session_id).replace("-", "_")
         return os.path.join(
-            self._workflow_folderpath, SPEEDDICT_FOLDERNAME, session_id_str
+            SPEEDDICT_FOLDERNAME, session_id_str
         )
 
     def get_cachedb_folderpath(self, function_name: str) -> str:
         """Get the cache database folder path for a specific function"""
         return os.path.join(
-            self._workflow_folderpath,
+            self.workflow_snapshot.workflow.workflow_folderpath,
             SPEEDDICT_FOLDERNAME,
             f"/function_cache/{function_name}",
         )
-
-    def get_route_layer(self, workitem_type: str) -> RouteLayer:
-        """get the route layer for a given workitem type"""
-        return self._map_workitem_type_2_route_layer[workitem_type]

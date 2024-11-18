@@ -4,7 +4,7 @@ import os
 
 from pydantic import BaseModel, field_validator
 
-from fastworkflow.command_source import CommandSource
+from fastworkflow import CommandSource
 
 
 class Utterances(BaseModel):
@@ -109,19 +109,6 @@ class UtteranceDefinition(BaseModel):
             ):
                 raise ValueError(f"Invalid value for type metadata '{key}'")
         return workitem_type_2_commandutterances
-
-    @classmethod
-    def create(cls, workflow_folderpath: str) -> "UtteranceDefinition":
-        workitem_type_2_commandutterances: dict[str, CommandUtterances] = {}
-        cls._populate_utterance_definition(
-            "", workflow_folderpath, workitem_type_2_commandutterances
-        )
-
-        utterance_definition = UtteranceDefinition(
-            workitem_type_2_commandutterances=workitem_type_2_commandutterances
-        )
-
-        return utterance_definition
 
     def get_command_names(self, workitem_type: str) -> list[str]:
         if workitem_type in self.workitem_type_2_commandutterances:
@@ -301,3 +288,29 @@ class UtteranceDefinition(BaseModel):
 
     class Config:
         arbitrary_types_allowed = True
+
+class UtteranceRegistry:
+    @classmethod
+    def create_definition(cls, workflow_folderpath: str):
+        if workflow_folderpath in cls._utterance_definitions:
+            return
+
+        workitem_type_2_commandutterances: dict[str, CommandUtterances] = {}
+        UtteranceDefinition._populate_utterance_definition(
+            "", workflow_folderpath, workitem_type_2_commandutterances
+        )
+
+        utterance_definition = UtteranceDefinition(
+            workitem_type_2_commandutterances=workitem_type_2_commandutterances
+        )
+
+        cls._utterance_definitions[workflow_folderpath] = utterance_definition
+        return utterance_definition
+    
+    @classmethod
+    def get_definition(cls, workflow_folderpath: str) -> UtteranceDefinition:
+        if workflow_folderpath not in cls._utterance_definitions:
+            raise ValueError(f"Utterance definition not found for workflow at '{workflow_folderpath}'")
+        return cls._utterance_definitions[workflow_folderpath]
+
+    _utterance_definitions: dict[str, UtteranceDefinition] = {}

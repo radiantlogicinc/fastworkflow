@@ -1,5 +1,3 @@
-from typing import Optional
-
 from pydantic import BaseModel
 
 from fastworkflow.session import Session
@@ -26,13 +24,13 @@ def process_command(
 
     :param input: The input parameters for the function.
     """
-    workitem = session.get_active_workitem()
+    workitem = session.workflow_snapshot.get_active_workitem()
     next_workitem = workitem.next_workitem(input.skip_completed)
 
     next_workitem_found = next_workitem is not None
     if next_workitem_found:
         active_workitem = next_workitem
-        session.set_active_workitem(active_workitem)
+        session.workflow_snapshot.set_active_workitem(active_workitem)
     else:
         active_workitem = workitem
 

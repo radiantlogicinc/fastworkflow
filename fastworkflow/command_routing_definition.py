@@ -5,7 +5,7 @@ from typing import Any, Optional, Type
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from fastworkflow.command_source import CommandSource
+from fastworkflow import CommandSource
 
 
 class ModuleType(Enum):
@@ -121,22 +121,6 @@ class CommandRoutingDefinition(BaseModel):
                 )
 
         return map_workitem_types_2_commandexecutionmetadata
-
-    @classmethod
-    def create(cls, workflow_folderpath: str) -> "CommandRoutingDefinition":
-        map_workitem_types_2_commandexecutionmetadata: dict[
-            str, CommandExecutionMetadata
-        ] = {}
-        cls._populate_command_routing_definition(
-            "", workflow_folderpath, map_workitem_types_2_commandexecutionmetadata
-        )
-
-        command_routing_definition = CommandRoutingDefinition(
-            workflow_folderpath=workflow_folderpath,
-            map_workitem_types_2_commandexecutionmetadata=map_workitem_types_2_commandexecutionmetadata,
-        )
-
-        return command_routing_definition
 
     def write(self, filename: str):
         with open(filename, "w") as f:
@@ -379,3 +363,33 @@ class CommandRoutingDefinition(BaseModel):
                         map_commands_2_metadata=map_commands_2_metadata
                     )
                 )
+
+class CommandRoutingRegistry:
+    """ This class is used to register command routing definitions for different workflows """
+    @classmethod
+    def create_definition(cls, workflow_folderpath: str):
+        if workflow_folderpath in cls._command_routing_definitions:
+            return
+
+        map_workitem_types_2_commandexecutionmetadata: dict[
+            str, CommandExecutionMetadata
+        ] = {}
+
+        CommandRoutingDefinition._populate_command_routing_definition(
+            "", workflow_folderpath, map_workitem_types_2_commandexecutionmetadata
+        )
+
+        command_routing_definition = CommandRoutingDefinition(
+            workflow_folderpath=workflow_folderpath,
+            map_workitem_types_2_commandexecutionmetadata=map_workitem_types_2_commandexecutionmetadata,
+        )
+
+        cls._command_routing_definitions[workflow_folderpath] = command_routing_definition
+    
+    @classmethod
+    def get_definition(cls, workflow_folderpath: str) -> CommandRoutingDefinition:
+        if workflow_folderpath not in cls._command_routing_definitions:
+            raise ValueError(f"Command routing definition not found for workflow at '{workflow_folderpath}'")
+        return cls._command_routing_definitions[workflow_folderpath]
+
+    _command_routing_definitions: dict[str, CommandRoutingDefinition] = {}

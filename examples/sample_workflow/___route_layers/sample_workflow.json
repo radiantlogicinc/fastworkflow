@@ -36,32 +36,6 @@
             "metadata": {}
         },
         {
-            "name": "abort",
-            "utterances": [
-                "abort",
-                "abort workflow",
-                "cancel",
-                "cancel workflow",
-                "stop",
-                "stop workflow",
-                "exit",
-                "exit workflow",
-                "quit",
-                "quit workflow",
-                "terminate",
-                "terminate workflow",
-                "end",
-                "end workflow",
-                "stop extraction",
-                "stop extraction workflow"
-            ],
-            "description": null,
-            "function_schemas": null,
-            "llm": null,
-            "score_threshold": 0.5,
-            "metadata": {}
-        },
-        {
             "name": "get_status",
             "utterances": [
                 "What is the current status of this work item?",

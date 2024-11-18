@@ -1,7 +1,9 @@
+import os
 from typing import List, Optional, Union
 
 from pydantic import BaseModel
 
+import fastworkflow
 from fastworkflow.workflow_definition import NodeType, SizeMetaData, WorkflowDefinition
 
 
@@ -9,12 +11,11 @@ class Workitem(BaseModel):
     def __init__(
         self,
         type: str,
-        node_type: str,
+        node_type: NodeType,
         parent_workflow: Optional["Workflow"],
-        id: Optional[str] = None,
-        **data,
+        id: Optional[str] = None
     ):
-        super().__init__(**data)
+        super().__init__()
 
         if not type:
             raise ValueError("type cannot be empty")
@@ -126,20 +127,21 @@ class Workitem(BaseModel):
 
 
 class Workflow(Workitem):
-    workflow_definition: WorkflowDefinition = None
-
+    # don't use this directly, use the registry to create workflows
     def __init__(
         self,
-        workflow_definition: WorkflowDefinition,
+        workflow_folderpath: str,
         type: str,
         parent_workflow: Optional["Workflow"],
-        id: Optional[str] = None,
-        **data,
+        id: Optional[str] = None
     ):
-        super().__init__(type, NodeType.Workflow, parent_workflow, id, **data)
-        self.workflow_definition = workflow_definition
+        super().__init__(type, NodeType.Workflow, parent_workflow, id)
 
-        self._allowable_child_types = self.workflow_definition.allowable_child_types[
+        self._workflow_folderpath = workflow_folderpath
+        self._type = type
+
+        workflow_definition = fastworkflow.WorkflowRegistry.get_definition(self._workflow_folderpath)
+        self._allowable_child_types = workflow_definition.allowable_child_types[
             type
         ]
 
@@ -147,7 +149,7 @@ class Workflow(Workitem):
         # if they are, add min size child workitems to the list
         for child_type, size_metadata in self._allowable_child_types.items():
             if size_metadata.min == size_metadata.max:
-                type_metadata = self.workflow_definition.types[child_type]
+                type_metadata = workflow_definition.types[child_type]
                 if type_metadata.node_type == NodeType.Workitem:
                     self._workitems.extend(
                         [
@@ -163,7 +165,7 @@ class Workflow(Workitem):
                     self._workitems.extend(
                         [
                             Workflow(
-                                workflow_definition=workflow_definition,
+                                workflow_folderpath=workflow_folderpath,
                                 type=child_type,
                                 parent_workflow=self,
                             )
@@ -174,6 +176,14 @@ class Workflow(Workitem):
                     raise ValueError(
                         f"Invalid workitem type '{type_metadata.node_type}'"
                     )
+
+    @property
+    def workflow_folderpath(self) -> str:
+        return self._workflow_folderpath
+
+    @property
+    def type(self) -> str:
+        return self._type
 
     @property
     def has_started(self) -> bool:
@@ -217,7 +227,8 @@ class Workflow(Workitem):
             )
 
         # is this a Workitem or a Workflow?
-        type_metadata = self.workflow_definition.types[item_type]
+        workflow_definition = fastworkflow.WorkflowRegistry.get_definition(self._workflow_folderpath)
+        type_metadata = workflow_definition.types[item_type]
         if type_metadata.node_type == NodeType.Workitem:
             item = Workitem(
                 type=item_type,
@@ -227,7 +238,7 @@ class Workflow(Workitem):
             )
         elif type_metadata.node_type == NodeType.Workflow:
             item = Workflow(
-                workflow_definition=self.workflow_definition,
+                workflow_folderpath=self._workflow_folderpath,
                 type=item_type,
                 parent_workflow=self,
                 id=item_id,

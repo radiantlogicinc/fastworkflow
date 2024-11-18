@@ -1,7 +1,6 @@
-from typing import Optional
-
 from pydantic import BaseModel
 
+import fastworkflow
 from fastworkflow.session import Session
 
 
@@ -20,9 +19,11 @@ def process_command(
     :param input: The input parameters for the function.
     """
     # Get the current workitem type
-    current_workitem = session.get_active_workitem()
+    current_workitem = session.workflow_snapshot.get_active_workitem()
 
-    utterances = session.utterance_definition.get_sample_utterances(current_workitem.type)
+    workflow_folderpath = session.workflow_snapshot.workflow.workflow_folderpath
+    utterance_definition = fastworkflow.UtteranceRegistry.get_definition(workflow_folderpath)
+    utterances = utterance_definition.get_sample_utterances(current_workitem.type)
 
     return CommandProcessorOutput(
         workitem_type=current_workitem.type, utterances=utterances

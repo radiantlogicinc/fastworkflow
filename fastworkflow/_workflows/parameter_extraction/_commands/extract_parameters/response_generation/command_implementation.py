@@ -1,8 +1,16 @@
-from typing import Optional
+from typing import Optional, Type
 
 from pydantic import BaseModel
 
-from fastworkflow.session import Session
+import dspy
+
+import fastworkflow
+from fastworkflow.command_routing_definition import ModuleType
+from fastworkflow.utils.logging import logger
+
+from fastworkflow.utils.pydantic_model_2_dspy_signature_class import (
+    TypedPredictorSignature,
+)
 
 
 class OutputOfProcessCommand(BaseModel):
@@ -10,38 +18,55 @@ class OutputOfProcessCommand(BaseModel):
     cmd_parameters: Optional[BaseModel] = None
     error_msg: Optional[str] = None
 
-
 def process_command(
-    caller_session: Session, command: str
+    session: fastworkflow.Session, command: str
 ) -> OutputOfProcessCommand:
-    """Extracts the parameter value from the command."""
-    param_extraction_info = caller_session.parameter_extraction_info
+    sws = session.workflow_snapshot.context["subject_workflow_snapshot"]
 
-    input_for_param_extraction_class = param_extraction_info["input_for_param_extraction_class"]
+    subject_workflow_folderpath = sws.workflow.workflow_folderpath
+    subject_command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(subject_workflow_folderpath)
+
+    active_workitem_type = sws.get_active_workitem().type
+    subject_command_name = session.workflow_snapshot.context["subject_command_name"]
+    input_for_param_extraction_class = subject_command_routing_definition.get_command_class(
+        active_workitem_type, subject_command_name, ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS)
     input_for_param_extraction = input_for_param_extraction_class.create(
-        session=caller_session, command=command
+        workflow_snapshot=sws, command=command
     )
 
-    command_parameters_class = param_extraction_info["command_parameters_class"]
-    parameter_extraction_func = param_extraction_info["parameter_extraction_func"]
-    _, input_obj = parameter_extraction_func(
-        caller_session, input_for_param_extraction, command_parameters_class
+    command_parameters_class = subject_command_routing_definition.get_command_class(
+        active_workitem_type, subject_command_name, ModuleType.COMMAND_PARAMETERS_CLASS)
+    input_obj = extract_command_parameters_from_input(
+        input_for_param_extraction, command_parameters_class
     )
 
-    parameter_validation_func = param_extraction_info["parameter_validation_func"]
-    is_valid, error_msg = parameter_validation_func(caller_session, input_obj)
+    is_valid, error_msg = input_for_param_extraction.validate_parameters(sws, input_obj)
     if not is_valid:
         return OutputOfProcessCommand(parameter_is_valid=False, error_msg=error_msg)
 
     return OutputOfProcessCommand(parameter_is_valid=True, cmd_parameters=input_obj)
 
 
-if __name__ == "__main__":
-    # create a session id
-    session_id = 1234
-    session = Session(
-        session_id, "shared/tests/lighthouse/workflows/_parameter_extraction"
-    )
+def extract_command_parameters_from_input(
+    input_for_param_extraction: BaseModel,
+    command_parameters_class: Type[BaseModel],
+) -> BaseModel:
+    try:
+        dspy_signature_class = TypedPredictorSignature.create(
+            input_for_param_extraction,
+            command_parameters_class,
+            prefix_instructions=input_for_param_extraction.__doc__,
+        )
 
-    tool_output = process_command(session, "extract_parameters")
-    print(tool_output)
+        DSPY_LM_MODEL = fastworkflow.get_env_var("DSPY_LM_MODEL")
+        OPENAI_API_KEY = fastworkflow.get_env_var("OPENAI_API_KEY")
+        lm = dspy.LM(DSPY_LM_MODEL, api_key=OPENAI_API_KEY)
+        with dspy.context(lm=lm):
+            extract_cmd_params = dspy.TypedChainOfThought(dspy_signature_class)
+            prediction = extract_cmd_params(**input_for_param_extraction.model_dump())
+            command_parameters_obj = command_parameters_class(**prediction)
+    except ValueError as e:
+        logger.error(f"DSPy error extracting command parameters: {e}")
+        command_parameters_obj = command_parameters_class()
+
+    return command_parameters_obj

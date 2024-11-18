@@ -2,7 +2,8 @@ from typing import Annotated, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from fastworkflow.session import Session
+import fastworkflow
+from fastworkflow.session import WorkflowSnapshot
 
 
 class CommandParameters(BaseModel):
@@ -42,14 +43,14 @@ class InputForParamExtraction(BaseModel):
     command: str
 
     @classmethod
-    def create(cls, session: Session, command: str):
+    def create(cls, workflow_snapshot: WorkflowSnapshot, command: str):
         return cls(
             command=command,
         )
 
     @classmethod
     def validate_parameters(
-        cls, session: Session, cmd_parameters: CommandParameters
+        cls, workflow_snapshot: WorkflowSnapshot, cmd_parameters: CommandParameters
     ) -> Tuple[bool, str]:
         """
         Check if the parameters are valid in the current context.
@@ -61,19 +62,24 @@ class InputForParamExtraction(BaseModel):
             return (False, "Missing or invalid workitem path")
 
         if cmd_parameters.workitem_path == "NOT_FOUND":
-            active_workitem = session.get_active_workitem()
+            active_workitem = workflow_snapshot.get_active_workitem()
             if active_workitem:
+                cmd_parameters.workitem_path = active_workitem.path
+                cmd_parameters.workitem_id = active_workitem.id
                 return (True, None)
+
+        workflow_folderpath = workflow_snapshot.workflow.workflow_folderpath
+        workflow_definition = fastworkflow.WorkflowRegistry.get_definition(workflow_folderpath)
 
         workitem_path = "".join(cmd_parameters.workitem_path.split()).strip(" \"'")
         relative_to_root = False
         if workitem_path in [
-            workitem_type for workitem_type in session.workflow_definition.types
+            workitem_type for workitem_type in workflow_definition.types
         ]:
             relative_to_root = True
             workitem_path = f"//{workitem_path}"
 
-        workitem = session.workflow.find_workitem(
+        workitem = workflow_snapshot.workflow.find_workitem(
             workitem_path, cmd_parameters.workitem_id, relative_to_root
         )
         if workitem is None:
@@ -82,6 +88,8 @@ class InputForParamExtraction(BaseModel):
                 "workitem path was valid but does not exist in this workflow",
             )
 
+        cmd_parameters.workitem_path = workitem.path
+        cmd_parameters.workitem_id = workitem.id
         return (True, None)
 
     class Config:
