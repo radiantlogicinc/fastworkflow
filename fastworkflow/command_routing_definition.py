@@ -139,7 +139,7 @@ class CommandRoutingDefinition(BaseModel):
                 f"Command routing definition not found for workitem type '{workitem_type}'"
             )
 
-    def get_command_class(
+    def _compute_command_class(
         self, workitem_type: str, command_name: str, module_type: ModuleType
     ) -> Optional[Type[Any]]:
         if workitem_type in self.map_workitem_types_2_commandexecutionmetadata:
@@ -212,6 +212,15 @@ class CommandRoutingDefinition(BaseModel):
             raise ValueError(
                 f"Command routing definition not found for workitem type '{workitem_type}'"
             )
+
+    _command_class_cache = {}
+    def get_command_class(self, workitem_type: str, command_name: str, module_type: ModuleType):
+        cache_key = f"{workitem_type}:{command_name}:{module_type}"
+        if cache_key in self._command_class_cache:
+            return self._command_class_cache[cache_key]
+        result = self._compute_command_class(workitem_type, command_name, module_type)
+        self._command_class_cache[cache_key] = result
+        return result
 
     def get_command_class_object(
         self, workitem_type: str, command_name: str, module_type: ModuleType
