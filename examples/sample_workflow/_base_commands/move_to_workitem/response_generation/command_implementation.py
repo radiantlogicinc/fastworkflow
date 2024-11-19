@@ -41,12 +41,10 @@ def process_command(
     )
 
     target_workitem_found = workitem is not None
-
     if target_workitem_found:
-        active_workitem = workitem
-        session.workflow_snapshot.set_active_workitem(active_workitem)
-    else:
-        active_workitem = session.workflow_snapshot.get_active_workitem()
+        session.workflow_snapshot.active_workitem = workitem
+
+    active_workitem = session.workflow_snapshot.active_workitem
 
     get_status_tool_output = get_status(
         session,

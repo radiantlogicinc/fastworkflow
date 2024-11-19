@@ -3,9 +3,16 @@
     "encoder_name": "sentence-transformers/all-MiniLM-L6-v2",
     "routes": [
         {
-            "name": "guess_command_name",
+            "name": "abort",
             "utterances": [
-                "extract command"
+                "abort",
+                "cancel",
+                "stop",
+                "quit",
+                "terminate",
+                "end",
+                "never mind",
+                "exit"
             ],
             "description": null,
             "function_schemas": null,

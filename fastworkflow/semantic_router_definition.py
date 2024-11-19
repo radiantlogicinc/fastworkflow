@@ -40,6 +40,9 @@ class SemanticRouterDefinition:
 
             routes = []
             for command_name in command_names:
+                if command_name == "*":
+                    continue
+
                 utterance_definition = fastworkflow.UtteranceRegistry.get_definition(self._workflow_folderpath)
                 utterances = utterance_definition.get_command_utterances(
                     workitem_type, command_name
@@ -108,5 +111,13 @@ class RouteLayerRegistry:
         if workitem_type not in cls._map_workflow_folderpath_to_route_layer_map[workflow_folderpath]:
             raise ValueError(f"Route layer not found for workitem type '{workitem_type}'")
         return cls._map_workflow_folderpath_to_route_layer_map[workflow_folderpath][workitem_type]
+
+    @classmethod
+    def build_route_layer_from_routelayers(cls, routelayers: list[RouteLayer]) -> RouteLayer:   
+        encoder = HuggingFaceEncoder()
+        routes = []
+        for route_list in routelayers:
+            routes.extend(route_list)
+        return RouteLayer(encoder=encoder, routes=routes)
 
     _map_workflow_folderpath_to_route_layer_map: dict[str, dict[str, RouteLayer]] = {}

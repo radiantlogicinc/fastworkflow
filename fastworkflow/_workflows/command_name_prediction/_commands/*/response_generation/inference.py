@@ -17,8 +17,9 @@ class ResponseGenerator:
             return CommandOutput(
                 command_responses=[
                     CommandResponse(
-                        response="",
+                        response="command aborted" if output_of_process_command.command_name == "abort" else "",
                         artifacts={
+                            "command": command,
                             "command_name": output_of_process_command.command_name,
                         },
                     )

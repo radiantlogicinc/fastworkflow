@@ -20,7 +20,7 @@ def process_command(
 
     :param input: The input parameters for the function.
     """
-    active_workitem = session.workflow_snapshot.get_active_workitem()
+    active_workitem = session.workflow_snapshot.active_workitem
     if not input.for_next_workitem:
         return CommandProcessorOutput(
             workitem_path=active_workitem.path, workitem_id=active_workitem.id

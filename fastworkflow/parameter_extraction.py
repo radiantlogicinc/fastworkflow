@@ -18,7 +18,7 @@ def extract_command_parameters(
     """
     startup_action = fastworkflow.Action(
         workitem_type="parameter_extraction",
-        command_name="extract_parameters",
+        command_name="*",
         command=command,
     )
 
@@ -28,7 +28,7 @@ def extract_command_parameters(
         command_output = command_executor.perform_action(workflow_session.session, startup_action)
         if len(command_output.command_responses) > 1:
             raise ValueError("Multiple command responses returned from parameter extraction workflow")    
-        return command_output
+        return (workflow_session.session.id, command_output)    
 
     fastworkflow_folder = os.path.dirname(os.path.abspath(__file__))
     parameter_extraction_workflow_folderpath = os.path.join(
@@ -40,10 +40,11 @@ def extract_command_parameters(
         "subject_workflow_snapshot": workflow_session.session.workflow_snapshot
     }
 
+    parameter_extraction_workflow_session_id = random.randint(1, 100000000)
     workflow_session = fastworkflow.WorkflowSession(
         workflow_session.command_router,
         workflow_session.command_executor,
-        random.randint(1, 100000000), 
+        parameter_extraction_workflow_session_id, 
         parameter_extraction_workflow_folderpath, 
         context=context,
         startup_action=startup_action, 
@@ -52,5 +53,4 @@ def extract_command_parameters(
         command_output_queue=workflow_session.command_output_queue,
     )
 
-    # Run child workflow in current thread (keep_alive=False)
     return workflow_session.start()

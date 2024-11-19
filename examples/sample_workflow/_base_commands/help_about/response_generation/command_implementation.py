@@ -22,7 +22,7 @@ def process_command(
 
     workitem_type = input.workitem_type
     if not workitem_type:
-        workitem = session.workflow_snapshot.get_active_workitem()
+        workitem = session.workflow_snapshot.active_workitem
         workitem_type = workitem.type
 
     help_info = {"workitem_type": workitem_type, "allowable_child_types": {}}

@@ -17,7 +17,6 @@ class ResponseGenerator:
                 command_responses=[
                     CommandResponse(
                         response="",
-                        success=True,
                         artifacts={
                             "cmd_parameters": output_of_process_command.cmd_parameters,
                         },
@@ -33,6 +32,3 @@ class ResponseGenerator:
                 )
             ]
         )
-
-
-# if __name__ == "__main__":

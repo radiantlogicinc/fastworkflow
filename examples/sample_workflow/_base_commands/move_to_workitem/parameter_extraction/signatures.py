@@ -38,12 +38,22 @@ class CommandParameters(BaseModel):
 
 
 class InputForParamExtraction(BaseModel):
-    """Extract the command parameters from the command"""
+    """Extract the workitem path and optionally the workitem id from the command. 
+Workitem id (if present) can be an integer or a string.
+Valid workitem paths are:\n
+{workitem_type_list} 
+"""
 
     command: str
 
     @classmethod
     def create(cls, workflow_snapshot: WorkflowSnapshot, command: str):
+        workflow_folderpath = workflow_snapshot.workflow.workflow_folderpath
+        workflow_definition = fastworkflow.WorkflowRegistry.get_definition(workflow_folderpath)
+        workitem_type_list = "\n".join(workflow_definition.types.keys())
+
+        cls.__doc__ = cls.__doc__.format(workitem_type_list=workitem_type_list)
+
         return cls(
             command=command,
         )
@@ -66,7 +76,7 @@ class InputForParamExtraction(BaseModel):
                 False,
                 "Workitem path is missing or invalid.\n"
                 f"Valid workitem paths are:\n"
-                f"{workitem_type_list}",
+                f"{workitem_type_list}\n"
             )
 
         workitem_path = "".join(cmd_parameters.workitem_path.split()).strip(" \"'")
@@ -81,7 +91,7 @@ class InputForParamExtraction(BaseModel):
         if workitem is None:
             return (
                 False,
-                f"workitem path {workitem_path} is syntactically valid but does not exist in this workflow",
+                f"workitem path {workitem_path} is syntactically valid but does not exist in this workflow\n",
             )
 
         return (True, None)

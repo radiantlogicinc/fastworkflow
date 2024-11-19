@@ -19,7 +19,7 @@ def process_command(
     :param input: The input parameters for the function.
     """
     # Get the current workitem type
-    current_workitem = session.workflow_snapshot.get_active_workitem()
+    current_workitem = session.workflow_snapshot.active_workitem
 
     workflow_folderpath = session.workflow_snapshot.workflow.workflow_folderpath
     utterance_definition = fastworkflow.UtteranceRegistry.get_definition(workflow_folderpath)

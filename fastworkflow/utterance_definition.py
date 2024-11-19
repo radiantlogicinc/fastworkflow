@@ -217,6 +217,9 @@ class UtteranceDefinition(BaseModel):
         commands_folder = os.path.join(workflow_folderpath, command_source.value)
         if os.path.exists(commands_folder):
             for command in os.listdir(commands_folder):
+                if command == "*":
+                    continue
+
                 subfolder_path = os.path.join(commands_folder, command)
 
                 if not os.path.isdir(subfolder_path):

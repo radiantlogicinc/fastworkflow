@@ -197,18 +197,13 @@ class WorkflowSession:
     def _process_message(self, message: str) -> fastworkflow.CommandOutput:
         """Process a single message"""
         command_output = self.command_router.route_command(self, message)
-
-        if command_output.command_responses[0].artifacts.get("abort", False) and not self.keep_alive:
-            self.workflow_is_complete = True
-        else:
-            if not command_output.command_responses[0].success or self.keep_alive:
-                self._command_output_queue.put(command_output)
-
+        if not command_output.success or self.keep_alive:
+            self._command_output_queue.put(command_output)
         return command_output
     
     def _process_action(self, action: fastworkflow.Action) -> fastworkflow.CommandOutput:
         """Process a startup action"""
         command_output = self.command_executor.perform_action(self.session, action)
-        if not command_output.command_responses[0].success or self.keep_alive:
+        if not command_output.success or self.keep_alive:
             self._command_output_queue.put(command_output)
         return command_output

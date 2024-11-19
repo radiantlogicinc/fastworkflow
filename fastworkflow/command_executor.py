@@ -44,7 +44,7 @@ class CommandExecutor(CommandExecutorInterface):
         workflow_folderpath = workflow_session.session.workflow_snapshot.workflow.workflow_folderpath
         command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(workflow_folderpath)
 
-        active_workitem_type = workflow_session.session.workflow_snapshot.get_active_workitem().type
+        active_workitem_type = workflow_session.session.workflow_snapshot.active_workitem.type
         response_generation_object = (
             command_routing_definition.get_command_class_object(
                 active_workitem_type,
@@ -83,7 +83,7 @@ class CommandExecutor(CommandExecutorInterface):
                 command_name,
                 command
             )
-            if not command_output.command_responses[0].success:
+            if command_output.command_aborted:
                 return command_output
 
             input_obj = command_output.command_responses[0].artifacts["cmd_parameters"]

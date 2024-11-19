@@ -25,6 +25,14 @@ class CommandResponse(BaseModel):
 class CommandOutput(BaseModel):
     command_responses: list[CommandResponse]
 
+    @property
+    def success(self) -> bool:
+        return all(response.success for response in self.command_responses)
+
+    @property
+    def command_aborted(self) -> bool:
+        return any(response.artifacts.get("command_name", None) == "abort" for response in self.command_responses)
+
 class CommandSource(str, Enum):
     BASE_COMMANDS = ("_base_commands",)
     COMMANDS = "_commands"

@@ -62,7 +62,7 @@ class InputForParamExtraction(BaseModel):
             return (False, "Missing or invalid workitem path")
 
         if cmd_parameters.workitem_path == "NOT_FOUND":
-            active_workitem = workflow_snapshot.get_active_workitem()
+            active_workitem = workflow_snapshot.active_workitem
             if active_workitem:
                 cmd_parameters.workitem_path = active_workitem.path
                 cmd_parameters.workitem_id = active_workitem.id

@@ -38,22 +38,22 @@ def enablecache(func):
 
 class WorkflowSnapshot(BaseModel):
     workflow: Workflow
-    active_workitem_path: str
-    active_workitem_id: Optional[Union[int, str]]
     context: dict
+    active_workitem: Optional[Union[Workitem, Workflow]] = None
 
-    def get_active_workitem(self) -> Optional[Union[Workitem, Workflow]]:
-        """get the active workitem"""
-        return self.workflow.find_workitem(
-            self.active_workitem_path,
-            self.active_workitem_id
+    def __init__(self, 
+                 workflow: Workflow, 
+                 active_workitem_path: str, 
+                 active_workitem_id: Optional[Union[int, str]] = None,
+                 context: dict = {}):
+        super().__init__(
+            workflow=workflow,
+            context=context,
+            active_workitem=workflow.find_workitem(
+                active_workitem_path,
+                active_workitem_id
+            )
         )
-    
-    def set_active_workitem(self, workitem: Workitem):
-        """set the active workitem"""
-        self.active_workitem_path = workitem.path
-        self.active_workitem_id = workitem.id
-
 
 SPEEDDICT_FOLDERNAME = "___workflow_contexts"
 

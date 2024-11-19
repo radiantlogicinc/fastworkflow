@@ -27,7 +27,7 @@ class InputForParamExtraction(BaseModel):
         workitem_types = ", ".join(workflow_definition.types.keys())
         cls.__doc__ = cls.__doc__.format(workitem_types=workitem_types)
 
-        return cls(command=command, current_context=workflow_snapshot.get_active_workitem().type)
+        return cls(command=command, current_context=workflow_snapshot.active_workitem.type)
 
     @classmethod
     def validate_parameters(

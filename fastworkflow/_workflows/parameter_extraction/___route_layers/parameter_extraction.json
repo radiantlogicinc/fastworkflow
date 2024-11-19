@@ -3,9 +3,16 @@
     "encoder_name": "sentence-transformers/all-MiniLM-L6-v2",
     "routes": [
         {
-            "name": "extract_parameters",
+            "name": "abort",
             "utterances": [
-                "extract parameters"
+                "abort",
+                "cancel",
+                "stop",
+                "quit",
+                "terminate",
+                "end",
+                "never mind",
+                "exit"
             ],
             "description": null,
             "function_schemas": null,
