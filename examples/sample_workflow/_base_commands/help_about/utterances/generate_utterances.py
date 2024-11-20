@@ -20,7 +20,7 @@ def generate_utterances(workflow: Workflow, command_name: str) -> list[str]:
         workflow.type, command_name
     )
 
-    utterance_list: list[str] = utterances_obj.plain_utterances
+    utterance_list: list[str] = [command_name] + utterances_obj.plain_utterances
 
     inputs: list[CommandParameters] = generate_command_inputs(workflow)
     for input in inputs:

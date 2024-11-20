@@ -5,6 +5,7 @@
         {
             "name": "help_about",
             "utterances": [
+                "help_about",
                 "I need help",
                 "I need help with this task type",
                 "Can you help me with this stage type",
@@ -38,6 +39,7 @@
         {
             "name": "get_status",
             "utterances": [
+                "get_status",
                 "What is the current status of this work item?",
                 "get status",
                 "What is the status of this work flow?",
@@ -100,6 +102,7 @@
         {
             "name": "get_path_and_id",
             "utterances": [
+                "get_path_and_id",
                 "what are we working on?",
                 "where am I",
                 "where are we",
@@ -133,6 +136,7 @@
         {
             "name": "move_to_workitem",
             "utterances": [
+                "move_to_workitem",
                 "Go to",
                 "Move to",
                 "Lets switch to",
@@ -216,6 +220,7 @@
         {
             "name": "move_to_next_workitem",
             "utterances": [
+                "move_to_next_workitem",
                 "let's move to the next work item",
                 "move next",
                 "go to next",
