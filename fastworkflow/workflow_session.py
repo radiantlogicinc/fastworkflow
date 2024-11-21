@@ -24,14 +24,14 @@ class WorkflowWorker(Thread):
     def run(self):
         """Process messages for the root workflow"""
         try:
-            self.workflow_session.status = SessionStatus.RUNNING
+            self.workflow_session._status = SessionStatus.RUNNING
             logger.debug(f"Started root workflow {self.workflow_session.session.id}")
             
             # Run the workflow loop
             self.workflow_session._run_workflow_loop()
             
         finally:
-            self.workflow_session.status = SessionStatus.STOPPED
+            self.workflow_session._status = SessionStatus.STOPPED
             # Ensure session is popped if thread terminates unexpectedly
             if WorkflowSession.get_active_session_id() == self.workflow_session.session.id:
                 WorkflowSession.pop_active_session()
@@ -87,75 +87,87 @@ class WorkflowSession:
         if startup_command and startup_action:
             raise ValueError("Cannot provide both startup_command and startup_action")
 
-        self.keep_alive = keep_alive
         if keep_alive:
             if not (user_message_queue is None and command_output_queue is None):
                 raise ValueError("user_message_queue and command_output_queue are created automatically when keep_alive is True")
-            self._user_message_queue = Queue()
-            self._command_output_queue = Queue()
+            user_message_queue = Queue()
+            command_output_queue = Queue()
         else:
             if user_message_queue is None or command_output_queue is None:
                 raise ValueError("user_message_queue and command_output_queue must be provided when keep_alive is False")
-            self._user_message_queue = user_message_queue
-            self._command_output_queue = command_output_queue
 
-        self.session = fastworkflow.Session.create(
+        self._session = fastworkflow.Session.create(
             session_id, 
-            workflow_folderpath, 
-            context
+            workflow_folderpath,
+            keep_alive=keep_alive,
+            user_message_queue=user_message_queue,
+            command_output_queue=command_output_queue,
+            context=context
         )
 
-        self.status = SessionStatus.STOPPED
+        self._status = SessionStatus.STOPPED
         self._worker: Optional[WorkflowWorker] = None
-        self.startup_command = startup_command
+        self._startup_command = startup_command
 
         if startup_action and startup_action.session_id is None:
             startup_action.session_id = session_id
-        self.startup_action = startup_action
+        self._startup_action = startup_action
 
-        self.command_router = command_router
-        self.command_executor = command_executor
+        self._command_router = command_router
+        self._command_executor = command_executor
         
         # Register session
         WorkflowSession._map_session_id_2_workflow_session[session_id] = self
     
     def start(self) -> Optional[fastworkflow.CommandOutput]:
         """Start the workflow session"""
-        if self.status != SessionStatus.STOPPED:
+        if self._status != SessionStatus.STOPPED:
             raise RuntimeError("Session already started")
         
-        self.status = SessionStatus.STARTING
+        self._status = SessionStatus.STARTING
         
         # Push this session as active
-        WorkflowSession.push_active_session(self.session.id)
+        WorkflowSession.push_active_session(self._session.id)
         
         command_output = None
-        if self.keep_alive:
+        if self._session.keep_alive:
             # Root workflow gets a worker thread
             self._worker = WorkflowWorker(self)
             self._worker.start()
         else:
             # Child workflows run their loop in the current thread
-            self.status = SessionStatus.RUNNING
+            self._status = SessionStatus.RUNNING
             command_output = self._run_workflow_loop()
 
         return command_output
 
     @property
+    def session(self) -> fastworkflow.Session:
+        return self._session
+
+    @property
     def user_message_queue(self) -> Queue:
-        return self._user_message_queue
+        return self._session.user_message_queue
 
     @property
     def command_output_queue(self) -> Queue:
-        return self._command_output_queue
+        return self._session.command_output_queue
 
     @property
     def workflow_is_complete(self) -> bool:
-        return self.session.workflow_snapshot.workflow.is_complete
+        return self._session.workflow_snapshot.workflow.is_complete
     
     @workflow_is_complete.setter
     def workflow_is_complete(self, value: bool) -> None:
-        self.session.workflow_snapshot.workflow.is_complete = value
+        self._session.workflow_snapshot.workflow.is_complete = value
+
+    @property
+    def command_router(self) -> CommandRouterInterface:
+        return self._command_router
+
+    @property
+    def command_executor(self) -> CommandExecutorInterface:
+        return self._command_executor
 
     def _run_workflow_loop(self) -> Optional[fastworkflow.CommandOutput]:
         """
@@ -168,13 +180,13 @@ class WorkflowSession:
         
         try:
             # Handle startup command/action
-            if self.startup_command:
-                last_output = self._process_message(self.startup_command)
-            elif self.startup_action:
-                last_output = self._process_action(self.startup_action)
+            if self._startup_command:
+                last_output = self._process_message(self._startup_command)
+            elif self._startup_action:
+                last_output = self._process_action(self._startup_action)
             
-            while not self.workflow_is_complete or self.keep_alive:
-                if self.status == SessionStatus.STOPPING:
+            while not self.workflow_is_complete or self._session.keep_alive:
+                if self._status == SessionStatus.STOPPING:
                     break
                     
                 try:
@@ -184,26 +196,26 @@ class WorkflowSession:
                     continue
             
             # Return final output for child workflows, regardless of success/failure
-            if not self.keep_alive:
+            if not self._session.keep_alive:
                 return last_output
                 
         finally:
-            self.status = SessionStatus.STOPPED
+            self._status = SessionStatus.STOPPED
             WorkflowSession.pop_active_session()
-            logger.debug(f"Workflow {self.session.id} completed")
+            logger.debug(f"Workflow {self._session.id} completed")
             
         return None
     
     def _process_message(self, message: str) -> fastworkflow.CommandOutput:
         """Process a single message"""
-        command_output = self.command_router.route_command(self, message)
-        if not command_output.success or self.keep_alive:
-            self._command_output_queue.put(command_output)
+        command_output = self._command_router.route_command(self, message)
+        if not command_output.success or self._session.keep_alive:
+            self._session.command_output_queue.put(command_output)
         return command_output
     
     def _process_action(self, action: fastworkflow.Action) -> fastworkflow.CommandOutput:
         """Process a startup action"""
-        command_output = self.command_executor.perform_action(self.session, action)
-        if not command_output.success or self.keep_alive:
-            self._command_output_queue.put(command_output)
+        command_output = self._command_executor.perform_action(self._session, action)
+        if not command_output.success or self._session.keep_alive:
+            self._session.command_output_queue.put(command_output)
         return command_output

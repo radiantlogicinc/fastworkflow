@@ -71,10 +71,6 @@ class CommandExecutor(CommandExecutorInterface):
             )
         )
         if input_for_param_extraction_class and command_parameters_class:
-            # input_for_parameter_extraction = input_for_param_extraction_class.create(
-            #     workflow_snapshot=workflow_session.session.workflow_snapshot, command=command
-            # )
-
             # lazy import to avoid circular dependency
             from fastworkflow.parameter_extraction import extract_command_parameters
 

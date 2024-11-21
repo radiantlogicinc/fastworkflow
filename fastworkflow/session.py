@@ -1,4 +1,5 @@
 import os
+from queue import Queue
 import shutil
 import sys
 from functools import wraps
@@ -65,6 +66,9 @@ class Session:
         cls,
         session_id: int, 
         workflow_folderpath: str,
+        keep_alive: bool = False,
+        user_message_queue: Optional[Queue] = None,
+        command_output_queue: Optional[Queue] = None,
         context: dict = {},
         for_training_semantic_router: bool = False
     ) -> "Session":
@@ -98,14 +102,23 @@ class Session:
             active_workitem_id=None,
             context=context,
         )
-        session = Session(cls.__create_key, session_id, workflow_snapshot)
+        session = Session(cls.__create_key, 
+                          session_id, 
+                          workflow_snapshot, 
+                          keep_alive, 
+                          user_message_queue, 
+                          command_output_queue)
         session.save()  # save the workflow snapshot
 
         Session._map_session_id_2_session[session_id] = session
         return session
 
     @classmethod
-    def load(cls, session_id: int) -> Optional["Session"]:
+    def load(cls, 
+             session_id: int, 
+             keep_alive: bool = False,
+             user_message_queue: Optional[Queue] = None,
+             command_output_queue: Optional[Queue] = None) -> Optional["Session"]:
         """load the session"""
         if session_id in cls._map_session_id_2_session:
             return cls._map_session_id_2_session[session_id]
@@ -118,14 +131,23 @@ class Session:
         workflow_snapshot: WorkflowSnapshot = keyvalue_db.get["workflow_snapshot"]
         keyvalue_db.close()
 
-        session = Session(cls.__create_key, session_id, workflow_snapshot)
+        session = Session(cls.__create_key, 
+                          session_id, 
+                          workflow_snapshot, 
+                          keep_alive, 
+                          user_message_queue, 
+                          command_output_queue)
         Session._map_session_id_2_session[session_id] = session
         return session
 
     @classmethod
-    def get_session(cls, session_id: int) -> "Session":
+    def get_session(cls, 
+                    session_id: int,
+                    keep_alive: bool = False,
+                    user_message_queue: Optional[Queue] = None,
+                    command_output_queue: Optional[Queue] = None) -> "Session":
         if session_id not in cls._map_session_id_2_session:
-            session = cls.load(session_id)
+            session = cls.load(session_id, keep_alive, user_message_queue, command_output_queue)
             if session is None:
                 raise ValueError(f"Session with id {session_id} does not exist")
             cls._map_session_id_2_session[session_id] = session
@@ -140,7 +162,10 @@ class Session:
     def __init__(self,
                  create_key, 
                  session_id: int, 
-                 workflow_snapshot: WorkflowSnapshot):
+                 workflow_snapshot: WorkflowSnapshot,
+                 keep_alive: bool = False,
+                 user_message_queue: Optional[Queue] = None,
+                 command_output_queue: Optional[Queue] = None):
         """initialize the Session class"""
         if create_key is Session.__create_key:
             pass
@@ -149,6 +174,9 @@ class Session:
 
         self._session_id = session_id
         self._workflow_snapshot = workflow_snapshot
+        self._keep_alive = keep_alive
+        self._user_message_queue = user_message_queue
+        self._command_output_queue = command_output_queue
 
     @property
     def id(self) -> int:
@@ -159,6 +187,21 @@ class Session:
     def workflow_snapshot(self) -> WorkflowSnapshot:
         """get the workflow snapshot"""
         return self._workflow_snapshot
+
+    @property
+    def keep_alive(self) -> bool:
+        """get the keep alive flag"""
+        return self._keep_alive
+
+    @property
+    def user_message_queue(self) -> Queue:
+        """get the user message queue"""
+        return self._user_message_queue
+
+    @property
+    def command_output_queue(self) -> Queue:
+        """get the command output queue"""
+        return self._command_output_queue
 
     def close(self) -> bool:
         """close the session"""
