@@ -59,10 +59,13 @@ if not os.path.isdir(args.workflow_path):
     exit(1)
 
 print(
-    f"{Fore.GREEN}{Style.BRIGHT}AI>{Style.RESET_ALL}{Fore.GREEN} AI Assistant is running with workflow: {args.workflow_path}{Style.RESET_ALL}"
+    f"{Fore.GREEN}{Style.BRIGHT}AI>{Style.RESET_ALL}{Fore.GREEN} fastWorkflow: {args.workflow_path}{Style.RESET_ALL}"
 )
 print(
-    f"{Fore.GREEN}{Style.BRIGHT}AI>{Style.RESET_ALL}{Fore.GREEN} Type 'exit' to quit.{Style.RESET_ALL}"
+    f"{Fore.GREEN}{Style.BRIGHT}AI>{Style.RESET_ALL}{Fore.GREEN} Type 'exit' to quit the application.{Style.RESET_ALL}"
+)
+print(
+    f"{Fore.GREEN}{Style.BRIGHT}AI>{Style.RESET_ALL}{Fore.GREEN} Starting. Please wait...{Style.RESET_ALL}"
 )
 
 if args.startup_command and args.startup_action:
