@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import queue
 import random
 from typing import Optional
 from dotenv import dotenv_values
@@ -86,9 +87,12 @@ workflow_session = fastworkflow.WorkflowSession(
 )
 
 workflow_session.start()
-command_output: fastworkflow.CommandOutput = workflow_session.command_output_queue.get(timeout=1)
-if command_output:
-    print_command_output(command_output)
+try:
+    command_output: fastworkflow.CommandOutput = workflow_session.command_output_queue.get(timeout=1)
+    if command_output:
+        print_command_output(command_output)
+except queue.Empty:
+    pass
 
 while not workflow_session.workflow_is_complete or args.keep_alive:
     user_command = input(
