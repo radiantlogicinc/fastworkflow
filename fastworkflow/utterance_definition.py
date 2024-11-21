@@ -313,7 +313,7 @@ class UtteranceRegistry:
     @classmethod
     def get_definition(cls, workflow_folderpath: str) -> UtteranceDefinition:
         if workflow_folderpath not in cls._utterance_definitions:
-            raise ValueError(f"Utterance definition not found for workflow at '{workflow_folderpath}'")
+            cls.create_definition(workflow_folderpath)
         return cls._utterance_definitions[workflow_folderpath]
 
     _utterance_definitions: dict[str, UtteranceDefinition] = {}

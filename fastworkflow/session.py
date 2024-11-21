@@ -62,6 +62,26 @@ SPEEDDICT_FOLDERNAME = "___workflow_contexts"
 class Session:
     """Session class"""
     @classmethod
+    def get_session(cls, 
+                    session_id: int,
+                    keep_alive: bool = False,
+                    user_message_queue: Optional[Queue] = None,
+                    command_output_queue: Optional[Queue] = None) -> "Session":
+        if session_id not in cls._map_session_id_2_session:
+            session = cls._load(session_id, keep_alive, user_message_queue, command_output_queue)
+            if not session:
+                return None
+
+            workflow_folderpath = session.workflow_snapshot.workflow.workflow_folderpath
+            if workflow_folderpath not in sys.path:
+                # THIS IS IMPORTANT: it allows relative import of modules in the code inside workflow_folderpath
+                sys.path.insert(0, workflow_folderpath)
+
+            cls._map_session_id_2_session[session_id] = session
+
+        return cls._map_session_id_2_session[session_id]
+
+    @classmethod
     def create(
         cls,
         session_id: int, 
@@ -72,6 +92,9 @@ class Session:
         context: dict = {},
         for_training_semantic_router: bool = False
     ) -> "Session":
+        if session := cls.get_session(session_id, keep_alive, user_message_queue, command_output_queue):
+            return session
+
         if not os.path.exists(workflow_folderpath):
             raise ValueError(f"The folder path {workflow_folderpath} does not exist")
 
@@ -83,14 +106,6 @@ class Session:
 
         speedict_folderpath = os.path.join(workflow_folderpath, SPEEDDICT_FOLDERNAME)
         os.makedirs(speedict_folderpath, exist_ok=True)       
-
-        # fastworkflow.WorkflowRegistry.create_definition(workflow_folderpath)
-        fastworkflow.CommandRoutingRegistry.create_definition(workflow_folderpath)
-        fastworkflow.UtteranceRegistry.create_definition(workflow_folderpath)
-        if not for_training_semantic_router:
-            # importing here to avoid circular import
-            from fastworkflow.semantic_router_definition import RouteLayerRegistry
-            RouteLayerRegistry.build_route_layer_map(workflow_folderpath)
 
         workflow_snapshot = WorkflowSnapshot(
             workflow=Workflow(
@@ -114,7 +129,7 @@ class Session:
         return session
 
     @classmethod
-    def load(cls, 
+    def _load(cls, 
              session_id: int, 
              keep_alive: bool = False,
              user_message_queue: Optional[Queue] = None,
@@ -139,19 +154,6 @@ class Session:
                           command_output_queue)
         Session._map_session_id_2_session[session_id] = session
         return session
-
-    @classmethod
-    def get_session(cls, 
-                    session_id: int,
-                    keep_alive: bool = False,
-                    user_message_queue: Optional[Queue] = None,
-                    command_output_queue: Optional[Queue] = None) -> "Session":
-        if session_id not in cls._map_session_id_2_session:
-            session = cls.load(session_id, keep_alive, user_message_queue, command_output_queue)
-            if session is None:
-                raise ValueError(f"Session with id {session_id} does not exist")
-            cls._map_session_id_2_session[session_id] = session
-        return cls._map_session_id_2_session[session_id]
 
     _map_session_id_2_session: dict[int, "Session"] = {}
 

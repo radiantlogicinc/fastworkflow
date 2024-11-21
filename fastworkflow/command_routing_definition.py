@@ -398,7 +398,7 @@ class CommandRoutingRegistry:
     @classmethod
     def get_definition(cls, workflow_folderpath: str) -> CommandRoutingDefinition:
         if workflow_folderpath not in cls._command_routing_definitions:
-            raise ValueError(f"Command routing definition not found for workflow at '{workflow_folderpath}'")
+            cls.create_definition(workflow_folderpath)
         return cls._command_routing_definitions[workflow_folderpath]
 
     _command_routing_definitions: dict[str, CommandRoutingDefinition] = {}

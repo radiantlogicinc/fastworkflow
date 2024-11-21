@@ -106,10 +106,12 @@ class RouteLayerRegistry:
     @classmethod
     def get_route_layer(cls, workflow_folderpath: str, workitem_type: str) -> RouteLayer:
         """get the route layer for a given workitem type"""
-        if workflow_folderpath not in cls._map_workflow_folderpath_to_route_layer_map:
-            raise ValueError(f"Route layer map not found for workflow at '{workflow_folderpath}'")
-        if workitem_type not in cls._map_workflow_folderpath_to_route_layer_map[workflow_folderpath]:
-            raise ValueError(f"Route layer not found for workitem type '{workitem_type}'")
+        if (
+            workflow_folderpath not in cls._map_workflow_folderpath_to_route_layer_map or
+            workitem_type not in cls._map_workflow_folderpath_to_route_layer_map[workflow_folderpath]
+        ):
+            cls.build_route_layer_map(workflow_folderpath)
+            
         return cls._map_workflow_folderpath_to_route_layer_map[workflow_folderpath][workitem_type]
 
     @classmethod
