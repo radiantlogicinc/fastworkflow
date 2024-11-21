@@ -86,7 +86,7 @@ workflow_session = fastworkflow.WorkflowSession(
 )
 
 workflow_session.start()
-command_output: fastworkflow.CommandOutput = workflow_session.command_output_queue.get()#(timeout=1)
+command_output: fastworkflow.CommandOutput = workflow_session.command_output_queue.get(timeout=1)
 if command_output:
     print_command_output(command_output)
 
