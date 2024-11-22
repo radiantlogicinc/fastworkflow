@@ -46,8 +46,11 @@ if __name__ == "__main__":
         semantic_router_definition = SemanticRouterDefinition(encoder, workflow_path)
 
         session_id = -random.randint(1, 10000000)
-        session = fastworkflow.Session.create(session_id, workflow_path, 
-                          for_training_semantic_router=True)
+        session = fastworkflow.Session.create(
+            workflow_path, 
+            session_id=session_id, 
+            for_training_semantic_router=True
+        )
         semantic_router_definition.train(session.workflow_snapshot.workflow)
         session.close()
 

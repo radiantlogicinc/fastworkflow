@@ -3,12 +3,12 @@ from queue import Queue
 import shutil
 import sys
 from functools import wraps
-from typing import Any, Optional, Union
+from typing import Optional, Union
 
 from pydantic import BaseModel
 from speedict import Rdict
+import murmurhash
 
-import fastworkflow
 from fastworkflow.utils.logging import logger
 from fastworkflow.workflow import Workflow, Workitem
 
@@ -67,31 +67,39 @@ class Session:
                     keep_alive: bool = False,
                     user_message_queue: Optional[Queue] = None,
                     command_output_queue: Optional[Queue] = None) -> "Session":
-        if session_id not in cls._map_session_id_2_session:
-            session = cls._load(session_id, keep_alive, user_message_queue, command_output_queue)
-            if not session:
-                return None
+        session = cls._load(session_id, keep_alive, user_message_queue, command_output_queue)
+        if not session:
+            return None
 
-            workflow_folderpath = session.workflow_snapshot.workflow.workflow_folderpath
-            if workflow_folderpath not in sys.path:
-                # THIS IS IMPORTANT: it allows relative import of modules in the code inside workflow_folderpath
-                sys.path.insert(0, workflow_folderpath)
-
-            cls._map_session_id_2_session[session_id] = session
-
-        return cls._map_session_id_2_session[session_id]
+        workflow_folderpath = session.workflow_snapshot.workflow.workflow_folderpath
+        if workflow_folderpath not in sys.path:
+            # THIS IS IMPORTANT: it allows relative import of modules in the code inside workflow_folderpath
+            sys.path.insert(0, workflow_folderpath)
 
     @classmethod
     def create(
         cls,
-        session_id: int, 
         workflow_folderpath: str,
+        session_id: Optional[int] = None, 
+        parent_session_id: Optional[int] = None, 
         keep_alive: bool = False,
         user_message_queue: Optional[Queue] = None,
         command_output_queue: Optional[Queue] = None,
         context: dict = {},
         for_training_semantic_router: bool = False
     ) -> "Session":
+        if session_id is None and parent_session_id is None:
+            raise ValueError("Either session_id or parent_session_id must be provided")
+
+        if session_id is not None and parent_session_id is not None:
+            raise ValueError("session_id and parent_session_id cannot both be provided")
+
+        if parent_session_id is not None and keep_alive:
+            raise ValueError("keep_alive must be False if parent_session_id is provided")
+
+        if session_id is None:
+            session_id = cls._generate_session_id(parent_session_id, workflow_folderpath)
+
         if session := cls.get_session(session_id, keep_alive, user_message_queue, command_output_queue):
             return session
 
@@ -104,9 +112,6 @@ class Session:
         # THIS IS IMPORTANT: it allows relative import of modules in the code inside workflow_folderpath
         sys.path.insert(0, workflow_folderpath)
 
-        speedict_folderpath = os.path.join(workflow_folderpath, SPEEDDICT_FOLDERNAME)
-        os.makedirs(speedict_folderpath, exist_ok=True)       
-
         workflow_snapshot = WorkflowSnapshot(
             workflow=Workflow(
                 workflow_folderpath=workflow_folderpath,
@@ -118,14 +123,14 @@ class Session:
             context=context,
         )
         session = Session(cls.__create_key, 
+                          workflow_snapshot,
                           session_id, 
-                          workflow_snapshot, 
+                          parent_session_id,
                           keep_alive, 
                           user_message_queue, 
                           command_output_queue)
         session.save()  # save the workflow snapshot
 
-        Session._map_session_id_2_session[session_id] = session
         return session
 
     @classmethod
@@ -135,27 +140,36 @@ class Session:
              user_message_queue: Optional[Queue] = None,
              command_output_queue: Optional[Queue] = None) -> Optional["Session"]:
         """load the session"""
-        if session_id in cls._map_session_id_2_session:
-            return cls._map_session_id_2_session[session_id]
-
-        sessiondb_folderpath = cls._get_sessiondb_folderpath(session_id)
-        if not os.path.exists(sessiondb_folderpath):
+        map_sessionid_2_sessiondb_folderpath_dir = Session._get_session_id_2_sessiondb_folderpath()
+        map_sessionid_2_sessiondb_folderpath_db = Rdict(map_sessionid_2_sessiondb_folderpath_dir)
+        sessiondb_folderpath = map_sessionid_2_sessiondb_folderpath_db.get(session_id, None)
+        map_sessionid_2_sessiondb_folderpath_db.close()
+        if not sessiondb_folderpath:
             return None
 
+        if not os.path.exists(sessiondb_folderpath):
+            raise ValueError(f"Session database folder path {sessiondb_folderpath} does not exist")
+
         keyvalue_db = Rdict(sessiondb_folderpath)
-        workflow_snapshot: WorkflowSnapshot = keyvalue_db.get["workflow_snapshot"]
+        workflow_snapshot: WorkflowSnapshot = keyvalue_db["workflow_snapshot"]
+        parent_session_id = keyvalue_db.get("parent_session_id", None)
         keyvalue_db.close()
 
         session = Session(cls.__create_key, 
+                          workflow_snapshot,
                           session_id, 
-                          workflow_snapshot, 
+                          parent_session_id,
                           keep_alive, 
                           user_message_queue, 
                           command_output_queue)
-        Session._map_session_id_2_session[session_id] = session
         return session
 
-    _map_session_id_2_session: dict[int, "Session"] = {}
+    @classmethod
+    def _generate_session_id(cls, parent_session_id: int, workflow_folderpath: str) -> int:
+        """generate a new session id"""
+        workflow_type = os.path.basename(workflow_folderpath).rstrip("/")
+        session_id_str = f"{parent_session_id}{workflow_type}"
+        return int(murmurhash.hash(session_id_str))
 
     # enforce session creation exclusively using Session.create_session
     # https://stackoverflow.com/questions/8212053/private-constructor-in-python
@@ -163,8 +177,9 @@ class Session:
    
     def __init__(self,
                  create_key, 
-                 session_id: int, 
                  workflow_snapshot: WorkflowSnapshot,
+                 session_id: int, 
+                 parent_session_id: Optional[int] = None,
                  keep_alive: bool = False,
                  user_message_queue: Optional[Queue] = None,
                  command_output_queue: Optional[Queue] = None):
@@ -174,8 +189,9 @@ class Session:
         else:
             raise ValueError("Session objects must be created using Session.create")
 
-        self._session_id = session_id
         self._workflow_snapshot = workflow_snapshot
+        self._session_id = session_id
+        self._parent_session_id = parent_session_id
         self._keep_alive = keep_alive
         self._user_message_queue = user_message_queue
         self._command_output_queue = command_output_queue
@@ -207,7 +223,7 @@ class Session:
 
     def close(self) -> bool:
         """close the session"""
-        sessiondb_folderpath = self._get_sessiondb_folderpath(self.id)
+        sessiondb_folderpath = self._get_sessiondb_folderpath()
         try:
             shutil.rmtree(sessiondb_folderpath, ignore_errors=True)
         except OSError as e:
@@ -216,25 +232,51 @@ class Session:
 
         sys.path.remove(self.workflow_snapshot.workflow.workflow_folderpath)
 
-        if self.id in Session._map_session_id_2_session:
-            del Session._map_session_id_2_session[self.id]
+        map_sessionid_2_sessiondb_folderpath_dir = Session._get_session_id_2_sessiondb_folderpath()
+        map_sessionid_2_sessiondb_folderpath_db = Rdict(map_sessionid_2_sessiondb_folderpath_dir)
+        del map_sessionid_2_sessiondb_folderpath_db[self._session_id]
+        map_sessionid_2_sessiondb_folderpath_db.close()
 
         return True
 
     def save(self) -> None:
         """save the session"""
-        sessiondb_folderpath = self._get_sessiondb_folderpath(self.id)
+        sessiondb_folderpath = self._get_sessiondb_folderpath()
+        os.makedirs(sessiondb_folderpath, exist_ok=True)       
+
         keyvalue_db = Rdict(sessiondb_folderpath)
         keyvalue_db["workflow_snapshot"] = self._workflow_snapshot
+        keyvalue_db["parent_session_id"] = self._parent_session_id
         keyvalue_db.close()
 
-    @classmethod
-    def _get_sessiondb_folderpath(cls, session_id: int) -> str:
+    def _get_sessiondb_folderpath(self) -> str:
         """get the db folder path"""
-        session_id_str = str(session_id).replace("-", "_")
-        return os.path.join(
-            SPEEDDICT_FOLDERNAME, session_id_str
-        )
+        if self._parent_session_id:
+            parent_session = Session._load(self._parent_session_id)
+            if not parent_session:
+                raise ValueError(f"Parent session {self._parent_session_id} not found")
+            parent_session_folder = parent_session._get_sessiondb_folderpath()
+        else:
+            parent_session_folder = os.path.join(
+                self.workflow_snapshot.workflow.workflow_folderpath, 
+                SPEEDDICT_FOLDERNAME
+            )
+    
+        session_id_str = str(self._session_id).replace("-", "_")
+        session_db_folderpath = os.path.join(parent_session_folder, session_id_str)
+
+        map_sessionid_2_sessiondb_folderpath_dir = Session._get_session_id_2_sessiondb_folderpath()
+        map_sessionid_2_sessiondb_folderpath_db = Rdict(map_sessionid_2_sessiondb_folderpath_dir)
+        map_sessionid_2_sessiondb_folderpath_db[self._session_id] = session_db_folderpath
+        map_sessionid_2_sessiondb_folderpath_db.close()
+
+        return session_db_folderpath
+
+    @classmethod
+    def _get_session_id_2_sessiondb_folderpath(cls) -> str:
+        """get the session db folder path"""
+        os.makedirs(SPEEDDICT_FOLDERNAME, exist_ok=True)
+        return SPEEDDICT_FOLDERNAME
 
     def get_cachedb_folderpath(self, function_name: str) -> str:
         """Get the cache database folder path for a specific function"""

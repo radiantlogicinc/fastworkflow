@@ -17,12 +17,12 @@ class CommandRouter(CommandRouterInterface):
             # misunderstood_command = 
             # command = ""
 
-        command_name_prediction_workflow_session_id, command_output = guess_command_name(
+        cnp_workflow_session_id, command_output = guess_command_name(
             workflow_session=workflow_session,
             command=command,
         )
         current_session_id = fastworkflow.WorkflowSession.get_active_session_id()
-        if current_session_id == command_name_prediction_workflow_session_id:
+        if current_session_id == cnp_workflow_session_id:
             return command_output
         if command_output.command_aborted:
             # return command output right away only if abort is not a valid command in the current session
@@ -57,9 +57,9 @@ def _was_command_name_misunderstood(
     )
 
     session = fastworkflow.Session.create(
-                            -random.randint(1, 100000000), 
-                            misunderstanding_detection_workflow_folderpath, 
-                        )
+        misunderstanding_detection_workflow_folderpath,
+        parent_session_id=session.id
+    )
 
     startup_action = fastworkflow.Action(
         workitem_type="misunderstood_command_detection",

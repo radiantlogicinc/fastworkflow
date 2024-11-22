@@ -67,8 +67,9 @@ class WorkflowSession:
     def __init__(self,
                  command_router: CommandRouterInterface,
                  command_executor: CommandExecutorInterface,
-                 session_id: int,
                  workflow_folderpath: str,
+                 session_id: Optional[int] = None,
+                 parent_session_id: Optional[int] = None,
                  context: dict = {},
                  startup_command: str = "",
                  startup_action: Optional[fastworkflow.Action] = None,
@@ -97,8 +98,9 @@ class WorkflowSession:
                 raise ValueError("user_message_queue and command_output_queue must be provided when keep_alive is False")
 
         self._session = fastworkflow.Session.create(
-            session_id, 
             workflow_folderpath,
+            session_id=session_id,
+            parent_session_id=parent_session_id,
             keep_alive=keep_alive,
             user_message_queue=user_message_queue,
             command_output_queue=command_output_queue,
@@ -117,7 +119,7 @@ class WorkflowSession:
         self._command_executor = command_executor
         
         # Register session
-        WorkflowSession._map_session_id_2_workflow_session[session_id] = self
+        WorkflowSession._map_session_id_2_workflow_session[self._session.id] = self
     
     def start(self) -> Optional[fastworkflow.CommandOutput]:
         """Start the workflow session"""

@@ -79,8 +79,8 @@ if args.startup_action:
 workflow_session = fastworkflow.WorkflowSession(
     CommandRouter(),
     CommandExecutor(),
-    random.randint(1, 100000000),
     args.workflow_path, 
+    session_id=random.randint(1, 100000000),
     startup_command=args.startup_command, 
     startup_action=startup_action, 
     keep_alive=args.keep_alive
@@ -106,3 +106,5 @@ while not workflow_session.workflow_is_complete or args.keep_alive:
     command_output = workflow_session.command_output_queue.get()
     if command_output:
         print_command_output(command_output)
+
+workflow_session.session.close()

@@ -40,17 +40,15 @@ def extract_command_parameters(
         "subject_workflow_snapshot": workflow_session.session.workflow_snapshot
     }
 
-    parameter_extraction_workflow_session_id = random.randint(1, 100000000)
-    workflow_session = fastworkflow.WorkflowSession(
+    pe_workflow_session = fastworkflow.WorkflowSession(
         workflow_session.command_router,
         workflow_session.command_executor,
-        parameter_extraction_workflow_session_id, 
         parameter_extraction_workflow_folderpath, 
+        parent_session_id=workflow_session.session.id, 
         context=context,
         startup_action=startup_action, 
-        keep_alive=False,
         user_message_queue=workflow_session.user_message_queue,
         command_output_queue=workflow_session.command_output_queue,
     )
 
-    return workflow_session.start()
+    return pe_workflow_session.start()

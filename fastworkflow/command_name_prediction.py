@@ -8,7 +8,7 @@ from fastworkflow.command_executor import CommandExecutor
 def guess_command_name(
     workflow_session: fastworkflow.WorkflowSession,
     command: str,
-) -> CommandOutput:
+) -> tuple[int, CommandOutput]:
     startup_action = Action(
         workitem_type="command_name_prediction",
         command_name="*",
@@ -32,19 +32,17 @@ def guess_command_name(
         "subject_workflow_snapshot": workflow_session.session.workflow_snapshot
     }
 
-    command_name_prediction_workflow_session_id = random.randint(1, 100000000)
-    workflow_session = fastworkflow.WorkflowSession(
+    cnp_workflow_session = fastworkflow.WorkflowSession(
         workflow_session.command_router,
         workflow_session.command_executor,
-        command_name_prediction_workflow_session_id, 
         commandname_prediction_workflow_folderpath,
+        parent_session_id=workflow_session.session.id, 
         context=context,
         startup_action=startup_action, 
-        keep_alive=False,
         user_message_queue=workflow_session.user_message_queue,
         command_output_queue=workflow_session.command_output_queue,
     )
 
-    command_output = workflow_session.start()
-    return (command_name_prediction_workflow_session_id, command_output)
+    command_output = cnp_workflow_session.start()
+    return (cnp_workflow_session.session.id, command_output)
 
