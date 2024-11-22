@@ -14,7 +14,8 @@ def generate_command_inputs(workflow: Workflow) -> list[CommandParameters]:
 
 
 @parameterize(command_name=["help_about"])
-def generate_utterances(workflow: Workflow, command_name: str) -> list[str]:
+def generate_utterances(session: fastworkflow.Session, command_name: str) -> list[str]:
+    workflow = session.workflow_snapshot.workflow
     utterance_definition = fastworkflow.UtteranceRegistry.get_definition(workflow.workflow_folderpath)
     utterances_obj = utterance_definition.get_command_utterances(
         workflow.type, command_name

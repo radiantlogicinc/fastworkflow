@@ -6,8 +6,9 @@ from dotenv import dotenv_values
 from colorama import Fore, Style
 from semantic_router.encoders import HuggingFaceEncoder
 
-from fastworkflow.semantic_router_definition import SemanticRouterDefinition
 import fastworkflow
+from fastworkflow.semantic_router_definition import SemanticRouterDefinition
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -45,13 +46,18 @@ if __name__ == "__main__":
         # create a session and train the main workflow
         semantic_router_definition = SemanticRouterDefinition(encoder, workflow_path)
 
-        session_id = -random.randint(1, 10000000)
         session = fastworkflow.Session.create(
             workflow_path, 
-            session_id=session_id, 
+            session_id_str=f"train_{workflow_path}", 
             for_training_semantic_router=True
         )
-        semantic_router_definition.train(session.workflow_snapshot.workflow)
+        semantic_router_definition.train(session)
+
+        fastworkflow.WorkflowRegistry._create_definition(workflow_path)
+        fastworkflow.CommandRoutingRegistry._create_definition(workflow_path)
+        fastworkflow.UtteranceRegistry._create_definition(workflow_path)
+        fastworkflow.RouteLayerRegistry._build_route_layer_map(workflow_path)
+
         session.close()
 
     train_workflow(args.workflow_folderpath, encoder)

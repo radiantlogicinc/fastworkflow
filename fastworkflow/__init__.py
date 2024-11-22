@@ -37,9 +37,31 @@ class CommandSource(str, Enum):
     BASE_COMMANDS = ("_base_commands",)
     COMMANDS = "_commands"
 
+
+_env_vars: dict = {}
+WorkflowRegistry = None
+CommandRoutingRegistry = None
+UtteranceRegistry = None
+RouteLayerRegistry = None
+# WorkflowSession = None
+
 def init(env_vars: dict):
-    global _env_vars
+    global _env_vars, Session, WorkflowRegistry, CommandRoutingRegistry, UtteranceRegistry, RouteLayerRegistry, WorkflowSession
     _env_vars = env_vars
+
+    # init before importing other modules so env vars are available
+    from .workflow_definition import WorkflowRegistry as WorkflowRegistryClass
+    from .command_routing_definition import CommandRoutingRegistry as CommandRoutingRegistryClass
+    from .utterance_definition import UtteranceRegistry as UtteranceRegistryClass
+    from .semantic_router_definition import RouteLayerRegistry as RouteLayerRegistryClass
+    # from .workflow_session import WorkflowSession as WorkflowSessionClass
+
+    # Assign to global variables
+    WorkflowRegistry = WorkflowRegistryClass
+    CommandRoutingRegistry = CommandRoutingRegistryClass
+    UtteranceRegistry = UtteranceRegistryClass
+    RouteLayerRegistry = RouteLayerRegistryClass
+    # WorkflowSession = WorkflowSessionClass
 
 def get_env_var(var_name: str, var_type: type = str, default: Optional[Union[str, int, float, bool]] = None) -> Union[str, int, float, bool]:
     """get the environment variable"""
@@ -68,12 +90,5 @@ def get_env_var(var_name: str, var_type: type = str, default: Optional[Union[str
     except ValueError:
         raise ValueError(f"Cannot convert '{value}' to {var_type.__name__}.")
 
-_env_vars: dict = {}
-
-
-from .workflow_definition import WorkflowRegistry
-from .command_routing_definition import CommandRoutingRegistry
-from .utterance_definition import UtteranceRegistry
-from .semantic_router_definition import RouteLayerRegistry
 from .session import Session
 from .workflow_session import WorkflowSession

@@ -1,11 +1,14 @@
 import os
 
+from speedict import Rdict
+import dill
+
 from semantic_router import Route
 from semantic_router.encoders import HuggingFaceEncoder
 from semantic_router.layer import RouteLayer
 
 import fastworkflow
-from fastworkflow.workflow import Workflow
+
 
 class SemanticRouterDefinition:
     def __init__(self, encoder: HuggingFaceEncoder, workflow_folderpath: str):
@@ -28,7 +31,8 @@ class SemanticRouterDefinition:
         )
         return RouteLayer.from_json(route_layer_filepath)
 
-    def train(self, workflow: Workflow):
+    def train(self, session: fastworkflow.Session):
+        workflow = session.workflow_snapshot.workflow
         workflow_definition = fastworkflow.WorkflowRegistry.get_definition(self._workflow_folderpath)
         command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(self._workflow_folderpath)
         for workitem_type in workflow_definition.types:
@@ -50,7 +54,7 @@ class SemanticRouterDefinition:
                 utterances_func = utterances.get_generated_utterances_func(
                     self._workflow_folderpath
                 )
-                utterance_list = utterances_func(workflow)
+                utterance_list = utterances_func(session)
 
                 utterance_command_tuples.extend(
                     list(zip(utterance_list, [command_name] * len(utterance_list)))
@@ -85,10 +89,30 @@ class SemanticRouterDefinition:
 
 class RouteLayerRegistry:
     @classmethod
-    def build_route_layer_map(cls, workflow_folderpath: str):
+    def get_route_layer(cls, workflow_folderpath: str, workitem_type: str) -> RouteLayer:
+        """get the route layer for a given workitem type"""
         if workflow_folderpath in cls._map_workflow_folderpath_to_route_layer_map:
-            return
+            route_layer_map = cls._map_workflow_folderpath_to_route_layer_map[workflow_folderpath]
+        else:
+            routelayermapdb_folderpath_dir = cls._get_routelayermap_db_folderpath()
+            routelayermapdb = Rdict(routelayermapdb_folderpath_dir)
+            route_layer_map = None
+            route_layer_map_bytes = routelayermapdb.get(workflow_folderpath, None)
+            if route_layer_map_bytes:
+                route_layer_map = dill.loads(route_layer_map_bytes)
+            routelayermapdb.close()
 
+            if route_layer_map:
+                cls._map_workflow_folderpath_to_route_layer_map[workflow_folderpath] = route_layer_map
+            else:
+                route_layer_map = cls._build_route_layer_map(workflow_folderpath)
+
+        if workitem_type not in route_layer_map:
+            raise ValueError(f"Route layer for workitem type {workitem_type} not found.")
+        return route_layer_map[workitem_type]
+
+    @classmethod
+    def _build_route_layer_map(cls, workflow_folderpath: str) -> dict[str, RouteLayer]:
         route_layers_folderpath = os.path.join(workflow_folderpath, "___route_layers")
         if not os.path.exists(route_layers_folderpath):
             raise ValueError(f"Train the semantic router first. Before running the workflow.")
@@ -101,18 +125,14 @@ class RouteLayerRegistry:
         for workitem_type in workflow_definition.types:
             route_layer = semantic_router.get_route_layer(workitem_type)
             map_workitem_type_2_route_layer[workitem_type] = route_layer
-        cls._map_workflow_folderpath_to_route_layer_map[workflow_folderpath] = map_workitem_type_2_route_layer
+        
+        routelayermapdb_folderpath_dir = cls._get_routelayermap_db_folderpath()
+        routelayermapdb = Rdict(routelayermapdb_folderpath_dir)
+        routelayermapdb[workflow_folderpath] = dill.dumps(map_workitem_type_2_route_layer)
+        routelayermapdb.close()
 
-    @classmethod
-    def get_route_layer(cls, workflow_folderpath: str, workitem_type: str) -> RouteLayer:
-        """get the route layer for a given workitem type"""
-        if (
-            workflow_folderpath not in cls._map_workflow_folderpath_to_route_layer_map or
-            workitem_type not in cls._map_workflow_folderpath_to_route_layer_map[workflow_folderpath]
-        ):
-            cls.build_route_layer_map(workflow_folderpath)
-            
-        return cls._map_workflow_folderpath_to_route_layer_map[workflow_folderpath][workitem_type]
+        cls._map_workflow_folderpath_to_route_layer_map[workflow_folderpath] = map_workitem_type_2_route_layer
+        return map_workitem_type_2_route_layer
 
     @classmethod
     def build_route_layer_from_routelayers(cls, routelayers: list[RouteLayer]) -> RouteLayer:   
@@ -121,5 +141,16 @@ class RouteLayerRegistry:
         for route_list in routelayers:
             routes.extend(route_list)
         return RouteLayer(encoder=encoder, routes=routes)
+
+    @classmethod
+    def _get_routelayermap_db_folderpath(cls) -> str:
+        """get the route layer map db folder path"""
+        SPEEDDICT_FOLDERNAME = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
+        routelayermap_db_folderpath = os.path.join(
+            SPEEDDICT_FOLDERNAME,
+            "routelayermaps"
+        )
+        os.makedirs(routelayermap_db_folderpath, exist_ok=True)
+        return routelayermap_db_folderpath
 
     _map_workflow_folderpath_to_route_layer_map: dict[str, dict[str, RouteLayer]] = {}

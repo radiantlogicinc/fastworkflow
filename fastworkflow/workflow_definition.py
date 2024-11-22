@@ -3,6 +3,9 @@ import os
 from enum import Enum
 from typing import Optional
 
+from speedict import Rdict
+
+import fastworkflow
 from pydantic import BaseModel, field_validator, model_validator
 
 
@@ -151,12 +154,25 @@ class WorkflowDefinition(BaseModel):
     class Config:
         arbitrary_types_allowed = True
 
-class WorkflowRegistry:
+class WorkflowRegistry:   
     @classmethod
-    def create_definition(cls, workflow_folderpath: str):
+    def get_definition(cls, workflow_folderpath: str) -> WorkflowDefinition:
         if workflow_folderpath in cls._workflow_definitions:
-            return
+            return cls._workflow_definitions[workflow_folderpath]
 
+        workflowdefinitiondb_folderpath_dir = cls._get_workflowdefinition_db_folderpath()
+        workflowdefinitiondb = Rdict(workflowdefinitiondb_folderpath_dir)
+        workflow_definition = workflowdefinitiondb.get(workflow_folderpath, None)
+        workflowdefinitiondb.close()
+
+        if workflow_definition:
+            cls._workflow_definitions[workflow_folderpath] = workflow_definition
+            return workflow_definition
+        
+        return WorkflowRegistry._create_definition(workflow_folderpath)
+
+    @classmethod
+    def _create_definition(cls, workflow_folderpath: str) -> WorkflowDefinition:
         types = {}
         allowable_child_types = {}
 
@@ -169,12 +185,23 @@ class WorkflowRegistry:
             types=types, allowable_child_types=allowable_child_types
         )
 
+        workflowdefinitiondb_folderpath_dir = cls._get_workflowdefinition_db_folderpath()
+        workflowdefinitiondb = Rdict(workflowdefinitiondb_folderpath_dir)
+        workflowdefinitiondb[workflow_folderpath] = workflow_definition
+        workflowdefinitiondb.close()
+
         cls._workflow_definitions[workflow_folderpath] = workflow_definition
-    
+        return workflow_definition
+
     @classmethod
-    def get_definition(cls, workflow_folderpath: str) -> WorkflowDefinition:
-        if workflow_folderpath not in cls._workflow_definitions:
-            WorkflowRegistry.create_definition(workflow_folderpath)
-        return cls._workflow_definitions[workflow_folderpath]
+    def _get_workflowdefinition_db_folderpath(cls) -> str:
+        """get the workflow definition db folder path"""
+        SPEEDDICT_FOLDERNAME = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
+        workflowdefinition_db_folderpath = os.path.join(
+            SPEEDDICT_FOLDERNAME,
+            "workflowdefinitions"
+        )
+        os.makedirs(workflowdefinition_db_folderpath, exist_ok=True)
+        return workflowdefinition_db_folderpath
 
     _workflow_definitions: dict[str, WorkflowDefinition] = {}

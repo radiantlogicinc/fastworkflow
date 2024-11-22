@@ -3,7 +3,9 @@ import json
 import os
 
 from pydantic import BaseModel, field_validator
+from speedict import Rdict
 
+import fastworkflow
 from fastworkflow import CommandSource
 
 
@@ -292,12 +294,25 @@ class UtteranceDefinition(BaseModel):
     class Config:
         arbitrary_types_allowed = True
 
-class UtteranceRegistry:
+class UtteranceRegistry:   
     @classmethod
-    def create_definition(cls, workflow_folderpath: str):
+    def get_definition(cls, workflow_folderpath: str) -> UtteranceDefinition:
         if workflow_folderpath in cls._utterance_definitions:
-            return
+            return cls._utterance_definitions[workflow_folderpath]
+        
+        utterancedefinitiondb_folderpath_dir = cls._get_utterancedefinition_db_folderpath()
+        utterancedefinitiondb = Rdict(utterancedefinitiondb_folderpath_dir)
+        utterance_definition = utterancedefinitiondb.get(workflow_folderpath, None)
+        utterancedefinitiondb.close()
 
+        if utterance_definition:
+            cls._utterance_definitions[workflow_folderpath] = utterance_definition
+            return utterance_definition
+        
+        return UtteranceRegistry._create_definition(workflow_folderpath)
+
+    @classmethod
+    def _create_definition(cls, workflow_folderpath: str) -> UtteranceDefinition:
         workitem_type_2_commandutterances: dict[str, CommandUtterances] = {}
         UtteranceDefinition._populate_utterance_definition(
             "", workflow_folderpath, workitem_type_2_commandutterances
@@ -307,13 +322,23 @@ class UtteranceRegistry:
             workitem_type_2_commandutterances=workitem_type_2_commandutterances
         )
 
+        utterancedefinitiondb_folderpath_dir = cls._get_utterancedefinition_db_folderpath()
+        utterancedefinitiondb = Rdict(utterancedefinitiondb_folderpath_dir)
+        utterancedefinitiondb[workflow_folderpath] = utterance_definition
+        utterancedefinitiondb.close()
+
         cls._utterance_definitions[workflow_folderpath] = utterance_definition
         return utterance_definition
-    
+
     @classmethod
-    def get_definition(cls, workflow_folderpath: str) -> UtteranceDefinition:
-        if workflow_folderpath not in cls._utterance_definitions:
-            cls.create_definition(workflow_folderpath)
-        return cls._utterance_definitions[workflow_folderpath]
+    def _get_utterancedefinition_db_folderpath(cls) -> str:
+        """get the utterance definition db folder path"""
+        SPEEDDICT_FOLDERNAME = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
+        utterancedefinition_db_folderpath = os.path.join(
+            SPEEDDICT_FOLDERNAME,
+            "utterancedefinitions"
+        )
+        os.makedirs(utterancedefinition_db_folderpath, exist_ok=True)
+        return utterancedefinition_db_folderpath
 
     _utterance_definitions: dict[str, UtteranceDefinition] = {}

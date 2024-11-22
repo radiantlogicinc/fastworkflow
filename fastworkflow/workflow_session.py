@@ -68,7 +68,7 @@ class WorkflowSession:
                  command_router: CommandRouterInterface,
                  command_executor: CommandExecutorInterface,
                  workflow_folderpath: str,
-                 session_id: Optional[int] = None,
+                 session_id_str: Optional[str] = None,
                  parent_session_id: Optional[int] = None,
                  context: dict = {},
                  startup_command: str = "",
@@ -99,7 +99,7 @@ class WorkflowSession:
 
         self._session = fastworkflow.Session.create(
             workflow_folderpath,
-            session_id=session_id,
+            session_id_str=session_id_str,
             parent_session_id=parent_session_id,
             keep_alive=keep_alive,
             user_message_queue=user_message_queue,
@@ -112,7 +112,7 @@ class WorkflowSession:
         self._startup_command = startup_command
 
         if startup_action and startup_action.session_id is None:
-            startup_action.session_id = session_id
+            startup_action.session_id = self._session.id
         self._startup_action = startup_action
 
         self._command_router = command_router

@@ -4,7 +4,9 @@ from enum import Enum
 from typing import Any, Optional, Type
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from speedict import Rdict
 
+import fastworkflow
 from fastworkflow import CommandSource
 
 
@@ -376,10 +378,23 @@ class CommandRoutingDefinition(BaseModel):
 class CommandRoutingRegistry:
     """ This class is used to register command routing definitions for different workflows """
     @classmethod
-    def create_definition(cls, workflow_folderpath: str):
+    def get_definition(cls, workflow_folderpath: str) -> CommandRoutingDefinition:
         if workflow_folderpath in cls._command_routing_definitions:
-            return
+            return cls._command_routing_definitions[workflow_folderpath]
+        
+        commandroutingdefinitiondb_folderpath_dir = cls._get_commandroutingdefinition_db_folderpath()
+        commandroutingdefinitiondb = Rdict(commandroutingdefinitiondb_folderpath_dir)
+        command_routing_definition = commandroutingdefinitiondb.get(workflow_folderpath, None)
+        commandroutingdefinitiondb.close()
 
+        if command_routing_definition:
+            cls._command_routing_definitions[workflow_folderpath] = command_routing_definition
+            return command_routing_definition
+        
+        return CommandRoutingRegistry._create_definition(workflow_folderpath)
+
+    @classmethod
+    def _create_definition(cls, workflow_folderpath: str) -> CommandRoutingDefinition:
         map_workitem_types_2_commandexecutionmetadata: dict[
             str, CommandExecutionMetadata
         ] = {}
@@ -393,12 +408,23 @@ class CommandRoutingRegistry:
             map_workitem_types_2_commandexecutionmetadata=map_workitem_types_2_commandexecutionmetadata,
         )
 
+        commandroutingdefinitiondb_folderpath_dir = cls._get_commandroutingdefinition_db_folderpath()
+        commandroutingdefinitiondb = Rdict(commandroutingdefinitiondb_folderpath_dir)
+        commandroutingdefinitiondb[workflow_folderpath] = command_routing_definition
+        commandroutingdefinitiondb.close()
+
         cls._command_routing_definitions[workflow_folderpath] = command_routing_definition
+        return command_routing_definition
     
     @classmethod
-    def get_definition(cls, workflow_folderpath: str) -> CommandRoutingDefinition:
-        if workflow_folderpath not in cls._command_routing_definitions:
-            cls.create_definition(workflow_folderpath)
-        return cls._command_routing_definitions[workflow_folderpath]
+    def _get_commandroutingdefinition_db_folderpath(cls) -> str:
+        """get the command routing definition db folder path"""
+        SPEEDDICT_FOLDERNAME = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
+        commandroutingdefinition_db_folderpath = os.path.join(
+            SPEEDDICT_FOLDERNAME,
+            "commandroutingdefinitions"
+        )
+        os.makedirs(commandroutingdefinition_db_folderpath, exist_ok=True)
+        return commandroutingdefinition_db_folderpath
 
     _command_routing_definitions: dict[str, CommandRoutingDefinition] = {}

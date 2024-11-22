@@ -17,7 +17,8 @@ def generate_command_parameters(
 
 
 @parameterize(command_name=["get_path_and_id"])
-def generate_utterances(workflow: Workflow, command_name: str) -> list[str]:
+def generate_utterances(session: fastworkflow.Session, command_name: str) -> list[str]:
+    workflow = session.workflow_snapshot.workflow
     utterance_definition = fastworkflow.UtteranceRegistry.get_definition(workflow.workflow_folderpath)
     utterances_obj = utterance_definition.get_command_utterances(
         workflow.type, command_name
