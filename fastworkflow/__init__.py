@@ -43,7 +43,6 @@ WorkflowRegistry = None
 CommandRoutingRegistry = None
 UtteranceRegistry = None
 RouteLayerRegistry = None
-# WorkflowSession = None
 
 def init(env_vars: dict):
     global _env_vars, Session, WorkflowRegistry, CommandRoutingRegistry, UtteranceRegistry, RouteLayerRegistry, WorkflowSession
@@ -54,14 +53,12 @@ def init(env_vars: dict):
     from .command_routing_definition import CommandRoutingRegistry as CommandRoutingRegistryClass
     from .utterance_definition import UtteranceRegistry as UtteranceRegistryClass
     from .semantic_router_definition import RouteLayerRegistry as RouteLayerRegistryClass
-    # from .workflow_session import WorkflowSession as WorkflowSessionClass
 
     # Assign to global variables
     WorkflowRegistry = WorkflowRegistryClass
     CommandRoutingRegistry = CommandRoutingRegistryClass
     UtteranceRegistry = UtteranceRegistryClass
     RouteLayerRegistry = RouteLayerRegistryClass
-    # WorkflowSession = WorkflowSessionClass
 
 def get_env_var(var_name: str, var_type: type = str, default: Optional[Union[str, int, float, bool]] = None) -> Union[str, int, float, bool]:
     """get the environment variable"""

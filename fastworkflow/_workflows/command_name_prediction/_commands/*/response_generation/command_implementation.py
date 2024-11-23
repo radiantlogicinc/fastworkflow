@@ -33,7 +33,11 @@ def process_command(
     route_choice_list = rl.retrieve_multiple_routes(command)
     if route_choice_list:
         if len(route_choice_list) > 1:
-            route_choice_list = route_choice_list[:2]   # get the top two route choices
+            route_choice_list = sorted(
+                route_choice_list[:2],
+                key=lambda x: x.similarity_score,
+                reverse=True
+            )   # get the top two route choices sorted by similarity_score
             score_difference = abs(route_choice_list[0].similarity_score - route_choice_list[1].similarity_score)
             if score_difference < 0.09:
                 error_msg = formulate_ambiguous_command_error_message(route_choice_list)
