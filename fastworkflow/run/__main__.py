@@ -41,6 +41,9 @@ parser = argparse.ArgumentParser(description="AI Assistant for workflow processi
 parser.add_argument("workflow_path", help="Path to the workflow folder")
 parser.add_argument("env_file_path", help="Path to the environment file")
 parser.add_argument(
+    "--context_file_path", help="Optional context file path", default=""
+)
+parser.add_argument(
     "--startup_command", help="Optional startup command", default=""
 )
 parser.add_argument(
@@ -76,11 +79,17 @@ if args.startup_action:
         startup_action_dict = json.load(file)
     startup_action = fastworkflow.Action(**startup_action_dict)
 
+context_dict = {}
+if args.context_file_path:
+    with open(args.context_file_path, 'r') as file:
+        context_dict = json.load(file)
+
 workflow_session = fastworkflow.WorkflowSession(
     CommandRouter(),
     CommandExecutor(),
     args.workflow_path, 
     session_id_str=f"run_{args.workflow_path}",
+    context=context_dict,
     startup_command=args.startup_command, 
     startup_action=startup_action, 
     keep_alive=args.keep_alive
