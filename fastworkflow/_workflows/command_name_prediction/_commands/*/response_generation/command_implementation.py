@@ -92,22 +92,22 @@ def validate_command_name(
         command_parameters.command_name = "*"
         return (True, None)
 
-    command_list = "\n".join(valid_command_names)
+    command_list = "\n".join(f"@{name}" for name in valid_command_names)
     return (
         False,
-        "The command is ambiguous. Use one of the intents below in wording your command:\n"
+        "The command is ambiguous. Prefix your command with an appropriate tag from the list below:\n"
         f"{command_list}"
     )
 
 def formulate_ambiguous_command_error_message(route_choice_list: list[RouteChoice]) -> str:
     command_list = (
         "\n".join([
-            f"{route_choice.name}" 
+            f"@{route_choice.name}" 
             for route_choice in route_choice_list
         ])
     )
 
     return (
-        f"The command is ambiguous. Use one of the intents below in wording your command:\n"
+        "The command is ambiguous. Prefix your command with an appropriate tag from the list below:\n"
         f"{command_list}"
     )
