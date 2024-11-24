@@ -33,6 +33,8 @@ def process_command(
     valid_command_names = get_valid_command_names(sws)
 
     command_name = None
+
+    # Check if the entire command is a valid command name
     normalized_command = command.replace(" ", "_").lower()
     for name in valid_command_names:
         if normalized_command == name.lower():
@@ -41,25 +43,33 @@ def process_command(
 
     if not command_name:
         if "@" in command:
-            command_name = command.split("@")[1].split()[0]
-            command = command.replace(f"@{command_name}", "").strip().replace("  ", " ")
-        else:
-            route_choice_list = rl.retrieve_multiple_routes(command)
-            if route_choice_list:
-                if len(route_choice_list) > 1:
-                    route_choice_list = sorted(
-                        route_choice_list,
-                        key=lambda x: x.similarity_score,
-                        reverse=True
-                    )   # get the top route choices sorted by similarity_score
-                    # score_difference = abs(route_choice_list[0].similarity_score - route_choice_list[1].similarity_score)
-                    # if score_difference < 0.09:
-                    error_msg = formulate_ambiguous_command_error_message(route_choice_list)
-                    return OutputOfProcessCommand(error_msg=error_msg)
-                    # else:
-                    #     command_name = route_choice_list[0].name
-                else:
-                    command_name = route_choice_list[0].name
+            # Check if the command has a valid @command_name
+            tentative_command_name = command.split("@")[1].split()[0]
+            normalized_command_name = tentative_command_name.lower()
+            for name in valid_command_names:
+                if normalized_command_name == name.lower():
+                    command_name = name
+                    command = command.replace(f"@{tentative_command_name}", "").strip().replace("  ", " ")
+                    break
+
+    if not command_name:
+        # Check if the command has a valid route
+        route_choice_list = rl.retrieve_multiple_routes(command)
+        if route_choice_list:
+            if len(route_choice_list) > 1:
+                route_choice_list = sorted(
+                    route_choice_list,
+                    key=lambda x: x.similarity_score,
+                    reverse=True
+                )   # get the top route choices sorted by similarity_score
+                # score_difference = abs(route_choice_list[0].similarity_score - route_choice_list[1].similarity_score)
+                # if score_difference < 0.09:
+                error_msg = formulate_ambiguous_command_error_message(route_choice_list)
+                return OutputOfProcessCommand(error_msg=error_msg)
+                # else:
+                #     command_name = route_choice_list[0].name
+            else:
+                command_name = route_choice_list[0].name
 
     command_parameters = CommandParameters(command_name=command_name)
     is_valid, error_msg = validate_command_name(valid_command_names, command_parameters)
