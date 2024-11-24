@@ -38,8 +38,6 @@ class CommandExecutor(CommandExecutorInterface):
     ) -> fastworkflow.CommandOutput:
         if not command_name:
             raise ValueError("Command name cannot be None.")
-        if not command:
-            raise ValueError("Command cannot be None.")
 
         workflow_folderpath = workflow_session.session.workflow_snapshot.workflow.workflow_folderpath
         command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(workflow_folderpath)

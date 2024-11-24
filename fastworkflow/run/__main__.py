@@ -2,7 +2,6 @@ import argparse
 import json
 import os
 import queue
-import random
 from typing import Optional
 from dotenv import dotenv_values
 
@@ -113,5 +112,4 @@ while not workflow_session.workflow_is_complete or args.keep_alive:
     workflow_session.user_message_queue.put(user_command)
     
     command_output = workflow_session.command_output_queue.get()
-    if command_output:
-        print_command_output(command_output)
+    print_command_output(command_output)

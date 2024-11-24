@@ -7,7 +7,6 @@ from typing import Optional, Union
 
 from pydantic import BaseModel
 from speedict import Rdict
-import murmurhash
 
 import fastworkflow
 from fastworkflow.utils.logging import logger
@@ -81,7 +80,7 @@ class Session:
             raise ValueError("keep_alive must be False if parent_session_id is provided")
 
         if session_id_str:
-            session_id = cls._generate_session_id_from_str(session_id_str)
+            session_id = fastworkflow.get_session_id(session_id_str)
         else:
             session_id = cls._generate_child_session_id(parent_session_id, workflow_folderpath)
 
@@ -159,15 +158,11 @@ class Session:
         return session
 
     @classmethod
-    def _generate_session_id_from_str(cls, session_id_str: str) -> int:
-        return int(murmurhash.hash(session_id_str))
-
-    @classmethod
     def _generate_child_session_id(cls, parent_session_id: int, workflow_folderpath: str) -> int:
         """generate a child session id"""
         workflow_type = os.path.basename(workflow_folderpath).rstrip("/")
         session_id_str = f"{parent_session_id}{workflow_type}"
-        return cls._generate_session_id_from_str(session_id_str)
+        return fastworkflow.get_session_id(session_id_str)
 
     # enforce session creation exclusively using Session.create_session
     # https://stackoverflow.com/questions/8212053/private-constructor-in-python

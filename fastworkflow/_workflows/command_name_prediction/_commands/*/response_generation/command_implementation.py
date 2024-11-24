@@ -37,7 +37,6 @@ def process_command(
     for name in valid_command_names:
         if normalized_command == name.lower():
             command_name = name
-            command = " "
             break
 
     if not command_name:
