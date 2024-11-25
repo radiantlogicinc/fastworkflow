@@ -118,6 +118,25 @@ class Session:
                           command_output_queue)
         session.save()  # save the workflow snapshot
 
+        session_data = {
+            "sessiondb_folderpath": session._get_sessiondb_folderpath(),
+            "children": []
+        }
+
+        sessionid_2_sessiondata_mapdir = Session._get_session_id_2_sessiondata_mapdir()
+        map_sessionid_2_session_db = Rdict(sessionid_2_sessiondata_mapdir)       
+        
+        map_sessionid_2_session_db[session._session_id] = session_data
+
+        if session._parent_session_id:
+            parent_session_data = map_sessionid_2_session_db[session._parent_session_id]
+            sibling_list = parent_session_data["children"]
+            if session._session_id not in sibling_list:
+                sibling_list.append(session._session_id)
+                parent_session_data["children"] = sibling_list
+                map_sessionid_2_session_db[session._parent_session_id] = parent_session_data
+
+        map_sessionid_2_session_db.close()
         return session
 
     @classmethod
@@ -126,15 +145,17 @@ class Session:
              keep_alive: bool = False,
              user_message_queue: Optional[Queue] = None,
              command_output_queue: Optional[Queue] = None,
-             context: dict = {}) -> Optional["Session"]:
+             context: Optional[dict] = None) -> Optional["Session"]:
         """load the session"""
-        map_sessionid_2_sessiondb_folderpath_dir = Session._get_session_id_2_sessiondb_folderpath()
-        map_sessionid_2_sessiondb_folderpath_db = Rdict(map_sessionid_2_sessiondb_folderpath_dir)
-        sessiondb_folderpath = map_sessionid_2_sessiondb_folderpath_db.get(session_id, None)
-        map_sessionid_2_sessiondb_folderpath_db.close()
-        if not sessiondb_folderpath:
+        sessionid_2_sessiondata_mapdir = Session._get_session_id_2_sessiondata_mapdir()
+        map_sessionid_2_session_db = Rdict(sessionid_2_sessiondata_mapdir)       
+        sessiondata_dict = map_sessionid_2_session_db.get(session_id, None)
+        map_sessionid_2_session_db.close()
+
+        if not sessiondata_dict:
             return None
 
+        sessiondb_folderpath = sessiondata_dict["sessiondb_folderpath"]
         if not os.path.exists(sessiondb_folderpath):
             raise ValueError(f"Session database folder path {sessiondb_folderpath} does not exist")
 
@@ -144,17 +165,20 @@ class Session:
         keyvalue_db.close()
 
         # set the new context, this means we have to save the session again
-        workflow_snapshot.context = context
+        if context:
+            workflow_snapshot.context = context
 
         session = Session(cls.__create_key, 
                           workflow_snapshot,
-                          session_id, 
+                          session_id,
                           parent_session_id,
                           keep_alive, 
                           user_message_queue, 
                           command_output_queue)
         
-        session.save()
+        if context:
+            session.save()
+
         return session
 
     @classmethod
@@ -221,19 +245,42 @@ class Session:
 
     def close(self) -> bool:
         """close the session"""
+        if self._parent_session_id:
+            raise ValueError("close should only be called on the root session")
+
+        sessionid_2_sessiondata_mapdir = Session._get_session_id_2_sessiondata_mapdir()
+        map_sessionid_2_session_db = Rdict(sessionid_2_sessiondata_mapdir)
+
+        # collect all descendants
+        descendant_list = []
+        to_process = map_sessionid_2_session_db[self._session_id]["children"][:]  # Create a shallow copy
+        while to_process:
+            current_id = to_process.pop()
+            child_session_data = Session._get_session_data(
+                current_id,
+                map_sessionid_2_session_db=map_sessionid_2_session_db
+            )
+            descendant_list.append(current_id)
+            sys.path.remove(child_session_data[3])  # remove the workflow folderpath from sys.path
+            # Add any children to the processing queue
+            to_process.extend(child_session_data[2])
+
+        # process all descendants
+        for descendant_session_id in descendant_list:
+            del map_sessionid_2_session_db[descendant_session_id]
+
+        sys.path.remove(self.workflow_snapshot.workflow.workflow_folderpath)
+        # remove ourselves from the sessionid_2_sessiondata_map
+        del map_sessionid_2_session_db[self._session_id]
+
+        map_sessionid_2_session_db.close()
+
         sessiondb_folderpath = self._get_sessiondb_folderpath()
         try:
             shutil.rmtree(sessiondb_folderpath, ignore_errors=True)
         except OSError as e:
             logger.error(f"Error closing session: {e}")
             return False
-
-        sys.path.remove(self.workflow_snapshot.workflow.workflow_folderpath)
-
-        map_sessionid_2_sessiondb_folderpath_dir = Session._get_session_id_2_sessiondb_folderpath()
-        map_sessionid_2_sessiondb_folderpath_db = Rdict(map_sessionid_2_sessiondb_folderpath_dir)
-        del map_sessionid_2_sessiondb_folderpath_db[self._session_id]
-        map_sessionid_2_sessiondb_folderpath_db.close()
 
         return True
 
@@ -250,10 +297,21 @@ class Session:
     def _get_sessiondb_folderpath(self) -> str:
         """get the db folder path"""
         if self._parent_session_id:
-            parent_session = Session.get_session(self._parent_session_id)
-            if not parent_session:
-                raise ValueError(f"Parent session {self._parent_session_id} not found")
-            parent_session_folder = parent_session._get_sessiondb_folderpath()
+            parent_session_id = self._parent_session_id
+            parent_session_folder = ""
+
+            sessionid_2_sessiondata_mapdir = Session._get_session_id_2_sessiondata_mapdir()
+            map_sessionid_2_session_db = Rdict(sessionid_2_sessiondata_mapdir)       
+            
+            while parent_session_id:
+                parent_session_data = Session._get_session_data(
+                    parent_session_id,
+                    map_sessionid_2_session_db=map_sessionid_2_session_db
+                )
+                parent_session_id = parent_session_data[0]
+                parent_session_folder = os.path.join(parent_session_data[1], parent_session_folder)
+            
+            map_sessionid_2_session_db.close()
         else:
             speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
             parent_session_folder = os.path.join(
@@ -262,25 +320,41 @@ class Session:
             )
     
         session_id_str = str(self._session_id).replace("-", "_")
-        session_db_folderpath = os.path.join(parent_session_folder, session_id_str)
-
-        map_sessionid_2_sessiondb_folderpath_dir = Session._get_session_id_2_sessiondb_folderpath()
-        map_sessionid_2_sessiondb_folderpath_db = Rdict(map_sessionid_2_sessiondb_folderpath_dir)
-        map_sessionid_2_sessiondb_folderpath_db[self._session_id] = session_db_folderpath
-        map_sessionid_2_sessiondb_folderpath_db.close()
-
-        return session_db_folderpath
+        return os.path.join(parent_session_folder, session_id_str)
 
     @classmethod
-    def _get_session_id_2_sessiondb_folderpath(cls) -> str:
-        """get the session db folder path"""
+    def _get_session_data(cls, session_id: int, map_sessionid_2_session_db: Rdict) -> (int, str, list, str):
+        """get the parent id, the session db folder path, the children list, and the workflow folderpath"""
+        sessiondata_dict = map_sessionid_2_session_db.get(session_id, None)
+
+        if not sessiondata_dict:
+            raise ValueError(f"Session {session_id} not found")
+
+        sessiondb_folderpath = sessiondata_dict["sessiondb_folderpath"]
+        if not os.path.exists(sessiondb_folderpath):
+            raise ValueError(f"Session database folder path {sessiondb_folderpath} does not exist")
+
+        children_list = sessiondata_dict["children"]
+        if children_list is None:
+            raise ValueError(f"Session {session_id} must have a children list even if it is empty")
+
+        keyvalue_db = Rdict(sessiondb_folderpath)
+        workflow_snapshot: WorkflowSnapshot = keyvalue_db["workflow_snapshot"]
+        parent_session_id = keyvalue_db.get("parent_session_id", None)
+        keyvalue_db.close()
+
+        return (parent_session_id, sessiondb_folderpath, children_list, workflow_snapshot.workflow.workflow_folderpath)
+
+    @classmethod
+    def _get_session_id_2_sessiondata_mapdir(cls) -> str:
+        """get the sessionid_2_sessiondata_map folder path"""
         speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
-        map_sessionid_2_sessiondb_folderpath_dir = os.path.join(
+        sessionid_2_sessiondata_mapdir = os.path.join(
             speedict_foldername,
-            "map_sessionid_2_sessiondb_folderpath"
+            "sessionid_2_sessiondata_map"
         )
-        os.makedirs(map_sessionid_2_sessiondb_folderpath_dir, exist_ok=True)
-        return map_sessionid_2_sessiondb_folderpath_dir
+        os.makedirs(sessionid_2_sessiondata_mapdir, exist_ok=True)
+        return sessionid_2_sessiondata_mapdir
 
     def get_cachedb_folderpath(self, function_name: str) -> str:
         """Get the cache database folder path for a specific function"""
