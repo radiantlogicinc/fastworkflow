@@ -111,7 +111,6 @@ class Session:
         workflow_folderpath: str,
         session_id_str: Optional[str] = None, 
         parent_session_id: Optional[int] = None, 
-        keep_alive: bool = False,
         user_message_queue: Optional[Queue] = None,
         command_output_queue: Optional[Queue] = None,
         context: dict = {},
@@ -123,9 +122,6 @@ class Session:
         if session_id_str is not None and parent_session_id is not None:
             raise ValueError("session_id_str and parent_session_id cannot both be provided")
 
-        if parent_session_id is not None and keep_alive:
-            raise ValueError("keep_alive must be False if parent_session_id is provided")
-
         if session_id_str:
             session_id = fastworkflow.get_session_id(session_id_str)
         else:
@@ -133,7 +129,6 @@ class Session:
 
         if session := cls.get_session(
             session_id, 
-            keep_alive, 
             user_message_queue, 
             command_output_queue,
             context
@@ -160,9 +155,6 @@ class Session:
         )
         session = Session(cls.__create_key, 
                           workflow_snapshot,
-                          session_id, 
-                          parent_session_id,
-                          keep_alive, 
                           user_message_queue, 
                           command_output_queue)
 
@@ -193,7 +185,6 @@ class Session:
     @classmethod
     def get_session(cls, 
              session_id: int, 
-             keep_alive: bool = False,
              user_message_queue: Optional[Queue] = None,
              command_output_queue: Optional[Queue] = None,
              context: Optional[dict] = None) -> Optional["Session"]:
@@ -219,9 +210,6 @@ class Session:
 
         session = Session(cls.__create_key, 
                           workflow_snapshot,
-                          session_id,
-                          workflow_snapshot.parent_session_id,
-                          keep_alive, 
                           user_message_queue, 
                           command_output_queue)
 
@@ -241,9 +229,6 @@ class Session:
     def __init__(self,
                  create_key, 
                  workflow_snapshot: WorkflowSnapshot,
-                 session_id: int, 
-                 parent_session_id: Optional[int] = None,
-                 keep_alive: bool = False,
                  user_message_queue: Optional[Queue] = None,
                  command_output_queue: Optional[Queue] = None):
         """initialize the Session class"""
@@ -258,7 +243,6 @@ class Session:
             sys.path.insert(0, workflow_folderpath)
 
         self._workflow_snapshot = workflow_snapshot
-        self._keep_alive = keep_alive
         self._user_message_queue = user_message_queue
         self._command_output_queue = command_output_queue
 
@@ -276,11 +260,6 @@ class Session:
     def workflow_snapshot(self) -> WorkflowSnapshot:
         """get the workflow snapshot"""
         return self._workflow_snapshot
-
-    @property
-    def keep_alive(self) -> bool:
-        """get the keep alive flag"""
-        return self._keep_alive
 
     @property
     def user_message_queue(self) -> Queue:

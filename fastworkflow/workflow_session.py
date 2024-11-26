@@ -101,7 +101,6 @@ class WorkflowSession:
             workflow_folderpath,
             session_id_str=session_id_str,
             parent_session_id=parent_session_id,
-            keep_alive=keep_alive,
             user_message_queue=user_message_queue,
             command_output_queue=command_output_queue,
             context=context
@@ -114,6 +113,7 @@ class WorkflowSession:
         if startup_action and startup_action.session_id is None:
             startup_action.session_id = self._session.id
         self._startup_action = startup_action
+        self._keep_alive = keep_alive
 
         self._command_router = command_router
         self._command_executor = command_executor
@@ -132,7 +132,7 @@ class WorkflowSession:
         WorkflowSession.push_active_session(self._session.id)
         
         command_output = None
-        if self._session.keep_alive:
+        if self._keep_alive:
             # Root workflow gets a worker thread
             self._worker = WorkflowWorker(self)
             self._worker.start()
@@ -187,7 +187,7 @@ class WorkflowSession:
             elif self._startup_action:
                 last_output = self._process_action(self._startup_action)
             
-            while not self.workflow_is_complete or self._session.keep_alive:
+            while not self.workflow_is_complete or self._keep_alive:
                 if self._status == SessionStatus.STOPPING:
                     break
                     
@@ -198,7 +198,7 @@ class WorkflowSession:
                     continue
             
             # Return final output for child workflows, regardless of success/failure
-            if not self._session.keep_alive:
+            if not self._keep_alive:
                 return last_output
                 
         finally:
@@ -211,13 +211,13 @@ class WorkflowSession:
     def _process_message(self, message: str) -> fastworkflow.CommandOutput:
         """Process a single message"""
         command_output = self._command_router.route_command(self, message)
-        if not command_output.success or self._session.keep_alive:
+        if not command_output.success or self._keep_alive:
             self._session.command_output_queue.put(command_output)
         return command_output
     
     def _process_action(self, action: fastworkflow.Action) -> fastworkflow.CommandOutput:
         """Process a startup action"""
         command_output = self._command_executor.perform_action(self._session, action)
-        if not command_output.success or self._session.keep_alive:
+        if not command_output.success or self._keep_alive:
             self._session.command_output_queue.put(command_output)
         return command_output
