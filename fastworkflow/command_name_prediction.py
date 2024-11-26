@@ -1,5 +1,4 @@
 import os
-import random
 
 import fastworkflow
 from fastworkflow import Action, CommandOutput

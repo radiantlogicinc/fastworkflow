@@ -1,5 +1,4 @@
 import os
-import random
 
 import fastworkflow
 from fastworkflow.command_name_prediction import guess_command_name

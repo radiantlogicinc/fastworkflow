@@ -1,6 +1,5 @@
 import argparse
 import os
-import random
 from dotenv import dotenv_values
 
 from colorama import Fore, Style
