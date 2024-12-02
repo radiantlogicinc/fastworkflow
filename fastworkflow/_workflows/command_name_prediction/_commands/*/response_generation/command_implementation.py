@@ -62,12 +62,12 @@ def process_command(
                     key=lambda x: x.similarity_score,
                     reverse=True
                 )   # get the top route choices sorted by similarity_score
-                # score_difference = abs(route_choice_list[0].similarity_score - route_choice_list[1].similarity_score)
-                # if score_difference < 0.09:
-                error_msg = formulate_ambiguous_command_error_message(route_choice_list)
-                return OutputOfProcessCommand(error_msg=error_msg)
-                # else:
-                #     command_name = route_choice_list[0].name
+                score_difference = abs(route_choice_list[0].similarity_score - route_choice_list[1].similarity_score)
+                if score_difference < 0.09 and len(route_choice_list) <= 2:
+                    error_msg = formulate_ambiguous_command_error_message(route_choice_list)
+                    return OutputOfProcessCommand(error_msg=error_msg)
+                else:
+                    command_name = route_choice_list[0].name
             else:
                 command_name = route_choice_list[0].name
 
