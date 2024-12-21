@@ -1,2 +1,6 @@
 {
+    "atypeofworkitem": {
+        "min": 0,
+        "max": 5
+    }
 }
