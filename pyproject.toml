@@ -9,7 +9,7 @@ repository = "https://github.com/radiantlogicinc/fastworkflow"
 
 [tool.poetry]
 name = "fastworkflow"
-version = "1.0.24"
+version = "1.0.25"
 description = "A framework for rapidly building large-scale, deterministic, interactive workflows with a fault-tolerant, conversational UX"
 authors = ["Dhar Rawal <drawal@radiantlogic.com>"]
 license = "Apache-2.0"
@@ -17,7 +17,7 @@ readme = "README.md"
 keywords = ["fastworkflow", "ai", "workflow", "llm", "openai"]
 
 [tool.poetry.dependencies]
-python = "~3.11.9"
+python = ">=3.11,<3.13"
 pydantic = "^2.9.2"
 semantic-router = "^0.0.72"
 dspy-ai = "^2.5.20"
