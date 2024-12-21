@@ -141,8 +141,9 @@ class WorkflowDefinition(BaseModel):
                 for child_type, size_meta in child_cardinality.items():
                     if child_type not in allowable_child_types[workitem_type]:
                         raise ValueError(
-                            "cardinality file contains a child of type {child_type} that does not exist for {workitem_type}"
+                             f"cardinality file contains a child of type {child_type} that does not exist for {workitem_type}"
                         )
+
                     allowable_child_types[workitem_type][child_type] = SizeMetaData(
                         **size_meta
                     )
