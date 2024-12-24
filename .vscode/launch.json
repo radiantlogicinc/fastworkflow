@@ -17,7 +17,7 @@
                 "./examples/sample_workflow",
                 "./env/.env",
                 "--startup_action",
-                "./env/startup_action.json"
+                "./examples/sample_workflow/startup_action.json"
             ]
         },
         {
