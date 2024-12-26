@@ -3,7 +3,7 @@ import os
 from enum import Enum
 from typing import Any, Optional, Type
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator, PrivateAttr
 from speedict import Rdict
 
 import fastworkflow
@@ -215,7 +215,7 @@ class CommandRoutingDefinition(BaseModel):
                 f"Command routing definition not found for workitem type '{workitem_type}'"
             )
 
-    _command_class_cache = {}
+    _command_class_cache: dict[str, Type[Any]] = PrivateAttr(default_factory=dict)
     def get_command_class(self, workitem_type: str, command_name: str, module_type: ModuleType):
         cache_key = f"{workitem_type}:{command_name}:{module_type}"
         if cache_key in self._command_class_cache:
