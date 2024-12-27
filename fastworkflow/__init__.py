@@ -1,3 +1,4 @@
+import os
 from typing import Any, Optional, Union
 from enum import Enum
 
@@ -67,8 +68,10 @@ def get_env_var(var_name: str, var_type: type = str, default: Optional[Union[str
 
     value = _env_vars.get(var_name)
     if value is None:
-        if default is None:
-            raise ValueError(f"Environment variable '{var_name}' does not exist and no default value is provided.")
+        if default is None:           
+            value = os.getenv(var_name)
+            if value is None:
+                raise ValueError(f"Environment variable '{var_name}' does not exist and no default value is provided.")
         else:
             return default
     

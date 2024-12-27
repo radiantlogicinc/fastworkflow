@@ -60,8 +60,7 @@ def extract_command_parameters_from_input(
         )
 
         DSPY_LM_MODEL = fastworkflow.get_env_var("DSPY_LM_MODEL")
-        OPENAI_API_KEY = fastworkflow.get_env_var("OPENAI_API_KEY")
-        lm = dspy.LM(DSPY_LM_MODEL, api_key=OPENAI_API_KEY)
+        lm = dspy.LM(DSPY_LM_MODEL)
         with dspy.context(lm=lm):
             extract_cmd_params = dspy.TypedChainOfThought(dspy_signature_class)
             prediction = extract_cmd_params(**input_for_param_extraction.model_dump())

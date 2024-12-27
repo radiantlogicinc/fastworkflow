@@ -17,8 +17,7 @@ class ResponseGenerator:
         output = process_command(session, command_parameters)
 
         DSPY_LM_MODEL = fastworkflow.get_env_var("DSPY_LM_MODEL")
-        OPENAI_API_KEY = fastworkflow.get_env_var("OPENAI_API_KEY")
-        lm = dspy.LM(DSPY_LM_MODEL, api_key=OPENAI_API_KEY)
+        lm = dspy.LM(DSPY_LM_MODEL)
         answer_generator = ResponseGenerator.BasicQA(lm)
 
         with DSPyRotatingFileLogger("inference_log.jsonl"):
