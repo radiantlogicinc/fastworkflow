@@ -71,14 +71,32 @@ class Workitem(BaseModel):
             # if the current item is a child of this workitem (self),
             # then we need to loop until we find the current item
             found_current_item = (
-                False if current_item_path and self.path in current_item_path else True
+                not current_item_path or self.path not in current_item_path
             )
 
             # search children
             for item in self._workitems:
                 if not found_current_item:
-                    if item.path == current_item_path:
+                    if item.path == current_item_path and item.id == self.id:
                         found_current_item = True
+                    continue
+
+                if not skip_completed or not item.is_complete:
+                    return item
+
+            # delegate search to grandparent workflow
+            if self._parent_workflow:
+                return self._parent_workflow.next_workitem(skip_completed, self.path)
+        elif self._parent_workflow:
+            current_item_path = self.path
+            # search siblings
+            found_current_item = False
+            for item in self._parent_workflow._workitems:
+                if item.path == current_item_path and item.id == self.id:
+                    found_current_item = True
+                    continue
+
+                if not found_current_item:
                     continue
 
                 if skip_completed and item.is_complete:
@@ -87,31 +105,10 @@ class Workitem(BaseModel):
                 return item
 
             # delegate search to grandparent workflow
-            if self._parent_workflow:
-                return self._parent_workflow.next_workitem(skip_completed, self.path)
-        else:
-            if self._parent_workflow:
-                current_item_path = self.path
-                # search siblings
-                found_current_item = False
-                for item in self._parent_workflow._workitems:
-                    if item.path == current_item_path:
-                        found_current_item = True
-                        continue
-
-                    if not found_current_item:
-                        continue
-
-                    if skip_completed and item.is_complete:
-                        continue
-
-                    return item
-
-                # delegate search to grandparent workflow
-                if self._parent_workflow._parent_workflow:
-                    return self._parent_workflow._parent_workflow.next_workitem(
-                        skip_completed, self._parent_workflow.path
-                    )
+            if self._parent_workflow._parent_workflow:
+                return self._parent_workflow._parent_workflow.next_workitem(
+                    skip_completed, self._parent_workflow.path
+                )
 
         return None
 
