@@ -16,13 +16,13 @@ def extract_command_parameters(
     If it is called from the extraction failure workflow, the session is the source workflow session which is basically what we want.
     """
     startup_action = fastworkflow.Action(
-        workitem_type="parameter_extraction",
+        workitem_path="/parameter_extraction",
         command_name="*",
         command=command,
     )
 
     # if we are already in the parameter extraction workflow, we can just perform the action
-    if workflow_session.session.workflow_snapshot.workflow.type == "parameter_extraction":
+    if workflow_session.session.workflow_snapshot.workflow.path == "parameter_extraction":
         command_executor = CommandExecutor()
         command_output = command_executor.perform_action(workflow_session.session, startup_action)
         if len(command_output.command_responses) > 1:

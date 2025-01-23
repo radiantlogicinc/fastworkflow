@@ -29,8 +29,8 @@ class CommandRouter(CommandRouterInterface):
             # (e.g. abort command in parameter extraction session)
             workflow_folderpath = workflow_session.session.workflow_snapshot.workflow.workflow_folderpath
             command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(workflow_folderpath)
-            workitem_type = workflow_session.session.workflow_snapshot.active_workitem.type
-            valid_command_names = command_routing_definition.get_command_names(workitem_type)
+            workitem_path = workflow_session.session.workflow_snapshot.active_workitem.path
+            valid_command_names = command_routing_definition.get_command_names(workitem_path)
             if "abort" not in valid_command_names:
                 return command_output
 
@@ -61,7 +61,7 @@ def _was_command_name_misunderstood(
     )
 
     startup_action = fastworkflow.Action(
-        workitem_type="misunderstood_command_detection",
+        workitem_path="/misunderstood_command_detection",
         command_name="was_command_name_misunderstood",
         command=command,
         session_id=session.id,

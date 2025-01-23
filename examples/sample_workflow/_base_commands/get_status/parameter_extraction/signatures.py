@@ -62,8 +62,7 @@ class InputForParamExtraction(BaseModel):
             return (False, "Missing or invalid workitem path")
 
         if cmd_parameters.workitem_path == "NOT_FOUND":
-            active_workitem = workflow_snapshot.active_workitem
-            if active_workitem:
+            if active_workitem := workflow_snapshot.active_workitem:
                 cmd_parameters.workitem_path = active_workitem.path
                 cmd_parameters.workitem_id = active_workitem.id
                 return (True, None)
@@ -72,15 +71,8 @@ class InputForParamExtraction(BaseModel):
         workflow_definition = fastworkflow.WorkflowRegistry.get_definition(workflow_folderpath)
 
         workitem_path = "".join(cmd_parameters.workitem_path.split()).strip(" \"'")
-        relative_to_root = False
-        if workitem_path in [
-            workitem_type for workitem_type in workflow_definition.types
-        ]:
-            relative_to_root = True
-            workitem_path = f"//{workitem_path}"
-
         workitem = workflow_snapshot.workflow.find_workitem(
-            workitem_path, cmd_parameters.workitem_id, relative_to_root
+            workitem_path, cmd_parameters.workitem_id, True
         )
         if workitem is None:
             return (

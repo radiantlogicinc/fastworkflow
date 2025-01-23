@@ -26,7 +26,7 @@ def process_command(
     subject_workflow_folderpath = sws.workflow.workflow_folderpath
     subject_command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(subject_workflow_folderpath)
 
-    active_workitem_type = sws.active_workitem.type
+    active_workitem_type = sws.active_workitem.path
     subject_command_name = session.workflow_snapshot.context["subject_command_name"]
     input_for_param_extraction_class = subject_command_routing_definition.get_command_class(
         active_workitem_type, subject_command_name, ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS)

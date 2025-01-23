@@ -37,12 +37,9 @@ def enablecache(func):
 
 
 class WorkflowSnapshot:
-    def __init__(self,
-                 session_id: int,
-                 workflow: Workflow, 
-                 active_workitem: Union[Workitem, Workflow],
-                 context: dict = {},
-                 parent_session_id: Optional[int] = None):
+    def __init__(self, session_id: int, workflow: Workflow, active_workitem: Union[Workitem, Workflow], context: dict = None, parent_session_id: Optional[int] = None):
+        if context is None:
+            context = {}
         self._session_id = session_id
         self._workflow = workflow
         self._active_workitem = active_workitem
@@ -106,16 +103,9 @@ class WorkflowSnapshot:
 class Session:
     """Session class"""
     @classmethod
-    def create(
-        cls,
-        workflow_folderpath: str,
-        session_id_str: Optional[str] = None, 
-        parent_session_id: Optional[int] = None, 
-        user_message_queue: Optional[Queue] = None,
-        command_output_queue: Optional[Queue] = None,
-        context: dict = {},
-        for_training_semantic_router: bool = False
-    ) -> "Session":
+    def create(cls, workflow_folderpath: str, session_id_str: Optional[str] = None, parent_session_id: Optional[int] = None, user_message_queue: Optional[Queue] = None, command_output_queue: Optional[Queue] = None, context: dict = None, for_training_semantic_router: bool = False) -> "Session":
+        if context is None:
+            context = {}
         if session_id_str is None and parent_session_id is None:
             raise ValueError("Either session_id_str or parent_session_id must be provided")
 
@@ -143,7 +133,7 @@ class Session:
 
         workflow=Workflow(
             workflow_folderpath=workflow_folderpath,
-            type=os.path.basename(workflow_folderpath).rstrip("/"),
+            path=f"/{os.path.basename(workflow_folderpath).rstrip('/')}",
             parent_workflow=None,
         )
         workflow_snapshot = WorkflowSnapshot(
@@ -166,7 +156,7 @@ class Session:
 
         sessionid_2_sessiondata_mapdir = Session._get_session_id_2_sessiondata_mapdir()
         map_sessionid_2_session_db = Rdict(sessionid_2_sessiondata_mapdir)       
-        
+
         map_sessionid_2_session_db[session.id] = {
             "sessiondb_folderpath": session_db_folderpath,
             "children": []
@@ -190,7 +180,7 @@ class Session:
              context: Optional[dict] = None) -> Optional["Session"]:
         """load the session"""
         sessionid_2_sessiondata_mapdir = Session._get_session_id_2_sessiondata_mapdir()
-        map_sessionid_2_session_db = Rdict(sessionid_2_sessiondata_mapdir)       
+        map_sessionid_2_session_db = Rdict(sessionid_2_sessiondata_mapdir)
         sessiondata_dict = map_sessionid_2_session_db.get(session_id, None)
         map_sessionid_2_session_db.close()
 
@@ -208,12 +198,12 @@ class Session:
         if context:
             workflow_snapshot.context = context
 
-        session = Session(cls.__create_key, 
-                          workflow_snapshot,
-                          user_message_queue, 
-                          command_output_queue)
-
-        return session
+        return Session(
+            cls.__create_key,
+            workflow_snapshot,
+            user_message_queue,
+            command_output_queue,
+        )
 
     @classmethod
     def _generate_child_session_id(cls, parent_session_id: int, workflow_folderpath: str) -> int:
@@ -232,9 +222,7 @@ class Session:
                  user_message_queue: Optional[Queue] = None,
                  command_output_queue: Optional[Queue] = None):
         """initialize the Session class"""
-        if create_key is Session.__create_key:
-            pass
-        else:
+        if create_key is not Session.__create_key:
             raise ValueError("Session objects must be created using Session.create")
 
         workflow_folderpath = workflow_snapshot.workflow.workflow_folderpath
@@ -354,7 +342,7 @@ class Session:
         return os.path.join(parent_session_folder, session_id_str)
 
     @classmethod
-    def _get_session_data(cls, session_id: int, map_sessionid_2_session_db: Rdict) -> (int, str, list, str):
+    def _get_session_data(cls, session_id: int, map_sessionid_2_session_db: Rdict) -> tuple[int, str, list, str]:
         """get the parent id, the session db folder path, the children list, and the workflow folderpath"""
         sessiondata_dict = map_sessionid_2_session_db.get(session_id, None)
 

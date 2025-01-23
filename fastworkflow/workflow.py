@@ -4,35 +4,25 @@ from typing import List, Optional, Union
 from pydantic import BaseModel
 
 import fastworkflow
-from fastworkflow.workflow_definition import NodeType, SizeMetaData, WorkflowDefinition
+from fastworkflow.workflow_definition import NodeType, SizeMetaData
 
 
 class Workitem(BaseModel):
     def __init__(
         self,
-        type: str,
+        path: str,
         node_type: NodeType,
         parent_workflow: Optional["Workflow"],
         id: Optional[str] = None
     ):
         super().__init__()
 
-        if not type:
-            raise ValueError("type cannot be empty")
-        self._type = type
+        if not path:
+            raise ValueError("path cannot be empty")
+        self._path = path
         self._node_type = node_type
         self._parent_workflow = parent_workflow
         self._id = id
-
-        if parent_workflow:
-            parent_path = parent_workflow.path
-        else:
-            parent_path = ""
-        self._path = f"{parent_path}/{type}"
-
-    @property
-    def type(self) -> str:
-        return self._type
 
     @property
     def node_type(self) -> str:
@@ -48,9 +38,8 @@ class Workitem(BaseModel):
             self._is_complete = True
             if self._parent_workflow:
                 self._parent_workflow.has_started = True
-        else:
-            if self._parent_workflow:
-                self._parent_workflow._recalculate_started_state()
+        elif self._parent_workflow:
+            self._parent_workflow._recalculate_started_state()
 
     @property
     def parent_workflow(self) -> "Workflow":
@@ -113,9 +102,8 @@ class Workitem(BaseModel):
         return None
 
     def print(self, indent=0):
-        print(" " * (indent + 2) + f"Workitem(type={self._type}, id={self._id})")
+        print(" " * (indent + 2) + f"Workitem(path={self._path}, id={self._id})")
 
-    _type: str
     _node_type: str
     _is_complete: bool = False
     _parent_workflow: Optional["Workflow"] = None
@@ -128,30 +116,33 @@ class Workflow(Workitem):
     def __init__(
         self,
         workflow_folderpath: str,
-        type: str,
+        path: str,
         parent_workflow: Optional["Workflow"],
         id: Optional[str] = None
     ):
-        super().__init__(type, NodeType.Workflow, parent_workflow, id)
+        super().__init__(path, NodeType.Workflow, parent_workflow, id)
 
         self._workflow_folderpath = workflow_folderpath
-        self._type = type
+        self._path = path
 
         workflow_definition = fastworkflow.WorkflowRegistry.get_definition(self._workflow_folderpath)
-        self._allowable_child_types = workflow_definition.allowable_child_types[
-            type
-        ]
+        if path in workflow_definition.paths_2_allowable_child_paths_2_sizemetadata:
+            allowable_child_paths_2_sizemetadata = (
+                workflow_definition.paths_2_allowable_child_paths_2_sizemetadata[path]
+            )
+        else:
+            allowable_child_paths_2_sizemetadata = {}
 
         # for each child type, check if the min and max size are same
         # if they are, add min size child workitems to the list
-        for child_type, size_metadata in self._allowable_child_types.items():
+        for child_path, size_metadata in allowable_child_paths_2_sizemetadata.items():
             if size_metadata.min == size_metadata.max:
-                type_metadata = workflow_definition.types[child_type]
+                type_metadata = workflow_definition.paths_2_typemetadata[child_path]
                 if type_metadata.node_type == NodeType.Workitem:
                     self._workitems.extend(
                         [
                             Workitem(
-                                type=child_type,
+                                path=child_path,
                                 node_type=NodeType.Workitem,
                                 parent_workflow=self,
                             )
@@ -163,7 +154,7 @@ class Workflow(Workitem):
                         [
                             Workflow(
                                 workflow_folderpath=workflow_folderpath,
-                                type=child_type,
+                                path=child_path,
                                 parent_workflow=self,
                             )
                         ]
@@ -179,10 +170,6 @@ class Workflow(Workitem):
         return self._workflow_folderpath
 
     @property
-    def type(self) -> str:
-        return self._type
-
-    @property
     def has_started(self) -> bool:
         return self._has_started
 
@@ -191,11 +178,10 @@ class Workflow(Workitem):
         self._has_started = value
         if value:
             # if all workitems are complete, mark this workflow as complete
-            if all([item.is_complete for item in self._workitems]):
+            if all(item.is_complete for item in self._workitems):
                 self.is_complete = True
-            else:
-                if self._parent_workflow:
-                    self._parent_workflow.has_started = True
+            elif self._parent_workflow:
+                self._parent_workflow.has_started = True
         else:
             self._parent_workflow._recalculate_started_state()
 
@@ -205,30 +191,33 @@ class Workflow(Workitem):
         any_workflow_has_started = any(item.has_started for item in self._workitems if item.node_type == NodeType.Workflow)
         self.has_started = any_workitem_is_complete or any_workflow_has_started
 
-    def add_workitem(self, item_type: str, item_id: Optional[str] = None):
-        # check if item_type is valid
-        if item_type not in self._allowable_child_types:
+    def add_workitem(self, item_path: str, item_id: Optional[str] = None):
+        allowable_child_paths_2_sizemetadata = (
+            workflow_definition.paths_2_allowable_child_paths_2_sizemetadata[self._path]
+        )
+        # check if item_path is valid
+        if item_path not in allowable_child_paths_2_sizemetadata:
             raise ValueError(
-                f"Item type '{item_type}' is not allowed. Allowed types: {self._allowable_child_types}"
+                f"Item type '{item_path}' is not allowed. Allowed types: {allowable_child_paths_2_sizemetadata}"
             )
 
         # check that the number of child workitems of this type is within the allowable range
-        size_metadata = self._allowable_child_types[item_type]
+        size_metadata = allowable_child_paths_2_sizemetadata[item_path]
         if (
             size_metadata.max
-            and len([i for i in self._workitems if i._type == item_type])
+            and len([i for i in self._workitems if i._path == item_path])
             >= size_metadata.max
         ):
             raise ValueError(
-                f"Maximum number of child workitems of type '{item_type}' reached"
+                f"Maximum number of child workitems of type '{item_path}' reached"
             )
 
         # is this a Workitem or a Workflow?
         workflow_definition = fastworkflow.WorkflowRegistry.get_definition(self._workflow_folderpath)
-        type_metadata = workflow_definition.types[item_type]
+        type_metadata = workflow_definition.paths_2_typemetadata[item_path]
         if type_metadata.node_type == NodeType.Workitem:
             item = Workitem(
-                type=item_type,
+                path=item_path,
                 node_type=NodeType.Workitem,
                 parent_workflow=self,
                 id=item_id,
@@ -236,7 +225,7 @@ class Workflow(Workitem):
         elif type_metadata.node_type == NodeType.Workflow:
             item = Workflow(
                 workflow_folderpath=self._workflow_folderpath,
-                type=item_type,
+                path=item_path,
                 parent_workflow=self,
                 id=item_id,
             )
@@ -277,7 +266,7 @@ class Workflow(Workitem):
 
             parts = parts[1:]
             if (
-                workitem.type == parts[0]
+                os.path.basename(workitem.path.rstrip('/')) == parts[0]
             ):  # since we are getting stuff relative to the root workflow
                 parts = parts[1:]
         elif parts[0] == ".":  # relative path
@@ -288,41 +277,38 @@ class Workflow(Workitem):
 
         # raise error if any part contains a '/', '.' or '..', or is empty - as this is not supported
         if any(
-            [part == "" or "/" in part or part == "." or part == ".." for part in parts]
+            part == "" or "/" in part or part == "." or part == ".."
+            for part in parts
         ):
             raise ValueError("Invalid path")
 
         for part in parts:
             found = False
             for item in workitem._workitems:
-                if item._type == part:
+                if os.path.basename(item._path.rstrip('/')) == part:
                     if isinstance(item, Workflow):
                         workitem = item
                         found = True
                         break
                     else:
-                        if item_id:
-                            if item._id == item_id:
-                                return item
-                        else:
+                        if item_id and item._id == item_id or not item_id:
                             return item
+            if found:
+                break
 
-            if not found:
-                return None
-
-        return workitem
+        return workitem if found else None
 
     def _find_workitem_recursive(
         self, parts: List[str], item_id: str = None
     ) -> Union[Workitem, "Workflow", None]:
         # Check if the current workflow matches the first part
-        if parts and self._type == parts[0]:
+        if parts and os.path.basename(self._path.rstrip('/')) == parts[0]:
             if len(parts) == 1:
                 return self if not item_id or self._id == item_id else None
             return self._find_workitem_recursive(parts[1:], item_id)
 
         for item in self._workitems:
-            if item._type == parts[0]:
+            if os.path.basename(item._path.rstrip('/')) == parts[0]:
                 if len(parts) == 1:
                     if item_id:
                         if item._id == item_id:
@@ -331,18 +317,16 @@ class Workflow(Workitem):
                             continue
                     return item
                 if isinstance(item, Workflow):
-                    result = item._find_workitem_recursive(parts[1:], item_id)
-                    if result:
+                    if result := item._find_workitem_recursive(parts[1:], item_id):
                         return result
             elif isinstance(item, Workflow):
-                result = item._find_workitem_recursive(parts, item_id)
-                if result:
+                if result := item._find_workitem_recursive(parts, item_id):
                     return result
 
         return None
 
     def print_tree(self, indent=0):
-        print(" " * indent + f"Workflow(type={self._type})")
+        print(" " * indent + f"Workflow(path={self._path})")
         for item in self._workitems:
             if isinstance(item, Workflow):
                 item.print_tree(indent + 2)
@@ -353,5 +337,4 @@ class Workflow(Workitem):
         arbitrary_types_allowed = True
 
     _has_started: bool = False
-    _allowable_child_types: dict[str, SizeMetaData] = {}
     _workitems: List[Union[Workitem, "Workflow"]] = []

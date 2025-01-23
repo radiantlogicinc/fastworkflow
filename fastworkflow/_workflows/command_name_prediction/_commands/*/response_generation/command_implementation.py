@@ -20,42 +20,39 @@ def process_command(
 ) -> OutputOfProcessCommand:
     sws = session.workflow_snapshot.context["subject_workflow_snapshot"]
     sws_workflow_folderpath = sws.workflow.workflow_folderpath
-    sws_active_workitem_type = sws.active_workitem.type
-    sws_route_layer = fastworkflow.RouteLayerRegistry.get_route_layer(sws_workflow_folderpath, sws_active_workitem_type)   
+    sws_active_workitem_path = sws.active_workitem.path
+    sws_route_layer = fastworkflow.RouteLayerRegistry.get_route_layer(sws_workflow_folderpath, sws_active_workitem_path)   
 
     current_workflow_folderpath = session.workflow_snapshot.workflow.workflow_folderpath
-    current_active_workitem_type = session.workflow_snapshot.active_workitem.type
-    current_route_layer = fastworkflow.RouteLayerRegistry.get_route_layer(current_workflow_folderpath, current_active_workitem_type)
+    current_active_workitem_path = session.workflow_snapshot.active_workitem.path
+    current_route_layer = fastworkflow.RouteLayerRegistry.get_route_layer(current_workflow_folderpath, current_active_workitem_path)
 
     route_list = [sws_route_layer.routes, current_route_layer.routes]
     rl = fastworkflow.RouteLayerRegistry.build_route_layer_from_routelayers(route_list)
 
     valid_command_names = get_valid_command_names(sws)
 
-    command_name = None
-
     # Check if the entire command is a valid command name
     normalized_command = command.replace(" ", "_").lower()
-    for name in valid_command_names:
-        if normalized_command == name.lower():
-            command_name = name
-            break
+    command_name = next(
+        (
+            name
+            for name in valid_command_names
+            if normalized_command == name.lower()
+        ),
+        None,
+    )
+    if not command_name and "@" in command:
+        tentative_command_name = command.split("@")[1].split()[0]
+        normalized_command_name = tentative_command_name.lower()
+        for name in valid_command_names:
+            if normalized_command_name == name.lower():
+                command_name = name
+                command = command.replace(f"@{tentative_command_name}", "").strip().replace("  ", " ")
+                break
 
     if not command_name:
-        if "@" in command:
-            # Check if the command has a valid @command_name
-            tentative_command_name = command.split("@")[1].split()[0]
-            normalized_command_name = tentative_command_name.lower()
-            for name in valid_command_names:
-                if normalized_command_name == name.lower():
-                    command_name = name
-                    command = command.replace(f"@{tentative_command_name}", "").strip().replace("  ", " ")
-                    break
-
-    if not command_name:
-        # Check if the command has a valid route
-        route_choice_list = rl.retrieve_multiple_routes(command)
-        if route_choice_list:
+        if route_choice_list := rl.retrieve_multiple_routes(command):
             if len(route_choice_list) > 1:
                 route_choice_list = sorted(
                     route_choice_list,
@@ -86,7 +83,7 @@ def get_valid_command_names(sws: WorkflowSnapshot) -> set[str]:
     sws_workflow_folderpath = sws.workflow.workflow_folderpath
     sws_command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(sws_workflow_folderpath)
     valid_command_names |= set(sws_command_routing_definition.get_command_names(
-        sws.active_workitem.type
+        sws.active_workitem.path
     ))
     return valid_command_names
 

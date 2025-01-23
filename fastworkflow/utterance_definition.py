@@ -112,44 +112,42 @@ class UtteranceDefinition(BaseModel):
                 raise ValueError(f"Invalid value for type metadata '{key}'")
         return workitem_type_2_commandutterances
 
-    def get_command_names(self, workitem_type: str) -> list[str]:
-        if workitem_type in self.workitem_type_2_commandutterances:
+    def get_command_names(self, workitem_path: str) -> list[str]:
+        if workitem_path in self.workitem_type_2_commandutterances:
             return list(
                 self.workitem_type_2_commandutterances[
-                    workitem_type
+                    workitem_path
                 ].map_command_2_utterances.keys()
             )
         else:
             raise ValueError(
-                f"Utterance definition not found for workitem type '{workitem_type}'"
+                f"Utterance definition not found for workitem type '{workitem_path}'"
             )
 
     def get_command_utterances(
-        self, workitem_type: str, command_name: str
+        self, workitem_path: str, command_name: str
     ) -> Utterances:
-        if workitem_type in self.workitem_type_2_commandutterances:
-            command_utterances = self.workitem_type_2_commandutterances[workitem_type]
-            if command_name in command_utterances.map_command_2_utterances:
-                return command_utterances.map_command_2_utterances[command_name]
-            else:
-                raise ValueError(
-                    f"Utterance definition not found for command '{command_name}'"
-                )
+        if workitem_path not in self.workitem_type_2_commandutterances:
+            raise ValueError(
+                f"Utterance definition not found for workitem type '{workitem_path}'"
+            )
+        command_utterances = self.workitem_type_2_commandutterances[workitem_path]
+        if command_name in command_utterances.map_command_2_utterances:
+            return command_utterances.map_command_2_utterances[command_name]
         else:
             raise ValueError(
-                f"Utterance definition not found for workitem type '{workitem_type}'"
+                f"Utterance definition not found for command '{command_name}'"
             )
 
-    def get_sample_utterances(self, workitem_type: str) -> list[str]:
-        command_names = self.get_command_names(workitem_type)
+    def get_sample_utterances(self, workitem_path: str) -> list[str]:
+        command_names = self.get_command_names(workitem_path)
         sample_utterances = []
         for command_name in command_names:
-            command_utterances = self.get_command_utterances(workitem_type, command_name)
+            command_utterances = self.get_command_utterances(workitem_path, command_name)
             if command_utterances.template_utterances:
                 sample_utterances.append(command_utterances.template_utterances[0])
-            else:
-                if command_utterances.plain_utterances:
-                    sample_utterances.append(command_utterances.plain_utterances[0])
+            elif command_utterances.plain_utterances:
+                sample_utterances.append(command_utterances.plain_utterances[0])
         return sample_utterances
 
     def write(self, filename: str):
@@ -159,32 +157,32 @@ class UtteranceDefinition(BaseModel):
     @classmethod
     def _populate_utterance_definition(
         cls,
-        parent_workitem_type: str,
+        parent_workitem_path: str,
         workflow_folderpath: str,
         workitem_type_2_commandutterances: dict[str, CommandUtterances],
     ):
         if not os.path.isdir(workflow_folderpath):
             raise ValueError(f"{workflow_folderpath} must be a directory")
 
-        workitem_type = os.path.basename(workflow_folderpath.rstrip("/"))
-        # if workitem_type.startswith("_"):
-        #     raise ValueError(f"{workitem_type} starts with an '_'. Names starting with an _ are reserved")
+        workitem_path = f"{parent_workitem_path}/{os.path.basename(workflow_folderpath.rstrip('/'))}"
+        # if workitem_path.startswith("_"):
+        #     raise ValueError(f"{workitem_path} starts with an '_'. Names starting with an _ are reserved")
 
         # read the _base_commands folder if it exists
         cls._populate_command_utterances(
-            parent_workitem_type,
+            parent_workitem_path,
             workflow_folderpath,
             workitem_type_2_commandutterances,
-            workitem_type,
+            workitem_path,
             CommandSource.BASE_COMMANDS,
         )
 
         # read the _commands folder if it exists
         cls._populate_command_utterances(
-            parent_workitem_type,
+            parent_workitem_path,
             workflow_folderpath,
             workitem_type_2_commandutterances,
-            workitem_type,
+            workitem_path,
             CommandSource.COMMANDS,
         )
 
@@ -193,7 +191,7 @@ class UtteranceDefinition(BaseModel):
             subfolder_path = os.path.join(workflow_folderpath, command)
             if os.path.isdir(subfolder_path) and not command.startswith("_"):
                 cls._populate_utterance_definition(
-                    workitem_type, subfolder_path, workitem_type_2_commandutterances
+                    workitem_path, subfolder_path, workitem_type_2_commandutterances
                 )
 
     @classmethod
@@ -202,7 +200,7 @@ class UtteranceDefinition(BaseModel):
         parent_workitem_type: str,
         workflow_folderpath: str,
         workitem_type_2_commandutterances: dict[str, CommandUtterances],
-        workitem_type: str,
+        workitem_path: str,
         command_source: CommandSource,
     ):
         map_command_2_utterances: dict[str, Utterances] = {}
@@ -268,8 +266,8 @@ class UtteranceDefinition(BaseModel):
                     generated_utterances_func_name=generated_utterances_func_name,
                 )
 
-        if workitem_type in workitem_type_2_commandutterances:
-            command_utterances = workitem_type_2_commandutterances[workitem_type]
+        if workitem_path in workitem_type_2_commandutterances:
+            command_utterances = workitem_type_2_commandutterances[workitem_path]
             for command, utterances in map_command_2_utterances.items():
                 if command in command_utterances:
                     command_utterances[command].plain_utterances.extend(
@@ -287,7 +285,7 @@ class UtteranceDefinition(BaseModel):
                 else:
                     command_utterances.map_command_2_utterances[command] = utterances
         else:
-            workitem_type_2_commandutterances[workitem_type] = CommandUtterances(
+            workitem_type_2_commandutterances[workitem_path] = CommandUtterances(
                 map_command_2_utterances=map_command_2_utterances
             )
 

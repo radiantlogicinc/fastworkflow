@@ -50,7 +50,7 @@ Valid workitem paths are:\n
     def create(cls, workflow_snapshot: WorkflowSnapshot, command: str):
         workflow_folderpath = workflow_snapshot.workflow.workflow_folderpath
         workflow_definition = fastworkflow.WorkflowRegistry.get_definition(workflow_folderpath)
-        workitem_type_list = "\n".join(workflow_definition.types.keys())
+        workitem_type_list = "\n".join(workflow_definition.paths_2_typemetadata.keys())
 
         cls.__doc__ = cls.__doc__.format(workitem_type_list=workitem_type_list)
 
@@ -70,34 +70,29 @@ Valid workitem paths are:\n
         """
         workflow_folderpath = workflow_snapshot.workflow.workflow_folderpath
         workflow_definition = fastworkflow.WorkflowRegistry.get_definition(workflow_folderpath)
-        workflow_type_list = [
-            type_name for type_name, type_metadata in workflow_definition.types.items()
+        workflow_path_list = [
+            path for path, type_metadata in workflow_definition.paths_2_typemetadata.items()
             if type_metadata.node_type == NodeType.Workflow
         ]
-        workflow_type_list_str = "\n".join(workflow_type_list)
         if cmd_parameters.workitem_path in ["NOT_FOUND", "INVALID"]:
+            workflow_path_list_str = "\n".join(workflow_path_list)
             return (
                 False,
                 "Workitem path is missing or invalid.\n"
                 f"Valid workitem paths are:\n"
-                f"{workflow_type_list_str}\n"
+                f"{workflow_path_list_str}\n"
             )
 
-        workitem_path = "".join(cmd_parameters.workitem_path.split()).strip(" \"'")
-        relative_to_root = False
-        if workitem_path.lstrip('/') in workflow_type_list:
-            relative_to_root = True
-            workitem_path = f"//{workitem_path.lstrip('/')}"
-
+        cmd_parameters.workitem_path = "".join(cmd_parameters.workitem_path.split()).strip(" \"'")
         workitem = workflow_snapshot.workflow.find_workitem(
-            workitem_path, cmd_parameters.workitem_id, relative_to_root
+            cmd_parameters.workitem_path, cmd_parameters.workitem_id
         )
         if workitem is None:
             return (
                 False,
-                f"workitem path '{workitem_path}' does not exist in this workflow\n"
+                f"workitem path '{cmd_parameters.workitem_path}' does not exist in this workflow\n"
                 f"Valid workitem paths are:\n"
-                f"{workflow_type_list_str}\n"
+                f"{workflow_path_list_str}\n"
             )
 
         return (True, None)

@@ -15,7 +15,7 @@ class ResponseGenerator:
 
         # Create the response
         response = (
-            f"Here are some example commands available in this task ({output.workitem_type}):\n"
+            f"Here are some example commands available in this task ({output.workitem_path}):\n"
             f"{utterance_list}\n"
             f"Your chat message must fall within the scope of these utterances."
         )

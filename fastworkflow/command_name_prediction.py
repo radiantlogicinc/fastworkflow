@@ -9,13 +9,13 @@ def guess_command_name(
     command: str,
 ) -> tuple[int, CommandOutput]:
     startup_action = Action(
-        workitem_type="command_name_prediction",
+        workitem_path="/command_name_prediction",
         command_name="*",
         command=command,
     )
 
     # if we are already in the command name prediction workflow, we can just perform the action
-    if workflow_session.session.workflow_snapshot.workflow.type == "command_name_prediction":
+    if workflow_session.session.workflow_snapshot.workflow.path == "command_name_prediction":
         command_executor = CommandExecutor()
         command_output = command_executor.perform_action(workflow_session.session, startup_action)
         if len(command_output.command_responses) > 1:
@@ -44,4 +44,3 @@ def guess_command_name(
 
     command_output = cnp_workflow_session.start()
     return (cnp_workflow_session.session.id, command_output)
-

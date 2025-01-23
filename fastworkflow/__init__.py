@@ -7,7 +7,7 @@ import murmurhash
 
 
 class Action(BaseModel):
-    workitem_type: str
+    workitem_path: str
     command_name: str
     command: str = ""   # only use is to display autocomplete item in the UI
     parameters: dict[str, Optional[Union[str, bool, int, float, BaseModel]]] = {}

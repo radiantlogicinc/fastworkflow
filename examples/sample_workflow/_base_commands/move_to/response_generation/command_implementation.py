@@ -25,19 +25,8 @@ def process_command(
 
     :param input: The input parameters for the function.
     """
-    workflow_folderpath = session.workflow_snapshot.workflow.workflow_folderpath
-    workflow_definition = fastworkflow.WorkflowRegistry.get_definition(workflow_folderpath)
-
-    input.workitem_path = "".join(input.workitem_path.split()).strip(" \"'")
-    relative_to_root = False
-    if input.workitem_path in [
-        workitem_type for workitem_type in workflow_definition.types
-    ]:
-        relative_to_root = True
-        input.workitem_path = f"//{input.workitem_path}"
-
     workitem = session.workflow_snapshot.workflow.find_workitem(
-        input.workitem_path, input.workitem_id, relative_to_root
+        input.workitem_path, input.workitem_id
     )
 
     target_workitem_found = workitem is not None

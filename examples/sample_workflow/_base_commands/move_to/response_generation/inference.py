@@ -25,8 +25,8 @@ class ResponseGenerator:
                     next_actions=[
                         Action(
                             session_id=session.id,
-                            workitem_type="sample_workflow",
-                            command_name="move_to_workitem",
+                            workitem_path="/sample_workflow",
+                            command_name="move_to",
                             command="Move to mytask",
                             parameters={"workitem_path": "mytask", "workitem_id": None},
                         )

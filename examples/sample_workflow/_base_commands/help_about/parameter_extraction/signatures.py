@@ -7,7 +7,7 @@ from fastworkflow.session import WorkflowSnapshot
 
 
 class CommandParameters(BaseModel):
-    workitem_type: str = Field(default="NOT_FOUND", description="The workitem type")
+    workitem_path: str = Field(default="NOT_FOUND", description="The workitem type")
 
 
 class InputForParamExtraction(BaseModel):
@@ -24,10 +24,10 @@ class InputForParamExtraction(BaseModel):
 
         workflow_folderpath = workflow_snapshot.workflow.workflow_folderpath
         workflow_definition = fastworkflow.WorkflowRegistry.get_definition(workflow_folderpath)
-        workitem_types = ", ".join(workflow_definition.types.keys())
+        workitem_types = ", ".join(workflow_definition.paths_2_typemetadata.keys())
         cls.__doc__ = cls.__doc__.format(workitem_types=workitem_types)
 
-        return cls(command=command, current_context=workflow_snapshot.active_workitem.type)
+        return cls(command=command, current_context=workflow_snapshot.active_workitem.path)
 
     @classmethod
     def validate_parameters(
@@ -41,14 +41,14 @@ class InputForParamExtraction(BaseModel):
         """
         workflow_folderpath = workflow_snapshot.workflow.workflow_folderpath
         workflow_definition = fastworkflow.WorkflowRegistry.get_definition(workflow_folderpath)
-        if cmd_parameters.workitem_type in workflow_definition.types:
+        if cmd_parameters.workitem_path in workflow_definition.paths_2_typemetadata:
             return (True, None)
 
-        workitem_types = "\n".join(workflow_definition.types.keys())
+        workitem_types = "\n".join(workflow_definition.paths_2_typemetadata.keys())
         return (
             False,
             (
-                f"The workitem type {cmd_parameters.workitem_type} is not in the list of valid workitem types:\n"
+                f"The workitem type {cmd_parameters.workitem_path} is not in the list of valid workitem types:\n"
                 f"{workitem_types}\n"
                 "Please choose a valid workitem type from the list"
             ),

@@ -42,7 +42,7 @@ class CommandExecutor(CommandExecutorInterface):
         workflow_folderpath = workflow_session.session.workflow_snapshot.workflow.workflow_folderpath
         command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(workflow_folderpath)
 
-        active_workitem_type = workflow_session.session.workflow_snapshot.active_workitem.type
+        active_workitem_type = workflow_session.session.workflow_snapshot.active_workitem.path
         response_generation_object = (
             command_routing_definition.get_command_class_object(
                 active_workitem_type,
@@ -97,40 +97,38 @@ class CommandExecutor(CommandExecutorInterface):
 
         response_generation_object = (
             command_routing_definition.get_command_class_object(
-                action.workitem_type,
+                action.workitem_path,
                 action.command_name,
                 CommandModuleType.RESPONSE_GENERATION_INFERENCE,
             )
         )
         if not response_generation_object:
             raise ValueError(
-                f"Response generation object not found for workitem type '{action.workitem_type}' and command name '{action.command_name}'"
+                f"Response generation object not found for workitem type '{action.workitem_path}' and command name '{action.command_name}'"
             )
 
         command_parameters_class = (
             command_routing_definition.get_command_class(
-                action.workitem_type, action.command_name, CommandModuleType.COMMAND_PARAMETERS_CLASS
+                action.workitem_path, action.command_name, CommandModuleType.COMMAND_PARAMETERS_CLASS
             )
         )
-        if command_parameters_class:
-            if action.parameters:
-                input_obj = command_parameters_class(**action.parameters)
+        if not command_parameters_class:
+            return response_generation_object(session, action.command)
 
-                input_for_param_extraction_class = (
-                    command_routing_definition.get_command_class(
-                        action.workitem_type,
-                        action.command_name,
-                        CommandModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS,
-                    )
+        if action.parameters:
+            input_obj = command_parameters_class(**action.parameters)
+
+            input_for_param_extraction_class = (
+                command_routing_definition.get_command_class(
+                    action.workitem_path,
+                    action.command_name,
+                    CommandModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS,
                 )
-                is_valid, error_msg = input_for_param_extraction_class.validate_parameters(session.workflow_snapshot, input_obj)
-                if not is_valid:
-                    raise ValueError(f"Invalid action parameters: {error_msg}")
-            else:
-                input_obj = command_parameters_class()
-
-            command_output = response_generation_object(session, action.command, input_obj)
+            )
+            is_valid, error_msg = input_for_param_extraction_class.validate_parameters(session.workflow_snapshot, input_obj)
+            if not is_valid:
+                raise ValueError(f"Invalid action parameters: {error_msg}")
         else:
-            command_output = response_generation_object(session, action.command)
+            input_obj = command_parameters_class()
 
-        return command_output
+        return response_generation_object(session, action.command, input_obj)

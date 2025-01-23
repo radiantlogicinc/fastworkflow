@@ -8,9 +8,10 @@ from ..parameter_extraction.signatures import CommandParameters
 def generate_command_inputs(workflow: Workflow) -> list[CommandParameters]:
     workflow_definition = fastworkflow.WorkflowRegistry.get_definition(workflow.workflow_folderpath)
     workitem_paths = []
-    for workitem_type in workflow_definition.types:
-        workitem_paths.append(f"{workitem_type}")
-
+    workitem_paths.extend(
+        f"{workitem_path}"
+        for workitem_path in workflow_definition.paths_2_typemetadata
+    )
     # add full paths
     workitem = workflow.next_workitem(skip_completed=False)
     while workitem is not None:
@@ -28,17 +29,14 @@ def generate_utterances(session: fastworkflow.Session, command_name: str) -> lis
     workflow = session.workflow_snapshot.workflow
     utterance_definition = fastworkflow.UtteranceRegistry.get_definition(workflow.workflow_folderpath)
     utterances_obj = utterance_definition.get_command_utterances(
-        workflow.type, command_name
+        workflow.path, command_name
     )
 
     utterance_list: list[str] = [command_name] + utterances_obj.plain_utterances
 
     inputs: list[CommandParameters] = generate_command_inputs(workflow)
     for input in inputs:
-        kwargs = {}
-        for field in input.model_fields:
-            kwargs[field] = getattr(input, field)
-
+        kwargs = {field: getattr(input, field) for field in input.model_fields}
         for template in utterances_obj.template_utterances:
             utterance = template.format(**kwargs)
             utterance_list.append(utterance)

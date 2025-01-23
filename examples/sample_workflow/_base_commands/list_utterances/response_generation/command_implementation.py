@@ -5,7 +5,7 @@ from fastworkflow.session import Session
 
 
 class CommandProcessorOutput(BaseModel):
-    workitem_type: str
+    workitem_path: str
     utterances: list[str]
 
 
@@ -14,7 +14,7 @@ def process_command(
 ) -> CommandProcessorOutput:
     """
     Provides helpful information about this type of work-item.
-    If the workitem_type is not provided, it provides information about the current work-item.
+    If the workitem_path is not provided, it provides information about the current work-item.
 
     :param input: The input parameters for the function.
     """
@@ -23,10 +23,10 @@ def process_command(
 
     workflow_folderpath = session.workflow_snapshot.workflow.workflow_folderpath
     utterance_definition = fastworkflow.UtteranceRegistry.get_definition(workflow_folderpath)
-    utterances = utterance_definition.get_sample_utterances(current_workitem.type)
+    utterances = utterance_definition.get_sample_utterances(current_workitem.path)
 
     return CommandProcessorOutput(
-        workitem_type=current_workitem.type, utterances=utterances
+        workitem_path=current_workitem.path, utterances=utterances
     )
 
 

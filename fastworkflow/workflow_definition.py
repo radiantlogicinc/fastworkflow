@@ -40,40 +40,38 @@ class SizeMetaData(BaseModel):
 
     @field_validator("max", mode="before")
     def parse_max(cls, max: Optional[int]):
-        if max is not None:
-            if max < 1:
-                raise ValueError("Maximum value must be greater than or equal to 1")
+        if max is not None and max < 1:
+            raise ValueError("Maximum value must be greater than or equal to 1")
         return max
 
     @model_validator(mode="after")
     def check_size_metadata(cls, size_meta: "SizeMetaData"):
-        if size_meta.max is not None:
-            if size_meta.min > size_meta.max:
-                raise ValueError(
-                    "Maximum value must be greater than or equal to the minimum value"
-                )
+        if size_meta.max is not None and size_meta.min > size_meta.max:
+            raise ValueError(
+                "Maximum value must be greater than or equal to the minimum value"
+            )
         return size_meta
 
 
 class WorkflowDefinition(BaseModel):
     workflow_folderpath: str
-    types: dict[str, TypeMetadata]
-    allowable_child_types: dict[str, dict[str, SizeMetaData]]
+    paths_2_typemetadata: dict[str, TypeMetadata]
+    paths_2_allowable_child_paths_2_sizemetadata: dict[str, dict[str, SizeMetaData]]
 
-    @field_validator("types", mode="before")
-    def parse_type_metadata(cls, types: dict[str, TypeMetadata]):
-        for key, value in types.items():
+    @field_validator("paths_2_typemetadata", mode="before")
+    def parse_type_metadata(cls, paths_2_typemetadata: dict[str, TypeMetadata]):
+        for key, value in paths_2_typemetadata.items():
             if isinstance(value, dict):
-                types[key] = TypeMetadata(**value)
-            elif not isinstance(types[key], TypeMetadata):
+                paths_2_typemetadata[key] = TypeMetadata(**value)
+            elif not isinstance(paths_2_typemetadata[key], TypeMetadata):
                 raise ValueError(f"Invalid value for type metadata '{key}'")
-        return types
+        return paths_2_typemetadata
 
-    @field_validator("allowable_child_types", mode="before")
+    @field_validator("paths_2_allowable_child_paths_2_sizemetadata", mode="before")
     def parse_size_metadata(
-        cls, allowable_child_types: dict[str, dict[str, SizeMetaData]]
+        cls, paths_2_allowable_child_paths_2_sizemetadata: dict[str, dict[str, SizeMetaData]]
     ):
-        for _, children in allowable_child_types.items():
+        for children in paths_2_allowable_child_paths_2_sizemetadata.values():
             for child_type, size_meta in children.items():
                 if isinstance(size_meta, dict):
                     children[child_type] = SizeMetaData(**size_meta)
@@ -81,22 +79,22 @@ class WorkflowDefinition(BaseModel):
                     raise ValueError(
                         f"Invalid value for child size metadata '{child_type}'"
                     )
-        return allowable_child_types
+        return paths_2_allowable_child_paths_2_sizemetadata
 
     @model_validator(mode="after")
     def check_workflow_definition(cls, wfd: "WorkflowDefinition"):
         # check that all types have a valid non-empty key
-        for key in wfd.types.keys():
+        for key in wfd.paths_2_typemetadata.keys():
             if not key:
                 raise ValueError("Workflow/workitem type cannot be an empty string")
 
-        for parent_type, children in wfd.allowable_child_types.items():
-            if parent_type not in wfd.types:
-                raise ValueError(f"Parent type '{parent_type}' is not defined in types")
-            for child_type, size_metadata in children.items():
-                if child_type not in wfd.types:
+        for parent_path, children in wfd.paths_2_allowable_child_paths_2_sizemetadata.items():
+            if parent_path not in wfd.paths_2_typemetadata:
+                raise ValueError(f"Parent type '{parent_path}' is not defined in types")
+            for child_path, size_metadata in children.items():
+                if child_path not in wfd.paths_2_typemetadata:
                     raise ValueError(
-                        f"Child type '{child_type}' is not defined in types"
+                        f"Child type '{child_path}' is not defined in types"
                     )
         return wfd
 
@@ -104,33 +102,29 @@ class WorkflowDefinition(BaseModel):
     def _populate_workflow_definition(
         cls,
         workflow_folderpath: str,
-        types: dict[str, TypeMetadata],
-        allowable_child_types: dict[str, dict[str, SizeMetaData]],
+        paths_2_typemetadata: dict[str, TypeMetadata],
+        paths_2_allowable_child_paths_2_sizemetadata: dict[str, dict[str, SizeMetaData]],
+        parent_path: Optional[str] = None
     ):
         if not os.path.isdir(workflow_folderpath):
             raise ValueError(f"{workflow_folderpath} must be a directory")
 
-        workitem_type = os.path.basename(workflow_folderpath.rstrip("/"))
-        # if workitem_type.startswith("_"):
-        #     raise ValueError(f"{workitem_type} starts with an '_'. Names starting with an _ are reserved")
-
-        types[workitem_type] = TypeMetadata(node_type=NodeType.Workitem)
-        if workitem_type not in allowable_child_types:
-            allowable_child_types[workitem_type] = {}
-
-        # Recursively process subfolders
-        for subfolder in os.listdir(workflow_folderpath):
-            subfolder_path = os.path.join(workflow_folderpath, subfolder)
-            if os.path.isdir(subfolder_path) and not subfolder.startswith("_"):
-                types[workitem_type] = TypeMetadata(node_type=NodeType.Workflow)
-                child_workitem_type = os.path.basename(subfolder_path.rstrip("/"))
-                allowable_child_types[workitem_type][child_workitem_type] = (
+        basename = os.path.basename(workflow_folderpath.rstrip('/'))
+        if parent_path:
+            workitem_path = f"{parent_path}/{basename}"
+            if workitem_path not in paths_2_allowable_child_paths_2_sizemetadata:
+                if parent_path not in paths_2_allowable_child_paths_2_sizemetadata:
+                    paths_2_allowable_child_paths_2_sizemetadata[parent_path] = {}
+                paths_2_allowable_child_paths_2_sizemetadata[parent_path][workitem_path] = (
                     SizeMetaData(min=0, max=None)
                 )
-                cls._populate_workflow_definition(
-                    subfolder_path, types, allowable_child_types
-                )
+        else:
+            workitem_path = f"/{basename}"
 
+        paths_2_typemetadata[workitem_path] = TypeMetadata(node_type=NodeType.Workitem)
+
+
+        child_cardinality = {}
         # Read the child cardinality if it exists
         child_cardinality_file = os.path.join(
             workflow_folderpath, "child_cardinality.json"
@@ -138,15 +132,33 @@ class WorkflowDefinition(BaseModel):
         if os.path.exists(child_cardinality_file):
             with open(child_cardinality_file, "r") as f:
                 child_cardinality = json.load(f)
-                for child_type, size_meta in child_cardinality.items():
-                    if child_type not in allowable_child_types[workitem_type]:
-                        raise ValueError(
-                             f"cardinality file contains a child of type {child_type} that does not exist for {workitem_type}"
-                        )
 
-                    allowable_child_types[workitem_type][child_type] = SizeMetaData(
-                        **size_meta
-                    )
+        if not child_cardinality:
+            return
+
+        # Recursively process subfolders
+        for subfolder in os.listdir(workflow_folderpath):
+            subfolder_path = os.path.join(workflow_folderpath, subfolder)
+            if os.path.isdir(subfolder_path) and not subfolder.startswith("_"):
+                child_workitem_path = f"{workitem_path}/{os.path.basename(subfolder_path.rstrip('/'))}"
+                cls._populate_workflow_definition(
+                    subfolder_path, 
+                    paths_2_typemetadata, 
+                    paths_2_allowable_child_paths_2_sizemetadata, 
+                    workitem_path
+                )
+
+        if child_cardinality:
+            paths_2_typemetadata[workitem_path] = TypeMetadata(node_type=NodeType.Workflow)
+
+        for child_type, size_meta in child_cardinality.items():
+            child_path = f"{workitem_path}/{child_type}"
+            if child_path not in paths_2_allowable_child_paths_2_sizemetadata[workitem_path]:
+                raise ValueError(
+                        f"cardinality file contains a child of type {child_type} that does not exist for {workitem_path}"
+                )
+
+            paths_2_allowable_child_paths_2_sizemetadata[workitem_path][child_path] = size_meta
 
     def write(self, filename: str):
         with open(filename, "w") as f:
@@ -174,16 +186,17 @@ class WorkflowRegistry:
 
     @classmethod
     def _create_definition(cls, workflow_folderpath: str) -> WorkflowDefinition:
-        types = {}
-        allowable_child_types = {}
+        paths_2_typemetadata = {}
+        paths_2_allowable_child_paths_2_sizemetadata = {}
 
         WorkflowDefinition._populate_workflow_definition(
-            workflow_folderpath, types, allowable_child_types
+            workflow_folderpath, paths_2_typemetadata, paths_2_allowable_child_paths_2_sizemetadata
         )
 
         workflow_definition = WorkflowDefinition(
             workflow_folderpath=workflow_folderpath,
-            types=types, allowable_child_types=allowable_child_types
+            paths_2_typemetadata=paths_2_typemetadata, 
+            paths_2_allowable_child_paths_2_sizemetadata=paths_2_allowable_child_paths_2_sizemetadata
         )
 
         workflowdefinitiondb_folderpath_dir = cls._get_workflowdefinition_db_folderpath()
