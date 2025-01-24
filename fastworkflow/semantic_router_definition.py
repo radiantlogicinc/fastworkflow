@@ -1,13 +1,14 @@
 import os
 from typing import Optional
 
-import dill
-
 from semantic_router import Route
 from semantic_router.encoders import HuggingFaceEncoder
 from semantic_router.layer import RouteLayer
 
 import fastworkflow
+
+
+HUGGINGFACE_ENCODER = HuggingFaceEncoder()
 
 
 def route_layers_folderpath(workflow_folderpath: str) -> str:
@@ -99,18 +100,11 @@ class RouteLayerRegistry:
         if workflow_folderpath in cls._map_workflow_folderpath_to_route_layer_map:
             route_layer_map = cls._map_workflow_folderpath_to_route_layer_map[workflow_folderpath]
         else:
-            # Try to load from file
-            map_file = os.path.join(route_layers_folderpath(workflow_folderpath), "route_layer_map")
-            if os.path.exists(map_file):
-                with open(map_file, 'rb') as f:
-                    route_layer_map = dill.loads(f.read())
-            else:
-                route_layer_map = cls._build_route_layer_map(workflow_folderpath)
-                if not route_layer_map:
-                    raise ValueError(f"Train the semantic router before running the workflow '{workflow_folderpath}'")
-            
-            if route_layer_map:
-                cls._map_workflow_folderpath_to_route_layer_map[workflow_folderpath] = route_layer_map
+            route_layer_map = cls._build_route_layer_map(workflow_folderpath)
+            if not route_layer_map:
+                raise ValueError(f"Train the semantic router before running the workflow '{workflow_folderpath}'")
+
+            cls._map_workflow_folderpath_to_route_layer_map[workflow_folderpath] = route_layer_map
 
         if workitem_path not in route_layer_map:
             raise ValueError(f"Route layer for workitem path {workitem_path} not found.")
@@ -122,8 +116,7 @@ class RouteLayerRegistry:
         if not os.path.exists(rl_folderpath):
             return None
 
-        encoder = HuggingFaceEncoder()
-        semantic_router = SemanticRouterDefinition(encoder, workflow_folderpath)
+        semantic_router = SemanticRouterDefinition(HUGGINGFACE_ENCODER, workflow_folderpath)
         map_workitem_path_2_route_layer: dict[str, RouteLayer] = {}
 
         root_workitem = f"/{os.path.basename(workflow_folderpath.rstrip('/'))}"
@@ -134,12 +127,6 @@ class RouteLayerRegistry:
         for workitem_path in workflow_definition.paths_2_allowable_child_paths_2_sizemetadata:
             route_layer = semantic_router.get_route_layer(workitem_path)
             map_workitem_path_2_route_layer[workitem_path] = route_layer
-        
-        # Store the serialized map directly to a file
-        serialized_map = dill.dumps(map_workitem_path_2_route_layer)
-        map_file = os.path.join(rl_folderpath, "route_layer_map")
-        with open(map_file, 'wb') as f:
-            f.write(serialized_map)
 
         cls._map_workflow_folderpath_to_route_layer_map[workflow_folderpath] = map_workitem_path_2_route_layer
         return map_workitem_path_2_route_layer

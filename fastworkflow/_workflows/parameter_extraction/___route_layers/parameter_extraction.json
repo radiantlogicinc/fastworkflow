@@ -1,0 +1,24 @@
+{
+    "encoder_type": "huggingface",
+    "encoder_name": "sentence-transformers/all-MiniLM-L6-v2",
+    "routes": [
+        {
+            "name": "abort",
+            "utterances": [
+                "abort",
+                "cancel",
+                "stop",
+                "quit",
+                "terminate",
+                "end",
+                "never mind",
+                "exit"
+            ],
+            "description": null,
+            "function_schemas": null,
+            "llm": null,
+            "score_threshold": 0.5,
+            "metadata": {}
+        }
+    ]
+}

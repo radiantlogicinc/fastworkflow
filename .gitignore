@@ -1,6 +1,6 @@
 *passwords*
 ___workflow_contexts*
-___route_layers*
+examples/*/___route_layers*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
