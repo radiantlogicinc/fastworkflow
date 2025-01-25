@@ -13,7 +13,7 @@ class Workitem(BaseModel):
         path: str,
         node_type: NodeType,
         parent_workflow: Optional["Workflow"],
-        id: Optional[str] = None
+        id: Optional[Union[str, int]] = None
     ):
         super().__init__()
 
@@ -50,7 +50,7 @@ class Workitem(BaseModel):
         return self._path
 
     @property
-    def id(self) -> Optional[str]:
+    def id(self) -> Optional[Union[str, int]]:
         return self._id
 
     def next_workitem(
@@ -191,7 +191,8 @@ class Workflow(Workitem):
         any_workflow_has_started = any(item.has_started for item in self._workitems if item.node_type == NodeType.Workflow)
         self.has_started = any_workitem_is_complete or any_workflow_has_started
 
-    def add_workitem(self, item_path: str, item_id: Optional[str] = None):
+    def add_workitem(self, item_path: str, item_id: Optional[Union[str, int]] = None):
+        workflow_definition = fastworkflow.WorkflowRegistry.get_definition(self._workflow_folderpath)
         allowable_child_paths_2_sizemetadata = (
             workflow_definition.paths_2_allowable_child_paths_2_sizemetadata[self._path]
         )
@@ -213,7 +214,6 @@ class Workflow(Workitem):
             )
 
         # is this a Workitem or a Workflow?
-        workflow_definition = fastworkflow.WorkflowRegistry.get_definition(self._workflow_folderpath)
         type_metadata = workflow_definition.paths_2_typemetadata[item_path]
         if type_metadata.node_type == NodeType.Workitem:
             item = Workitem(
@@ -239,86 +239,70 @@ class Workflow(Workitem):
     # the path uses the same format as a file system path, e.g. "Anomalous/Leavers"
     # the path could be absolute or relative to the current workflow
     def find_workitem(
-        self, path: str, item_id: str = None, relative_to_root: bool = False
+        self, path: str, item_id: Optional[Union[str, int]] = None, relative_to_root: bool = False
     ) -> Union[Workitem, "Workflow", None]:
+        """Find a workitem by path and optional ID.
+        
+        Args:
+            path: Path to the workitem. Can be:
+                - Absolute path starting with '/' (e.g. '/accessreview/anomalous')
+                - Relative path (e.g. 'anomalous/leavers' or './anomalous/leavers')
+            item_id: Optional ID to match specific workitem
+            relative_to_root: If True, treats path as relative to root workflow
+        """
         if not path:
             raise ValueError("path cannot be empty")
 
+        # Validate and normalize path
+        parts = [p for p in path.split("/") if p]  # Remove empty parts
+        if any("." in part for part in parts):  # Catches both '.' and '..'
+            raise ValueError("Path cannot contain '.' or '..' components")
+
+        # Handle absolute paths or relative_to_root flag
         workitem = self
-
-        # split the path into parts
-        parts = path.split("/")
-
-        # Handle '//' at the beginning of the path
-        if path.startswith("//"):
-            if relative_to_root:
-                # find the root workflow by recursively going up the parent chain
-                while workitem._parent_workflow:
-                    workitem = workitem._parent_workflow
-            return workitem._find_workitem_recursive(parts[2:], item_id)
-
-        # if path starts with a '/', it is an absolute path
-        # if path is absolute or empty, parts[0] is empty
-        if not parts[0] or relative_to_root:
-            # find the root workflow by recursively going up the parent chain
+        if path.startswith("/") or relative_to_root:
             while workitem._parent_workflow:
                 workitem = workitem._parent_workflow
 
-            parts = parts[1:]
-            if (
-                os.path.basename(workitem.path.rstrip('/')) == parts[0]
-            ):  # since we are getting stuff relative to the root workflow
+            # Skip root name if it matches first path part to avoid double-processing
+            if parts and os.path.basename(workitem._path.rstrip('/')) == parts[0]:
                 parts = parts[1:]
-        elif parts[0] == ".":  # relative path
-            parts = parts[1:]
 
-        if not parts or not parts[0]:
-            return workitem
-
-        # raise error if any part contains a '/', '.' or '..', or is empty - as this is not supported
-        if any(
-            part == "" or "/" in part or part == "." or part == ".."
-            for part in parts
-        ):
-            raise ValueError("Invalid path")
-
-        for part in parts:
-            found = False
-            for item in workitem._workitems:
-                if os.path.basename(item._path.rstrip('/')) == part:
-                    if isinstance(item, Workflow):
-                        workitem = item
-                        found = True
-                        break
-                    else:
-                        if item_id and item._id == item_id or not item_id:
-                            return item
-            if found:
-                break
-
-        return workitem if found else None
+        # Handle empty paths or paths pointing to root
+        return workitem._find_workitem_recursive(parts, item_id) if parts else workitem
 
     def _find_workitem_recursive(
-        self, parts: List[str], item_id: str = None
+        self, parts: List[str], item_id: Optional[Union[str, int]] = None
     ) -> Union[Workitem, "Workflow", None]:
-        # Check if the current workflow matches the first part
-        if parts and os.path.basename(self._path.rstrip('/')) == parts[0]:
-            if len(parts) == 1:
+        """Recursively search for a workitem in the workflow tree.
+        
+        Args:
+            parts: Normalized path parts to search
+            item_id: Optional ID to match specific workitem
+        """
+        current_name = os.path.basename(self._path.rstrip('/'))
+
+        # Check if current workflow matches first path part
+        if current_name == parts[0]:
+            if len(parts) == 1:  # This is the target
                 return self if not item_id or self._id == item_id else None
             return self._find_workitem_recursive(parts[1:], item_id)
 
+        # Search through child items
         for item in self._workitems:
-            if os.path.basename(item._path.rstrip('/')) == parts[0]:
+            item_name = os.path.basename(item._path.rstrip('/'))
+
+            if item_name == parts[0]:
                 if len(parts) == 1:
-                    if item_id:
-                        if item._id == item_id:
-                            return item
-                        else:
-                            continue
-                    return item
+                    if not item_id or str(item._id) == str(item_id):
+                        return item
+                    else:
+                        continue
+
                 if isinstance(item, Workflow):
                     if result := item._find_workitem_recursive(parts[1:], item_id):
                         return result
+
             elif isinstance(item, Workflow):
                 if result := item._find_workitem_recursive(parts, item_id):
                     return result

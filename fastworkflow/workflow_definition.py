@@ -130,6 +130,8 @@ class WorkflowDefinition(BaseModel):
             workflow_folderpath, "child_cardinality.json"
         )
         if os.path.exists(child_cardinality_file):
+            paths_2_typemetadata[workitem_path] = TypeMetadata(node_type=NodeType.Workflow)
+
             with open(child_cardinality_file, "r") as f:
                 child_cardinality = json.load(f)
 
@@ -147,9 +149,6 @@ class WorkflowDefinition(BaseModel):
                     paths_2_allowable_child_paths_2_sizemetadata, 
                     workitem_path
                 )
-
-        if child_cardinality:
-            paths_2_typemetadata[workitem_path] = TypeMetadata(node_type=NodeType.Workflow)
 
         for child_type, size_meta in child_cardinality.items():
             child_path = f"{workitem_path}/{child_type}"

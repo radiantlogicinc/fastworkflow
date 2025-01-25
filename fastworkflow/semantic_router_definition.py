@@ -38,7 +38,7 @@ class SemanticRouterDefinition:
             self._workflow_folderpath
         ):
             self.build_route_layers(session, command_routing_definition, workflow.path)
-            for workitem_path in workflow_definition.paths_2_allowable_child_paths_2_sizemetadata:
+            for workitem_path in workflow_definition.paths_2_typemetadata:
                 self.build_route_layers(session, command_routing_definition, workitem_path)
 
     def build_route_layers(self, session, command_routing_definition, workitem_path):
@@ -124,7 +124,7 @@ class RouteLayerRegistry:
         map_workitem_path_2_route_layer[root_workitem] = route_layer
 
         workflow_definition = fastworkflow.WorkflowRegistry.get_definition(workflow_folderpath)
-        for workitem_path in workflow_definition.paths_2_allowable_child_paths_2_sizemetadata:
+        for workitem_path in workflow_definition.paths_2_typemetadata:
             route_layer = semantic_router.get_route_layer(workitem_path)
             map_workitem_path_2_route_layer[workitem_path] = route_layer
 

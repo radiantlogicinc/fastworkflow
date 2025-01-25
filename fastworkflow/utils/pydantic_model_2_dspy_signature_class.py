@@ -85,18 +85,17 @@ class TypedPredictorSignature:
                 )
 
             output_field = OutputField(
-                desc=field.description if field.description else ""
+                desc=field.description or ""
             )
             dspy_fields[field_name] = (field.annotation, output_field)
 
             instructions += f"When extracting '{field_name}':\n"
             instructions += f"If it is not mentioned in the input fields, return: '{field.default}'. "
 
-            examples = field.examples
-            if examples:
+            if examples := field.examples:
                 quoted_examples = [f"'{example}'" for example in examples]
                 instructions += (
-                    f"Example values are: {', '.join(quoted_examples)} etc. "
+                    f"Example values of {field_name} are: {', '.join(quoted_examples)} etc. "
                 )
 
             if field.metadata:
