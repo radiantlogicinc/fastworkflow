@@ -37,15 +37,18 @@ class UtteranceDefinition(BaseModel):
     @classmethod
     def _populate_utterance_definition(
         cls,
+        workflow_folderpath: str,
         command_directory: CommandDirectory,
     ):
         for command_key in command_directory.get_command_keys():
             if command_key.endswith("/*"):
                 continue
-
-            # command key also serves as the path to the command folder
-            # it is relative to the folder in which the app is running
-            subfolder_path = command_key
+            
+            command_metadata = command_directory.get_command_metadata(command_key)
+            command_source = command_metadata.command_source
+            commands_folder = os.path.join(workflow_folderpath, command_source.value)
+            command = command_key.split("/")[-1]
+            subfolder_path = os.path.join(commands_folder, command)
 
             plain_utterances: list[str] = []
             template_utterances: list[str] = []
@@ -99,7 +102,9 @@ class UtteranceRegistry:
             workflow_folderpath)
         if not command_routing_definition:
             return None
-        UtteranceDefinition._populate_utterance_definition(command_routing_definition.command_directory)
+        UtteranceDefinition._populate_utterance_definition(
+            workflow_folderpath,
+            command_routing_definition.command_directory)
 
         command_routing_definition.command_directory.save()
         return command_routing_definition.command_directory

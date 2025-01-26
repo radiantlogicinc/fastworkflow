@@ -1,7 +1,7 @@
 {
     "workflow_folderpath": "./fastworkflow/_workflows/parameter_extraction",
     "map_commandkey_2_metadata": {
-        "./fastworkflow/_workflows/parameter_extraction/_commands/abort": {
+        "_commands/abort": {
             "command_source": "_commands",
             "parameter_extraction_signature_module_path": null,
             "input_for_param_extraction_class": null,
@@ -9,7 +9,7 @@
             "response_generation_module_path": "./fastworkflow/_workflows/parameter_extraction/_commands/abort/response_generation/inference.py",
             "response_generation_class_name": "ResponseGenerator"
         },
-        "./fastworkflow/_workflows/parameter_extraction/_commands/*": {
+        "_commands/*": {
             "command_source": "_commands",
             "parameter_extraction_signature_module_path": null,
             "input_for_param_extraction_class": null,
@@ -19,7 +19,7 @@
         }
     },
     "map_command_key_2_utterance_metadata": {
-        "./fastworkflow/_workflows/parameter_extraction/_commands/abort": {
+        "_commands/abort": {
             "plain_utterances": [
                 "cancel",
                 "stop",

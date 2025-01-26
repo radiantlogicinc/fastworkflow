@@ -36,7 +36,7 @@ class CommandOutput(BaseModel):
         return any(response.artifacts.get("command_name", None) == "abort" for response in self.command_responses)
 
 class CommandSource(str, Enum):
-    BASE_COMMANDS = ("_base_commands",)
+    BASE_COMMANDS = "_base_commands"
     COMMANDS = "_commands"
 
 

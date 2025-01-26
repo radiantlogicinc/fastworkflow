@@ -342,8 +342,10 @@ class CommandRoutingDefinition(BaseModel):
                     response_generation_class_name=response_generation_class_name,
                 )
 
-                command_directory.register_command_metadata(subfolder_path, command_metadata)
-                map_command_2_command_key[command] = subfolder_path 
+                command_key = f"{command_source.value}/{command}"
+                command_directory.register_command_metadata(
+                    command_key, command_metadata)
+                map_command_2_command_key[command] = command_key 
 
         if workitem_path in map_workitem_paths_2_commandkeymap:
             map_workitem_paths_2_commandkeymap[workitem_path].map_command_2_command_key.update(map_command_2_command_key)

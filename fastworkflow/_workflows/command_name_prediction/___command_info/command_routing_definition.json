@@ -3,8 +3,8 @@
     "map_workitem_paths_2_commandkey_map": {
         "/command_name_prediction": {
             "map_command_2_command_key": {
-                "abort": "./fastworkflow/_workflows/command_name_prediction/_commands/abort",
-                "*": "./fastworkflow/_workflows/command_name_prediction/_commands/*"
+                "abort": "_commands/abort",
+                "*": "_commands/*"
             }
         }
     }
