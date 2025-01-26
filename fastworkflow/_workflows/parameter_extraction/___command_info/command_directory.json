@@ -1,0 +1,37 @@
+{
+    "workflow_folderpath": "./fastworkflow/_workflows/parameter_extraction",
+    "map_commandkey_2_metadata": {
+        "./fastworkflow/_workflows/parameter_extraction/_commands/abort": {
+            "command_source": "_commands",
+            "parameter_extraction_signature_module_path": null,
+            "input_for_param_extraction_class": null,
+            "command_parameters_class": null,
+            "response_generation_module_path": "./fastworkflow/_workflows/parameter_extraction/_commands/abort/response_generation/inference.py",
+            "response_generation_class_name": "ResponseGenerator"
+        },
+        "./fastworkflow/_workflows/parameter_extraction/_commands/*": {
+            "command_source": "_commands",
+            "parameter_extraction_signature_module_path": null,
+            "input_for_param_extraction_class": null,
+            "command_parameters_class": null,
+            "response_generation_module_path": "./fastworkflow/_workflows/parameter_extraction/_commands/*/response_generation/inference.py",
+            "response_generation_class_name": "ResponseGenerator"
+        }
+    },
+    "map_command_key_2_utterance_metadata": {
+        "./fastworkflow/_workflows/parameter_extraction/_commands/abort": {
+            "plain_utterances": [
+                "cancel",
+                "stop",
+                "quit",
+                "terminate",
+                "end",
+                "never mind",
+                "exit"
+            ],
+            "template_utterances": [],
+            "generated_utterances_module_filepath": "./fastworkflow/_workflows/parameter_extraction/_commands/abort/utterances/generate_utterances.py",
+            "generated_utterances_func_name": "generate_utterances"
+        }
+    }
+}

@@ -179,33 +179,32 @@ class WorkflowSession:
         - All outputs (success or failure) are sent to queue during processing
         """
         last_output = None
-        
+
         try:
             # Handle startup command/action
             if self._startup_command:
                 last_output = self._process_message(self._startup_command)
             elif self._startup_action:
                 last_output = self._process_action(self._startup_action)
-            
-            while not self.workflow_is_complete or self._keep_alive:
-                if self._status == SessionStatus.STOPPING:
-                    break
-                    
+
+            while (
+                not self.workflow_is_complete or self._keep_alive
+            ) and self._status != SessionStatus.STOPPING:
                 try:
                     message = self.user_message_queue.get()
                     last_output = self._process_message(message)
                 except Empty:
                     continue
-            
+
             # Return final output for child workflows, regardless of success/failure
             if not self._keep_alive:
                 return last_output
-                
+
         finally:
             self._status = SessionStatus.STOPPED
             WorkflowSession.pop_active_session()
             logger.debug(f"Workflow {self._session.id} completed")
-            
+
         return None
     
     def _process_message(self, message: str) -> fastworkflow.CommandOutput:

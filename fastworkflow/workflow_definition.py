@@ -181,10 +181,10 @@ class WorkflowRegistry:
             cls._workflow_definitions[workflow_folderpath] = workflow_definition
             return workflow_definition
         
-        return WorkflowRegistry._create_definition(workflow_folderpath)
+        return WorkflowRegistry.create_definition(workflow_folderpath)
 
     @classmethod
-    def _create_definition(cls, workflow_folderpath: str) -> WorkflowDefinition:
+    def create_definition(cls, workflow_folderpath: str) -> WorkflowDefinition:
         paths_2_typemetadata = {}
         paths_2_allowable_child_paths_2_sizemetadata = {}
 

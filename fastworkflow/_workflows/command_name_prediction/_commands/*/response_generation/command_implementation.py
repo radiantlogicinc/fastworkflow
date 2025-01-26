@@ -20,12 +20,10 @@ def process_command(
 ) -> OutputOfProcessCommand:
     sws = session.workflow_snapshot.context["subject_workflow_snapshot"]
     sws_workflow_folderpath = sws.workflow.workflow_folderpath
-    sws_active_workitem_path = sws.active_workitem.path
-    sws_route_layer = fastworkflow.RouteLayerRegistry.get_route_layer(sws_workflow_folderpath, sws_active_workitem_path)   
+    sws_route_layer = fastworkflow.RouteLayerRegistry.get_route_layer(sws_workflow_folderpath)   
 
     current_workflow_folderpath = session.workflow_snapshot.workflow.workflow_folderpath
-    current_active_workitem_path = session.workflow_snapshot.active_workitem.path
-    current_route_layer = fastworkflow.RouteLayerRegistry.get_route_layer(current_workflow_folderpath, current_active_workitem_path)
+    current_route_layer = fastworkflow.RouteLayerRegistry.get_route_layer(current_workflow_folderpath)
 
     route_list = [sws_route_layer.routes, current_route_layer.routes]
     rl = fastworkflow.RouteLayerRegistry.build_route_layer_from_routelayers(route_list)

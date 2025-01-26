@@ -28,9 +28,9 @@ if __name__ == "__main__":
     encoder = HuggingFaceEncoder()
 
     def train_workflow(workflow_path: str, encoder: HuggingFaceEncoder):
-        fastworkflow.WorkflowRegistry._create_definition(workflow_path)
-        fastworkflow.CommandRoutingRegistry._create_definition(workflow_path)
-        fastworkflow.UtteranceRegistry._create_definition(workflow_path)
+        fastworkflow.WorkflowRegistry.create_definition(workflow_path)
+        fastworkflow.CommandRoutingRegistry.create_definition(workflow_path)
+        fastworkflow.UtteranceRegistry.create_definition(workflow_path)
 
         #first, recursively train all child workflows
         workflows_dir = os.path.join(workflow_path, "_workflows")
@@ -43,21 +43,17 @@ if __name__ == "__main__":
                     print(f"{Fore.YELLOW}Training child workflow: {child_workflow_path}{Style.RESET_ALL}")
                     train_workflow(child_workflow_path, encoder)
 
-        # if workflow_path.startswith("./fastworkflow") and "_workflows" not in workflow_path:
-        #     return
+        if workflow_path.startswith("./fastworkflow") and "_workflows" not in workflow_path:
+            return
 
         # create a session and train the main workflow
-        semantic_router_definition = SemanticRouterDefinition(encoder, workflow_path)
-
         session = fastworkflow.Session.create(
             workflow_path, 
             session_id_str=f"train_{workflow_path}", 
             for_training_semantic_router=True
         )
+        semantic_router_definition = SemanticRouterDefinition(encoder)
         semantic_router_definition.train(session)
-
-        fastworkflow.RouteLayerRegistry._build_route_layer_map(workflow_path)
-
         session.close()
 
     train_workflow(args.workflow_folderpath, encoder)

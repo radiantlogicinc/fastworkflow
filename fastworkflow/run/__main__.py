@@ -36,6 +36,7 @@ def print_command_output(command_output):
             )
 
 
+import contextlib
 parser = argparse.ArgumentParser(description="AI Assistant for workflow processing")
 parser.add_argument("workflow_path", help="Path to the workflow folder")
 parser.add_argument("env_file_path", help="Path to the environment file")
@@ -95,13 +96,11 @@ workflow_session = fastworkflow.WorkflowSession(
 )
 
 workflow_session.start()
-try:
-    command_output: fastworkflow.CommandOutput = workflow_session.command_output_queue.get(timeout=0.1)
-    if command_output:
+with contextlib.suppress(queue.Empty):
+    if command_output := workflow_session.command_output_queue.get(
+        timeout=0.1
+    ):
         print_command_output(command_output)
-except queue.Empty:
-    pass
-
 while not workflow_session.workflow_is_complete or args.keep_alive:
     user_command = input(
         f"{Fore.YELLOW}{Style.BRIGHT}User>{Style.RESET_ALL}{Fore.YELLOW} "
@@ -110,6 +109,6 @@ while not workflow_session.workflow_is_complete or args.keep_alive:
         break
 
     workflow_session.user_message_queue.put(user_command)
-    
+
     command_output = workflow_session.command_output_queue.get()
     print_command_output(command_output)
