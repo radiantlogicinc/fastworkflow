@@ -31,7 +31,7 @@ def process_command(
     input_for_param_extraction_class = subject_command_routing_definition.get_command_class(
         active_workitem_type, subject_command_name, ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS)
     input_for_param_extraction = input_for_param_extraction_class.create(
-        workflow_snapshot=sws, command=command
+        sws, command
     )
 
     command_parameters_class = subject_command_routing_definition.get_command_class(
