@@ -6,6 +6,7 @@ from typing import Optional
 from pydantic import BaseModel, field_validator, model_validator, ConfigDict
 
 from fastworkflow import CommandSource
+from fastworkflow.utils import python_utils
 
 
 class CommandMetadata(BaseModel):
@@ -39,35 +40,11 @@ class UtteranceMetadata(BaseModel):
     generated_utterances_module_filepath: str
     generated_utterances_func_name: str
 
-    def get_generated_utterances_func(self, workflow_folderpath: str) -> list[str]:
-        # Import the module with parent package information
-        module_name = os.path.splitext(
-            os.path.basename(self.generated_utterances_module_filepath)
-        )[0]
-        relative_module_filepath = os.path.relpath(
-            self.generated_utterances_module_filepath, workflow_folderpath
+    def get_generated_utterances_func(self, workflow_folderpath: str) -> list[str]:      
+        module = python_utils.get_module(
+            self.generated_utterances_module_filepath, 
+            workflow_folderpath
         )
-        package_name = (
-            os.path.dirname(relative_module_filepath)
-            .replace("/", ".")
-            .replace("\\", ".")
-        )
-        full_module_name = f".{package_name}.{module_name}"
-
-        workflow_folder_syspath = (
-            ... if workflow_folderpath.endswith("/") else f"{workflow_folderpath}/"
-        )
-        workflow_package_name = (
-            os.path.dirname(workflow_folder_syspath)
-            .split("site-packages/", 1)[-1]
-            .replace("/", ".")
-            .replace("\\", ".")
-        ).replace("..", "")
-
-        spec = importlib.util.find_spec(full_module_name, package=workflow_package_name)
-        if spec is None:
-            raise ImportError(f"Module {full_module_name} not found")
-        module = importlib.import_module(full_module_name, package=workflow_package_name)
 
         # Get the function from the module and execute it
         return getattr(module, self.generated_utterances_func_name)

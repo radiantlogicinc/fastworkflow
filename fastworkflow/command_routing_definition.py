@@ -11,6 +11,7 @@ from pydantic import BaseModel, field_validator, model_validator, PrivateAttr
 from fastworkflow import CommandSource
 from fastworkflow.command_directory import CommandDirectory, CommandMetadata, CommandKeyMap, UtteranceMetadata
 
+from fastworkflow.utils import python_utils
 
 class ModuleType(Enum):
     INPUT_FOR_PARAM_EXTRACTION_CLASS = 0
@@ -176,39 +177,8 @@ class CommandRoutingDefinition(BaseModel):
         else:
             raise ValueError(f"Invalid module type '{module_type}'")
 
-        if not module_file_path:
-            return None
-
-        module_name = os.path.splitext(os.path.basename(module_file_path))[0]
-
-        workflow_folder_syspath = (
-            ... if self.workflow_folderpath.endswith("/") else f"{self.workflow_folderpath}/"
-        )
-        relative_module_filepath = os.path.relpath(
-            module_file_path, os.path.dirname(workflow_folder_syspath)
-        )
-
-        package_name = (
-            os.path.dirname(relative_module_filepath)
-            .replace("/", ".")
-            .replace("\\", ".")
-        )
-        full_module_name = f".{package_name}.{module_name}"
-
-        parent_folder = os.path.dirname(workflow_folder_syspath)
-        fastworkflow_relpath = parent_folder[parent_folder.rfind("fastworkflow"):] if "fastworkflow" in parent_folder else parent_folder
-        workflow_package_name = (
-            fastworkflow_relpath.replace("/", ".")
-            .replace("\\", ".")
-        ).replace("..", "")
-
-        spec = importlib.util.find_spec(full_module_name, package=workflow_package_name)
-        if spec is None:
-            raise ImportError(f"Module {full_module_name} not found")
-        module = importlib.import_module(full_module_name, package=workflow_package_name)
-
-        # Get the class from the module
-        return getattr(module, module_class_name)
+        module = python_utils.get_module(module_file_path, self.workflow_folderpath)
+        return getattr(module, module_class_name) if module else None
 
     @classmethod
     def _populate_command_routing_definition(
