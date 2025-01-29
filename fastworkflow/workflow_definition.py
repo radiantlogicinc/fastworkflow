@@ -130,10 +130,11 @@ class WorkflowDefinition(BaseModel):
             workflow_folderpath, "child_cardinality.json"
         )
         if os.path.exists(child_cardinality_file):
-            paths_2_typemetadata[workitem_path] = TypeMetadata(node_type=NodeType.Workflow)
-
             with open(child_cardinality_file, "r") as f:
                 child_cardinality = json.load(f)
+
+            if child_cardinality:
+                paths_2_typemetadata[workitem_path] = TypeMetadata(node_type=NodeType.Workflow)
 
         if not child_cardinality:
             return

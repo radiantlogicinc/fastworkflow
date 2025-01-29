@@ -182,7 +182,7 @@ class Workflow(Workitem):
                 self.is_complete = True
             elif self._parent_workflow:
                 self._parent_workflow.has_started = True
-        else:
+        elif self._parent_workflow:
             self._parent_workflow._recalculate_started_state()
 
     def _recalculate_started_state(self):
