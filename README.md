@@ -18,6 +18,16 @@ A framework for rapidly building large-scale, deterministic, interactive workflo
   - Special constrained workflows are used to handle routing and parameter extraction errors
 - AI-powered recommendations after every command interaction
   - Recommendations are generated AFTER a command has been processed. The user has complete control over the workflow and discretion over whether to follow a recommendation or take a different action.
+
+# Getting started
+- Clone the repo
+- Create an env folder with a .env file inside and add the following entries
+  - DSPY_LM_MODEL: the model to use for the DSPy API
+  - SPEEDDICT_FOLDERNAME: the folder where the workflow definitions are stored
+ - export the OPENAI_API_KEY as an environment variable
+   - Note: If you use a different model, specify the model path in the DSPY_LM_MODEL environment variable (The app uses Litellm as the LLM wrapper)
+- Train then run the sample workflow
+  - Hint: review the .vscode/launch.json file for training/running the sample workflow
  
 # Future Roadmap
 - Training pipeline for prompt-tuning/fine-tuning the models - routing, parameter extraction, response generation, and recommendations
