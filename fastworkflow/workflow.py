@@ -213,6 +213,10 @@ class Workflow(Workitem):
                 f"Maximum number of child workitems of type '{item_path}' reached"
             )
 
+        # check that the id is not already used
+        if item_id is not None and any(i.id == item_id for i in self._workitems):
+            raise ValueError(f"Workitem with ID '{item_id}' already exists in this workflow.")
+
         # is this a Workitem or a Workflow?
         type_metadata = workflow_definition.paths_2_typemetadata[item_path]
         if type_metadata.node_type == NodeType.Workitem:
