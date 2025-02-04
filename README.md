@@ -21,6 +21,7 @@ A framework for rapidly building large-scale, deterministic, interactive workflo
 
 # Getting started
 - Clone the repo
+  - Use WSL if you are on Windows
 - Create an env folder with a .env file inside and add the following entries
   - DSPY_LM_MODEL: the model to use for the DSPy API
   - SPEEDDICT_FOLDERNAME: the folder where the workflow definitions are stored
