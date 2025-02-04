@@ -12,8 +12,11 @@ class ResponseGenerator:
             session_id=session.id,
             command_responses=[
                 CommandResponse(
-                    response="Command aborted",
-                    artifacts={"abort": True},
+                    response="command aborted",
+                    artifacts={
+                        "command": command,
+                        "command_name": "abort",
+                    },
                 )
             ]
         )
