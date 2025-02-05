@@ -89,13 +89,14 @@ class WorkflowSession:
             raise ValueError("Cannot provide both startup_command and startup_action")
 
         if keep_alive:
-            if not (user_message_queue is None and command_output_queue is None):
+            if user_message_queue is not None or command_output_queue is not None:
                 raise ValueError("user_message_queue and command_output_queue are created automatically when keep_alive is True")
             user_message_queue = Queue()
             command_output_queue = Queue()
-        else:
-            if user_message_queue is None or command_output_queue is None:
-                raise ValueError("user_message_queue and command_output_queue must be provided when keep_alive is False")
+        elif user_message_queue is None and command_output_queue is not None:
+            raise ValueError("when keep_alive is False - Provide both user_message_queue and command_output_queue OR provide neither")
+        elif user_message_queue is not None and command_output_queue is None:
+            raise ValueError("when keep_alive is False - Provide both user_message_queue and command_output_queue OR provide neither")
 
         self._session = fastworkflow.Session.create(
             workflow_folderpath,
@@ -117,7 +118,7 @@ class WorkflowSession:
 
         self._command_router = command_router
         self._command_executor = command_executor
-        
+
         # Register session
         WorkflowSession._map_session_id_2_workflow_session[self._session.id] = self
     
@@ -210,13 +211,15 @@ class WorkflowSession:
     def _process_message(self, message: str) -> fastworkflow.CommandOutput:
         """Process a single message"""
         command_output = self._command_router.route_command(self, message)
-        if not command_output.success or self._keep_alive:
+        if (not command_output.success or self._keep_alive) and \
+            self._session.command_output_queue:
             self._session.command_output_queue.put(command_output)
         return command_output
     
     def _process_action(self, action: fastworkflow.Action) -> fastworkflow.CommandOutput:
         """Process a startup action"""
         command_output = self._command_executor.perform_action(self._session, action)
-        if not command_output.success or self._keep_alive:
+        if (not command_output.success or self._keep_alive) and \
+            self._session.command_output_queue:
             self._session.command_output_queue.put(command_output)
         return command_output
