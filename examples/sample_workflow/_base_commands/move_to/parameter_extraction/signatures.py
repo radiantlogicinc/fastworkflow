@@ -34,7 +34,7 @@ class CommandParameters(BaseModel):
             Union[str, int],
             Field(description="The ID of the workitem", examples=["John Doe", "24"]),
         ]
-    ]
+    ] = None
 
 
 class InputForParamExtraction(BaseModel):

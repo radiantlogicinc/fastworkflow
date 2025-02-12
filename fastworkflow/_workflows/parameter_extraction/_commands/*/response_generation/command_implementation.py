@@ -28,20 +28,30 @@ def process_command(
 
     active_workitem_type = sws.active_workitem.path
     subject_command_name = session.workflow_snapshot.context["subject_command_name"]
+    command_parameters_class = subject_command_routing_definition.get_command_class(
+        active_workitem_type, subject_command_name, ModuleType.COMMAND_PARAMETERS_CLASS)
+
     input_for_param_extraction_class = subject_command_routing_definition.get_command_class(
         active_workitem_type, subject_command_name, ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS)
     input_for_param_extraction = input_for_param_extraction_class.create(
         sws, command
     )
 
-    command_parameters_class = subject_command_routing_definition.get_command_class(
-        active_workitem_type, subject_command_name, ModuleType.COMMAND_PARAMETERS_CLASS)
-    input_obj = extract_command_parameters_from_input(
-        input_for_param_extraction, command_parameters_class
-    )
+    # if we are already in the parameter extraction workflow, no need to predict
+    # require parameters to be passed in comma delimited format
+    if session.workflow_snapshot.context.get("in_param_extraction_workflow", None):
+        param_values = [item.strip() for item in command.split(',')]
+        fields = list(command_parameters_class.__fields__.keys())
+        data = dict(zip(fields, param_values))
+        input_obj = command_parameters_class(**data)
+    else:
+        input_obj = extract_command_parameters_from_input(
+            input_for_param_extraction, command_parameters_class
+        )
 
     is_valid, error_msg = input_for_param_extraction.validate_parameters(sws, input_obj)
     if not is_valid:
+        session.workflow_snapshot.context["in_param_extraction_workflow"] = True
         error_msg += "Enter 'abort' if you want to abort the command."
         return OutputOfProcessCommand(parameter_is_valid=False, error_msg=error_msg)
 
