@@ -37,7 +37,7 @@ def process_command(
         sws, command
     )
 
-    # if we are already in the parameter extraction workflow, no need to predict
+    # if we are already in the parameter extraction workflow, no need to predict using DSPy
     # require parameters to be passed in comma delimited format
     if session.workflow_snapshot.context.get("in_param_extraction_workflow", None):
         param_values = [item.strip() for item in command.split(',')]
