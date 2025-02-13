@@ -79,4 +79,10 @@ def extract_command_parameters_from_input(
         logger.error(f"DSPy error extracting command parameters: {e}")
         command_parameters_obj = command_parameters_class()
 
+    # Clean up the values of all fields, replacing "\_" with "_"
+    for field_name, value in command_parameters_obj.model_dump().items():
+        if isinstance(value, str):
+            cleaned_value = value.replace('\\_', '_')
+            setattr(command_parameters_obj, field_name, cleaned_value)
+
     return command_parameters_obj
