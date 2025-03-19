@@ -44,7 +44,11 @@ class CommandRoutingDefinition(BaseModel):
     map_workitem_paths_2_commandkey_map: dict[
         str, CommandKeyMap
     ] = None
-
+    # if '/fastworkflow' in workflow_folderpath:
+    #     fastworkflow_folder="./fastworkflow"
+    #     workflow_folderpath = os.path.join(
+    #         fastworkflow_folder, "_workflows", "command_name_prediction"
+    #     )
     @field_validator("map_workitem_paths_2_commandkey_map", mode="before")
     def validate_command_routing_map(
         cls, map_workitem_paths_2_commandkey_map
@@ -77,11 +81,26 @@ class CommandRoutingDefinition(BaseModel):
 
     def get_command_names(self, workitem_path: str) -> list[str]:
         if workitem_path in self.map_workitem_paths_2_commandkey_map:
+            # m=list()
+            # i=0
+            # for key in self.map_workitem_paths_2_commandkey_map[workitem_path]:
+            #     i+=1
+            #     if i==0:
+            #         continue
+            #     for k in key[1]:
+            #         y=k
+            #         k=key[1][k]
+            #         x=self.command_directory.get_command_metadata(k)
+            #         x=x.workflow_folderpath
+            #         if x==None:
+                        # m.append(y)
+
             return list(
                 self.map_workitem_paths_2_commandkey_map[
                     workitem_path
                 ].map_command_2_command_key.keys()
             )
+            # return m
         else:
             raise ValueError(
                 f"Command routing definition not found for workitem type '{workitem_path}'"
@@ -196,6 +215,27 @@ class CommandRoutingDefinition(BaseModel):
         workitem_path = f"{parent_workitem_path}/{os.path.basename(workflow_folderpath.rstrip('/'))}"
         # if workitem_path.startswith("_"):
         #     raise ValueError(f"{workitem_path} starts with an '_'. Names starting with an _ are reserved")
+        
+        #read the built-in commands from the _workflows folder in fastworkflow. 
+        fastworkflow_folder = os.path.dirname(os.path.abspath(__file__))
+        ############################################################
+        # There needs to be a better way of getting the fastworkflow folder from __file__
+        if '/fastworkflow' in fastworkflow_folder:
+                    fastworkflow_folder="./fastworkflow"
+        #############################################################
+        commandname_prediction_workflow_folderpath = os.path.join(
+            fastworkflow_folder, "_workflows", "command_name_prediction"
+        )
+        cls._populate_command_key_map(
+            parent_workitem_path,
+            commandname_prediction_workflow_folderpath,
+            command_directory,
+            map_workitem_paths_2_commandkeymap,
+            workitem_path,
+            CommandSource.BASE_COMMANDS,
+        )
+
+
 
         # read the _base_commands folder if it exists
         cls._populate_command_key_map(
@@ -301,9 +341,15 @@ class CommandRoutingDefinition(BaseModel):
                     )
                 response_generation_module_path = inference_filepath
                 response_generation_class_name = "ResponseGenerator"
+                
+                # if '/fastworkflow' in workflow_folderpath:
+                #     workflow_folderpath="./fastworkflow/_workflows/command_name_prediction"
+                # else:
+                #     workflow_folderpath=None
 
                 command_metadata = CommandMetadata(
                     command_source=command_source,
+                    workflow_folderpath= workflow_folderpath if '/fastworkflow' in workflow_folderpath else None,
                     parameter_extraction_signature_module_path=parameter_extraction_signature_module_path,
                     input_for_param_extraction_class=input_for_param_extraction_class,
                     command_parameters_class=command_parameters_class,

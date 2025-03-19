@@ -6,8 +6,9 @@ from colorama import Fore, Style
 from semantic_router.encoders import HuggingFaceEncoder
 
 import fastworkflow
-from fastworkflow.semantic_router_definition import SemanticRouterDefinition
-
+# from fastworkflow.semantic_router_definition import SemanticRouterDefinition
+from fastworkflow.TinyBerttesrt import train
+from fastworkflow.fastworkflow_train import train_fastworkflows
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -52,8 +53,14 @@ if __name__ == "__main__":
             session_id_str=f"train_{workflow_path}", 
             for_training_semantic_router=True
         )
-        semantic_router_definition = SemanticRouterDefinition(encoder)
-        semantic_router_definition.train(session)
+        #semantic_router_definition = SemanticRouterDefinition(encoder)
+        #semantic_router_definition.train(session)
+
+        if workflow_path=="./examples/sample_workflow":
+            train(session)
+        else:
+            train_fastworkflows(session)
+
         session.close()
 
     train_workflow(args.workflow_folderpath, encoder)

@@ -20,9 +20,9 @@ def extract_command_parameters(
         command_name="*",
         command=command,
     )
-
+    
     # if we are already in the parameter extraction workflow, we can just perform the action
-    if workflow_session.session.workflow_snapshot.workflow.path == "parameter_extraction":
+    if workflow_session.session.workflow_snapshot.workflow.path == "/parameter_extraction":
         command_executor = CommandExecutor()
         command_output = command_executor.perform_action(workflow_session.session, startup_action)
         if len(command_output.command_responses) > 1:
@@ -34,10 +34,19 @@ def extract_command_parameters(
         fastworkflow_folder, "_workflows", "parameter_extraction"
     )
 
+    sws_workflow_snapshot=workflow_session.session.workflow_snapshot
+    if sws := workflow_session.session.workflow_snapshot.context.get("subject_workflow_snapshot"):
+        sws_workflow_snapshot = sws
+
     context = {
         "subject_command_name": command_name,
-        "subject_workflow_snapshot": workflow_session.session.workflow_snapshot
+        "subject_workflow_snapshot": sws_workflow_snapshot
     }
+
+    # context = {
+    #     "subject_command_name": command_name,
+    #     "subject_workflow_snapshot": workflow_session.session.workflow_snapshot
+    # }
 
     pe_workflow_session = fastworkflow.WorkflowSession(
         workflow_session.command_router,

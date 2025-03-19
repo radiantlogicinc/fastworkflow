@@ -27,6 +27,8 @@ class UtteranceDefinition(BaseModel):
         command_names = self.get_command_names(workitem_path)
         sample_utterances = []
         for command_name in command_names:
+            if command_name=="*":
+                continue
             command_utterances = self.get_command_utterances(workitem_path, command_name)
             if command_utterances.template_utterances:
                 sample_utterances.append(command_utterances.template_utterances[0])
@@ -46,7 +48,11 @@ class UtteranceDefinition(BaseModel):
             
             command_metadata = command_directory.get_command_metadata(command_key)
             command_source = command_metadata.command_source
-            commands_folder = os.path.join(workflow_folderpath, command_source.value)
+            commands_folder = os.path.join(
+                workflow_folderpath 
+                if command_metadata.workflow_folderpath is None 
+                else command_metadata.workflow_folderpath, 
+                command_source.value)
             command = command_key.split("/")[-1]
             subfolder_path = os.path.join(commands_folder, command)
 
@@ -82,6 +88,7 @@ class UtteranceDefinition(BaseModel):
                     generated_utterances_func_name = "generate_utterances"
 
             utterance_metadata = UtteranceMetadata(
+                workflow_folderpath=commands_folder,
                 plain_utterances=plain_utterances,
                 template_utterances=template_utterances,
                 generated_utterances_module_filepath=generated_utterances_module_filepath,
