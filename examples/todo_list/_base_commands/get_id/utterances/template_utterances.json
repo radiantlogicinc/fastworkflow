@@ -1,0 +1,4 @@
+[
+    "get the path and id of {next_or_current} workitem {with_or_without_skipping_completed}",
+    "{with_or_without_skipping_completed}, get the path and id of the {next_or_current} workitem"
+]

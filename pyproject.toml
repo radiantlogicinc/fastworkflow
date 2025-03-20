@@ -24,6 +24,9 @@ dspy-ai = "^2.5.20"
 speedict = "^0.3.12"
 python-dotenv = "^1.0.1"
 murmurhash = "^1.0.10"
+scikit-learn = "^1.6.1"
+transformers = "^4.48.2"
+together = "^1.4.0"
 
 [tool.poetry.group.dev.dependencies]
 isort = "^5.13.2"
