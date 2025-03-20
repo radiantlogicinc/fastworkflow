@@ -1,37 +1,33 @@
 {
-    "workflow_folderpath": "./fastworkflow/_workflows/command_name_prediction",
+    "workflow_folderpath": "/Users/adityabhatt/Desktop/Fastworkflows/fastworkflow/fastworkflow/_workflows/command_name_prediction",
     "map_commandkey_2_metadata": {
-        "_commands/abort": {
-            "command_source": "_commands",
+        "_base_commands/abort": {
+            "command_source": "_base_commands",
+            "workflow_folderpath": "/Users/adityabhatt/Desktop/Fastworkflows/fastworkflow/fastworkflow/_workflows/command_name_prediction",
             "parameter_extraction_signature_module_path": null,
             "input_for_param_extraction_class": null,
             "command_parameters_class": null,
-            "response_generation_module_path": "./fastworkflow/_workflows/command_name_prediction/_commands/abort/response_generation/inference.py",
+            "response_generation_module_path": "/Users/adityabhatt/Desktop/Fastworkflows/fastworkflow/fastworkflow/_workflows/command_name_prediction/_base_commands/abort/response_generation/inference.py",
             "response_generation_class_name": "ResponseGenerator"
         },
-        "_commands/*": {
-            "command_source": "_commands",
+        "_base_commands/*": {
+            "command_source": "_base_commands",
+            "workflow_folderpath": "/Users/adityabhatt/Desktop/Fastworkflows/fastworkflow/fastworkflow/_workflows/command_name_prediction",
             "parameter_extraction_signature_module_path": null,
             "input_for_param_extraction_class": null,
             "command_parameters_class": null,
-            "response_generation_module_path": "./fastworkflow/_workflows/command_name_prediction/_commands/*/response_generation/inference.py",
+            "response_generation_module_path": "/Users/adityabhatt/Desktop/Fastworkflows/fastworkflow/fastworkflow/_workflows/command_name_prediction/_base_commands/*/response_generation/inference.py",
+            "response_generation_class_name": "ResponseGenerator"
+        },
+        "_base_commands/None_of_these": {
+            "command_source": "_base_commands",
+            "workflow_folderpath": "/Users/adityabhatt/Desktop/Fastworkflows/fastworkflow/fastworkflow/_workflows/command_name_prediction",
+            "parameter_extraction_signature_module_path": null,
+            "input_for_param_extraction_class": null,
+            "command_parameters_class": null,
+            "response_generation_module_path": "/Users/adityabhatt/Desktop/Fastworkflows/fastworkflow/fastworkflow/_workflows/command_name_prediction/_base_commands/None_of_these/response_generation/inference.py",
             "response_generation_class_name": "ResponseGenerator"
         }
     },
-    "map_command_key_2_utterance_metadata": {
-        "_commands/abort": {
-            "plain_utterances": [
-                "cancel",
-                "stop",
-                "quit",
-                "terminate",
-                "end",
-                "never mind",
-                "exit"
-            ],
-            "template_utterances": [],
-            "generated_utterances_module_filepath": "./fastworkflow/_workflows/command_name_prediction/_commands/abort/utterances/generate_utterances.py",
-            "generated_utterances_func_name": "generate_utterances"
-        }
-    }
+    "map_command_key_2_utterance_metadata": {}
 }

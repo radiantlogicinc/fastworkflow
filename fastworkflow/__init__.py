@@ -34,6 +34,10 @@ class CommandOutput(BaseModel):
     @property
     def command_aborted(self) -> bool:
         return any(response.artifacts.get("command_name", None) == "abort" for response in self.command_responses)
+    
+    @property
+    def not_what_i_meant(self) -> bool:
+        return any(response.artifacts.get("command_name", None) == "None_of_these" for response in self.command_responses)
 
 class CommandSource(str, Enum):
     BASE_COMMANDS = "_base_commands"
@@ -45,9 +49,10 @@ WorkflowRegistry = None
 CommandRoutingRegistry = None
 UtteranceRegistry = None
 RouteLayerRegistry = None
+Modelpipeline=None
 
 def init(env_vars: dict):
-    global _env_vars, Session, WorkflowRegistry, CommandRoutingRegistry, UtteranceRegistry, RouteLayerRegistry, WorkflowSession
+    global _env_vars, Session, WorkflowRegistry, CommandRoutingRegistry, UtteranceRegistry, RouteLayerRegistry, WorkflowSession,modelpipelineregistry
     _env_vars = env_vars
 
     # init before importing other modules so env vars are available
@@ -55,12 +60,14 @@ def init(env_vars: dict):
     from .command_routing_definition import CommandRoutingRegistry as CommandRoutingRegistryClass
     from .utterance_definition import UtteranceRegistry as UtteranceRegistryClass
     from .semantic_router_definition import RouteLayerRegistry as RouteLayerRegistryClass
+    from .model_pipeline_training import ModelPipeline as modelpipelineclass
 
     # Assign to global variables
     WorkflowRegistry = WorkflowRegistryClass
     CommandRoutingRegistry = CommandRoutingRegistryClass
     UtteranceRegistry = UtteranceRegistryClass
     RouteLayerRegistry = RouteLayerRegistryClass
+    modelpipelineregistry=modelpipelineclass
 
 def get_env_var(var_name: str, var_type: type = str, default: Optional[Union[str, int, float, bool]] = None) -> Union[str, int, float, bool]:
     """get the environment variable"""

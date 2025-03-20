@@ -13,6 +13,7 @@ class CommandMetadata(BaseModel):
     command_source: CommandSource
     """Command metadata"""
     # parameter extraction
+    workflow_folderpath: Optional[str] = None
     parameter_extraction_signature_module_path: Optional[str] = None
     input_for_param_extraction_class: Optional[str] = None
     command_parameters_class: Optional[str] = None
@@ -34,16 +35,16 @@ class CommandMetadata(BaseModel):
 
 
 class UtteranceMetadata(BaseModel):
+    workflow_folderpath: Optional[str] = None
     plain_utterances: list[str]
     template_utterances: list[str]
-
     generated_utterances_module_filepath: str
     generated_utterances_func_name: str
 
     def get_generated_utterances_func(self, workflow_folderpath: str) -> list[str]:      
         module = python_utils.get_module(
             self.generated_utterances_module_filepath, 
-            workflow_folderpath
+            self.workflow_folderpath if self.workflow_folderpath else workflow_folderpath
         )
 
         # Get the function from the module and execute it

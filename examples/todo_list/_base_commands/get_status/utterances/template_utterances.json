@@ -1,0 +1,6 @@
+[
+    "What is the status of the work item at {workitem_path}",
+    "Can you tell me the status of the work item at {workitem_path} with ID {workitem_id}",
+    "What is the current status of the work item at {workitem_path}",
+    "Can you tell me the current status of the work item at {workitem_path} with ID {workitem_id}"
+]

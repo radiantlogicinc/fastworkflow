@@ -16,6 +16,14 @@
             "command_parameters_class": null,
             "response_generation_module_path": "./fastworkflow/_workflows/parameter_extraction/_commands/*/response_generation/inference.py",
             "response_generation_class_name": "ResponseGenerator"
+        },
+        "_commands/None_of_these": {
+            "command_source": "_commands",
+            "parameter_extraction_signature_module_path": null,
+            "input_for_param_extraction_class": null,
+            "command_parameters_class": null,
+            "response_generation_module_path": "./fastworkflow/_workflows/parameter_extraction/_commands/None_of_these/response_generation/inference.py",
+            "response_generation_class_name": "ResponseGenerator"
         }
     },
     "map_command_key_2_utterance_metadata": {
@@ -31,6 +39,18 @@
             ],
             "template_utterances": [],
             "generated_utterances_module_filepath": "./fastworkflow/_workflows/parameter_extraction/_commands/abort/utterances/generate_utterances.py",
+            "generated_utterances_func_name": "generate_utterances"
+        },
+        "_commands/None_of_these": {
+            "plain_utterances": [
+                "These is not what i meant",
+                "it is incorrect",
+                "You miss-understood",
+                "Its wrong",
+                "Not one of this command"
+            ],
+            "template_utterances": [],
+            "generated_utterances_module_filepath": "./fastworkflow/_workflows/parameter_extraction/_commands/None_of_these/utterances/generate_utterances.py",
             "generated_utterances_func_name": "generate_utterances"
         }
     }
