@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from semantic_router.schema import RouteChoice
 import fastworkflow
 from fastworkflow.session import WorkflowSnapshot
-from fastworkflow.TinyBerttesrt import predict_single_sentence
+from fastworkflow.model_pipeline_training import predict_single_sentence
 import json
 import os
 from speedict import Rdict
@@ -137,33 +137,7 @@ def process_command(
     cache_path = get_cache_path(id,convo_path)
     
 
-    # command_name, confidence=predict_label(command,"./fastworkflow/_workflows/parameter_extraction/___command_info/tinymodel.pth")
-    # if confidence>0.95:
-    #     if command_name=="None_of_these":
-    #         error_msg = formulate_ambiguous_command_error_message(valid_command_names)
-    #         path=get_cache_path_cache()
-    #         change_flag(path,1)
-    #         return OutputOfProcessCommand(error_msg=error_msg)
-    #     elif command_name=="abort":
-    #         command_name=command_name
-    # else:
-    #     command_name=None
-
-    # if not command_name and "@nwim:" in command:
-    #     # is a nwim flag set in the context?
-    #     # if not, set it
-    #     # if it is set, now we know user actually typed "none of the above" 
-    #     parts = command.split("@nwim:", 1)
-    #     command=parts[1]
-    #     error_msg = formulate_ambiguous_command_error_message(valid_command_names)
-    #     count=store_utterance(cache_path,command,"None")
-    #     path=get_cache_path_cache()
-    #     change_flag(path,1)
-    #     return OutputOfProcessCommand(error_msg=error_msg)
         
-    
-    
-
     if not command_name and "@" in command:
         tentative_command_name = command.split("@")[1].split()[0]
         normalized_command_name = tentative_command_name.lower()
@@ -239,22 +213,6 @@ def process_command(
             store_utterance_cache(path,utterance,command_name)  
             change_flag(path,0)         
             
-
-        # # if route_choice_list := rl.retrieve_multiple_routes(command):
-        # #     if len(route_choice_list) > 1:
-        # #         route_choice_list = sorted(
-        # #             route_choice_list,
-        # #             key=lambda x: x.similarity_score,
-        # #             reverse=True
-        # #         )   # get the top route choices sorted by similarity_score
-        # #         score_difference = abs(route_choice_list[0].similarity_score - route_choice_list[1].similarity_score)
-        # #         if score_difference < 0.09 and len(route_choice_list) <= 2:
-        # #             error_msg = formulate_ambiguous_command_error_message(route_choice_list)
-        # #             return OutputOfProcessCommand(error_msg=error_msg)
-        #         else:
-        #             command_name = route_choice_list[0].name
-        #     else:
-        #         command_name = route_choice_list[0].name
     
     if command_name!="None_of_these":
         count=store_utterance(cache_path,command,command_name)
@@ -272,12 +230,13 @@ def process_command(
 
 def get_valid_command_names(sws: WorkflowSnapshot) -> set[str]:
     # valid_command_names = {'abort'}
-    valid_command_names = {'None_of these','abort'}
+    valid_command_names = {'None_of_these','abort'}
     sws_workflow_folderpath = sws.workflow.workflow_folderpath
     sws_command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(sws_workflow_folderpath)
     valid_command_names |= set(sws_command_routing_definition.get_command_names(
         sws.active_workitem.path
     ))
+    valid_command_names.remove("*")
     return valid_command_names
 
 def validate_command_name(

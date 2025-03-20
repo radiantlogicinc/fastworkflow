@@ -60,7 +60,7 @@ def init(env_vars: dict):
     from .command_routing_definition import CommandRoutingRegistry as CommandRoutingRegistryClass
     from .utterance_definition import UtteranceRegistry as UtteranceRegistryClass
     from .semantic_router_definition import RouteLayerRegistry as RouteLayerRegistryClass
-    from .TinyBerttesrt import ModelPipeline as modelpipelineclass
+    from .model_pipeline_training import ModelPipeline as modelpipelineclass
 
     # Assign to global variables
     WorkflowRegistry = WorkflowRegistryClass

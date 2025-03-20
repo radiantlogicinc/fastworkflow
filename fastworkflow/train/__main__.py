@@ -7,7 +7,7 @@ from semantic_router.encoders import HuggingFaceEncoder
 
 import fastworkflow
 # from fastworkflow.semantic_router_definition import SemanticRouterDefinition
-from fastworkflow.TinyBerttesrt import train
+from fastworkflow.model_pipeline_training import train
 from fastworkflow.fastworkflow_train import train_fastworkflows
 
 if __name__ == "__main__":

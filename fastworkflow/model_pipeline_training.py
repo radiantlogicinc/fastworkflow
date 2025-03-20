@@ -76,7 +76,7 @@ def find_optimal_confidence_threshold(model, test_loader, device, min_threshold=
             return f1 * (1 - 2 * (top3_usage - max_top3_usage))  # Strong penalty for exceeding limit
         return f1
     
-    # Test different thresholds
+    # Test different correct thresholds 
     model.eval()
     with torch.no_grad():
         for threshold in tqdm(np.arange(start_threshold, end_threshold, step_size), 
@@ -231,174 +231,6 @@ def find_optimal_threshold(tiny_stats, test_loader, pipeline):
     return best_result, results
 
 
-
-# Model Pipeline Architecture using tiny bert and distilBert
-# class ModelPipeline:
-#     def __init__(
-#         self,
-#         tiny_model_path: str,
-#         distil_model_path: str,
-#         confidence_threshold: float = 0.65,
-#         device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
-#     ):
-#         self.device = device
-#         self.confidence_threshold = confidence_threshold
-
-#         # Load TinyBERT
-#         self.tiny_tokenizer = AutoTokenizer.from_pretrained(tiny_model_path)
-#         self.tiny_model = AutoModelForSequenceClassification.from_pretrained(
-#             tiny_model_path
-#         ).to(device)
-
-#         # Load DistilBERT
-#         self.distil_tokenizer = AutoTokenizer.from_pretrained(distil_model_path)
-#         self.distil_model = AutoModelForSequenceClassification.from_pretrained(
-#             distil_model_path
-#         ).to(device)
-
-#         self.tiny_model.eval()
-#         self.distil_model.eval()
-
-#     def calculate_ndcg_at_k(self, predictions: List[int], confidences: List[float], true_labels: List[int], k: int = 3) -> float:
-#         # Calculate the NDCG@k using predictions and confidences
-#         relevance = [1 if pred == true else 0 for pred, true in zip(predictions, true_labels)]
-
-#         # Sorting based on confidence (descending order)
-#         sorted_indices = sorted(range(len(confidences)), key=lambda i: confidences[i], reverse=True)
-
-#         # Calculate DCG
-#         dcg = 0
-#         for i in range(min(k, len(confidences))):
-#             if relevance[sorted_indices[i]] == 1:
-#                 dcg += 1 / torch.log2(torch.tensor(i + 2, dtype=torch.float32))
-
-#         # Calculate IDCG
-#         idcg = sum(1 / torch.log2(torch.tensor(i + 2, dtype=torch.float32)) for i in range(min(k, len(confidences))))
-
-#         # Calculate NDCG
-#         ndcg = dcg / idcg if idcg != 0 else 0
-#         return ndcg
-
-#     @torch.no_grad()
-#     def predict_batch(
-#         self,
-#         texts: List[str],
-#         batch_size: int = 32
-#     ) -> Dict:
-#         all_predictions = []
-#         all_confidences = []
-#         all_logits = []
-#         all_used_distil = []
-
-#         for i in range(0, len(texts), batch_size):
-#             batch_texts = texts[i:i + batch_size]
-
-#             # Predict with TinyBERT
-#             tiny_inputs = self.tiny_tokenizer(
-#                 batch_texts,
-#                 padding=True,
-#                 truncation=True,
-#                 max_length=128,
-#                 return_tensors="pt"
-#             ).to(self.device)
-
-#             tiny_outputs = self.tiny_model(**tiny_inputs)
-#             tiny_logits = tiny_outputs.logits
-#             tiny_probs = torch.softmax(tiny_logits, dim=1)
-#             tiny_confidence, tiny_predictions = torch.max(tiny_probs, dim=1)
-
-#             # Identify low-confidence samples
-#             need_distil = tiny_confidence < self.confidence_threshold
-
-#             # Initialize with TinyBERT results
-#             batch_predictions = tiny_predictions.clone()
-#             batch_confidences = tiny_confidence.clone()
-#             batch_logits = tiny_logits.clone()
-#             batch_used_distil = need_distil.clone()
-
-#             # Predict with DistilBERT for low-confidence samples
-#             if need_distil.any():
-#                 distil_texts = [text for text, flag in zip(batch_texts, need_distil) if flag]
-
-#                 distil_inputs = self.distil_tokenizer(
-#                     distil_texts,
-#                     padding=True,
-#                     truncation=True,
-#                     max_length=128,
-#                     return_tensors="pt"
-#                 ).to(self.device)
-
-#                 distil_outputs = self.distil_model(**distil_inputs)
-#                 distil_logits = distil_outputs.logits
-#                 distil_probs = torch.softmax(distil_logits, dim=1)
-#                 distil_confidence, distil_predictions = torch.max(distil_probs, dim=1)
-
-#                 # Update results for low-confidence samples
-#                 distil_idx = 0
-#                 for j in range(len(batch_predictions)):
-#                     if need_distil[j]:
-#                         batch_predictions[j] = distil_predictions[distil_idx]
-#                         batch_confidences[j] = distil_confidence[distil_idx]
-#                         batch_logits[j] = distil_logits[distil_idx]
-#                         distil_idx += 1
-
-#             # Store results
-#             all_predictions.extend(batch_predictions.cpu().tolist())
-#             all_confidences.extend(batch_confidences.cpu().tolist())
-#             all_logits.append(batch_logits.cpu())
-#             all_used_distil.extend(batch_used_distil.cpu().tolist())
-
-#         return {
-#             "predictions": all_predictions,
-#             "confidences": all_confidences,
-#             "logits": torch.cat(all_logits, dim=0).to(self.device),
-#             "used_distil": all_used_distil
-#         }
-
-#     def evaluate(self, test_loader: DataLoader) -> Tuple[float, float, Dict]:
-#         all_predictions = []
-#         all_labels = []
-#         all_confidences = []
-#         all_logits = []
-#         total_used_distil = 0
-#         total_samples = 0
-
-#         for batch in tqdm(test_loader, desc="Evaluating"):
-#             encodings, labels = batch
-#             texts = self.tiny_tokenizer.batch_decode(
-#                 encodings['input_ids'],
-#                 skip_special_tokens=True
-#             )
-
-#             results = self.predict_batch(texts)
-
-#             all_predictions.extend(results['predictions'])
-#             all_labels.extend(labels.cpu().tolist())
-#             all_confidences.extend(results['confidences'])
-#             all_logits.append(results['logits'])
-#             total_used_distil += sum(results['used_distil'])
-#             total_samples += len(labels)
-
-#         # Calculate F1 Score
-#         f1 = f1_score(all_labels, all_predictions, average='weighted')
-
-#         # Calculate NDCG@3
-#         ndcg = self.calculate_ndcg_at_k(
-#             all_predictions,
-#             all_confidences,
-#             all_labels,
-#             k=3
-#         )
-
-#         # Model usage stats
-#         stats = {
-#             "total_samples": total_samples,
-#             "distil_usage": total_used_distil,
-#             "distil_percentage": (total_used_distil / total_samples) * 100,
-#             "tiny_percentage": ((total_samples - total_used_distil) / total_samples) * 100
-#         }
-
-#         return f1, ndcg, stats
 
 def get_route_layer_filepath_model(workflow_folderpath,model_name) -> RouteLayer:
     command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(
@@ -609,35 +441,10 @@ class ModelPipeline:
         return f1, avg_ndcg, stats
 
 
-def evaluate_pipeline(test_loader):
-    pipeline = ModelPipeline(
-        tiny_model_path="./examples/sample_workflow/___command_info/tinymodel.pth",  # Replace with your fine-tuned TinyBERT model path
-        distil_model_path="./examples/sample_workflow/___command_info/tinymodel.pth",  # Replace with your fine-tuned DistilBERT model path
-        confidence_threshold=0.65
-    )
-
-    f1, ndcg, stats = pipeline.evaluate(test_loader)
-
-    print("\nEvaluation Results:")
-    print(f"F1 Score: {f1:.4f}")
-    print(f"NDCG@3: {ndcg:.4f}")
-    print("\nModel Usage Statistics:")
-    print(f"Total Samples: {stats['total_samples']}")
-    print(f"DistilBERT Usage: {stats['distil_percentage']:.2f}%")
-    print(f"TinyBERT Usage: {stats['tiny_percentage']:.2f}%")
-
-    return f1, ndcg, stats
-
-
-
-
-
-
-
 # def evaluate_pipeline(test_loader):
 #     pipeline = ModelPipeline(
 #         tiny_model_path="./examples/sample_workflow/___command_info/tinymodel.pth",  # Replace with your fine-tuned TinyBERT model path
-#         distil_model_path=tiny_model_path="./examples/sample_workflow/___command_info/tinymodel.pth",,
+#         distil_model_path="./examples/sample_workflow/___command_info/tinymodel.pth",  # Replace with your fine-tuned DistilBERT model path
 #         confidence_threshold=0.65
 #     )
 
@@ -652,6 +459,8 @@ def evaluate_pipeline(test_loader):
 #     print(f"TinyBERT Usage: {stats['tiny_percentage']:.2f}%")
 
 #     return f1, ndcg, stats
+
+
 
 #for single utterance prediction
 def predict_single_sentence(
@@ -803,8 +612,6 @@ def train(session: fastworkflow.Session):
         utterance_command_tuples.extend(
             list(zip(utterance_list, [command_name] * len(utterance_list)))
         )
-
-        #rl = RouteLayer(encoder=self._encoder, routes=routes)
 
         # unpack the test data and train data
         X, y = zip(*utterance_command_tuples)
@@ -1003,7 +810,6 @@ def train(session: fastworkflow.Session):
     print(f"DistilBERT Usage: {stats['distil_percentage']:.2f}%")
     print(f"TinyBERT Usage: {stats['tiny_percentage']:.2f}%")
     
-    # tiny_model_path="./examples/sample_workflow/___command_info/tinymodel.pth"
     model = AutoModelForSequenceClassification.from_pretrained(tiny_path).to(device)
 
     optimal_threshold, best_metrics = find_optimal_confidence_threshold(

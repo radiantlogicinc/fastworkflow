@@ -81,6 +81,8 @@ class CommandRoutingDefinition(BaseModel):
 
     def get_command_names(self, workitem_path: str) -> list[str]:
         if workitem_path in self.map_workitem_paths_2_commandkey_map:
+            # To discard "abort", "*" and "none_of_these" from the list of valid commands
+            
             # m=list()
             # i=0
             # for key in self.map_workitem_paths_2_commandkey_map[workitem_path]:
@@ -94,13 +96,13 @@ class CommandRoutingDefinition(BaseModel):
             #         x=x.workflow_folderpath
             #         if x==None:
                         # m.append(y)
+            # return m
 
             return list(
                 self.map_workitem_paths_2_commandkey_map[
                     workitem_path
                 ].map_command_2_command_key.keys()
             )
-            # return m
         else:
             raise ValueError(
                 f"Command routing definition not found for workitem type '{workitem_path}'"
