@@ -1,8 +1,5 @@
 import os
 from typing import Optional
-from semantic_router import Route
-from semantic_router.encoders import HuggingFaceEncoder
-from semantic_router.layer import RouteLayer
 from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification, AdamW
 from sklearn.decomposition import PCA
 from sklearn.metrics import f1_score
@@ -232,7 +229,7 @@ def find_optimal_threshold(tiny_stats, test_loader, pipeline):
 
 
 
-def get_route_layer_filepath_model(workflow_folderpath,model_name) -> RouteLayer:
+def get_route_layer_filepath_model(workflow_folderpath,model_name) -> str:
     command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(
         workflow_folderpath
     )
@@ -504,7 +501,7 @@ def predict_single_sentence(
 
 
 
-def get_route_layer_filepath(workflow_folderpath) -> RouteLayer:
+def get_route_layer_filepath(workflow_folderpath) -> str:
     command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(
         workflow_folderpath
     )
@@ -514,7 +511,7 @@ def get_route_layer_filepath(workflow_folderpath) -> RouteLayer:
         "tinymodel.pth"
     )
 
-def get_route_layer_filepath1(workflow_folderpath) -> RouteLayer:
+def get_route_layer_filepath1(workflow_folderpath) -> str:
     command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(
         workflow_folderpath
     )
@@ -524,7 +521,7 @@ def get_route_layer_filepath1(workflow_folderpath) -> RouteLayer:
         "largemodel.pth"
     )
 
-def get_route_layer_filepath2(workflow_folderpath) -> RouteLayer:
+def get_route_layer_filepath2(workflow_folderpath) -> str:
     command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(
         workflow_folderpath
     )
@@ -596,7 +593,6 @@ def train(session: fastworkflow.Session):
     )
     cmddir = command_routing_definition.command_directory
 
-    routes = []
     utterance_command_tuples = []
     for command_key in cmddir.get_utterance_keys():
         utterance_metadata = cmddir.get_utterance_metadata(command_key)
@@ -606,7 +602,6 @@ def train(session: fastworkflow.Session):
         utterance_list = utterances_func(session)
 
         command_name = cmddir.get_command_name(command_key)
-        routes.append(Route(name=command_name, utterances=utterance_list))
 
         # dataset for training
         utterance_command_tuples.extend(
@@ -616,7 +611,7 @@ def train(session: fastworkflow.Session):
         # unpack the test data and train data
         X, y = zip(*utterance_command_tuples)
         num= len(set(y))
-    
+
 
     model_name = "prajjwal1/bert-tiny"
     print(f"\nLoading {model_name}...")
@@ -648,7 +643,7 @@ def train(session: fastworkflow.Session):
         )
         # Convert labels to long tensor
         labels = torch.tensor(batch_labels, dtype=torch.long)
-        
+
         return encodings, labels
 
     train_loader = DataLoader(
@@ -688,7 +683,7 @@ def train(session: fastworkflow.Session):
         epoch_start_time = time()
         print(f"\nEpoch {epoch + 1}/{num_epochs}")
         total_loss = 0
-        progress_bar = tqdm(train_loader, desc=f"Training")
+        progress_bar = tqdm(train_loader, desc="Training")
 
         for batch_idx, (encodings, labels) in enumerate(progress_bar):
             input_ids = encodings['input_ids'].to(device)
@@ -715,9 +710,9 @@ def train(session: fastworkflow.Session):
         print(f"F1 Score: {f1:.4f}")
         print(f"NDCG@3: {ndcg:.4f}")
         print(f"Epoch Time: {epoch_time:.2f} seconds")
-    
+
     path=get_route_layer_filepath(workflow_folderpath)
-    save_model(tiny_model,tokenizer, path)   
+    save_model(tiny_model,tokenizer, path)
     total_training_time = time() - training_start_time
 
 
@@ -732,7 +727,7 @@ def train(session: fastworkflow.Session):
     for epoch in range(num_epochs):
         print(f"\nEpoch {epoch + 1}/{num_epochs}")
         total_loss = 0
-        progress_bar = tqdm(train_loader, desc=f"Training")
+        progress_bar = tqdm(train_loader, desc="Training")
 
         for batch_idx, (encodings, labels) in enumerate(progress_bar):
             input_ids = encodings['input_ids'].to(device)
@@ -755,7 +750,7 @@ def train(session: fastworkflow.Session):
         print(f"NDCG@3: {ndcg:.4f}")
 
     path=get_route_layer_filepath1(workflow_folderpath)
-    save_model(large_model,tokenizer,path)  
+    save_model(large_model,tokenizer,path)
     tiny_path=get_route_layer_filepath_model(workflow_folderpath,"tinymodel.pth")
     large_path=get_route_layer_filepath_model(workflow_folderpath,"largemodel.pth")
 
@@ -809,7 +804,7 @@ def train(session: fastworkflow.Session):
     print(f"Total Samples: {stats['total_samples']}")
     print(f"DistilBERT Usage: {stats['distil_percentage']:.2f}%")
     print(f"TinyBERT Usage: {stats['tiny_percentage']:.2f}%")
-    
+
     model = AutoModelForSequenceClassification.from_pretrained(tiny_path).to(device)
 
     optimal_threshold, best_metrics = find_optimal_confidence_threshold(

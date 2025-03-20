@@ -2,8 +2,8 @@
 A framework for rapidly building large-scale, deterministic, interactive workflows with a fault-tolerant, conversational UX and AI-powered recommendations.
 
 - Built on the principle on "Convention over configuration", ALA Ruby on Rails
-- Uses:  
-  - [Semantic Router](https://github.com/aurelio-labs/semantic-router) for fast command routing
+- Uses:
+  - A custom-built intent detection pipeline for fault-tolerant, self-correcting command routing
   - [Pydantic](https://docs.pydantic.dev/) and [DSPy](https://github.com/stanfordnlp/dspy) for parameter extraction and response generation
 
 # Concepts

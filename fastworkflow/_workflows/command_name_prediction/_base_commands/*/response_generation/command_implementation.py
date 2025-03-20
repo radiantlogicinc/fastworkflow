@@ -1,7 +1,6 @@
 from typing import Optional
 
 from pydantic import BaseModel
-from semantic_router.schema import RouteChoice
 import fastworkflow
 from fastworkflow.session import WorkflowSnapshot
 from fastworkflow.model_pipeline_training import predict_single_sentence
@@ -9,8 +8,6 @@ import json
 import os
 from speedict import Rdict
 from fastworkflow.cache_matching import get_flag,change_flag,store_utterance_cache,cache_match
-from fastworkflow.fastworkflow_train import predict_label
-from semantic_router.layer import RouteLayer
 
 class CommandParameters(BaseModel):
     command_name: Optional[str] = None
@@ -27,9 +24,7 @@ def get_cache_path(session_id,convo_path):
     base_dir = convo_path
     # Create directory if it doesn't exist
     os.makedirs(base_dir, exist_ok=True)
-    # Create cache path with session ID
-    cache_path = os.path.join(base_dir, f"{session_id}.db")
-    return cache_path
+    return os.path.join(base_dir, f"{session_id}.db")
 
 def get_cache_path_cache(convo_path):
     """
@@ -38,12 +33,10 @@ def get_cache_path_cache(convo_path):
     base_dir = convo_path
     # Create directory if it doesn't exist
     os.makedirs(base_dir, exist_ok=True)
-    # Create cache path with session ID
-    cache_path = os.path.join(base_dir, "cache.db")
-    return cache_path
+    return os.path.join(base_dir, "cache.db")
 
 
-def get_route_layer_filepath(workflow_folderpath,model_name) -> RouteLayer:
+def get_route_layer_filepath(workflow_folderpath,model_name) -> str:
     command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(
         workflow_folderpath
     )
@@ -58,7 +51,7 @@ def process_command(
 ) -> OutputOfProcessCommand:
     sws = session.workflow_snapshot.context["subject_workflow_snapshot"]
     sws_workflow_folderpath = sws.workflow.workflow_folderpath
-    id=sws.session_id
+    sws_session_id=sws.session_id
     
 
     convo_path=os.path.join(sws_workflow_folderpath,"___convo_info")
@@ -134,7 +127,7 @@ def process_command(
         finally:
             db.close()
 
-    cache_path = get_cache_path(id,convo_path)
+    cache_path = get_cache_path(sws_session_id,convo_path)
     
 
         
@@ -257,7 +250,7 @@ def validate_command_name(
         f"{command_list}"
     )
 
-def formulate_ambiguous_command_error_message(route_choice_list: list[RouteChoice]) -> str:
+def formulate_ambiguous_command_error_message(route_choice_list: list[str]) -> str:
     command_list = (
         "\n".join([
             f"@{route_choice}" 

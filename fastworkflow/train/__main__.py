@@ -3,16 +3,13 @@ import os
 from dotenv import dotenv_values
 
 from colorama import Fore, Style
-from semantic_router.encoders import HuggingFaceEncoder
 
 import fastworkflow
-# from fastworkflow.semantic_router_definition import SemanticRouterDefinition
 from fastworkflow.model_pipeline_training import train
-from fastworkflow.fastworkflow_train import train_fastworkflows
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Train the semantic router for a workflow"
+        description="Train the intent detection pipeline for a workflow"
     )
     parser.add_argument("workflow_folderpath", help="Path to the workflow folder")
     parser.add_argument("env_file_path", help="Path to the environment file")
@@ -26,9 +23,7 @@ if __name__ == "__main__":
 
     fastworkflow.init(env_vars={**dotenv_values(args.env_file_path)})
 
-    encoder = HuggingFaceEncoder()
-
-    def train_workflow(workflow_path: str, encoder: HuggingFaceEncoder):
+    def train_workflow(workflow_path: str):
         fastworkflow.WorkflowRegistry.create_definition(workflow_path)
         fastworkflow.CommandRoutingRegistry.create_definition(workflow_path)
         fastworkflow.UtteranceRegistry.create_definition(workflow_path)
@@ -42,7 +37,7 @@ if __name__ == "__main__":
                 child_workflow_path = os.path.join(workflows_dir, child_workflow)
                 if os.path.isdir(child_workflow_path):
                     print(f"{Fore.YELLOW}Training child workflow: {child_workflow_path}{Style.RESET_ALL}")
-                    train_workflow(child_workflow_path, encoder)
+                    train_workflow(child_workflow_path)
 
         if workflow_path.startswith("./fastworkflow") and "_workflows" not in workflow_path:
             return
@@ -53,14 +48,9 @@ if __name__ == "__main__":
             session_id_str=f"train_{workflow_path}", 
             for_training_semantic_router=True
         )
-        #semantic_router_definition = SemanticRouterDefinition(encoder)
-        #semantic_router_definition.train(session)
 
-        if workflow_path=="./examples/sample_workflow":
-            train(session)
-        else:
-            train_fastworkflows(session)
+        train(session)
 
         session.close()
 
-    train_workflow(args.workflow_folderpath, encoder)
+    train_workflow(args.workflow_folderpath)

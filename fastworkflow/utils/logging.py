@@ -111,7 +111,6 @@ logging.getLogger("openai").setLevel(logging.WARNING)
 logging.getLogger("speedict").setLevel(logging.WARNING)
 logging.getLogger("filelock").setLevel(logging.WARNING)
 logging.getLogger("datasets").setLevel(logging.WARNING)
-logging.getLogger("semantic_router.utils.logger").setLevel(logging.WARNING)
 
 # some testing code
 if __name__ == "__main__":

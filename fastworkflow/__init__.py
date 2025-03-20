@@ -59,14 +59,12 @@ def init(env_vars: dict):
     from .workflow_definition import WorkflowRegistry as WorkflowRegistryClass
     from .command_routing_definition import CommandRoutingRegistry as CommandRoutingRegistryClass
     from .utterance_definition import UtteranceRegistry as UtteranceRegistryClass
-    from .semantic_router_definition import RouteLayerRegistry as RouteLayerRegistryClass
     from .model_pipeline_training import ModelPipeline as modelpipelineclass
 
     # Assign to global variables
     WorkflowRegistry = WorkflowRegistryClass
     CommandRoutingRegistry = CommandRoutingRegistryClass
     UtteranceRegistry = UtteranceRegistryClass
-    RouteLayerRegistry = RouteLayerRegistryClass
     modelpipelineregistry=modelpipelineclass
 
 def get_env_var(var_name: str, var_type: type = str, default: Optional[Union[str, int, float, bool]] = None) -> Union[str, int, float, bool]:
@@ -75,13 +73,13 @@ def get_env_var(var_name: str, var_type: type = str, default: Optional[Union[str
 
     value = _env_vars.get(var_name)
     if value is None:
-        if default is None:           
-            value = os.getenv(var_name)
-            if value is None:
-                raise ValueError(f"Environment variable '{var_name}' does not exist and no default value is provided.")
-        else:
+        if default is not None:
             return default
-    
+        value = os.getenv(var_name)
+
+    if value is None:
+        raise ValueError(f"Environment variable '{var_name}' does not exist and no default value is provided.")
+
     try:
         if var_type is int:
             return int(value)
@@ -95,8 +93,8 @@ def get_env_var(var_name: str, var_type: type = str, default: Optional[Union[str
             else:
                 raise ValueError(f"Cannot convert '{value}' to {var_type.__name__}.")
         return str(value)  # Default case for str
-    except ValueError:
-        raise ValueError(f"Cannot convert '{value}' to {var_type.__name__}.")
+    except ValueError as e:
+        raise ValueError(f"Cannot convert '{value}' to {var_type.__name__}.") from e
 
 def get_session_id(session_id_str: str) -> int:
     return int(murmurhash.hash(session_id_str))
