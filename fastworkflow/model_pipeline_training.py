@@ -793,11 +793,11 @@ def train(session: fastworkflow.Session):
         min_threshold=pipeline.confidence_threshold,
         max_top3_usage=0.3
     )
-    
-    ambigous_threshold = optimal_threshold
+
+    ambiguous_threshold = optimal_threshold
     model_switch_path=get_route_layer_filepath_model(workflow_folderpath,"ambigous_threshold.json")
     with open(model_switch_path, 'w') as f:
-        json.dump({'confidence_threshold': ambigous_threshold}, f)
+        json.dump({'confidence_threshold': ambiguous_threshold}, f)
     
     print("\nOptimal Threshold Results:")
     print(f"Threshold: {best_metrics['threshold']:.3f}")
