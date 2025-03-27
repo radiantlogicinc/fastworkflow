@@ -438,27 +438,6 @@ class ModelPipeline:
         return f1, avg_ndcg, stats
 
 
-# def evaluate_pipeline(test_loader):
-#     pipeline = ModelPipeline(
-#         tiny_model_path="./examples/sample_workflow/___command_info/tinymodel.pth",  # Replace with your fine-tuned TinyBERT model path
-#         distil_model_path="./examples/sample_workflow/___command_info/tinymodel.pth",  # Replace with your fine-tuned DistilBERT model path
-#         confidence_threshold=0.65
-#     )
-
-#     f1, ndcg, stats = pipeline.evaluate(test_loader)
-
-#     print("\nEvaluation Results:")
-#     print(f"F1 Score: {f1:.4f}")
-#     print(f"NDCG@3: {ndcg:.4f}")
-#     print("\nModel Usage Statistics:")
-#     print(f"Total Samples: {stats['total_samples']}")
-#     print(f"DistilBERT Usage: {stats['distil_percentage']:.2f}%")
-#     print(f"TinyBERT Usage: {stats['tiny_percentage']:.2f}%")
-
-#     return f1, ndcg, stats
-
-
-
 #for single utterance prediction
 def predict_single_sentence(
     pipeline: ModelPipeline,
@@ -815,13 +794,17 @@ def train(session: fastworkflow.Session):
         max_top3_usage=0.3
     )
 
+    ambiguous_threshold = optimal_threshold
+    model_switch_path=get_route_layer_filepath_model(workflow_folderpath,"ambigous_threshold.json")
+    with open(model_switch_path, 'w') as f:
+        json.dump({'confidence_threshold': ambiguous_threshold}, f)
+    
     print("\nOptimal Threshold Results:")
     print(f"Threshold: {best_metrics['threshold']:.3f}")
     print(f"F1 Score: {best_metrics['f1_score']:.3f}")
     print(f"Top-3 Usage: {best_metrics['top3_usage']:.3f}")
     print(f"Top-1 Accuracy: {best_metrics['top1_accuracy']:.3f}")
     print(f"Top-3 Accuracy: {best_metrics['top3_accuracy']:.3f}")
-
 
     text = "list commands"
     try:

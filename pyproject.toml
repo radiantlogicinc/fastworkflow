@@ -26,6 +26,8 @@ murmurhash = "^1.0.10"
 scikit-learn = "^1.6.1"
 transformers = "^4.48.2"
 together = "^1.4.0"
+mmh3 = "^5.1.0"
+python-levenshtein = "^0.27.1"
 
 [tool.poetry.group.dev.dependencies]
 isort = "^5.13.2"
