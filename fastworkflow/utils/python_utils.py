@@ -8,12 +8,17 @@ def get_module(module_file_path: str, workflow_folderpath: str):
     def truncate_path(path):
         # Find the second occurrence of "fastworkflow" in the path
         first_index = path.find("fastworkflow")
-        if first_index != -1:
-            second_index = path.find("fastworkflow", first_index + 1)
-            if second_index != -1:
-                # Replace everything before the second "fastworkflow" with "./"
-                return f"./{path[second_index:]}"
-        return path
+
+        if first_index == -1:
+            return path
+
+        second_index = path.find("fastworkflow", first_index + 1)
+        if second_index == -1:
+            return f"./{path[first_index:]}"
+
+        # Replace everything before the second "fastworkflow" with "./"
+        return f"./{path[second_index:]}"
+
 
     # Truncate both paths
     workflow_folderpath = truncate_path(workflow_folderpath)

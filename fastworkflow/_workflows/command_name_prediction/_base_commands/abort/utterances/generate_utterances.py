@@ -11,8 +11,4 @@ def generate_utterances(session: fastworkflow.Session, command_name: str) -> lis
     utterances_obj = utterance_definition.get_command_utterances(
         workflow.path, command_name
     )
-    result=generate_diverse_utterances(utterances_obj.plain_utterances,command_name,10,10,5)
-    all_utterances = [utt["utterance"] for utt in result["generated_utterances"]]
-    utterance_list: list[str] = [command_name] + utterances_obj.plain_utterances+all_utterances
-
-    return utterance_list
+    return generate_diverse_utterances(utterances_obj.plain_utterances, command_name)

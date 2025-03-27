@@ -29,6 +29,10 @@ class UtteranceDefinition(BaseModel):
         for command_name in command_names:
             if command_name=="*":
                 continue
+            if command_name=="abort":
+                continue
+            if command_name=="None_of_these":
+                continue
             command_utterances = self.get_command_utterances(workitem_path, command_name)
             if command_utterances.template_utterances:
                 sample_utterances.append(command_utterances.template_utterances[0])
