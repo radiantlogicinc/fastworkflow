@@ -1,20 +1,24 @@
 import json
 from typing import List, Dict
 from datasets import load_dataset
-from together import Together
 import random
 import fastworkflow
+import litellm
 
+NUMOF_PERSONAS=fastworkflow.get_env_var('SYNTHETIC_UTTERANCE_GEN_NUMOF_PERSONAS', int)
+UTTERANCES_PER_PERSONA=fastworkflow.get_env_var('SYNTHETIC_UTTERANCE_GEN_UTTERANCES_PER_PERSONA', int)
+PERSONAS_PER_BATCH=fastworkflow.get_env_var('SYNTHETIC_UTTERANCE_GEN_PERSONAS_PER_BATCH', int)
 
 def generate_diverse_utterances(
     seed_utterances: List[str],
     command_name,
-    num_personas: int = 5,
-    utterances_per_persona: int = 5,
-    personas_per_batch: int = 2
-) -> Dict:
-    # Initialize the Together client
-    client = Together(api_key="645ab4306a057859ab62afae309cdf05b47604696fd4ae7a64d8dcff1d6c3739")
+    num_personas: int = NUMOF_PERSONAS,
+    utterances_per_persona: int = UTTERANCES_PER_PERSONA,
+    personas_per_batch: int = PERSONAS_PER_BATCH
+) -> list[str]:
+    # Initialize LiteLLM with API key
+    api_key = fastworkflow.get_env_var("llm_api_key")
+    litellm.api_key = api_key
 
     # Load PersonaHub dataset
     persona_dataset = load_dataset("proj-persona/PersonaHub", data_files="persona.jsonl")['train']
@@ -86,16 +90,13 @@ def generate_diverse_utterances(
             }
         ]
 
-        response = client.chat.completions.create(
-            model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+        response = litellm.completion(
+            model="mistral/mistral-small-latest",  # Corrected model name
             messages=messages,
             max_tokens=1000,
             temperature=1.0,
             top_p=0.9,
-            top_k=50,
-            repetition_penalty=1.1,
-            stop=["<|end_of_text|>"],
-            stream=False
+            stop=["<|end_of_text|>"]
         )
 
         # Process responses
@@ -120,7 +121,7 @@ def generate_diverse_utterances(
                 continue
 
     # Structure the output
-    output = {
+    result = {
         "seed_utterances": seed_utterances,
         "generated_utterances": all_generated_responses,
         "personas": used_personas,
@@ -131,5 +132,5 @@ def generate_diverse_utterances(
             "total_utterances": len(all_generated_responses)
         }
     }
-
-    return output
+    all_utterances = [utt["utterance"] for utt in result["generated_utterances"]]
+    return [command_name] + seed_utterances + all_utterances
