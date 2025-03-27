@@ -17,7 +17,8 @@ def generate_diverse_utterances(
     personas_per_batch: int = PERSONAS_PER_BATCH
 ) -> list[str]:
     # Initialize LiteLLM with API key
-    api_key = fastworkflow.get_env_var("llm_api_key")
+    api_key = fastworkflow.get_env_var("LITELLM_API_KEY")
+    model=fastworkflow.get_env_var("LLM")
     litellm.api_key = api_key
 
     # Load PersonaHub dataset
@@ -91,7 +92,7 @@ def generate_diverse_utterances(
         ]
 
         response = litellm.completion(
-            model="mistral/mistral-small-latest",  # Corrected model name
+            model=model,  # Corrected model name
             messages=messages,
             max_tokens=1000,
             temperature=1.0,
