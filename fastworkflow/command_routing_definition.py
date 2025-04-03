@@ -222,8 +222,8 @@ class CommandRoutingDefinition(BaseModel):
         fastworkflow_folder = os.path.dirname(os.path.abspath(__file__))
         ############################################################
         # There needs to be a better way of getting the fastworkflow folder from __file__
-        if '/fastworkflow' in fastworkflow_folder:
-                    fastworkflow_folder="./fastworkflow"
+        # if '/fastworkflow' in fastworkflow_folder:
+        #             fastworkflow_folder="./fastworkflow"
         #############################################################
         commandname_prediction_workflow_folderpath = os.path.join(
             fastworkflow_folder, "_workflows", "command_name_prediction"

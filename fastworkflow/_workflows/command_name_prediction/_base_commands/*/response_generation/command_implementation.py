@@ -9,6 +9,7 @@ from speedict import Rdict
 from fastworkflow.cache_matching import get_flag, change_flag, store_utterance_cache, cache_match
 import re
 import Levenshtein
+from fastworkflow.utils.fuzzy_match import find_best_match
 # Flag values:
 # 0 - Normal state (no constraints)
 # 1 - Ambiguous command (low confidence, multiple potential commands)
@@ -167,52 +168,7 @@ def process_command(
         finally:
             db.close()
 
-    def normalize_text(text):
-        """
-        Normalize text by removing spaces, @ symbol, underscores, and converting to lowercase
-        """
-        cleaned_text = re.sub(r'[@\s_]', '', str(text).lower())
-        return cleaned_text
-
-    def normalized_levenshtein_distance(s1, s2):
-        """Calculate normalized Levenshtein distance"""
-        distance = Levenshtein.distance(s1, s2)
-        max_length = max(len(s1), len(s2))
-        if max_length == 0:
-            return 0.0
-        return distance / max_length
-
-    def find_best_match(input_text, text_list, threshold=0.4):
-        """Find best match using normalized Levenshtein distance"""
-        # Convert text_list to a list if it's not already one
-        text_list = list(text_list)
-        
-        normalized_input = normalize_text(input_text)
-        normalized_list = [normalize_text(text) for text in text_list]
-        
-        # If empty list, return None
-        if not normalized_list:
-            return None, None
-        
-        normalized_distances = [
-            normalized_levenshtein_distance(normalized_input, normalized) 
-            for normalized in normalized_list
-        ]
-        
-        best_match_index = min(
-            range(len(normalized_list)),
-            key=lambda i: normalized_distances[i]
-        )
-        
-        best_distance = normalized_distances[best_match_index]
-        
-        if best_distance <= threshold:
-            return (
-                text_list[best_match_index],
-                best_distance
-            )
-        
-        return None, None
+    
     cache_path = get_cache_path(sws_session_id, convo_path)
     tiny_path = get_route_layer_filepath(sws_workflow_folderpath, "tinymodel.pth")
     large_path = get_route_layer_filepath(sws_workflow_folderpath, "largemodel.pth")
@@ -348,7 +304,7 @@ def process_command(
                 command_name = results['label']
                 
                 # If confidence is low, treat as ambiguous command (type 1)
-                if results['confidence'] < ambiguos_confidence_threshold :
+                if results['confidence'] < ambiguos_confidence_threshold:
                     error_msg = formulate_ambiguous_command_error_message(results["topk_labels"])
                     count = store_utterance(cache_path, command, command_name)
                     # Store suggested commands and set flag to 1 (ambiguous)
