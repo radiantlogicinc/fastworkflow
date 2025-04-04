@@ -5,7 +5,26 @@ def get_module(module_file_path: str, workflow_folderpath: str):
     if not module_file_path:
             return None
 
-    module_file_path = module_file_path.removeprefix('./')
+    def truncate_path(path):
+        # Find the second occurrence of "fastworkflow" in the path
+        first_index = path.find("fastworkflow")
+
+        if first_index == -1:
+            return path
+
+        second_index = path.find("fastworkflow", first_index + 1)
+        if second_index == -1:
+            return f"./{path[first_index:]}"
+
+        # Replace everything before the second "fastworkflow" with "./"
+        return f"./{path[second_index:]}"
+
+
+    # Truncate both paths
+    workflow_folderpath = truncate_path(workflow_folderpath)
+    module_file_path = truncate_path(module_file_path)
+
+    module_file_path = module_file_path.removeprefix('./').removeprefix('/')
     # Strip '.py' and replace slashes
     module_pythonic_path = module_file_path.replace(os.sep, ".").rsplit(".py", 1)[0]
 

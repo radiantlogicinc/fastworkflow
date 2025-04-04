@@ -1,0 +1,12 @@
+[
+    "Go to {workitem_path}",
+    "Go to the work item at {workitem_path} with ID {workitem_id}",
+    "Move to {workitem_path}",
+    "Lets switch to {workitem_path}",
+    "Switch to {workitem_path}",
+    "jump to {workitem_id} under {workitem_path}",
+    "Move to the work item at {workitem_path}",
+    "Can you switch to the work item at {workitem_path} with ID {workitem_id}?",
+    "Go to the work item located at {workitem_path}",
+    "Switch to the work item identified by {workitem_id} at {workitem_path}"
+]

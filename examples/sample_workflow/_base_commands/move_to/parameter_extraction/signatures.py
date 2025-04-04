@@ -2,7 +2,7 @@ from typing import Annotated, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from fastworkflow.utils.signatures import InputForParamExtraction, DatabaseValidator
+from fastworkflow.utils.signatures import InputForParamExtraction
 
 import fastworkflow
 from fastworkflow.session import WorkflowSnapshot
@@ -31,15 +31,10 @@ class CommandParameters(BaseModel):
             invalid_value="INVALID",
         ),
     ]
-
-    workitem_id: Optional[Union[str, int]] = Field(
-    default=None, 
-    description="The ID of the workitem", 
-    examples=["John Doe", "24"]
-    )
-
-    workitem_srno: int = Field(default=1, description="the serial number of the workitem", examples=[1,2,3,10,11])
-
-
-
-
+      
+    workitem_id: Optional[
+        Annotated[
+            Union[str, int],
+            Field(description="The ID of the workitem", examples=["John Doe", "24"]),
+        ]
+    ] = None

@@ -15,7 +15,7 @@ def guess_command_name(
     )
 
     # if we are already in the command name prediction workflow, we can just perform the action
-    if workflow_session.session.workflow_snapshot.workflow.path == "command_name_prediction":
+    if workflow_session.session.workflow_snapshot.workflow.path == "/command_name_prediction":
         command_executor = CommandExecutor()
         command_output = command_executor.perform_action(workflow_session.session, startup_action)
         if len(command_output.command_responses) > 1:
@@ -27,9 +27,16 @@ def guess_command_name(
         fastworkflow_folder, "_workflows", "command_name_prediction"
     )
 
+    sws_workflow_snapshot=workflow_session.session.workflow_snapshot
+    if sws := workflow_session.session.workflow_snapshot.context.get("subject_workflow_snapshot"):
+        sws_workflow_snapshot = sws
+
     context = {
-        "subject_workflow_snapshot": workflow_session.session.workflow_snapshot
+        "subject_workflow_snapshot": sws_workflow_snapshot,
     }
+    # context = {
+    #     "subject_workflow_snapshot": workflow_session.session.workflow_snapshot
+    # }
 
     cnp_workflow_session = fastworkflow.WorkflowSession(
         workflow_session.command_router,

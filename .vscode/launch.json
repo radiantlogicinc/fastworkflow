@@ -35,6 +35,34 @@
             ]
         },
         {
+            "name": "run_todo_list",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "fastworkflow.run",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/"
+            },
+            "args": [
+                "./examples/todo_list",
+                "./env/.env",
+            ]
+        },
+        {
+            "name": "train_todo_list",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "fastworkflow.train",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/"
+            },
+            "args": [
+                "./examples/todo_list",
+                "./env/.env"
+            ]
+        },
+        {
             "name": "train_fastworkflow",
             "type": "debugpy",
             "request": "launch",
