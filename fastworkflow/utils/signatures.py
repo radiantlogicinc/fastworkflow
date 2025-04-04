@@ -13,12 +13,6 @@ from fastworkflow.utils.pydantic_model_2_dspy_signature_class import TypedPredic
 from fastworkflow.train.train_airline_workflow import DSPY_LM_MODEL
 
 DATABASES = {
-    "airline": [
-        "American Airlines", "Delta Air Lines", "United Airlines", "Southwest Airlines",
-        "JetBlue Airways", "Alaska Airlines", "Spirit Airlines", "Frontier Airlines",
-        "Hawaiian Airlines", "British Airways", "Lufthansa", "Air France", "Emirates",
-        "Qatar Airways", "Singapore Airlines"
-    ]
 }
 
 
