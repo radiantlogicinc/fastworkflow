@@ -13,24 +13,15 @@ from fastworkflow.utils.pydantic_model_2_dspy_signature_class import (
 )
 
 
-class SessionParameterStore:
-    def __init__(self):
-        self._sessions = {} 
-    
-    def get_parameters(self, session_id):
-        if session_id not in self._sessions:
-            return None
-        return self._sessions[session_id]
-    
-    def store_parameters(self, session_id, parameters):
-        self._sessions[session_id] = parameters
-    
-    def clear_parameters(self, session_id):
-        if session_id in self._sessions:
-            del self._sessions[session_id]
+def get_stored_parameters(workflow_snapshot):
+    return workflow_snapshot.context.get("stored_parameters")
 
-parameter_store = SessionParameterStore()
+def store_parameters(workflow_snapshot, parameters):
+    workflow_snapshot.context["stored_parameters"] = parameters
 
+def clear_parameters(workflow_snapshot):
+    if "stored_parameters" in workflow_snapshot.context:
+        del workflow_snapshot.context["stored_parameters"]
 
 
 class OutputOfProcessCommand(BaseModel):
@@ -56,31 +47,12 @@ def process_command(
     input_for_param_extraction = input_for_param_extraction_class.create(sws, command)
     
     session_id = session.id
-    stored_params = parameter_store.get_parameters(session_id)
-    stored_missing_fields = []
+    stored_params = get_stored_parameters(sws)
     
     if stored_params:
-        validation_result = input_for_param_extraction.validate_parameters(sws, stored_params)
-
-        if len(validation_result) == 3:
-            is_valid, error_msg, suggestions = validation_result
-        else:
-            is_valid, error_msg = validation_result
-            suggestions = {}
-        
-        if not is_valid:
-            if "Missing required information:" in error_msg:
-                missing_fields_str = error_msg.split("Missing required information:\n")[1].split("\n")[0]
-                stored_missing_fields = [field.strip() for field in missing_fields_str.split(",")]
-
-            if "Invalid information:" in error_msg:
-                invalid_section = error_msg.split("Invalid information:\n")[1]
-                if "\n" in invalid_section:
-                    invalid_fields_str = invalid_section.split("\n")[0]
-                    # Parse each field - format is usually "Field Name 'value'"
-                    for invalid_field in invalid_fields_str.split(", "):
-                        field_name = invalid_field.split(" '")[0].strip()
-                        stored_missing_fields.append(field_name)
+        is_valid, error_msg, suggestions, stored_missing_fields = extract_missing_fields(input_for_param_extraction, sws, stored_params)
+    else:
+        stored_missing_fields = []
     
     new_params = extract_command_parameters_from_input(
         input_for_param_extraction, 
@@ -92,9 +64,9 @@ def process_command(
         merged_params = merge_parameters(stored_params, new_params, stored_missing_fields)
     else:
         merged_params = new_params
+
     
-    parameter_store.store_parameters(session_id, merged_params)
-    
+    store_parameters(sws, merged_params) 
 
     is_valid, error_msg, suggestions = input_for_param_extraction.validate_parameters(sws, merged_params)
     
@@ -108,8 +80,29 @@ def process_command(
         error_msg += "\nEnter 'abort' if you want to abort the command."
         return OutputOfProcessCommand(parameter_is_valid=False, error_msg=error_msg, cmd_parameters=merged_params, suggestions=suggestions)
     
-    parameter_store.clear_parameters(session_id)
+    clear_parameters(sws)
     return OutputOfProcessCommand(parameter_is_valid=True, cmd_parameters=merged_params, suggestions={})
+
+
+def extract_missing_fields(input_for_param_extraction, sws, stored_params):
+    stored_missing_fields = []
+    is_valid, error_msg, suggestions = input_for_param_extraction.validate_parameters(sws, stored_params)
+
+    missing_info_msg = fastworkflow.get_env_var("MISSING_INFORMATION_ERRMSG")
+    invalid_info_msg = fastworkflow.get_env_var("INVALID_INFORMATION_ERRMSG")
+    
+    if not is_valid:
+        if missing_info_msg in error_msg:
+            missing_fields_str = error_msg.split(f"{missing_info_msg}\n")[1].split("\n")[0]
+            stored_missing_fields = [f.strip() for f in missing_fields_str.split(",")]
+        if invalid_info_msg in error_msg:
+            invalid_section = error_msg.split(f"{invalid_info_msg}\n")[1]
+            if "\n" in invalid_section:
+                invalid_fields_str = invalid_section.split("\n")[0]
+                for invalid_field in invalid_fields_str.split(", "):
+                    stored_missing_fields.append(invalid_field.split(" '")[0].strip())
+    return is_valid, error_msg, suggestions, stored_missing_fields
+
 
 def merge_parameters(old_params, new_params, missing_fields):
     """
@@ -124,9 +117,18 @@ def merge_parameters(old_params, new_params, missing_fields):
         if hasattr(new_params, field_name):
             new_value = getattr(new_params, field_name)
             old_value = getattr(merged, field_name)
+
+            invalid_int_value = fastworkflow.get_env_var("INVALID_INT_VALUE")
+            invalid_float_value = fastworkflow.get_env_var("INVALID_FLOAT_VALUE")
             
             if new_value is not None and new_value != "NOT_FOUND":
                 if isinstance(old_value, str) and "INVALID" in old_value and "INVALID" not in new_value:
+                    setattr(merged, field_name, new_value)
+                
+                elif isinstance(old_value, int) and old_value == invalid_int_value:
+                    setattr(merged, field_name, new_value)
+
+                elif isinstance(old_value, float) and old_value == invalid_float_value:
                     setattr(merged, field_name, new_value)
                 
                 elif (field_name in missing_fields and 
@@ -140,7 +142,7 @@ def merge_parameters(old_params, new_params, missing_fields):
                       merged.model_fields.get(field_name).pattern is not None):
                     setattr(merged, field_name, new_value)
                 
-                elif old_value is None or old_value == "NOT_FOUND" or old_value == 1:
+                elif old_value is None or old_value == "NOT_FOUND":
                     setattr(merged, field_name, new_value)
     
     return merged
@@ -213,29 +215,8 @@ def extract_command_parameters_from_input(
         command = input_for_param_extraction.command
         
         if missing_fields:
-            params = default_params.model_copy()
-    
-            if "," in command:
-                parts = [part.strip() for part in command.split(",")]
-                
-                if len(missing_fields) == 1:
-                    field = missing_fields[0]
-                    if hasattr(params, field):
-                        setattr(params, field, parts[0])
-                        return params
-                elif len(missing_fields) > 1:
-                    for i, field in enumerate(missing_fields):
-                        if i < len(parts) and hasattr(params, field):
-                            setattr(params, field, parts[i])
-                    return params
-            # No commas in command
-            else:
-                if len(missing_fields) >= 1:
-                    field = missing_fields[0]
-                    if hasattr(params, field):
-                        setattr(params, field, command.strip())
-                        return params
-        
+            return apply_missing_fields(command, default_params, missing_fields)
+                    
         if hasattr(input_for_param_extraction, 'extract_parameters'):
             try:
                 return input_for_param_extraction.extract_parameters(command_parameters_class)
@@ -269,3 +250,64 @@ def extract_command_parameters_from_input(
     except Exception as e:
         logger.error(f"Error in parameter extraction: {e}")
         return default_params
+    
+def apply_missing_fields(command: str, default_params: BaseModel, missing_fields: list):
+    params = default_params.model_copy()
+            
+    if "," in command:
+        parts = parse_command(command)
+
+        if len(parts) ==  len(missing_fields):                
+            if len(missing_fields) == 1:
+                field = missing_fields[0]
+                if hasattr(params, field):
+                    setattr(params, field, parts[0])
+                    return params
+            elif len(missing_fields) > 1:
+                for i, field in enumerate(missing_fields):
+                    if i < len(parts) and hasattr(params, field):
+                        setattr(params, field, parts[i])
+                return params
+        elif len(parts) > len(missing_fields):
+            error_msg = f"Too many parameters provided. Expected {len(missing_fields)} value(s) for: {', '.join(missing_fields)}"
+            logger.error(error_msg)
+            return default_params
+        else:
+            error_msg = f"Not enough values provided. Expected {len(missing_fields)} values for: {', '.join(missing_fields)}"
+            logger.error(error_msg)
+            return default_params                  
+    # No commas in command
+    else:
+        if len(missing_fields) > 1:
+            error_msg = f"Not enough values provided. Expected {len(missing_fields)} values for: {', '.join(missing_fields)}"
+            logger.error(error_msg)
+            return default_params
+        elif len(missing_fields) == 1:
+            field = missing_fields[0]
+            if hasattr(params, field):
+                setattr(params, field, command.strip())
+                return params
+
+
+def parse_command(command_str):
+    results = []
+    current = []
+    in_quotes = False
+
+    for char in command_str:
+        if char == "'" and not in_quotes:
+            in_quotes = True
+        elif char == "'" and in_quotes:
+            in_quotes = False
+        elif char == "," and not in_quotes:
+            results.append(''.join(current).strip())
+            current = []
+            continue
+        current.append(char)
+
+    if current:
+        results.append(''.join(current).strip())
+
+    results = [part.strip("'").strip() for part in results]
+
+    return results

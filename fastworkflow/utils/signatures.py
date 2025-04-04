@@ -13,6 +13,12 @@ from fastworkflow.utils.pydantic_model_2_dspy_signature_class import TypedPredic
 from fastworkflow.train.train_airline_workflow import DSPY_LM_MODEL
 
 DATABASES = {
+    "airline": [
+        "American Airlines", "Delta Air Lines", "United Airlines", "Southwest Airlines",
+        "JetBlue Airways", "Alaska Airlines", "Spirit Airlines", "Frontier Airlines",
+        "Hawaiian Airlines", "British Airways", "Lufthansa", "Air France", "Emirates",
+        "Qatar Airways", "Singapore Airlines"
+    ]
 }
 
 
@@ -30,6 +36,7 @@ class DatabaseValidator:
         database = DATABASES.get(database_key, [])
         if not database:
             return False, None, []
+            
             
         normalized_value = value.lower()
         
@@ -160,39 +167,31 @@ Today's date is {today}.
         Returns:
             The extracted parameters
         """
-        try:
-            DSPY_LM_MODEL = fastworkflow.get_env_var("DSPY_LM_MODEL")
-            lm = dspy.LM(DSPY_LM_MODEL)
+        DSPY_LM_MODEL = fastworkflow.get_env_var("DSPY_LM_MODEL")
+        lm = dspy.LM(DSPY_LM_MODEL)
 
-            model_class = CommandParameters 
+        model_class = CommandParameters 
 
-            if model_class is None:
-                raise ValueError("No model class provided")
+        if model_class is None:
+            raise ValueError("No model class provided")
             
-            with dspy.context(lm=lm, adapter=dspy.JSONAdapter()):
-                params_signature = self.create_signature_from_pydantic_model(
-                    model_class
-                )
-                module = dspy.ChainOfThought(params_signature)
-                dspy_result = module(query=self.command)
+        with dspy.context(lm=lm, adapter=dspy.JSONAdapter()):
+            params_signature = self.create_signature_from_pydantic_model(
+                model_class
+            )
+            module = dspy.ChainOfThought(params_signature)
+            dspy_result = module(query=self.command)
             
-            field_names = list(model_class.model_fields.keys())
+        field_names = list(model_class.model_fields.keys())
             
-            param_dict = {}
-            for field_name in field_names:
-                default = model_class.model_fields[field_name].default
-                param_dict[field_name] = getattr(dspy_result, field_name, default)
+        param_dict = {}
+        for field_name in field_names:
+            default = model_class.model_fields[field_name].default
+            param_dict[field_name] = getattr(dspy_result, field_name, default)
                 
-            params = model_class(**param_dict)
+        params = model_class(**param_dict)
             
-            return params
-        except ValidationError as e:
-            print(f"Validation error: {e}")
-            model_class = CommandParameters  
-            if model_class:
-                return model_class()
-            else:
-                raise ValueError("CommandParameters class not found")
+        return params
     
     @classmethod
     def validate_parameters(cls, workflow_snapshot: WorkflowSnapshot, cmd_parameters: BaseModel) -> Tuple[bool, str, Dict[str, List[str]]]:
@@ -246,7 +245,7 @@ Today's date is {today}.
 
                 else:
                     pattern_regex = re.compile(pattern)
-                    if not pattern_regex.match(str(field_value)):
+                    if not pattern_regex.fullmatch(str(field_value)):
                         invalid_fields.append(f"{field_name} '{field_value}'")
                         pattern_str = str(pattern)
                         examples = getattr(field_info, "examples", [])
@@ -279,12 +278,15 @@ Today's date is {today}.
             return (True, "All required parameters are valid.", {})
         
         message = ""
+
+        missing_info_msg = fastworkflow.get_env_var("MISSING_INFORMATION_ERRMSG")
+        invalid_info_msg = fastworkflow.get_env_var("INVALID_INFORMATION_ERRMSG")
         
         if missing_fields:
-            message += "Missing required information:\n" + ", ".join(missing_fields) + "\n"
+            message += f"{missing_info_msg}\n" + ", ".join(missing_fields) + "\n"
         
         if invalid_fields:
-            message += "Invalid information:\n" + ", ".join(invalid_fields) + "\n"
+            message += f"{invalid_info_msg}\n" + ", ".join(invalid_fields) + "\n"
         
         message += "Please provide this information to complete your request."
         
@@ -306,6 +308,7 @@ Today's date is {today}.
             
         if combined_fields:
             combined_fields_str = ", ".join(combined_fields)
-            message += f"\n\nProvide your response in this exact order, separated by commas:\n{combined_fields_str}"
+            message += f"\n\nProvide your response in this exact order, separated by commas:\n{combined_fields_str}. "
+            message += "\nIf any parameter value needs to include a comma, please enclose that value in single quotes (e.g., 'value, with comma')."
         
         return (False, message, all_suggestions)
