@@ -10,7 +10,6 @@ import re
 import inspect
 from difflib import get_close_matches
 from fastworkflow.utils.pydantic_model_2_dspy_signature_class import TypedPredictorSignature
-from fastworkflow.train.train_airline_workflow import DSPY_LM_MODEL
 
 DATABASES = {
 }
