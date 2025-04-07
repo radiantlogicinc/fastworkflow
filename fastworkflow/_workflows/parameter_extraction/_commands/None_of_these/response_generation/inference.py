@@ -13,7 +13,7 @@ class ResponseGenerator:
             session_id=session.id,
             command_responses=[
                 CommandResponse(
-                    response="Command ambigous",
+                    response="Command ambiguous",
                     artifacts={"command_name": "None_of_these", "None": True},
                 )
             ]

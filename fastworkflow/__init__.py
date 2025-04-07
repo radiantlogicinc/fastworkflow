@@ -3,7 +3,7 @@ from typing import Any, Optional, Union
 from enum import Enum
 
 from pydantic import BaseModel
-import murmurhash
+import mmh3
 
 
 class Action(BaseModel):
@@ -97,7 +97,7 @@ def get_env_var(var_name: str, var_type: type = str, default: Optional[Union[str
         raise ValueError(f"Cannot convert '{value}' to {var_type.__name__}.") from e
 
 def get_session_id(session_id_str: str) -> int:
-    return int(murmurhash.hash(session_id_str))
+    return int(mmh3.hash(session_id_str))
 
 from .session import Session
 from .workflow_session import WorkflowSession

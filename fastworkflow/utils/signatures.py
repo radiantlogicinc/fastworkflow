@@ -16,7 +16,7 @@ INVALID_INFORMATION_ERRMSG = fastworkflow.get_env_var("INVALID_INFORMATION_ERRMS
 
 NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
 
-DSPY_LM_MODEL = fastworkflow.get_env_var("DSPY_LM_MODEL")
+LLM = fastworkflow.get_env_var("LLM")
 
 DATABASES = {
 }
@@ -167,7 +167,7 @@ Today's date is {today}.
         Returns:
             The extracted parameters
         """
-        lm = dspy.LM(DSPY_LM_MODEL)
+        lm = dspy.LM(LLM)
 
         model_class = CommandParameters 
 

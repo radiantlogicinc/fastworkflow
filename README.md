@@ -23,10 +23,10 @@ A framework for rapidly building large-scale, deterministic, interactive workflo
 - Clone the repo
   - Use WSL if you are on Windows
 - Create an env folder with a .env file inside and add the following entries
-  - DSPY_LM_MODEL: the model to use for the DSPy API
+  - LLM: the model to use for the DSPy API
   - SPEEDDICT_FOLDERNAME: the folder where the workflow definitions are stored
  - export the OPENAI_API_KEY as an environment variable
-   - Note: If you use a different model, specify the model path in the DSPY_LM_MODEL environment variable (The app uses Litellm as the LLM wrapper)
+   - Note: If you use a different model, specify the model path in the LLM environment variable (The app uses Litellm as the LLM wrapper)
 - Train then run the sample workflow
   - Hint: review the .vscode/launch.json file for training/running the sample workflow
  
