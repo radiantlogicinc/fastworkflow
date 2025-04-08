@@ -174,12 +174,12 @@ def process_command(
     large_path = get_route_layer_filepath(sws_workflow_folderpath, "largemodel.pth")
     
     threshold_path = get_route_layer_filepath(sws_workflow_folderpath, "threshold.json")
-    ambiguos_threshold_path = get_route_layer_filepath(sws_workflow_folderpath, "ambigous_threshold.json")
+    ambiguous_threshold_path = get_route_layer_filepath(sws_workflow_folderpath, "ambiguous_threshold.json")
     with open(threshold_path, 'r') as f:
         data = json.load(f)
         confidence_threshold = data['confidence_threshold']
 
-    with open(ambiguos_threshold_path, 'r') as f:
+    with open(ambiguous_threshold_path, 'r') as f:
         data = json.load(f)
         ambiguos_confidence_threshold = data['confidence_threshold']
     

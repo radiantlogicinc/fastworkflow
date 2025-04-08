@@ -158,7 +158,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 import fastworkflow
 import torch
 from speedict import Rdict
-import mmh3  # MurmurHash3 implementation
+import mmh3  # mmh33 implementation
 from datetime import datetime
 
 def get_flag(cache_path):
@@ -183,7 +183,7 @@ def change_flag(cache_path, value):
 
 def store_utterance_cache(cache_path, utterance, label, model_pipeline=None):
     """
-    Store utterance in the new format with MurmurHash and command mapping
+    Store utterance in the new format with mmh3 and command mapping
     
     Args:
         cache_path (str): Path to the cache database
@@ -201,7 +201,7 @@ def store_utterance_cache(cache_path, utterance, label, model_pipeline=None):
         if "flag" not in db:
             db["flag"] = 0
             
-        # Generate hash for utterance using MurmurHash
+        # Generate hash for utterance using mmh3
         utterance_hash = str(mmh3.hash(utterance))
         
         # Get the cache or initialize

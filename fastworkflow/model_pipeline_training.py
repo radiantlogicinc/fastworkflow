@@ -795,7 +795,7 @@ def train(session: fastworkflow.Session):
     )
 
     ambiguous_threshold = optimal_threshold
-    model_switch_path=get_route_layer_filepath_model(workflow_folderpath,"ambigous_threshold.json")
+    model_switch_path=get_route_layer_filepath_model(workflow_folderpath,"ambiguous_threshold.json")
     with open(model_switch_path, 'w') as f:
         json.dump({'confidence_threshold': ambiguous_threshold}, f)
     

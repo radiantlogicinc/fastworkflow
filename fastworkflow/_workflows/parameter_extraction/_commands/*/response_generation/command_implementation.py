@@ -23,7 +23,8 @@ PARAMETER_EXTRACTION_ERROR_MSG = fastworkflow.get_env_var("PARAMETER_EXTRACTION_
 NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
 INVALID = fastworkflow.get_env_var("INVALID")
 
-DSPY_LM_MODEL = fastworkflow.get_env_var("DSPY_LM_MODEL")
+LLM = fastworkflow.get_env_var("LLM")
+LITELLM_API_KEY = fastworkflow.get_env_var("LITELLM_API_KEY")
 
 
 def get_stored_parameters(session):
@@ -51,48 +52,46 @@ def process_command(
     subject_command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(subject_workflow_folderpath)
     active_workitem_type = sws.active_workitem.path
     subject_command_name = session.workflow_snapshot.context["subject_command_name"]
-    
+
     input_for_param_extraction_class = subject_command_routing_definition.get_command_class(
         active_workitem_type, subject_command_name, ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS)
     command_parameters_class = subject_command_routing_definition.get_command_class(
         active_workitem_type, subject_command_name, ModuleType.COMMAND_PARAMETERS_CLASS)
-    
+
     input_for_param_extraction = input_for_param_extraction_class.create(sws, command)
-    
+
     session_id = session.id
     stored_params = get_stored_parameters(session)
-    
+
     if stored_params:
         is_valid, error_msg, suggestions, stored_missing_fields = extract_missing_fields(input_for_param_extraction, sws, stored_params)
     else:
         stored_missing_fields = []
-    
+
     new_params = extract_command_parameters_from_input(
         input_for_param_extraction, 
         command_parameters_class,
         stored_missing_fields 
     )
-    
+
     if stored_params:
         merged_params = merge_parameters(stored_params, new_params, stored_missing_fields)
     else:
         merged_params = new_params
 
-    
+
     store_parameters(session, merged_params) 
 
     is_valid, error_msg, suggestions = input_for_param_extraction.validate_parameters(sws, merged_params)
-    
+
 
     if not is_valid:
-        params_str = format_parameters_for_display(merged_params)
-        
-        if params_str:
+        if params_str := format_parameters_for_display(merged_params):
             error_msg = f"Extracted parameters so far:\n{params_str}\n\n{error_msg}"
 
         error_msg += "\nEnter 'abort' if you want to abort the command."
         return OutputOfProcessCommand(parameter_is_valid=False, error_msg=error_msg, cmd_parameters=merged_params, suggestions=suggestions)
-    
+
     clear_parameters(session)
     return OutputOfProcessCommand(parameter_is_valid=True, cmd_parameters=merged_params, suggestions={})
 
@@ -100,7 +99,7 @@ def process_command(
 def extract_missing_fields(input_for_param_extraction, sws, stored_params):
     stored_missing_fields = []
     is_valid, error_msg, suggestions = input_for_param_extraction.validate_parameters(sws, stored_params)
-    
+
     if not is_valid:
         if MISSING_INFORMATION_ERRMSG in error_msg:
             missing_fields_str = error_msg.split(f"{MISSING_INFORMATION_ERRMSG}\n")[1].split("\n")[0]
@@ -109,8 +108,10 @@ def extract_missing_fields(input_for_param_extraction, sws, stored_params):
             invalid_section = error_msg.split(f"{INVALID_INFORMATION_ERRMSG}\n")[1]
             if "\n" in invalid_section:
                 invalid_fields_str = invalid_section.split("\n")[0]
-                for invalid_field in invalid_fields_str.split(", "):
-                    stored_missing_fields.append(invalid_field.split(" '")[0].strip())
+                stored_missing_fields.extend(
+                    invalid_field.split(" '")[0].strip()
+                    for invalid_field in invalid_fields_str.split(", ")
+                )
     return is_valid, error_msg, suggestions, stored_missing_fields
 
 
@@ -171,31 +172,31 @@ def format_parameters_for_display(params):
     """
     if not params:
         return ""
-        
+
     lines = []
-    
+
     all_fields = list(params.model_fields.keys())
-    
+
     for field_name in all_fields:
         value = getattr(params, field_name, None)
-        
+
         if value is None or value == NOT_FOUND:
             continue
-            
+
         display_name = " ".join(word.capitalize() for word in field_name.split('_'))
-            
+
         # Format fields appropriately based on type
-        if isinstance(value, bool):
+        if (
+            isinstance(value, bool)
+            or not hasattr(value, 'value')
+            and isinstance(value, (int, float))
+            or not hasattr(value, 'value')
+            and isinstance(value, str)
+            or not hasattr(value, 'value')
+        ):
             lines.append(f"{display_name}: {value}")
-        elif hasattr(value, 'value'):  # Handle enum types
+        else:  # Handle enum types
             lines.append(f"{display_name}: {value.value}")
-        elif isinstance(value, (int, float)):
-            lines.append(f"{display_name}: {value}")
-        elif isinstance(value, str):
-            lines.append(f"{display_name}: {value}")
-        else:
-            lines.append(f"{display_name}: {value}")
-        
     return "\n".join(lines)
 
 
@@ -226,54 +227,55 @@ def extract_command_parameters_from_input(
             default_params[field_name] = None
         else:
             default_params[field_name] = None
-    
+
     default_params = command_parameters_class(**default_params)
-    
+
     try:
         command = input_for_param_extraction.command
-        
+
         if missing_fields:
             return apply_missing_fields(command, default_params, missing_fields)
-                    
+
         if hasattr(input_for_param_extraction, 'extract_parameters'):
             try:
                 return input_for_param_extraction.extract_parameters(command_parameters_class)
             except Exception as inner_e:
                 logger.error(PARAMETER_EXTRACTION_ERROR_MSG.format(error=inner_e))
-        
+
         try:
             dspy_signature_class = TypedPredictorSignature.create(
                 input_for_param_extraction,
                 command_parameters_class,
                 prefix_instructions=input_for_param_extraction.__doc__,
             )
-            lm = dspy.LM(DSPY_LM_MODEL)
+            lm = dspy.LM(LLM, api_key=LITELLM_API_KEY)
             with dspy.context(lm=lm):
                 extract_cmd_params = dspy.TypedChainOfThought(dspy_signature_class)
                 prediction = extract_cmd_params(**input_for_param_extraction.model_dump())
-                
-                param_values = {}
-                for field_name in command_parameters_class.model_fields:
-                    if hasattr(prediction, field_name):
-                        param_values[field_name] = getattr(prediction, field_name)
-                    else:
-                        param_values[field_name] = getattr(default_params, field_name)
-                
+
+                param_values = {
+                    field_name: (
+                        getattr(prediction, field_name)
+                        if hasattr(prediction, field_name)
+                        else getattr(default_params, field_name)
+                    )
+                    for field_name in command_parameters_class.model_fields
+                }
                 return command_parameters_class(**param_values)
         except Exception as dspy_error:
             logger.error(f"DSPy error: {dspy_error}")
             return default_params
-            
+
     except Exception as e:
         logger.error(PARAMETER_EXTRACTION_ERROR_MSG.format(error=e))
         return default_params
     
 def apply_missing_fields(command: str, default_params: BaseModel, missing_fields: list):
     params = default_params.model_copy()
-    
+
     if "," in command:
         parts = [part.strip() for part in command.split(",")]
-        
+
         if len(parts) == len(missing_fields):
             if len(missing_fields) == 1:
                 field = missing_fields[0]
@@ -291,11 +293,9 @@ def apply_missing_fields(command: str, default_params: BaseModel, missing_fields
                 if hasattr(params, field):
                     setattr(params, field, parts[0])         
             return params
-                 
-    # No commas in command
-    else:
-        if missing_fields:
-            field = missing_fields[0]
-            if hasattr(params, field):
-                setattr(params, field, command.strip())
-                return params
+
+    elif missing_fields:
+        field = missing_fields[0]
+        if hasattr(params, field):
+            setattr(params, field, command.strip())
+            return params
