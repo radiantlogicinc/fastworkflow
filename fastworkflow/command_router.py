@@ -4,27 +4,6 @@ import fastworkflow
 from fastworkflow.command_name_prediction import guess_command_name
 from fastworkflow.command_interfaces import CommandRouterInterface
 from fastworkflow.command_executor import CommandExecutor
-from speedict import Rdict
-
-CMD_NOT_FOUND_ERRMSG=fastworkflow.get_env_var("CMD_NOT_FOUND_ERRMSG")
-
-def get_count(cache_path):
-       
-        db = Rdict(cache_path)
-        try:
-            return db.get("utterance_count")
-        finally:
-            db.close()
-
-def read_utterance(cache_path, utterance_id):
-        """
-        Read a specific utterance from the database
-        """
-        db = Rdict(cache_path)
-        try:
-            return db.get(utterance_id)['utterance']
-        finally:
-            db.close()
 
 class CommandRouter(CommandRouterInterface):
     def route_command(
@@ -41,18 +20,6 @@ class CommandRouter(CommandRouterInterface):
             workflow_session=workflow_session,
             command=command,
         )
-        
-        # if command_output.not_what_i_meant:
-        #     cache_path="./examples/sample_workflow/___convo_info/-694349230.db"
-        #     count=get_count(cache_path)
-        #     command_prev=read_utterance(cache_path,count-1)
-        #     command=f"@nwim:{command_prev}"
-        #     cnp_workflow_session_id, command_output = guess_command_name(
-        #         workflow_session=workflow_session,
-        #         command=command,
-        #     )
-            #return command_output
-
         current_session_id = fastworkflow.WorkflowSession.get_active_session_id()
         if current_session_id == cnp_workflow_session_id:
             return command_output
@@ -73,31 +40,11 @@ class CommandRouter(CommandRouterInterface):
         command_name = command_output.command_responses[0].artifacts["command_name"]
         command = command_output.command_responses[0].artifacts["command"]
         command_executor = CommandExecutor()
-        try:
-            result = command_executor.invoke_command(
-                workflow_session,
-                command_name,
-                command
-            )
-            return result
-        except ValueError as e:
-            error_msg = str(e)
-            if "Command '" in error_msg and CMD_NOT_FOUND_ERRMSG in error_msg:
-                workflow_folderpath = workflow_session.session.workflow_snapshot.workflow.workflow_folderpath
-                command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(workflow_folderpath)
-                workitem_path = workflow_session.session.workflow_snapshot.active_workitem.path
-                
-                try:
-                    if "*" in command_routing_definition.get_command_names(workitem_path):
-                        return command_executor.invoke_command(
-                            workflow_session,
-                            "*",  
-                            command
-                        )
-                except Exception as inner_e:
-                    print(f"Failed: {inner_e}")
-                    
-            raise
+        return command_executor.invoke_command(
+            workflow_session,
+            command_name, 
+            command
+        )
 
 def _was_command_name_misunderstood(
     session: fastworkflow.Session,
