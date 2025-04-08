@@ -6,6 +6,8 @@ from fastworkflow.command_interfaces import CommandRouterInterface
 from fastworkflow.command_executor import CommandExecutor
 from speedict import Rdict
 
+CMD_NOT_FOUND_ERRMSG=fastworkflow.get_env_var("CMD_NOT_FOUND_ERRMSG")
+
 def get_count(cache_path):
        
         db = Rdict(cache_path)
@@ -71,11 +73,31 @@ class CommandRouter(CommandRouterInterface):
         command_name = command_output.command_responses[0].artifacts["command_name"]
         command = command_output.command_responses[0].artifacts["command"]
         command_executor = CommandExecutor()
-        return command_executor.invoke_command(
-            workflow_session,
-            command_name, 
-            command
-        )
+        try:
+            result = command_executor.invoke_command(
+                workflow_session,
+                command_name,
+                command
+            )
+            return result
+        except ValueError as e:
+            error_msg = str(e)
+            if "Command '" in error_msg and CMD_NOT_FOUND_ERRMSG in error_msg:
+                workflow_folderpath = workflow_session.session.workflow_snapshot.workflow.workflow_folderpath
+                command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(workflow_folderpath)
+                workitem_path = workflow_session.session.workflow_snapshot.active_workitem.path
+                
+                try:
+                    if "*" in command_routing_definition.get_command_names(workitem_path):
+                        return command_executor.invoke_command(
+                            workflow_session,
+                            "*",  
+                            command
+                        )
+                except Exception as inner_e:
+                    print(f"Failed: {inner_e}")
+                    
+            raise
 
 def _was_command_name_misunderstood(
     session: fastworkflow.Session,
