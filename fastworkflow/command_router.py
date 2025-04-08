@@ -5,6 +5,7 @@ from fastworkflow.command_name_prediction import guess_command_name
 from fastworkflow.command_interfaces import CommandRouterInterface
 from fastworkflow.command_executor import CommandExecutor
 
+
 class CommandRouter(CommandRouterInterface):
     def route_command(
         self,
