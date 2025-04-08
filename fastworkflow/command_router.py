@@ -4,7 +4,25 @@ import fastworkflow
 from fastworkflow.command_name_prediction import guess_command_name
 from fastworkflow.command_interfaces import CommandRouterInterface
 from fastworkflow.command_executor import CommandExecutor
+from speedict import Rdict
 
+def get_count(cache_path):
+       
+        db = Rdict(cache_path)
+        try:
+            return db.get("utterance_count")
+        finally:
+            db.close()
+
+def read_utterance(cache_path, utterance_id):
+        """
+        Read a specific utterance from the database
+        """
+        db = Rdict(cache_path)
+        try:
+            return db.get(utterance_id)['utterance']
+        finally:
+            db.close()
 
 class CommandRouter(CommandRouterInterface):
     def route_command(
@@ -21,6 +39,18 @@ class CommandRouter(CommandRouterInterface):
             workflow_session=workflow_session,
             command=command,
         )
+        
+        # if command_output.not_what_i_meant:
+        #     cache_path="./examples/sample_workflow/___convo_info/-694349230.db"
+        #     count=get_count(cache_path)
+        #     command_prev=read_utterance(cache_path,count-1)
+        #     command=f"@nwim:{command_prev}"
+        #     cnp_workflow_session_id, command_output = guess_command_name(
+        #         workflow_session=workflow_session,
+        #         command=command,
+        #     )
+            #return command_output
+
         current_session_id = fastworkflow.WorkflowSession.get_active_session_id()
         if current_session_id == cnp_workflow_session_id:
             return command_output
