@@ -1,11 +1,14 @@
 import argparse
 import os
+import json
 from dotenv import dotenv_values
 
 from colorama import Fore, Style
-
+from fastworkflow.utils import python_utils
 import fastworkflow
-from fastworkflow.model_pipeline_training import train
+from fastworkflow.command_routing_definition import ModuleType
+from fastworkflow.model_pipeline_training import train,get_route_layer_filepath_model
+from fastworkflow.utils.generate_param_examples import generate_dspy_examples
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -49,8 +52,91 @@ if __name__ == "__main__":
             for_training_semantic_router=True
         )
 
-        train(session)
+        def get_commands_with_parameters(json_path):
+            """
+            Parse command_directory.json file and create a mapping between command names 
+            and their parameter extraction signature module paths for commands that have
+            a non-null command_parameters_class.
+            
+            Args:
+                json_path: Path to the command_directory.json file
+                
+            Returns:
+                dict: Dictionary mapping command names to parameter_extraction_signature_module_path
+            """
+            # Load the JSON file
+            with open(json_path, 'r') as f:
+                command_directory = json.load(f)
+            
+            # Extract the command metadata
+            commands_metadata = command_directory.get("map_commandkey_2_metadata", {})
+            
+            # Initialize result dictionary
+            commands_with_parameters = {}
+            
+            # Iterate through each command entry
+            for command_key, metadata in commands_metadata.items():
+                # Check if command_parameters_class is not null
+                if metadata.get("command_parameters_class") is not None:
+                    # Extract command name (last part after the slash)
+                    command_name = command_key.split("/")[-1]
+                    
+                    # Get the parameter extraction module path
+                    param_extraction_path = metadata.get("parameter_extraction_signature_module_path")
+                    
+                    # Add to result dictionary
+                    commands_with_parameters[command_name] = {
+                        "parameter_path": param_extraction_path,
+                        "full_command_key": command_key,
+                        "parameters_class": metadata.get("command_parameters_class"),
+                        "input_class": metadata.get("input_for_param_extraction_class")
+                    }
+            
+            return commands_with_parameters
+        
+        workflow_folderpath = session.workflow_snapshot.workflow.workflow_folderpath
+        json_path=get_route_layer_filepath_model(workflow_folderpath,"command_directory.json")
+        # json_path = "./examples/sample_workflow/___command_info/command_directory.json"
+        commands = get_commands_with_parameters(json_path)
+        for command_name in commands.keys():
+            command_metadata = commands[command_name]
+            module_file_path = command_metadata["parameter_path"]
+            module_class_name = command_metadata["parameters_class"]
+            
 
+            # Import the module dynamically
+            module = python_utils.get_module(module_file_path, workflow_path)
+            if module:
+                fields=getattr(module, module_class_name)
+
+                examples, rejected_examples = generate_dspy_examples(
+                field_annotations=fields.model_fields,
+                command_name=command_name,
+                num_examples=15,
+                validation_threshold=0.3  # You can adjust this threshold as needed
+                )
+                output_dir = os.path.join(workflow_path, "___command_info")
+                os.makedirs(output_dir, exist_ok=True)
+                
+                # Format the examples for JSON
+                examples_data = {
+                    "command_name": command_name,
+                    "valid_examples": examples,
+                    "rejected_examples": rejected_examples
+                }
+                
+                # Save to JSON file
+                output_file = os.path.join(output_dir, f"{command_name}_param_labeled.json")
+                with open(output_file, 'w') as f:
+                    json.dump(examples_data, f, indent=2)
+                
+                print(f"{Fore.GREEN}Saved {len(examples)} examples for command '{command_name}' to {output_file}{Style.RESET_ALL}")
+                
+            else:
+                None
+        
+        train(session)
+        
         session.close()
 
     train_workflow(args.workflow_folderpath)
