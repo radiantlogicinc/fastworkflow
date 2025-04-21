@@ -10,6 +10,10 @@ import re
 import inspect
 from difflib import get_close_matches
 from fastworkflow.utils.pydantic_model_2_dspy_signature_class import TypedPredictorSignature
+from dspy.teleprompt import LabeledFewShot
+import json
+from fastworkflow.utils.logging import logger
+from fastworkflow.model_pipeline_training import train,get_route_layer_filepath_model
 
 MISSING_INFORMATION_ERRMSG = fastworkflow.get_env_var("MISSING_INFORMATION_ERRMSG")
 INVALID_INFORMATION_ERRMSG = fastworkflow.get_env_var("INVALID_INFORMATION_ERRMSG")
@@ -20,6 +24,36 @@ LLM = fastworkflow.get_env_var("LLM")
 
 DATABASES = {
 }
+
+
+def get_trainset(subject_command_name,workflow_folderpath) -> List[Dict[str, Any]]:
+        """Load labeled trainset from the command specific JSON file for LabeledFewShot"""
+
+        trainset = []
+
+        if not subject_command_name:
+            return trainset
+        
+        try:
+            trainset_file = f"{subject_command_name}_param_labeled.json"
+            trainset_path=get_route_layer_filepath_model(workflow_folderpath,trainset_file)
+            
+            if os.path.exists(trainset_path):
+                with open(trainset_path, "r") as f:
+                    trainset_data = json.load(f)
+
+                if 'valid_examples' in trainset_data:
+                    for example_str in trainset_data['valid_examples']:
+                        try:
+                            example = eval(example_str, {'dspy': dspy})
+                            trainset.append(example)
+                        except Exception as e:
+                            logger.warning(f"Failed to parse example {example_str}: {e}")                    
+            
+        except Exception as e:
+            logger.warning(f"Error loading trainset for {subject_command_name}: {e}")
+            
+        return trainset
 
 
 class DatabaseValidator:
@@ -101,7 +135,7 @@ Today's date is {today}.
         """
         signature_components = {}
         
-        signature_components["query"] = (str, dspy.InputField(desc="User's request"))
+        signature_components["command"] = (str, dspy.InputField(desc="User's request"))
         
         steps = ["query: The original user query (Always include this)."]
         field_num = 1
@@ -160,7 +194,7 @@ Today's date is {today}.
         return dspy.Signature(signature_components, instructions)
 
     
-    def extract_parameters(self, CommandParameters: Type[BaseModel] = None):
+    def extract_parameters(self, CommandParameters: Type[BaseModel] = None, subject_command_name: str = None, workflow_folderpath: str = None) -> BaseModel:
         """
         Extract parameters from the command using DSPy.
         
@@ -168,28 +202,42 @@ Today's date is {today}.
             The extracted parameters
         """
         lm = dspy.LM(LLM)
-
+        
         model_class = CommandParameters 
-
         if model_class is None:
             raise ValueError("No model class provided")
-            
+        
+        params_signature = self.create_signature_from_pydantic_model(model_class)
+        
+        class ParamExtractor(dspy.Module):
+            def __init__(self, signature):
+                super().__init__()
+                self.predictor = dspy.ChainOfThought(signature)
+                
+            def forward(self, command=None):
+                return self.predictor(command=command)
+        
+        param_extractor = ParamExtractor(params_signature)
+        
+        trainset = get_trainset(subject_command_name,workflow_folderpath)
+        length = len(trainset)
+        
         with dspy.context(lm=lm, adapter=dspy.JSONAdapter()):
-            params_signature = self.create_signature_from_pydantic_model(
-                model_class
+            optimizer = dspy.LabeledFewShot(k=length)
+            compiled_model = optimizer.compile(
+                student=param_extractor,
+                trainset=trainset
             )
-            module = dspy.ChainOfThought(params_signature)
-            dspy_result = module(query=self.command)
             
+            dspy_result = compiled_model(command=self.command)
+        
         field_names = list(model_class.model_fields.keys())
-            
         param_dict = {}
         for field_name in field_names:
             default = model_class.model_fields[field_name].default
             param_dict[field_name] = getattr(dspy_result, field_name, default)
-                
-        params = model_class(**param_dict)
             
+        params = model_class(**param_dict)
         return params
     
     @classmethod
