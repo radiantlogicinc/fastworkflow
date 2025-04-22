@@ -21,6 +21,7 @@ INVALID_INFORMATION_ERRMSG = fastworkflow.get_env_var("INVALID_INFORMATION_ERRMS
 NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
 
 LLM = fastworkflow.get_env_var("LLM")
+LITELLM_API_KEY = fastworkflow.get_env_var("LITELLM_API_KEY")
 
 DATABASES = {
 }
@@ -43,12 +44,13 @@ def get_trainset(subject_command_name,workflow_folderpath) -> List[Dict[str, Any
                     trainset_data = json.load(f)
 
                 if 'valid_examples' in trainset_data:
-                    for example_str in trainset_data['valid_examples']:
+                    for example_dict in trainset_data['valid_examples']:
                         try:
-                            example = eval(example_str, {'dspy': dspy})
+                            example = dspy.Example(**example_dict["fields"])
+                            example = example.with_inputs(*example_dict["inputs"])
                             trainset.append(example)
                         except Exception as e:
-                            logger.warning(f"Failed to parse example {example_str}: {e}")                    
+                            logger.warning(f"Failed to parse example {example_dict}: {e}")                    
             
         except Exception as e:
             logger.warning(f"Error loading trainset for {subject_command_name}: {e}")
@@ -201,7 +203,7 @@ Today's date is {today}.
         Returns:
             The extracted parameters
         """
-        lm = dspy.LM(LLM)
+        lm = dspy.LM(LLM, api_key=LITELLM_API_KEY)
         
         model_class = CommandParameters 
         if model_class is None:
