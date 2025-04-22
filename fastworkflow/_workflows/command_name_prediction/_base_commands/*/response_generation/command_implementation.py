@@ -99,7 +99,7 @@ def process_command(
 
     convo_path = os.path.join(sws_workflow_folderpath, "___convo_info")
     valid_command_names = get_valid_command_names(sws)
-    
+
     # Check if the entire command is a valid command name
     normalized_command = command.replace(" ", "_").lower()
     command_name = next(
@@ -110,14 +110,14 @@ def process_command(
         ),
         None,
     )
-    
+
     def get_count(cache_path):
         db = Rdict(cache_path)
         try:
             return db.get("utterance_count")
         finally:
             db.close()
-    
+
     def print_db_contents(cache_path):
         db = Rdict(cache_path)
         try:
@@ -134,25 +134,25 @@ def process_command(
         """
         # Open the database (creates if doesn't exist)
         db = Rdict(cache_path)
-        
+
         try:
             # Get existing counter or initialize to 0
             utterance_count = db.get("utterance_count", 0)
-            
+
             # Create and store the utterance entry
             utterance_data = {
                 "utterance": utterance,
                 "label": label
             }
-            
+
             db[utterance_count] = utterance_data
-            
+
             # Increment and store the counter
             utterance_count += 1
             db["utterance_count"] = utterance_count
-            
+
             return utterance_count - 1  # Return the count used for this utterance
-        
+
         finally:
             # Always close the database
             db.close()
@@ -168,11 +168,11 @@ def process_command(
         finally:
             db.close()
 
-    
+
     cache_path = get_cache_path(sws_session_id, convo_path)
     tiny_path = get_route_layer_filepath(sws_workflow_folderpath, "tinymodel.pth")
     large_path = get_route_layer_filepath(sws_workflow_folderpath, "largemodel.pth")
-    
+
     threshold_path = get_route_layer_filepath(sws_workflow_folderpath, "threshold.json")
     ambiguous_threshold_path = get_route_layer_filepath(sws_workflow_folderpath, "ambiguous_threshold.json")
     with open(threshold_path, 'r') as f:
@@ -182,25 +182,30 @@ def process_command(
     with open(ambiguous_threshold_path, 'r') as f:
         data = json.load(f)
         ambiguos_confidence_threshold = data['confidence_threshold']
-    
+
     modelpipeline = fastworkflow.modelpipelineregistry(
         tiny_model_path=tiny_path,
         distil_model_path=large_path,
         confidence_threshold=confidence_threshold       
     )
-    
+
     path = get_cache_path_cache(convo_path)
     flag = get_flag(path)
 
     # Check if we're in constrained mode (flag != 0)
-    if flag != 0 and flag != None:
+    if flag not in [0, None]:
         flag_type = get_flag_type(path)
-        
+
         # Special cases: allow abort or "None of these" without @ prefix
         if command.lower() == "abort" or normalized_command == "abort":
             command_name = "abort"
             change_flag(path, 0)  # Reset flag
-        elif command.lower() in ["none of these", "none of the above", "neither", "none"]:
+        elif command.lower() in {
+            "none of these",
+            "none of the above",
+            "neither",
+            "none",
+        }:
             # User wants to see all options instead of the top 3
             error_msg = formulate_misclassified_command_error_message(valid_command_names)
             # Set flag to 2 because user is indicating none of the suggestions match
@@ -210,23 +215,23 @@ def process_command(
         else:
             # Only accept commands prefixed with @ that match the suggested commands
             suggested_commands = get_suggested_commands(path)
-            
+
             # Create appropriate message based on flag type
             message_prefix = "The command is ambiguous" if flag_type == 1 else "The previous command was misclassified"
-            
+
             if "@" in command:
                 # Extract everything after @ until the next @ or end of string
                 full_command_text = command.split("@", 1)[1]
                 after_at = full_command_text.split("@", 1)[0] if "@" in full_command_text else full_command_text
                 after_at = after_at.strip()
-                
+
                 # Get the first part for reference (still needed for command parts)
                 tentative_command_name = after_at.split()[0] if " " in after_at else after_at
-                
+
                 # Try different matching strategies in order of strictness
             valid_choice = False
             matched_command = None
-    
+
             # Use Levenshtein distance for fuzzy matching with the full command part after @
             matched_command, distance = find_best_match(
                 command, 
@@ -234,7 +239,7 @@ def process_command(
                 threshold=0.3  # Adjust threshold as needed
             )
             valid_choice = matched_command is not None
-            
+
             if valid_choice:
                 command_name = matched_command
                 # Remove the entire @command part from the input
@@ -245,14 +250,14 @@ def process_command(
                 error_msg += "\n".join(f"@{name}" for name in suggested_commands)
                 error_msg += "\n\nor type 'None of these' to see all commands\nor type 'abort' to cancel"
                 return OutputOfProcessCommand(error_msg=error_msg)
-           
-            
+
+
             # Process the selected command
             count = get_count(cache_path)
             utterance = read_utterance(cache_path, count-1)
             store_utterance_cache(path, utterance, command_name, modelpipeline)  
             change_flag(path, 0)  # Reset flag
-            
+
             # If user selects None_of_these in constrained mode, show all valid commands
             if command_name == "None_of_these":
                 error_msg = formulate_misclassified_command_error_message(valid_command_names)
@@ -262,7 +267,7 @@ def process_command(
                 return OutputOfProcessCommand(error_msg=error_msg)
     else:
         # Normal flow (not in constrained mode)
-        
+
         # If user explicitly selects None_of_these, treat as misclassification
         if command_name == "None_of_these":
             error_msg = formulate_misclassified_command_error_message(valid_command_names)
@@ -270,7 +275,7 @@ def process_command(
             store_suggested_commands(path, valid_command_names, 2)
             change_flag(path, 2)
             return OutputOfProcessCommand(error_msg=error_msg)
-            
+
         if not command_name and "@" in command:
             tentative_command_name = command.split("@")[1].split()[0]
             normalized_command_name = tentative_command_name.lower()
@@ -302,7 +307,7 @@ def process_command(
                 # If no cache match, use the model to predict
                 results = predict_single_sentence(modelpipeline, command, sws_workflow_folderpath)
                 command_name = results['label']
-                
+
                 # If confidence is low, treat as ambiguous command (type 1)
                 if results['confidence'] < ambiguos_confidence_threshold:
                     error_msg = formulate_ambiguous_command_error_message(results["topk_labels"])
@@ -311,7 +316,7 @@ def process_command(
                     store_suggested_commands(path, results["topk_labels"], 1)
                     change_flag(path, 1)
                     return OutputOfProcessCommand(error_msg=error_msg)
-                
+
                 # If model prediction is None_of_these, present all commands as options
                 if command_name == "None_of_these":
                     error_msg = formulate_misclassified_command_error_message(valid_command_names)
@@ -334,14 +339,14 @@ def process_command(
                 utterance = read_utterance(cache_path, count-1)
                 store_utterance_cache(path, utterance, command_name, modelpipeline)  
                 change_flag(path, 0)         
-    
+
     # Store the final command and classification
     if command_name != "None_of_these":
         count = store_utterance(cache_path, command, command_name)
 
     command_parameters = CommandParameters(command_name=command_name)
     is_valid, error_msg = validate_command_name(valid_command_names, command_parameters)
-    
+
     # If validation fails, set flag to 2 (misclassified)
     if not is_valid:
         store_suggested_commands(path, valid_command_names, 2)
