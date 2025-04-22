@@ -71,7 +71,9 @@ def process_command(
     new_params = extract_command_parameters_from_input(
         input_for_param_extraction, 
         command_parameters_class,
-        stored_missing_fields 
+        stored_missing_fields,
+        subject_command_name,
+        subject_workflow_folderpath 
     )
 
     if stored_params:
@@ -203,7 +205,9 @@ def format_parameters_for_display(params):
 def extract_command_parameters_from_input(
     input_for_param_extraction: BaseModel,
     command_parameters_class: Type[BaseModel],
-    missing_fields: list = None
+    missing_fields: list = None,
+    subject_command_name: str = None,
+    subject_workflow_folderpath: str = None,
 ) -> BaseModel:
     """
     Extract command parameters from user input.
@@ -238,7 +242,7 @@ def extract_command_parameters_from_input(
 
         if hasattr(input_for_param_extraction, 'extract_parameters'):
             try:
-                return input_for_param_extraction.extract_parameters(command_parameters_class)
+                return input_for_param_extraction.extract_parameters(command_parameters_class, subject_command_name, subject_workflow_folderpath)
             except Exception as inner_e:
                 logger.error(PARAMETER_EXTRACTION_ERROR_MSG.format(error=inner_e))
 
