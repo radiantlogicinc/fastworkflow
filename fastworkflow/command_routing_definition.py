@@ -225,19 +225,19 @@ class CommandRoutingDefinition(BaseModel):
         # if '/fastworkflow' in fastworkflow_folder:
         #             fastworkflow_folder="./fastworkflow"
         #############################################################
-        commandname_prediction_workflow_folderpath = os.path.join(
-            fastworkflow_folder, "_workflows", "command_name_prediction"
-        )
-        cls._populate_command_key_map(
-            parent_workitem_path,
-            commandname_prediction_workflow_folderpath,
-            command_directory,
-            map_workitem_paths_2_commandkeymap,
-            workitem_path,
-            CommandSource.BASE_COMMANDS,
-        )
 
-
+        #############################################################
+        # commandname_prediction_workflow_folderpath = os.path.join(
+        #     fastworkflow_folder, "_workflows", "command_name_prediction"
+        # )
+        # cls._populate_command_key_map(
+        #     parent_workitem_path,
+        #     commandname_prediction_workflow_folderpath,
+        #     command_directory,
+        #     map_workitem_paths_2_commandkeymap,
+        #     workitem_path,
+        #     CommandSource.BASE_COMMANDS,
+        # )
 
         # read the _base_commands folder if it exists
         cls._populate_command_key_map(

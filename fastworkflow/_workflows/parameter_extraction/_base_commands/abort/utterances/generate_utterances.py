@@ -1,7 +1,7 @@
 import fastworkflow
 from fastworkflow.workflow import Workflow
 from fastworkflow.utils.parameterize_func_decorator import parameterize
-
+from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 
 @parameterize(command_name=["abort"])
 def generate_utterances(session: fastworkflow.Session, command_name: str) -> list[str]:
@@ -11,5 +11,4 @@ def generate_utterances(session: fastworkflow.Session, command_name: str) -> lis
         workflow.path, command_name
     )
 
-    utterance_list: list[str] = [command_name] + utterances_obj.plain_utterances
-    return utterance_list
+    return generate_diverse_utterances(utterances_obj.plain_utterances, command_name)

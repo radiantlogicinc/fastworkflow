@@ -17,7 +17,8 @@ class ResponseGenerator:
         output = process_command(session, command_parameters)
 
         LLM = fastworkflow.get_env_var("LLM")
-        lm = dspy.LM(LLM)
+        LITELLM_API_KEY = fastworkflow.get_env_var("LITELLM_API_KEY")
+        lm = dspy.LM(LLM, api_key=LITELLM_API_KEY)
         answer_generator = ResponseGenerator.BasicQA(lm)
 
         with DSPyRotatingFileLogger("inference_log.jsonl"):

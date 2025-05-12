@@ -3,7 +3,8 @@ from typing import Optional
 from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification, AdamW
 from sklearn.decomposition import PCA
 from sklearn.metrics import f1_score
-import torch
+import torch 
+# from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 import numpy as np
@@ -32,7 +33,7 @@ def load_label_encoder(filepath):
         label_encoder = pickle.load(f)
 
 
-def find_optimal_confidence_threshold(model, test_loader, device, min_threshold=0.5129, max_top3_usage=0.3, step_size=0.01):
+def find_optimal_confidence_threshold(model, test_loader, device, min_threshold=0.5129, max_top3_usage=0.3, step_size=0.01, k_val=3):
     """
     Find optimal confidence threshold above the escalation threshold while limiting top@3 usage.
     
@@ -94,7 +95,7 @@ def find_optimal_confidence_threshold(model, test_loader, device, min_threshold=
                 logits = outputs.logits
                 probs = torch.softmax(logits, dim=1)
                 
-                top_probs, top_preds = torch.topk(probs, k=3, dim=1)
+                top_probs, top_preds = torch.topk(probs, k=k_val, dim=1) #TODO remove the hardcode k value set it based on len of y
                 max_confidences = top_probs[:, 0]
                 
                 batch_size = labels.size(0)
@@ -293,7 +294,8 @@ class ModelPipeline:
     def predict_batch(
         self,
         texts: List[str],
-        batch_size: int = 32
+        batch_size: int = 32,
+        k_val: int = 2
     ) -> Dict:
         all_predictions = []
         all_confidences = []
@@ -301,7 +303,7 @@ class ModelPipeline:
         all_top_k_scores = []      # Store top k confidence scores for each sample
         all_logits = []
         all_used_distil = []
-        k = 3  # For NDCG@3
+        k=k_val
 
         for i in range(0, len(texts), batch_size):
             batch_texts = texts[i:i + batch_size]
@@ -452,13 +454,20 @@ def predict_single_sentence(
     if not text.strip():
         raise ValueError("Input text cannot be empty")
 
-    # Make prediction using the pipeline's batch prediction method
-    results = pipeline.predict_batch([text])
-    # Get the numeric prediction
-    numeric_prediction = results["predictions"][0]
+    
     global label_encoder
     path=get_route_layer_filepath2(path)
     load_label_encoder(path)
+    k_val=len(label_encoder.classes_)
+    if k_val>2:
+        k_val=3
+    else:
+        k_val=2
+
+    # Make prediction using the pipeline's batch prediction method
+    results = pipeline.predict_batch([text],k_val=k_val)
+    # Get the numeric prediction
+    numeric_prediction = results["predictions"][0]
 
     label_names = label_encoder.inverse_transform(results['top_k_predictions'][0])
     
@@ -519,7 +528,7 @@ def save_model(model,tokenizer, save_path):
     print(f"Model and tokenizer saved to {save_path}")
 
 
-def evaluate_model(model, data_loader, device):
+def evaluate_model(model, data_loader, device, k_val):
     model.eval()
     all_preds = []
     all_labels = []
@@ -538,7 +547,7 @@ def evaluate_model(model, data_loader, device):
             total_loss += loss.item()
 
             preds = torch.argmax(outputs.logits, dim=1)
-            ndcg = calculate_ndcg_at_k(outputs.logits, labels, k=3)
+            ndcg = calculate_ndcg_at_k(outputs.logits, labels, k=k_val) # TODO this should be min of 3
             total_ndcg += ndcg
             num_batches += 1
 
@@ -587,10 +596,44 @@ def train(session: fastworkflow.Session):
             list(zip(utterance_list, [command_name] * len(utterance_list)))
         )
 
-        # unpack the test data and train data
-        X, y = zip(*utterance_command_tuples)
-        num= len(set(y))
+    ###########################################################################
+    # This was added just to add None_of_these command to the existing command utterance tuple
+    if not "fastworkflow" in workflow_folderpath:
+        workflow_path="./fastworkflow/_workflows/command_name_prediction"
+        session = fastworkflow.Session.create(
+            workflow_path, 
+            session_id_str=f"train_{workflow_path}", 
+            for_training_semantic_router=True
+        )
+        command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(
+            workflow_path
+        )
 
+        cmddir = command_routing_definition.command_directory
+        for command_key in cmddir.get_utterance_keys():
+            utterance_metadata = cmddir.get_utterance_metadata(command_key)
+            utterances_func = utterance_metadata.get_generated_utterances_func(
+                    workflow_folderpath
+                )
+            command_name = cmddir.get_command_name(command_key)
+
+            if command_name!="None_of_these":
+                continue
+
+            utterance_list = utterances_func(session)
+            utterance_command_tuples.extend(
+                list(zip(utterance_list, [command_name] * len(utterance_list)))
+            )
+    ###################################################################
+
+
+    # unpack the test data and train data
+    X, y = zip(*utterance_command_tuples)
+    num= len(set(y))
+    if num>2:
+        k_val=3
+    else:
+        k_val=2
 
     model_name = "prajjwal1/bert-tiny"
     print(f"\nLoading {model_name}...")
@@ -682,7 +725,7 @@ def train(session: fastworkflow.Session):
         training_losses.append(avg_train_loss)  # Append training loss for the epoch
 
         # Evaluate after each epoch
-        f1, ndcg, avg_test_loss = evaluate_model(tiny_model, test_loader, device)
+        f1, ndcg, avg_test_loss = evaluate_model(tiny_model, test_loader, device, k_val)
         test_losses.append(avg_test_loss)
         epoch_time = time() - epoch_start_time
         print(f"Epoch {epoch + 1} Results:")
@@ -723,7 +766,7 @@ def train(session: fastworkflow.Session):
             progress_bar.set_postfix({'loss': total_loss / (batch_idx + 1)})
 
         # Evaluate after each epoch
-        f1, ndcg,avg_loss= evaluate_model(large_model, test_loader, device)
+        f1, ndcg,avg_loss= evaluate_model(large_model, test_loader, device, k_val)
         print(f"Epoch {epoch + 1} Results:")
         print(f"F1 Score: {f1:.4f}")
         print(f"NDCG@3: {ndcg:.4f}")
@@ -791,20 +834,22 @@ def train(session: fastworkflow.Session):
         test_loader, 
         device,
         min_threshold=pipeline.confidence_threshold,
-        max_top3_usage=0.3
+        max_top3_usage=0.3,
+        k_val=k_val
     )
+    ambiguous_threshold = optimal_threshold or 0.0
 
-    ambiguous_threshold = optimal_threshold
     model_switch_path=get_route_layer_filepath_model(workflow_folderpath,"ambiguous_threshold.json")
     with open(model_switch_path, 'w') as f:
         json.dump({'confidence_threshold': ambiguous_threshold}, f)
     
-    print("\nOptimal Threshold Results:")
-    print(f"Threshold: {best_metrics['threshold']:.3f}")
-    print(f"F1 Score: {best_metrics['f1_score']:.3f}")
-    print(f"Top-3 Usage: {best_metrics['top3_usage']:.3f}")
-    print(f"Top-1 Accuracy: {best_metrics['top1_accuracy']:.3f}")
-    print(f"Top-3 Accuracy: {best_metrics['top3_accuracy']:.3f}")
+    if ambiguous_threshold > 0.0:
+        print("\nOptimal Threshold Results:")
+        print(f"Threshold: {best_metrics['threshold']:.3f}")
+        print(f"F1 Score: {best_metrics['f1_score']:.3f}")
+        print(f"Top-3 Usage: {best_metrics['top3_usage']:.3f}")
+        print(f"Top-1 Accuracy: {best_metrics['top1_accuracy']:.3f}")
+        print(f"Top-3 Accuracy: {best_metrics['top3_accuracy']:.3f}")
 
     text = "list commands"
     try:

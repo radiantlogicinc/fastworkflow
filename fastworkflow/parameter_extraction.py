@@ -34,19 +34,10 @@ def extract_command_parameters(
         fastworkflow_folder, "_workflows", "parameter_extraction"
     )
 
-    sws_workflow_snapshot=workflow_session.session.workflow_snapshot
-    if sws := workflow_session.session.workflow_snapshot.context.get("subject_workflow_snapshot"):
-        sws_workflow_snapshot = sws
-
     context = {
         "subject_command_name": command_name,
-        "subject_workflow_snapshot": sws_workflow_snapshot
+        "param_extraction_sws": workflow_session.session.workflow_snapshot
     }
-
-    # context = {
-    #     "subject_command_name": command_name,
-    #     "subject_workflow_snapshot": workflow_session.session.workflow_snapshot
-    # }
 
     pe_workflow_session = fastworkflow.WorkflowSession(
         workflow_session.command_router,

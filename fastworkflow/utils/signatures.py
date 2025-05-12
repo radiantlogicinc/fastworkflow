@@ -2,29 +2,29 @@ import dspy
 import os
 from typing import Annotated, Optional, Tuple, Union, Dict, Any, Type, List, get_args
 from enum import Enum
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, ConfigDict
 import fastworkflow
 from fastworkflow.session import WorkflowSnapshot
 from datetime import date
 import re
 import inspect
 from difflib import get_close_matches
+from fastworkflow.command_routing_definition import ModuleType
 from fastworkflow.utils.pydantic_model_2_dspy_signature_class import TypedPredictorSignature
 from dspy.teleprompt import LabeledFewShot
 import json
 from fastworkflow.utils.logging import logger
 from fastworkflow.model_pipeline_training import train,get_route_layer_filepath_model
+from fastworkflow.utils.fuzzy_match import find_best_match
 
 MISSING_INFORMATION_ERRMSG = fastworkflow.get_env_var("MISSING_INFORMATION_ERRMSG")
 INVALID_INFORMATION_ERRMSG = fastworkflow.get_env_var("INVALID_INFORMATION_ERRMSG")
-
+PARAMETER_EXTRACTION_ERROR_MSG = fastworkflow.get_env_var("PARAMETER_EXTRACTION_ERROR_MSG")
 NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
 
 LLM = fastworkflow.get_env_var("LLM")
 LITELLM_API_KEY = fastworkflow.get_env_var("LITELLM_API_KEY")
 
-DATABASES = {
-}
 
 
 def get_trainset(subject_command_name,workflow_folderpath) -> List[Dict[str, Any]]:
@@ -62,38 +62,40 @@ class DatabaseValidator:
     """Generic validator for database lookups with fuzzy matching"""
     
     @staticmethod
-    def fuzzy_match(value: str, database_key: str, threshold: float = 0.2) -> Tuple[bool, Optional[str], List[str]]:
+    def fuzzy_match(value: str, key_values: list[str], threshold: float = 0.2) -> Tuple[bool, Optional[str], List[str]]:
         """
         Find the closest matching value in the specified database.
         """
         if not value or value in [None, NOT_FOUND]:
             return False, None, []
+        
+        if not key_values:
+            return False, None, []     
+        
+        best_match,_=find_best_match(value, key_values,threshold=0.7)
+        if best_match:
+            return True, best_match, []
+        else:
+            normalized_value = value.lower()
             
-        database = DATABASES.get(database_key, [])
-        if not database:
-            return False, None, []
+            for value in key_values:
+                if normalized_value == value.lower():
+                    return True, value, []
             
+            matches = get_close_matches(normalized_value, 
+                                    [val.lower() for val in key_values], 
+                                    n=3, 
+                                    cutoff=threshold)
             
-        normalized_value = value.lower()
-        
-        for db_value in database:
-            if normalized_value == db_value.lower():
-                return True, db_value, []
-        
-        matches = get_close_matches(normalized_value, 
-                                   [db_val.lower() for db_val in database], 
-                                   n=3, 
-                                   cutoff=threshold)
-        
-        original_matches = []
-        for match_lower in matches:
-            for db_val in database:
-                if db_val.lower() == match_lower:
-                    original_matches.append(db_val)
-                    break
-        
-        if original_matches:
-            return False, None, original_matches
+            original_matches = []
+            for match_lower in matches:
+                for value in key_values:
+                    if value.lower() == match_lower:
+                        original_matches.append(value)
+                        break
+            
+            if original_matches:
+                return False, None, original_matches
         
         return False, None, []
 
@@ -103,6 +105,8 @@ class InputForParamExtraction(BaseModel):
 Today's date is {today}.
 """  
     command: str
+    input_for_param_extraction: Optional[Any] = None
+    model_config = ConfigDict(arbitrary_types_allowed=True)
     
     @classmethod
     def create(cls, workflow_snapshot: WorkflowSnapshot, command: str):
@@ -113,13 +117,30 @@ Today's date is {today}.
             command: The user's request
         
         Returns:
-            An instance of InputForParamExtraction
+            An instance of InputForParamExtraction   
         """
+        if workflow_snapshot.context:
+            sws = workflow_snapshot.context["param_extraction_sws"]
+            subject_workflow_folderpath = sws.workflow.workflow_folderpath
+            subject_command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(subject_workflow_folderpath)
+            active_workitem_type = sws.active_workitem.path
+            subject_command_name =workflow_snapshot.context["subject_command_name"]
+
+            input_for_param_extraction_class = subject_command_routing_definition.get_command_class(
+                active_workitem_type, subject_command_name, ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS)
+            if input_for_param_extraction_class:
+                input_for_param_extraction = input_for_param_extraction_class.create(sws, command)
+            else:
+                input_for_param_extraction = None
+        else:
+                input_for_param_extraction = None
+        
         today=date.today()
         cls.__doc__ = cls.__doc__.format(today=today)
         
         return cls(
             command=command,
+            input_for_param_extraction=input_for_param_extraction
         )
     
     @staticmethod
@@ -203,7 +224,7 @@ Today's date is {today}.
         Returns:
             The extracted parameters
         """
-        lm = dspy.LM(LLM, api_key=LITELLM_API_KEY)
+        lm = dspy.LM(LLM,api_key=LITELLM_API_KEY)
         
         model_class = CommandParameters 
         if model_class is None:
@@ -223,27 +244,28 @@ Today's date is {today}.
         
         trainset = get_trainset(subject_command_name,workflow_folderpath)
         length = len(trainset)
-        
+
+        param_dict = {}
+        field_names = list(model_class.model_fields.keys())
         with dspy.context(lm=lm, adapter=dspy.JSONAdapter()):
             optimizer = dspy.LabeledFewShot(k=length)
             compiled_model = optimizer.compile(
                 student=param_extractor,
                 trainset=trainset
             )
-            
-            dspy_result = compiled_model(command=self.command)
-        
-        field_names = list(model_class.model_fields.keys())
-        param_dict = {}
-        for field_name in field_names:
-            default = model_class.model_fields[field_name].default
-            param_dict[field_name] = getattr(dspy_result, field_name, default)
-            
+
+            try:
+                dspy_result = compiled_model(command=self.command)
+                for field_name in field_names:
+                    default = model_class.model_fields[field_name].default
+                    param_dict[field_name] = getattr(dspy_result, field_name, default)
+            except Exception as exc:
+                logger.error(PARAMETER_EXTRACTION_ERROR_MSG.format(error=exc))
+                    
         params = model_class(**param_dict)
         return params
     
-    @classmethod
-    def validate_parameters(cls, workflow_snapshot: WorkflowSnapshot, cmd_parameters: BaseModel) -> Tuple[bool, str, Dict[str, List[str]]]:
+    def validate_parameters(self, workflow_snapshot: WorkflowSnapshot, cmd_parameters: BaseModel) -> Tuple[bool, str, Dict[str, List[str]]]:
         """
         Check if the parameters are valid in the current context, including database lookups.
         """
@@ -309,12 +331,15 @@ Today's date is {today}.
             if field_value in [NOT_FOUND, None]:
                 continue
                 
-            db_key = None
+            is_db_lookup = None
             if hasattr(field_info, "json_schema_extra") and field_info.json_schema_extra:
-                db_key = field_info.json_schema_extra.get("db_validation")
+                is_db_lookup = field_info.json_schema_extra.get("db_lookup")
             
-            if db_key in DATABASES:
-                matched, corrected_value, field_suggestions = DatabaseValidator.fuzzy_match(field_value, db_key)
+            if is_db_lookup:
+                if not self.input_for_param_extraction:
+                    raise ValueError("input_for_param_extraction is not set.")
+                key_values=self.input_for_param_extraction.db_lookup(field_name) 
+                matched, corrected_value, field_suggestions = DatabaseValidator.fuzzy_match(field_value, key_values)
                 
                 if matched:
                     setattr(cmd_parameters, field_name, corrected_value)
