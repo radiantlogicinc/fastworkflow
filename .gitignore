@@ -172,3 +172,4 @@ fastworkflow/_workflows/parameter_extraction/___command_info
 fastworkflow/_workflows/command_name_prediction/___command_info
 fastworkflow/_workflows/command_name_prediction/___command_info/command_directory.json
 fastworkflow/_workflows/command_name_prediction/___command_info/command_routing_definition.json
+fastworkflow/_workflows/parameter_extraction/___convo_info

@@ -47,8 +47,8 @@ class UtteranceDefinition(BaseModel):
         command_directory: CommandDirectory,
     ):
         for command_key in command_directory.get_command_keys():
-            if command_key.endswith("/*"):
-                continue
+            # if command_key.endswith("/*"):
+            #     continue
             
             command_metadata = command_directory.get_command_metadata(command_key)
             command_source = command_metadata.command_source

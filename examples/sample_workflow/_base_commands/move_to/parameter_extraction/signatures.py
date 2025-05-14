@@ -1,6 +1,6 @@
 from typing import Annotated, Optional, Tuple, Union
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, ConfigDict
 
 import fastworkflow
 from fastworkflow.session import WorkflowSnapshot
@@ -36,3 +36,34 @@ class CommandParameters(BaseModel):
             Field(description="The ID of the workitem", examples=["John Doe", "24"]),
         ]
     ] = None
+
+class InputForParamExtraction(BaseModel):
+    command: str
+    workflow_snapshot: WorkflowSnapshot
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @classmethod
+    def create(cls, workflow_snapshot: WorkflowSnapshot, command: str):
+        return cls(command=command, workflow_snapshot=workflow_snapshot)
+    
+    def db_lookup(self, _:str) -> list[str]: 
+        workflow_folderpath = self.workflow_snapshot.workflow.workflow_folderpath
+        workflow_definition = fastworkflow.WorkflowRegistry.get_definition(workflow_folderpath)
+
+        return workflow_definition.paths_2_typemetadata.keys()
+        
+
+
+    def validate_parameters(
+        self, cmd_parameters: CommandParameters
+    ) -> Tuple[bool, str]:
+        """
+        Check if the parameters are valid in the current context.
+        Parameter is a single field pydantic model.
+        Return a tuple with a boolean indicating success or failure.
+        And a message with suggested parameter values that are closest matches to the input.
+        """
+        if cmd_parameters.workitem_path == "NOT_FOUND":
+            cmd_parameters.workitem_path = self.workflow_snapshot.active_workitem.path
+
+        return (True, None)

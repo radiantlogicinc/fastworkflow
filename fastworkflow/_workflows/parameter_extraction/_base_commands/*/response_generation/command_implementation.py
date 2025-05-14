@@ -7,7 +7,7 @@ import dspy
 import fastworkflow
 from fastworkflow.command_routing_definition import ModuleType
 from fastworkflow.utils.logging import logger
-
+from fastworkflow.utils.signatures import InputForParamExtraction
 from fastworkflow.utils.pydantic_model_2_dspy_signature_class import (
     TypedPredictorSignature,
 )
@@ -17,8 +17,6 @@ INVALID_FLOAT_VALUE = fastworkflow.get_env_var("INVALID_FLOAT_VALUE")
 
 MISSING_INFORMATION_ERRMSG = fastworkflow.get_env_var("MISSING_INFORMATION_ERRMSG")
 INVALID_INFORMATION_ERRMSG = fastworkflow.get_env_var("INVALID_INFORMATION_ERRMSG")
-
-PARAMETER_EXTRACTION_ERROR_MSG = fastworkflow.get_env_var("PARAMETER_EXTRACTION_ERROR_MSG")
 
 NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
 INVALID = fastworkflow.get_env_var("INVALID")
@@ -47,20 +45,18 @@ class OutputOfProcessCommand(BaseModel):
 def process_command(
     session: fastworkflow.Session, command: str
 ) -> OutputOfProcessCommand:
-    sws = session.workflow_snapshot.context["subject_workflow_snapshot"]
+    sws = session.workflow_snapshot.context["param_extraction_sws"]
     subject_workflow_folderpath = sws.workflow.workflow_folderpath
     subject_command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(subject_workflow_folderpath)
     active_workitem_type = sws.active_workitem.path
     subject_command_name = session.workflow_snapshot.context["subject_command_name"]
-
-    input_for_param_extraction_class = subject_command_routing_definition.get_command_class(
-        active_workitem_type, subject_command_name, ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS)
+    
     command_parameters_class = subject_command_routing_definition.get_command_class(
         active_workitem_type, subject_command_name, ModuleType.COMMAND_PARAMETERS_CLASS)
 
-    input_for_param_extraction = input_for_param_extraction_class.create(sws, command)
+    input_for_param_extraction = InputForParamExtraction.create(session.workflow_snapshot,command)
 
-    session_id = session.id
+    # session_id = session.id
     stored_params = get_stored_parameters(session)
 
     if stored_params:
@@ -84,8 +80,11 @@ def process_command(
 
     store_parameters(session, merged_params) 
 
-    is_valid, error_msg, suggestions = input_for_param_extraction.validate_parameters(sws, merged_params)
+    is_valid, error_msg, suggestions = input_for_param_extraction.validate_parameters(sws,merged_params)
 
+    # if is_valid: check if the input for parameter extraction class is defined in the registary then call the validate function on the instance.
+
+    # if is_valid:
 
     if not is_valid:
         if params_str := format_parameters_for_display(merged_params):
@@ -147,7 +146,7 @@ def merge_parameters(old_params, new_params, missing_fields):
                 elif (field_name in missing_fields and 
                       hasattr(merged.model_fields.get(field_name), "json_schema_extra") and 
                       merged.model_fields.get(field_name).json_schema_extra and 
-                      "db_validation" in merged.model_fields.get(field_name).json_schema_extra):
+                      "db_lookup" in merged.model_fields.get(field_name).json_schema_extra):
                     setattr(merged, field_name, new_value)
 
                 elif field_name in missing_fields:
@@ -234,45 +233,14 @@ def extract_command_parameters_from_input(
 
     default_params = command_parameters_class(**default_params)
 
-    try:
-        command = input_for_param_extraction.command
+    
+    command = input_for_param_extraction.command
 
-        if missing_fields:
-            return apply_missing_fields(command, default_params, missing_fields)
+    if missing_fields:
+        return apply_missing_fields(command, default_params, missing_fields)
 
-        if hasattr(input_for_param_extraction, 'extract_parameters'):
-            try:
-                return input_for_param_extraction.extract_parameters(command_parameters_class, subject_command_name, subject_workflow_folderpath)
-            except Exception as inner_e:
-                logger.error(PARAMETER_EXTRACTION_ERROR_MSG.format(error=inner_e))
 
-        try:
-            dspy_signature_class = TypedPredictorSignature.create(
-                input_for_param_extraction,
-                command_parameters_class,
-                prefix_instructions=input_for_param_extraction.__doc__,
-            )
-            lm = dspy.LM(LLM, api_key=LITELLM_API_KEY)
-            with dspy.context(lm=lm):
-                extract_cmd_params = dspy.TypedChainOfThought(dspy_signature_class)
-                prediction = extract_cmd_params(**input_for_param_extraction.model_dump())
-
-                param_values = {
-                    field_name: (
-                        getattr(prediction, field_name)
-                        if hasattr(prediction, field_name)
-                        else getattr(default_params, field_name)
-                    )
-                    for field_name in command_parameters_class.model_fields
-                }
-                return command_parameters_class(**param_values)
-        except Exception as dspy_error:
-            logger.error(f"DSPy error: {dspy_error}")
-            return default_params
-
-    except Exception as e:
-        logger.error(PARAMETER_EXTRACTION_ERROR_MSG.format(error=e))
-        return default_params
+    return input_for_param_extraction.extract_parameters(command_parameters_class, subject_command_name, subject_workflow_folderpath) 
     
 def apply_missing_fields(command: str, default_params: BaseModel, missing_fields: list):
     params = default_params.model_copy()

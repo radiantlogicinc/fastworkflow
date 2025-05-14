@@ -7,8 +7,9 @@ from colorama import Fore, Style
 from fastworkflow.utils import python_utils
 import fastworkflow
 from fastworkflow.command_routing_definition import ModuleType
-from fastworkflow.model_pipeline_training import train,get_route_layer_filepath_model
+from fastworkflow.model_pipeline_training import train, get_route_layer_filepath_model
 from fastworkflow.utils.generate_param_examples import generate_dspy_examples
+from fastworkflow.param_workflow_training import param_train
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -51,6 +52,15 @@ if __name__ == "__main__":
             session_id_str=f"train_{workflow_path}", 
             for_training_semantic_router=True
         )
+
+        # workflow_path="./fastworkflow/_workflows/parameter_extraction"
+        # session = fastworkflow.Session.create(
+        #     workflow_path, 
+        #     session_id_str=f"train_{workflow_path}", 
+        #     for_training_semantic_router=True
+        # )
+
+        # param_train(session)
 
         def get_commands_with_parameters(json_path):
             """
@@ -130,13 +140,12 @@ if __name__ == "__main__":
                 with open(output_file, 'w') as f:
                     json.dump(examples_data, f, indent=2)
                 
-                print(f"{Fore.GREEN}Saved {len(examples)} examples for command '{command_name}' to {output_file}{Style.RESET_ALL}")
+                # print(f"{Fore.GREEN}Saved {len(examples)} examples for command '{command_name}' to {output_file}{Style.RESET_ALL}")
                 
             else:
                 None
         
         train(session)
-        
         session.close()
 
     train_workflow(args.workflow_folderpath)

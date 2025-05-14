@@ -93,7 +93,7 @@ def get_route_layer_filepath(workflow_folderpath, model_name) -> str:
 def process_command(
     session: fastworkflow.Session, command: str
 ) -> OutputOfProcessCommand:
-    sws = session.workflow_snapshot.context["subject_workflow_snapshot"]
+    sws = session.workflow_snapshot.context["intent_detection_sws"]
     sws_workflow_folderpath = sws.workflow.workflow_folderpath
     sws_session_id = sws.session_id
 
@@ -365,7 +365,7 @@ def get_valid_command_names(sws: WorkflowSnapshot) -> set[str]:
     valid_command_names |= set(sws_command_routing_definition.get_command_names(
         sws.active_workitem.path
     ))
-    valid_command_names.remove("*")
+    # valid_command_names.remove("*")
     return valid_command_names
 
 def validate_command_name(
