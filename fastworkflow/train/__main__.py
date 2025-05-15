@@ -9,7 +9,7 @@ import fastworkflow
 from fastworkflow.command_routing_definition import ModuleType
 from fastworkflow.model_pipeline_training import train, get_route_layer_filepath_model
 from fastworkflow.utils.generate_param_examples import generate_dspy_examples
-from fastworkflow.param_workflow_training import param_train
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
