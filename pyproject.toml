@@ -19,7 +19,7 @@ keywords = ["fastworkflow", "ai", "workflow", "llm", "openai"]
 [tool.poetry.dependencies]
 python = ">=3.11,<3.13"
 pydantic = "^2.9.2"
-dspy-ai = "^2.5.20"
+dspy-ai = "2.5.36"
 speedict = "^0.3.12"
 python-dotenv = "^1.0.1"
 scikit-learn = "^1.6.1"

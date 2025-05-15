@@ -82,10 +82,6 @@ def process_command(
 
     is_valid, error_msg, suggestions = input_for_param_extraction.validate_parameters(sws,merged_params)
 
-    # if is_valid: check if the input for parameter extraction class is defined in the registary then call the validate function on the instance.
-
-    # if is_valid:
-
     if not is_valid:
         if params_str := format_parameters_for_display(merged_params):
             error_msg = f"Extracted parameters so far:\n{params_str}\n\n{error_msg}"

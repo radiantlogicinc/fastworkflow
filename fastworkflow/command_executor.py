@@ -1,6 +1,7 @@
 import fastworkflow
 from fastworkflow.command_interfaces import CommandExecutorInterface
 from fastworkflow.command_routing_definition import ModuleType as CommandModuleType
+from fastworkflow.utils.signatures import InputForParamExtraction
 
 # import torch
 # from transformers import BitsAndBytesConfig
@@ -91,7 +92,7 @@ class CommandExecutor(CommandExecutorInterface):
         self,
         session: fastworkflow.Session,
         action: fastworkflow.Action,
-    ) -> fastworkflow.CommandOutput:
+    ) -> fastworkflow.CommandOutput:  # sourcery skip: extract-method
         workflow_folderpath = session.workflow_snapshot.workflow.workflow_folderpath
         command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(workflow_folderpath)
 
@@ -118,14 +119,15 @@ class CommandExecutor(CommandExecutorInterface):
         if action.parameters:
             input_obj = command_parameters_class(**action.parameters)
 
-            input_for_param_extraction_class = (
-                command_routing_definition.get_command_class(
-                    action.workitem_path,
-                    action.command_name,
-                    CommandModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS,
-                )
-            )
-            is_valid, error_msg = input_for_param_extraction_class.validate_parameters(session.workflow_snapshot, input_obj)
+            previous_context = session.workflow_snapshot.context
+            session.workflow_snapshot.context =  {
+                "subject_command_name": action.command_name,
+                "param_extraction_sws": session.workflow_snapshot
+            }
+            input_for_param_extraction = InputForParamExtraction.create(session.workflow_snapshot, action.command)
+            session.workflow_snapshot.context = previous_context
+
+            is_valid, error_msg, _ = input_for_param_extraction.validate_parameters(session.workflow_snapshot, input_obj)
             if not is_valid:
                 raise ValueError(f"Invalid action parameters: {error_msg}")
         else:

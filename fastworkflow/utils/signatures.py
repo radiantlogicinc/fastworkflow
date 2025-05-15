@@ -26,7 +26,6 @@ LLM = fastworkflow.get_env_var("LLM")
 LITELLM_API_KEY = fastworkflow.get_env_var("LITELLM_API_KEY")
 
 
-
 def get_trainset(subject_command_name,workflow_folderpath) -> List[Dict[str, Any]]:
         """Load labeled trainset from the command specific JSON file for LabeledFewShot"""
 
@@ -273,7 +272,11 @@ Today's date is {today}.
         missing_fields = []
         invalid_fields = []
         all_suggestions = {}
-        
+
+        # check if the input for parameter extraction class is defined in the registary then call the process_parameters function on the instance.
+        if hasattr(self.input_for_param_extraction, 'process_extracted_parameters'):
+            self.input_for_param_extraction.process_extracted_parameters(cmd_parameters)
+
         # Check required fields
         for field_name, field_info in cmd_parameters.model_fields.items():
             field_value = getattr(cmd_parameters, field_name, None)

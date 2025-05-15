@@ -1,7 +1,6 @@
 from typing import Annotated, Type, Union, get_args, get_origin
 
 import dspy
-from dspy import InputField, OutputField, Signature
 from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
@@ -14,7 +13,7 @@ class TypedPredictorSignature:
         pydantic_class_for_dspy_input_fields: Type[BaseModel],
         pydantic_class_for_dspy_output_fields: Type[BaseModel],
         prefix_instructions: str = "",
-    ) -> Type[Signature]:
+    ) -> Type[dspy.Signature]:
         """
         Return a DSPy Signature class that can be used to extract the output parameters.
 
@@ -53,7 +52,7 @@ class TypedPredictorSignature:
             else:
                 field.validate_default = False
 
-            input_field = InputField(desc=field.description)
+            input_field = dspy.InputField(desc=field.description)
             dspy_fields[field_name] = (field.annotation, input_field)
 
         for (
@@ -84,7 +83,7 @@ class TypedPredictorSignature:
                     "Change the field to be Optional or specify a default value."
                 )
 
-            output_field = OutputField(
+            output_field = dspy.OutputField(
                 desc=field.description or ""
             )
             dspy_fields[field_name] = (field.annotation, output_field)

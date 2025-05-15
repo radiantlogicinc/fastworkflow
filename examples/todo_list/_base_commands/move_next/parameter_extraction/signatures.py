@@ -20,12 +20,3 @@ class InputForParamExtraction(BaseModel):
             command=command,
         )
 
-    @classmethod
-    def validate_parameters(
-        cls, workflow_snapshot: WorkflowSnapshot, cmd_parameters: CommandParameters
-    ) -> Tuple[bool, str]:
-        """Nothing to validate"""
-        return (True, None)
-
-    class Config:
-        arbitrary_types_allowed = True
