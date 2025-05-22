@@ -41,6 +41,7 @@ import contextlib
 parser = argparse.ArgumentParser(description="AI Assistant for workflow processing")
 parser.add_argument("workflow_path", help="Path to the workflow folder")
 parser.add_argument("env_file_path", help="Path to the environment file")
+parser.add_argument("passwords_file_path", help="Path to the passwords file")
 parser.add_argument(
     "--context_file_path", help="Optional context file path", default=""
 )
@@ -72,7 +73,12 @@ print(
 if args.startup_command and args.startup_action:
     raise ValueError("Cannot provide both startup_command and startup_action")
 
-fastworkflow.init(env_vars={**dotenv_values(args.env_file_path)})
+env_vars = {
+    **dotenv_values(args.env_file_path),
+    **dotenv_values(args.passwords_file_path)
+}
+
+fastworkflow.init(env_vars=env_vars)
 
 startup_action: Optional[fastworkflow.Action] = None
 if args.startup_action:

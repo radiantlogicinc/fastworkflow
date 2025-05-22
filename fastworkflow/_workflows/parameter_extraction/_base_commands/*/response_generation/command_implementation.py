@@ -21,9 +21,6 @@ INVALID_INFORMATION_ERRMSG = fastworkflow.get_env_var("INVALID_INFORMATION_ERRMS
 NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
 INVALID = fastworkflow.get_env_var("INVALID")
 
-LLM = fastworkflow.get_env_var("LLM")
-LITELLM_API_KEY = fastworkflow.get_env_var("LITELLM_API_KEY")
-
 
 def get_stored_parameters(session):
     return session.workflow_snapshot.context.get("stored_parameters")

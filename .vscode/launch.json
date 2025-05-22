@@ -5,7 +5,24 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "run_sample_workflow",
+            "name": "run_sample_workflow_agent",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "fastworkflow.run_agent",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/"
+            },
+            "args": [
+                "./examples/sample_workflow",
+                "./env/.env",
+                "./passwords/.env",
+                "--startup_action",
+                "./examples/sample_workflow/startup_action.json"
+            ]
+        },
+        {
+            "name": "run_sample_workflow_assistant",
             "type": "debugpy",
             "request": "launch",
             "module": "fastworkflow.run",
@@ -16,6 +33,7 @@
             "args": [
                 "./examples/sample_workflow",
                 "./env/.env",
+                "./passwords/.env",
                 "--startup_action",
                 "./examples/sample_workflow/startup_action.json"
             ]
@@ -31,7 +49,8 @@
             },
             "args": [
                 "./examples/sample_workflow",
-                "./env/.env"
+                "./env/.env",
+                "./passwords/.env"
             ]
         },
         {
@@ -46,6 +65,7 @@
             "args": [
                 "./examples/todo_list",
                 "./env/.env",
+                "./passwords/.env"
             ]
         },
         {
@@ -59,7 +79,8 @@
             },
             "args": [
                 "./examples/todo_list",
-                "./env/.env"
+                "./env/.env",
+                "./passwords/.env"
             ]
         },
         {
@@ -73,7 +94,8 @@
             },
             "args": [
                 "./fastworkflow",
-                "./env/.env"
+                "./env/.env",
+                "./passwords/.env"
             ]
         },
         {

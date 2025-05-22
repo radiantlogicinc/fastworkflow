@@ -1,6 +1,7 @@
 import os
 from typing import Optional
-from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification, AdamW
+from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification
+from torch.optim import AdamW
 from sklearn.decomposition import PCA
 from sklearn.metrics import f1_score
 import torch 
@@ -630,11 +631,7 @@ def train(session: fastworkflow.Session):
     # unpack the test data and train data
     X, y = zip(*utterance_command_tuples)
     num= len(set(y))
-    if num>2:
-        k_val=3
-    else:
-        k_val=2
-
+    k_val = 3 if num>2 else 2
     model_name = "prajjwal1/bert-tiny"
     print(f"\nLoading {model_name}...")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -842,7 +839,7 @@ def train(session: fastworkflow.Session):
     model_switch_path=get_route_layer_filepath_model(workflow_folderpath,"ambiguous_threshold.json")
     with open(model_switch_path, 'w') as f:
         json.dump({'confidence_threshold': ambiguous_threshold}, f)
-    
+
     if ambiguous_threshold > 0.0:
         print("\nOptimal Threshold Results:")
         print(f"Threshold: {best_metrics['threshold']:.3f}")

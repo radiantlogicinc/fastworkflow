@@ -22,7 +22,9 @@ class CommandParameters(BaseModel):
     )
 
     workitem_id: Optional[Union[str, int]] = Field(
-        description="The ID of the workitem", examples=["John Doe", "24"]
+        default=None, 
+        description="The ID of the workitem", 
+        examples=["John Doe", "24"]
     )
 
 

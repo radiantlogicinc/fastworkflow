@@ -24,7 +24,6 @@ speedict = "^0.3.12"
 python-dotenv = "^1.0.1"
 scikit-learn = "^1.6.1"
 transformers = "^4.48.2"
-together = "^1.4.0"
 mmh3 = "^5.1.0"
 python-levenshtein = "^0.27.1"
 
@@ -39,4 +38,8 @@ bandit = "^1.7.10"
 [tool.poetry.group.test.dependencies]
 pytest = "^8.3.3"
 requests-mock = "^1.12.1"
+
+# poetry install --with aws if you are using AWS Bedrock for LLM or AGENT_LLM
+[tool.poetry.group.aws.dependencies]
+boto3 = {version = "^1.38.22", optional = true}
 

@@ -17,6 +17,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("workflow_folderpath", help="Path to the workflow folder")
     parser.add_argument("env_file_path", help="Path to the environment file")
+    parser.add_argument("passwords_file_path", help="Path to the passwords file")
     args = parser.parse_args()
 
     if not os.path.isdir(args.workflow_folderpath):
@@ -25,7 +26,11 @@ if __name__ == "__main__":
         )
         exit(1)
 
-    fastworkflow.init(env_vars={**dotenv_values(args.env_file_path)})
+    env_vars = {
+        **dotenv_values(args.env_file_path),
+        **dotenv_values(args.passwords_file_path)
+    }
+    fastworkflow.init(env_vars=env_vars)
 
     def train_workflow(workflow_path: str):
         fastworkflow.WorkflowRegistry.create_definition(workflow_path)

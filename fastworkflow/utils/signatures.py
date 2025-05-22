@@ -223,7 +223,7 @@ Today's date is {today}.
         Returns:
             The extracted parameters
         """
-        lm = dspy.LM(LLM,api_key=LITELLM_API_KEY)
+        lm = dspy.LM(LLM, api_key=LITELLM_API_KEY)
         
         model_class = CommandParameters 
         if model_class is None:
