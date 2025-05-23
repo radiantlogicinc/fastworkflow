@@ -81,10 +81,13 @@ def main():
     }
     fastworkflow.init(env_vars=env_vars)
 
-    AGENT_LLM = fastworkflow.get_env_var("AGENT_LLM")
-    if not AGENT_LLM:
-        print(f"{Fore.RED}Error: DSPy Language Model not provided. Set AGENT_LLM environment variable.{Style.RESET_ALL}")
+    LLM_AGENT = fastworkflow.get_env_var("LLM_AGENT")
+    if not LLM_AGENT:
+        print(f"{Fore.RED}Error: DSPy Language Model not provided. Set LLM_AGENT environment variable.{Style.RESET_ALL}")
         exit(1)
+
+    # this could be None
+    LITELLM_API_KEY_AGENT = fastworkflow.get_env_var("LITELLM_API_KEY_AGENT")
 
     startup_action: Optional[fastworkflow.Action] = None
     if args.startup_action:
@@ -109,7 +112,7 @@ def main():
     )
 
     try:
-        react_agent = initialize_dspy_agent(workflow_session, AGENT_LLM)
+        react_agent = initialize_dspy_agent(workflow_session, LLM_AGENT, LITELLM_API_KEY_AGENT)
     except (EnvironmentError, RuntimeError) as e:
         print(f"{Fore.RED}Failed to initialize DSPy agent: {e}{Style.RESET_ALL}")
         exit(1)

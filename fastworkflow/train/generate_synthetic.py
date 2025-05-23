@@ -17,8 +17,8 @@ def generate_diverse_utterances(
     personas_per_batch: int = PERSONAS_PER_BATCH
 ) -> list[str]:
     # Initialize LiteLLM with API key
-    api_key = fastworkflow.get_env_var("LITELLM_API_KEY")
-    model=fastworkflow.get_env_var("LLM")
+    api_key = fastworkflow.get_env_var("LITELLM_API_KEY_SYNDATA_GEN")
+    model=fastworkflow.get_env_var("LLM_SYNDATA_GEN")
     litellm.api_key = api_key
 
     # Load PersonaHub dataset

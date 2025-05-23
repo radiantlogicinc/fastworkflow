@@ -78,9 +78,12 @@ def get_env_var(var_name: str, var_type: type = str, default: Optional[Union[str
         value = os.getenv(var_name)
 
     if value is None:
-        raise ValueError(f"Environment variable '{var_name}' does not exist and no default value is provided.")
+        from fastworkflow.utils.logging import logger
+        logger.warning(f"Environment variable '{var_name}' does not exist and no default value is provided.")
 
     try:
+        if value is None:
+            return None
         if var_type is int:
             return int(value)
         elif var_type is float:

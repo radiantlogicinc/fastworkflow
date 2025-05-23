@@ -22,17 +22,14 @@ A framework for rapidly building large-scale, deterministic, interactive workflo
 # Getting started
 - Clone the repo
   - Use WSL if you are on Windows
-- Create an env folder with a .env file inside and add the following entries
-  - LLM: the model to use for the DSPy API
-  - SPEEDDICT_FOLDERNAME: the folder where the workflow definitions are stored
- - export the OPENAI_API_KEY as an environment variable
-   - Note: If you use a different model, specify the model path in the LLM environment variable (The app uses Litellm as the LLM wrapper)
-- Train then run the sample workflow
+- Create a .env file in the passwords folder and add below keys if required
+  - LITELLM_API_KEY_SYNDATA_GEN
+  - LITELLM_API_KEY_PARAM_EXTRACTION
+  - LITELLM_API_KEY_RESPONSE_GEN
+  - LITELLM_API_KEY_AGENT
+- Train fastworkflow, then train the sample workflow, finally run the sample workflow agent or assistant
   - Hint: review the .vscode/launch.json file for training/running the sample workflow
  
 # Future Roadmap
-- Training pipeline for prompt-tuning/fine-tuning the models - routing, parameter extraction, response generation, and recommendations
-- Connectors to email, slack, databases etc.
-- A chat assistant for generating workflow application code
-- A chat assistant for generating natural language to SQL mappings
-- An AI engine to guide users at every step of the workflow with command recommendations
+- AI enabled python applications 
+- Tools to enable rapid application development - declarative/imperative/visual

@@ -17,13 +17,13 @@ from fastworkflow.utils.logging import logger
 from fastworkflow.model_pipeline_training import train,get_route_layer_filepath_model
 from fastworkflow.utils.fuzzy_match import find_best_match
 
-MISSING_INFORMATION_ERRMSG = fastworkflow.get_env_var("MISSING_INFORMATION_ERRMSG")
-INVALID_INFORMATION_ERRMSG = fastworkflow.get_env_var("INVALID_INFORMATION_ERRMSG")
-PARAMETER_EXTRACTION_ERROR_MSG = fastworkflow.get_env_var("PARAMETER_EXTRACTION_ERROR_MSG")
-NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
+MISSING_INFORMATION_ERRMSG = None
+INVALID_INFORMATION_ERRMSG = None
+PARAMETER_EXTRACTION_ERROR_MSG = None
+NOT_FOUND = None
 
-LLM = fastworkflow.get_env_var("LLM")
-LITELLM_API_KEY = fastworkflow.get_env_var("LITELLM_API_KEY")
+LLM_PARAM_EXTRACTION = None
+LITELLM_API_KEY_PARAM_EXTRACTION = None
 
 
 def get_trainset(subject_command_name,workflow_folderpath) -> List[Dict[str, Any]]:
@@ -65,6 +65,10 @@ class DatabaseValidator:
         """
         Find the closest matching value in the specified database.
         """
+        global NOT_FOUND
+        if not NOT_FOUND:
+            NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
+
         if not value or value in [None, NOT_FOUND]:
             return False, None, []
         
@@ -223,7 +227,16 @@ Today's date is {today}.
         Returns:
             The extracted parameters
         """
-        lm = dspy.LM(LLM, api_key=LITELLM_API_KEY)
+        global PARAMETER_EXTRACTION_ERROR_MSG, LLM_PARAM_EXTRACTION, LITELLM_API_KEY_PARAM_EXTRACTION
+
+        if not PARAMETER_EXTRACTION_ERROR_MSG:
+            PARAMETER_EXTRACTION_ERROR_MSG = fastworkflow.get_env_var("PARAMETER_EXTRACTION_ERROR_MSG")
+
+        if not LLM_PARAM_EXTRACTION:
+            LLM_PARAM_EXTRACTION = fastworkflow.get_env_var("LLM_PARAM_EXTRACTION")
+            LITELLM_API_KEY_PARAM_EXTRACTION = fastworkflow.get_env_var("LITELLM_API_KEY_PARAM_EXTRACTION")
+
+        lm = dspy.LM(LLM_PARAM_EXTRACTION, api_key=LITELLM_API_KEY_PARAM_EXTRACTION)
         
         model_class = CommandParameters 
         if model_class is None:
@@ -259,7 +272,7 @@ Today's date is {today}.
                     default = model_class.model_fields[field_name].default
                     param_dict[field_name] = getattr(dspy_result, field_name, default)
             except Exception as exc:
-                logger.error(PARAMETER_EXTRACTION_ERROR_MSG.format(error=exc))
+                logger.warning(PARAMETER_EXTRACTION_ERROR_MSG.format(error=exc))
                     
         params = model_class(**param_dict)
         return params
@@ -268,6 +281,14 @@ Today's date is {today}.
         """
         Check if the parameters are valid in the current context, including database lookups.
         """
+        global MISSING_INFORMATION_ERRMSG, INVALID_INFORMATION_ERRMSG, NOT_FOUND
+        if not MISSING_INFORMATION_ERRMSG:
+            MISSING_INFORMATION_ERRMSG = fastworkflow.get_env_var("MISSING_INFORMATION_ERRMSG")
+        if not INVALID_INFORMATION_ERRMSG:
+            INVALID_INFORMATION_ERRMSG = fastworkflow.get_env_var("INVALID_INFORMATION_ERRMSG")
+        if not NOT_FOUND:
+            NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
+
         is_valid = True
         missing_fields = []
         invalid_fields = []

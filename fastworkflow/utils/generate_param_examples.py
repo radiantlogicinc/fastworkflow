@@ -10,9 +10,9 @@ import fastworkflow
 
 # Define the client with LiteLLM
 # Replace with your API key and setup
-api_key = fastworkflow.get_env_var("LITELLM_API_KEY") # Set your API key
+api_key = fastworkflow.get_env_var("LITELLM_API_KEY_SYNDATA_GEN") # Set your API key
 # Optional: Set a default model
-model = fastworkflow.get_env_var("LLM")  # Default model, can be overridden in calls
+model = fastworkflow.get_env_var("LLM_SYNDATA_GEN")  # Default model, can be overridden in calls
 
 def normalize_text(text):
     """Normalize text by removing spaces, @ symbol, underscores, and converting to lowercase"""
@@ -343,8 +343,8 @@ def generate_dspy_examples(
         Tuple of (valid examples list, rejected examples list)
     """
 
-    model = fastworkflow.get_env_var("LLM")
-    api_key = fastworkflow.get_env_var("LITELLM_API_KEY")
+    model = fastworkflow.get_env_var("LLM_SYNDATA_GEN")
+    api_key = fastworkflow.get_env_var("LITELLM_API_KEY_SYNDATA_GEN")
     temperature =  0.9
     # Extract detailed field information
     field_details = extract_field_details(field_annotations)

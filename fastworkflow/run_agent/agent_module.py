@@ -1,7 +1,7 @@
 # fastworkflow/run_agent/agent_module.py
 import functools
 import os
-from typing import Any
+from typing import Any, Optional
 
 import dspy
 from colorama import Fore, Style # For logging within the agent tool
@@ -12,7 +12,8 @@ import fastworkflow # For WorkflowSession type hint and get_env_var
 class DialogueWithWorkflow(dspy.Signature):
     """
     "Understand the user's request, interact with the WorkflowAssistant tool to get information,"
-    "or perform actions, and then provide a final answer to the user." 
+    "or perform actions, and then provide a final answer to the user."
+    "If the assistant misunderstands your intent and executes the wrong action, you can respond with 'thats not what i meant'." 
     "BUT FIRST, get a good understanding of assistant skills by asking the assistant: 'What can you do?'"
     """
     user_query = dspy.InputField(desc="The user's full input or question.")
@@ -61,23 +62,23 @@ def _execute_workflow_command_tool(query: str, *, workflow_session_obj: fastwork
     print(f"{Fore.CYAN}{Style.BRIGHT}Workflow -> Agent>{Style.RESET_ALL}{Fore.CYAN} {formatted_output[:200].replace(os.linesep, ' ')}...{Style.RESET_ALL}")
     return formatted_output
 
-def initialize_dspy_agent(workflow_session: fastworkflow.WorkflowSession, agent_llm_name: str, max_iters: int = 10):
+def initialize_dspy_agent(workflow_session: fastworkflow.WorkflowSession, LLM_AGENT: str, LITELLM_API_KEY_AGENT: Optional[str] = None, max_iters: int = 10):
     """
     Configures and returns a DSPy ReAct agent.
     Raises:
-        EnvironmentError: If AGENT_LLM is not set.
+        EnvironmentError: If LLM_AGENT is not set.
         RuntimeError: If there's an error configuring the DSPy LM.
     """
-    if not agent_llm_name:
-        # This check might be redundant if AGENT_LLM is checked before calling this function,
+    if not LLM_AGENT:
+        # This check might be redundant if LLM_AGENT is checked before calling this function,
         # but good for encapsulation.
         print(f"{Fore.RED}Error: DSPy Language Model name not provided.{Style.RESET_ALL}")
         raise EnvironmentError("DSPy Language Model name not provided.")
 
     try:
-        lm = dspy.LM(model=agent_llm_name)
+        lm = dspy.LM(model=LLM_AGENT, api_key=LITELLM_API_KEY_AGENT)
         dspy.settings.configure(lm=lm)
-        print(f"{Fore.BLUE}DSPy LM Configured: {agent_llm_name}{Style.RESET_ALL}")
+        print(f"{Fore.BLUE}DSPy LM Configured: {LLM_AGENT}{Style.RESET_ALL}")
     except Exception as e:
         print(f"{Fore.RED}Error configuring DSPy LM: {e}{Style.RESET_ALL}")
         raise RuntimeError(f"Error configuring DSPy LM: {e}") from e

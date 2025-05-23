@@ -39,7 +39,7 @@ bandit = "^1.7.10"
 pytest = "^8.3.3"
 requests-mock = "^1.12.1"
 
-# poetry install --with aws if you are using AWS Bedrock for LLM or AGENT_LLM
+# poetry install --with aws if you are using AWS Bedrock for LLM or LLM_AGENT
 [tool.poetry.group.aws.dependencies]
 boto3 = {version = "^1.38.22", optional = true}
 
