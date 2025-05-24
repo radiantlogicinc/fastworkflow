@@ -11,10 +11,11 @@ import fastworkflow # For WorkflowSession type hint and get_env_var
 # DSPy Signature for the Agent
 class DialogueWithWorkflow(dspy.Signature):
     """
-    "Understand the user's request, interact with the WorkflowAssistant tool to get information,"
-    "or perform actions, and then provide a final answer to the user."
-    "If the assistant misunderstands your intent and executes the wrong action, you can respond with 'thats not what i meant'." 
-    "BUT FIRST, get a good understanding of assistant skills by asking the assistant: 'What can you do?'"
+    "Understand the user's request, interact with the WorkflowAssistant tool to get information, "
+    "or perform actions, and then provide a final answer to the user. "
+    "If the assistant misunderstands your intent and executes the wrong action, you can respond with 'thats not what i meant'. " 
+    "BUT FIRST, get a good understanding of assistant skills by asking the assistant: 'What can you do?'. "
+    "And if none of the skills are relevant, use your internal knowledge to answer the user's question."
     """
     user_query = dspy.InputField(desc="The user's full input or question.")
     final_answer = dspy.OutputField(desc="The agent's comprehensive response to the user after interacting with the workflow.")
