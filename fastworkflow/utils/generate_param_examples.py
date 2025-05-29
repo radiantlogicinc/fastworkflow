@@ -8,26 +8,15 @@ import Levenshtein  # Make sure to install this package
 import litellm  # Import litellm instead of together
 import fastworkflow
 
-# Define the client with LiteLLM
-# Replace with your API key and setup
-api_key = fastworkflow.get_env_var("LITELLM_API_KEY_SYNDATA_GEN") # Set your API key
-# Optional: Set a default model
-model = fastworkflow.get_env_var("LLM_SYNDATA_GEN")  # Default model, can be overridden in calls
-
 def normalize_text(text):
     """Normalize text by removing spaces, @ symbol, underscores, and converting to lowercase"""
-    if text is None:
-        return ""
-    cleaned_text = re.sub(r'[@\s_]', '', str(text).lower())
-    return cleaned_text
+    return "" if text is None else re.sub(r'[@\s_]', '', str(text).lower())
 
 def normalized_levenshtein_distance(s1, s2):
     """Calculate normalized Levenshtein distance"""
     distance = Levenshtein.distance(s1, s2)
     max_length = max(len(s1), len(s2))
-    if max_length == 0:
-        return 0.0
-    return distance / max_length
+    return 0.0 if max_length == 0 else distance / max_length
 
 def validate_parameters(utterance, params_dict, threshold=0.4):
     """
@@ -36,7 +25,7 @@ def validate_parameters(utterance, params_dict, threshold=0.4):
     """
     utterance = utterance.lower()
     results = {}
-    
+
     for param_name, param_value in params_dict.items():
         # Skip None values and numeric values
         if param_value is None or isinstance(param_value, (int, float)):
@@ -46,10 +35,10 @@ def validate_parameters(utterance, params_dict, threshold=0.4):
                 'confidence': 1.0 if param_value is not None else None
             }
             continue
-            
+
         # Convert to string and normalize
         param_str = str(param_value).lower()
-        
+
         # First check for exact substring match
         if param_str.lower() in utterance:
             results[param_name] = {
@@ -59,15 +48,16 @@ def validate_parameters(utterance, params_dict, threshold=0.4):
                 'match_type': 'exact'
             }
             continue
-            
+
         # If no exact match, use fuzzy matching
         # Extract words and phrases from utterance to check against
         words = utterance.split()
         phrases = []
         for i in range(len(words)):
-            for j in range(i+1, min(i+6, len(words)+1)): # Check phrases up to 5 words
-                phrases.append(' '.join(words[i:j]))
-                
+            phrases.extend(
+                ' '.join(words[i:j])
+                for j in range(i + 1, min(i + 6, len(words) + 1))
+            )
         # Find best match among phrases
         best_match = None
         best_distance = float('inf')
@@ -80,7 +70,7 @@ def validate_parameters(utterance, params_dict, threshold=0.4):
             if distance < best_distance:
                 best_distance = distance
                 best_match = phrase
-                
+
         confidence = 1.0 - best_distance
         results[param_name] = {
             'value': param_value,
@@ -88,7 +78,7 @@ def validate_parameters(utterance, params_dict, threshold=0.4):
             'confidence': round(confidence, 2),
             'best_match': best_match
         }
-        
+
     return results
 
 def extract_field_details(field_annotations) -> List[Dict[str, Any]]:
@@ -104,7 +94,7 @@ def extract_field_details(field_annotations) -> List[Dict[str, Any]]:
         List of dictionaries with field details
     """
     field_details = []
-    
+
     # Handle the case when field_annotations is already a dictionary (model_fields)
     if isinstance(field_annotations, dict):
         for field_name, field_info in field_annotations.items():
@@ -115,12 +105,12 @@ def extract_field_details(field_annotations) -> List[Dict[str, Any]]:
                 field_type = field_type.replace(" | NoneType", "").replace("NoneType | ", "")
             else:
                 is_optional = field_info.is_required() is False
-            
+
             # Extract description and examples from metadata
             description = ""
             examples = []
             pattern = None
-            
+
             if hasattr(field_info, 'json_schema_extra') and field_info.json_schema_extra:
                 schema_extra = field_info.json_schema_extra
                 description = schema_extra.get('description', '')
@@ -128,7 +118,7 @@ def extract_field_details(field_annotations) -> List[Dict[str, Any]]:
                     examples = schema_extra['examples']
                 if 'pattern' in schema_extra:
                     pattern = schema_extra['pattern']
-            
+
             # Add to field details
             field_details.append({
                 "name": field_name,
@@ -138,25 +128,25 @@ def extract_field_details(field_annotations) -> List[Dict[str, Any]]:
                 "examples": examples,
                 "pattern": pattern
             })
-        
+
         return field_details
-    
+
     # If field_annotations is a string, parse it (legacy support)
     field_names = re.findall(r'(\w+)(?=:)', field_annotations)
-    
+
     for field_name in field_names:
         # Find this field's section in the annotations
         field_pattern = rf'{field_name}:\s*(.*?)(?=\w+:|$)'
         field_match = re.search(field_pattern, field_annotations, re.DOTALL)
-        
+
         if not field_match:
             continue
-        
+
         field_text = field_match.group(1).strip()
-        
+
         # Check if optional
         is_optional = "Optional" in field_text or "None" in field_text
-        
+
         # Extract field type - handle various formats
         if "Annotated" in field_text:
             # Extract the base type from Annotated
@@ -169,22 +159,19 @@ def extract_field_details(field_annotations) -> List[Dict[str, Any]]:
         else:
             # Direct type
             field_type = field_text.split('=')[0].strip()
-        
+
         # Clean up the type
         field_type = field_type.strip()
-        
+
         # Extract description
         desc_match = re.search(r'description="([^"]+)"', field_text)
         description = desc_match.group(1) if desc_match else ""
-        
+
         # Extract examples
         examples = []
-        examples_match = re.search(r'examples=\[(.*?)\]', field_text)
-        if examples_match:
+        if examples_match := re.search(r'examples=\[(.*?)\]', field_text):
             examples_text = examples_match.group(1)
-            # Handle quoted examples
-            example_items = re.findall(r'"([^"]*)"', examples_text)
-            if example_items:
+            if example_items := re.findall(r'"([^"]*)"', examples_text):
                 examples = example_items
             else:
                 # Try to safely evaluate the examples
@@ -193,11 +180,11 @@ def extract_field_details(field_annotations) -> List[Dict[str, Any]]:
                 except:
                     # If evaluation fails, try to parse manually
                     examples = [item.strip() for item in examples_text.split(',')]
-        
+
         # Extract pattern
         pattern_match = re.search(r'pattern=r?["\']([^"\']+)["\']', field_text)
         pattern = pattern_match.group(1) if pattern_match else None
-        
+
         # Add to field details
         field_details.append({
             "name": field_name,
@@ -207,7 +194,7 @@ def extract_field_details(field_annotations) -> List[Dict[str, Any]]:
             "examples": examples,
             "pattern": pattern
         })
-    
+
     return field_details
     
 # def transform_examples_to_dict_format(examples: List[str]) -> List[Dict]:
@@ -327,7 +314,7 @@ def generate_dspy_examples(
     command_name: str,
     num_examples: int = 10,
     validation_threshold: float = 0.4
-) -> tuple[List[str], List[Dict]]:  # Updated return type to include rejected examples
+) -> tuple[List[str], List[Dict]]:    # Updated return type to include rejected examples
     """
     Generate DSPy examples for parameter extraction based on field annotations.
 
@@ -486,7 +473,7 @@ def generate_dspy_examples(
 
         # Make sure the example uses dspy.Example
         if cleaned_example.startswith("Example("):
-            cleaned_example = "dspy." + cleaned_example
+            cleaned_example = f"dspy.{cleaned_example}"
 
         # Ensure the example has no extra code or comments
         if "dspy.Example(" in cleaned_example and ".with_inputs" in cleaned_example:
@@ -494,11 +481,11 @@ def generate_dspy_examples(
 
     # Print the number of examples found
     print(f"Found {len(examples)} examples")
-    
+
     # Validate examples using the fuzzy matching logic
     validated_examples = []
     rejected_examples = []
-    
+
     for example in examples:
         try:
             # Extract command and parameters from the example
@@ -513,9 +500,9 @@ def generate_dspy_examples(
                     "params": {}
                 })
                 continue
-                
+
             command = command_match.group(1)
-            
+
             # Extract parameters
             params = {}
             for field in field_details:
@@ -524,8 +511,7 @@ def generate_dspy_examples(
                 if field["type"] == "str":
                     # For string types, look for fieldname="value"
                     pattern = rf'{field_name}="(.*?)"'
-                    match = re.search(pattern, example)
-                    if match:
+                    if match := re.search(pattern, example):
                         params[field_name] = match.group(1)
                     else:
                         # Check if it's explicitly None
@@ -535,8 +521,7 @@ def generate_dspy_examples(
                 elif field["type"] == "int":
                     # For int types, look for fieldname=123
                     pattern = rf'{field_name}=(\d+)'
-                    match = re.search(pattern, example)
-                    if match:
+                    if match := re.search(pattern, example):
                         params[field_name] = int(match.group(1))
                     else:
                         # Check if it's explicitly None
@@ -546,8 +531,7 @@ def generate_dspy_examples(
                 elif field["type"] == "float":
                     # For float types, look for fieldname=123.45
                     pattern = rf'{field_name}=(\d+\.\d+)'
-                    match = re.search(pattern, example)
-                    if match:
+                    if match := re.search(pattern, example):
                         params[field_name] = float(match.group(1))
                     else:
                         # Check if it's explicitly None
@@ -557,18 +541,17 @@ def generate_dspy_examples(
                 elif field["type"] == "bool" or field["type"].endswith("bool"):
                     # For boolean types, look for fieldname=True or fieldname=False
                     pattern = rf'{field_name}=(True|False)'
-                    match = re.search(pattern, example)
-                    if match:
+                    if match := re.search(pattern, example):
                         params[field_name] = match.group(1) == "True"
                     else:
                         # Check if it's explicitly None
                         none_pattern = rf'{field_name}=None'
                         if re.search(none_pattern, example):
                             params[field_name] = None
-            
+
             # Validate the extracted parameters against the command
             validation_results = validate_parameters(command, params, threshold=validation_threshold)
-            
+
             # Check if all required parameters are valid
             invalid_params = []
             for field in field_details:
@@ -581,7 +564,7 @@ def generate_dspy_examples(
                             "confidence": result.get("confidence"),
                             "best_match": result.get("best_match")
                         })
-            
+
             # Also check if any optional parameters that have values are invalid
             for field in field_details:
                 if field["optional"] and field["name"] in validation_results:
@@ -593,7 +576,7 @@ def generate_dspy_examples(
                             "confidence": result.get("confidence"),
                             "best_match": result.get("best_match")
                         })
-            
+
             if invalid_params:
                 rejection_reason = {
                     "example": example,
@@ -606,7 +589,7 @@ def generate_dspy_examples(
                 print(f"Rejected example: '{command}' - Invalid parameters: {invalid_params}")
             else:
                 validated_examples.append(example)
-                
+
         except Exception as e:
             print(f"Error processing example: {str(e)}")
             rejected_examples.append({
@@ -615,15 +598,15 @@ def generate_dspy_examples(
                 "command": command if 'command' in locals() else None,
                 "params": params if 'params' in locals() else {}
             })
-    
+
     print(f"Validated {len(validated_examples)} examples, rejected {len(rejected_examples)} examples")
-    
+
     # If we have rejected examples, save them for analysis
     if rejected_examples:
         with open("rejected_examples.json", "w") as f:
             json.dump(rejected_examples, f, indent=2)
     dict_examples = transform_examples_to_dict_format(examples)
-    
+
     return dict_examples, rejected_examples
             
     # return validated_examples, rejected_examples
@@ -642,7 +625,7 @@ def save_examples_to_json(examples: List[str], command_name: str, filename: str 
     import json
 
     # Format examples properly as strings
-    formatted_examples = [example for example in examples]
+    formatted_examples = list(examples)
 
     data = {
         "command_name": command_name,

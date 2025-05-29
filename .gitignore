@@ -1,6 +1,7 @@
 passwords/*
 ___workflow_contexts*
-examples/*/___command_info*
+___command_info*
+___convo_info*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -164,11 +165,3 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 inference_log.jsonl
-examples/sample_workflow/___convo_info/-694349230.db/000225.sst
-examples/sample_workflow/___convo_info/
-fastworkflow/___command_info
-fastworkflow/_workflows/parameter_extraction/___command_info
-fastworkflow/_workflows/command_name_prediction/___command_info
-fastworkflow/_workflows/command_name_prediction/___command_info/command_directory.json
-fastworkflow/_workflows/command_name_prediction/___command_info/command_routing_definition.json
-fastworkflow/_workflows/parameter_extraction/___convo_info
