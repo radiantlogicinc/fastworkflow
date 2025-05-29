@@ -29,10 +29,8 @@ def extract_command_parameters(
             raise ValueError("Multiple command responses returned from parameter extraction workflow")    
         return (workflow_session.session.id, command_output)    
 
-    fastworkflow_folder = os.path.dirname(os.path.abspath(__file__))
-    parameter_extraction_workflow_folderpath = os.path.join(
-        fastworkflow_folder, "_workflows", "parameter_extraction"
-    )
+    # Use the utility function to get the internal workflow path
+    parameter_extraction_workflow_folderpath = fastworkflow.get_internal_workflow_path("parameter_extraction")
 
     context = {
         "subject_command_name": command_name,

@@ -81,10 +81,8 @@ def _was_command_name_misunderstood(
     session: fastworkflow.Session,
     command: str,
 ) -> fastworkflow.CommandOutput:
-    fastworkflow_folder = os.path.dirname(os.path.abspath(__file__))
-    misunderstanding_detection_workflow_folderpath = os.path.join(
-        fastworkflow_folder, "_workflows", "misunderstood_command_detection"
-    )
+    # Use the utility function to get the internal workflow path
+    misunderstanding_detection_workflow_folderpath = fastworkflow.get_internal_workflow_path("misunderstood_command_detection")
 
     session = fastworkflow.Session.create(
         misunderstanding_detection_workflow_folderpath,

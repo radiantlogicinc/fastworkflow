@@ -599,8 +599,9 @@ def train(session: fastworkflow.Session):
 
     ###########################################################################
     # This was added just to add None_of_these command to the existing command utterance tuple
-    if not "fastworkflow" in workflow_folderpath:
-        workflow_path="./fastworkflow/_workflows/command_name_prediction"
+    if "fastworkflow" not in workflow_folderpath:
+        # Use the utility function to get the internal workflow path
+        workflow_path = fastworkflow.get_internal_workflow_path("command_name_prediction")
         session = fastworkflow.Session.create(
             workflow_path, 
             session_id_str=f"train_{workflow_path}", 

@@ -76,10 +76,8 @@ def guess_command_name(
             raise ValueError("Multiple command responses returned from parameter extraction workflow")    
         return (workflow_session.session.id, command_output)    
 
-    fastworkflow_folder = os.path.dirname(os.path.abspath(__file__))
-    commandname_prediction_workflow_folderpath = os.path.join(
-        fastworkflow_folder, "_workflows", "command_name_prediction"
-    )
+    # Use the utility function to get the internal workflow path
+    commandname_prediction_workflow_folderpath = fastworkflow.get_internal_workflow_path("command_name_prediction")
 
     context = {
         "intent_detection_sws": workflow_session.session.workflow_snapshot

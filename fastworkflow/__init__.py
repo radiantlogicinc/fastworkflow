@@ -99,6 +99,38 @@ def get_env_var(var_name: str, var_type: type = str, default: Optional[Union[str
     except ValueError as e:
         raise ValueError(f"Cannot convert '{value}' to {var_type.__name__}.") from e
 
+def get_fastworkflow_package_path() -> str:
+    """Get the fastworkflow package directory.
+    
+    This works both in development (when working in the fastworkflow repo)
+    and when fastworkflow is pip installed.
+    
+    Returns:
+        str: Path to the fastworkflow package directory
+    """
+    return os.path.dirname(os.path.abspath(__file__))
+
+def get_internal_workflow_path(workflow_name: str) -> str:
+    """Get the path to an internal fastworkflow workflow.
+    
+    Args:
+        workflow_name: Name of the workflow in the _workflows directory
+        
+    Returns:
+        str: Full path to the internal workflow
+    """
+    return os.path.join(get_fastworkflow_package_path(), "_workflows", workflow_name)
+
+def is_fastworkflow_trained() -> bool:
+    """Check if fastworkflow has been trained by looking for training artifacts.
+    
+    Returns:
+        bool: True if fastworkflow has been trained, False otherwise
+    """
+    command_name_prediction_path = get_internal_workflow_path("command_name_prediction")
+    command_info_path = os.path.join(command_name_prediction_path, "___command_info")
+    return os.path.exists(command_info_path)
+
 def get_session_id(session_id_str: str) -> int:
     return int(mmh3.hash(session_id_str))
 

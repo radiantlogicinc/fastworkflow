@@ -48,7 +48,7 @@ if __name__ == "__main__":
                     print(f"{Fore.YELLOW}Training child workflow: {child_workflow_path}{Style.RESET_ALL}")
                     train_workflow(child_workflow_path)
 
-        if workflow_path.startswith("./fastworkflow") and "_workflows" not in workflow_path:
+        if "fastworkflow" in workflow_path and "_workflows" not in workflow_path:
             return
 
         # create a session and train the main workflow
@@ -57,15 +57,6 @@ if __name__ == "__main__":
             session_id_str=f"train_{workflow_path}", 
             for_training_semantic_router=True
         )
-
-        # workflow_path="./fastworkflow/_workflows/parameter_extraction"
-        # session = fastworkflow.Session.create(
-        #     workflow_path, 
-        #     session_id_str=f"train_{workflow_path}", 
-        #     for_training_semantic_router=True
-        # )
-
-        # param_train(session)
 
         def get_commands_with_parameters(json_path):
             """
@@ -152,5 +143,14 @@ if __name__ == "__main__":
         
         train(session)
         session.close()
+
+    # Check if fastworkflow has been trained, and train it if not
+    if "fastworkflow" not in args.workflow_folderpath and not fastworkflow.is_fastworkflow_trained():
+        print(f"{Fore.CYAN}Fastworkflow has not been trained yet. Training fastworkflow first...{Style.RESET_ALL}")
+        fastworkflow_package_path = fastworkflow.get_fastworkflow_package_path()
+        train_workflow(fastworkflow_package_path)
+        print(f"{Fore.GREEN}Fastworkflow training completed.{Style.RESET_ALL}")
+    else:
+        print(f"{Fore.GREEN}Fastworkflow is already trained. Proceeding with workflow training.{Style.RESET_ALL}")
 
     train_workflow(args.workflow_folderpath)
