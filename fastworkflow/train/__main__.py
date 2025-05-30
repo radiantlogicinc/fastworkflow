@@ -1,6 +1,7 @@
 import argparse
 import os
 import json
+import shutil
 from dotenv import dotenv_values
 
 from colorama import Fore, Style
@@ -45,6 +46,8 @@ if __name__ == "__main__":
                     continue
                 child_workflow_path = os.path.join(workflows_dir, child_workflow)
                 if os.path.isdir(child_workflow_path):
+                    if "fastworkflow" in child_workflow_path and "___command_info" in os.listdir(child_workflow_path):
+                        continue
                     print(f"{Fore.YELLOW}Training child workflow: {child_workflow_path}{Style.RESET_ALL}")
                     train_workflow(child_workflow_path)
 
@@ -145,9 +148,11 @@ if __name__ == "__main__":
         session.close()
 
     # Check if fastworkflow has been trained, and train it if not
-    if "fastworkflow" not in args.workflow_folderpath and not fastworkflow.is_fastworkflow_trained():
-        print(f"{Fore.CYAN}Fastworkflow has not been trained yet. Training fastworkflow first...{Style.RESET_ALL}")
+    if "fastworkflow" not in args.workflow_folderpath:
+        print(f"{Fore.CYAN}Training fastworkflow ...{Style.RESET_ALL}")
         fastworkflow_package_path = fastworkflow.get_fastworkflow_package_path()
+        speeddict_folder_name=fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
+        shutil.rmtree(f"./{speeddict_folder_name}", ignore_errors=True)
         train_workflow(fastworkflow_package_path)
         print(f"{Fore.GREEN}Fastworkflow training completed.{Style.RESET_ALL}")
     else:

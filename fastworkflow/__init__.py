@@ -121,16 +121,6 @@ def get_internal_workflow_path(workflow_name: str) -> str:
     """
     return os.path.join(get_fastworkflow_package_path(), "_workflows", workflow_name)
 
-def is_fastworkflow_trained() -> bool:
-    """Check if fastworkflow has been trained by looking for training artifacts.
-    
-    Returns:
-        bool: True if fastworkflow has been trained, False otherwise
-    """
-    command_name_prediction_path = get_internal_workflow_path("command_name_prediction")
-    command_info_path = os.path.join(command_name_prediction_path, "___command_info")
-    return os.path.exists(command_info_path)
-
 def get_session_id(session_id_str: str) -> int:
     return int(mmh3.hash(session_id_str))
 
