@@ -276,8 +276,8 @@ def process_command(
             change_flag(path, 2)
             return OutputOfProcessCommand(error_msg=error_msg)
 
-        if not command_name and "@" in command:
-            tentative_command_name = command.split("@")[1].split()[0]
+        if command.startswith('@'):
+            tentative_command_name = command.split("@")[1].split()[0].rstrip(':-')
             normalized_command_name = tentative_command_name.lower()
             for name in valid_command_names:
                 if normalized_command_name == name.lower():
