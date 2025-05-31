@@ -3,6 +3,7 @@ from queue import Empty, Queue
 from threading import Thread, Lock
 from typing import ClassVar, Optional
 from collections import deque
+import json
 
 import fastworkflow
 from fastworkflow.utils.logging import logger
@@ -193,7 +194,13 @@ class WorkflowSession:
             ) and self._status != SessionStatus.STOPPING:
                 try:
                     message = self.user_message_queue.get()
-                    last_output = self._process_message(message)
+                    
+                    # NEW: Route based on message type
+                    if self._is_mcp_tool_call(message):
+                        last_output = self._process_mcp_tool_call(message)
+                    else:
+                        last_output = self._process_message(message)
+                        
                 except Empty:
                     continue
 
@@ -207,6 +214,58 @@ class WorkflowSession:
             logger.debug(f"Workflow {self._session.id} completed")
 
         return None
+    
+    def _is_mcp_tool_call(self, message: str) -> bool:
+        """Detect if message is an MCP tool call JSON"""
+        try:
+            data = json.loads(message)
+            return data.get("type") == "mcp_tool_call"
+        except (json.JSONDecodeError, AttributeError):
+            return False
+    
+    def _process_mcp_tool_call(self, message: str) -> fastworkflow.CommandOutput:
+        """Process an MCP tool call message"""
+        try:
+            # Parse JSON message
+            data = json.loads(message)
+            tool_call_data = data["tool_call"]
+            
+            # Create MCPToolCall object
+            tool_call = fastworkflow.MCPToolCall(
+                name=tool_call_data["name"],
+                arguments=tool_call_data["arguments"]
+            )
+            
+            # Execute via command executor
+            mcp_result = self._command_executor.perform_mcp_tool_call(
+                self._session, 
+                tool_call, 
+                workitem_path=self._session.workflow_snapshot.active_workitem.path
+            )
+            
+            # Convert MCPToolResult back to CommandOutput for consistency
+            command_output = self._convert_mcp_result_to_command_output(mcp_result)
+            
+            # Put in output queue if needed
+            if (not command_output.success or self._keep_alive) and self._session.command_output_queue:
+                self._session.command_output_queue.put(command_output)
+                
+            return command_output
+            
+        except Exception as e:
+            logger.error(f"Error processing MCP tool call: {e}. Tool call content: {message}")
+            return self._process_message(message)  # process as a message
+    
+    def _convert_mcp_result_to_command_output(self, mcp_result: fastworkflow.MCPToolResult) -> fastworkflow.CommandOutput:
+        """Convert MCPToolResult to CommandOutput for compatibility"""
+        command_response = fastworkflow.CommandResponse(
+            response=mcp_result.content[0].text if mcp_result.content else "No response",
+            success=not mcp_result.isError
+        )
+        
+        command_output = fastworkflow.CommandOutput(command_responses=[command_response])
+        command_output._mcp_source = mcp_result  # Mark for special formatting
+        return command_output
     
     def _process_message(self, message: str) -> fastworkflow.CommandOutput:
         """Process a single message"""

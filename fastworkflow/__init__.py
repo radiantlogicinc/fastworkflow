@@ -13,6 +13,23 @@ class Action(BaseModel):
     parameters: dict[str, Optional[Union[str, bool, int, float, BaseModel]]] = {}
     session_id: Optional[int] = None    # when creating a new action, this is set by the workflow session
 
+# MCP-compliant classes
+class MCPToolCall(BaseModel):
+    """MCP-compliant tool call request format"""
+    name: str
+    arguments: dict[str, Any] = {}
+
+class MCPContent(BaseModel):
+    """MCP content block"""
+    type: str  # "text", "image", etc.
+    text: Optional[str] = None
+    # Add other content type fields as needed
+
+class MCPToolResult(BaseModel):
+    """MCP-compliant tool result format"""
+    content: list[MCPContent]
+    isError: bool = False
+
 class Recommendation(BaseModel):
     summary: str
     suggested_actions: list[Action] = []
@@ -38,6 +55,18 @@ class CommandOutput(BaseModel):
     @property
     def not_what_i_meant(self) -> bool:
         return any(response.artifacts.get("command_name", None) == "None_of_these" for response in self.command_responses)
+
+    def to_mcp_result(self) -> MCPToolResult:
+        """Convert CommandOutput to MCP-compliant format"""
+        content = []
+        content.extend(
+            MCPContent(type="text", text=response.response)
+            for response in self.command_responses
+        )
+        return MCPToolResult(
+            content=content,
+            isError=not self.success
+        )
 
 class CommandSource(str, Enum):
     BASE_COMMANDS = "_base_commands"

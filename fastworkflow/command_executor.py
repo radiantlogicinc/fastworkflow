@@ -134,3 +134,60 @@ class CommandExecutor(CommandExecutorInterface):
             input_obj = command_parameters_class()
 
         return response_generation_object(session, action.command, input_obj)
+
+    # MCP-compliant methods
+    def perform_mcp_tool_call(
+        self,
+        session: fastworkflow.Session,
+        tool_call: fastworkflow.MCPToolCall,
+        workitem_path: str = "/"
+    ) -> fastworkflow.MCPToolResult:
+        """
+        MCP-compliant tool execution method.
+        
+        Args:
+            session: FastWorkflow session
+            tool_call: MCP tool call request
+            workitem_path: Default workitem path if not specified in arguments
+            
+        Returns:
+            MCPToolResult: MCP-compliant result format
+        """
+        try:
+            # Convert MCP tool call to FastWorkflow Action using helper method
+            action = self.action_from_mcp_tool_call(tool_call, workitem_path)
+            
+            # Execute using existing perform_action method
+            command_output = self.perform_action(session, action)
+            
+            # Convert to MCP format
+            return command_output.to_mcp_result()
+            
+        except Exception as e:
+            # Return error in MCP format
+            return fastworkflow.MCPToolResult(
+                content=[fastworkflow.MCPContent(type="text", text=f"Error: {str(e)}")],
+                isError=True
+            )
+
+    @staticmethod
+    def action_from_mcp_tool_call(
+        tool_call: fastworkflow.MCPToolCall,
+        default_workitem_path: str = "/"
+    ) -> fastworkflow.Action:
+        """
+        Convert MCP tool call to FastWorkflow Action.
+        
+        Args:
+            tool_call: MCP tool call request
+            default_workitem_path: Default workitem path
+            
+        Returns:
+            Action: FastWorkflow action object
+        """
+        return fastworkflow.Action(
+            workitem_path=tool_call.arguments.get('workitem_path', default_workitem_path),
+            command_name=tool_call.name,
+            command=tool_call.arguments.get('command', ''),
+            parameters={k: v for k, v in tool_call.arguments.items() if k != 'command'}
+        )
