@@ -50,8 +50,7 @@ def configure_dspy_cache(enable_cache: bool = True, cache_dir: Optional[str] = N
 # DSPy Signature for the Agent
 class DialogueWithWorkflow(dspy.Signature):
     """
-    'AskUser for feedback on the plan for building the final answer. '
-    'After user approval, execute the plan using the WorkflowAssistant tool."
+    'Prepare and execute a plan for building the final answer using the WorkflowAssistant tool"
     """
     user_query = dspy.InputField(desc="The user's full input or question.")
     final_answer = dspy.OutputField(desc="The agent's comprehensive response to the user after interacting with the workflow.")
@@ -60,10 +59,9 @@ class DialogueWithWorkflow(dspy.Signature):
 class ExecuteMCPTool(dspy.Signature):
     """
     "Understand the agent's natural language query. Based on this query, select the most appropriate tool (tool) from the available list. "
-    "Then, construct a complete and valid MCP (Modular Command Protocol) JSON string for that chosen tool, including its specific arguments. "
-    "Finally, invoke the chosen tool by passing this single, fully-formed MCP JSON string as its argument. "
-    "If the user's request is ambiguous or lacks necessary information for a tool, or if no tool seems relevant, use your internal knowledge or indicate inability to proceed. "
-    "If none of the workflowassistant tools are relevant, use your internal knowledge to answer the user's question."
+    "Then, construct a complete and valid specially formatted query string for that chosen tool, including its specific arguments. "
+    "Finally, invoke the chosen tool by passing this query string as its argument. "
+    "If tool execution returns with an error, use available information and your internal knowledge to correct the query string and try again. "
     """
     tool_request = dspy.InputField(desc="The agent's natural language query that needs to be mapped to a specific tool and formatted as an MCP JSON.")
     tool_result = dspy.OutputField(desc="Result from the MCP tool execution after invoking the tool with the constructed MCP JSON.")
@@ -394,6 +392,6 @@ def initialize_dspy_agent(workflow_session: fastworkflow.WorkflowSession, LLM_AG
 
     return dspy.ReAct(
         DialogueWithWorkflow,
-        tools=[workflow_assistant_instance, ask_user_instance], # Use instances of dspy.Tool
+        tools=[workflow_assistant_instance], # Use instances of dspy.Tool
         max_iters=max_iters,
     )

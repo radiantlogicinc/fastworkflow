@@ -83,10 +83,10 @@ class FastWorkflowMCPServer:
                     description = f"{description}. {command_parameters_class.__doc__.strip()}"
             
             # Add standard FastWorkflow parameters
-            input_schema["properties"]["command"] = {
-                "type": "string",
-                "description": "Natural language command or query"
-            }
+            # input_schema["properties"]["command"] = {
+            #     "type": "string",
+            #     "description": "Natural language command or query"
+            # }
             # input_schema["properties"]["workitem_path"] = {
             #     "type": "string", 
             #     "description": "Workflow item path (optional)",
