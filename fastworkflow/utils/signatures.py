@@ -273,8 +273,11 @@ Today's date is {today}.
                     param_dict[field_name] = getattr(dspy_result, field_name, default)
             except Exception as exc:
                 logger.warning(PARAMETER_EXTRACTION_ERROR_MSG.format(error=exc))
-                    
-        params = model_class(**param_dict)
+
+        try:            
+            params = model_class(**param_dict)
+        except ValidationError as e:
+            params = None
         return params
     
     def validate_parameters(self, workflow_snapshot: WorkflowSnapshot, cmd_parameters: BaseModel) -> Tuple[bool, str, Dict[str, List[str]]]:
@@ -299,7 +302,7 @@ Today's date is {today}.
             self.input_for_param_extraction.process_extracted_parameters(cmd_parameters)
 
         # Check required fields
-        for field_name, field_info in cmd_parameters.model_fields.items():
+        for field_name, field_info in type(cmd_parameters).model_fields.items():
             field_value = getattr(cmd_parameters, field_name, None)
 
             is_optional = False
@@ -308,28 +311,27 @@ Today's date is {today}.
                 union_elements = get_args(attribute_type)
                 if type(None) in union_elements:
                     is_optional = True
-            
+
             is_required=True
-            if is_optional is True:
-                is_required=False
-            
+            if is_optional:
+                    is_required=False
+
             # Only add to missing fields if it's required AND has no value
             if is_required and field_value in [NOT_FOUND, None]:
                 missing_fields.append(field_name)
                 is_valid = False
-            
-            # Check pattern validation for string fields
-            pattern = None
-            for meta in getattr(field_info, "metadata", []):
-                if hasattr(meta, "pattern"):
-                    pattern = meta.pattern
-                    break
-                    
+
+            pattern = next(
+                (meta.pattern
+                    for meta in getattr(field_info, "metadata", [])
+                    if hasattr(meta, "pattern")),
+                None,
+            )
             if pattern and field_value is not None and field_value != NOT_FOUND:
                 invalid_value = None
                 if hasattr(field_info, "json_schema_extra") and field_info.json_schema_extra:
                     invalid_value = field_info.json_schema_extra.get("invalid_value")
-                    
+
                 if invalid_value and field_value == invalid_value:
                     invalid_fields.append(f"{field_name} '{field_value}'")
                     pattern_str = str(pattern)
@@ -347,48 +349,48 @@ Today's date is {today}.
                         example = examples[0] if examples else ""
                         all_suggestions[field_name] = [f"Please use the format matching pattern {pattern_str} (e.g., {example})"]
                         is_valid = False
-        
 
-        for field_name, field_info in cmd_parameters.model_fields.items():
+
+        for field_name, field_info in type(cmd_parameters).model_fields.items():
             field_value = getattr(cmd_parameters, field_name, None)
-            
+
             if field_value in [NOT_FOUND, None]:
                 continue
-                
+
             is_db_lookup = None
             if hasattr(field_info, "json_schema_extra") and field_info.json_schema_extra:
                 is_db_lookup = field_info.json_schema_extra.get("db_lookup")
-            
+
             if is_db_lookup:
                 if not self.input_for_param_extraction:
                     raise ValueError("input_for_param_extraction is not set.")
                 key_values=self.input_for_param_extraction.db_lookup(field_name) 
                 matched, corrected_value, field_suggestions = DatabaseValidator.fuzzy_match(field_value, key_values)
-                
+
                 if matched:
                     setattr(cmd_parameters, field_name, corrected_value)
                 elif field_suggestions:
                     invalid_fields.append(f"{field_name} '{field_value}'")
                     all_suggestions[field_name] = field_suggestions
                     is_valid = False
-        
+
         if is_valid:
             return (True, "All required parameters are valid.", {})
-        
+
         message = ""
-        
+
         if missing_fields:
             message += f"{MISSING_INFORMATION_ERRMSG}\n" + ", ".join(missing_fields) + "\n"
-        
+
         if invalid_fields:
             message += f"{INVALID_INFORMATION_ERRMSG}\n" + ", ".join(invalid_fields) + "\n"
-        
+
         message += "Please provide this information to complete your request."
-        
+
         for field, suggestions in all_suggestions.items():
             if suggestions:
                 is_format_instruction = any(("format" in str(s).lower() or "pattern" in str(s).lower()) for s in suggestions)
-                
+
                 if is_format_instruction:
                     message += f"\n{field}: {', '.join(suggestions)}"
                 else:
@@ -400,10 +402,10 @@ Today's date is {today}.
         if invalid_fields:
             invalid_field_names = [field.split(" '")[0].strip() for field in invalid_fields]
             combined_fields.extend(invalid_field_names)
-            
+
         if combined_fields:
             combined_fields_str = ", ".join(combined_fields)
             message += f"\n\nProvide your response in this exact order, separated by commas:\n{combined_fields_str}. "
             message += "\nIf any parameter value needs to include a comma, please enter the parameters one by one, i.e one at a time."
-        
+
         return (False, message, all_suggestions)
