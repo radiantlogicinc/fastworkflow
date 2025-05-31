@@ -1,0 +1,69 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Agent Development Guide
+
+## Agent System Overview
+The FastWorkflow agent system integrates DSPy ReAct agents with MCP-compliant tool calling via queue-based communication.
+
+## Key Files for Agent Development
+
+### Agent Core
+- **[fastworkflow/run_agent/__main__.py](mdc:fastworkflow/run_agent/__main__.py)** - CLI entry point for running agents
+- **[fastworkflow/run_agent/agent_module.py](mdc:fastworkflow/run_agent/agent_module.py)** - Agent initialization and tool functions
+
+### Agent Communication
+- Uses `user_message_queue.put()` for sending queries to workflow
+- Receives responses via `command_output_queue.get()`
+- Supports both plain utterances and structured MCP tool calls
+
+## Working with Agent Tools
+
+### The WorkflowAssistant Tool
+```python
+_execute_workflow_command_tool(query: str, *, workflow_session_obj)
+```
+
+**Behavior:**
+- Detects if `query` is JSON MCP tool call or plain utterance
+- Plain utterances: automatically wrapped as MCP calls
+- MCP tool calls: sent directly to workflow session
+- Returns formatted response for agent consumption
+
+### Helper Functions
+- `_is_json_mcp_tool_call()` - Detects MCP tool call format
+- `_wrap_utterance_as_mcp_call()` - Wraps plain text as MCP call
+- `_format_workflow_output_for_agent()` - Formats responses for agents
+
+## Agent Initialization Pattern
+
+```python
+# Agent gets MCP server and available tools
+mcp_server = FastWorkflowMCPServer(workflow_session)
+available_tools = mcp_server.list_tools()
+
+# Tool documentation includes MCP tool schemas
+workflow_assistant_tool.__doc__ = _build_tool_documentation(available_tools)
+```
+
+## Development Best Practices
+
+### When Adding New Agent Capabilities
+1. Extend tool documentation in `_build_tool_documentation()`
+2. Add new helper functions for complex query processing
+3. Update agent prompts to leverage new MCP tools
+4. Test with both structured and unstructured queries
+
+### Testing Agent Functionality
+- Use `keep_alive=True` when creating `WorkflowSession` for agents
+- Test both plain utterances and MCP tool call formats
+- Verify tool discovery and documentation generation
+- Test error handling and graceful degradation
+
+### Debugging Agent Issues
+- Check agent logs for "Agent -> Workflow Assistant>" and "Workflow Assistant -> Agent>" messages
+- Verify MCP server initialization doesn't fail
+- Ensure `workflow_session.start()` is called before using queues
+- Test message routing logic in `WorkflowSession._run_workflow_loop()`

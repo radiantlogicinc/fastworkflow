@@ -1,0 +1,74 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# MCP Integration Architecture
+
+## Overview
+FastWorkflow implements Model Context Protocol (MCP) compliance with a streamlined agent integration that enforces structured tool calling patterns and delegates message processing to the workflow session layer.
+
+## Core Components
+
+### MCP Server Implementation
+- **[fastworkflow/mcp_server_example.py](mdc:fastworkflow/mcp_server_example.py)** - Complete MCP server with JSON-RPC 2.0 support
+- **[fastworkflow/__init__.py](mdc:fastworkflow/__init__.py)** - MCP data classes (`MCPToolCall`, `MCPContent`, `MCPToolResult`)
+- **[fastworkflow/command_executor.py](mdc:fastworkflow/command_executor.py)** - MCP-compliant command execution methods
+
+### Agent Integration
+- **[fastworkflow/run_agent/agent_module.py](mdc:fastworkflow/run_agent/agent_module.py)** - Agent tool that exclusively accepts structured MCP tool calls
+- **[fastworkflow/workflow_session.py](mdc:fastworkflow/workflow_session.py)** - Message routing logic for MCP vs regular commands
+
+## Message Flow Architecture
+
+```
+Agent Query → _execute_workflow_command_tool() → user_message_queue → WorkflowSession
+                                                                           ↓
+                                                                  Message Processing Logic
+                                                                           ↓
+                                                               _process_mcp_tool_call()
+```
+
+## Key Implementation Details
+
+### Agent Layer Simplification
+- `_execute_workflow_command_tool()` passes queries directly to workflow session queue
+- **No client-side validation or processing** - agent trusts DSPy to format queries correctly
+- **No automatic wrapping** - structured MCP tool calls are required from the agent
+- Agent documentation enforces JSON format requirements through tool descriptions
+
+### Tool Discovery & Documentation
+- Agent initialization creates `FastWorkflowMCPServer` and calls `list_tools()`
+- Tool documentation enforces structured format requirements:
+  - **ONLY JSON-formatted MCP tool calls accepted**
+  - Required format: `{"type": "mcp_tool_call", "tool_call": {"name": "tool_name", "arguments": {...}}}`
+  - Complete input schema with parameter types, descriptions, and required status
+- Enhanced schema documentation via `_format_input_schema()`
+- Graceful fallback if MCP server initialization fails
+
+### Input Schema Documentation
+- `_format_input_schema()` formats tool parameters for agent consumption
+- Shows parameter types, descriptions, and required/optional status
+- Provides "No parameters required" for tools without input requirements
+
+### Processing Delegation
+- Agent layer focuses on documentation and discovery
+- **All message parsing and validation delegated to workflow session**
+- Workflow session handles JSON detection via `_is_mcp_tool_call()` (utility function available but unused in agent)
+- Processing logic remains in `WorkflowSession._process_mcp_tool_call()`
+
+### Output Formatting
+- `_format_workflow_output_for_agent()` detects MCP results via `_mcp_source` marker
+- Separate formatting for MCP results vs regular command responses
+- Maintains backward compatibility for command response structures
+
+## Testing
+- **[tests/test_mcp_server_integration.py](mdc:tests/test_mcp_server_integration.py)** - 23 comprehensive integration tests
+- Tests cover tool discovery, execution, JSON-RPC protocol, and data conversions
+- Uses actual retail workflow data for realistic testing
+
+## Design Philosophy
+- **Agent layer**: Documentation and discovery only
+- **Workflow session layer**: Message processing and validation
+- **Clear separation of concerns**: Agent enforces format requirements through documentation, workflow session handles implementation
+- **Structured format enforcement**: No fallback to plain text - requires proper MCP tool call formatting

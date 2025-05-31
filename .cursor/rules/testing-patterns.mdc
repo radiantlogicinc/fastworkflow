@@ -1,0 +1,113 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# Testing Patterns for FastWorkflow
+
+## MCP Integration Testing
+
+### Test Structure
+- **[tests/test_mcp_server_integration.py](mdc:tests/test_mcp_server_integration.py)** - 23 comprehensive integration tests
+- **[tests/conftest.py](mdc:tests/conftest.py)** - Pytest configuration and shared fixtures
+- **[tests/README.md](mdc:tests/README.md)** - Testing documentation and usage guide
+
+### Test Categories
+
+#### MCP Server Functionality (`TestFastWorkflowMCPServer`)
+- Server initialization and tool discovery
+- Tool schema validation and structure
+- Tool execution with various parameter types
+- JSON-RPC protocol compliance
+- Error handling for invalid requests
+
+#### Real Workflow Commands (`TestRetailWorkflowCommands`)
+- Tests actual retail workflow commands without mocks
+- Parameter validation and extraction
+- Command execution with real data
+- Error handling for invalid parameters
+
+#### Data Format Conversions (`TestMCPDataConversion`)
+- `CommandOutput` to `MCPToolResult` conversion
+- `MCPToolCall` to `Action` conversion
+- Error state handling and propagation
+
+### Testing Best Practices
+
+#### Integration Testing Philosophy
+```python
+# ✅ DO: Use real workflow data
+workflow_path = os.path.join("examples", "retail_workflow") 
+
+# ✅ DO: Test end-to-end functionality
+result = mcp_server.call_tool("get_user_details", {"user_id": "sara_doe_496"})
+
+# ❌ DON'T: Mock FastWorkflow components
+# ❌ DON'T: Use fake data when real data is available
+```
+
+#### Session Management for Tests
+```python
+# Required for agent testing
+workflow_session = fastworkflow.WorkflowSession(
+    CommandRouter(),
+    CommandExecutor(), 
+    workflow_path,
+    session_id_str="test_session",  # Required parameter
+    keep_alive=True  # For queue creation
+)
+workflow_session.start()  # Start processing
+```
+
+### Running Tests
+
+#### All MCP Tests
+```bash
+pytest tests/test_mcp_server_integration.py -v
+```
+
+#### Specific Test Classes
+```bash
+pytest tests/test_mcp_server_integration.py::TestFastWorkflowMCPServer -v
+pytest tests/test_mcp_server_integration.py::TestRetailWorkflowCommands -v
+```
+
+#### With Markers
+```bash
+pytest -m integration -v      # Integration tests only
+pytest -m slow -v            # Slow tests only  
+pytest -m "not slow" -v      # Skip slow tests
+```
+
+### Test Development Patterns
+
+#### Adding New MCP Tool Tests
+1. Add test method to `TestRetailWorkflowCommands`
+2. Use real workflow commands and parameters
+3. Test both success and error cases
+4. Verify MCP compliance of outputs
+
+#### Testing Agent Integration
+```python
+# Test both plain utterances and MCP tool calls
+def test_agent_tool():
+    # Plain utterance
+    result1 = _execute_workflow_command_tool(
+        "What can you do?", 
+        workflow_session_obj=session
+    )
+    
+    # MCP tool call
+    mcp_call = {"type": "mcp_tool_call", "tool_call": {...}}
+    result2 = _execute_workflow_command_tool(
+        json.dumps(mcp_call),
+        workflow_session_obj=session  
+    )
+```
+
+#### Error Testing
+- Test malformed JSON requests
+- Test invalid tool names
+- Test missing required parameters
+- Test recursion depth limits
+- Verify graceful error handling

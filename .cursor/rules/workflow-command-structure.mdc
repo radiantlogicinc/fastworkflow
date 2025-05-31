@@ -1,0 +1,88 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# Workflow Command Structure Guide
+
+## Overview
+FastWorkflow commands follow a consistent directory structure pattern. Each command has separate modules for parameter extraction, response generation, and utterance generation.
+
+## Command Directory Structure
+```
+_base_commands/
+  <command_name>/
+    parameter_extraction/
+      __init__.py
+      signatures.py          # CommandParameters and InputForParamExtraction classes
+    response_generation/
+      __init__.py
+      command_implementation.py  # Core business logic
+      inference.py          # ResponseGenerator class
+    utterances/
+      __init__.py
+      generate_utterances.py    # Utterance generation logic
+      plain_utterances.json    # Static utterance examples
+      template_utterances.json # Template patterns
+```
+
+## Key Components
+
+### Parameter Extraction
+- `signatures.py` contains Pydantic models for command parameters
+- Uses Annotated fields with validation patterns and examples
+- `CommandParameters` class defines the expected inputs
+- `InputForParamExtraction` provides workflow context
+
+### Response Generation
+- `command_implementation.py` contains the core business logic
+- `process_command()` function takes Session and CommandParameters
+- Returns `CommandProcessorOutput` with structured results
+- `inference.py` wraps the implementation for the framework
+
+### Utterances
+- `plain_utterances.json` contains example user inputs
+- `template_utterances.json` contains parameterized patterns
+- `generate_utterances.py` creates training data variations
+
+## Example Command: get_user_details
+Located in [examples/retail_workflow/_base_commands/get_user_details](mdc:examples/retail_workflow/_base_commands/get_user_details)
+
+### Parameter Pattern
+```python
+class CommandParameters(BaseModel):
+    user_id: Annotated[
+        str,
+        Field(
+            default="NOT_FOUND",
+            description="The user ID to get details for",
+            pattern=r"^([a-z]+_[a-z]+_\d+|NOT_FOUND)$",
+            examples=["sara_doe_496"]
+        )
+    ]
+```
+
+### Implementation Pattern
+```python
+def process_command(session: Session, input: CommandParameters) -> CommandProcessorOutput:
+    data = load_data()
+    result = GetUserDetails.invoke(data=data, user_id=input.user_id)
+    return CommandProcessorOutput(status=result)
+```
+
+### Tool Integration
+- Commands integrate with tools in [examples/retail_workflow/tools](mdc:examples/retail_workflow/tools)
+- Tools follow the `Tool` base class pattern
+- Data is loaded from [examples/retail_workflow/retail_data](mdc:examples/retail_workflow/retail_data)
+
+## Validation Patterns
+- Use regex patterns for structured IDs (order_ids, user_ids, etc.)
+- Default to "NOT_FOUND" for missing parameters
+- Include clear examples in Field descriptions
+- Use List[str] for multiple items (item_ids, new_item_ids)
+
+## Naming Conventions
+- Command names use snake_case (e.g., `get_user_details`)
+- Tool classes use PascalCase (e.g., `GetUserDetails`)
+- Parameter fields match tool method parameters
+- File names follow the module structure pattern

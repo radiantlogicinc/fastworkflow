@@ -1,0 +1,95 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# MCP Integration Patterns Guide
+
+## Overview
+FastWorkflow integrates with the Model Context Protocol (MCP) to expose workflow commands as structured tools with JSON schemas.
+
+## Core MCP Components
+
+### FastWorkflowMCPServer
+Located in [fastworkflow/mcp_server_example.py](mdc:fastworkflow/mcp_server_example.py)
+- Wraps `CommandExecutor` to provide MCP-compliant interfaces
+- Generates tool definitions from Pydantic models
+- Handles JSON-RPC 2.0 requests (`tools/list`, `tools/call`)
+
+### Tool Definition Generation
+```python
+def list_tools(self) -> List[Dict[str, Any]]:
+    # Gets command names from workflow definition
+    # Converts Pydantic models to JSON schemas
+    # Adds standard parameters (command, workitem_path)
+```
+
+### JSON Schema Mapping
+- Pydantic `Field` → JSON Schema `properties`
+- `description` → JSON Schema `description`
+- `pattern` → JSON Schema `pattern`
+- `examples` → JSON Schema `examples`
+- `is_required()` → JSON Schema `required` array
+
+## Tool Call Format
+JSON MCP tool calls must follow this exact format:
+```json
+{
+  "type": "mcp_tool_call",
+  "tool_call": {
+    "name": "command_name",
+    "arguments": {
+      "parameter1": "value1",
+      "parameter2": "value2"
+    }
+  }
+}
+```
+
+## Schema Generation Process
+1. Command routing gets available commands for current workitem
+2. For each command, gets the `CommandParameters` Pydantic class
+3. Extracts `model_fields` to build JSON schema properties
+4. Adds standard FastWorkflow parameters (`command`, `workitem_path`)
+5. Creates MCP tool definition with `inputSchema`
+
+## MCP Tool Annotations
+```python
+"annotations": {
+    "title": command_name.replace("_", " ").title(),
+    "readOnlyHint": False,      # Assume tools can modify state
+    "destructiveHint": False,   # Conservative default
+    "idempotentHint": False,
+    "openWorldHint": True       # FastWorkflow can interact with external systems
+}
+```
+
+## Tool Execution Flow
+1. `call_tool()` receives tool name and arguments
+2. Creates `MCPToolCall` object
+3. Calls `CommandExecutor.perform_mcp_tool_call()`
+4. Returns `MCPToolResult` with success/error status
+
+## Result Format
+```python
+class MCPToolResult:
+    isError: bool
+    content: List[MCPContent]  # Contains text results
+```
+
+## Integration with Agent Architecture
+- Main agent detects JSON MCP tool calls via `_is_json_mcp_tool_call()`
+- MCP Tool Agent exposes individual tools as DSPy functions
+- Each individual tool calls `mcp_server.call_tool()` directly
+- Results are formatted via `_format_mcp_result_for_agent()`
+
+## Example Retail Workflow Tools
+The [examples/retail_workflow](mdc:examples/retail_workflow) exposes these MCP tools:
+- `get_user_details` - Look up user information
+- `get_order_details` - Retrieve order status
+- `cancel_pending_order` - Cancel orders with reason
+- `list_all_product_types` - Browse product catalog
+- `modify_pending_order_address` - Update shipping details
+
+## Error Handling
+MCP errors are wrapped in `MCPToolResult` with `isError: true`. The agent architecture lets all exceptions bubble up naturally for debugging.

@@ -1,0 +1,64 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# Delegated Agent Architecture Guide
+
+## Overview
+The FastWorkflow system uses a delegated agent architecture where the main agent delegates MCP tool calls to a specialized MCP Tool Agent while handling plain text queries directly.
+
+## Architecture Components
+
+### Main Agent
+- Located in [fastworkflow/run_agent/agent_module.py](mdc:fastworkflow/run_agent/agent_module.py)
+- Uses `DialogueWithWorkflow` DSPy signature
+- Exposes two tools: `WorkflowAssistant` and `AskUser`
+- The `WorkflowAssistant` tool delegates JSON MCP tool calls to the MCP Tool Agent
+
+### MCP Tool Agent
+- Specialized DSPy ReAct agent that exposes individual MCP tools
+- Uses `ExecuteMCPTool` DSPy signature
+- Each MCP tool becomes a separate DSPy tool with full schema documentation
+- Initialized by `initialize_mcp_tool_agent()` function
+
+### MCP Server Integration
+- [fastworkflow/mcp_server_example.py](mdc:fastworkflow/mcp_server_example.py) provides MCP-compliant tool execution
+- `FastWorkflowMCPServer` class wraps the CommandExecutor
+- Generates tool definitions with JSON schemas from Pydantic models
+
+## Key Functions
+
+### Tool Creation
+- `_create_individual_mcp_tool()`: Creates DSPy tool functions for each MCP tool
+- `_build_simplified_tool_documentation()`: Generates simplified docs (names + descriptions only)
+- `_build_tool_documentation()`: Generates full docs with schemas (legacy)
+
+### Delegation Logic
+- `_execute_workflow_command_tool_with_delegation()`: Main delegation function
+- JSON MCP tool calls → MCP Tool Agent
+- Plain text queries → Direct workflow execution
+- `_is_json_mcp_tool_call()`: Detects JSON MCP tool call format
+
+## Exception Handling Policy
+**IMPORTANT**: Do not add try/catch blocks in this codebase. Let exceptions bubble up naturally so developers can see and fix the underlying issues. This applies to:
+- JSON parsing errors
+- MCP tool execution errors
+- Agent delegation failures
+- DSPy LM configuration errors
+- User input interruptions
+
+## Tool Documentation Format
+- Main agent sees simplified tool list (names + descriptions)
+- Individual MCP tools have full parameter schemas
+- Uses colorama for colored console output during execution
+
+## Workflow Examples
+The [examples/retail_workflow](mdc:examples/retail_workflow) demonstrates the architecture with real commands like:
+- `get_user_details`
+- `get_order_details` 
+- `cancel_pending_order`
+- `list_all_product_types`
+
+## Testing
+Integration tests are in [tests/test_mcp_server_integration.py](mdc:tests/test_mcp_server_integration.py) and cover the MCP server functionality. The delegated architecture is purely internal and doesn't expose new functionality, so existing tests remain adequate.
