@@ -112,7 +112,12 @@ def main():
     )
 
     try:
-        react_agent = initialize_dspy_agent(workflow_session, LLM_AGENT, LITELLM_API_KEY_AGENT)
+        react_agent = initialize_dspy_agent(
+            workflow_session, 
+            LLM_AGENT, 
+            LITELLM_API_KEY_AGENT,
+            clear_cache=True
+        )
     except (EnvironmentError, RuntimeError) as e:
         print(f"{Fore.RED}Failed to initialize DSPy agent: {e}{Style.RESET_ALL}")
         exit(1)
