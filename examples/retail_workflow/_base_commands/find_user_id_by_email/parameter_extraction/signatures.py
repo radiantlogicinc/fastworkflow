@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field, ConfigDict
 from fastworkflow.session import WorkflowSnapshot
 
 class CommandParameters(BaseModel):
+    """Returns the user_id"""
     email: Annotated[
         str,
         Field(

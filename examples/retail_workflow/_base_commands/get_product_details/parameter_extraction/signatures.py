@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field, ConfigDict
 from fastworkflow.session import WorkflowSnapshot
 
 class CommandParameters(BaseModel):
+    """Returns product name and details of a list variants including variant item_id, variant attributes such as color, size, material and style, whether it is available and the price"""
     product_id: Annotated[
         str,
         Field(

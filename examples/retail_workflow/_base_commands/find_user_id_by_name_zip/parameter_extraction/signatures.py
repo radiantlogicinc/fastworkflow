@@ -4,6 +4,7 @@ from fastworkflow.session import WorkflowSnapshot
 from fastworkflow.utils.signatures import InputForParamExtraction
 
 class CommandParameters(BaseModel):
+    """Returns the user_id"""
     first_name: Annotated[
         str,
         Field(

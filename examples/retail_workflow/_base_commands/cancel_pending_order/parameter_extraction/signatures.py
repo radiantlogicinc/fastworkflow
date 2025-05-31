@@ -8,6 +8,7 @@ from fastworkflow.utils.signatures import InputForParamExtraction
 
 
 class CommandParameters(BaseModel):
+    """Returns status (whether cancellation succeeded)"""
     order_id: Annotated[
         str,
         Field(

@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field, ConfigDict
 from fastworkflow.session import WorkflowSnapshot
 
 class CommandParameters(BaseModel):
+    """Returns details of items ordered, order delivery address, fulfillments, status, and payment history"""
     order_id: Annotated[
         str,
         Field(

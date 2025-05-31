@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field, ConfigDict
 from fastworkflow.session import WorkflowSnapshot
 
 class CommandParameters(BaseModel):
+    """Returns status (whether order items modification succeeded)"""
     order_id: Annotated[
         str,
         Field(

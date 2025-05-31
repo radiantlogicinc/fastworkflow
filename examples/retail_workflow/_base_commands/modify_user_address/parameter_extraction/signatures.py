@@ -4,6 +4,7 @@ from fastworkflow.session import WorkflowSnapshot
 from fastworkflow.utils.signatures import InputForParamExtraction
 
 class CommandParameters(BaseModel):
+    """Returns status (whether user address modification succeeded)"""
     user_id: Annotated[
         str,
         Field(

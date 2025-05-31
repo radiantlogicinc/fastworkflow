@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field, ConfigDict
 from fastworkflow.session import WorkflowSnapshot
 
 class CommandParameters(BaseModel):
+    """Returns status (whether exchange succeeded)"""
     order_id: Annotated[
         str,
         Field(
@@ -35,7 +36,7 @@ class CommandParameters(BaseModel):
         str,
         Field(
             default="NOT_FOUND",
-            description="Payment method ID for price difference",
+            description="Payment method ID for price difference. You can get this from order details->payment_history",
             examples=["gift_card_0000000", "credit_card_0000000"]
         )
     ]
