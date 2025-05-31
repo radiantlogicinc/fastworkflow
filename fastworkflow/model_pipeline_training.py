@@ -455,23 +455,19 @@ def predict_single_sentence(
     if not text.strip():
         raise ValueError("Input text cannot be empty")
 
-    
+
     global label_encoder
     path=get_route_layer_filepath2(path)
     load_label_encoder(path)
     k_val=len(label_encoder.classes_)
-    if k_val>2:
-        k_val=3
-    else:
-        k_val=2
-
+    k_val = 3 if k_val>2 else 2
     # Make prediction using the pipeline's batch prediction method
     results = pipeline.predict_batch([text],k_val=k_val)
     # Get the numeric prediction
     numeric_prediction = results["predictions"][0]
 
     label_names = label_encoder.inverse_transform(results['top_k_predictions'][0])
-    
+
     # Convert numeric prediction back to original label name
     label_name = label_encoder.inverse_transform([numeric_prediction])[0]
 
