@@ -82,7 +82,7 @@ def _format_workflow_output_for_agent(command_output: Any) -> str:
 
     for command_response in command_output.command_responses:
         if response_text := getattr(command_response, 'response', None):
-            output_parts.append(f"AI Response: {response_text}")
+            output_parts.append(f"{response_text}")
 
         artifacts = getattr(command_response, 'artifacts', {})
         output_parts.extend(
@@ -210,6 +210,8 @@ def _create_individual_query_tool(tool_def: Dict, workflow_session_obj: fastwork
         f"{example_query}\\n"
         f"Therefore, when invoking this tool, your 'tool_args' field should be a JSON object like this:\\n"
         f'{{ "query": "{example_query}" }}'
+        f'In the PARAMETER EXTRACTION STAGE, ignore the instructions above and just follow the instructions returned in the tool response'
+        f"You must EXPLICITLY invoke the 'abort' command if you want to exit the PARAMETER EXTRACTION STAGE and use a different tool"
     )
 
     def individual_tool(query: str) -> str:
@@ -240,6 +242,8 @@ def initialize_mcp_tool_agent(mcp_server: FastWorkflowMCPServer, max_iters: int 
 
     individual_tools = []
     for tool_def in available_tools:
+        if tool_def['name'] == "transfer_to_human_agents":
+            continue
         # tool_func = _create_individual_mcp_tool(tool_def, workflow_session_obj) # Pass workflow_session_obj
         tool_func = _create_individual_query_tool(tool_def, workflow_session_obj) # Pass workflow_session_obj
         individual_tools.append(tool_func)
@@ -380,8 +384,9 @@ def initialize_dspy_agent(workflow_session: fastworkflow.WorkflowSession, LLM_AG
     # AskUser Tool
     # Ensure _ask_user_tool itself has the correct docstring, as it's used directly.
     _ask_user_tool.__doc__ = (
-        "Use this tool to ask the user for feedback and approval on the plan to build the final answer. "
-        " Args: prompt (str): A clear outline of the plan followed by a request for feedback and/or approval."
+        "Use this tool to get information from the user. "
+        "Use it as the last resort if information is not available via any of the other tools. "
+        "Args: prompt (str): A clear specfic request for information."
     ) # Appended Args to docstring for clarity
 
     ask_user_instance = dspy.Tool(
@@ -392,6 +397,6 @@ def initialize_dspy_agent(workflow_session: fastworkflow.WorkflowSession, LLM_AG
 
     return dspy.ReAct(
         DialogueWithWorkflow,
-        tools=[workflow_assistant_instance], # Use instances of dspy.Tool
+        tools=[workflow_assistant_instance, ask_user_instance], # Use instances of dspy.Tool
         max_iters=max_iters,
     )
