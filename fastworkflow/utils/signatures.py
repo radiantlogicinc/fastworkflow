@@ -276,8 +276,17 @@ Today's date is {today}.
 
         try:            
             params = model_class(**param_dict)
-        except ValidationError as e:
-            params = None
+        except ValidationError:
+            default_params = {
+                field_name: field_info.default
+                for field_name, field_info in model_class.model_fields.items()
+            }
+            
+            try:
+                params = model_class(**default_params)
+            except ValidationError:
+                # If we still can't create a valid instance, raise exception with custom message
+                raise ValidationError("required parameters must have a default value specified") from ex
         return params
     
     def validate_parameters(self, workflow_snapshot: WorkflowSnapshot, cmd_parameters: BaseModel) -> Tuple[bool, str, Dict[str, List[str]]]:
