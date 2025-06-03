@@ -63,7 +63,7 @@ class ExecuteMCPTool(dspy.Signature):
     "Finally, invoke the chosen tool by passing this query string as its argument. "
     "If tool execution returns with an error, use available information and your internal knowledge to correct the query string and try again. "
     """
-    tool_request = dspy.InputField(desc="A natural language tool request.")
+    tool_request = dspy.InputField(desc="The natural language tool request.")
     tool_result = dspy.OutputField(desc="Result after invoking the tool.")
 
 def _format_workflow_output_for_agent(command_output: Any) -> str:
