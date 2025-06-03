@@ -8,7 +8,7 @@ class CommandParameters(BaseModel):
         str,
         Field(
             default="NOT_FOUND",
-            description="The order ID to get details for (must start with #)",
+            description="The order ID to get details for (must start with #). You can get order id's from get_user_details, given a user id",
             pattern=r"^(#[\w\d]+|NOT_FOUND)$",
             examples=["#W0000000"]
         )
