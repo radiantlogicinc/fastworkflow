@@ -58,9 +58,8 @@ def process_command(
     command_name = extracted_command_name_match.group(1) if extracted_command_name_match else None
     if command_name:
         command = command.replace(f"@{command_name}", '').strip()
-        # throw away stored params if we switched to a different command name
-        if command_name != subject_command_name:
-            stored_params = None
+        # throw away stored parameters, agent must supply full set of params with command
+        stored_params = None
     else:
         command_name = subject_command_name
 
