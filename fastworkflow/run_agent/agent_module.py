@@ -196,7 +196,7 @@ def _create_individual_query_tool(tool_def: Dict, workflow_session_obj: fastwork
     if tool_def.get('inputSchema', {}).get('properties'):
         param_name_value_list = []
         for param_name, param_dict in tool_def.get('inputSchema', {}).get('properties', {}).items():
-            param_name_value_list.append((param_name, f"<{param_dict.get('description', 'value')}>"))
+            param_name_value_list.append((param_name, f"<replace with {param_dict.get('description', 'value')} or '' if unavailable>"))
 
         if param_name_value_list:
             param_values = ', '.join(f'{name}={value}' for name, value in param_name_value_list)
