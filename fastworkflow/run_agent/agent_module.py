@@ -63,7 +63,7 @@ class ExecuteMCPTool(dspy.Signature):
     "Finally, invoke the chosen tool by passing this query string as its argument. "
     "If tool execution returns with an error, use available information and your internal knowledge to correct the query string and try again. "
     """
-    tool_request = dspy.InputField(desc="The natural language tool request.")
+    tool_request = dspy.InputField(desc="A natural language tool request.")
     tool_result = dspy.OutputField(desc="Result after invoking the tool.")
 
 def _format_workflow_output_for_agent(command_output: Any) -> str:
@@ -109,7 +109,7 @@ def _format_mcp_result_for_agent(mcp_result) -> str:
     else:
         return mcp_result.content[0].text
 
-def _build_simplified_tool_documentation(available_tools: List[Dict]) -> str:
+def _build_assistant_tool_documentation(available_tools: List[Dict]) -> str:
     """Build simplified tool documentation for the main agent's WorkflowAssistant tool.
     This documentation is used as the __doc__ string for the WorkflowAssistant tool function.
     It should guide the main LLM on how to call WorkflowAssistant, primarily by passing the user's query.
@@ -119,9 +119,9 @@ def _build_simplified_tool_documentation(available_tools: List[Dict]) -> str:
     # Guidance for the MAIN AGENT on how to call WorkflowAssistant
     main_agent_guidance = """
     Use the WorkflowAssistant to interact with a suite of underlying tools to assist the user.
-    It takes a simple natural language query as input and delegates it to an internal agent 
+    It takes a natural language query as input and delegates to an internal agent 
     that will try to understand the request, select the most appropriate tool, and execute it.
-    Example tool_args: {"tool_request": "<the natural language query with all required input parameters>"}
+    Example tool_args: {"tool_request": "<A single tool request with all required input parameters>"}
 
     Available tools that WorkflowAssistant can access:
     """
@@ -287,14 +287,15 @@ def _execute_workflow_query_tool(query: str, *, workflow_session_obj: fastworkfl
     print(f"{Fore.CYAN}{Style.BRIGHT}Workflow -> Workflow Assistant>{Style.RESET_ALL}{Fore.CYAN} {formatted_output.replace(os.linesep, ' ')}{Style.RESET_ALL}")
     return formatted_output
 
-def _execute_workflow_command_tool_with_delegation(tool_request: str, *, mcp_tool_agent, workflow_session_obj: fastworkflow.WorkflowSession) -> str:
+def _execute_workflow_command_tool_with_delegation(tool_request: str, 
+                                                   workflow_tool_agent) -> str:
     """
     Delegate JSON MCP tool requests to MCP Tool Agent
     This function is intended to be used as a tool by the Workflow DSPy agent.
     """
     print(f"{Fore.CYAN}{Style.BRIGHT}Agent -> Workflow Assistant>{Style.RESET_ALL}{Fore.CYAN} {tool_request}{Style.RESET_ALL}")
 
-    agent_result = mcp_tool_agent(tool_request=tool_request)
+    agent_result = workflow_tool_agent(tool_request=tool_request)
 
     result = (
         agent_result.tool_result
@@ -359,21 +360,19 @@ def initialize_dspy_agent(workflow_session: fastworkflow.WorkflowSession, LLM_AG
     available_tools = mcp_server.list_tools()
 
     # --- Initialize MCP Tool Agent ---
-    mcp_tool_agent = initialize_workflow_tool_agent(mcp_server, max_iters=5)
+    workflow_tool_agent = initialize_workflow_tool_agent(mcp_server, max_iters=5)
 
     # WorkflowAssistant Tool
     _workflow_assistant_partial_func = functools.partial(
         _execute_workflow_command_tool_with_delegation,
-        mcp_tool_agent=mcp_tool_agent,
-        workflow_session_obj=workflow_session
+        workflow_tool_agent=workflow_tool_agent
     )
     # Set the docstring for the partial object, which ReAct will use as the description.
-    _workflow_assistant_partial_func.__doc__ = _build_simplified_tool_documentation(available_tools)
+    _workflow_assistant_partial_func.__doc__ = _build_assistant_tool_documentation(available_tools)
 
     workflow_assistant_instance = dspy.Tool(
         name="WorkflowAssistant",
         func=_workflow_assistant_partial_func
-        # Removed description and InputField kwargs
     )
 
     # AskUser Tool
