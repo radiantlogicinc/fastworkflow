@@ -58,13 +58,13 @@ class DialogueWithWorkflow(dspy.Signature):
 # DSPy Signature for the MCP Tool Agent
 class ExecuteMCPTool(dspy.Signature):
     """
-    "Understand the agent's natural language query. Based on this query, select the most appropriate tool (tool) from the available list. "
+    "Understand the tool request. Based on this tool request, select the most appropriate tool from the available list. "
     "Then, construct a complete and valid specially formatted query string for that chosen tool, including its specific arguments. "
     "Finally, invoke the chosen tool by passing this query string as its argument. "
     "If tool execution returns with an error, use available information and your internal knowledge to correct the query string and try again. "
     """
-    tool_request = dspy.InputField(desc="The agent's natural language query that needs to be mapped to a specific tool and formatted as an MCP JSON.")
-    tool_result = dspy.OutputField(desc="Result from the MCP tool execution after invoking the tool with the constructed MCP JSON.")
+    tool_request = dspy.InputField(desc="The natural language tool request.")
+    tool_result = dspy.OutputField(desc="Result after invoking the tool.")
 
 def _format_workflow_output_for_agent(command_output: Any) -> str:
     """
@@ -121,7 +121,7 @@ def _build_simplified_tool_documentation(available_tools: List[Dict]) -> str:
     Use the WorkflowAssistant to interact with a suite of underlying tools to assist the user.
     It takes a simple natural language query as input and delegates it to an internal agent 
     that will try to understand the request, select the most appropriate tool, and execute it.
-    Example tool_args: {"tool_request": "Can you get me details for order #W2378156?"}
+    Example tool_args: {"tool_request": "<the natural language query with all required input parameters>"}
 
     Available tools that WorkflowAssistant can access:
     """
@@ -135,54 +135,54 @@ def _build_simplified_tool_documentation(available_tools: List[Dict]) -> str:
     
     return main_agent_guidance + "\n".join(tool_docs)
 
-def _create_individual_mcp_tool(tool_def: Dict, workflow_session_obj: fastworkflow.WorkflowSession):
-    """Create a DSPy tool function for a specific MCP tool.
-    This tool expects a single string argument 'mcp_json_payload' containing the full MCP JSON for the specific tool.
-    It then passes this payload to _execute_workflow_command_tool for processing by the WorkflowSession.
-    """
-    tool_name = tool_def['name']
-    tool_desc = tool_def['description']
+# def _create_individual_mcp_tool(tool_def: Dict, workflow_session_obj: fastworkflow.WorkflowSession):
+#     """Create a DSPy tool function for a specific MCP tool.
+#     This tool expects a single string argument 'mcp_json_payload' containing the full MCP JSON for the specific tool.
+#     It then passes this payload to _execute_workflow_command_tool for processing by the WorkflowSession.
+#     """
+#     tool_name = tool_def['name']
+#     tool_desc = tool_def['description']
 
-    example_args = {}
-    if tool_def.get('inputSchema', {}).get('properties'):
-        for param_name in tool_def.get('inputSchema', {}).get('properties', {}):
-            if param_name == "command":
-                example_args[param_name] = '<the natural language query (tool_request)>'
-            else:
-                example_args[param_name] = f"value_for_{param_name}" 
+#     example_args = {}
+#     if tool_def.get('inputSchema', {}).get('properties'):
+#         for param_name in tool_def.get('inputSchema', {}).get('properties', {}):
+#             if param_name == "command":
+#                 example_args[param_name] = '<the natural language query (tool_request)>'
+#             else:
+#                 example_args[param_name] = f"value_for_{param_name}" 
 
-    example_mcp_for_this_tool = {
-        "type": "mcp_tool_call",
-        "tool_call": {
-            "name": tool_name,
-            "arguments": example_args
-        }
-    }
-    # For the docstring, we need to show what the mcp_json_payload *string itself* should look like,
-    # and then how it fits into the tool_args for the ReAct agent.
-    # json.dumps(example_mcp_for_this_tool) gives the string content of mcp_json_payload.
-    # json.dumps(json.dumps(example_mcp_for_this_tool)) gives an escaped string suitable for embedding in another JSON string (like tool_args value).
-    string_content_of_mcp_json_payload = json.dumps(example_mcp_for_this_tool, indent=2)
-    example_tool_args_value = json.dumps(string_content_of_mcp_json_payload) # This is what ReAct should put in tool_args
+#     example_mcp_for_this_tool = {
+#         "type": "mcp_tool_call",
+#         "tool_call": {
+#             "name": tool_name,
+#             "arguments": example_args
+#         }
+#     }
+#     # For the docstring, we need to show what the mcp_json_payload *string itself* should look like,
+#     # and then how it fits into the tool_args for the ReAct agent.
+#     # json.dumps(example_mcp_for_this_tool) gives the string content of mcp_json_payload.
+#     # json.dumps(json.dumps(example_mcp_for_this_tool)) gives an escaped string suitable for embedding in another JSON string (like tool_args value).
+#     string_content_of_mcp_json_payload = json.dumps(example_mcp_for_this_tool, indent=2)
+#     example_tool_args_value = json.dumps(string_content_of_mcp_json_payload) # This is what ReAct should put in tool_args
 
-    tool_docstring = (
-        f"Executes the '{tool_name}' tool. Tool description: {tool_desc}.\\n"
-        f"To use this tool, you MUST provide a single string argument named 'mcp_json_payload'.\\n"
-        f"The value for 'mcp_json_payload' MUST be a formatted string specifically for the '{tool_name}' tool.\\n"
-        f"Example of the MCP JSON string that should be the VALUE of 'mcp_json_payload':\\n"
-        f"{string_content_of_mcp_json_payload}\\n"
-        f"Therefore, when invoking this tool, your 'tool_args' field should be a JSON object like this (ensure the mcp_json_payload value is a correctly escaped JSON string):\\n"
-        f'{{ "mcp_json_payload": {example_tool_args_value} }}'
-    )
+#     tool_docstring = (
+#         f"Executes the '{tool_name}' tool. Tool description: {tool_desc}.\\n"
+#         f"To use this tool, you MUST provide a single string argument named 'mcp_json_payload'.\\n"
+#         f"The value for 'mcp_json_payload' MUST be a formatted string specifically for the '{tool_name}' tool.\\n"
+#         f"Example of the MCP JSON string that should be the VALUE of 'mcp_json_payload':\\n"
+#         f"{string_content_of_mcp_json_payload}\\n"
+#         f"Therefore, when invoking this tool, your 'tool_args' field should be a JSON object like this (ensure the mcp_json_payload value is a correctly escaped JSON string):\\n"
+#         f'{{ "mcp_json_payload": {example_tool_args_value} }}'
+#     )
 
-    def individual_tool(mcp_json_payload: str) -> str:
-        """Receives a complete MCP JSON string for the '{tool_name}' tool and passes it to the core workflow execution."""
-        return _execute_workflow_mcp_tool(mcp_json_payload=mcp_json_payload, workflow_session_obj=workflow_session_obj)
+#     def individual_tool(mcp_json_payload: str) -> str:
+#         """Receives a complete MCP JSON string for the '{tool_name}' tool and passes it to the core workflow execution."""
+#         return _execute_workflow_mcp_tool(mcp_json_payload=mcp_json_payload, workflow_session_obj=workflow_session_obj)
     
-    individual_tool.__name__ = tool_name 
-    individual_tool.__doc__ = tool_docstring
+#     individual_tool.__name__ = tool_name 
+#     individual_tool.__doc__ = tool_docstring
     
-    return individual_tool
+#     return individual_tool
 
 def _create_individual_query_tool(tool_def: Dict, workflow_session_obj: fastworkflow.WorkflowSession):
     """Create a DSPy tool function for a specific MCP tool.
@@ -200,7 +200,7 @@ def _create_individual_query_tool(tool_def: Dict, workflow_session_obj: fastwork
 
         if param_name_value_list:
             param_values = ', '.join(f'{name}={value}' for name, value in param_name_value_list)
-            example_query = f'{example_query}: {param_values}'
+            example_query = f'{example_query} {param_values}'
 
     tool_docstring = (
         f"Executes the '{tool_name}' tool. Tool description: {tool_desc}.\\n"
@@ -210,8 +210,7 @@ def _create_individual_query_tool(tool_def: Dict, workflow_session_obj: fastwork
         f"{example_query}\\n"
         f"Therefore, when invoking this tool, your 'tool_args' field should be a JSON object like this:\\n"
         f'{{ "query": "{example_query}" }}'
-        f'In the PARAMETER EXTRACTION STAGE, ignore the instructions above and just follow the instructions returned in the tool response'
-        f"You must EXPLICITLY invoke the 'abort' command if you want to exit the PARAMETER EXTRACTION STAGE and use a different tool"
+        f'If there is a PARAMETER EXTRACTION ERROR, ignore the instructions above and just follow the instructions returned in the tool response'
     )
 
     def individual_tool(query: str) -> str:
@@ -223,7 +222,7 @@ def _create_individual_query_tool(tool_def: Dict, workflow_session_obj: fastwork
     
     return individual_tool
 
-def initialize_mcp_tool_agent(mcp_server: FastWorkflowMCPServer, max_iters: int = 5):
+def initialize_workflow_tool_agent(mcp_server: FastWorkflowMCPServer, max_iters: int = 5):
     """
     Initialize and return a DSPy ReAct agent that exposes individual MCP tools.
     Each tool expects a single MCP JSON string payload for its specific tool.
@@ -254,22 +253,22 @@ def initialize_mcp_tool_agent(mcp_server: FastWorkflowMCPServer, max_iters: int 
         max_iters=max_iters,
     )
 
-def _execute_workflow_mcp_tool(mcp_json_payload: str, *, workflow_session_obj: fastworkflow.WorkflowSession) -> str:
-    """
-    Process JSON MCP tool call query.
-    This function is intended to be used as a tool by a DSPy agent.
-    """
-    print(f"{Fore.CYAN}{Style.BRIGHT}Workflow Assistant -> Workflow>{Style.RESET_ALL}{Fore.CYAN} {mcp_json_payload}{Style.RESET_ALL}")
+# def _execute_workflow_mcp_tool(mcp_json_payload: str, *, workflow_session_obj: fastworkflow.WorkflowSession) -> str:
+#     """
+#     Process JSON MCP tool call query.
+#     This function is intended to be used as a tool by a DSPy agent.
+#     """
+#     print(f"{Fore.CYAN}{Style.BRIGHT}Workflow Assistant -> Workflow>{Style.RESET_ALL}{Fore.CYAN} {mcp_json_payload}{Style.RESET_ALL}")
     
-    workflow_session_obj.user_message_queue.put(mcp_json_payload)
+#     workflow_session_obj.user_message_queue.put(mcp_json_payload)
     
-    # Get response and format
-    command_output = workflow_session_obj.command_output_queue.get()
-    formatted_output = _format_workflow_output_for_agent(command_output)
+#     # Get response and format
+#     command_output = workflow_session_obj.command_output_queue.get()
+#     formatted_output = _format_workflow_output_for_agent(command_output)
     
-    # Log the truncated workflow response to the agent
-    print(f"{Fore.CYAN}{Style.BRIGHT}Workflow -> Workflow Assistant>{Style.RESET_ALL}{Fore.CYAN} {formatted_output.replace(os.linesep, ' ')}{Style.RESET_ALL}")
-    return formatted_output
+#     # Log the truncated workflow response to the agent
+#     print(f"{Fore.CYAN}{Style.BRIGHT}Workflow -> Workflow Assistant>{Style.RESET_ALL}{Fore.CYAN} {formatted_output.replace(os.linesep, ' ')}{Style.RESET_ALL}")
+#     return formatted_output
 
 def _execute_workflow_query_tool(query: str, *, workflow_session_obj: fastworkflow.WorkflowSession) -> str:
     """
@@ -324,7 +323,7 @@ def _ask_user_tool(prompt: str) -> str:
     print(f"{Fore.GREEN}User response received: {user_response}{Style.RESET_ALL}")
     return user_response
 
-def initialize_dspy_agent(workflow_session: fastworkflow.WorkflowSession, LLM_AGENT: str, LITELLM_API_KEY_AGENT: Optional[str] = None, max_iters: int = 10, clear_cache: bool = False):
+def initialize_dspy_agent(workflow_session: fastworkflow.WorkflowSession, LLM_AGENT: str, LITELLM_API_KEY_AGENT: Optional[str] = None, max_iters: int = 25, clear_cache: bool = False):
     """
     Configures and returns a DSPy ReAct agent.
     
@@ -360,11 +359,7 @@ def initialize_dspy_agent(workflow_session: fastworkflow.WorkflowSession, LLM_AG
     available_tools = mcp_server.list_tools()
 
     # --- Initialize MCP Tool Agent ---
-    mcp_tool_agent = None
-    if mcp_server and available_tools:
-        mcp_tool_agent = initialize_mcp_tool_agent(mcp_server, max_iters=5)
-
-    # --- Define Tools directly using dspy.Tool constructor ---
+    mcp_tool_agent = initialize_workflow_tool_agent(mcp_server, max_iters=5)
 
     # WorkflowAssistant Tool
     _workflow_assistant_partial_func = functools.partial(
