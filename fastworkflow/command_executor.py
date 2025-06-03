@@ -82,6 +82,20 @@ class CommandExecutor(CommandExecutorInterface):
                 return command_output
 
             input_obj = command_output.command_responses[0].artifacts["cmd_parameters"]
+            command_name_from_param_extraction = command_output.command_responses[0].artifacts["command_name"]
+            if command_name_from_param_extraction != command_name:
+                command_name = command_name_from_param_extraction
+                response_generation_object = (
+                    command_routing_definition.get_command_class_object(
+                        active_workitem_type,
+                        command_name,
+                        CommandModuleType.RESPONSE_GENERATION_INFERENCE,
+                    )
+                )
+                if not response_generation_object:
+                    raise ValueError(
+                        f"Response generation object not found for workitem type '{active_workitem_type}' and command name '{command_name}'"
+                    )
 
         if input_obj:
             return response_generation_object(workflow_session.session, command, input_obj)

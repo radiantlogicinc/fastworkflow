@@ -34,6 +34,8 @@ def clear_parameters(session):
 
 
 class OutputOfProcessCommand(BaseModel):
+    command_name: str
+    command: str
     parameter_is_valid: bool
     cmd_parameters: Optional[BaseModel] = None
     error_msg: Optional[str] = None
@@ -47,17 +49,28 @@ def process_command(
     subject_command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(subject_workflow_folderpath)
     active_workitem_type = sws.active_workitem.path
     subject_command_name = session.workflow_snapshot.context["subject_command_name"]
-    
-    command_parameters_class = subject_command_routing_definition.get_command_class(
-        active_workitem_type, subject_command_name, ModuleType.COMMAND_PARAMETERS_CLASS)
 
-    input_for_param_extraction = InputForParamExtraction.create(session.workflow_snapshot,command)
-
-    # session_id = session.id
+    import re
     stored_params = get_stored_parameters(session)
 
+    # Search for @command pattern at start of string
+    extracted_command_name_match = re.search(r'^@(\S+)\s', command)
+    command_name = extracted_command_name_match.group(1) if extracted_command_name_match else None
+    if command_name:
+        command = command.replace(f"@{command_name}", '').strip()
+        # throw away stored params if we switched to a different command name
+        if command_name != subject_command_name:
+            stored_params = None
+    else:
+        command_name = subject_command_name
+
+    command_parameters_class = subject_command_routing_definition.get_command_class(
+        active_workitem_type, command_name, ModuleType.COMMAND_PARAMETERS_CLASS)
+
+    input_for_param_extraction = InputForParamExtraction.create(session.workflow_snapshot, command)
+
     if stored_params:
-        is_valid, error_msg, suggestions, stored_missing_fields = extract_missing_fields(input_for_param_extraction, sws, stored_params)
+        _, _, _, stored_missing_fields = extract_missing_fields(input_for_param_extraction, sws, stored_params)
     else:
         stored_missing_fields = []
 
@@ -65,7 +78,7 @@ def process_command(
         input_for_param_extraction, 
         command_parameters_class,
         stored_missing_fields,
-        subject_command_name,
+        command_name,
         subject_workflow_folderpath 
     )
 
@@ -84,10 +97,21 @@ def process_command(
             error_msg = f"Extracted parameters so far:\n{params_str}\n\n{error_msg}"
 
         error_msg += "\nEnter 'abort' if you want to abort the command."
-        return OutputOfProcessCommand(parameter_is_valid=False, error_msg=error_msg, cmd_parameters=merged_params, suggestions=suggestions)
+        return OutputOfProcessCommand(
+            command_name=command_name,
+            command=command,
+            parameter_is_valid=False, 
+            error_msg=error_msg, 
+            cmd_parameters=merged_params, 
+            suggestions=suggestions)
 
     clear_parameters(session)
-    return OutputOfProcessCommand(parameter_is_valid=True, cmd_parameters=merged_params, suggestions={})
+    return OutputOfProcessCommand(
+        command_name=command_name,
+        command=command,
+        parameter_is_valid=True, 
+        cmd_parameters=merged_params, 
+        suggestions={})
 
 
 def extract_missing_fields(input_for_param_extraction, sws, stored_params):

@@ -18,19 +18,20 @@ class ResponseGenerator:
                     CommandResponse(
                         response="",
                         artifacts={
+                            "command_name": output_of_process_command.command_name,
                             "cmd_parameters": output_of_process_command.cmd_parameters,
                         },
                     )
                 ]
             )
 
-        # Get the command name from session context
-        command_name = session.workflow_snapshot.context["subject_command_name"]
-
         return CommandOutput(
             command_responses=[
                 CommandResponse(
-                    response=f'CURRENT TOOL: {command_name}, PARAMETER EXTRACTION ERROR MESSAGE: {command}. {output_of_process_command.error_msg}',
+                    response=(
+                        f"PARAMETER EXTRACTION ERROR: "
+                        f"{output_of_process_command.error_msg}"
+                    ),
                     success=False
                 )
             ]
