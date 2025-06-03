@@ -8,7 +8,7 @@ class CommandParameters(BaseModel):
         str,
         Field(
             default="NOT_FOUND",
-            description="The email address to search for",
+            description="The email address to search for. If email is not available, you can use find_user_id_by_name_zip",
             pattern=r"^(NOT_FOUND|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})$",
             examples=["user@example.com"]
         )
