@@ -61,10 +61,15 @@ class ExecuteMCPTool(dspy.Signature):
     "Understand the tool request. Based on this tool request, select the most appropriate tool from the available list. "
     "Then, construct a complete and valid specially formatted query string for that chosen tool, including its specific arguments. "
     "Finally, invoke the chosen tool by passing this query string as its argument. "
-    "If tool execution returns with an error, use available information and your internal knowledge to correct the query string and try again. "
+    "Tool execution may return an error message because of missing or invalid parameter values. "
+    "Retry with a corrected query string if: "
+    "1. Missing parameters can be found in the tool request "
+    "2. Error message indicates parameter values are improperly formatted and the formatting errors can be corrected using your internal knowledge. "
+    "Otherwise, return the error message back to the user and finish. "
+    "Invoke only one tool"
     """
     tool_request = dspy.InputField(desc="The natural language tool request.")
-    tool_result = dspy.OutputField(desc="Result after invoking the tool.")
+    tool_result = dspy.OutputField(desc="Result or information request after invoking the tool.")
 
 def _format_workflow_output_for_agent(command_output: Any) -> str:
     """
@@ -121,18 +126,23 @@ def _build_assistant_tool_documentation(available_tools: List[Dict]) -> str:
     Use the WorkflowAssistant to interact with a suite of underlying tools to assist the user.
     It takes a natural language query as input and delegates to an internal agent 
     that will try to understand the request, select the most appropriate tool, and execute it.
-    Example tool_args: {"tool_request": "<A single tool request with all required input parameters>"}
+    Example tool_args: {"tool_request": "<A single tool request with tool description and all required input parameter names and values>"}
 
     Available tools that WorkflowAssistant can access:
     """
-    
+
     tool_docs = []
     for tool_def in available_tools:
         tool_name = tool_def['name']
         tool_desc = tool_def['description']
-        # Main agent does not need the detailed input schema, only name and description.
-        tool_docs.append(f"\n• Tool Name: \"{tool_name}\"\n  Description: {tool_desc}") 
-    
+
+        # Main agent does not need the detailed input schema, only name, description and parameters.
+        tool_docs.append(
+            f"\nTool Name: \"{tool_name}\""
+            f"\nDescription: {tool_desc}"
+            f"\nRequired Parameters: {tool_def['inputSchema']['required']}"
+        ) 
+
     return main_agent_guidance + "\n".join(tool_docs)
 
 # def _create_individual_mcp_tool(tool_def: Dict, workflow_session_obj: fastworkflow.WorkflowSession):
@@ -193,14 +203,13 @@ def _create_individual_query_tool(tool_def: Dict, workflow_session_obj: fastwork
     tool_desc = tool_def['description']
 
     example_query = f'@{tool_name}'
-    if tool_def.get('inputSchema', {}).get('properties'):
-        param_name_value_list = []
-        for param_name, param_dict in tool_def.get('inputSchema', {}).get('properties', {}).items():
-            param_name_value_list.append((param_name, f"<replace with {param_dict.get('description', 'value')} or '' if unavailable>"))
+    param_name_value_list = []
+    for param_name, param_dict in tool_def['inputSchema']['properties'].items():
+        param_name_value_list.append((param_name, f"<replace with {param_dict.get('description', 'value')} or '{param_dict.get('default', 'null')}'>"))
 
-        if param_name_value_list:
-            param_values = ', '.join(f'{name}={value}' for name, value in param_name_value_list)
-            example_query = f'{example_query} {param_values}'
+    if param_name_value_list:
+        param_values = ', '.join(f'{name}={value}' for name, value in param_name_value_list)
+        example_query = f'{example_query} {param_values}'
 
     tool_docstring = (
         f"Executes the '{tool_name}' tool. Tool description: {tool_desc}.\\n"
@@ -287,7 +296,8 @@ def _execute_workflow_query_tool(query: str, *, workflow_session_obj: fastworkfl
     print(f"{Fore.CYAN}{Style.BRIGHT}Workflow -> Workflow Assistant>{Style.RESET_ALL}{Fore.CYAN} {formatted_output.replace(os.linesep, ' ')}{Style.RESET_ALL}")
     return formatted_output
 
-def _execute_workflow_command_tool_with_delegation(tool_request: str, 
+def _execute_workflow_command_tool_with_delegation(tool_request: str,
+                                                   *, 
                                                    workflow_tool_agent) -> str:
     """
     Delegate JSON MCP tool requests to MCP Tool Agent
