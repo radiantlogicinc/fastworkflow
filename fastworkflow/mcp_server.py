@@ -36,12 +36,14 @@ class FastWorkflowMCPServer:
         Returns:
             List of tool definitions in MCP format
         """
+        NOT_FOUND = fastworkflow.get_env_var('NOT_FOUND')
+
         # Get available commands from workflow
         workflow_folderpath = self.workflow_session.session.workflow_snapshot.workflow.workflow_folderpath
         command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(workflow_folderpath)
         active_workitem_path = self.workflow_session.session.workflow_snapshot.active_workitem.path
         command_names = command_routing_definition.get_command_names(active_workitem_path)
-        
+
         tools = []
         for command_name in command_names:
             # Get command parameters class to build schema
@@ -50,16 +52,16 @@ class FastWorkflowMCPServer:
                 command_name, 
                 CommandModuleType.COMMAND_PARAMETERS_CLASS
             )
-            
+
             # Build JSON schema from Pydantic model
             input_schema = {
                 "type": "object",
                 "properties": {},
                 "required": []
             }
-            
+
             description = f"Executes {command_name}"
- 
+
             if command_parameters_class:
                 field_descriptions = []
                 model_fields = command_parameters_class.model_fields
@@ -71,17 +73,22 @@ class FastWorkflowMCPServer:
                         field_descriptions.append(field_info.description)
                     else:
                         field_descriptions.append(field_name)
-                    input_schema["properties"][field_name] = prop
-                    
-                    # Add to required if field is required
-                    if field_info.is_required():
+
+                    if hasattr(field_info, 'default') and field_info.default:
+                        prop["default"] = field_info.default
+                        # Add to required if default is NOT_FOUND
+                        if field_info.default == NOT_FOUND:
+                            input_schema["required"].append(field_name)
+                    elif field_info.is_required():
                         input_schema["required"].append(field_name)
+
+                    input_schema["properties"][field_name] = prop
 
                 if field_descriptions:
                     description = f"Input: {', '.join(field_descriptions)}"
                 if command_parameters_class.__doc__:
                     description = f"{description}. {command_parameters_class.__doc__.strip()}"
-            
+
             # Add standard FastWorkflow parameters
             # input_schema["properties"]["command"] = {
             #     "type": "string",
@@ -106,7 +113,7 @@ class FastWorkflowMCPServer:
                 }
             }
             tools.append(tool_def)
-        
+
         return tools
     
     def call_tool(self, name: str, arguments: Dict[str, Any]) -> fastworkflow.MCPToolResult:
