@@ -48,7 +48,7 @@ def configure_dspy_cache(enable_cache: bool = True, cache_dir: Optional[str] = N
     print(f"{Fore.GREEN}✅ DSPy cache configured{Style.RESET_ALL}")
 
 # DSPy Signature for the Agent
-class DialogueWithWorkflow(dspy.Signature):
+class PlanningAgentSignature(dspy.Signature):
     """
     'Prepare and execute a plan for building the final answer using the WorkflowAssistant tool"
     """
@@ -56,7 +56,7 @@ class DialogueWithWorkflow(dspy.Signature):
     final_answer = dspy.OutputField(desc="The agent's comprehensive response to the user after interacting with the workflow.")
 
 # DSPy Signature for the MCP Tool Agent
-class ExecuteMCPTool(dspy.Signature):
+class WorkflowAssistantSignature(dspy.Signature):
     """
     "Understand the tool request. Based on this tool request, select the most appropriate tool from the available list. "
     "Then, construct a complete and valid specially formatted query string for that chosen tool, including its specific arguments. "
@@ -66,7 +66,7 @@ class ExecuteMCPTool(dspy.Signature):
     "1. Missing parameters can be found in the tool request "
     "2. Error message indicates parameter values are improperly formatted and the formatting errors can be corrected using your internal knowledge. "
     "Otherwise, return the error message back to the user and finish. "
-    "Invoke only one tool"
+    "Invoke only one tool. DO NOT invoke any other tools except the one explicitly requested"
     """
     tool_request = dspy.InputField(desc="The natural language tool request.")
     tool_result = dspy.OutputField(desc="Result or information request after invoking the tool.")
@@ -257,7 +257,7 @@ def initialize_workflow_tool_agent(mcp_server: FastWorkflowMCPServer, max_iters:
         individual_tools.append(tool_func)
     
     return dspy.ReAct(
-        ExecuteMCPTool,
+        WorkflowAssistantSignature,
         tools=individual_tools,
         max_iters=max_iters,
     )
@@ -390,7 +390,7 @@ def initialize_dspy_agent(workflow_session: fastworkflow.WorkflowSession, LLM_AG
     _ask_user_tool.__doc__ = (
         "Use this tool to get information from the user. "
         "Use it as the last resort if information is not available via any of the other tools. "
-        "Args: prompt (str): A clear specfic request for information."
+        "Args: prompt (str): A clear specific request with helpful context based on the information already gathered."
     ) # Appended Args to docstring for clarity
 
     ask_user_instance = dspy.Tool(
@@ -400,7 +400,7 @@ def initialize_dspy_agent(workflow_session: fastworkflow.WorkflowSession, LLM_AG
     )
 
     return dspy.ReAct(
-        DialogueWithWorkflow,
+        PlanningAgentSignature,
         tools=[workflow_assistant_instance, ask_user_instance], # Use instances of dspy.Tool
         max_iters=max_iters,
     )
