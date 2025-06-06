@@ -28,7 +28,7 @@ class InputForParamExtraction(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     @classmethod
-    def create(cls, workflow_snapshot: WorkflowSnapshot, command: str):
+    def create(cls, workflow_snapshot: WorkflowSnapshot, _: str, command: str):
         return cls(command=command, workflow_snapshot=workflow_snapshot)
     
     def db_lookup(self, _:str) -> list[str]: 

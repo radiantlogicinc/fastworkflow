@@ -53,7 +53,7 @@ Two supported input formats in workflow session:
 ### Processing Flow
 - WorkflowSession routes based on JSON detection in `_run_workflow_loop()`
 - MCP tool calls → `_process_mcp_tool_call()` → `CommandExecutor.perform_mcp_tool_call()`
-- Regular commands → `_process_message()` → `CommandRouter.route_command()`
+- Regular commands → `_process_message()` → `CommandExecutor.invoke_command()`
 - Results marked with `_mcp_source` for special formatting in agent responses
 
 ### Output Formatting

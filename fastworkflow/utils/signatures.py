@@ -112,7 +112,7 @@ Today's date is {today}.
     model_config = ConfigDict(arbitrary_types_allowed=True)
     
     @classmethod
-    def create(cls, workflow_snapshot: WorkflowSnapshot, command: str):
+    def create(cls, subject_workflow_snapshot: WorkflowSnapshot, subject_command_name: str, subject_command: str):
         """
         Create an instance of InputForParamExtraction with a command string.
         
@@ -122,27 +122,23 @@ Today's date is {today}.
         Returns:
             An instance of InputForParamExtraction   
         """
-        if workflow_snapshot.context:
-            sws = workflow_snapshot.context["param_extraction_sws"]
-            subject_workflow_folderpath = sws.workflow.workflow_folderpath
-            subject_command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(subject_workflow_folderpath)
-            active_workitem_type = sws.active_workitem.path
-            subject_command_name =workflow_snapshot.context["subject_command_name"]
+        subject_workflow_folderpath = subject_workflow_snapshot.workflow.workflow_folderpath
+        subject_command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(subject_workflow_folderpath)
+        active_workitem_type = subject_workflow_snapshot.active_workitem.path
 
-            input_for_param_extraction_class = subject_command_routing_definition.get_command_class(
-                active_workitem_type, subject_command_name, ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS)
-            if input_for_param_extraction_class:
-                input_for_param_extraction = input_for_param_extraction_class.create(sws, command)
-            else:
-                input_for_param_extraction = None
+        input_for_param_extraction_class = subject_command_routing_definition.get_command_class(
+            active_workitem_type, subject_command_name, ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS)
+        if input_for_param_extraction_class and input_for_param_extraction_class is not cls:
+            input_for_param_extraction = input_for_param_extraction_class.create(
+                subject_workflow_snapshot, subject_command_name, subject_command)
         else:
-                input_for_param_extraction = None
+            input_for_param_extraction = None
         
         today=date.today()
         cls.__doc__ = cls.__doc__.format(today=today)
         
         return cls(
-            command=command,
+            command=subject_command,
             input_for_param_extraction=input_for_param_extraction
         )
     
@@ -289,7 +285,7 @@ Today's date is {today}.
                 raise ValidationError("required parameters must have a default value specified") from ex
         return params
     
-    def validate_parameters(self, workflow_snapshot: WorkflowSnapshot, cmd_parameters: BaseModel) -> Tuple[bool, str, Dict[str, List[str]]]:
+    def validate_parameters(self, cmd_parameters: BaseModel) -> Tuple[bool, str, Dict[str, List[str]]]:
         """
         Check if the parameters are valid in the current context, including database lookups.
         """
@@ -389,12 +385,10 @@ Today's date is {today}.
         message = ""
 
         if missing_fields:
-            message += f"{MISSING_INFORMATION_ERRMSG}\n" + ", ".join(missing_fields) + "\n"
+            message += f"{MISSING_INFORMATION_ERRMSG}" + ", ".join(missing_fields) + "\n"
 
         if invalid_fields:
-            message += f"{INVALID_INFORMATION_ERRMSG}\n" + ", ".join(invalid_fields) + "\n"
-
-        message += "Please provide this information to complete your request."
+            message += f"{INVALID_INFORMATION_ERRMSG}" + ", ".join(invalid_fields) + "\n"
 
         for field, suggestions in all_suggestions.items():
             if suggestions:
@@ -414,7 +408,7 @@ Today's date is {today}.
 
         if combined_fields:
             combined_fields_str = ", ".join(combined_fields)
-            message += f"\n\nProvide your response in this exact order, separated by commas:\n{combined_fields_str}. "
-            message += "\nIf any parameter value needs to include a comma, please enter the parameters one by one, i.e one at a time."
+            message += f"\nProvide corrected parameter values in the exact order specified below, separated by commas:\n{combined_fields_str}"
+            message += "\nFor parameter values that include a comma, provide separately from other values, and one at a time."
 
         return (False, message, all_suggestions)

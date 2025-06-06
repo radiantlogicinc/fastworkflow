@@ -1,6 +1,6 @@
 ---
-description:
-globs:
+description: 
+globs: 
 alwaysApply: false
 ---
 # Testing Patterns for FastWorkflow
@@ -50,7 +50,6 @@ result = mcp_server.call_tool("get_user_details", {"user_id": "sara_doe_496"})
 ```python
 # Required for agent testing
 workflow_session = fastworkflow.WorkflowSession(
-    CommandRouter(),
     CommandExecutor(), 
     workflow_path,
     session_id_str="test_session",  # Required parameter

@@ -7,7 +7,7 @@ import json
 
 import fastworkflow
 from fastworkflow.utils.logging import logger
-from fastworkflow.command_interfaces import CommandExecutorInterface, CommandRouterInterface
+from fastworkflow.command_interfaces import CommandExecutorInterface
 
 
 class SessionStatus(Enum):
@@ -66,7 +66,6 @@ class WorkflowSession:
             return session_id
 
     def __init__(self,
-                 command_router: CommandRouterInterface,
                  command_executor: CommandExecutorInterface,
                  workflow_folderpath: str,
                  session_id_str: Optional[str] = None,
@@ -117,7 +116,6 @@ class WorkflowSession:
         self._startup_action = startup_action
         self._keep_alive = keep_alive
 
-        self._command_router = command_router
         self._command_executor = command_executor
 
         # Register session
@@ -164,10 +162,6 @@ class WorkflowSession:
     @workflow_is_complete.setter
     def workflow_is_complete(self, value: bool) -> None:
         self._session.workflow_snapshot.workflow.is_complete = value
-
-    @property
-    def command_router(self) -> CommandRouterInterface:
-        return self._command_router
 
     @property
     def command_executor(self) -> CommandExecutorInterface:
@@ -269,7 +263,7 @@ class WorkflowSession:
     
     def _process_message(self, message: str) -> fastworkflow.CommandOutput:
         """Process a single message"""
-        command_output = self._command_router.route_command(self, message)
+        command_output = self._command_executor.invoke_command(self, message)
         if (not command_output.success or self._keep_alive) and \
             self._session.command_output_queue:
             self._session.command_output_queue.put(command_output)

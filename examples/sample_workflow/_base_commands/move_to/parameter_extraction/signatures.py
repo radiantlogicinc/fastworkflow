@@ -34,7 +34,7 @@ class InputForParamExtraction(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     @classmethod
-    def create(cls, workflow_snapshot: WorkflowSnapshot, command: str):
+    def create(cls, workflow_snapshot: WorkflowSnapshot, _: str, command: str):
         return cls(command=command, workflow_snapshot=workflow_snapshot)
     
     def db_lookup(self, _:str) -> list[str]: 
@@ -42,15 +42,3 @@ class InputForParamExtraction(BaseModel):
         workflow_definition = fastworkflow.WorkflowRegistry.get_definition(workflow_folderpath)
 
         return workflow_definition.paths_2_typemetadata.keys()
-
-    def process_extracted_parameters(
-        self, cmd_parameters: CommandParameters
-    ) -> None:
-        """
-        This function will be called before parameter validation
-        to allow further processing of extracted parameters.
-        """
-        if cmd_parameters.workitem_path == "NOT_FOUND":
-            if active_workitem := self.workflow_snapshot.active_workitem:
-                cmd_parameters.workitem_path = active_workitem.path
-                cmd_parameters.workitem_id = active_workitem.id

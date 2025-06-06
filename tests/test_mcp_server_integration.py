@@ -12,7 +12,6 @@ from typing import Dict, Any
 
 import fastworkflow
 from fastworkflow.mcp_server import FastWorkflowMCPServer, create_mcp_server_for_workflow
-from fastworkflow.command_router import CommandRouter
 from fastworkflow.command_executor import CommandExecutor
 
 
@@ -34,7 +33,7 @@ def initialized_fastworkflow():
 def workflow_session(retail_workflow_path, initialized_fastworkflow):
     """Create a FastWorkflow session for the retail workflow."""
     return fastworkflow.WorkflowSession(
-        CommandRouter(), CommandExecutor(), retail_workflow_path, session_id_str="test_session"
+        CommandExecutor(), retail_workflow_path, session_id_str="test_session"
     )
 
 
@@ -392,7 +391,7 @@ class TestMCPDataConversion:
         )
         
         command_executor = CommandExecutor()
-        action = command_executor.action_from_mcp_tool_call(
+        action = command_executor._action_from_mcp_tool_call(
             tool_call,
             default_workitem_path="/test"
         )
@@ -415,7 +414,7 @@ class TestMCPDataConversion:
         )
         
         command_executor = CommandExecutor()
-        action = command_executor.action_from_mcp_tool_call(tool_call)
+        action = command_executor._action_from_mcp_tool_call(tool_call)
         
         assert action.workitem_path == "/custom/path"
 

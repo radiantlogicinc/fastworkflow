@@ -198,11 +198,9 @@ def create_mcp_server_for_workflow(workflow_path: str) -> FastWorkflowMCPServer:
     fastworkflow.init({})
     
     # Create workflow session
-    from fastworkflow.command_router import CommandRouter
     from fastworkflow.command_executor import CommandExecutor
     
     workflow_session = fastworkflow.WorkflowSession(
-        CommandRouter(),
         CommandExecutor(), 
         workflow_path,
         session_id_str="mcp_server_session"

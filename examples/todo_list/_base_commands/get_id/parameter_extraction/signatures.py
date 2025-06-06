@@ -16,7 +16,7 @@ class InputForParamExtraction(BaseModel):
     command: str
 
     @classmethod
-    def create(cls, workflow_snapshot: WorkflowSnapshot, command: str):
+    def create(cls, workflow_snapshot: WorkflowSnapshot, _: str, command: str):
         return cls(
             command=command,
         )

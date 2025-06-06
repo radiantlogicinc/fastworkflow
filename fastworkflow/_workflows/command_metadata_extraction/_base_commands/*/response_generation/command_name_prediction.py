@@ -20,7 +20,6 @@ class CommandParameters(BaseModel):
 
 class OutputOfProcessCommand(BaseModel):
     command_name: Optional[str] = None
-    command: Optional[str] = None
     error_msg: Optional[str] = None
 
 def get_cache_path(session_id, convo_path):
@@ -93,7 +92,7 @@ def get_route_layer_filepath(workflow_folderpath, model_name) -> str:
 def process_command(
     session: fastworkflow.Session, command: str
 ) -> OutputOfProcessCommand:
-    sws = session.workflow_snapshot.context["intent_detection_sws"]
+    sws = session.workflow_snapshot.context["subject_workflow_snapshot"]
     sws_workflow_folderpath = sws.workflow.workflow_folderpath
     sws_session_id = sws.session_id
 
@@ -355,7 +354,6 @@ def process_command(
 
     return OutputOfProcessCommand(
         command_name=command_parameters.command_name,
-        command=command
     )   
 
 def get_valid_command_names(sws: WorkflowSnapshot) -> set[str]:
@@ -382,7 +380,7 @@ def validate_command_name(
     command_list = "\n".join(f"@{name}" for name in valid_command_names)
     return (
         False,
-        "The command was misclassified. Please select the correct command from the list below:\n"
+        "Please select the correct command from the list below:\n"
         f"{command_list}\n\nor type 'abort' to cancel"
     )
 
@@ -409,6 +407,6 @@ def formulate_misclassified_command_error_message(route_choice_list: list[str]) 
     )
 
     return (
-        "The command was misclassified. Please select the correct command from the list below:\n"
+        "Please select the correct command from the list below:\n"
         f"{command_list}\n\nor type 'abort' to cancel"
     )

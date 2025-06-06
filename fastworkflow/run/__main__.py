@@ -8,7 +8,6 @@ from dotenv import dotenv_values
 from colorama import Fore, Style, init
 
 import fastworkflow
-from fastworkflow.command_router import CommandRouter
 from fastworkflow.command_executor import CommandExecutor
 
 
@@ -92,7 +91,6 @@ if args.context_file_path:
         context_dict = json.load(file)
 
 workflow_session = fastworkflow.WorkflowSession(
-    CommandRouter(),
     CommandExecutor(),
     args.workflow_path, 
     session_id_str=f"run_{args.workflow_path}",

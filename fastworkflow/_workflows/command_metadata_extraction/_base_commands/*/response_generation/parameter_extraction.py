@@ -1,16 +1,12 @@
 from typing import Optional, Type, List, Dict, Union
-
 from pydantic import BaseModel
-
-import dspy
+import re
 
 import fastworkflow
+from fastworkflow.session import WorkflowSnapshot
 from fastworkflow.command_routing_definition import ModuleType
-from fastworkflow.utils.logging import logger
 from fastworkflow.utils.signatures import InputForParamExtraction
-from fastworkflow.utils.pydantic_model_2_dspy_signature_class import (
-    TypedPredictorSignature,
-)
+
 
 INVALID_INT_VALUE = fastworkflow.get_env_var("INVALID_INT_VALUE")
 INVALID_FLOAT_VALUE = fastworkflow.get_env_var("INVALID_FLOAT_VALUE")
@@ -34,42 +30,35 @@ def clear_parameters(session):
 
 
 class OutputOfProcessCommand(BaseModel):
-    command_name: str
-    command: str
-    parameter_is_valid: bool
+    parameters_are_valid: bool
     cmd_parameters: Optional[BaseModel] = None
     error_msg: Optional[str] = None
     suggestions: Optional[Dict[str, List[str]]] = None
 
 def process_command(
-    session: fastworkflow.Session, command: str
+    session: fastworkflow.Session, 
+    subject_workflow_snapshot: WorkflowSnapshot, 
+    command_name: str,
+    command: str
 ) -> OutputOfProcessCommand:
-    sws = session.workflow_snapshot.context["param_extraction_sws"]
-    subject_workflow_folderpath = sws.workflow.workflow_folderpath
+    subject_workflow_folderpath = subject_workflow_snapshot.workflow.workflow_folderpath
     subject_command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(subject_workflow_folderpath)
-    active_workitem_type = sws.active_workitem.path
-    subject_command_name = session.workflow_snapshot.context["subject_command_name"]
+    active_workitem_type = subject_workflow_snapshot.active_workitem.path
 
-    import re
+    command_parameters_class = (
+        subject_command_routing_definition.get_command_class(
+            active_workitem_type, command_name, ModuleType.COMMAND_PARAMETERS_CLASS
+        )
+    )
+    if not command_parameters_class:
+        return OutputOfProcessCommand(parameters_are_valid=True)
+
     stored_params = get_stored_parameters(session)
 
-    # Search for @command pattern at start of string
-    extracted_command_name_match = re.search(r'^@(\S+)\s', command)
-    command_name = extracted_command_name_match.group(1) if extracted_command_name_match else None
-    if command_name:
-        command = command.replace(f"@{command_name}", '').strip()
-        # throw away stored parameters, agent must supply full set of params with command
-        stored_params = None
-    else:
-        command_name = subject_command_name
-
-    command_parameters_class = subject_command_routing_definition.get_command_class(
-        active_workitem_type, command_name, ModuleType.COMMAND_PARAMETERS_CLASS)
-
-    input_for_param_extraction = InputForParamExtraction.create(session.workflow_snapshot, command)
+    input_for_param_extraction = InputForParamExtraction.create(subject_workflow_snapshot, command_name, command)
 
     if stored_params:
-        _, _, _, stored_missing_fields = extract_missing_fields(input_for_param_extraction, sws, stored_params)
+        _, _, _, stored_missing_fields = extract_missing_fields(input_for_param_extraction, subject_workflow_snapshot, stored_params)
     else:
         stored_missing_fields = []
 
@@ -86,31 +75,27 @@ def process_command(
     else:
         merged_params = new_params
 
-
     store_parameters(session, merged_params) 
 
-    is_valid, error_msg, suggestions = input_for_param_extraction.validate_parameters(sws,merged_params)
+    is_valid, error_msg, suggestions = input_for_param_extraction.validate_parameters(
+        merged_params)
 
     if not is_valid:
         if params_str := format_parameters_for_display(merged_params):
             error_msg = f"Extracted parameters so far:\n{params_str}\n\n{error_msg}"
 
         error_msg += "\nEnter 'abort' if you want to abort the command."
+        error_msg += "\nEnter 'you misunderstood' if the wrong command was executed."
         return OutputOfProcessCommand(
-            command_name=command_name,
-            command=command,
-            parameter_is_valid=False, 
+            parameters_are_valid=False, 
             error_msg=error_msg, 
             cmd_parameters=merged_params, 
             suggestions=suggestions)
 
     clear_parameters(session)
     return OutputOfProcessCommand(
-        command_name=command_name,
-        command=command,
-        parameter_is_valid=True, 
-        cmd_parameters=merged_params, 
-        suggestions={})
+        parameters_are_valid=True, 
+        cmd_parameters=merged_params)
 
 
 def extract_missing_fields(input_for_param_extraction, sws, stored_params):
