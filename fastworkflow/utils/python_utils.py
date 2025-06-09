@@ -3,50 +3,20 @@ import importlib
 
 def get_module(module_file_path: str, workflow_folderpath: str):
     if not module_file_path:
-            return None
+        return None
 
-    def truncate_path(path):
-        # Find the second occurrence of "fastworkflow" in the path
-        first_index = path.find("fastworkflow")
+    # Get absolute paths to ensure consistency
+    abs_module_path = os.path.abspath(module_file_path)
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 
-        if first_index == -1:
-            return path
-
-        second_index = path.find("fastworkflow", first_index + 1)
-        if second_index == -1:
-            return f"./{path[first_index:]}"
-
-        # Replace everything before the second "fastworkflow" with "./"
-        return f"./{path[second_index:]}"
-
-
-    # Truncate both paths
-    workflow_folderpath = truncate_path(workflow_folderpath)
-    module_file_path = truncate_path(module_file_path)
-
-    module_file_path = module_file_path.removeprefix('./').removeprefix('/')
-    # Strip '.py' and replace slashes
-    module_pythonic_path = module_file_path.replace(os.sep, ".").rsplit(".py", 1)[0]
-
-    # Split paths into components and find common prefix
-    root_package_pythonic_path = workflow_folderpath.replace(os.sep, ".").lstrip('.')
-    root_parts = root_package_pythonic_path.split('.')
-    module_parts = module_pythonic_path.split('.')
-    common_prefix = []
-    for r_start_index, r in enumerate(root_parts):
-        if r == module_parts[0]:
-            break
-    for offsetted_r, m in zip(root_parts[r_start_index:], module_parts):
-        if offsetted_r != m:
-            break
-        common_prefix.append(offsetted_r)
-    root_package_name = '.'.join(common_prefix) if common_prefix else ""
-
-    relative_module_name = (
-        module_pythonic_path[len(root_package_name):] 
-        if root_package_name else module_pythonic_path
-    )
-    spec = importlib.util.find_spec(relative_module_name, root_package_name)
-    if spec is None:
-        raise ImportError(f"Module {relative_module_name} not found")
-    return importlib.import_module(relative_module_name, root_package_name)
+    # Determine the pythonic path relative to the project root
+    if not abs_module_path.startswith(project_root):
+        raise ImportError(f"Module {abs_module_path} is outside of project root {project_root}")
+        
+    relative_path = os.path.relpath(abs_module_path, project_root)
+    module_pythonic_path = relative_path.replace(os.sep, ".").rsplit(".py", 1)[0]
+    
+    try:
+        return importlib.import_module(module_pythonic_path)
+    except ImportError as e:
+        raise ImportError(f"Could not import module from path: {module_pythonic_path}") from e

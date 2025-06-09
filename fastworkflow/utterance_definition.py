@@ -2,11 +2,13 @@ import json
 import os
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from fastworkflow import CommandRoutingRegistry, CommandSource
+from fastworkflow.command_routing_definition import ModuleType
 import fastworkflow
 from fastworkflow.command_directory import CommandDirectory, UtteranceMetadata
+from fastworkflow.utils import python_utils
 
 
 class UtteranceDefinition(BaseModel):
@@ -47,52 +49,33 @@ class UtteranceDefinition(BaseModel):
         command_directory: CommandDirectory,
     ):
         for command_key in command_directory.get_command_keys():
-            # if command_key.endswith("/*"):
-            #     continue
-            
             command_metadata = command_directory.get_command_metadata(command_key)
-            command_source = command_metadata.command_source
-            commands_folder = os.path.join(
-                workflow_folderpath 
-                if command_metadata.workflow_folderpath is None 
-                else command_metadata.workflow_folderpath, 
-                command_source.value)
-            command = command_key.split("/")[-1]
-            subfolder_path = os.path.join(commands_folder, command)
+            
+            # Get the Signature class from the command module
+            module = python_utils.get_module(
+                command_metadata.response_generation_module_path,
+                command_metadata.workflow_folderpath or workflow_folderpath
+            )
+            if not module:
+                continue
 
-            plain_utterances: list[str] = []
-            template_utterances: list[str] = []
-            generated_utterances_module_filepath: str = ""
-            generated_utterances_func_name: str = ""
+            Signature = getattr(module, "Signature", None)
+            if not Signature:
+                continue
 
-            utterances_folderpath = os.path.join(subfolder_path, "utterances")
-            if os.path.exists(utterances_folderpath):
-                plain_utterances_filepath = os.path.join(
-                    utterances_folderpath, "plain_utterances.json"
-                )
-                if os.path.exists(plain_utterances_filepath):
-                    with open(plain_utterances_filepath, "r") as f:
-                        plain_utterances = json.load(f)
+            # Extract utterances from the Signature class
+            plain_utterances = getattr(Signature, "plain_utterances", [])
+            template_utterances = getattr(Signature, "template_utterances", [])
 
-                template_utterance_filepath = os.path.join(
-                    utterances_folderpath, "template_utterances.json"
-                )
-                if os.path.exists(template_utterance_filepath):
-                    with open(template_utterance_filepath, "r") as f:
-                        template_utterances = json.load(f)
-
-                generated_utterances_module_filepath = os.path.join(
-                    utterances_folderpath, "generate_utterances.py"
-                )
-                if not os.path.exists(generated_utterances_module_filepath):
-                    raise ValueError(
-                        f"Generated utterances module filepath '{generated_utterances_module_filepath}' not found"
-                    )
-                else:
-                    generated_utterances_func_name = "generate_utterances"
+            # Get generation function if it exists
+            generated_utterances_module_filepath = ""
+            generated_utterances_func_name = ""
+            if hasattr(Signature, "generate_utterances"):
+                generated_utterances_module_filepath = command_metadata.response_generation_module_path
+                generated_utterances_func_name = "Signature.generate_utterances"
 
             utterance_metadata = UtteranceMetadata(
-                workflow_folderpath=commands_folder,
+                workflow_folderpath=command_metadata.workflow_folderpath or workflow_folderpath,
                 plain_utterances=plain_utterances,
                 template_utterances=template_utterances,
                 generated_utterances_module_filepath=generated_utterances_module_filepath,
@@ -103,8 +86,7 @@ class UtteranceDefinition(BaseModel):
                 command_key, utterance_metadata
             )
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 class UtteranceRegistry:   
     @classmethod

@@ -1,7 +1,7 @@
 import os
 from typing import List, Optional, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 import fastworkflow
 from fastworkflow.workflow_definition import NodeType, SizeMetaData
@@ -321,8 +321,7 @@ class Workflow(Workitem):
             else:
                 item.print(indent)
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     _has_started: bool = False
     _workitems: List[Union[Workitem, "Workflow"]] = []

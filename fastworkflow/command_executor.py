@@ -81,11 +81,10 @@ class CommandExecutor(CommandExecutorInterface):
         if action.parameters:
             input_obj = command_parameters_class(**action.parameters)
 
-            input_for_param_extraction = InputForParamExtraction.create(
-                session.workflow_snapshot, action.command_name, action.command)
-
+            input_for_param_extraction = InputForParamExtraction(command=action.command)
             is_valid, error_msg, _ = input_for_param_extraction.validate_parameters(
-                input_obj)
+                session.workflow_snapshot, action.command_name, input_obj
+            )
             if not is_valid:
                 raise ValueError(f"Invalid action parameters for command '{action.command_name}'\n{error_msg}")
         else:
@@ -140,7 +139,7 @@ class CommandExecutor(CommandExecutorInterface):
     ) -> tuple[int, CommandOutput]:
         startup_action = Action(
             workitem_path="/command_metadata_extraction",
-            command_name="*",
+            command_name="wildcard",
             command=command,
         )
 

@@ -5,6 +5,9 @@ alwaysApply: false
 ---
 # Testing Patterns for FastWorkflow
 
+- Always activate conda env fastworkflow before running pytests
+- Do not remove pytest tests without explicit user approval
+
 ## MCP Integration Testing
 
 ### Test Structure
@@ -62,20 +65,20 @@ workflow_session.start()  # Start processing
 
 #### All MCP Tests
 ```bash
-pytest tests/test_mcp_server_integration.py -v
+conda run -n fastworkflow python -m pytest tests/test_mcp_server_integration.py -v
 ```
 
 #### Specific Test Classes
 ```bash
-pytest tests/test_mcp_server_integration.py::TestFastWorkflowMCPServer -v
-pytest tests/test_mcp_server_integration.py::TestRetailWorkflowCommands -v
+conda run -n fastworkflow python -m pytest tests/test_mcp_server_integration.py::TestFastWorkflowMCPServer -v
+conda run -n fastworkflow python -m pytest tests/test_mcp_server_integration.py::TestRetailWorkflowCommands -v
 ```
 
 #### With Markers
 ```bash
-pytest -m integration -v      # Integration tests only
-pytest -m slow -v            # Slow tests only  
-pytest -m "not slow" -v      # Skip slow tests
+conda run -n fastworkflow python -m pytest -m integration -v      # Integration tests only
+conda run -n fastworkflow python -m pytest -m slow -v            # Slow tests only  
+conda run -n fastworkflow python -m pytest -m "not slow" -v      # Skip slow tests
 ```
 
 ### Test Development Patterns

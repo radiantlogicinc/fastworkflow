@@ -6,7 +6,7 @@ from typing import Optional
 from speedict import Rdict
 
 import fastworkflow
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, field_validator, model_validator, ConfigDict
 
 
 class NodeType(str, Enum):
@@ -164,8 +164,7 @@ class WorkflowDefinition(BaseModel):
         with open(filename, "w") as f:
             f.write(self.model_dump_json(indent=4))
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 class WorkflowRegistry:   
     @classmethod

@@ -1,4 +1,3 @@
-
 import importlib
 import os
 from typing import Optional
@@ -48,7 +47,17 @@ class UtteranceMetadata(BaseModel):
         )
 
         # Get the function from the module and execute it
-        return getattr(module, self.generated_utterances_func_name)
+        if not module or not self.generated_utterances_func_name:
+            return None
+            
+        if '.' in self.generated_utterances_func_name:
+            parts = self.generated_utterances_func_name.split('.')
+            func = module
+            for part in parts:
+                func = getattr(func, part)
+            return func
+
+        return getattr(module, self.generated_utterances_func_name, None)
 
     @field_validator("plain_utterances", mode="before")
     def parse_plain_utterances(cls, plain_utterances: list[str]):

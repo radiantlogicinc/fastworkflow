@@ -457,7 +457,7 @@ def predict_single_sentence(
 
 
     global label_encoder
-    path=get_route_layer_filepath2(path)
+    path=get_route_layer_label_encoder_filepath(path)
     load_label_encoder(path)
     k_val=len(label_encoder.classes_)
     k_val = 3 if k_val>2 else 2
@@ -479,14 +479,7 @@ def predict_single_sentence(
         "topk_labels":label_names
     }
 
-
-
-
-
-
-
-
-def get_route_layer_filepath(workflow_folderpath) -> str:
+def get_route_layer_tinymodel_filepath(workflow_folderpath) -> str:
     command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(
         workflow_folderpath
     )
@@ -496,7 +489,7 @@ def get_route_layer_filepath(workflow_folderpath) -> str:
         "tinymodel.pth"
     )
 
-def get_route_layer_filepath1(workflow_folderpath) -> str:
+def get_route_layer_largemodel_filepath(workflow_folderpath) -> str:
     command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(
         workflow_folderpath
     )
@@ -506,7 +499,7 @@ def get_route_layer_filepath1(workflow_folderpath) -> str:
         "largemodel.pth"
     )
 
-def get_route_layer_filepath2(workflow_folderpath) -> str:
+def get_route_layer_label_encoder_filepath(workflow_folderpath) -> str:
     command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(
         workflow_folderpath
     )
@@ -584,9 +577,8 @@ def train(session: fastworkflow.Session):
         utterances_func = utterance_metadata.get_generated_utterances_func(
                 workflow_folderpath
             )
-        utterance_list = utterances_func(session)
-
         command_name = cmddir.get_command_name(command_key)
+        utterance_list = utterances_func(session, command_name)
 
         # dataset for training
         utterance_command_tuples.extend(
@@ -597,7 +589,7 @@ def train(session: fastworkflow.Session):
     # This was added just to add None_of_these command to the existing command utterance tuple
     if "fastworkflow" not in workflow_folderpath:
         # Use the utility function to get the internal workflow path
-        workflow_path = fastworkflow.get_internal_workflow_path("command_name_prediction")
+        workflow_path = fastworkflow.get_internal_workflow_path("command_metadata_extraction")
         session = fastworkflow.Session.create(
             workflow_path, 
             session_id_str=f"train_{workflow_path}", 
@@ -615,10 +607,10 @@ def train(session: fastworkflow.Session):
                 )
             command_name = cmddir.get_command_name(command_key)
 
-            if command_name!="None_of_these":
+            if command_name!="none_of_these":
                 continue
 
-            utterance_list = utterances_func(session)
+            utterance_list = utterances_func(session, command_name)
             utterance_command_tuples.extend(
                 list(zip(utterance_list, [command_name] * len(utterance_list)))
             )
@@ -686,7 +678,7 @@ def train(session: fastworkflow.Session):
     optimizer = AdamW(tiny_model.parameters(), lr=1e-4)  # Slightly higher learning rate
     num_epochs = 12
 
-    path=get_route_layer_filepath1(workflow_folderpath)
+    path=get_route_layer_largemodel_filepath(workflow_folderpath)
     from time import time
     print("Starting training...")
     tiny_model.train()
@@ -727,7 +719,7 @@ def train(session: fastworkflow.Session):
         print(f"NDCG@3: {ndcg:.4f}")
         print(f"Epoch Time: {epoch_time:.2f} seconds")
 
-    path=get_route_layer_filepath(workflow_folderpath)
+    path=get_route_layer_tinymodel_filepath(workflow_folderpath)
     save_model(tiny_model,tokenizer, path)
     total_training_time = time() - training_start_time
 
@@ -765,7 +757,7 @@ def train(session: fastworkflow.Session):
         print(f"F1 Score: {f1:.4f}")
         print(f"NDCG@3: {ndcg:.4f}")
 
-    path=get_route_layer_filepath1(workflow_folderpath)
+    path=get_route_layer_largemodel_filepath(workflow_folderpath)
     save_model(large_model,tokenizer,path)
     tiny_path=get_route_layer_filepath_model(workflow_folderpath,"tinymodel.pth")
     large_path=get_route_layer_filepath_model(workflow_folderpath,"largemodel.pth")
@@ -775,7 +767,7 @@ def train(session: fastworkflow.Session):
         distil_model_path=large_path,
         confidence_threshold=0.65
     )
-    path=get_route_layer_filepath2(workflow_folderpath)
+    path=get_route_layer_label_encoder_filepath(workflow_folderpath)
     save_label_encoder(path)
 
     print("\nAnalyzing TinyBERT confidence patterns...")
@@ -783,16 +775,40 @@ def train(session: fastworkflow.Session):
 
     print("\nTinyBERT Confidence Statistics:")
     print("\nFalse Classifications:")
-    print(f"Minimum Confidence: {tiny_stats['failed']['min']:.4f}")
-    print(f"Maximum Confidence: {tiny_stats['failed']['max']:.4f}")
-    print(f"Mean Confidence: {tiny_stats['failed']['mean']:.4f}")
-    print(f"Median Confidence: {tiny_stats['failed']['median']:.4f}")
+    if tiny_stats['failed']['min'] is not None:
+        print(f"Minimum Confidence: {tiny_stats['failed']['min']:.4f}")
+    else:
+        print("Minimum Confidence: N/A")
+    if tiny_stats['failed']['max'] is not None:
+        print(f"Maximum Confidence: {tiny_stats['failed']['max']:.4f}")
+    else:
+        print("Maximum Confidence: N/A")
+    if tiny_stats['failed']['mean'] is not None:
+        print(f"Mean Confidence: {tiny_stats['failed']['mean']:.4f}")
+    else:
+        print("Mean Confidence: N/A")
+    if tiny_stats['failed']['median'] is not None:
+        print(f"Median Confidence: {tiny_stats['failed']['median']:.4f}")
+    else:
+        print("Median Confidence: N/A")
 
     print("\nTrue Classifications:")
-    print(f"Minimum Confidence: {tiny_stats['successful']['min']:.4f}")
-    print(f"Maximum Confidence: {tiny_stats['successful']['max']:.4f}")
-    print(f"Mean Confidence: {tiny_stats['successful']['mean']:.4f}")
-    print(f"Median Confidence: {tiny_stats['successful']['median']:.4f}")
+    if tiny_stats['successful']['min'] is not None:
+        print(f"Minimum Confidence: {tiny_stats['successful']['min']:.4f}")
+    else:
+        print("Minimum Confidence: N/A")
+    if tiny_stats['successful']['max'] is not None:
+        print(f"Maximum Confidence: {tiny_stats['successful']['max']:.4f}")
+    else:
+        print("Maximum Confidence: N/A")
+    if tiny_stats['successful']['mean'] is not None:
+        print(f"Mean Confidence: {tiny_stats['successful']['mean']:.4f}")
+    else:
+        print("Mean Confidence: N/A")
+    if tiny_stats['successful']['median'] is not None:
+        print(f"Median Confidence: {tiny_stats['successful']['median']:.4f}")
+    else:
+        print("Median Confidence: N/A")
 
     print("\nFinding optimal threshold...")
     best_result, all_results = find_optimal_threshold(tiny_stats, test_loader, pipeline)

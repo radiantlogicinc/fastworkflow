@@ -285,7 +285,10 @@ Today's date is {today}.
                 raise ValidationError("required parameters must have a default value specified") from ex
         return params
     
-    def validate_parameters(self, cmd_parameters: BaseModel) -> Tuple[bool, str, Dict[str, List[str]]]:
+    def validate_parameters(self,
+                            subject_workflow_snapshot: WorkflowSnapshot, 
+                            subject_command_name: str,
+                            cmd_parameters: BaseModel) -> Tuple[bool, str, Dict[str, List[str]]]:
         """
         Check if the parameters are valid in the current context, including database lookups.
         """
@@ -304,7 +307,7 @@ Today's date is {today}.
 
         # check if the input for parameter extraction class is defined in the registary then call the process_parameters function on the instance.
         if hasattr(self.input_for_param_extraction, 'process_extracted_parameters'):
-            self.input_for_param_extraction.process_extracted_parameters(cmd_parameters)
+            self.input_for_param_extraction.process_extracted_parameters(subject_workflow_snapshot, subject_command_name, cmd_parameters)
 
         # Check required fields
         for field_name, field_info in type(cmd_parameters).model_fields.items():
@@ -369,7 +372,7 @@ Today's date is {today}.
             if is_db_lookup:
                 if not self.input_for_param_extraction:
                     raise ValueError("input_for_param_extraction is not set.")
-                key_values=self.input_for_param_extraction.db_lookup(field_name) 
+                key_values=self.input_for_param_extraction.db_lookup(subject_workflow_snapshot, subject_command_name) 
                 matched, corrected_value, field_suggestions = DatabaseValidator.fuzzy_match(field_value, key_values)
 
                 if matched:

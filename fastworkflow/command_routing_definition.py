@@ -199,7 +199,18 @@ class CommandRoutingDefinition(BaseModel):
             raise ValueError(f"Invalid module type '{module_type}'")
 
         module = python_utils.get_module(module_file_path, self.workflow_folderpath)
-        return getattr(module, module_class_name) if module else None
+        if not module or not module_class_name:
+            return None
+
+        # Handle nested classes like 'Signature.Input'
+        if '.' in module_class_name:
+            parts = module_class_name.split('.')
+            cls_obj = module
+            for part in parts:
+                cls_obj = getattr(cls_obj, part)
+            return cls_obj
+        
+        return getattr(module, module_class_name, None)
 
     @classmethod
     def _populate_command_routing_definition(
@@ -299,55 +310,20 @@ class CommandRoutingDefinition(BaseModel):
 
         commands_folder = os.path.join(workflow_folderpath, command_source.value)
         if os.path.exists(commands_folder):
-            for command in os.listdir(commands_folder):
-                subfolder_path = os.path.join(commands_folder, command)
+            for command_filename in os.listdir(commands_folder):
+                if not command_filename.endswith(".py") or command_filename.startswith("_"):
+                    continue
 
-                if not os.path.isdir(subfolder_path):
-                    continue
-                if command.startswith("_"):
-                    continue
+                command_filepath = os.path.join(commands_folder, command_filename)
+                command_name = os.path.splitext(command_filename)[0]
 
                 # parameter extraction
-                parameter_extraction_signature_module_path: Optional[str] = None
-                input_for_param_extraction_class: Optional[str] = None
-                command_parameters_class: Optional[str] = None
+                parameter_extraction_signature_module_path = command_filepath
+                input_for_param_extraction_class = "Signature"
+                command_parameters_class = "Signature.Input"
                 # response generation
-                response_generation_module_path: str
-                response_generation_class_name: str
-
-                parameter_extraction_folderpath = os.path.join(
-                    subfolder_path, "parameter_extraction"
-                )
-                if os.path.exists(parameter_extraction_folderpath):
-                    signature_filepath = os.path.join(
-                        parameter_extraction_folderpath, "signatures.py"
-                    )
-                    if os.path.exists(signature_filepath):
-                        parameter_extraction_signature_module_path = signature_filepath
-                        input_for_param_extraction_class = "InputForParamExtraction"
-                        command_parameters_class = "CommandParameters"
-
-                response_generation_folderpath = os.path.join(
-                    subfolder_path, "response_generation"
-                )
-                if not os.path.exists(response_generation_folderpath):
-                    raise ValueError(
-                        f"Response generation folder not found at '{response_generation_folderpath}'"
-                    )
-                inference_filepath = os.path.join(
-                    response_generation_folderpath, "inference.py"
-                )
-                if not os.path.exists(inference_filepath):
-                    raise ValueError(
-                        f"Response generation inference file not found at '{inference_filepath}'"
-                    )
-                response_generation_module_path = inference_filepath
+                response_generation_module_path = command_filepath
                 response_generation_class_name = "ResponseGenerator"
-                
-                # if '/fastworkflow' in workflow_folderpath:
-                #     workflow_folderpath="./fastworkflow/_workflows/command_name_prediction"
-                # else:
-                #     workflow_folderpath=None
 
                 command_metadata = CommandMetadata(
                     command_source=command_source,
@@ -360,10 +336,10 @@ class CommandRoutingDefinition(BaseModel):
                     response_generation_class_name=response_generation_class_name,
                 )
 
-                command_key = f"{command_source.value}/{command}"
+                command_key = f"{command_source.value}/{command_name}"
                 command_directory.register_command_metadata(
                     command_key, command_metadata)
-                map_command_2_command_key[command] = command_key 
+                map_command_2_command_key[command_name] = command_key
 
         if workitem_path in map_workitem_paths_2_commandkeymap:
             map_workitem_paths_2_commandkeymap[workitem_path].map_command_2_command_key.update(map_command_2_command_key)
