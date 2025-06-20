@@ -1,13 +1,12 @@
+from enum import Enum
 import os
 from typing import Any, Optional, Union
-from enum import Enum
 
 from pydantic import BaseModel
 import mmh3
 
 
 class Action(BaseModel):
-    workitem_path: str
     command_name: str
     command: str = ""   # only use is to display autocomplete item in the UI
     parameters: dict[str, Optional[Union[str, bool, int, float, BaseModel]]] = {}
@@ -51,10 +50,14 @@ class CommandOutput(BaseModel):
     @property
     def command_aborted(self) -> bool:
         return any(response.artifacts.get("command_name", None) == "abort" for response in self.command_responses)
+
+    @property
+    def command_handled(self) -> bool:
+        return any(response.artifacts.get("command_handled", False) == True for response in self.command_responses)
     
     @property
     def not_what_i_meant(self) -> bool:
-        return any(response.artifacts.get("command_name", None) == "None_of_these" for response in self.command_responses)
+        return any(response.artifacts.get("command_name", None) == "misunderstood_intent" for response in self.command_responses)
 
     def to_mcp_result(self) -> MCPToolResult:
         """Convert CommandOutput to MCP-compliant format"""
@@ -68,33 +71,41 @@ class CommandOutput(BaseModel):
             isError=not self.success
         )
 
-class CommandSource(str, Enum):
-    BASE_COMMANDS = "_base_commands"
-    COMMANDS = "_commands"
-
+class ModuleType(Enum):
+    """Specifies which part of a command's implementation to load."""
+    INPUT_FOR_PARAM_EXTRACTION_CLASS = 0
+    COMMAND_PARAMETERS_CLASS = 1
+    RESPONSE_GENERATION_INFERENCE = 2
+    CONTEXT_CLASS = 3
 
 _env_vars: dict = {}
-WorkflowRegistry = None
+CommandContextModel = None
 CommandRoutingRegistry = None
 UtteranceRegistry = None
-RouteLayerRegistry = None
-Modelpipeline=None
+ModelPipelineRegistry=None
+Session = None
+WorkflowSession = None
 
 def init(env_vars: dict):
-    global _env_vars, Session, WorkflowRegistry, CommandRoutingRegistry, UtteranceRegistry, RouteLayerRegistry, WorkflowSession,modelpipelineregistry
+    global _env_vars, CommandContextModel, CommandRoutingRegistry, UtteranceRegistry, ModelPipelineRegistry, Session, WorkflowSession
     _env_vars = env_vars
 
     # init before importing other modules so env vars are available
-    from .workflow_definition import WorkflowRegistry as WorkflowRegistryClass
+    from .command_context_model import CommandContextModel as CommandContextModelClass
     from .command_routing_definition import CommandRoutingRegistry as CommandRoutingRegistryClass
     from .utterance_definition import UtteranceRegistry as UtteranceRegistryClass
-    from .model_pipeline_training import ModelPipeline as modelpipelineclass
+    from .model_pipeline_training import ModelPipeline
+
+    from .session import Session as SessionClass
+    from .workflow_session import WorkflowSession as WorkflowSessionClass
 
     # Assign to global variables
-    WorkflowRegistry = WorkflowRegistryClass
+    CommandContextModel = CommandContextModelClass
     CommandRoutingRegistry = CommandRoutingRegistryClass
     UtteranceRegistry = UtteranceRegistryClass
-    modelpipelineregistry=modelpipelineclass
+    ModelPipelineRegistry = ModelPipeline
+    Session = SessionClass
+    WorkflowSession = WorkflowSessionClass
 
 def get_env_var(var_name: str, var_type: type = str, default: Optional[Union[str, int, float, bool]] = None) -> Union[str, int, float, bool]:
     """get the environment variable"""
@@ -152,6 +163,3 @@ def get_internal_workflow_path(workflow_name: str) -> str:
 
 def get_session_id(session_id_str: str) -> int:
     return int(mmh3.hash(session_id_str))
-
-from .session import Session
-from .workflow_session import WorkflowSession

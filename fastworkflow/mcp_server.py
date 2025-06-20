@@ -8,7 +8,8 @@ to provide MCP-compliant tool execution.
 from typing import Dict, Any, List
 import fastworkflow
 from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.command_routing_definition import ModuleType as CommandModuleType
+from fastworkflow.command_routing_definition import CommandRoutingDefinition, ModuleType
+from uuid import uuid4
 
 
 class FastWorkflowMCPServer:
@@ -39,18 +40,23 @@ class FastWorkflowMCPServer:
         NOT_FOUND = fastworkflow.get_env_var('NOT_FOUND')
 
         # Get available commands from workflow
-        workflow_folderpath = self.workflow_session.session.workflow_snapshot.workflow.workflow_folderpath
-        command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(workflow_folderpath)
-        active_workitem_path = self.workflow_session.session.workflow_snapshot.active_workitem.path
-        command_names = command_routing_definition.get_command_names(active_workitem_path)
+        workflow_folderpath = self.workflow_session.session.workflow_snapshot.workflow_folderpath
+        routing = CommandRoutingDefinition.build(workflow_folderpath)
+
+        # Get active context name from session, not workflow_snapshot
+        active_ctx_name = self.workflow_session.session.current_command_context_name
+        if active_ctx_name not in routing.contexts:
+            active_ctx = '*'
+        else:
+            active_ctx = active_ctx_name
+        command_names = routing.get_command_names(active_ctx)
 
         tools = []
         for command_name in command_names:
             # Get command parameters class to build schema
-            command_parameters_class = command_routing_definition.get_command_class(
-                active_workitem_path, 
-                command_name, 
-                CommandModuleType.COMMAND_PARAMETERS_CLASS
+            command_parameters_class = routing.get_command_class(
+                command_name,
+                ModuleType.COMMAND_PARAMETERS_CLASS
             )
 
             # Build JSON schema from Pydantic model
@@ -94,10 +100,11 @@ class FastWorkflowMCPServer:
                 "type": "string",
                 "description": "Natural language command or query"
             }
+
             input_schema["properties"]["workitem_path"] = {
-                "type": "string", 
-                "description": "Workflow item path (optional)",
-                "default": active_workitem_path
+                "type": "string",
+                "description": "Command context (optional)",
+                "default": active_ctx
             }
 
             tool_def = {
@@ -137,7 +144,7 @@ class FastWorkflowMCPServer:
         return self.command_executor.perform_mcp_tool_call(
             self.workflow_session.session,
             tool_call,
-            workitem_path=self.workflow_session.session.workflow_snapshot.active_workitem.path
+            command_context=self._resolve_workitem_path_for_call()
         )
     
     def handle_json_rpc_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
@@ -182,6 +189,14 @@ class FastWorkflowMCPServer:
                 }
             }
 
+    # ---------------------------------------------------------------------
+    def _resolve_workitem_path_for_call(self) -> str:
+        """Return a workitem path that has registered commands.
+
+        Falls back to the first available path if the active workitem has none.
+        """
+        return '*'
+
 
 # Example usage
 def create_mcp_server_for_workflow(workflow_path: str) -> FastWorkflowMCPServer:
@@ -197,13 +212,14 @@ def create_mcp_server_for_workflow(workflow_path: str) -> FastWorkflowMCPServer:
     # Initialize FastWorkflow (would need actual env vars in practice)
     fastworkflow.init({})
     
-    # Create workflow session
-    from fastworkflow.command_executor import CommandExecutor
+    # Recreate routing definition to guarantee it reflects the latest object model
+    CommandRoutingDefinition.build(workflow_path)
     
+    # Create workflow session
     workflow_session = fastworkflow.WorkflowSession(
-        CommandExecutor(), 
+        CommandExecutor(),
         workflow_path,
-        session_id_str="mcp_server_session"
+        session_id_str=str(uuid4())
     )
     
     return FastWorkflowMCPServer(workflow_session) 

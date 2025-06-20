@@ -1,0 +1,86 @@
+from __future__ import annotations
+
+"""Utility to generate context folders based on the command context model.
+
+This module provides functionality to create the directory structure required
+for context-aware commands, based on the inheritance relationships defined
+in the command_context_model.json file.
+"""
+
+import os
+from pathlib import Path
+from typing import Dict, Any, Optional
+
+from fastworkflow.context_model_loader import ContextModelLoader
+from fastworkflow.utils.logging import logger
+
+__all__ = ["ContextFolderGenerator"]
+
+
+class ContextFolderGenerator:
+    """Generates context folders based on the command context model."""
+
+    def __init__(
+        self, 
+        commands_root: str | Path = "_commands", 
+        model_path: str | Path = "command_context_model.json"
+    ) -> None:
+        """Initialize the context folder generator.
+
+        Args:
+            commands_root: Path to the commands directory, defaults to "_commands"
+            model_path: Path to the command context model JSON file, defaults to
+                "command_context_model.json"
+        """
+        self.commands_root = Path(commands_root)
+        self.model_path = Path(model_path)
+        self._model_data: Optional[Dict[str, Any]] = None
+
+    def load_context_model(self) -> Dict[str, Any]:
+        """Load the context model using the ContextModelLoader.
+
+        Returns:
+            Dict[str, Any]: The parsed context model
+        
+        Raises:
+            Exception: If the context model cannot be loaded
+        """
+        if self._model_data is not None:
+            return self._model_data  # Return cached model if available
+
+        try:
+            loader = ContextModelLoader(self.model_path)
+            self._model_data = loader.load()
+            return self._model_data
+        except Exception as e:
+            logger.error(f"Error loading context model: {e}")
+            raise
+
+    def generate_folders(self) -> Dict[str, Path]:
+        """Generate context folders based on the model.
+        
+        Creates a folder for each context in the inheritance block,
+        except for the global "*" context.
+        
+        Returns:
+            Dict[str, Path]: Mapping of context names to their folder paths
+        """
+        # Load context model
+        context_model = self.load_context_model()
+        
+        # Ensure root commands directory exists
+        self.commands_root.mkdir(exist_ok=True, parents=True)
+        
+        # Create context folders
+        contexts = set(context_model.get('inheritance', {}).keys())
+        contexts.discard('*')  # Global context doesn't need a folder
+        
+        created_folders = {}
+        
+        for context in contexts:
+            context_dir = self.commands_root / context
+            context_dir.mkdir(exist_ok=True)
+            logger.debug(f"Created context folder: {context_dir}")
+            created_folders[context] = context_dir
+        
+        return created_folders 

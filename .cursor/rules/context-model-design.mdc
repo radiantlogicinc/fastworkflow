@@ -1,0 +1,27 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Context Model – JSON-based Workflow Definition
+
+Key concepts
+------------
+1. A context is described by exactly two *possible* keys:
+   * `/` → list of command names that belong to this context.
+   * `base` → list of other context names whose commands are inherited (duplicates are deduped).
+2. Validation rules implemented in
+   * [context_model.py](mdc:fastworkflow/context_model.py)
+3. At load-time `fastworkflow/context_model.py` parses the file
+4. Command availability for a given path is the union of its `/` list **plus** all commands inherited via the `base` hierarchy.  
+5. `CommandRoutingDefinition` verifies that every declared command has an implementation file in _commands.
+
+Practical navigation hints
+-------------------------
+• To find a context's commands, open `context_model.json` and look at its `/` list along with any listed `base` contexts.
+
+Relevant implementation entry points
+------------------------------------
+* Command routing population: [command_routing_definition.py](mdc:fastworkflow/command_routing_definition.py) → JSON traversal replacing old folder walk.
+
+Use these pointers when adding new commands or contexts – update *only* the JSON, then create the corresponding Python command file.

@@ -15,7 +15,7 @@ if project_root not in sys.path:
 os.environ.setdefault("PYTEST_RUNNING", "1")
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(scope="session")
 def setup_test_environment():
     """Set up the test environment."""
     # Ensure we're using the local fastworkflow module

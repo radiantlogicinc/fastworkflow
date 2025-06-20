@@ -3,13 +3,14 @@ import os
 from typing import Annotated, Optional, Tuple, Union, Dict, Any, Type, List, get_args
 from enum import Enum
 from pydantic import BaseModel, Field, ValidationError, field_validator, ConfigDict
+from pydantic_core import PydanticUndefined
 import fastworkflow
 from fastworkflow.session import WorkflowSnapshot
 from datetime import date
 import re
 import inspect
 from difflib import get_close_matches
-from fastworkflow.command_routing_definition import ModuleType
+from fastworkflow import ModuleType
 from fastworkflow.utils.pydantic_model_2_dspy_signature_class import TypedPredictorSignature
 from dspy.teleprompt import LabeledFewShot
 import json
@@ -112,7 +113,7 @@ Today's date is {today}.
     model_config = ConfigDict(arbitrary_types_allowed=True)
     
     @classmethod
-    def create(cls, subject_workflow_snapshot: WorkflowSnapshot, subject_command_name: str, subject_command: str):
+    def create(cls, subject_session: fastworkflow.Session, subject_command_name: str, subject_command: str):
         """
         Create an instance of InputForParamExtraction with a command string.
         
@@ -122,17 +123,19 @@ Today's date is {today}.
         Returns:
             An instance of InputForParamExtraction   
         """
-        subject_workflow_folderpath = subject_workflow_snapshot.workflow.workflow_folderpath
+        subject_workflow_folderpath = subject_session.workflow_snapshot.workflow_folderpath
         subject_command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(subject_workflow_folderpath)
-        active_workitem_type = subject_workflow_snapshot.active_workitem.path
-
+        
         input_for_param_extraction_class = subject_command_routing_definition.get_command_class(
-            active_workitem_type, subject_command_name, ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS)
-        if input_for_param_extraction_class and input_for_param_extraction_class is not cls:
-            input_for_param_extraction = input_for_param_extraction_class.create(
-                subject_workflow_snapshot, subject_command_name, subject_command)
-        else:
-            input_for_param_extraction = None
+            subject_command_name, ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS)
+        
+        input_for_param_extraction = None
+        if input_for_param_extraction_class and input_for_param_extraction_class is not cls and hasattr(input_for_param_extraction_class, 'create'):
+            try:
+                input_for_param_extraction = input_for_param_extraction_class.create(
+                    subject_session.workflow_snapshot, subject_command_name, subject_command)
+            except Exception as e:
+                logger.warning(f"Failed to create input_for_param_extraction: {e}")
         
         today=date.today()
         cls.__doc__ = cls.__doc__.format(today=today)
@@ -171,9 +174,14 @@ Today's date is {today}.
                 if type(None) in union_elements:
                     is_optional = True
                     attribute_type = next((elem for elem in union_elements if elem is not type(None)), str)
-            
-            default_value = None
-            if attribute_metadata.default is not None and attribute_metadata.default != Ellipsis:
+
+            NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")            
+            default_value = NOT_FOUND if attribute_type is str else None
+            if (
+                attribute_metadata.default is not PydanticUndefined and 
+                attribute_metadata.default is not None and 
+                attribute_metadata.default != Ellipsis
+            ):
                 default_value = attribute_metadata.default
             
             info_text = attribute_metadata.description or f"The {attribute_name}"
@@ -215,6 +223,31 @@ Today's date is {today}.
         
         return dspy.Signature(signature_components, instructions)
 
+    @staticmethod
+    def populate_defaults_dict(command_parameters_class):
+        default_params = {}
+        for field_name, field_info in command_parameters_class.model_fields.items():
+            if (
+                field_info.default is not PydanticUndefined and 
+                field_info.default is not None and 
+                field_info.default is not Ellipsis
+            ):
+                default_params[field_name] = field_info.default
+            # Handle strings
+            elif field_info.annotation == str:
+                default_params[field_name] = NOT_FOUND
+            elif field_info.annotation == int:
+                default_params[field_name] = None
+            # Handle Optional[int]
+            elif (hasattr(field_info.annotation, "__origin__") and
+                  field_info.annotation.__origin__ is Union and
+                  int in field_info.annotation.__args__ and
+                  type(None) in field_info.annotation.__args__):
+                default_params[field_name] = None
+            else:
+                default_params[field_name] = None
+
+        return command_parameters_class(**default_params)
     
     def extract_parameters(self, CommandParameters: Type[BaseModel] = None, subject_command_name: str = None, workflow_folderpath: str = None) -> BaseModel:
         """
@@ -273,20 +306,12 @@ Today's date is {today}.
         try:            
             params = model_class(**param_dict)
         except ValidationError:
-            default_params = {
-                field_name: field_info.default
-                for field_name, field_info in model_class.model_fields.items()
-            }
-            
-            try:
-                params = model_class(**default_params)
-            except ValidationError:
-                # If we still can't create a valid instance, raise exception with custom message
-                raise ValidationError("required parameters must have a default value specified") from ex
+            params = self.populate_defaults_dict(model_class)
+
         return params
     
     def validate_parameters(self,
-                            subject_workflow_snapshot: WorkflowSnapshot, 
+                            subject_session: fastworkflow.Session, 
                             subject_command_name: str,
                             cmd_parameters: BaseModel) -> Tuple[bool, str, Dict[str, List[str]]]:
         """
@@ -307,7 +332,7 @@ Today's date is {today}.
 
         # check if the input for parameter extraction class is defined in the registary then call the process_parameters function on the instance.
         if hasattr(self.input_for_param_extraction, 'process_extracted_parameters'):
-            self.input_for_param_extraction.process_extracted_parameters(subject_workflow_snapshot, subject_command_name, cmd_parameters)
+            self.input_for_param_extraction.process_extracted_parameters(subject_session.workflow_snapshot, subject_command_name, cmd_parameters)
 
         # Check required fields
         for field_name, field_info in type(cmd_parameters).model_fields.items():
@@ -372,7 +397,7 @@ Today's date is {today}.
             if is_db_lookup:
                 if not self.input_for_param_extraction:
                     raise ValueError("input_for_param_extraction is not set.")
-                key_values=self.input_for_param_extraction.db_lookup(subject_workflow_snapshot, subject_command_name) 
+                key_values=self.input_for_param_extraction.db_lookup(subject_session.workflow_snapshot, subject_command_name) 
                 matched, corrected_value, field_suggestions = DatabaseValidator.fuzzy_match(field_value, key_values)
 
                 if matched:

@@ -17,6 +17,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from typing import List, Dict, Tuple,Union
 import pickle
+from pathlib import Path
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -87,7 +88,7 @@ def find_optimal_confidence_threshold(model, test_loader, device, min_threshold=
             correct_top1 = 0
             correct_top3 = 0
             
-            for encodings, labels in test_loader:
+            for encodings, labels, _ in test_loader:
                 input_ids = encodings['input_ids'].to(device)
                 attention_mask = encodings['attention_mask'].to(device)
                 labels = labels.to(device)
@@ -160,7 +161,7 @@ def analyze_model_confidence(model, test_loader, device, model_name=""):
     all_labels = []
     
     with torch.no_grad():
-        for encodings, labels in tqdm(test_loader, desc=f"Analyzing {model_name} confidence"):
+        for encodings, labels, _ in tqdm(test_loader, desc=f"Analyzing {model_name} confidence"):
             input_ids = encodings['input_ids'].to(device)
             attention_mask = encodings['attention_mask'].to(device)
             labels = labels.to(device)
@@ -210,8 +211,23 @@ def find_optimal_threshold(tiny_stats, test_loader, pipeline):
     # Generate threshold range based on confidence statistics
     min_threshold = tiny_stats['failed']['mean']
     max_threshold = tiny_stats['successful']['mean']
-    thresholds = np.linspace(min_threshold, max_threshold, 20)
-    
+    if min_threshold and max_threshold:
+        thresholds = np.linspace(min_threshold, max_threshold, 20)
+    else:
+        return (
+            {            
+                'threshold': -1,
+                'f1': -1,
+                'ndcg': -1,
+                'distil_usage': -1
+            }, [{            
+                'threshold': -1,
+                'f1': -1,
+                'ndcg': -1,
+                'distil_usage': -1
+            }]
+        )
+
     results = []
     for threshold in tqdm(thresholds, desc="Finding optimal threshold"):
         pipeline.confidence_threshold = threshold
@@ -268,6 +284,10 @@ class ModelPipeline:
         self.tiny_model.eval()
         self.distil_model.eval()
 
+        # Determine top-k value once for this pipeline (≤3, but never > num_labels)
+        num_labels = AutoModelForSequenceClassification.from_pretrained(tiny_model_path).config.num_labels
+        self.k_val = min(3, num_labels)
+
     def calculate_ndcg_at_k(self, batch_top_k_preds: List[List[int]], batch_top_k_scores: List[List[float]], true_labels: List[int], k: int = 3) -> float:
         batch_ndcg = 0.0
         
@@ -296,7 +316,7 @@ class ModelPipeline:
         self,
         texts: List[str],
         batch_size: int = 32,
-        k_val: int = 2
+        k_val: int | None = None
     ) -> Dict:
         all_predictions = []
         all_confidences = []
@@ -304,7 +324,7 @@ class ModelPipeline:
         all_top_k_scores = []      # Store top k confidence scores for each sample
         all_logits = []
         all_used_distil = []
-        k=k_val
+        k = k_val or self.k_val
 
         for i in range(0, len(texts), batch_size):
             batch_texts = texts[i:i + batch_size]
@@ -398,11 +418,8 @@ class ModelPipeline:
         num_batches = 0
 
         for batch in tqdm(test_loader, desc="Evaluating"):
-            encodings, labels = batch
-            texts = self.tiny_tokenizer.batch_decode(
-                encodings['input_ids'],
-                skip_special_tokens=True
-            )
+            # Batch now comes with raw *texts* so we can skip expensive decode→encode
+            encodings, labels, texts = batch
 
             results = self.predict_batch(texts)
 
@@ -456,8 +473,8 @@ def predict_single_sentence(
         raise ValueError("Input text cannot be empty")
 
 
+    # `path` is expected to be the absolute path to the label_encoder artefact
     global label_encoder
-    path=get_route_layer_label_encoder_filepath(path)
     load_label_encoder(path)
     k_val=len(label_encoder.classes_)
     k_val = 3 if k_val>2 else 2
@@ -479,35 +496,29 @@ def predict_single_sentence(
         "topk_labels":label_names
     }
 
-def get_route_layer_tinymodel_filepath(workflow_folderpath) -> str:
-    command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(
-        workflow_folderpath
-    )
-    cmddir = command_routing_definition.command_directory
-    return os.path.join(
-        cmddir.get_commandinfo_folderpath(workflow_folderpath),
-        "tinymodel.pth"
-    )
+# ---------------------------------------------------------------------
+# Helper utilities for artefact locations (per-context)
+# ---------------------------------------------------------------------
+_GLOBAL_CONTEXT_FOLDER = "_global"
 
-def get_route_layer_largemodel_filepath(workflow_folderpath) -> str:
-    command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(
-        workflow_folderpath
-    )
-    cmddir = command_routing_definition.command_directory
-    return os.path.join(
-        cmddir.get_commandinfo_folderpath(workflow_folderpath),
-        "largemodel.pth"
-    )
+def get_artifact_path(workflow_folderpath: str, context_name: str, filename: str) -> str:
+    """Return the absolute path for a model/artefact for *context_name*.
 
-def get_route_layer_label_encoder_filepath(workflow_folderpath) -> str:
-    command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(
-        workflow_folderpath
-    )
-    cmddir = command_routing_definition.command_directory
-    return os.path.join(
-        cmddir.get_commandinfo_folderpath(workflow_folderpath),
-        "label_encoder.pkl"
-    )
+    The file lives under:
+        <workflow>/___command_info/<context_name>/<filename>
+
+    The directory is created if it does not yet exist.  The special
+    context name "*" is mapped to a folder named "_global".
+    """
+    from fastworkflow import CommandRoutingRegistry
+
+    ctx_folder = context_name if context_name != "*" else _GLOBAL_CONTEXT_FOLDER
+    crd = CommandRoutingRegistry.get_definition(workflow_folderpath)
+    base_dir = Path(crd.command_directory.get_commandinfo_folderpath(workflow_folderpath)) / ctx_folder
+    base_dir.mkdir(parents=True, exist_ok=True)
+    return str(base_dir / filename)
+
+# ---------------------------------------------------------------------
 
 # After training loop is complete
 def save_model(model,tokenizer, save_path):
@@ -527,7 +538,7 @@ def evaluate_model(model, data_loader, device, k_val):
     num_batches = 0
 
     with torch.no_grad():
-        for encodings, labels in tqdm(data_loader, desc="Evaluating"):
+        for encodings, labels, _ in tqdm(data_loader, desc="Evaluating"):
             input_ids = encodings['input_ids'].to(device)
             attention_mask = encodings['attention_mask'].to(device)
             labels = labels.to(device)
@@ -564,309 +575,335 @@ def calculate_ndcg_at_k(logits, true_labels, k=3):
     return ndcg.mean().item()
 
 def train(session: fastworkflow.Session):
+    """Train intent-classification models **per command context**.
 
-    workflow_folderpath = session.workflow_snapshot.workflow.workflow_folderpath
-    command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(
-        workflow_folderpath
-    )
-    cmddir = command_routing_definition.command_directory
+    A separate Tiny-/Distil-BERT pair (and label-encoder / thresholds) is
+    produced inside ``___command_info/<context_name>/`` for every context in
+    the application workflow.  The dataset for a context is built from:
 
-    utterance_command_tuples = []
-    for command_key in cmddir.get_utterance_keys():
-        utterance_metadata = cmddir.get_utterance_metadata(command_key)
-        utterances_func = utterance_metadata.get_generated_utterances_func(
-                workflow_folderpath
-            )
-        command_name = cmddir.get_command_name(command_key)
-        utterance_list = utterances_func(session, command_name)
+        effective_commands(context) ∪ core_commands  – {"wildcard"}
+    """
 
-        # dataset for training
-        utterance_command_tuples.extend(
-            list(zip(utterance_list, [command_name] * len(utterance_list)))
-        )
+    import time
 
-    ###########################################################################
-    # This was added just to add None_of_these command to the existing command utterance tuple
-    if "fastworkflow" not in workflow_folderpath:
-        # Use the utility function to get the internal workflow path
-        workflow_path = fastworkflow.get_internal_workflow_path("command_metadata_extraction")
-        session = fastworkflow.Session.create(
-            workflow_path, 
-            session_id_str=f"train_{workflow_path}", 
-            for_training_semantic_router=True
-        )
-        command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(
-            workflow_path
-        )
+    workflow_folderpath = session.workflow_snapshot.workflow_folderpath
+    crd = fastworkflow.CommandRoutingRegistry.get_definition(workflow_folderpath)
+    cmd_dir = crd.command_directory
 
-        cmddir = command_routing_definition.command_directory
-        for command_key in cmddir.get_utterance_keys():
-            utterance_metadata = cmddir.get_utterance_metadata(command_key)
-            utterances_func = utterance_metadata.get_generated_utterances_func(
-                    workflow_folderpath
+    # Helper to pull utterances for a command
+    def _get_utterances(cmd: str) -> list[str]:
+        um = cmd_dir.get_utterance_metadata(cmd)
+        func = um.get_generated_utterances_func(workflow_folderpath)
+        return func(session, cmd) if func else []
+
+    core_cmds = set(cmd_dir.core_command_names)
+
+    # Get contexts specific to this workflow (not from command_metadata_extraction)
+    internal_wf_path = fastworkflow.get_internal_workflow_path("command_metadata_extraction")
+    internal_contexts = set(fastworkflow.CommandContextModel.load(internal_wf_path)._command_contexts.keys())
+
+    if "command_metadata_extraction" in workflow_folderpath:
+        context_set_for_training = (set(internal_contexts) - {'Core', '*'})
+    else:
+        context_set_for_training = (set(crd.contexts.keys()) - internal_contexts) | {'*'}
+
+    # Only iterate through contexts defined in this specific workflow
+    for ctx_name in context_set_for_training:
+        ctx_cmd_list = crd.contexts[ctx_name]
+        print(f"\n\n=== Training model for context: {ctx_name} ===\n")
+        
+        # Build the label set for this context
+        train_cmds: set[str] = set(ctx_cmd_list) | core_cmds
+        if not train_cmds:
+            print(f"Skipping context {ctx_name} - no commands to train")
+            continue  # nothing to train
+
+        utterance_command_tuples: list[tuple[str, str]] = []
+        for cmd_name in sorted(train_cmds):
+            utterance_list = _get_utterances(cmd_name)
+            utterance_command_tuples.extend(zip(utterance_list, [cmd_name] * len(utterance_list)))
+
+        if not utterance_command_tuples:
+            print(f"Skipping context {ctx_name} - no utterances available")
+            continue  # skip empty
+            
+        # ==================================================================================
+        # Original training procedure below, with only artefact paths changed to per-context
+        # ==================================================================================
+
+        # unpack the test data and train data
+        X, y = zip(*utterance_command_tuples)
+        num= len(set(y))
+        k_val = 3 if num>2 else 2
+        model_name = "prajjwal1/bert-tiny"
+        print(f"\nLoading {model_name}...")
+        tiny_tokenizer = AutoTokenizer.from_pretrained(model_name)
+        tiny_model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num).to(device)
+
+
+        model_name = "distilbert-base-uncased"
+        print(f"Loading {model_name}...")
+        distil_tokenizer = AutoTokenizer.from_pretrained(model_name)
+        #large_model = AutoModel.from_pretrained(model_name).to(device)
+        large_model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num).to(device)
+        global label_encoder
+        dataset = list(zip(X, y))
+        #label_encoder = LabelEncoder()
+        y_encoded = label_encoder.fit_transform(y)
+
+        # Now create the dataset with encoded labels
+        dataset = list(zip(X, y_encoded))
+        train_data, test_data = train_test_split(dataset, test_size=0.25, random_state=42)
+
+        # ---------------------------------------------------------------
+        # Collate fn that keeps raw *texts* so we can avoid decode→encode
+        # later during evaluation / fallback inference.
+        # ---------------------------------------------------------------
+        def make_collate_fn(tok):
+            def _fn(batch):
+                texts = [item[0] for item in batch]
+                labels_tensor = torch.tensor([item[1] for item in batch], dtype=torch.long)
+                encodings = tok(
+                    texts,
+                    padding=True,
+                    truncation=True,
+                    max_length=128,
+                    return_tensors='pt'
                 )
-            command_name = cmddir.get_command_name(command_key)
+                return encodings, labels_tensor, texts
+            return _fn
 
-            if command_name!="none_of_these":
-                continue
-
-            utterance_list = utterances_func(session, command_name)
-            utterance_command_tuples.extend(
-                list(zip(utterance_list, [command_name] * len(utterance_list)))
-            )
-    ###################################################################
-
-
-    # unpack the test data and train data
-    X, y = zip(*utterance_command_tuples)
-    num= len(set(y))
-    k_val = 3 if num>2 else 2
-    model_name = "prajjwal1/bert-tiny"
-    print(f"\nLoading {model_name}...")
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    tiny_model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num).to(device)
-
-
-    model_name = "distilbert-base-uncased"
-    print(f"Loading {model_name}...")
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    #large_model = AutoModel.from_pretrained(model_name).to(device)
-    large_model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num).to(device)
-    global label_encoder
-    dataset = list(zip(X, y))
-    #label_encoder = LabelEncoder()
-    y_encoded = label_encoder.fit_transform(y)
-
-    # Now create the dataset with encoded labels
-    dataset = list(zip(X, y_encoded))
-    train_data, test_data = train_test_split(dataset, test_size=0.25, random_state=42)
-
-    def collate_batch(batch_texts, batch_labels):
-        encodings = tokenizer(
-            batch_texts, 
-            padding=True, 
-            truncation=True,
-            max_length=128, 
-            return_tensors='pt'
+        train_loader = DataLoader(
+            train_data,
+            batch_size=10,
+            shuffle=True,
+            collate_fn=make_collate_fn(tiny_tokenizer)
         )
-        # Convert labels to long tensor
-        labels = torch.tensor(batch_labels, dtype=torch.long)
 
-        return encodings, labels
-
-    train_loader = DataLoader(
-        train_data,
-        batch_size=10,
-        shuffle=True,
-        collate_fn=lambda batch: collate_batch(
-            [item[0] for item in batch],
-            [item[1] for item in batch]  # Now these are numbers, not strings
+        test_loader = DataLoader(
+            test_data,
+            batch_size=10,
+            shuffle=False,
+            collate_fn=make_collate_fn(tiny_tokenizer)
         )
-    )
 
-    test_loader = DataLoader(
-        test_data,
-        batch_size=10,
-        shuffle=False,
-        collate_fn=lambda batch: collate_batch(
-            [item[0] for item in batch],
-            [item[1] for item in batch]
+        # -----------------------------------------------------------------
+        # Preserve the Tiny-BERT test loader before we overwrite *test_loader*
+        # for Distil-BERT.  All Tiny-BERT analysis & threshold-tuning should
+        # continue to use this cached version to avoid tokenizer mismatch.
+        # -----------------------------------------------------------------
+        tiny_test_loader = test_loader
+
+        #batch_size = 64  # Increased batch size
+        optimizer = AdamW(tiny_model.parameters(), lr=1e-4)  # Slightly higher learning rate
+        num_epochs = 12
+        
+        from time import time
+        print("Starting training...")
+        tiny_model.train()
+        best_ndcg = 0
+        best_f1 = 0
+        training_start_time = time()
+        training_losses = []  # Store training loss for each epoch
+        test_losses = []
+        for epoch in range(num_epochs):
+            epoch_start_time = time()
+            print(f"\nEpoch {epoch + 1}/{num_epochs}")
+            total_loss = 0
+            progress_bar = tqdm(train_loader, desc="Training")
+
+            for batch_idx, (encodings, labels, _) in enumerate(progress_bar):
+                input_ids = encodings['input_ids'].to(device)
+                attention_mask = encodings['attention_mask'].to(device)
+                labels = labels.to(device)
+
+                optimizer.zero_grad()
+                outputs = tiny_model(input_ids, attention_mask=attention_mask, labels=labels)
+                loss = outputs.loss
+                loss.backward()
+                optimizer.step()
+
+                total_loss += loss.item()
+                progress_bar.set_postfix({'loss': total_loss / (batch_idx + 1)})
+
+            avg_train_loss = total_loss / len(train_loader)
+            training_losses.append(avg_train_loss)  # Append training loss for the epoch
+
+            # Evaluate after each epoch
+            f1, ndcg, avg_test_loss = evaluate_model(tiny_model, test_loader, device, k_val)
+            test_losses.append(avg_test_loss)
+            epoch_time = time() - epoch_start_time
+            print(f"Epoch {epoch + 1} Results:")
+            print(f"F1 Score: {f1:.4f}")
+            print(f"NDCG@3: {ndcg:.4f}")
+            print(f"Epoch Time: {epoch_time:.2f} seconds")
+
+        # Save paths updated to use context-specific folders
+        tiny_path = get_artifact_path(workflow_folderpath, ctx_name, "tinymodel.pth")
+        save_model(tiny_model, tiny_tokenizer, tiny_path)
+        total_training_time = time() - training_start_time
+
+
+        train_loader = DataLoader(
+            train_data,
+            batch_size=10,
+            shuffle=True,
+            collate_fn=make_collate_fn(distil_tokenizer)
         )
-    )
 
-    #batch_size = 64  # Increased batch size
-    optimizer = AdamW(tiny_model.parameters(), lr=1e-4)  # Slightly higher learning rate
-    num_epochs = 12
+        test_loader = DataLoader(
+            test_data,
+            batch_size=10,
+            shuffle=False,
+            collate_fn=make_collate_fn(distil_tokenizer)
+        )
 
-    path=get_route_layer_largemodel_filepath(workflow_folderpath)
-    from time import time
-    print("Starting training...")
-    tiny_model.train()
-    best_ndcg = 0
-    best_f1 = 0
-    training_start_time = time()
-    training_losses = []  # Store training loss for each epoch
-    test_losses = []
-    for epoch in range(num_epochs):
-        epoch_start_time = time()
-        print(f"\nEpoch {epoch + 1}/{num_epochs}")
-        total_loss = 0
-        progress_bar = tqdm(train_loader, desc="Training")
+        optimizer = AdamW(large_model.parameters(), lr=5e-5)
+        num_epochs = 5
 
-        for batch_idx, (encodings, labels) in enumerate(progress_bar):
-            input_ids = encodings['input_ids'].to(device)
-            attention_mask = encodings['attention_mask'].to(device)
-            labels = labels.to(device)
+        print("Started training distilBert...")
+        large_model.train()
+        best_ndcg = 0
+        best_f1 = 0
+        num_epochs=5
+        for epoch in range(num_epochs):
+            print(f"\nEpoch {epoch + 1}/{num_epochs}")
+            total_loss = 0
+            progress_bar = tqdm(train_loader, desc="Training")
 
-            optimizer.zero_grad()
-            outputs = tiny_model(input_ids, attention_mask=attention_mask, labels=labels)
-            loss = outputs.loss
-            loss.backward()
-            optimizer.step()
+            for batch_idx, (encodings, labels, _) in enumerate(progress_bar):
+                input_ids = encodings['input_ids'].to(device)
+                attention_mask = encodings['attention_mask'].to(device)
+                labels = labels.to(device)
 
-            total_loss += loss.item()
-            progress_bar.set_postfix({'loss': total_loss / (batch_idx + 1)})
+                optimizer.zero_grad()
+                outputs = large_model(input_ids, attention_mask=attention_mask, labels=labels)
+                loss = outputs.loss
+                loss.backward()
+                optimizer.step()
 
-        avg_train_loss = total_loss / len(train_loader)
-        training_losses.append(avg_train_loss)  # Append training loss for the epoch
+                total_loss += loss.item()
+                progress_bar.set_postfix({'loss': total_loss / (batch_idx + 1)})
 
-        # Evaluate after each epoch
-        f1, ndcg, avg_test_loss = evaluate_model(tiny_model, test_loader, device, k_val)
-        test_losses.append(avg_test_loss)
-        epoch_time = time() - epoch_start_time
-        print(f"Epoch {epoch + 1} Results:")
-        print(f"F1 Score: {f1:.4f}")
-        print(f"NDCG@3: {ndcg:.4f}")
-        print(f"Epoch Time: {epoch_time:.2f} seconds")
+            # Evaluate after each epoch
+            f1, ndcg, avg_loss = evaluate_model(large_model, test_loader, device, k_val)
+            print(f"Epoch {epoch + 1} Results:")
+            print(f"F1 Score: {f1:.4f}")
+            print(f"NDCG@3: {ndcg:.4f}")
 
-    path=get_route_layer_tinymodel_filepath(workflow_folderpath)
-    save_model(tiny_model,tokenizer, path)
-    total_training_time = time() - training_start_time
+        # Save paths updated to use context-specific folders
+        large_path = get_artifact_path(workflow_folderpath, ctx_name, "largemodel.pth")
+        save_model(large_model, distil_tokenizer, large_path)
 
+        pipeline = ModelPipeline(
+            tiny_model_path=tiny_path,  
+            distil_model_path=large_path,
+            confidence_threshold=0.65
+        )
+        
+        # Save paths updated to use context-specific folders
+        label_path = get_artifact_path(workflow_folderpath, ctx_name, "label_encoder.pkl")
+        save_label_encoder(label_path)
 
-    optimizer = AdamW(large_model.parameters(), lr=5e-5)
-    num_epochs = 5
+        print("\nAnalyzing TinyBERT confidence patterns...")
+        tiny_stats, tiny_confidences, tiny_predictions, tiny_labels, tiny_failed = analyze_model_confidence(tiny_model, tiny_test_loader, device, "TinyBERT")
 
-    print("Started training distilBert...")
-    large_model.train()
-    best_ndcg = 0
-    best_f1 = 0
-    num_epochs=5
-    for epoch in range(num_epochs):
-        print(f"\nEpoch {epoch + 1}/{num_epochs}")
-        total_loss = 0
-        progress_bar = tqdm(train_loader, desc="Training")
+        print("\nTinyBERT Confidence Statistics:")
+        print("\nFalse Classifications:")
+        if tiny_stats['failed']['min'] is not None:
+            print(f"Minimum Confidence: {tiny_stats['failed']['min']:.4f}")
+        else:
+            print("Minimum Confidence: N/A")
+        if tiny_stats['failed']['max'] is not None:
+            print(f"Maximum Confidence: {tiny_stats['failed']['max']:.4f}")
+        else:
+            print("Maximum Confidence: N/A")
+        if tiny_stats['failed']['mean'] is not None:
+            print(f"Mean Confidence: {tiny_stats['failed']['mean']:.4f}")
+        else:
+            print("Mean Confidence: N/A")
+        if tiny_stats['failed']['median'] is not None:
+            print(f"Median Confidence: {tiny_stats['failed']['median']:.4f}")
+        else:
+            print("Median Confidence: N/A")
 
-        for batch_idx, (encodings, labels) in enumerate(progress_bar):
-            input_ids = encodings['input_ids'].to(device)
-            attention_mask = encodings['attention_mask'].to(device)
-            labels = labels.to(device)
+        print("\nTrue Classifications:")
+        if tiny_stats['successful']['min'] is not None:
+            print(f"Minimum Confidence: {tiny_stats['successful']['min']:.4f}")
+        else:
+            print("Minimum Confidence: N/A")
+        if tiny_stats['successful']['max'] is not None:
+            print(f"Maximum Confidence: {tiny_stats['successful']['max']:.4f}")
+        else:
+            print("Maximum Confidence: N/A")
+        if tiny_stats['successful']['mean'] is not None:
+            print(f"Mean Confidence: {tiny_stats['successful']['mean']:.4f}")
+        else:
+            print("Mean Confidence: N/A")
+        if tiny_stats['successful']['median'] is not None:
+            print(f"Median Confidence: {tiny_stats['successful']['median']:.4f}")
+        else:
+            print("Median Confidence: N/A")
 
-            optimizer.zero_grad()
-            outputs = large_model(input_ids, attention_mask=attention_mask, labels=labels)
-            loss = outputs.loss
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item()
-            progress_bar.set_postfix({'loss': total_loss / (batch_idx + 1)})
-
-        # Evaluate after each epoch
-        f1, ndcg,avg_loss= evaluate_model(large_model, test_loader, device, k_val)
-        print(f"Epoch {epoch + 1} Results:")
-        print(f"F1 Score: {f1:.4f}")
-        print(f"NDCG@3: {ndcg:.4f}")
-
-    path=get_route_layer_largemodel_filepath(workflow_folderpath)
-    save_model(large_model,tokenizer,path)
-    tiny_path=get_route_layer_filepath_model(workflow_folderpath,"tinymodel.pth")
-    large_path=get_route_layer_filepath_model(workflow_folderpath,"largemodel.pth")
-
-    pipeline = ModelPipeline(
-        tiny_model_path=tiny_path,  
-        distil_model_path=large_path,
-        confidence_threshold=0.65
-    )
-    path=get_route_layer_label_encoder_filepath(workflow_folderpath)
-    save_label_encoder(path)
-
-    print("\nAnalyzing TinyBERT confidence patterns...")
-    tiny_stats, tiny_confidences, tiny_predictions, tiny_labels, tiny_failed = analyze_model_confidence(tiny_model, test_loader, device, "TinyBERT")
-
-    print("\nTinyBERT Confidence Statistics:")
-    print("\nFalse Classifications:")
-    if tiny_stats['failed']['min'] is not None:
-        print(f"Minimum Confidence: {tiny_stats['failed']['min']:.4f}")
-    else:
-        print("Minimum Confidence: N/A")
-    if tiny_stats['failed']['max'] is not None:
-        print(f"Maximum Confidence: {tiny_stats['failed']['max']:.4f}")
-    else:
-        print("Maximum Confidence: N/A")
-    if tiny_stats['failed']['mean'] is not None:
-        print(f"Mean Confidence: {tiny_stats['failed']['mean']:.4f}")
-    else:
-        print("Mean Confidence: N/A")
-    if tiny_stats['failed']['median'] is not None:
-        print(f"Median Confidence: {tiny_stats['failed']['median']:.4f}")
-    else:
-        print("Median Confidence: N/A")
-
-    print("\nTrue Classifications:")
-    if tiny_stats['successful']['min'] is not None:
-        print(f"Minimum Confidence: {tiny_stats['successful']['min']:.4f}")
-    else:
-        print("Minimum Confidence: N/A")
-    if tiny_stats['successful']['max'] is not None:
-        print(f"Maximum Confidence: {tiny_stats['successful']['max']:.4f}")
-    else:
-        print("Maximum Confidence: N/A")
-    if tiny_stats['successful']['mean'] is not None:
-        print(f"Mean Confidence: {tiny_stats['successful']['mean']:.4f}")
-    else:
-        print("Mean Confidence: N/A")
-    if tiny_stats['successful']['median'] is not None:
-        print(f"Median Confidence: {tiny_stats['successful']['median']:.4f}")
-    else:
-        print("Median Confidence: N/A")
-
-    print("\nFinding optimal threshold...")
-    best_result, all_results = find_optimal_threshold(tiny_stats, test_loader, pipeline)
-    print("\nOptimal Threshold Results:")
-    print(f"Threshold: {best_result['threshold']:.4f}")
-    print(f"F1 Score: {best_result['f1']:.4f}")
-    print(f"NDCG@3: {best_result['ndcg']:.4f}")
-    print(f"DistilBERT Usage: {best_result['distil_usage']:.2f}%")
-
-    pipeline.confidence_threshold = best_result['threshold']
-
-    threshold = best_result['threshold']
-    model_switch_path=get_route_layer_filepath_model(workflow_folderpath,"threshold.json")
-    with open(model_switch_path, 'w') as f:
-        json.dump({'confidence_threshold': threshold}, f)
-
-
-    pipeline.evaluate(test_loader)
-    f1, ndcg, stats = pipeline.evaluate(test_loader)
-
-    print("\nEvaluation Results:")
-    print(f"F1 Score: {f1:.4f}")
-    print(f"NDCG@3: {ndcg:.4f}")
-    print("\nModel Usage Statistics:")
-    print(f"Total Samples: {stats['total_samples']}")
-    print(f"DistilBERT Usage: {stats['distil_percentage']:.2f}%")
-    print(f"TinyBERT Usage: {stats['tiny_percentage']:.2f}%")
-
-    model = AutoModelForSequenceClassification.from_pretrained(tiny_path).to(device)
-
-    optimal_threshold, best_metrics = find_optimal_confidence_threshold(
-        model, 
-        test_loader, 
-        device,
-        min_threshold=pipeline.confidence_threshold,
-        max_top3_usage=0.3,
-        k_val=k_val
-    )
-    ambiguous_threshold = optimal_threshold or 0.0
-
-    model_switch_path=get_route_layer_filepath_model(workflow_folderpath,"ambiguous_threshold.json")
-    with open(model_switch_path, 'w') as f:
-        json.dump({'confidence_threshold': ambiguous_threshold}, f)
-
-    if ambiguous_threshold > 0.0:
+        print("\nFinding optimal threshold...")
+        best_result, all_results = find_optimal_threshold(tiny_stats, tiny_test_loader, pipeline)
         print("\nOptimal Threshold Results:")
-        print(f"Threshold: {best_metrics['threshold']:.3f}")
-        print(f"F1 Score: {best_metrics['f1_score']:.3f}")
-        print(f"Top-3 Usage: {best_metrics['top3_usage']:.3f}")
-        print(f"Top-1 Accuracy: {best_metrics['top1_accuracy']:.3f}")
-        print(f"Top-3 Accuracy: {best_metrics['top3_accuracy']:.3f}")
+        print(f"Threshold: {best_result['threshold']:.4f}")
+        print(f"F1 Score: {best_result['f1']:.4f}")
+        print(f"NDCG@3: {best_result['ndcg']:.4f}")
+        print(f"DistilBERT Usage: {best_result['distil_usage']:.2f}%")
 
-    text = "list commands"
-    try:
-        result = predict_single_sentence(pipeline, text,workflow_folderpath)
-        print(f"Predicted label: {result['label']}")
-        print(f"Confidence: {result['confidence']:.4f}")
-        print(f"Used DistilBERT: {'Yes' if result['used_distil'] else 'No'}")
-    except ValueError as e:
-        print(f"Error: {e}")
+        pipeline.confidence_threshold = best_result['threshold']
+
+        threshold = best_result['threshold']
+        # Save paths updated to use context-specific folders
+        threshold_path = get_artifact_path(workflow_folderpath, ctx_name, "threshold.json")
+        with open(threshold_path, 'w') as f:
+            json.dump({'confidence_threshold': threshold}, f)
+
+        f1, ndcg, stats = pipeline.evaluate(tiny_test_loader)
+
+        print("\nEvaluation Results:")
+        print(f"F1 Score: {f1:.4f}")
+        print(f"NDCG@3: {ndcg:.4f}")
+        print("\nModel Usage Statistics:")
+        print(f"Total Samples: {stats['total_samples']}")
+        print(f"DistilBERT Usage: {stats['distil_percentage']:.2f}%")
+        print(f"TinyBERT Usage: {stats['tiny_percentage']:.2f}%")
+
+        model = AutoModelForSequenceClassification.from_pretrained(tiny_path).to(device)
+
+        optimal_threshold, best_metrics = find_optimal_confidence_threshold(
+            model, 
+            tiny_test_loader, 
+            device,
+            min_threshold=pipeline.confidence_threshold,
+            max_top3_usage=0.3,
+            k_val=k_val
+        )
+        ambiguous_threshold = optimal_threshold or 0.0
+
+        # Save paths updated to use context-specific folders
+        ambiguous_threshold_path = get_artifact_path(workflow_folderpath, ctx_name, "ambiguous_threshold.json")
+        with open(ambiguous_threshold_path, 'w') as f:
+            json.dump({'confidence_threshold': ambiguous_threshold}, f)
+
+        if ambiguous_threshold > 0.0:
+            print("\nOptimal Threshold Results:")
+            print(f"Threshold: {best_metrics['threshold']:.3f}")
+            print(f"F1 Score: {best_metrics['f1_score']:.3f}")
+            print(f"Top-3 Usage: {best_metrics['top3_usage']:.3f}")
+            print(f"Top-1 Accuracy: {best_metrics['top1_accuracy']:.3f}")
+            print(f"Top-3 Accuracy: {best_metrics['top3_accuracy']:.3f}")
+
+        text = "list commands"
+        try:
+            result = predict_single_sentence(pipeline, text, label_path)
+            print(f"Predicted label: {result['label']}")
+            print(f"Confidence: {result['confidence']:.4f}")
+            print(f"Used DistilBERT: {'Yes' if result['used_distil'] else 'No'}")
+        except ValueError as e:
+            print(f"Error: {e}")
+            
+    # End of context loop
     return None

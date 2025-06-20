@@ -1,7 +1,6 @@
 """ utility functions """
 
 import logging
-import dspy
 from datetime import datetime, timezone
 from time import time_ns
 
@@ -102,12 +101,9 @@ ch.setLevel(logging.DEBUG)
 ch.setFormatter(FormatterNs("%(asctime)s - %(levelname)s - %(message)s"))
 pytest_assertion_logger.addHandler(ch)
 
-# Attempt to disable dspy internal logging globally
-dspy.disable_logging()
-
 logging.getLogger("dspy").setLevel(logging.WARNING)
 logging.getLogger("root").setLevel(logging.ERROR)
-logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+logging.getLogger("LiteLLM").setLevel(logging.CRITICAL)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)

@@ -1,0 +1,71 @@
+from typing import List
+
+import fastworkflow
+from pydantic import BaseModel, Field, ConfigDict
+from fastworkflow.session import Session
+from fastworkflow import CommandOutput, CommandResponse
+
+# Domain helpers
+from ..retail_data import load_data
+from ..tools.find_user_id_by_email import FindUserIdByEmail
+
+
+class Signature:
+    """Find user id by email"""
+    class Input(BaseModel):
+        """Parameters taken from user utterance."""
+
+        email: str = Field(
+            default="NOT_FOUND",
+            description=(
+                "The email address to search for. If email is not available, "
+                "use `find_user_id_by_name_zip` instead."
+            ),
+            pattern=r"^(NOT_FOUND|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})$",
+            examples=["user@example.com"],
+        )
+
+        model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
+
+    class Output(BaseModel):
+        status: str = Field(description="User identifier returned by lookup.")
+
+    plain_utterances: List[str] = [
+        "Can you tell me the ID linked to john.doe@example.com?",
+        "I only have the email address — how do I find the user ID?",
+        "What's the account ID for someone with the email jane_smith@domain.com?",
+        "I need the unique user ID associated with this email: support@acme.io",
+        "Do we have an ID on file for mark.brown@company.org?",
+    ]
+
+    template_utterances: List[str] = []
+
+    @staticmethod
+    def generate_utterances(session: fastworkflow.Session, command_name: str) -> List[str]:
+        utterance_definition = fastworkflow.UtteranceRegistry.get_definition(session.workflow_snapshot.workflow_folderpath)
+        utterances_obj = utterance_definition.get_command_utterances(command_name)
+
+        from fastworkflow.train.generate_synthetic import generate_diverse_utterances
+
+        return generate_diverse_utterances(utterances_obj.plain_utterances, command_name)
+
+
+class ResponseGenerator:
+    def __call__(
+        self,
+        session: Session,
+        command: str,
+        command_parameters: Signature.Input,
+    ) -> CommandOutput:
+        output = self._process_command(session, command_parameters)
+        return CommandOutput(
+            session_id=session.id,
+            command_responses=[
+                CommandResponse(response=f"The user id is: {output.status}")
+            ],
+        )
+
+    def _process_command(self, session: Session, input: Signature.Input) -> Signature.Output:
+        data = load_data()
+        result = FindUserIdByEmail.invoke(data=data, email=input.email)
+        return Signature.Output(status=result) 

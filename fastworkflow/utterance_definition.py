@@ -1,107 +1,78 @@
-import json
-import os
-from typing import Optional
-
 from pydantic import BaseModel, ConfigDict
 
-from fastworkflow import CommandRoutingRegistry, CommandSource
-from fastworkflow.command_routing_definition import ModuleType
-import fastworkflow
-from fastworkflow.command_directory import CommandDirectory, UtteranceMetadata
-from fastworkflow.utils import python_utils
+from fastworkflow.command_directory import CommandDirectory
+from fastworkflow.command_context_model import CommandContextModel
 
 
 class UtteranceDefinition(BaseModel):
+    """
+    Provides access to the utterances (sample phrases) for commands within a workflow.
+    It retrieves command availability from the ContextModel and utterance
+    details from the CommandDirectory.
+    """
     workflow_folderpath: str
-    def get_command_names(self, workitem_path: str) -> list[str]:
-        command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(self.workflow_folderpath)
-        return command_routing_definition.get_command_names(workitem_path)
+    context_model: CommandContextModel
+    command_directory: CommandDirectory
 
-    def get_command_utterances(
-        self, workitem_path: str, command_name: str
-    ) -> UtteranceMetadata:
-        command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(self.workflow_folderpath)
-        return command_routing_definition.get_utterance_metadata(
-            workitem_path, command_name
-        )
+    def get_command_names(self, context: str) -> list[str]:
+        """Gets the names of commands available in a given context."""
+        return self.context_model.commands(context)
 
-    def get_sample_utterances(self, workitem_path: str) -> list[str]:
-        command_names = self.get_command_names(workitem_path)
+    def get_command_utterances(self, command_name: str):
+        """Gets the utterance metadata for a single, specific command."""
+        try:
+            return self.command_directory.get_utterance_metadata(command_name)
+        except KeyError as e:
+            raise ValueError(
+                f"Could not find utterance metadata for command '{command_name}'. "
+                "It might be missing from the _commands directory."
+            ) from e
+
+    def get_sample_utterances(self, command_context: str) -> list[str]:
+        """Gets a sample utterance for each command in the given context."""
+        command_names = self.get_command_names(command_context)
         sample_utterances = []
         for command_name in command_names:
-            if command_name=="*":
+            if command_name in {"wildcard", "abort", "misunderstood_intent"}:
                 continue
-            if command_name=="abort":
+
+            command_utterances = self.get_command_utterances(command_name)
+            if not command_utterances:
                 continue
-            if command_name=="None_of_these":
-                continue
-            command_utterances = self.get_command_utterances(workitem_path, command_name)
+
             if command_utterances.template_utterances:
-                sample_utterances.append(command_utterances.template_utterances[0])
+                sample_utterances.append(f"{command_name}: {command_utterances.template_utterances[0]}")
             elif command_utterances.plain_utterances:
-                sample_utterances.append(command_utterances.plain_utterances[0])
+                sample_utterances.append(f"{command_name}: {command_utterances.plain_utterances[0]}")
+        
         return sample_utterances
-
-    @classmethod
-    def _populate_utterance_definition(
-        cls,
-        workflow_folderpath: str,
-        command_directory: CommandDirectory,
-    ):
-        for command_key in command_directory.get_command_keys():
-            command_metadata = command_directory.get_command_metadata(command_key)
-            
-            # Get the Signature class from the command module
-            module = python_utils.get_module(
-                command_metadata.response_generation_module_path,
-                command_metadata.workflow_folderpath or workflow_folderpath
-            )
-            if not module:
-                continue
-
-            Signature = getattr(module, "Signature", None)
-            if not Signature:
-                continue
-
-            # Extract utterances from the Signature class
-            plain_utterances = getattr(Signature, "plain_utterances", [])
-            template_utterances = getattr(Signature, "template_utterances", [])
-
-            # Get generation function if it exists
-            generated_utterances_module_filepath = ""
-            generated_utterances_func_name = ""
-            if hasattr(Signature, "generate_utterances"):
-                generated_utterances_module_filepath = command_metadata.response_generation_module_path
-                generated_utterances_func_name = "Signature.generate_utterances"
-
-            utterance_metadata = UtteranceMetadata(
-                workflow_folderpath=command_metadata.workflow_folderpath or workflow_folderpath,
-                plain_utterances=plain_utterances,
-                template_utterances=template_utterances,
-                generated_utterances_module_filepath=generated_utterances_module_filepath,
-                generated_utterances_func_name=generated_utterances_func_name,
-            )
-
-            command_directory.register_utterance_metadata(
-                command_key, utterance_metadata
-            )
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-class UtteranceRegistry:   
-    @classmethod
-    def create_definition(cls, workflow_folderpath: str) -> Optional[CommandDirectory]:
-        command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(
-            workflow_folderpath)
-        if not command_routing_definition:
-            return None
-        UtteranceDefinition._populate_utterance_definition(
-            workflow_folderpath,
-            command_routing_definition.command_directory)
 
-        command_routing_definition.command_directory.save()
-        return command_routing_definition.command_directory
+class UtteranceRegistry:
+    """A simple registry to get an UtteranceDefinition for a workflow."""
+    _definitions: dict[str, UtteranceDefinition] = {}
 
     @classmethod
     def get_definition(cls, workflow_folderpath: str) -> UtteranceDefinition:
-        return UtteranceDefinition(workflow_folderpath=workflow_folderpath)
+        """
+        Gets the utterance definition for a workflow.
+        If it doesn't exist, it will be created and cached.
+        """
+        if workflow_folderpath not in cls._definitions:
+            # Ensure command directory is parsed once so utterance metadata is available.
+            cmd_dir = CommandDirectory.load(workflow_folderpath)
+            ctx_model = CommandContextModel.load(workflow_folderpath)
+            cls._definitions[workflow_folderpath] = UtteranceDefinition(
+                workflow_folderpath=workflow_folderpath,
+                context_model=ctx_model,
+                command_directory=cmd_dir,
+            )
+        
+        return cls._definitions[workflow_folderpath]
+
+    @classmethod
+    def clear_registry(cls):
+        """Clears the registry. Useful for testing."""
+        cls._definitions.clear()

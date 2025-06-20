@@ -8,7 +8,7 @@ alwaysApply: false
 Many commands in this repo were historically organised like:
 
 ```
-_base_commands/<command_name>/
+_commands/<command_name>/
     parameter_extraction/
         signatures.py
     response_generation/
@@ -24,7 +24,7 @@ We are migrating every such command to a **single Python file** that sits
 next to its siblings:
 
 ```
-_base_commands/<command_name>.py
+_commands/<command_name>.py
 ```
 
 Inside that file we keep the same public surface but in a predictable

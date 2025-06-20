@@ -35,7 +35,7 @@
             ]
         },
         {
-            "name": "train_retail_assistant",
+            "name": "train_retail_workflow",
             "type": "debugpy",
             "request": "launch",
             "module": "fastworkflow.train",
@@ -48,55 +48,7 @@
                 "./env/.env",
                 "./passwords/.env"
             ]
-        },        {
-            "name": "run_sample_workflow_agent",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "fastworkflow.run_agent",
-            "justMyCode": false,
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}/"
-            },
-            "args": [
-                "./examples/sample_workflow",
-                "./env/.env",
-                "./passwords/.env",
-                "--startup_action",
-                "./examples/sample_workflow/startup_action.json"
-            ]
-        },
-        {
-            "name": "run_sample_workflow_assistant",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "fastworkflow.run",
-            "justMyCode": false,
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}/"
-            },
-            "args": [
-                "./examples/sample_workflow",
-                "./env/.env",
-                "./passwords/.env",
-                "--startup_action",
-                "./examples/sample_workflow/startup_action.json"
-            ]
-        },
-        {
-            "name": "train_sample_workflow",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "fastworkflow.train",
-            "justMyCode": false,
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}/"
-            },
-            "args": [
-                "./examples/sample_workflow",
-                "./env/.env",
-                "./passwords/.env"
-            ]
-        },
+        },        
         {
             "name": "run_todo_list",
             "type": "debugpy",
@@ -109,7 +61,9 @@
             "args": [
                 "./examples/todo_list",
                 "./env/.env",
-                "./passwords/.env"
+                "./passwords/.env",
+                "--startup_action",
+                "./examples/todo_list/startup_action.json"
             ]
         },
         {
@@ -143,6 +97,23 @@
             ]
         },
         {
+            "name": "build_todo_list",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "fastworkflow.build",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/",
+                "LOG_LEVEL": "DEBUG"
+            },
+            "args": [
+                "--source-dir", "./examples/todo_list/application",
+                "--output-dir", "./examples/todo_list/_commands",
+                "--context-model-dir", "./examples/todo_list",
+                "--overwrite"
+            ]
+        },
+        {
             "name": "Python Debugger: Current File with Arguments",
             "type": "debugpy",
             "request": "launch",
@@ -164,6 +135,6 @@
             "env": {
                 "PYTHONPATH": "${workspaceFolder}"
             }
-        }
+        },
     ]
 }

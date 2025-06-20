@@ -91,14 +91,20 @@ def generate_diverse_utterances(
             }
         ]
 
-        response = litellm.completion(
-            model=model,  # Corrected model name
-            messages=messages,
-            max_tokens=1000,
-            temperature=1.0,
-            top_p=0.9,
-            stop=["<|end_of_text|>"]
-        )
+        from fastworkflow.utils.logging import logger
+
+        try:
+            response = litellm.completion(
+                model=model,  # Corrected model name
+                messages=messages,
+                max_tokens=1000,
+                temperature=1.0,
+                top_p=0.9,
+                stop=["<|end_of_text|>"]
+            )
+        except litellm.exceptions.RateLimitError:
+            logger.error("LiteLLM Rate limiting error!")
+            return []
 
         # Process responses
         content = response.choices[0].message.content.strip()

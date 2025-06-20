@@ -1,0 +1,41 @@
+<context>
+# Overview  
+This PRD defines the new **Context Callback Module** feature for FastWorkflow. The goal is to allow workflow authors to provide per-context helper logic (e.g. `get_container_object`) that can be invoked at runtime.  
+
+# Core Features  
+- Discover context callback modules located at `_commands/<ContextName>/_<ContextName>.py`.  
+- Store discovery results in `command_directory.json` under a new `map_context_2_metadata` key.  
+- Expose the resolved callback class through `CommandContextModel.get_context_class()` and make it available to `Session.get_container_object()`.  
+- Skip underscore-prefixed files when building command metadata unless they exactly match the `_ContextName.py` pattern.  
+
+# User Experience  
+- Workflow authors create a file like `_TodoItem.py` inside the `TodoItem` context folder implementing a `Context` class with helper methods.  
+- At runtime, these helpers are automatically located and can be used without additional registration.
+</context>
+<PRD>
+# Technical Architecture  
+- Extend `CommandDirectory` to register `ContextMetadata` objects and persist them in `command_directory.json`.  
+- Extend `CommandContextModel` to expose `get_context_class()` using information from `CommandDirectory`.  
+- Add `ModuleType.CONTEXT_CLASS` to identify context callback lookups.  
+- Ensure loaders ignore generic underscore-prefixed files to avoid treating them as commands.  
+
+# Development Roadmap  
+- Phase 1: Command discovery update & metadata persistence.  
+- Phase 2: ContextModel API surface (`get_context_class`).  
+- Phase 3: Update core runtime (`Session`) to utilise new API (already wired).  
+- Phase 4: Documentation & examples (this PRD, README updates).  
+
+# Logical Dependency Chain  
+1. Update `ModuleType` enum (done).  
+2. `CommandDirectory` improvements.  
+3. `CommandContextModel` improvements.  
+4. Runtime integration & tests.  
+5. Documentation.  
+
+# Risks and Mitigations  
+- **Backward compatibility** – ensure existing workflows without context files still load (fallbacks & graceful skips).  
+- **False positive context detection** – strict filename matching mitigates accidental pickups.  
+
+# Appendix  
+N/A
+</PRD> 

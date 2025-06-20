@@ -1,77 +1,115 @@
-import os
 import pytest
-import shutil
-import fastworkflow
-from fastworkflow.utterance_definition import UtteranceDefinition, UtteranceRegistry
+from pathlib import Path
+
+from fastworkflow.utterance_definition import UtteranceDefinition
+from fastworkflow.command_directory import CommandDirectory
+from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.command_directory import UtteranceMetadata
 
-@pytest.fixture(scope="module")
-def retail_workflow_path():
-    """Get the path to the retail workflow example."""
-    return os.path.join(os.path.dirname(__file__), "..", "examples", "retail_workflow")
 
 @pytest.fixture(scope="module")
-def utterance_definition(retail_workflow_path):
-    """
-    Creates the command routing and utterance definitions for the retail workflow.
-    Returns the utterance definition.
-    """
-    # Ensure command info is cleared before running tests for this module
-    command_info_path = os.path.join(retail_workflow_path, "___command_info")
-    if os.path.exists(command_info_path):
-        shutil.rmtree(command_info_path)
+def sample_workflow_path() -> Path:
+    """Get the path to the sample workflow example."""
+    return Path(__file__).parent.parent / "examples" / "retail_workflow"
 
-    # Creating utterance definition depends on command routing being created first.
-    UtteranceRegistry.create_definition(retail_workflow_path)
-    return UtteranceRegistry.get_definition(retail_workflow_path)
+
+@pytest.fixture(scope="module")
+def utterance_definition(sample_workflow_path: Path) -> UtteranceDefinition:
+    """
+    Builds and returns an utterance definition for the sample workflow.
+    This now directly instantiates the required components.
+    """
+    context_model = CommandContextModel.load(str(sample_workflow_path))
+    command_directory = CommandDirectory.load(str(sample_workflow_path))
+    return UtteranceDefinition(
+        workflow_folderpath=str(sample_workflow_path),
+        context_model=context_model,
+        command_directory=command_directory,
+    )
 
 
 class TestUtteranceDefinition:
+    """Test suite for the refactored UtteranceDefinition."""
 
-    def test_definition_creation(self, utterance_definition):
+    def test_definition_creation(self, utterance_definition: UtteranceDefinition):
         """Test that the UtteranceDefinition is created correctly."""
         assert utterance_definition is not None
         assert isinstance(utterance_definition, UtteranceDefinition)
+        assert isinstance(utterance_definition.context_model, CommandContextModel)
+        assert isinstance(utterance_definition.command_directory, CommandDirectory)
 
-    def test_get_command_utterances(self, utterance_definition):
-        # sourcery skip: class-extract-method
-        """Test that utterances are correctly extracted from single-file commands."""
-        workitem_path = "/retail_workflow"
-        command_name = "cancel_pending_order"
+    def test_get_command_names(self, utterance_definition: UtteranceDefinition):
+        """Test that command names are correctly retrieved for a given context."""
+        context = "*"
+        command_names = utterance_definition.get_command_names(context)
+        
+        # This context in `context_model.json` contains these commands.
+        expected_commands = {
+            "cancel_pending_order",
+            "exchange_delivered_order_items",
+            "find_user_id_by_email",
+            "find_user_id_by_name_zip",
+            "get_order_details",
+            "get_product_details",
+            "get_user_details",
+            "list_all_product_types",
+            "modify_pending_order_address",
+            "modify_pending_order_items",
+            "modify_pending_order_payment",
+            "modify_user_address",
+            "return_delivered_order_items",
+            "transfer_to_human_agents",
+        }
+        assert set(command_names) == expected_commands
 
-        utterance_metadata = utterance_definition.get_command_utterances(workitem_path, command_name)
+    def test_get_command_utterances(self, utterance_definition: UtteranceDefinition):
+        """Test that utterances are correctly extracted for a specific command."""
+        command_name = "find_user_id_by_email"
+        utterance_metadata = utterance_definition.get_command_utterances(command_name)
 
         assert isinstance(utterance_metadata, UtteranceMetadata)
         
-        # Check plain utterances
         assert isinstance(utterance_metadata.plain_utterances, list)
-        assert len(utterance_metadata.plain_utterances) > 0
-        assert "Can you cancel my pending order?" in utterance_metadata.plain_utterances
+        assert "Can you tell me the ID linked to" in utterance_metadata.plain_utterances[0]
         
-        # Check template utterances (should be empty for this command)
-        assert isinstance(utterance_metadata.template_utterances, list)
-        
-        # Check generated utterances function metadata
-        assert utterance_metadata.generated_utterances_module_filepath.endswith("cancel_pending_order.py")
+        assert utterance_metadata.generated_utterances_module_filepath.endswith("find_user_id_by_email.py")
         assert utterance_metadata.generated_utterances_func_name == "Signature.generate_utterances"
 
-    def test_get_generated_utterances_func(self, utterance_definition):
-        """Test that the nested generate_utterances function can be retrieved."""
-        workitem_path = "/retail_workflow"
-        command_name = "cancel_pending_order"
-
-        utterance_metadata = utterance_definition.get_command_utterances(workitem_path, command_name)
-        
-        gen_func = utterance_metadata.get_generated_utterances_func(utterance_definition.workflow_folderpath)
-        
-        assert callable(gen_func)
-
-    def test_get_sample_utterances(self, utterance_definition):
-        """Test that sample utterances can be retrieved."""
-        workitem_path = "/retail_workflow"
-        sample_utterances = utterance_definition.get_sample_utterances(workitem_path)
+    def test_get_sample_utterances_from_context(self, utterance_definition: UtteranceDefinition):
+        """Test that sample utterances can be retrieved for a whole context."""
+        context = "*"
+        sample_utterances = utterance_definition.get_sample_utterances(context)
 
         assert isinstance(sample_utterances, list)
         assert len(sample_utterances) > 0
-        # Check if one of the first utterances is present
-        assert "I want to cancel my order because I no longer need it." in sample_utterances 
+        # The 'list_all_product_types' command should provide a sample about products.
+        assert any("products" in utt.lower() or "product" in utt.lower() for utt in sample_utterances)
+
+    def test_get_sample_utterances_handles_generated_utterances(self, utterance_definition: UtteranceDefinition):
+        """
+        Tests that get_sample_utterances correctly calls the generation function
+        for commands that have one, like 'find_user_id_by_email'.
+        """
+        context = "*"
+        sample_utterances = utterance_definition.get_sample_utterances(context)
+
+        assert isinstance(sample_utterances, list)
+        # Check for a dynamically generated utterance from find_user_id_by_email.py
+        assert any("id linked" in utt.lower() or "email" in utt.lower() for utt in sample_utterances)
+
+    def test_get_utterances_for_nonexistent_command(self, utterance_definition: UtteranceDefinition):
+        """Tests that requesting utterances for a command not in the directory raises a ValueError."""
+        with pytest.raises(ValueError, match="Could not find utterance metadata for command 'nonexistent_command'"):
+            utterance_definition.get_command_utterances("nonexistent_command")
+
+    def test_inheritance_in_sample_utterances(self, utterance_definition: UtteranceDefinition):
+        """
+        Tests that get_sample_utterances correctly includes utterances from inherited contexts.
+        The 'cmdset1_specialized' context inherits from 'cmd_set_1'.
+        """
+        context = "*"
+        sample_utterances = utterance_definition.get_sample_utterances(context)
+
+        assert isinstance(sample_utterances, list)
+        # Should include a sample about product types
+        assert any("product" in utt.lower() for utt in sample_utterances) 

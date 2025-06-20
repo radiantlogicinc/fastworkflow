@@ -90,7 +90,7 @@ The integration tests cover:
 
 The tests use the actual retail workflow example data located in:
 - `examples/retail_workflow/retail_data/`
-- `examples/retail_workflow/_base_commands/`
+- `examples/retail_workflow/_commands/`
 
 This provides realistic test scenarios without requiring mock data.
 

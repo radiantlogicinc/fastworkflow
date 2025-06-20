@@ -65,16 +65,16 @@ class WorkflowSession:
             logger.debug(f"Session stack after pop: {list(cls._session_stack)}")
             return session_id
 
-    def __init__(self,
-                 command_executor: CommandExecutorInterface,
-                 workflow_folderpath: str,
-                 session_id_str: Optional[str] = None,
-                 parent_session_id: Optional[int] = None,
-                 context: dict = {},
-                 startup_command: str = "",
-                 startup_action: Optional[fastworkflow.Action] = None,
-                 keep_alive: bool = False,
-                 user_message_queue: Optional[Queue] = None,
+    def __init__(self, 
+                 command_executor: CommandExecutorInterface, 
+                 workflow_folderpath: str, 
+                 session_id_str: Optional[str] = None, 
+                 parent_session_id: Optional[int] = None, 
+                 context: dict = None, 
+                 startup_command: str = "", 
+                 startup_action: Optional[fastworkflow.Action] = None, 
+                 keep_alive: bool = False, 
+                 user_message_queue: Optional[Queue] = None, 
                  command_output_queue: Optional[Queue] = None):
         """
         Initialize a workflow session.
@@ -83,8 +83,11 @@ class WorkflowSession:
             session: The underlying fastworkflow Session
             startup_command: Optional command to execute on startup
             startup_action: Optional action to execute on startup
+            initial_context: The starting context for the session.
             keep_alive: Whether to keep the session alive after workflow completion
         """
+        if context is None:
+            context = {}
         if startup_command and startup_action:
             raise ValueError("Cannot provide both startup_command and startup_action")
 
@@ -98,12 +101,15 @@ class WorkflowSession:
         elif user_message_queue is not None and command_output_queue is None:
             raise ValueError("when keep_alive is False - Provide both user_message_queue and command_output_queue OR provide neither")
 
+        self._user_message_queue=user_message_queue
+        self._command_output_queue=command_output_queue
+
         self._session = fastworkflow.Session.create(
             workflow_folderpath,
             session_id_str=session_id_str,
             parent_session_id=parent_session_id,
-            user_message_queue=user_message_queue,
-            command_output_queue=command_output_queue,
+            # user_message_queue=user_message_queue,
+            # command_output_queue=command_output_queue,
             context=context
         )
 
@@ -149,23 +155,24 @@ class WorkflowSession:
 
     @property
     def user_message_queue(self) -> Queue:
-        return self._session.user_message_queue
+        return self._user_message_queue
 
     @property
     def command_output_queue(self) -> Queue:
-        return self._session.command_output_queue
+        return self._command_output_queue
 
     @property
     def workflow_is_complete(self) -> bool:
-        return self._session.workflow_snapshot.workflow.is_complete
+        return self._session.workflow_snapshot.is_complete
     
     @workflow_is_complete.setter
     def workflow_is_complete(self, value: bool) -> None:
-        self._session.workflow_snapshot.workflow.is_complete = value
+        self._session.workflow_snapshot.is_complete = value
 
     @property
     def command_executor(self) -> CommandExecutorInterface:
         return self._command_executor
+       
 
     def _run_workflow_loop(self) -> Optional[fastworkflow.CommandOutput]:
         """
@@ -234,15 +241,15 @@ class WorkflowSession:
             mcp_result = self._command_executor.perform_mcp_tool_call(
                 self._session, 
                 tool_call, 
-                workitem_path=self._session.workflow_snapshot.active_workitem.path
+                workitem_path=self._session.current_command_context_name
             )
             
             # Convert MCPToolResult back to CommandOutput for consistency
             command_output = self._convert_mcp_result_to_command_output(mcp_result)
             
             # Put in output queue if needed
-            if (not command_output.success or self._keep_alive) and self._session.command_output_queue:
-                self._session.command_output_queue.put(command_output)
+            if (not command_output.success or self._keep_alive) and self.command_output_queue:
+                self.command_output_queue.put(command_output)
                 
             return command_output
             
@@ -265,14 +272,14 @@ class WorkflowSession:
         """Process a single message"""
         command_output = self._command_executor.invoke_command(self, message)
         if (not command_output.success or self._keep_alive) and \
-            self._session.command_output_queue:
-            self._session.command_output_queue.put(command_output)
+            self.command_output_queue:
+            self.command_output_queue.put(command_output)
         return command_output
     
     def _process_action(self, action: fastworkflow.Action) -> fastworkflow.CommandOutput:
         """Process a startup action"""
         command_output = self._command_executor.perform_action(self._session, action)
         if (not command_output.success or self._keep_alive) and \
-            self._session.command_output_queue:
-            self._session.command_output_queue.put(command_output)
+            self.command_output_queue:
+            self.command_output_queue.put(command_output)
         return command_output

@@ -149,7 +149,7 @@ def create_mcp_server_for_workflow(workflow_path: str) -> FastWorkflowMCPServer:
 ## Development Patterns
 
 ### Adding New Workflow Commands
-1. Create command in appropriate `_base_commands/` directory with Pydantic parameter class
+1. Create command in appropriate `_commands/` directory with Pydantic parameter class
 2. MCP tool automatically available via `list_tools()` with generated schema
 3. Test via MCP server, agent integration, or external MCP clients
 4. No additional MCP-specific configuration required

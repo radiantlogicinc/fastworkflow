@@ -1,0 +1,8 @@
+{
+    "IntentDetection": {
+        "base": ["Core"]
+    },
+    "ErrorCorrection": {
+        "base": ["Core"]
+    }
+}

@@ -1,6 +1,0 @@
-{
-    "workitem_path": "/sample_workflow",
-    "command_name": "get_status",
-    "command": "",
-    "parameters": {"workitem_path": "/sample_workflow", "workitem_id": "null"}
-}

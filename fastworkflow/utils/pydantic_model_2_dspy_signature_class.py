@@ -1,6 +1,7 @@
 from typing import Annotated, Type, Union, get_args, get_origin
 
 import dspy
+from dspy import InputField, OutputField, Signature
 from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined

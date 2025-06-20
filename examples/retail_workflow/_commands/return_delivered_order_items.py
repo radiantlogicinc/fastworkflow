@@ -1,0 +1,73 @@
+from typing import List
+
+import fastworkflow
+from pydantic import BaseModel, Field, ConfigDict
+from fastworkflow.session import Session
+from fastworkflow import CommandOutput, CommandResponse
+
+from ..retail_data import load_data
+from ..tools.return_delivered_order_items import ReturnDeliveredOrderItems
+
+
+class Signature:
+    """Return delivered order items"""
+    class Input(BaseModel):
+        order_id: str = Field(
+            default="NOT_FOUND",
+            description="The order ID for return (must start with #)",
+            pattern=r"^(#W\d+|NOT_FOUND)$",
+            examples=["#W0000000"],
+        )
+        item_ids: List[str] = Field(
+            default_factory=list,
+            description="List of item IDs to be returned",
+            examples=["1008292230"],
+        )
+        payment_method_id: str = Field(
+            default="NOT_FOUND",
+            description="Payment method ID for refund",
+            pattern=r"^((gift_card|credit_card)_\d+|NOT_FOUND)$",
+            examples=["gift_card_0000000", "credit_card_0000000"],
+        )
+
+        model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
+
+    class Output(BaseModel):
+        status: str = Field(description="Whether return succeeded.")
+
+    plain_utterances: List[str] = [
+        "I want to return some items from my order #W0001234.",
+        "Please help me return item 1008292230 and 1008292231 from order #W0005678.",
+        "Can I return item 1008292230 from my delivered order?",
+        "I need to return these products from my last order #W0009876.",
+        "Return item 1008292230 from order #W0001357 and refund to my gift card.",
+        "I want to request a return for multiple items from order #W0004567.",
+        "How can I return items 1008292230 and 1008292240 from order #W0002468?",
+    ]
+    template_utterances: List[str] = []
+
+    @staticmethod
+    def generate_utterances(session: fastworkflow.Session, command_name: str) -> List[str]:
+        utterance_definition = fastworkflow.UtteranceRegistry.get_definition(session.workflow_snapshot.workflow_folderpath)
+        utterances_obj = utterance_definition.get_command_utterances(command_name)
+        from fastworkflow.train.generate_synthetic import generate_diverse_utterances
+        return generate_diverse_utterances(utterances_obj.plain_utterances, command_name)
+
+
+class ResponseGenerator:
+    def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:
+        output = self._process_command(session, command_parameters)
+        return CommandOutput(
+            session_id=session.id,
+            command_responses=[CommandResponse(response=f"return status is: {output.status}")],
+        )
+
+    def _process_command(self, session: Session, input: Signature.Input) -> Signature.Output:
+        data = load_data()
+        result = ReturnDeliveredOrderItems.invoke(
+            data=data,
+            order_id=input.order_id,
+            item_ids=input.item_ids,
+            payment_method_id=input.payment_method_id,
+        )
+        return Signature.Output(status=result) 

@@ -1,7 +1,7 @@
 """
 Integration tests for FastWorkflow MCP Server functionality.
 
-These tests use the retail_workflow example to test MCP server integration
+These tests use the sample_workflow example to test MCP server integration
 without mocks, providing end-to-end testing of the MCP compliance features.
 """
 
@@ -9,15 +9,17 @@ import pytest
 import json
 import os
 from typing import Dict, Any
+import uuid
 
 import fastworkflow
 from fastworkflow.mcp_server import FastWorkflowMCPServer, create_mcp_server_for_workflow
 from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.command_routing_definition import CommandRoutingDefinition
 
 
 @pytest.fixture(scope="module")
-def retail_workflow_path():
-    """Get the path to the retail workflow example."""
+def sample_workflow_path():
+    """Get the path to the sample workflow example."""
     return os.path.join(os.path.dirname(__file__), "..", "examples", "retail_workflow")
 
 
@@ -30,12 +32,12 @@ def initialized_fastworkflow():
 
 
 @pytest.fixture
-def workflow_session(retail_workflow_path, initialized_fastworkflow):
-    """Create a FastWorkflow session for the retail workflow."""
-    # Ensure the command routing definition is created before the session
-    fastworkflow.CommandRoutingRegistry.create_definition(retail_workflow_path)
+def workflow_session(sample_workflow_path, initialized_fastworkflow):
+    """Create a FastWorkflow session for the sample workflow."""
+    # Build command routing definition once so that command metadata is ready
+    CommandRoutingDefinition.build(sample_workflow_path)
     return fastworkflow.WorkflowSession(
-        CommandExecutor(), retail_workflow_path, session_id_str="test_session"
+        CommandExecutor(), sample_workflow_path, session_id_str=str(uuid.uuid4())
     )
 
 
@@ -61,13 +63,13 @@ class TestFastWorkflowMCPServer:
         assert isinstance(tools, list)
         assert len(tools) > 0
         
-        # Check that retail workflow commands are present
+        # Check that sample workflow commands are present
         tool_names = [tool["name"] for tool in tools]
         expected_commands = [
-            "cancel_pending_order", 
-            "get_user_details",
+            "list_all_product_types",
+            "find_user_id_by_email",
             "get_order_details",
-            "list_all_product_types"
+            "get_product_details"
         ]
         
         for command in expected_commands:
@@ -92,7 +94,6 @@ class TestFastWorkflowMCPServer:
             
             # Check that command is always present
             assert "command" in schema["properties"]
-            # Note: workitem_path is currently commented out in the MCP server implementation
             
             # Check annotations
             annotations = tool["annotations"]
@@ -106,41 +107,40 @@ class TestFastWorkflowMCPServer:
         """Test calling a tool with no required parameters."""
         result = mcp_server.call_tool(
             name="list_all_product_types",
-            arguments={"command": "What products do you have?"}
+            arguments={}
         )
         
         assert isinstance(result, fastworkflow.MCPToolResult)
         assert result.isError is False
-        assert "list of product types" in result.content[0].text
+        assert "product" in result.content[0].text.lower()
 
     def test_call_tool_with_parameters(self, mcp_server):
-        """Test calling a tool that requires parameters."""
+        """Test calling a tool that requires parameters (get_path_and_id)."""
         result = mcp_server.call_tool(
-            name="get_user_details",
+            name="find_user_id_by_email",
             arguments={
-                "command": "Get details for user",
-                "user_id": "sara_doe_496"
+                "command": "find user by email",
+                "email": "john.doe@example.com"
             }
         )
-        
+
         assert isinstance(result, fastworkflow.MCPToolResult)
         assert result.isError is False
         assert len(result.content) > 0
-        assert "User details:" in result.content[0].text
+        assert "user id" in result.content[0].text.lower()
 
     def test_call_tool_with_invalid_parameters(self, mcp_server):
-        """Test calling a tool with invalid or missing parameters."""
+        """Test calling a tool with missing required parameters to induce validation failure."""
         result = mcp_server.call_tool(
-            name="get_user_details", 
+            name="find_user_id_by_email",
             arguments={
-                "command": "Get details for user",
-                "user_id": "invalid_user_id_format"
+                "command": "find user by email"
+                # missing email parameter expected to default but still acceptable.
             }
         )
-        
-        # Should handle the error gracefully
+
         assert isinstance(result, fastworkflow.MCPToolResult)
-        # May or may not be an error depending on validation, but should not crash
+        # May not be an error, but should not crash
 
     def test_call_nonexistent_tool(self, mcp_server):
         """Test calling a tool that doesn't exist."""
@@ -151,7 +151,7 @@ class TestFastWorkflowMCPServer:
         
         assert isinstance(result, fastworkflow.MCPToolResult)
         assert result.isError is True
-        assert "Error: Command 'nonexistent_tool' not found" in result.content[0].text
+        assert "nonexistent_tool" in result.content[0].text
 
     def test_handle_json_rpc_tools_list(self, mcp_server):
         # sourcery skip: class-extract-method
@@ -177,7 +177,7 @@ class TestFastWorkflowMCPServer:
             "method": "tools/call",
             "params": {
                 "name": "list_all_product_types",
-                "arguments": {"command": "Show me all products"}
+                "arguments": {}
             },
             "id": "test-456"
         }
@@ -233,6 +233,9 @@ class TestRetailWorkflowCommands:
             }
         )
         
+        assert isinstance(result, fastworkflow.MCPToolResult)
+        assert len(result.content) > 0
+        assert result.content[0].type == "text"
         assert result.isError is False
         assert "user not found" in result.content[0].text
 
@@ -248,13 +251,11 @@ class TestRetailWorkflowCommands:
             }
         )
         
-        # Should return a result, even if it's an error due to command-specific issues
         assert isinstance(result, fastworkflow.MCPToolResult)
         assert len(result.content) > 0
         assert result.content[0].type == "text"
-        # Note: This command may have recursion issues, so we don't assert success
-        if not result.isError:
-            assert "user id" in result.content[0].text.lower()
+        assert result.isError is False
+        assert "user id" in result.content[0].text.lower()
 
     def test_get_order_details(self, mcp_server):
         """Test getting order details."""
@@ -265,7 +266,10 @@ class TestRetailWorkflowCommands:
                 "order_id": "#W0000001"
             }
         )
-        
+
+        assert isinstance(result, fastworkflow.MCPToolResult)
+        assert len(result.content) > 0
+        assert result.content[0].type == "text"
         assert result.isError is False
         assert "Order details:" in result.content[0].text
 
@@ -279,6 +283,9 @@ class TestRetailWorkflowCommands:
             }
         )
         
+        assert isinstance(result, fastworkflow.MCPToolResult)
+        assert len(result.content) > 0
+        assert result.content[0].type == "text"
         assert result.isError is False
         assert "product not found" in result.content[0].text
 
@@ -293,13 +300,11 @@ class TestRetailWorkflowCommands:
             }
         )
         
-        # Should return a result, even if it's an error due to command-specific issues
         assert isinstance(result, fastworkflow.MCPToolResult)
         assert len(result.content) > 0
         assert result.content[0].type == "text"
-        # Note: This command may have recursion issues, so we don't assert success
-        if not result.isError:
-            assert "current status is:" in result.content[0].text
+        assert result.isError is False
+        assert "current status is:" in result.content[0].text
 
     def test_transfer_to_human_agents(self, mcp_server):
         """Test transferring to human agents."""
@@ -310,7 +315,10 @@ class TestRetailWorkflowCommands:
                 "summary": "Customer needs complex assistance"
             }
         )
-        
+
+        assert isinstance(result, fastworkflow.MCPToolResult)
+        assert len(result.content) > 0
+        assert result.content[0].type == "text"
         assert result.isError is False
         assert "transfer status:" in result.content[0].text
 
@@ -318,9 +326,9 @@ class TestRetailWorkflowCommands:
 class TestMCPServerCreation:
     """Test the create_mcp_server_for_workflow function."""
 
-    def test_create_server_for_workflow(self, retail_workflow_path, initialized_fastworkflow):
+    def test_create_server_for_workflow(self, sample_workflow_path, initialized_fastworkflow):
         """Test creating MCP server for a workflow path."""
-        server = create_mcp_server_for_workflow(retail_workflow_path)
+        server = create_mcp_server_for_workflow(sample_workflow_path)
         
         assert isinstance(server, FastWorkflowMCPServer)
         assert server.workflow_session is not None

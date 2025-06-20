@@ -1,79 +1,103 @@
-import os
 import pytest
-import shutil
-import fastworkflow
-from fastworkflow.command_routing_definition import CommandRoutingDefinition, CommandRoutingRegistry, ModuleType
+from pathlib import Path
 from pydantic import BaseModel
 
-@pytest.fixture(scope="module")
-def retail_workflow_path():
-    """Get the path to the retail workflow example."""
-    return os.path.join(os.path.dirname(__file__), "..", "examples", "retail_workflow")
+from fastworkflow.command_routing_definition import CommandRoutingRegistry, CommandRoutingDefinition, ModuleType
+
 
 @pytest.fixture(scope="module")
-def command_routing_definition(retail_workflow_path):
-    """Create and return a command routing definition for the retail workflow."""
-    # Ensure command info is cleared before running tests for this module
-    command_info_path = os.path.join(retail_workflow_path, "___command_info")
-    if os.path.exists(command_info_path):
-        shutil.rmtree(command_info_path)
-        
-    return CommandRoutingRegistry.create_definition(retail_workflow_path)
+def sample_workflow_path() -> Path:
+    """Provides the path to the sample workflow example."""
+    return Path(__file__).parent.parent / "examples" / "retail_workflow"
+
+
+@pytest.fixture(scope="function")
+def command_routing_definition(sample_workflow_path: Path) -> CommandRoutingDefinition:
+    """
+    Builds and returns a command routing definition for the sample workflow.
+    Uses function scope and clears the registry to ensure test isolation.
+    """
+    CommandRoutingRegistry.clear_registry()
+    return CommandRoutingRegistry.get_definition(str(sample_workflow_path))
 
 
 class TestCommandRoutingDefinition:
-    def test_definition_creation(self, command_routing_definition):
-        """Test that the CommandRoutingDefinition is created correctly."""
-        assert command_routing_definition is not None
-        assert isinstance(command_routing_definition, CommandRoutingDefinition)
+    """Test suite for the refactored CommandRoutingDefinition and CommandRoutingRegistry."""
 
-    def test_get_command_names(self, command_routing_definition):
-        """Test that command names are correctly discovered."""
-        # The workitem path is derived from the folder structure.
-        workitem_path = "/retail_workflow"
-        command_names = command_routing_definition.get_command_names(workitem_path)
+    def test_definition_creation_and_caching(self, sample_workflow_path: Path):
+        """Tests that the CommandRoutingDefinition is created and properly cached."""
+        CommandRoutingRegistry.clear_registry()
+        
+        definition1 = CommandRoutingRegistry.get_definition(str(sample_workflow_path))
+        assert definition1 is not None
+        assert isinstance(definition1, CommandRoutingDefinition)
+        
+        # Calling get_definition again for the same path should return the cached instance
+        definition2 = CommandRoutingRegistry.get_definition(str(sample_workflow_path))
+        assert definition1 is definition2
 
-        assert "cancel_pending_order" in command_names
-        assert "get_user_details" in command_names
-        assert "list_all_product_types" in command_names
+    def test_get_command_names_for_valid_context(self, command_routing_definition: CommandRoutingDefinition):
+        """Tests that command names are correctly retrieved for a valid, inherited context."""
+        context = "*"
+        command_names = command_routing_definition.get_command_names(context)
+        
+        expected_commands = {
+            "cancel_pending_order",
+            "exchange_delivered_order_items",
+            "find_user_id_by_email",
+            "find_user_id_by_name_zip",
+            "get_order_details",
+            "get_product_details",
+            "get_user_details",
+            "list_all_product_types",
+            "modify_pending_order_address",
+            "modify_pending_order_items",
+            "modify_pending_order_payment",
+            "modify_user_address",
+            "return_delivered_order_items",
+            "transfer_to_human_agents",
+            "Core/misunderstood_intent",
+        }
+        assert set(command_names) == expected_commands
 
-    def test_get_command_class_for_parameters(self, command_routing_definition):
-        """Test getting the command parameters class (Signature.Input)."""
-        workitem_path = "/retail_workflow"
-        command_name = "cancel_pending_order"
+    def test_get_command_names_for_invalid_context(self, command_routing_definition: CommandRoutingDefinition):
+        """Tests that requesting command names for an invalid context raises a ValueError."""
+        with pytest.raises(ValueError, match="Context 'invalid_context' not found"):
+            command_routing_definition.get_command_names("invalid_context")
+
+    def test_get_command_class_for_parameters(self, command_routing_definition: CommandRoutingDefinition):
+        """Tests getting the command parameters class (e.g., Signature.Input)."""
+        command_name = "find_user_id_by_email"
         
         param_class = command_routing_definition.get_command_class(
-            workitem_path, command_name, ModuleType.COMMAND_PARAMETERS_CLASS
+            command_name, ModuleType.COMMAND_PARAMETERS_CLASS
         )
         
         assert param_class is not None
         assert issubclass(param_class, BaseModel)
-        # Check a field to be sure
-        assert "order_id" in param_class.model_fields
+        assert "email" in param_class.model_fields
 
-    def test_get_command_class_for_response_generator(self, command_routing_definition):
-        """Test getting the response generator class."""
-        workitem_path = "/retail_workflow"
-        command_name = "cancel_pending_order"
+    def test_get_command_class_for_response_generator(self, command_routing_definition: CommandRoutingDefinition):
+        """Tests getting the response generator class for a command."""
+        command_name = "find_user_id_by_email"
 
         rg_class = command_routing_definition.get_command_class(
-            workitem_path, command_name, ModuleType.RESPONSE_GENERATION_INFERENCE
+            command_name, ModuleType.RESPONSE_GENERATION_INFERENCE
         )
 
         assert rg_class is not None
         assert hasattr(rg_class, "__call__")
         assert rg_class.__name__ == "ResponseGenerator"
+
+    def test_get_command_class_for_nonexistent_command_file(self, command_routing_definition: CommandRoutingDefinition):
+        """
+        Tests that requesting a class for a command that is NOT in the command directory
+        (e.g., has no corresponding .py file) returns None.
+        """
+        command_name = "this_command_truly_does_not_exist"
         
-    def test_get_command_class_for_input_signature(self, command_routing_definition):
-        """Test getting the input signature class (Signature)."""
-        workitem_path = "/retail_workflow"
-        command_name = "cancel_pending_order"
-
-        sig_class = command_routing_definition.get_command_class(
-            workitem_path, command_name, ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS
+        param_class = command_routing_definition.get_command_class(
+            command_name, ModuleType.COMMAND_PARAMETERS_CLASS
         )
-
-        assert sig_class is not None
-        assert hasattr(sig_class, "Input")
-        assert hasattr(sig_class, "Output")
-        assert sig_class.__name__ == "Signature" 
+        
+        assert param_class is None 

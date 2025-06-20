@@ -7,15 +7,25 @@ from dotenv import dotenv_values
 from colorama import Fore, Style
 from fastworkflow.utils import python_utils
 import fastworkflow
-from fastworkflow.command_routing_definition import ModuleType
+from fastworkflow import ModuleType
 from fastworkflow.model_pipeline_training import train, get_route_layer_filepath_model
 from fastworkflow.utils.generate_param_examples import generate_dspy_examples
+from fastworkflow.command_routing_definition import CommandRoutingDefinition
+from fastworkflow.utterance_definition import UtteranceRegistry
+from fastworkflow.command_context_model import CommandContextModel
+from fastworkflow.command_directory import CommandDirectory
 
 
 def train_workflow(workflow_path: str):
-    fastworkflow.WorkflowRegistry.create_definition(workflow_path)
-    fastworkflow.CommandRoutingRegistry.create_definition(workflow_path)
-    fastworkflow.UtteranceRegistry.create_definition(workflow_path)
+    # Ensure context model is parsed so downstream helpers have contexts
+    CommandContextModel.load(workflow_path)
+    CommandRoutingDefinition.build(workflow_path)
+    # Ensure the command directory is persisted so that downstream helpers
+    # (e.g. DSPy example generation) can read it from disk without first
+    # needing to rebuild it in-memory.
+    cmd_dir = CommandDirectory.load(workflow_path)
+    cmd_dir.save()
+    UtteranceRegistry.get_definition(workflow_path)
 
     #first, recursively train all child workflows
     workflows_dir = os.path.join(workflow_path, "_workflows")
@@ -44,7 +54,7 @@ def train_workflow(workflow_path: str):
     session.close()
 
 def _generate_dspy_examples_helper(workflow_path, session):
-    workflow_folderpath = session.workflow_snapshot.workflow.workflow_folderpath
+    workflow_folderpath = session.workflow_snapshot.workflow_folderpath
     json_path=get_route_layer_filepath_model(workflow_folderpath,"command_directory.json")
     # json_path = "./examples/sample_workflow/___command_info/command_directory.json"
     commands = _get_commands_with_parameters(json_path)
@@ -114,7 +124,7 @@ def _get_commands_with_parameters(json_path):
     for command_key, metadata in commands_metadata.items():
         # Check if command_parameters_class is not null
         if metadata.get("command_parameters_class") is not None:
-            # Extract command name (last part after the slash)
+            # We want to train on the full command path including the ContextFolder prefix
             command_name = command_key.split("/")[-1]
             
             # Get the parameter extraction module path
@@ -136,7 +146,8 @@ def is_fast_workflow_trained(fastworkflow_folderpath: str):
         fastworkflow_folderpath,
         '_workflows',
         'command_metadata_extraction', 
-        '___command_info'
+        '___command_info',
+        'ErrorCorrection'
     )
 
     return "largemodel.pth" in os.listdir(cme_commandinfo_folderpath)

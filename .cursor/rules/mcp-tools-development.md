@@ -3,7 +3,7 @@
 ## Adding New MCP Tools
 
 ### Workflow Commands Automatically Become MCP Tools
-All workflow commands in `_base_commands/` directories automatically become MCP tools via:
+All workflow commands in `_commands/` directories automatically become MCP tools via:
 - **[fastworkflow/mcp_server_example.py](mdc:fastworkflow/mcp_server_example.py)** - `list_tools()` method discovers commands automatically
 - **[fastworkflow/command_executor.py](mdc:fastworkflow/command_executor.py)** - `perform_mcp_tool_call()` method executes commands
 - **[fastworkflow/run_agent/agent_module.py](mdc:fastworkflow/run_agent/agent_module.py)** - Creates individual DSPy tools for delegated execution
@@ -99,9 +99,9 @@ def _create_individual_mcp_tool(tool_def: Dict, workflow_session_obj):
 ## Development Patterns
 
 ### Adding New Workflow Commands
-1. Create command in appropriate `_base_commands/` directory following standard structure:
+1. Create command in appropriate `_commands/` directory following standard structure:
    ```
-   _base_commands/
+   _commands/
      <command_name>/
        parameter_extraction/signatures.py  # CommandParameters Pydantic class
        response_generation/

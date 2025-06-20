@@ -5,7 +5,7 @@ FastWorkflow commands follow a consistent directory structure pattern with autom
 
 ## Command Directory Structure
 ```
-_base_commands/
+_commands/
   <command_name>/
     parameter_extraction/
       __init__.py
@@ -41,7 +41,7 @@ _base_commands/
 - `generate_utterances.py` creates training data variations
 
 ## Example Command: get_user_details
-Located in [examples/retail_workflow/_base_commands/get_user_details](mdc:examples/retail_workflow/_base_commands/get_user_details)
+Located in [examples/retail_workflow/_commands/get_user_details](mdc:examples/retail_workflow/_commands/get_user_details)
 
 ### Parameter Pattern with MCP Integration
 ```python

@@ -1,15 +1,14 @@
 import os
-from queue import Queue
 import shutil
 import sys
 from functools import wraps
-from typing import Optional, Union
+from typing import Any, Optional
+from pydantic import BaseModel
 
 from speedict import Rdict
 
 import fastworkflow
 from fastworkflow.utils.logging import logger
-from fastworkflow.workflow import Workflow, Workitem
 
 
 # implements the enablecache decorator
@@ -35,16 +34,15 @@ def enablecache(func):
 
     return wrapper
 
-
 class WorkflowSnapshot:
-    def __init__(self, session_id: int, workflow: Workflow, active_workitem: Union[Workitem, Workflow], context: dict = None, parent_session_id: Optional[int] = None):
-        if context is None:
-            context = {}
+    def __init__(self, session_id: int, 
+                 workflow_folderpath: str, workflow_context: dict = None, 
+                 parent_session_id: Optional[int] = None):
         self._session_id = session_id
-        self._workflow = workflow
-        self._active_workitem = active_workitem
-        self._context = context
+        self._workflow_folderpath = workflow_folderpath
+        self._workflow_context = {} if workflow_context is None else workflow_context
         self._parent_session_id = parent_session_id
+        self._is_complete = False
         self._save()
 
     @property
@@ -52,46 +50,42 @@ class WorkflowSnapshot:
         return self._session_id
 
     @property
-    def workflow(self) -> Workflow:
-        return self._workflow
+    def workflow_folderpath(self) -> str:
+        return self._workflow_folderpath
 
-    @workflow.setter
-    def workflow(self, value: Workflow) -> None:
-        self._workflow = value
+    @workflow_folderpath.setter
+    def workflow_folderpath(self, value: str) -> None:
+        self._workflow_folderpath = value
         self._save()
 
     @property
-    def active_workitem(self) -> Union[Workitem, Workflow]:
-        return self._active_workitem
+    def workflow_context(self) -> dict:
+        return self._workflow_context
     
-    @active_workitem.setter
-    def active_workitem(self, value: Union[Workitem, Workflow]) -> None:
-        if value.path == self._active_workitem.path and value.id == self._active_workitem.id:
-            return
-        self._active_workitem = value
-        self._save()
-
-    @property
-    def context(self) -> dict:
-        return self._context
-    
-    @context.setter
-    def context(self, value: dict) -> None:
-        if value == self._context:
-            return
-        self._context = value
+    @workflow_context.setter
+    def workflow_context(self, value: dict) -> None:
+        self._workflow_context = value
         self._save()
 
     @property
     def parent_session_id(self) -> Optional[int]:
         return self._parent_session_id
 
+    @property
+    def is_complete(self) -> bool:
+        return self._is_complete
+    
+    @is_complete.setter
+    def is_complete(self, value: bool) -> None:
+        self._is_complete = value
+        self._save()
+
     def _save(self) -> None:
         """save the workflow snapshot"""
         sessiondb_folderpath = Session._get_sessiondb_folderpath(
             session_id=self._session_id,
             parent_session_id=self._parent_session_id,
-            workflow_folderpath=self._workflow.workflow_folderpath
+            workflow_folderpath=self._workflow_folderpath
         )
         os.makedirs(sessiondb_folderpath, exist_ok=True)     
 
@@ -99,11 +93,10 @@ class WorkflowSnapshot:
         keyvalue_db["workflow_snapshot"] = self
         keyvalue_db.close()
 
-
 class Session:
     """Session class"""
     @classmethod
-    def create(cls, workflow_folderpath: str, session_id_str: Optional[str] = None, parent_session_id: Optional[int] = None, user_message_queue: Optional[Queue] = None, command_output_queue: Optional[Queue] = None, context: dict = None, for_training_semantic_router: bool = False) -> "Session":
+    def create(cls, workflow_folderpath: str, session_id_str: Optional[str] = None, parent_session_id: Optional[int] = None, context: dict = None, for_training_semantic_router: bool = False) -> "Session":
         if context is None:
             context = {}
         if session_id_str is None and parent_session_id is None:
@@ -117,12 +110,7 @@ class Session:
         else:
             session_id = cls._generate_child_session_id(parent_session_id, workflow_folderpath)
 
-        if session := cls.get_session(
-            session_id, 
-            user_message_queue, 
-            command_output_queue,
-            context
-        ):
+        if session := cls.get_session(session_id, context):
             return session
 
         if not os.path.exists(workflow_folderpath):
@@ -131,22 +119,13 @@ class Session:
         if not os.path.isdir(workflow_folderpath):
             raise ValueError(f"{workflow_folderpath} must be a directory")
 
-        workflow=Workflow(
-            workflow_folderpath=workflow_folderpath,
-            path=f"/{os.path.basename(workflow_folderpath).rstrip('/')}",
-            parent_workflow=None,
-        )
         workflow_snapshot = WorkflowSnapshot(
             session_id=session_id,
-            workflow=workflow,
-            active_workitem=workflow.find_workitem("/", None),
-            context=context,
+            workflow_folderpath=workflow_folderpath,
+            workflow_context=context,
             parent_session_id=parent_session_id,
         )
-        session = Session(cls.__create_key, 
-                          workflow_snapshot,
-                          user_message_queue, 
-                          command_output_queue)
+        session = Session(cls.__create_key, workflow_snapshot)
 
         session_db_folderpath = Session._get_sessiondb_folderpath(
             session_id=session_id,
@@ -175,8 +154,6 @@ class Session:
     @classmethod
     def get_session(cls, 
              session_id: int, 
-             user_message_queue: Optional[Queue] = None,
-             command_output_queue: Optional[Queue] = None,
              context: Optional[dict] = None) -> Optional["Session"]:
         """load the session"""
         sessionid_2_sessiondata_mapdir = Session._get_session_id_2_sessiondata_mapdir()
@@ -196,13 +173,11 @@ class Session:
         keyvalue_db.close()
 
         if context:
-            workflow_snapshot.context = context
+            workflow_snapshot.workflow_context = context
 
         return Session(
             cls.__create_key,
             workflow_snapshot,
-            user_message_queue,
-            command_output_queue,
         )
 
     @classmethod
@@ -216,23 +191,70 @@ class Session:
     # https://stackoverflow.com/questions/8212053/private-constructor-in-python
     __create_key = object()
    
-    def __init__(self,
-                 create_key, 
-                 workflow_snapshot: WorkflowSnapshot,
-                 user_message_queue: Optional[Queue] = None,
-                 command_output_queue: Optional[Queue] = None):
+    def __init__(self, create_key, workflow_snapshot: WorkflowSnapshot):
         """initialize the Session class"""
         if create_key is not Session.__create_key:
             raise ValueError("Session objects must be created using Session.create")
 
-        workflow_folderpath = workflow_snapshot.workflow.workflow_folderpath
+        workflow_folderpath = workflow_snapshot.workflow_folderpath
         if workflow_folderpath not in sys.path:
             # THIS IS IMPORTANT: it allows relative import of modules in the code inside workflow_folderpath
             sys.path.insert(0, workflow_folderpath)
 
         self._workflow_snapshot = workflow_snapshot
-        self._user_message_queue = user_message_queue
-        self._command_output_queue = command_output_queue
+        self._root_command_context = None
+        self._current_command_context = None
+
+    @property
+    def current_command_context(self) -> object:
+        return self._current_command_context
+
+    @property
+    def current_command_context_name(self) -> str:
+        return Session.get_command_context_name(self._current_command_context)
+
+    @property
+    def is_current_context_root(self) -> bool:
+        return self._current_command_context == self._root_command_context
+
+    @current_command_context.setter
+    def current_command_context(self, value: Optional[object]) -> None:
+        self._current_command_context = value
+
+    @property
+    def root_command_context(self) -> object:
+        return self._root_command_context
+
+    @root_command_context.setter
+    def root_command_context(self, value: Optional[object]) -> None:
+        if self._root_command_context:
+            raise ValueError("Root command context can only be set once per Session")
+
+        self._root_command_context = value
+        self._current_command_context = value
+
+    def get_container_object(self, command_context_object: Optional[object] = None) -> Optional[object]:
+        if command_context_object == self._root_command_context or command_context_object is None:
+            return self._root_command_context
+
+        crd = fastworkflow.CommandContextModel.load(
+            self._workflow_snapshot.workflow_folderpath)
+        context_class = crd.get_context_class(
+                Session.get_command_context_name(command_context_object),
+                fastworkflow.ModuleType.CONTEXT_CLASS
+        )
+        if context_class:
+            command_context_object = context_class.get_container_object(command_context_object)
+        else:
+            command_context_object = None
+
+        return command_context_object
+
+    @staticmethod
+    def get_command_context_name(command_context_object: Optional[object]) -> str:
+        if command_context_object:
+            return command_context_object.__class__.__name__
+        return '*'
 
     @property
     def id(self) -> int:
@@ -248,16 +270,6 @@ class Session:
     def workflow_snapshot(self) -> WorkflowSnapshot:
         """get the workflow snapshot"""
         return self._workflow_snapshot
-
-    @property
-    def user_message_queue(self) -> Queue:
-        """get the user message queue"""
-        return self._user_message_queue
-
-    @property
-    def command_output_queue(self) -> Queue:
-        """get the command output queue"""
-        return self._command_output_queue
 
     def close(self) -> bool:
         """close the session"""
@@ -286,7 +298,7 @@ class Session:
         for descendant_session_id in descendant_list:
             del map_sessionid_2_session_db[descendant_session_id]
 
-        sys.path.remove(self.workflow_snapshot.workflow.workflow_folderpath)
+        sys.path.remove(self.workflow_snapshot.workflow_folderpath)
         # remove ourselves from the sessionid_2_sessiondata_map
         del map_sessionid_2_session_db[self.id]
 
@@ -296,7 +308,7 @@ class Session:
             sessiondb_folderpath = Session._get_sessiondb_folderpath(
                 session_id=self.id,
                 parent_session_id=self.parent_id,
-                workflow_folderpath=self.workflow_snapshot.workflow.workflow_folderpath
+                workflow_folderpath=self.workflow_snapshot.workflow_folderpath
             )
             shutil.rmtree(sessiondb_folderpath, ignore_errors=True)
         except OSError as e:
@@ -361,7 +373,7 @@ class Session:
         workflow_snapshot: WorkflowSnapshot = keyvalue_db["workflow_snapshot"]
         keyvalue_db.close()
 
-        return (workflow_snapshot.parent_session_id, sessiondb_folderpath, children_list, workflow_snapshot.workflow.workflow_folderpath)
+        return (workflow_snapshot.parent_session_id, sessiondb_folderpath, children_list, workflow_snapshot.workflow_folderpath)
 
     @classmethod
     def _get_session_id_2_sessiondata_mapdir(cls) -> str:
@@ -378,7 +390,7 @@ class Session:
         """Get the cache database folder path for a specific function"""
         speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
         return os.path.join(
-            self.workflow_snapshot.workflow.workflow_folderpath,
+            self.workflow_snapshot.workflow_folderpath,
             speedict_foldername,
             f"/function_cache/{function_name}",
         )

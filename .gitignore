@@ -2,6 +2,7 @@ passwords/*
 ___workflow_contexts*
 ___command_info*
 ___convo_info*
+.roo*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -13,7 +14,6 @@ __pycache__/
 
 # Distribution / packaging
 .Python
-build/
 develop-eggs/
 dist/
 downloads/
@@ -165,3 +165,33 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 inference_log.jsonl
+
+# Added by Task Master AI
+# Logs
+logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dev-debug.log
+# Dependency directories
+node_modules/
+# Environment variables
+.env
+# Editor directories and files
+.idea
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+# OS specific
+.DS_Store
+# Task files
+tasks.json
+tasks/ 
+.roomodes
+.windsurfrules
+@todo_list.json
+.taskmaster/config.json
+.taskmaster/state.json
+.taskmaster/reports/task-complexity-report.json

@@ -1,6 +1,6 @@
 ---
-description:
-globs:
+description: 
+globs: 
 alwaysApply: false
 ---
 # MCP Tools Development Guide
@@ -8,7 +8,7 @@ alwaysApply: false
 ## Adding New MCP Tools
 
 ### Workflow Commands Become MCP Tools
-All workflow commands in `_base_commands/` directories automatically become MCP tools via:
+All workflow commands in `_commands/` directories automatically become MCP tools via:
 - **[fastworkflow/mcp_server_example.py](mdc:fastworkflow/mcp_server_example.py)** - `list_tools()` method
 - **[fastworkflow/command_executor.py](mdc:fastworkflow/command_executor.py)** - `perform_mcp_tool_call()` method
 
@@ -78,7 +78,7 @@ def handle_json_rpc_request(request: Dict)   # JSON-RPC 2.0 protocol
 ## Development Patterns
 
 ### Adding New Workflow Commands
-1. Create command in appropriate `_base_commands/` directory
+1. Create command in appropriate `_commands/` directory
 2. Define Pydantic parameter class for automatic schema generation
 3. MCP tool is automatically available via `list_tools()`
 4. Test via MCP server or agent integration
