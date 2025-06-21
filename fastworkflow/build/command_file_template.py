@@ -44,7 +44,9 @@ ${template_utterances}
         utterance_definition = fastworkflow.UtteranceRegistry.get_definition(session.workflow_snapshot.workflow_folderpath)
         utterances_obj = utterance_definition.get_command_utterances(command_name)
         result = generate_diverse_utterances(utterances_obj.plain_utterances, command_name)
-        utterance_list: list[str] = [command_name] + result
+        utterance_list: list[str] = [
+            command_name.split('/')[-1].lower().replace('_', ' ')
+        ] + result
         return utterance_list
 
     def process_extracted_parameters(self, workflow_snapshot: WorkflowSnapshot, command: str, cmd_parameters: "Signature.Input") -> None:
@@ -54,7 +56,7 @@ class ResponseGenerator:
     def _process_command(self, session: Session, input: Signature.Input) -> Signature.Output:
         """${docstring}"""
         # Access the application class instance:
-        app_instance = session.workflow_snapshot.context_object  # type: ${app_class_name}
+        app_instance = session.command_context_for_response_generation  # type: ${app_class_name}
 ${process_logic}
         return Signature.Output(${output_return})
 
@@ -63,7 +65,7 @@ ${process_logic}
         return CommandOutput(
             session_id=session.id,
             command_responses=[
-                CommandResponse(response=f"${response_format}")
+                CommandResponse(response=output.model_dump_json())
             ]
         )
 ''')
@@ -95,6 +97,25 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
         output_return = f"value=app_instance.{actual_prop_name}"
         response_format = "value={output.value}"
 
+    elif is_property_setter and not is_set_all_properties: # Individual property setter
+        if method_info.parameters and len(method_info.parameters) > 0:
+            param_name = method_info.parameters[0]['name']
+            param_type = method_info.parameters[0].get('annotation') or 'Any'
+            escaped_param_desc = (method_info.parameters[0].get('docstring') or f'New value for {method_info.name}').replace('"', '\\"')
+            input_fields = f'        {param_name}: {param_type} = Field(description="{escaped_param_desc}")'
+        else:
+            input_fields = "        value: Any = Field(description=\"New value\")"
+            param_name = "value"
+
+        output_fields = '        success: bool = Field(default=True, description="Indicates successful execution.")'
+
+        # Use attribute assignment for property setter
+        prop_name = method_info.name
+        process_logic_str = f"        # Set property using attribute assignment\n        todo_item.{prop_name} = input.{param_name}"
+
+        output_return = "success=True"
+        response_format = "success={output.success}"
+
     elif is_get_all_properties and all_properties_for_template:
         input_fields = "        pass" # No input for get_properties
         output_field_lines = []
@@ -112,7 +133,7 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
         else:
             output_fields = "\n".join(output_field_lines)
             output_return = ", ".join(output_return_parts)
-        
+
         response_format = "properties={output.dict()}" # Example response format
         # docstring is already set from the synthesized method_info for GetProperties
 
@@ -133,20 +154,30 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
             input_fields = "\n".join(input_field_lines)
         else:
             input_fields = "        pass" 
-        
+
         output_fields = "        success: bool = Field(description=\"True if properties update was attempted.\")"
-        
+
         set_logic_lines = []
         for prop_info in settable_properties_for_template:
-            set_logic_lines.append(f"        if input.{prop_info.name} is not None:")
-            set_logic_lines.append(f"            setattr(app_instance, '{prop_info.name}', input.{prop_info.name})")
+            set_logic_lines.extend(
+                (
+                    f"        if input.{prop_info.name} is not None:",
+                    f"            app_instance.{prop_info.name} = input.{prop_info.name}",
+                )
+            )
+        set_logic_lines.extend(
+            (
+                "        if input.is_complete is not None:",
+                f"            app_instance.status = {class_info.name}.COMPLETE if input.is_complete else {class_info.name}.INCOMPLETE",
+            )
+        )
         if not set_logic_lines: 
             set_logic_lines.append("        pass # No properties to set or no inputs provided")
         process_logic_str = "\n".join(set_logic_lines)
-        
+
         output_return = "success=True"
         response_format = "Set properties result: {output.success}"
-        # docstring is already set from the synthesized method_info for SetProperties
+                # docstring is already set from the synthesized method_info for SetProperties
 
     else: # For regular methods (default case)
         if method_info.parameters:
@@ -158,12 +189,12 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
             input_fields = "\n".join(input_field_lines)
         else:
             input_fields = "        pass"
-        
+
         method_return_type = method_info.return_annotation or 'Any'
         regular_method_logic_lines = []
         param_names = [p['name'] for p in method_info.parameters] if method_info.parameters else []
         call_params = ', '.join([f"{p_name}=input.{p_name}" for p_name in param_names])
-        
+
         if method_return_type.lower() == 'none' or not method_return_type:
             regular_method_logic_lines.append(f"        app_instance.{method_info.name.lower()}({call_params})")
             output_fields = '        success: bool = Field(default=True, description="Indicates successful execution.")'
@@ -175,7 +206,7 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
             output_return = "result=result_val" 
             response_format = "result={output.result}"
         process_logic_str = "\n".join(regular_method_logic_lines)
-            
+
     # Utterances
     plain_utterances = ",\n".join([f'        "{u}"' for u in generate_utterances(class_info.name, method_info.name, method_info.parameters)])
     template_utterances = "        \"TODO: Add template utterances\""

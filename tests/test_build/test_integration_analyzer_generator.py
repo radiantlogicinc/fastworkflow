@@ -23,7 +23,7 @@ def test_analyzer_and_generators_on_all_files():
                 os.remove(item_path)
     else:
         os.makedirs(OUTPUT_DIR, exist_ok=True) # exist_ok=True in case of parallel test runs or other creation logic
-    
+
     # Clean context model file
     if os.path.exists(CONTEXT_MODEL_FILE):
         os.remove(CONTEXT_MODEL_FILE)
@@ -55,14 +55,15 @@ def test_analyzer_and_generators_on_all_files():
         assert os.path.isdir(class_specific_output_dir), f"Class specific directory {class_specific_output_dir} was not created for class {class_name}"
 
         expected_simple_filenames = []
-        for method_info in class_info.methods:
-            expected_simple_filenames.append(f'{method_info.name.lower()}.py')
-        
+        expected_simple_filenames.extend(
+            f'{method_info.name.lower()}.py'
+            for method_info in class_info.methods
+        )
         if class_info.properties: # Check if there are any properties (could be direct or inherited)
             expected_simple_filenames.append('get_properties.py')
         if class_info.all_settable_properties: # Check if there are any settable properties
             expected_simple_filenames.append('set_properties.py')
-        
+
         generated_in_subdir = os.listdir(class_specific_output_dir)
         assert sorted(generated_in_subdir) == sorted(expected_simple_filenames), \
             f"File list mismatch in {class_specific_output_dir}. Expected {sorted(expected_simple_filenames)}, got {sorted(generated_in_subdir)}"
@@ -75,7 +76,7 @@ def test_analyzer_and_generators_on_all_files():
     # generate_context_model writes the file and returns the dictionary
     context_data = generate_context_model(classes, os.path.dirname(CONTEXT_MODEL_FILE), os.path.basename(CONTEXT_MODEL_FILE))
     assert os.path.exists(CONTEXT_MODEL_FILE), f"Context model file {CONTEXT_MODEL_FILE} was not created."
-    
+
     # Now, context_data is the loaded dictionary, no need to open and json.load again
 
     # Context model schema v2 validations
@@ -88,13 +89,9 @@ def test_analyzer_and_generators_on_all_files():
     for class_name, class_info in classes.items():
         expected_bases = [b for b in class_info.bases if b in all_class_names]
 
-        if expected_bases:
-            # Class should appear in inheritance block with correct bases
-            assert class_name in inheritance_block, f"{class_name} missing from inheritance block"
-            assert inheritance_block[class_name]['base'] == expected_bases, f"Base for {class_name} should be {expected_bases}, got {inheritance_block[class_name]['base']}"
-        else:
-            # Classes with no bases should not be included (to keep file small)
-            assert class_name not in inheritance_block, f"{class_name} should not be in inheritance block as it has no bases"
+        # All classes should appear in inheritance block, regardless of whether they have bases
+        assert class_name in inheritance_block, f"{class_name} missing from inheritance block"
+        assert inheritance_block[class_name]['base'] == expected_bases, f"Base for {class_name} should be {expected_bases}, got {inheritance_block[class_name]['base']}"
 
     # Ensure no old '/' keys exist anywhere
     json_as_str = json.dumps(context_data)

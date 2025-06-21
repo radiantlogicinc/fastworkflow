@@ -10,8 +10,10 @@ from fastworkflow.context_model_loader import ContextModelLoaderError
 
 def create_test_context_model(path, model_data):
     """Helper to create a test context model file."""
+    # Ensure parent directory exists
+    path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, 'w') as f:
-        json.dump(model_data, f)
+        json.dump(model_data, f, indent=2)
 
 
 @pytest.fixture
@@ -30,6 +32,26 @@ def basic_context_model(temp_dir):
             "TodoList": {"base": []},
             "TodoItem": {"base": []},
             "User": {"base": []},
+            "*": {"base": []}
+        },
+        "aggregation": {
+            "TodoItem": {"container": ["TodoList"]}
+        }
+    }
+    create_test_context_model(model_path, model_data)
+    return model_path
+
+
+@pytest.fixture
+def inheritance_context_model(temp_dir):
+    """Create a context model with inheritance relationships for testing."""
+    model_path = temp_dir / "_commands/context_inheritance_model.json"
+    model_data = {
+        "inheritance": {
+            "TodoList": {"base": ["BaseList"]},
+            "TodoItem": {"base": ["BaseItem"]},
+            "BaseList": {"base": []},
+            "BaseItem": {"base": []},
             "*": {"base": []}
         },
         "aggregation": {
@@ -69,6 +91,75 @@ def test_basic_folder_creation(temp_dir, basic_context_model, commands_dir):
     assert not (commands_dir / "*").exists()
 
 
+def test_handler_file_creation(temp_dir, basic_context_model, commands_dir):
+    """Test that _<ContextName>.py handler files are created."""
+    generator = ContextFolderGenerator(
+        commands_root=commands_dir,
+        model_path=basic_context_model
+    )
+
+    # Generate folders and handler files
+    generator.generate_folders()
+
+    # Check that handler files were created
+    assert (commands_dir / "TodoList" / "_TodoList.py").exists()
+    assert (commands_dir / "TodoItem" / "_TodoItem.py").exists()
+    assert (commands_dir / "User" / "_User.py").exists()
+
+    # Check content of handler files
+    with open(commands_dir / "TodoList" / "_TodoList.py", 'r') as f:
+        content = f.read()
+        # Verify imports
+        assert "from typing import Optional" in content
+        assert "from ...application.todolist import TodoList" in content
+        # Verify Context class with get_parent method
+        assert "class Context:" in content
+        assert "@classmethod" in content
+        assert "def get_parent(cls, command_context_object: TodoList)" in content
+        assert "return getattr(command_context_object, 'parent', None)" in content
+
+    # Check TodoItem handler file
+    with open(commands_dir / "TodoItem" / "_TodoItem.py", 'r') as f:
+        content = f.read()
+        assert "from typing import Optional" in content
+        assert "from ...application.todoitem import TodoItem" in content
+        assert "class Context:" in content
+        assert "@classmethod" in content
+        assert "def get_parent(cls, command_context_object: TodoItem)" in content
+        assert "return getattr(command_context_object, 'parent', None)" in content
+
+
+def test_handler_file_with_inheritance(temp_dir, inheritance_context_model, commands_dir):
+    """Test that handler files correctly reference parent classes from inheritance."""
+    generator = ContextFolderGenerator(
+        commands_root=commands_dir,
+        model_path=inheritance_context_model
+    )
+    
+    # Generate folders and handler files
+    generator.generate_folders()
+    
+    # Check TodoList handler file with inheritance
+    with open(commands_dir / "TodoList" / "_TodoList.py", 'r') as f:
+        content = f.read()
+        # Verify imports include the parent class
+        assert "from ...application.todolist import TodoList" in content
+        assert "from ...application.baselist import BaseList" in content
+        # Verify return type annotation includes parent class
+        assert "def get_parent(cls, command_context_object: TodoList) -> Optional[BaseList]:" in content
+        assert "return getattr(command_context_object, 'parent', None)" in content
+    
+    # Check TodoItem handler file with inheritance
+    with open(commands_dir / "TodoItem" / "_TodoItem.py", 'r') as f:
+        content = f.read()
+        # Verify imports include the parent class
+        assert "from ...application.todoitem import TodoItem" in content
+        assert "from ...application.baseitem import BaseItem" in content
+        # Verify return type annotation includes parent class
+        assert "def get_parent(cls, command_context_object: TodoItem) -> Optional[BaseItem]:" in content
+        assert "return getattr(command_context_object, 'parent', None)" in content
+
+
 def test_idempotence(temp_dir, basic_context_model, commands_dir):
     """Test that running the generator multiple times doesn't cause errors."""
     generator = ContextFolderGenerator(
@@ -85,6 +176,39 @@ def test_idempotence(temp_dir, basic_context_model, commands_dir):
     assert (commands_dir / "TodoList").exists()
     assert (commands_dir / "TodoItem").exists()
     assert (commands_dir / "User").exists()
+
+
+def test_handler_file_idempotence(temp_dir, basic_context_model, commands_dir):
+    """Test that handler files are not overwritten if they already exist."""
+    generator = ContextFolderGenerator(
+        commands_root=commands_dir,
+        model_path=basic_context_model
+    )
+    
+    # Generate folders and handler files
+    generator.generate_folders()
+    
+    # Modify a handler file
+    custom_content = """from typing import Optional
+from ...application.todolist import TodoList
+
+class Context:
+    @classmethod
+    def get_parent(cls, command_context_object: TodoList) -> Optional[object]:
+        # Custom implementation
+        return command_context_object.custom_parent
+"""
+    with open(commands_dir / "TodoList" / "_TodoList.py", 'w') as f:
+        f.write(custom_content)
+    
+    # Run the generator again
+    generator.generate_folders()
+    
+    # Check that the custom content was preserved
+    with open(commands_dir / "TodoList" / "_TodoList.py", 'r') as f:
+        content = f.read()
+        assert "# Custom implementation" in content
+        assert "return command_context_object.custom_parent" in content
 
 
 def test_missing_model_file(temp_dir, commands_dir):

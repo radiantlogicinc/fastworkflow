@@ -9,8 +9,10 @@ from fastworkflow.build.command_stub_generator import CommandStubGenerator
 
 def create_test_context_model(path, model_data):
     """Helper to create a test context model file."""
+    # Ensure parent directory exists
+    path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, 'w') as f:
-        json.dump(model_data, f)
+        json.dump(model_data, f, indent=2)
 
 
 @pytest.fixture

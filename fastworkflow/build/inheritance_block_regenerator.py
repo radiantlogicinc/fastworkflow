@@ -108,13 +108,11 @@ class InheritanceBlockRegenerator:
             # Use class information to build inheritance relationships
             all_class_names = set(classes.keys())
             
+            # Include all classes in the inheritance block, not just those with base classes
             for class_name, class_info in classes.items():
                 # Only include base classes that are also in the analyzed set
                 base_contexts = [b for b in class_info.bases if b in all_class_names]
-                
-                # Only include classes that have base classes to keep the file small
-                if base_contexts:
-                    inheritance[class_name] = {"base": base_contexts}
+                inheritance[class_name] = {"base": base_contexts}
         else:
             # Without class info, we can't determine inheritance relationships,
             # so we'll just create empty entries for all contexts found in the directory

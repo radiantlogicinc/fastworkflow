@@ -8,6 +8,11 @@ def collect_command_files_and_context_model(
 ) -> Tuple[List[str], Optional[Dict[str, Any]], Optional[str]]:
     """
     Collect all command files and load the context model from the output directory.
+    
+    Args:
+        output_dir: Path to the directory containing command files and context model
+                   (should be the _commands directory)
+    
     Returns:
         - List of command file paths (excluding __init__.py)
         - Parsed context model dict (or None if error)
@@ -23,7 +28,7 @@ def collect_command_files_and_context_model(
             if file.endswith('.py') and file != '__init__.py'
         )
     # Load context model
-    context_model_path = os.path.join(output_dir, '_commands/context_inheritance_model.json')
+    context_model_path = os.path.join(output_dir, 'context_inheritance_model.json')
     context_model = None
     if not os.path.exists(context_model_path):
         error = f"Context model file not found at {context_model_path}"
@@ -35,7 +40,7 @@ def collect_command_files_and_context_model(
             error = f"Invalid JSON in context model: {str(e)}"
         except Exception as e:
             error = f"Error reading context model: {str(e)}"
-    return command_files, context_model, error 
+    return command_files, context_model, error
 
 def extract_command_metadata(command_files: List[str]) -> List[Dict[str, Any]]:
     """
@@ -121,23 +126,63 @@ def generate_readme_content(
 ) -> str:
     """
     Build the README.md content as a single string.
-    For each context, include commands from its own '/' key and recursively from all base classes.
+    For each context, discover commands from the file system instead of relying on the '/' key.
     Inherited commands are indicated in the README.
+    
+    Args:
+        command_metadata: List of command metadata dictionaries
+        context_model: Context model dictionary
+        source_dir: Path to the source directory
+        
+    Returns:
+        str: README.md content
     """
-    def get_all_commands(context, visited=None):
+    # Group command metadata by context
+    commands_by_context = {}
+    for meta in command_metadata:
+        # Extract context from file path: _commands/ContextName/command.py
+        parts = meta['file_path'].split(os.path.sep)
+        if len(parts) >= 2:
+            # Find the part that comes after "_commands"
+            try:
+                cmd_idx = parts.index("_commands")
+                if cmd_idx + 1 < len(parts):
+                    context = parts[cmd_idx + 1]
+                    # Skip files directly in _commands (like startup.py)
+                    if context.endswith(".py"):
+                        continue
+                    # Skip special files like _TodoItem.py
+                    if os.path.basename(meta['file_path']).startswith("_"):
+                        continue
+                    if context not in commands_by_context:
+                        commands_by_context[context] = []
+                    commands_by_context[context].append(meta)
+            except ValueError:
+                # "_commands" not found in path
+                continue
+
+    # Helper function to get inherited commands
+    def get_inherited_commands(context, visited=None):
         if visited is None:
             visited = set()
         if context in visited:
-            return set(), set()  # Prevent cycles
+            return set()  # Prevent cycles
         visited.add(context)
-        data = context_model.get(context, {})
-        own_cmds = set(data.get('/', []) or [])
+
+        # Get base classes from context model
+        inheritance_data = context_model.get('inheritance', {}).get(context, {})
+        base_classes = inheritance_data.get('base', [])
+
+        # Collect commands from all base classes
         inherited_cmds = set()
-        for base in data.get('base', []) or []:
-            base_own, base_inherited = get_all_commands(base, visited)
-            inherited_cmds.update(base_own)
-            inherited_cmds.update(base_inherited)
-        return own_cmds, inherited_cmds
+        for base in base_classes:
+            # Add commands from this base class
+            if base in commands_by_context:
+                inherited_cmds.update(meta['command_name'] for meta in commands_by_context[base])
+            # Add commands inherited by this base class
+            inherited_cmds.update(get_inherited_commands(base, visited))
+
+        return inherited_cmds
 
     # --- Overview Section ---
     readme = [
@@ -159,32 +204,72 @@ def generate_readme_content(
 
     # --- Available Commands Section ---
     readme.append("## Available Commands\n")
-    for context, data in context_model.items():
-        context_name = "Global Commands" if context == "*" else f"{context} Context"
+
+    # Add global commands first if they exist
+    global_commands = []
+    for meta in command_metadata:
+        # Check if it's a file directly in _commands and not a special file
+        parts = meta['file_path'].split(os.path.sep)
+        if "_commands" in parts:
+            cmd_idx = parts.index("_commands")
+            if cmd_idx + 1 < len(parts) and parts[cmd_idx + 1].endswith(".py") and (not os.path.basename(meta['file_path']).startswith("_") and \
+                               os.path.basename(meta['file_path']) != "startup.py" and \
+                               os.path.basename(meta['file_path']) != "__init__.py"):
+                global_commands.append(meta)
+
+    if global_commands:
+        readme.append("### Global Commands\n")
+        for meta in sorted(global_commands, key=lambda m: m['command_name']):
+            readme.append(f"- **{meta['command_name']}**")
+            if meta['plain_utterances']:
+                readme.append("  - Example utterances:")
+                for utt in meta['plain_utterances']:
+                    readme.append(f"    - `{utt}`")
+            if meta['input_model']:
+                readme.append(f"  - Input model: `{meta['input_model']}`")
+            if meta['output_model']:
+                readme.append(f"  - Output model: `{meta['output_model']}`")
+            if meta['docstring']:
+                readme.append(f"  - Description: {meta['docstring']}")
+            if meta['errors']:
+                readme.append(f"  - [!] Metadata extraction errors: {meta['errors']}")
+        readme.append("")
+
+    # Process each context from the context model
+    for context in sorted(context_model.get('inheritance', {}).keys()):
+        if context == "*":  # Skip global context, we handled it above
+            continue
+
+        context_name = f"{context} Context"
         readme.append(f"### {context_name}\n")
-        own_cmds, inherited_cmds = get_all_commands(context)
-        if own_cmds or inherited_cmds:
+
+        # Get own commands
+        own_commands = commands_by_context.get(context, [])
+        own_command_names = {meta['command_name'] for meta in own_commands}
+
+        # Get inherited commands
+        inherited_command_names = get_inherited_commands(context)
+
+        if own_commands or inherited_command_names:
             # List own commands first
-            for cmd_name in sorted(own_cmds):
-                meta = next((m for m in command_metadata if m['command_name'] == cmd_name), None)
-                readme.append(f"- **{cmd_name}**")
-                if meta:
-                    if meta['plain_utterances']:
-                        readme.append("  - Example utterances:")
-                        for utt in meta['plain_utterances']:
-                            readme.append(f"    - `{utt}`")
-                    if meta['input_model']:
-                        readme.append(f"  - Input model: `{meta['input_model']}`")
-                    if meta['output_model']:
-                        readme.append(f"  - Output model: `{meta['output_model']}`")
-                    if meta['docstring']:
-                        readme.append(f"  - Description: {meta['docstring']}")
-                    if meta['errors']:
-                        readme.append(f"  - [!] Metadata extraction errors: {meta['errors']}")
-                else:
-                    readme.append(f"  - (metadata not found)")
+            for meta in sorted(own_commands, key=lambda m: m['command_name']):
+                readme.append(f"- **{meta['command_name']}**")
+                if meta['plain_utterances']:
+                    readme.append("  - Example utterances:")
+                    for utt in meta['plain_utterances']:
+                        readme.append(f"    - `{utt}`")
+                if meta['input_model']:
+                    readme.append(f"  - Input model: `{meta['input_model']}`")
+                if meta['output_model']:
+                    readme.append(f"  - Output model: `{meta['output_model']}`")
+                if meta['docstring']:
+                    readme.append(f"  - Description: {meta['docstring']}")
+                if meta['errors']:
+                    readme.append(f"  - [!] Metadata extraction errors: {meta['errors']}")
+
             # List inherited commands
-            for cmd_name in sorted(inherited_cmds - own_cmds):
+            for cmd_name in sorted(inherited_command_names - own_command_names):
+                # Find metadata for this command
                 meta = next((m for m in command_metadata if m['command_name'] == cmd_name), None)
                 readme.append(f"- **{cmd_name}** (inherited)")
                 if meta:
@@ -201,10 +286,12 @@ def generate_readme_content(
                     if meta['errors']:
                         readme.append(f"  - [!] Metadata extraction errors: {meta['errors']}")
                 else:
-                    readme.append(f"  - (metadata not found)")
+                    readme.append("  - (metadata not found)")
         else:
             readme.append("No commands in this context.\n")
-        base_classes = data.get('base')
+
+        # Show base classes
+        base_classes = context_model.get('inheritance', {}).get(context, {}).get('base', [])
         if base_classes:
             readme.append(f"  - Base classes: {', '.join(base_classes)}")
         readme.append("")
@@ -213,23 +300,35 @@ def generate_readme_content(
     readme.append("## Context Model\n")
     readme.append("The `context_inheritance_model.json` file maps application classes to command contexts, organizing commands by their class.\n")
     readme.append("Structure example:\n")
-    readme.append("```json\n{\n  \"context_name\": {\n    \"/\": [\"command1\", \"command2\", ...],\n    \"base\": [\"BaseClass1\", ...]\n  },\n  ...\n}\n```\n")
+    readme.append("```json\n{\n  \"inheritance\": {\n    \"ClassA\": {\"base\": [\"BaseClass1\", ...]},\n    \"*\": {\"base\": []}\n  },\n  \"aggregation\": { ... }\n}\n```\n")
     readme.append("### Contexts and Commands\n")
-    for context, data in context_model.items():
+
+    # Process each context again for the context model section
+    for context in sorted(context_model.get('inheritance', {}).keys()):
         context_name = "Global Context (*)" if context == "*" else f"{context} Context"
         readme.append(f"#### {context_name}")
-        own_cmds, inherited_cmds = get_all_commands(context)
-        if own_cmds:
+
+        # Get own commands
+        own_command_names = {meta['command_name'] for meta in commands_by_context.get(context, [])}
+
+        # Get inherited commands
+        inherited_command_names = get_inherited_commands(context)
+
+        if own_command_names:
             readme.append("Commands:")
-            for cmd in sorted(own_cmds):
+            for cmd in sorted(own_command_names):
                 readme.append(f"- `{cmd}`")
-        if inherited_cmds:
+
+        if inherited_command_names:
             readme.append("Inherited commands:")
-            for cmd in sorted(inherited_cmds - own_cmds):
+            for cmd in sorted(inherited_command_names - own_command_names):
                 readme.append(f"- `{cmd}`")
-        if not own_cmds and not inherited_cmds:
+
+        if not own_command_names and not inherited_command_names:
             readme.append("No commands in this context.")
-        base_classes = data.get('base')
+
+        # Show base classes
+        base_classes = context_model.get('inheritance', {}).get(context, {}).get('base', [])
         if base_classes:
             readme.append(f"Base classes: {', '.join(base_classes)}")
         readme.append("")
@@ -248,9 +347,16 @@ def write_readme_file(output_dir: str, content: str) -> bool:
     """
     Write the given content to README.md in the output directory.
     Overwrites any existing README.md. Returns True on success, False on error.
+    
+    Args:
+        output_dir: Directory to write README.md to (should be the _commands directory)
+        content: Content to write to README.md
+        
+    Returns:
+        bool: True on success, False on error
     """
     try:
-        readme_path = os.path.join(output_dir, "_commands/README.md")
+        readme_path = os.path.join(output_dir, "README.md")
         with open(readme_path, "w", encoding="utf-8") as f:
             f.write(content)
         return True

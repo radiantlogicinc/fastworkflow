@@ -1,6 +1,7 @@
 import os
 import pathlib
 import tempfile
+import ast
 
 import pytest
 from fastworkflow.build.command_file_template import create_command_file
@@ -20,6 +21,15 @@ def test_create_command_file_simple():
         assert 'class Input(BaseModel):' in content
         assert 'class ResponseGenerator' in content
         assert 'plain_utterances =' in content
+        
+        # Verify new format for generate_utterances
+        assert "command_name.split('/')[-1].lower().replace('_', ' ')" in content
+        
+        # Verify app_instance is retrieved from session.command_context_for_response_generation
+        assert "app_instance = session.command_context_for_response_generation" in content
+        
+        # Verify response uses output.model_dump_json()
+        assert "CommandResponse(response=output.model_dump_json())" in content
 
 def test_create_command_file_with_type_annotations():
     params = [
@@ -62,26 +72,32 @@ def test_create_command_file_get_properties():
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        file_path = create_command_file(
-            class_info=class_info, 
-            method_info=method_info_get_props, 
-            output_dir=tmpdir, 
-            source_dir='.', 
-            is_get_all_properties=True,
-            all_properties_for_template=class_info.properties
+        check_created_command_file(
+            class_info, method_info_get_props, tmpdir
         )
-        assert os.path.exists(file_path)
-        content = pathlib.Path(file_path).read_text()
 
-        assert "class Input(BaseModel):\n        pass" in content
-        assert "class Output(BaseModel):" in content
-        assert "product_id: int = Field(description=\"The product ID.\")" in content
-        assert "name: str = Field(description=\"The product name.\")" in content
-        assert "price: float = Field(description=\"Value of property price\")" in content
-        
-        assert "# For get_properties, the primary logic is to gather attribute values" in content
-        assert "return Signature.Output(product_id=app_instance.product_id, name=app_instance.name, price=app_instance.price)" in content
-        assert f"app_instance = session.workflow_snapshot.context_object  # type: {class_name}" in content
+
+def check_created_command_file(class_info, method_info_get_props, tmpdir):
+    file_path = create_command_file(
+        class_info=class_info, 
+        method_info=method_info_get_props, 
+        output_dir=tmpdir, 
+        source_dir='.', 
+        is_get_all_properties=True,
+        all_properties_for_template=class_info.properties
+    )
+    assert os.path.exists(file_path)
+    content = pathlib.Path(file_path).read_text()
+
+    assert "class Input(BaseModel):\n        pass" in content
+    assert "class Output(BaseModel):" in content
+    assert "product_id: int = Field(description=\"The product ID.\")" in content
+    assert "name: str = Field(description=\"The product name.\")" in content
+    assert "price: float = Field(description=\"Value of property price\")" in content
+
+    assert "# For get_properties, the primary logic is to gather attribute values" in content
+    assert "return Signature.Output(product_id=app_instance.product_id, name=app_instance.name, price=app_instance.price)" in content
+    assert "app_instance = session.command_context_for_response_generation" in content
 
 def test_create_command_file_set_properties():
     class_name = "InventoryItem"
@@ -124,11 +140,94 @@ def test_create_command_file_set_properties():
 
         assert "class Output(BaseModel):\n        success: bool = Field(description=\"True if properties update was attempted.\")" in content
         
+        # Verify property setters use attribute assignment
         assert "if input.sku is not None:" in content
-        assert "setattr(app_instance, 'sku', input.sku)" in content
+        assert "app_instance.sku = input.sku" in content
         assert "if input.quantity is not None:" in content
-        assert "setattr(app_instance, 'quantity', input.quantity)" in content
+        assert "app_instance.quantity = input.quantity" in content
         assert "if input.location is not None:" in content
-        assert "setattr(app_instance, 'location', input.location)" in content
+        assert "app_instance.location = input.location" in content
+        
+        # Verify is_complete handling
+        assert "if input.is_complete is not None:" in content
+        assert f"app_instance.status = {class_name}.COMPLETE if input.is_complete else {class_name}.INCOMPLETE" in content
+        
         assert "return Signature.Output(success=True)" in content
-        assert f"app_instance = session.workflow_snapshot.context_object  # type: {class_name}" in content 
+        assert "app_instance = session.command_context_for_response_generation" in content
+
+def test_property_setter_uses_attribute_assignment():
+    # sourcery skip: extract-method, use-next
+    """Test that property setters use attribute assignment instead of method calls."""
+    class_name = "TodoItem"
+    class_info = ClassInfo(class_name, 'application/todo_item.py')
+
+    method_info = MethodInfo(
+        name="assign_to",
+        parameters=[{'name': 'assign_to', 'annotation': 'str'}],
+        docstring="Set the person assigned to the todo item."
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        file_path = create_command_file(
+            class_info=class_info,
+            method_info=method_info,
+            output_dir=tmpdir,
+            source_dir='.',
+            is_property_setter=True
+        )
+
+        # Parse the generated file to check for attribute assignment
+        with open(file_path, 'r') as f:
+            tree = ast.parse(f.read())
+
+        # Find the _process_command method
+        process_command = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == '_process_command':
+                process_command = node
+                break
+
+        assert process_command is not None
+
+        found_attribute_assignment = any(
+            isinstance(node, ast.Assign)
+            and (
+                isinstance(node.targets[0], ast.Attribute)
+                and isinstance(node.targets[0].value, ast.Name)
+            )
+            and (
+                node.targets[0].value.id == 'todo_item'
+                and node.targets[0].attr == 'assign_to'
+            )
+            for node in ast.walk(process_command)
+        )
+        assert found_attribute_assignment, "Property setter should use attribute assignment"
+
+def test_response_uses_model_dump_json():
+    """Test that response uses output.model_dump_json()."""
+    class_info, method_info = make_class_and_method('User', 'get_details', docstring='Get user details.')
+    with tempfile.TemporaryDirectory() as tmpdir:
+        file_path = create_command_file(class_info, method_info, tmpdir, source_dir='.')
+
+        # Parse the generated file to check for model_dump_json
+        with open(file_path, 'r') as f:
+            tree = ast.parse(f.read())
+
+        call_method = next(
+            (
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef)
+                and node.name == '__call__'
+            ),
+            None,
+        )
+        assert call_method is not None
+
+        found_model_dump_json = any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == 'model_dump_json'
+            for node in ast.walk(call_method)
+        )
+        assert found_model_dump_json, "Response should use output.model_dump_json()" 

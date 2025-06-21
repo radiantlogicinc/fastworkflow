@@ -10,8 +10,10 @@ from fastworkflow.build.class_analysis_structures import ClassInfo
 
 def create_test_context_model(path, model_data):
     """Helper to create a test context model file."""
+    # Ensure parent directory exists
+    path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, 'w') as f:
-        json.dump(model_data, f)
+        json.dump(model_data, f, indent=2)
 
 
 @pytest.fixture
@@ -60,16 +62,13 @@ def existing_model(temp_dir):
 @pytest.fixture
 def mock_classes():
     """Create mock class information for testing."""
-    classes = {}
-    
     # Create TodoList class
     todo_list = ClassInfo(
         name="TodoList",
         module_path="app/models/todo_list.py",
         bases=["BaseModel"]
     )
-    classes["TodoList"] = todo_list
-    
+    classes = {"TodoList": todo_list}
     # Create TodoItem class
     todo_item = ClassInfo(
         name="TodoItem",
@@ -77,7 +76,7 @@ def mock_classes():
         bases=["BaseModel"]
     )
     classes["TodoItem"] = todo_item
-    
+
     # Create User class with inheritance
     user = ClassInfo(
         name="User",
@@ -85,7 +84,7 @@ def mock_classes():
         bases=["BaseModel", "TodoList"]
     )
     classes["User"] = user
-    
+
     # Create BaseModel class
     base_model = ClassInfo(
         name="BaseModel",
@@ -93,7 +92,7 @@ def mock_classes():
         bases=[]
     )
     classes["BaseModel"] = base_model
-    
+
     return classes
 
 

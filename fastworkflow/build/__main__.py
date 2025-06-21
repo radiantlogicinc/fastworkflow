@@ -3,6 +3,7 @@ import os
 import sys
 import re
 import glob
+import ast
 
 from dotenv import dotenv_values
 
@@ -33,6 +34,7 @@ def parse_args():
     parser.add_argument('--stub-commands', help='Comma-separated list of command names to generate stubs for')
     parser.add_argument('--generate-navigators', action='store_true', help='Generate navigator stub files for contexts')
     parser.add_argument('--navigators-dir', help='Directory to save the generated navigator files (default: "navigators" in the output directory)')
+    parser.add_argument('--no-startup', action='store_true', help='Skip generating the startup.py file')
     return parser.parse_args()
 
 def initialize_environment(args):
@@ -55,6 +57,16 @@ def validate_directories(args):
     if not os.access(args.output_dir, os.W_OK):
         print(f"Error: Output directory '{args.output_dir}' is not writable.")
         sys.exit(1)
+    
+    # Ensure the _commands directory exists
+    commands_dir = os.path.join(args.output_dir, "_commands")
+    os.makedirs(commands_dir, exist_ok=True)
+    
+    # Create __init__.py in _commands directory if it doesn't exist
+    init_path = os.path.join(commands_dir, "__init__.py")
+    if not os.path.exists(init_path):
+        with open(init_path, "w") as f:
+            f.write("")
 
 def run_command_generation(args):
     # Ensure output_dir and context_model_dir are Python packages
@@ -77,10 +89,17 @@ def run_command_generation(args):
     context_dir = args.context_model_dir or args.output_dir
     context_model_data = real_generate_context_model(all_classes, context_dir)
 
+    # Generate startup command file (unless --no-startup flag is used)
+    if not args.no_startup:
+        if generate_startup_command(context_dir, args.source_dir, args.overwrite):
+            logger.info("Generated startup command file")
+        else:
+            logger.warning("Failed to generate startup command file")
+
     # Generate context folders based on the model
     context_model_path = os.path.join(context_dir, '_commands/context_inheritance_model.json')
     folder_generator = ContextFolderGenerator(
-        commands_root=args.output_dir,
+        commands_root=os.path.join(context_dir, '_commands'),
         model_path=context_model_path
     )
     try:
@@ -104,7 +123,7 @@ def run_command_generation(args):
     # This is done separately to ensure handlers are generated even if no command stubs are requested
     try:
         stub_generator = CommandStubGenerator(
-            commands_root=args.output_dir,
+            commands_root=os.path.join(context_dir, '_commands'),
             model_path=context_model_path
         )
 
@@ -139,7 +158,7 @@ def run_command_generation(args):
             # Continue with command generation even if navigator generation fails
 
     # Generate command files
-    real_generate_command_files(all_classes, args.output_dir, args.source_dir, overwrite=args.overwrite)
+    real_generate_command_files(all_classes, os.path.join(context_dir, '_commands'), args.source_dir, overwrite=args.overwrite)
 
     return all_classes, context_model_data
 
@@ -171,36 +190,46 @@ def generate_command_stubs_for_contexts(args, context_model_path, context_model_
 
 def run_validation(args, all_classes, context_model_dict):
     errors = []
+    commands_dir = os.path.join(args.context_model_dir or args.output_dir, '_commands')
+    
+    # Check if command files were generated
     if [
         f
         for f in glob.glob(
-            os.path.join(args.output_dir, '**', '*.py'), recursive=True
+            os.path.join(commands_dir, '**', '*.py'), recursive=True
         )
-        if not f.endswith('__init__.py')
+        if not f.endswith('__init__.py') and not os.path.basename(f).startswith('_')
     ]:
-        if syntax_errors := validate_python_syntax_in_dir(args.output_dir):
+        if syntax_errors := validate_python_syntax_in_dir(commands_dir):
             errors.append(f"Error: {len(syntax_errors)} syntax error(s) found in generated command files.")
         if component_errors := validate_command_file_components_in_dir(
-            args.output_dir
+            commands_dir
         ):
             errors.append(f"Error: {len(component_errors)} component error(s) found in generated command files.")
-        # Validate command imports
-        # imports_ok = validate_command_imports(args.output_dir)
+        # Validate command imports - commented out as it can be slow and error-prone
+        # imports_ok = validate_command_imports(commands_dir)
         # if not imports_ok:
         #     errors.append("Error: Some command files could not be imported.")
     else:
-        errors.append(f"Error: No command files were generated in {args.output_dir}. Aborting.")
-    context_model_path = os.path.join(args.context_model_dir or args.output_dir, '_commands/context_inheritance_model.json')
+        errors.append(f"Error: No command files were generated in {commands_dir}. Aborting.")
+    
+    # Check for context model file - ensure we're looking for context_inheritance_model.json
+    context_model_path = os.path.join(commands_dir, 'context_inheritance_model.json')
     if not os.path.isfile(context_model_path):
-        errors.append(f"Error: Command context model JSON was not generated at {context_model_path}. Aborting.")
+        errors.append(f"Error: Context inheritance model JSON was not generated at {context_model_path}. Aborting.")
     else:
         commands_ok = verify_commands_against_context_model(
             context_model_dict,
-            args.output_dir,
+            commands_dir,
             all_classes
         )
-        if not commands_ok:
+        if isinstance(commands_ok, list) and commands_ok:
             errors.extend(commands_ok)
+    
+    # Check for startup.py file (if not explicitly skipped)
+    if not args.no_startup and not os.path.isfile(os.path.join(commands_dir, 'startup.py')):
+        errors.append(f"Warning: startup.py file was not generated in {commands_dir}.")
+    
     return errors
 
 def run_documentation(args):
@@ -210,18 +239,115 @@ def run_documentation(args):
         generate_readme_content,
         write_readme_file,
     )
-    command_files, _, _ = collect_command_files_and_context_model(args.output_dir)
-    context_model_dir = args.context_model_dir or args.output_dir
-    _, context_model, doc_error = collect_command_files_and_context_model(context_model_dir)
+    # Use the _commands directory specifically
+    commands_dir = os.path.join(args.context_model_dir or args.output_dir, '_commands')
+    command_files, _, _ = collect_command_files_and_context_model(commands_dir)
+    _, context_model, doc_error = collect_command_files_and_context_model(commands_dir)
+    
     if doc_error:
         print(f"Documentation generation skipped: {doc_error}")
         return
+    
     command_metadata = extract_command_metadata(command_files)
     readme_content = generate_readme_content(command_metadata, context_model, args.source_dir)
-    if write_readme_file(context_model_dir, readme_content):
-        print(f"README.md generated in {context_model_dir}")
+    
+    # Write README.md directly to the _commands directory
+    if write_readme_file(commands_dir, readme_content):
+        print(f"README.md generated in {commands_dir}")
     else:
         print("Error: Failed to write README.md.")
+
+def generate_startup_command(output_dir: str, source_dir: str, overwrite: bool = False) -> bool:
+    """Generate a startup command file in the _commands directory.
+    
+    Args:
+        output_dir: Path to the output directory
+        source_dir: Path to the source directory
+        overwrite: Whether to overwrite existing file
+        
+    Returns:
+        bool: True if file was created or already exists, False on error
+    """
+    # Determine file path
+    startup_path = os.path.join(output_dir, "_commands", "startup.py")
+    
+    # Check if file already exists and overwrite is False
+    if os.path.exists(startup_path) and not overwrite:
+        logger.debug(f"Startup file already exists at {startup_path}")
+        return True
+    
+    # Get the name of the application module (last part of source_dir)
+    app_module = os.path.basename(os.path.normpath(source_dir))
+    
+    # Find potential manager classes that could serve as root context
+    manager_classes = []
+    py_files = glob.glob(os.path.join(source_dir, "**", "*.py"), recursive=True)
+    for py_file in py_files:
+        if "manager" in py_file.lower():
+            # This is a heuristic - files with "manager" in the name are likely to contain manager classes
+            rel_path = os.path.relpath(py_file, source_dir)
+            module_path = os.path.splitext(rel_path)[0].replace(os.path.sep, ".")
+            manager_classes.append((module_path, os.path.basename(os.path.splitext(py_file)[0])))
+    
+    # Default manager class if none found
+    manager_import = "# TODO: Replace with your application's root context class"
+    manager_class = "YourRootContextClass"
+    
+    # Use the first manager class found, if any
+    if manager_classes:
+        module_path, module_name = manager_classes[0]
+        # Try to find a class name that ends with "Manager"
+        try:
+            with open(os.path.join(source_dir, *module_path.split("."))) as f:
+                tree = ast.parse(f.read())
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.ClassDef) and "manager" in node.name.lower():
+                        manager_class = node.name
+                        break
+        except:
+            # If parsing fails, use a default name based on the module
+            manager_class = f"{module_name.capitalize()}Manager"
+        
+        manager_import = f"from ..{app_module}.{module_path} import {manager_class}"
+    
+    # Generate startup.py content
+    startup_content = f'''import fastworkflow
+from fastworkflow import CommandOutput, CommandResponse
+{manager_import}
+
+class ResponseGenerator:
+    def __call__(self, session: fastworkflow.Session, command: str) -> CommandOutput:
+        # Initialize your application's root context here
+        # This is typically a manager class that provides access to all functionality
+        filepath = (
+            f'{{session.workflow_snapshot.workflow_folderpath}}/'
+            '{app_module}/'
+            'data.json'  # Replace with your application's data file if needed
+        )
+        session.root_command_context = {manager_class}(filepath)
+        
+        response = {{
+            "message": "Application initialized.",
+            "context": session.current_command_context_name
+        }}
+
+        return CommandOutput(
+            session_id=session.id,
+            command_responses=[
+                CommandResponse(response=str(response))
+            ]
+        )
+'''
+    
+    # Write the file
+    try:
+        with open(startup_path, 'w') as f:
+            f.write(startup_content)
+        logger.info(f"Generated startup command file: {startup_path}")
+        return True
+    except Exception as e:
+        logger.error(f"Error writing startup command file: {e}")
+        return False
 
 def main():
     args = parse_args()

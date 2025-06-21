@@ -30,7 +30,7 @@ class ContextFolderGenerator:
         Args:
             commands_root: Path to the commands directory, defaults to "_commands"
             model_path: Path to the command context model JSON file, defaults to
-                "context_inheritance_model.json"
+                "_commands/context_inheritance_model.json"
         """
         self.commands_root = Path(commands_root)
         self.model_path = Path(model_path)
@@ -60,27 +60,57 @@ class ContextFolderGenerator:
         """Generate context folders based on the model.
         
         Creates a folder for each context in the inheritance block,
-        except for the global "*" context.
+        except for the global "*" context. Also creates a _<ContextName>.py file
+        in each context folder with a Context class and get_parent method.
         
         Returns:
             Dict[str, Path]: Mapping of context names to their folder paths
         """
         # Load context model
         context_model = self.load_context_model()
-        
+
         # Ensure root commands directory exists
         self.commands_root.mkdir(exist_ok=True, parents=True)
-        
+
         # Create context folders
         contexts = set(context_model.get('inheritance', {}).keys())
         contexts.discard('*')  # Global context doesn't need a folder
-        
+
         created_folders = {}
-        
+
         for context in contexts:
             context_dir = self.commands_root / context
             context_dir.mkdir(exist_ok=True)
             logger.debug(f"Created context folder: {context_dir}")
             created_folders[context] = context_dir
-        
+
+            # Create _<ContextName>.py file if it doesn't exist
+            handler_file = context_dir / f"_{context}.py"
+            if not handler_file.exists():
+                # Determine parent type based on inheritance model
+                parent_type = "None"
+                parent_import = ""
+                
+                # Get base classes for this context
+                base_classes = context_model.get('inheritance', {}).get(context, {}).get('base', [])
+                if base_classes:
+                    # Use first base class as parent type
+                    parent_type = base_classes[0]
+                    parent_import = f"from ...application.{parent_type.lower()} import {parent_type}"
+                
+                # Create the handler file content
+                handler_content = f"""from typing import Optional
+from ...application.{context.lower()} import {context}
+{parent_import}
+
+class Context:
+    @classmethod
+    def get_parent(cls, command_context_object: {context}) -> Optional[{parent_type}]:
+        return getattr(command_context_object, 'parent', None)
+"""
+
+                # Write the file
+                handler_file.write_text(handler_content)
+                logger.debug(f"Created context handler file: {handler_file}")
+
         return created_folders 
