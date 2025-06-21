@@ -1,0 +1,17 @@
+{
+    "TodoItem": {
+      "parent": [
+        "TodoList"
+      ]
+    },
+    "TodoList": {
+      "parent": [
+        "TodoListManager"
+      ]
+    },
+    "TodoListManager": {
+      "parent": [
+        "*"
+      ]
+    }
+}
