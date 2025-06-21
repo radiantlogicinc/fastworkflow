@@ -60,7 +60,7 @@ class ResponseGenerator:
         if input.assign_to is not None:
             todo_item.assign_to = input.assign_to
         if input.is_complete is not None:
-            todo_item.assign_to = status = TodoItem.COMPLETE if input.is_complete else TodoItem.INCOMPLETE
+            todo_item.assign_to = TodoItem.COMPLETE if input.is_complete else TodoItem.INCOMPLETE
         return Signature.Output(success=True)
 
     def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:

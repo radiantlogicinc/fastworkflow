@@ -46,7 +46,7 @@ class ResponseGenerator:
         """Set the description of the todo item."""
         # Access the application class instance:
         todo_item = session.command_context_for_response_generation  # type: TodoItem
-        todo_item.description(value=input.description)
+        todo_item.description = input.description
         return Signature.Output(success=True)
 
     def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:

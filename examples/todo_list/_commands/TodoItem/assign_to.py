@@ -46,7 +46,7 @@ class ResponseGenerator:
         """Set the person assigned to the todo item."""
         # Access the application class instance:
         todo_item = session.command_context_for_response_generation  # type: TodoItem
-        todo_item.assign_to(value=input.assign_to)
+        todo_item.assign_to = input.assign_to
         return Signature.Output(success=True)
 
     def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:
