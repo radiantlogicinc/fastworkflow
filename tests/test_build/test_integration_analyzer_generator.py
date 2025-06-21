@@ -6,9 +6,9 @@ from fastworkflow.build.ast_class_extractor import analyze_python_file, resolve_
 from fastworkflow.build.command_file_generator import generate_command_files
 from fastworkflow.build.context_model_generator import generate_context_model
 
-INPUT_FOLDER = 'examples/todo_list/application'
-OUTPUT_DIR = 'examples/todo_list/_commands'
-CONTEXT_MODEL_FILE = 'examples/todo_list/command_context_model.json'
+INPUT_FOLDER = 'tests/example_workflow/application'
+OUTPUT_DIR = 'tests/example_workflow/_commands'
+CONTEXT_MODEL_FILE = 'tests/example_workflow/command_context_model.json'
 
 @pytest.mark.integration
 def test_analyzer_and_generators_on_all_files():

@@ -1,0 +1,13 @@
+{
+  "inheritance": {
+    "TodoList": {
+      "base": [
+        "TodoItem"
+      ]
+    },
+    "*": {
+      "base": []
+    }
+  },
+  "aggregation": {}
+}
