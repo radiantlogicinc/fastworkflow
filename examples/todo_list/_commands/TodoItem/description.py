@@ -15,21 +15,17 @@ from ...application.todo_item import TodoItem
 
 class Signature:
     class Input(BaseModel):
-        value: str = Field(description="Parameter value")
-        model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
+        description: str = Field(
+            description="Description of this todo item",
+            examples=['laundry', 'homework']
+        )
 
     class Output(BaseModel):
         success: bool = Field(default=True, description="Indicates successful execution.")
 
     plain_utterances = [
-        "description todoitem",
-        "Call description on todoitem",
-        "description todoitem {value}",
-        "Call description on todoitem with {value}"
-    ]
-
-    template_utterances = [
-        "TODO: Add template utterances"
+        "update description",
+        "change description",
     ]
 
     @staticmethod
@@ -47,17 +43,10 @@ class Signature:
 
 class ResponseGenerator:
     def _process_command(self, session: Session, input: Signature.Input) -> Signature.Output:
-        """Set the description of the todo item.
-
-Args:
-    value (str): The new description.
-
-Raises:
-    ValueError: If the description is empty.
-    TypeError: If the description is not a string."""
+        """Set the description of the todo item."""
         # Access the application class instance:
-        app_instance = session.command_context_for_response_generation  # type: TodoItem
-        app_instance.description(value=input.value)
+        todo_item = session.command_context_for_response_generation  # type: TodoItem
+        todo_item.description(value=input.description)
         return Signature.Output(success=True)
 
     def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:

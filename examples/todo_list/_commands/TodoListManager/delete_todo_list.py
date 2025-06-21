@@ -1,4 +1,3 @@
-
 from pydantic import ConfigDict
 
 import fastworkflow
@@ -15,22 +14,20 @@ from ...application.todo_manager import TodoListManager
 from ...application.todo_list import TodoList
 
 class Signature:
+    """Delete a todo list by ID"""
     class Input(BaseModel):
-        id: int = Field(description="Parameter id")
-        model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
+        id: int = Field(
+            description="id of the todo list to delete",
+            examples=['1', '56']
+        )
 
     class Output(BaseModel):
-        result: bool = Field(description="Result of the method call")
+        success: bool = Field(
+            description="True if the list was deleted, False if not found"
+        )
 
     plain_utterances = [
-        "delete todo list todolistmanager",
-        "Call delete_todo_list on todolistmanager",
-        "delete todo list todolistmanager {id}",
-        "Call delete_todo_list on todolistmanager with {id}"
-    ]
-
-    template_utterances = [
-        "TODO: Add template utterances"
+        "delete project"
     ]
 
     @staticmethod
@@ -48,17 +45,11 @@ class Signature:
 
 class ResponseGenerator:
     def _process_command(self, session: Session, input: Signature.Input) -> Signature.Output:
-        """Delete a todo list.
-
-Args:
-    id (int): ID of the todo list to delete.
-
-Returns:
-    bool: True if the list was deleted, False if not found."""
+        """Delete a todo list."""
         # Access the application class instance:
         app_instance = session.command_context_for_response_generation  # type: TodoListManager
-        result_val = app_instance.delete_todo_list(id=input.id)
-        return Signature.Output(result=result_val)
+        result = app_instance.delete_todo_list(id=input.id)
+        return Signature.Output(success=result)
 
     def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:
         output = self._process_command(session, command_parameters)

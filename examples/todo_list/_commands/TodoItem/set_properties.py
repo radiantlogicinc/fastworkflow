@@ -15,23 +15,26 @@ from ...application.todo_item import TodoItem
 
 class Signature:
     class Input(BaseModel):
-        description: Optional[str] = Field(default=None, description="Settable property description.")
-        assign_to: Optional[str] = Field(default=None, description="Settable property assign_to.")
-        status: Optional[str] = Field(default=None, description="Settable property status.")
-        model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
+        description: Optional[str] = Field(
+            default=None, 
+            description="Description of the todo list",
+            examples=["Weekly shopping", "House chores"]
+        )
+        assign_to: Optional[str] = Field(
+            default=None, 
+            description="Person assigned to the todo list",
+            examples=["John Smith", "Mary Jones"]
+        )
+        is_complete: Optional[bool] = Field(
+            description="True if complete, False otherwise",
+        )
 
     class Output(BaseModel):
         success: bool = Field(description="True if properties update was attempted.")
 
     plain_utterances = [
-        "setproperties todoitem",
-        "Call setproperties on todoitem",
-        "setproperties todoitem {description} {assign_to} {status}",
-        "Call setproperties on todoitem with {description} {assign_to} {status}"
-    ]
-
-    template_utterances = [
-        "TODO: Add template utterances"
+        "update workitem properties",
+        "edit task details"
     ]
 
     @staticmethod
@@ -51,13 +54,13 @@ class ResponseGenerator:
     def _process_command(self, session: Session, input: Signature.Input) -> Signature.Output:
         """Sets one or more properties for an instance of TodoItem."""
         # Access the application class instance:
-        app_instance = session.command_context_for_response_generation  # type: TodoItem
+        todo_item = session.command_context_for_response_generation  # type: TodoItem
         if input.description is not None:
-            setattr(app_instance, 'description', input.description)
+            todo_item.description = input.description
         if input.assign_to is not None:
-            setattr(app_instance, 'assign_to', input.assign_to)
-        if input.status is not None:
-            setattr(app_instance, 'status', input.status)
+            todo_item.assign_to = input.assign_to
+        if input.is_complete is not None:
+            todo_item.assign_to = status = TodoItem.COMPLETE if input.is_complete else TodoItem.INCOMPLETE
         return Signature.Output(success=True)
 
     def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:

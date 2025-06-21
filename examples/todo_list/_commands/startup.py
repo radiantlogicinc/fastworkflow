@@ -10,15 +10,15 @@ class ResponseGenerator:
             'todo_list.json'
         )
         session.root_command_context = TodoListManager(filepath)
+        
+        response = {
+            "message": "Application initialized.",
+            "context": session.current_command_context_name
+        }
 
         return CommandOutput(
             session_id=session.id,
             command_responses=[
-                CommandResponse(
-                    response = (
-                        "Application initialized. "
-                        f"Current command context={session.current_command_context_name}"
-                    )
-                )
+                CommandResponse(response=str(response))
             ]
         )

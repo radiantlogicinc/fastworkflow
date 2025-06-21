@@ -1,4 +1,3 @@
-
 from pydantic import ConfigDict
 
 import fastworkflow
@@ -15,22 +14,21 @@ from ...application.todo_list import TodoList
 from ...application.todo_item import TodoItem
 
 class Signature:
+    """Remove a child item or list from this todo list"""
     class Input(BaseModel):
-        child_id: int = Field(description="Parameter child_id")
-        model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
+        child_id: int = Field(
+            description="ID of the child to remove",
+            examples=['2', '5']
+        )
 
     class Output(BaseModel):
-        result: bool = Field(description="Result of the method call")
+        success: bool = Field(
+            description="True if the child was removed, False if not found"
+        )
 
     plain_utterances = [
-        "remove child by id todolist",
-        "Call remove_child_by_id on todolist",
-        "remove child by id todolist {child_id}",
-        "Call remove_child_by_id on todolist with {child_id}"
-    ]
-
-    template_utterances = [
-        "TODO: Add template utterances"
+        "remove item",
+        "delete workitem"
     ]
 
     @staticmethod
@@ -48,15 +46,11 @@ class Signature:
 
 class ResponseGenerator:
     def _process_command(self, session: Session, input: Signature.Input) -> Signature.Output:
-        """Remove a child by its ID.
-Args:
-    child_id: The ID of the child to remove
-Returns:
-    bool: True if the child was removed, False if not found"""
+        """Remove a child by its ID."""
         # Access the application class instance:
         app_instance = session.command_context_for_response_generation  # type: TodoList
-        result_val = app_instance.remove_child_by_id(child_id=input.child_id)
-        return Signature.Output(result=result_val)
+        result = app_instance.remove_child_by_id(child_id=input.child_id)
+        return Signature.Output(success=result)
 
     def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:
         output = self._process_command(session, command_parameters)

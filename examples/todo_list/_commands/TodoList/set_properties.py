@@ -1,4 +1,3 @@
-
 from pydantic import ConfigDict
 
 import fastworkflow
@@ -15,24 +14,30 @@ from ...application.todo_list import TodoList
 from ...application.todo_item import TodoItem
 
 class Signature:
+    """Set multiple properties of this todo list at once"""
     class Input(BaseModel):
-        description: Optional[str] = Field(default=None, description="Settable property description.")
-        assign_to: Optional[str] = Field(default=None, description="Settable property assign_to.")
-        status: Optional[str] = Field(default=None, description="Settable property status.")
-        model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
+        description: Optional[str] = Field(
+            default=None, 
+            description="Description of the todo list",
+            examples=["Weekly shopping", "House chores"]
+        )
+        assign_to: Optional[str] = Field(
+            default=None, 
+            description="Person assigned to the todo list",
+            examples=["John Smith", "Mary Jones"]
+        )
+        is_complete: Optional[bool] = Field(
+            description="True if complete, False otherwise",
+        )
 
     class Output(BaseModel):
-        success: bool = Field(description="True if properties update was attempted.")
+        success: bool = Field(
+            description="True if properties were updated successfully"
+        )
 
     plain_utterances = [
-        "setproperties todolist",
-        "Call setproperties on todolist",
-        "setproperties todolist {description} {assign_to} {status}",
-        "Call setproperties on todolist with {description} {assign_to} {status}"
-    ]
-
-    template_utterances = [
-        "TODO: Add template utterances"
+        "update project properties",
+        "edit project details"
     ]
 
     @staticmethod
@@ -52,13 +57,13 @@ class ResponseGenerator:
     def _process_command(self, session: Session, input: Signature.Input) -> Signature.Output:
         """Sets one or more properties for an instance of TodoList."""
         # Access the application class instance:
-        app_instance = session.command_context_for_response_generation  # type: TodoList
+        todo_list = session.command_context_for_response_generation  # type: TodoList
         if input.description is not None:
-            setattr(app_instance, 'description', input.description)
+            todo_list.description = input.description
         if input.assign_to is not None:
-            setattr(app_instance, 'assign_to', input.assign_to)
-        if input.status is not None:
-            setattr(app_instance, 'status', input.status)
+            todo_list.assign_to = input.assign_to
+        if input.is_complete is not None:
+            todo_list.assign_to = status = TodoItem.COMPLETE if input.is_complete else TodoItem.INCOMPLETE
         return Signature.Output(success=True)
 
     def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:

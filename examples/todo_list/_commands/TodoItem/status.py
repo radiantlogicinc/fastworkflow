@@ -15,21 +15,16 @@ from ...application.todo_item import TodoItem
 
 class Signature:
     class Input(BaseModel):
-        value: str = Field(description="Parameter value")
-        model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
+        is_complete: bool = Field(
+            description="True if complete, False otherwise",
+        )
 
     class Output(BaseModel):
         success: bool = Field(default=True, description="Indicates successful execution.")
 
     plain_utterances = [
-        "status todoitem",
-        "Call status on todoitem",
-        "status todoitem {value}",
-        "Call status on todoitem with {value}"
-    ]
-
-    template_utterances = [
-        "TODO: Add template utterances"
+        "update status",
+        "change status",
     ]
 
     @staticmethod
@@ -47,16 +42,10 @@ class Signature:
 
 class ResponseGenerator:
     def _process_command(self, session: Session, input: Signature.Input) -> Signature.Output:
-        """Set the status of the todo item.
-
-Args:
-    value (str): The new status (must be either COMPLETE or INCOMPLETE).
-
-Raises:
-    ValueError: If the status is not one of the allowed values."""
+        """Set the status of the todo item."""
         # Access the application class instance:
-        app_instance = session.command_context_for_response_generation  # type: TodoItem
-        app_instance.status(value=input.value)
+        todo_item = session.command_context_for_response_generation  # type: TodoItem
+        todo_item.status(value=TodoItem.COMPLETE if input.is_complete else TodoItem.INCOMPLETE)
         return Signature.Output(success=True)
 
     def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:

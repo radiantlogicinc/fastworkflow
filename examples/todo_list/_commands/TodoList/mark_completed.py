@@ -1,4 +1,3 @@
-
 from pydantic import ConfigDict
 
 import fastworkflow
@@ -15,20 +14,15 @@ from ...application.todo_list import TodoList
 from ...application.todo_item import TodoItem
 
 class Signature:
-    class Input(BaseModel):
-        pass
-        model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
-
+    """Mark this TodoList and all children as complete"""
     class Output(BaseModel):
-        success: bool = Field(default=True, description="Indicates successful execution.")
+        success: bool = Field(
+            description="True if the operation was successful"
+        )
 
     plain_utterances = [
-        "mark completed todolist",
-        "Call mark_completed on todolist"
-    ]
-
-    template_utterances = [
-        "TODO: Add template utterances"
+        "complete project",
+        "mark as done"
     ]
 
     @staticmethod
@@ -45,15 +39,15 @@ class Signature:
         pass
 
 class ResponseGenerator:
-    def _process_command(self, session: Session, input: Signature.Input) -> Signature.Output:
+    def _process_command(self, session: Session) -> Signature.Output:
         """Mark this TodoList and all children as complete."""
         # Access the application class instance:
         app_instance = session.command_context_for_response_generation  # type: TodoList
         app_instance.mark_completed()
         return Signature.Output(success=True)
 
-    def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:
-        output = self._process_command(session, command_parameters)
+    def __call__(self, session: Session, command: str) -> CommandOutput:
+        output = self._process_command(session)
         return CommandOutput(
             session_id=session.id,
             command_responses=[

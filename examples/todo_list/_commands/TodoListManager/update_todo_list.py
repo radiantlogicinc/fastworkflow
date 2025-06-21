@@ -1,4 +1,3 @@
-
 from pydantic import ConfigDict
 
 import fastworkflow
@@ -15,22 +14,20 @@ from ...application.todo_manager import TodoListManager
 from ...application.todo_list import TodoList
 
 class Signature:
+    """Update a todo list by ID"""
     class Input(BaseModel):
-        id: int = Field(description="Parameter id")
-        model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
+        id: int = Field(
+            description="id of the todo list to update",
+            examples=['1', '56']
+        )
 
     class Output(BaseModel):
-        result: bool = Field(description="Result of the method call")
+        success: bool = Field(
+            description="True if the list was updated, False if not found"
+        )
 
     plain_utterances = [
-        "update todo list todolistmanager",
-        "Call update_todo_list on todolistmanager",
-        "update todo list todolistmanager {id}",
-        "Call update_todo_list on todolistmanager with {id}"
-    ]
-
-    template_utterances = [
-        "TODO: Add template utterances"
+        "update project"
     ]
 
     @staticmethod
@@ -48,21 +45,11 @@ class Signature:
 
 class ResponseGenerator:
     def _process_command(self, session: Session, input: Signature.Input) -> Signature.Output:
-        """Update a todo list.
-
-Args:
-    id (int): ID of the todo list to update.
-    **fields: Fields to update (name).
-
-Returns:
-    bool: True if the list was updated, False if not found.
-
-Raises:
-    ValueError: If an invalid name is provided."""
+        """Update a todo list."""
         # Access the application class instance:
         app_instance = session.command_context_for_response_generation  # type: TodoListManager
-        result_val = app_instance.update_todo_list(id=input.id)
-        return Signature.Output(result=result_val)
+        result = app_instance.update_todo_list(id=input.id)
+        return Signature.Output(success=result)
 
     def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:
         output = self._process_command(session, command_parameters)

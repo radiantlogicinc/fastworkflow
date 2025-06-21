@@ -1,4 +1,3 @@
-
 from pydantic import ConfigDict
 
 import fastworkflow
@@ -15,20 +14,15 @@ from ...application.todo_list import TodoList
 from ...application.todo_item import TodoItem
 
 class Signature:
-    class Input(BaseModel):
-        pass
-        model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
-
+    """Update the status of this TodoList based on its children"""
     class Output(BaseModel):
-        success: bool = Field(default=True, description="Indicates successful execution.")
+        success: bool = Field(
+            description="True if the status was updated successfully"
+        )
 
     plain_utterances = [
-        "update status todolist",
-        "Call update_status on todolist"
-    ]
-
-    template_utterances = [
-        "TODO: Add template utterances"
+        "refresh status",
+        "sync project status"
     ]
 
     @staticmethod
@@ -45,7 +39,7 @@ class Signature:
         pass
 
 class ResponseGenerator:
-    def _process_command(self, session: Session, input: Signature.Input) -> Signature.Output:
+    def _process_command(self, session: Session) -> Signature.Output:
         """Update the status of this TodoList based on its children.
 If all children are complete, this TodoList is complete. Otherwise, it's incomplete."""
         # Access the application class instance:
@@ -53,8 +47,8 @@ If all children are complete, this TodoList is complete. Otherwise, it's incompl
         app_instance.update_status()
         return Signature.Output(success=True)
 
-    def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:
-        output = self._process_command(session, command_parameters)
+    def __call__(self, session: Session, command: str) -> CommandOutput:
+        output = self._process_command(session)
         return CommandOutput(
             session_id=session.id,
             command_responses=[

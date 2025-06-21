@@ -1,4 +1,3 @@
-
 from pydantic import ConfigDict
 
 import fastworkflow
@@ -15,20 +14,14 @@ from ...application.todo_manager import TodoListManager
 from ...application.todo_list import TodoList
 
 class Signature:
-    class Input(BaseModel):
-        pass
-        model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
-
+    """Save all todo lists to the JSON file"""
     class Output(BaseModel):
-        success: bool = Field(default=True, description="Indicates successful execution.")
+        success: bool = Field(
+            description="True if lists were saved successfully"
+        )
 
     plain_utterances = [
-        "save lists todolistmanager",
-        "Call save_lists on todolistmanager"
-    ]
-
-    template_utterances = [
-        "TODO: Add template utterances"
+        "save projects"
     ]
 
     @staticmethod
@@ -45,15 +38,15 @@ class Signature:
         pass
 
 class ResponseGenerator:
-    def _process_command(self, session: Session, input: Signature.Input) -> Signature.Output:
+    def _process_command(self, session: Session) -> Signature.Output:
         """Save todo lists to the JSON file."""
         # Access the application class instance:
         app_instance = session.command_context_for_response_generation  # type: TodoListManager
         app_instance.save_lists()
         return Signature.Output(success=True)
 
-    def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:
-        output = self._process_command(session, command_parameters)
+    def __call__(self, session: Session, command: str) -> CommandOutput:
+        output = self._process_command(session)
         return CommandOutput(
             session_id=session.id,
             command_responses=[

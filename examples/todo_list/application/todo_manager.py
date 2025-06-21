@@ -203,7 +203,7 @@ class TodoListManager:
         if id not in self.lists:
             return False
         del self.lists[id]
-        self._save_lists()
+        self.save_lists()
         return True
 
     def list_todo_lists(self) -> List[TodoList]:

@@ -1,4 +1,3 @@
-
 from pydantic import ConfigDict
 
 import fastworkflow
@@ -15,24 +14,23 @@ from ...application.todo_list import TodoList
 from ...application.todo_item import TodoItem
 
 class Signature:
-    class Input(BaseModel):
-        pass
-        model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
-
+    """Get all properties of this todo list"""
     class Output(BaseModel):
-        INCOMPLETE: str = Field(description="Value of property INCOMPLETE")
-        COMPLETE: str = Field(description="Value of property COMPLETE")
-        description: str = Field(description="Get the description of the todo item.\\n\\nReturns:\\n    str: The description of the todo item.")
-        assign_to: str = Field(description="Get the person assigned to the todo item.\\n\\nReturns:\\n    str: The person assigned to the todo item.")
-        status: str = Field(description="Get the status of the todo item.\\n\\nReturns:\\n    str: The status of the todo item (COMPLETE or INCOMPLETE).")
+        description: str = Field(
+            description="Description of this todo item",
+            examples=['laundry', 'homework']
+        )
+        assign_to: str = Field(
+            description="name of the person responsible for doing this task",
+            examples=['John Doe', 'Jane Smith']
+        )
+        is_complete: bool = Field(
+            description="True if complete, False otherwise",
+        )
 
     plain_utterances = [
-        "getproperties todolist",
-        "Call getproperties on todolist"
-    ]
-
-    template_utterances = [
-        "TODO: Add template utterances"
+        "show project details",
+        "get project info"
     ]
 
     @staticmethod
@@ -49,18 +47,18 @@ class Signature:
         pass
 
 class ResponseGenerator:
-    def _process_command(self, session: Session, input: Signature.Input) -> Signature.Output:
+    def _process_command(self, session: Session) -> Signature.Output:
         """Get all properties of the TodoList class."""
         # Access the application class instance:
-        app_instance = session.command_context_for_response_generation  # type: TodoList
-        # For get_properties, the primary logic is to gather attribute values,
-        # which is handled by constructing the output_return string that references app_instance attributes directly.
-        # No additional complex processing steps are typically needed in this block.
-        pass # Placeholder if no other pre-return logic is needed
-        return Signature.Output(INCOMPLETE=app_instance.INCOMPLETE, COMPLETE=app_instance.COMPLETE, description=app_instance.description, assign_to=app_instance.assign_to, status=app_instance.status)
+        todo_list = session.command_context_for_response_generation  # type: TodoList
+        return Signature.Output(
+            description=todo_list.description, 
+            assign_to=todo_list.assign_to, 
+            is_complete=todo_list.status == TodoItem.COMPLETE
+        )
 
-    def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:
-        output = self._process_command(session, command_parameters)
+    def __call__(self, session: Session, command: str) -> CommandOutput:
+        output = self._process_command(session)
         return CommandOutput(
             session_id=session.id,
             command_responses=[

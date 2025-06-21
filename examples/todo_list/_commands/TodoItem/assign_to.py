@@ -15,21 +15,17 @@ from ...application.todo_item import TodoItem
 
 class Signature:
     class Input(BaseModel):
-        value: str = Field(description="Parameter value")
-        model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
+        assign_to: str = Field(
+            description="name of the person responsible for doing this task",
+            examples=['John Doe', 'Jane Smith']
+        )
 
     class Output(BaseModel):
         success: bool = Field(default=True, description="Indicates successful execution.")
 
     plain_utterances = [
-        "assign to todoitem",
-        "Call assign_to on todoitem",
-        "assign to todoitem {value}",
-        "Call assign_to on todoitem with {value}"
-    ]
-
-    template_utterances = [
-        "TODO: Add template utterances"
+        "assign workitem",
+        "assign responsibility"
     ]
 
     @staticmethod
@@ -47,16 +43,10 @@ class Signature:
 
 class ResponseGenerator:
     def _process_command(self, session: Session, input: Signature.Input) -> Signature.Output:
-        """Set the person assigned to the todo item.
-
-Args:
-    value (str): The new assignee.
-
-Raises:
-    TypeError: If the assignee is not a string."""
+        """Set the person assigned to the todo item."""
         # Access the application class instance:
-        app_instance = session.command_context_for_response_generation  # type: TodoItem
-        app_instance.assign_to(value=input.value)
+        todo_item = session.command_context_for_response_generation  # type: TodoItem
+        todo_item.assign_to(value=input.assign_to)
         return Signature.Output(success=True)
 
     def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:
