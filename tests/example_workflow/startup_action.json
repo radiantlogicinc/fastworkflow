@@ -1,5 +1,5 @@
 {
-    "command_name": "initialize_application",
+    "command_name": "startup",
     "command": "",
     "parameters": {}
 }
