@@ -26,7 +26,7 @@ No commands in this context.
 
 ## Context Model
 
-The `command_context_model.json` file maps application classes to command contexts, organizing commands by their class.
+The `context_inheritance_model.json` file maps application classes to command contexts, organizing commands by their class.
 
 Structure example:
 
