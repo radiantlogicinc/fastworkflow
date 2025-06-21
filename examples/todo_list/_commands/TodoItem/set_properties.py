@@ -39,7 +39,9 @@ class Signature:
         utterance_definition = fastworkflow.UtteranceRegistry.get_definition(session.workflow_snapshot.workflow_folderpath)
         utterances_obj = utterance_definition.get_command_utterances(command_name)
         result = generate_diverse_utterances(utterances_obj.plain_utterances, command_name)
-        utterance_list: list[str] = [command_name] + result
+        utterance_list: list[str] = [
+            command_name.split('/')[-1].lower().replace('_', ' ')
+        ] + result
         return utterance_list
 
     def process_extracted_parameters(self, workflow_snapshot: WorkflowSnapshot, command: str, cmd_parameters: "Signature.Input") -> None:
@@ -49,7 +51,7 @@ class ResponseGenerator:
     def _process_command(self, session: Session, input: Signature.Input) -> Signature.Output:
         """Sets one or more properties for an instance of TodoItem."""
         # Access the application class instance:
-        app_instance = session.workflow_snapshot.context_object  # type: TodoItem
+        app_instance = session.command_context_for_response_generation  # type: TodoItem
         if input.description is not None:
             setattr(app_instance, 'description', input.description)
         if input.assign_to is not None:
@@ -63,6 +65,6 @@ class ResponseGenerator:
         return CommandOutput(
             session_id=session.id,
             command_responses=[
-                CommandResponse(response=f"Set properties result: {output.success}")
+                CommandResponse(response=output.model_dump_json())
             ]
         )

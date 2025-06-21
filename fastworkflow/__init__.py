@@ -83,8 +83,7 @@ CommandContextModel = None
 CommandRoutingRegistry = None
 UtteranceRegistry = None
 ModelPipelineRegistry=None
-Session = None
-WorkflowSession = None
+
 
 def init(env_vars: dict):
     global _env_vars, CommandContextModel, CommandRoutingRegistry, UtteranceRegistry, ModelPipelineRegistry, Session, WorkflowSession
@@ -96,16 +95,16 @@ def init(env_vars: dict):
     from .utterance_definition import UtteranceRegistry as UtteranceRegistryClass
     from .model_pipeline_training import ModelPipeline
 
-    from .session import Session as SessionClass
-    from .workflow_session import WorkflowSession as WorkflowSessionClass
+    # from .session import Session as SessionClass
+    # from .workflow_session import WorkflowSession as WorkflowSessionClass
 
     # Assign to global variables
     CommandContextModel = CommandContextModelClass
     CommandRoutingRegistry = CommandRoutingRegistryClass
     UtteranceRegistry = UtteranceRegistryClass
     ModelPipelineRegistry = ModelPipeline
-    Session = SessionClass
-    WorkflowSession = WorkflowSessionClass
+    # Session = SessionClass
+    # WorkflowSession = WorkflowSessionClass
 
 def get_env_var(var_name: str, var_type: type = str, default: Optional[Union[str, int, float, bool]] = None) -> Union[str, int, float, bool]:
     """get the environment variable"""
@@ -163,3 +162,6 @@ def get_internal_workflow_path(workflow_name: str) -> str:
 
 def get_session_id(session_id_str: str) -> int:
     return int(mmh3.hash(session_id_str))
+
+from .session import Session as Session
+from .workflow_session import WorkflowSession as WorkflowSession

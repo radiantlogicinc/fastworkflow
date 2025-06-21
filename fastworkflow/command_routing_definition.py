@@ -152,7 +152,7 @@ class CommandRoutingDefinition(BaseModel):
         If none, returns '*' (global).
         """
         context_model_loader = ContextModelLoader(model_path=os.path.join(
-            self.workflow_folderpath, 'command_context_model.json'))
+            self.workflow_folderpath, '_commands/context_inheritance_model.json'))
         context_model = context_model_loader.load()
         container_list = context_model.get('aggregation', {}).get(command_context, {}).get('container', [])
         return container_list[0] if container_list else '*'

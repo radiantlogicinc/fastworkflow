@@ -3,7 +3,7 @@ from __future__ import annotations
 """Utility to regenerate only the inheritance block in the command context model.
 
 This module provides functionality to update the inheritance relationships in
-the command_context_model.json file while preserving the aggregation block,
+the context_inheritance_model.json file while preserving the aggregation block,
 which is maintained manually by developers.
 """
 
@@ -24,14 +24,14 @@ class InheritanceBlockRegenerator:
     def __init__(
         self, 
         commands_root: str | Path = "_commands", 
-        model_path: str | Path = "command_context_model.json"
+        model_path: str | Path = "_commands/context_inheritance_model.json"
     ) -> None:
         """Initialize the inheritance block regenerator.
 
         Args:
             commands_root: Path to the commands directory, defaults to "_commands"
             model_path: Path to the command context model JSON file, defaults to
-                "command_context_model.json"
+                "context_inheritance_model.json"
         """
         self.commands_root = Path(commands_root)
         self.model_path = Path(model_path)

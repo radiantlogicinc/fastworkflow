@@ -78,7 +78,7 @@ def run_command_generation(args):
     context_model_data = real_generate_context_model(all_classes, context_dir)
 
     # Generate context folders based on the model
-    context_model_path = os.path.join(context_dir, 'command_context_model.json')
+    context_model_path = os.path.join(context_dir, '_commands/context_inheritance_model.json')
     folder_generator = ContextFolderGenerator(
         commands_root=args.output_dir,
         model_path=context_model_path
@@ -190,7 +190,7 @@ def run_validation(args, all_classes, context_model_dict):
         #     errors.append("Error: Some command files could not be imported.")
     else:
         errors.append(f"Error: No command files were generated in {args.output_dir}. Aborting.")
-    context_model_path = os.path.join(args.context_model_dir or args.output_dir, 'command_context_model.json')
+    context_model_path = os.path.join(args.context_model_dir or args.output_dir, '_commands/context_inheritance_model.json')
     if not os.path.isfile(context_model_path):
         errors.append(f"Error: Command context model JSON was not generated at {context_model_path}. Aborting.")
     else:

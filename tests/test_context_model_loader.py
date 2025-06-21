@@ -14,7 +14,7 @@ def _init_fastworkflow():
 
 
 def _write_tmp_model(tmp_path: Path, data: dict) -> Path:
-    file_path = tmp_path / "command_context_model.json"
+    file_path = tmp_path / "_commands/context_inheritance_model.json"
     file_path.write_text(json.dumps(data))
     return file_path
 
@@ -53,7 +53,7 @@ def test_missing_inheritance_raises(tmp_path):
 
 
 def test_invalid_json(tmp_path):
-    bad_file = tmp_path / "command_context_model.json"
+    bad_file = tmp_path / "_commands/context_inheritance_model.json"
     bad_file.write_text("{ invalid json }")
     loader = ContextModelLoader(bad_file)
     with pytest.raises(ContextModelLoaderError):

@@ -4,7 +4,7 @@ This module defines the TodoItem class, which represents a single todo item with
 attributes like id, description, assign_to, and status.
 """
 
-from typing import Dict, Any, Type
+from typing import Dict, Any, Type, Optional, Union
 
 class TodoItem:
     """Represents a single todo item in the todo list.
@@ -14,6 +14,7 @@ class TodoItem:
         description (str): Description of the todo item.
         assign_to (str): Person assigned to the todo item.
         status (str): Current status of the todo item ('INCOMPLETE' or 'COMPLETE').
+        parent: Optional reference to containing TodoList or TodoListManager.
     """
 
     INCOMPLETE: str = 'INCOMPLETE'
@@ -38,6 +39,7 @@ class TodoItem:
         self.description = description  # Will use setter for validation
         self.assign_to = assign_to      # Will use setter for validation
         self.status = status            # Will use setter for validation
+        self.parent = None
 
     @property
     def description(self) -> str:

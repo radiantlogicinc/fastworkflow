@@ -103,7 +103,7 @@ workflow_session = fastworkflow.WorkflowSession(
 workflow_session.start()
 with contextlib.suppress(queue.Empty):
     if command_output := workflow_session.command_output_queue.get(
-        timeout=0.1
+        timeout=1.0
     ):
         print_command_output(command_output)
 while not workflow_session.workflow_is_complete or args.keep_alive:

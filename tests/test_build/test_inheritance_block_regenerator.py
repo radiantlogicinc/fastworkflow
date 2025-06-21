@@ -41,7 +41,7 @@ def context_dirs(commands_dir):
 @pytest.fixture
 def existing_model(temp_dir):
     """Create an existing model file with aggregation block."""
-    model_path = temp_dir / "command_context_model.json"
+    model_path = temp_dir / "_commands/context_inheritance_model.json"
     model_data = {
         "inheritance": {
             "OldClass": {"base": []},
@@ -151,7 +151,7 @@ def test_load_invalid_model(temp_dir):
 
 def test_regenerate_inheritance_with_directory_scan(context_dirs, temp_dir):
     """Test regenerating inheritance block based on directory scan."""
-    model_path = temp_dir / "command_context_model.json"
+    model_path = temp_dir / "_commands/context_inheritance_model.json"
     regenerator = InheritanceBlockRegenerator(
         commands_root=context_dirs,
         model_path=model_path
@@ -173,7 +173,7 @@ def test_regenerate_inheritance_with_directory_scan(context_dirs, temp_dir):
 
 def test_regenerate_inheritance_with_classes(mock_classes, temp_dir):
     """Test regenerating inheritance block based on class information."""
-    model_path = temp_dir / "command_context_model.json"
+    model_path = temp_dir / "_commands/context_inheritance_model.json"
     regenerator = InheritanceBlockRegenerator(model_path=model_path)
     
     model = regenerator.regenerate_inheritance(mock_classes)

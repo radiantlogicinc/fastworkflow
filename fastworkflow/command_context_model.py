@@ -11,28 +11,27 @@ from fastworkflow.utils import python_utils
 
 """Utility for loading and traversing the single-file workflow command context model.
 
-The canonical representation lives in a JSON file named ``command_context_model.json``
-inside the workflow folder (e.g. ``examples/sample_workflow/command_context_model.json``).
+The canonical representation lives in a JSON file named ``context_inheritance_model.json``
+inside the workflow _commands folder (e.g. ``examples/sample_workflow/_commands/context_inheritance_model.json``).
 
-The ``command_context_model.json`` contains a dictionary whose keys represent command context names
+The ``context_inheritance_model.json`` contains a dictionary whose keys represent command context names
 and values represent context definitions. Its primary role is to define inheritance 
 relationships between contexts.
 
 Schema (see Cursor rule ``context-model-design``):
 ------------------------------------------------
-Context := {  # As defined in command_context_model.json
+Context := {  # As defined in context_inheritance_model.json
     "base": list[str]      # Contexts whose commands are inherited. Cannot be empty or missing.
 }
 
 Validation Rules:
 -----------------------------------------------
-- For any context defined in ``command_context_model.json``:
+- For any context defined in ``context_inheritance_model.json``:
     - The "base" key MUST be present and be a list of strings. It cannot be empty or missing.
-    - The "/" key (for listing direct commands) MUST NOT be present. Direct commands are discovered from the filesystem.
-- An empty or missing ``command_context_model.json`` file is valid.
+- An empty or missing ``context_inheritance_model.json`` file is valid.
 -----------------------------------------------
 This loader performs:
-1. Validation of ``command_context_model.json`` against the rules above.
+1. Validation of ``context_inheritance_model.json`` against the rules above.
 2. Discovery of contexts and their direct commands from the ``_commands/`` filesystem structure.
 3. Merging of filesystem-discovered commands with JSON-defined inheritance.
 4. Cycle detection for the ``base`` context inheritance graph.
@@ -68,7 +67,7 @@ class CommandContextModel:
         """
         Scans the _commands directory to discover contexts (subdirectories)
         and their commands (Python files within those subdirectories).
-        Returns a dictionary in the same format as command_context_model.json contents.
+        Returns a dictionary in the same format as context_inheritance_model.json contents.
         """
         discovered_contexts = {}
         commands_root_dir = workflow_path / "_commands"
@@ -121,7 +120,7 @@ class CommandContextModel:
         """Loads and validates the command context model from a workflow path,
         augmenting with contexts and commands discovered from the _commands directory."""
         workflow_path_obj = Path(workflow_path)
-        json_model_path = workflow_path_obj / "command_context_model.json"
+        json_model_path = workflow_path_obj / "_commands/context_inheritance_model.json"
 
         # 1. Load from JSON file (if it exists)
         raw_contexts_from_json = {}

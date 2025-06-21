@@ -3,6 +3,7 @@ ___workflow_contexts*
 ___command_info*
 ___convo_info*
 .roo*
+tests/example_workflow/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

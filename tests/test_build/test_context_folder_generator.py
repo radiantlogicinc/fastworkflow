@@ -24,7 +24,7 @@ def temp_dir():
 @pytest.fixture
 def basic_context_model(temp_dir):
     """Create a basic context model for testing."""
-    model_path = temp_dir / "command_context_model.json"
+    model_path = temp_dir / "_commands/context_inheritance_model.json"
     model_data = {
         "inheritance": {
             "TodoList": {"base": []},

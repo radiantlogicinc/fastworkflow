@@ -16,6 +16,7 @@ class TodoList(TodoItem):
         assign_to (str): Person assigned to this TodoList
         status (str): Status of this TodoList (COMPLETE or INCOMPLETE)
         children (List[Union[TodoItem, 'TodoList']]): List of child items
+        parent: Optional reference to containing TodoList or TodoListManager
     """
     def __init__(self, id: int, description: str, assign_to: str = "", status: str = TodoItem.INCOMPLETE) -> None:
         super().__init__(id, description, assign_to, status)
@@ -40,6 +41,7 @@ class TodoList(TodoItem):
         if any(child.id == new_id for child in self.children):
             raise ValueError(f"A child with id {new_id} already exists.")
         child = TodoItem(new_id, description, assign_to, status)
+        child.parent = self
         self.children.append(child)
         return child
 
@@ -60,6 +62,7 @@ class TodoList(TodoItem):
         child = TodoList(new_id, description, assign_to, status)
         if child is self:
             raise ValueError("Cannot add a TodoList as a child of itself")
+        child.parent = self
         self.children.append(child)
         return child
 
@@ -72,6 +75,7 @@ class TodoList(TodoItem):
         """
         for child in self.children:
             if child.id == child_id:
+                child.parent = None
                 self.children.remove(child)
                 return True
         return False

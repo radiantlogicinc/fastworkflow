@@ -8,7 +8,7 @@ from fastworkflow.build.context_model_generator import generate_context_model
 
 INPUT_FOLDER = 'tests/example_workflow/application'
 OUTPUT_DIR = 'tests/example_workflow/_commands'
-CONTEXT_MODEL_FILE = 'tests/example_workflow/command_context_model.json'
+CONTEXT_MODEL_FILE = 'tests/example_workflow/_commands/context_inheritance_model.json'
 
 @pytest.mark.integration
 def test_analyzer_and_generators_on_all_files():

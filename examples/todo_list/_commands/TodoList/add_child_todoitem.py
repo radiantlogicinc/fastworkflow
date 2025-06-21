@@ -15,24 +15,27 @@ from ...application.todo_list import TodoList
 from ...application.todo_item import TodoItem
 
 class Signature:
+    """Add a todo item to this todolist and set it as the current command context"""
     class Input(BaseModel):
-        description: str = Field(description="Parameter description")
-        assign_to: str = Field(description="Parameter assign_to")
-        status: str = Field(description="Parameter status")
-        model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
+        description: str = Field(
+            description="Description of this todo item",
+            examples=['laundry', 'homework']
+        )
+        assign_to: str = Field(
+            description="name of the person responsible for doing this task",
+            examples=['John Doe', 'Jane Smith']
+        )
+        is_complete: bool = Field(
+            description="True if complete, False otherwise",
+        )
 
     class Output(BaseModel):
-        result: TodoItem = Field(description="Result of the method call")
+        success: bool = Field(
+            description="True if item was added, False otherwise"
+        )
 
     plain_utterances = [
-        "add child todoitem todolist",
-        "Call add_child_todoitem on todolist",
-        "add child todoitem todolist {description} {assign_to} {status}",
-        "Call add_child_todoitem on todolist with {description} {assign_to} {status}"
-    ]
-
-    template_utterances = [
-        "TODO: Add template utterances"
+        "add workitem"
     ]
 
     @staticmethod
@@ -40,33 +43,29 @@ class Signature:
         utterance_definition = fastworkflow.UtteranceRegistry.get_definition(session.workflow_snapshot.workflow_folderpath)
         utterances_obj = utterance_definition.get_command_utterances(command_name)
         result = generate_diverse_utterances(utterances_obj.plain_utterances, command_name)
-        utterance_list: list[str] = [command_name] + result
+        utterance_list: list[str] = [
+            command_name.split('/')[-1].lower().replace('_', ' ')
+        ] + result
         return utterance_list
-
-    def process_extracted_parameters(self, workflow_snapshot: WorkflowSnapshot, command: str, cmd_parameters: "Signature.Input") -> None:
-        pass
 
 class ResponseGenerator:
     def _process_command(self, session: Session, input: Signature.Input) -> Signature.Output:
-        """Add a new TodoItem as a child to this TodoList.
-Args:
-    description (str): Description of the todo item.
-    assign_to (str): Person assigned to the todo item.
-    status (str): Status of the todo item.
-Returns:
-    TodoItem: The newly created child TodoItem.
-Raises:
-    ValueError: If a child with the generated id already exists."""
+        """Add a new TodoItem as a child to this TodoList."""
         # Access the application class instance:
-        app_instance = session.workflow_snapshot.context_object  # type: TodoList
-        result_val = app_instance.add_child_todoitem(description=input.description, assign_to=input.assign_to, status=input.status)
-        return Signature.Output(result=result_val)
+        app_instance = session.command_context_for_response_generation  # type: TodoList
+        todoitem = app_instance.add_child_todoitem(
+            description=input.description, 
+            assign_to=input.assign_to, 
+            status=TodoItem.COMPLETE if input.is_complete else TodoItem.INCOMPLETE
+        )
+        session.current_command_context = todoitem
+        return Signature.Output(success=True)
 
     def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:
         output = self._process_command(session, command_parameters)
         return CommandOutput(
             session_id=session.id,
             command_responses=[
-                CommandResponse(response=f"result={output.result}")
+                CommandResponse(response=output.model_dump_json())
             ]
         )

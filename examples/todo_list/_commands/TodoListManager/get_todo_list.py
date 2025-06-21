@@ -15,22 +15,20 @@ from ...application.todo_manager import TodoListManager
 from ...application.todo_list import TodoList
 
 class Signature:
+    """Set the requested todolist as the command context and return its description"""
     class Input(BaseModel):
-        id: int = Field(description="Parameter id")
-        model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
+        id: int = Field(
+            description="id of the todo list",
+            examples=['1', '56']
+        )
 
     class Output(BaseModel):
-        result: Optional[TodoList] = Field(description="Result of the method call")
+        description: str = Field(
+            description="Description of the returned todo list"
+        )
 
     plain_utterances = [
-        "get todo list todolistmanager",
-        "Call get_todo_list on todolistmanager",
-        "get todo list todolistmanager {id}",
-        "Call get_todo_list on todolistmanager with {id}"
-    ]
-
-    template_utterances = [
-        "TODO: Add template utterances"
+        "show project"
     ]
 
     @staticmethod
@@ -38,7 +36,9 @@ class Signature:
         utterance_definition = fastworkflow.UtteranceRegistry.get_definition(session.workflow_snapshot.workflow_folderpath)
         utterances_obj = utterance_definition.get_command_utterances(command_name)
         result = generate_diverse_utterances(utterances_obj.plain_utterances, command_name)
-        utterance_list: list[str] = [command_name] + result
+        utterance_list: list[str] = [
+            command_name.split('/')[-1].lower().replace('_', ' ')
+        ] + result
         return utterance_list
 
     def process_extracted_parameters(self, workflow_snapshot: WorkflowSnapshot, command: str, cmd_parameters: "Signature.Input") -> None:
@@ -46,23 +46,19 @@ class Signature:
 
 class ResponseGenerator:
     def _process_command(self, session: Session, input: Signature.Input) -> Signature.Output:
-        """Get a todo list by ID.
-
-Args:
-    id (int): ID of the todo list to get.
-
-Returns:
-    TodoList or None: The TodoList with the given ID, or None if not found."""
+        """Get a todo list by ID."""
         # Access the application class instance:
-        app_instance = session.workflow_snapshot.context_object  # type: TodoListManager
-        result_val = app_instance.get_todo_list(id=input.id)
-        return Signature.Output(result=result_val)
+        app_instance = session.command_context_for_response_generation  # type: TodoListManager
+        if todo_list := app_instance.get_todo_list(id=input.id):
+            session.current_command_context = todo_list
+            return Signature.Output(description=todo_list.description)
+        return Signature.Output(description='NOT_FOUND')
 
     def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:
         output = self._process_command(session, command_parameters)
         return CommandOutput(
             session_id=session.id,
             command_responses=[
-                CommandResponse(response=f"result={output.result}")
+                CommandResponse(response=output.model_dump_json())
             ]
         )

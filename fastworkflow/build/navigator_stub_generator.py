@@ -23,14 +23,14 @@ class NavigatorStubGenerator:
     def __init__(
         self, 
         navigators_root: str | Path = "navigators", 
-        model_path: str | Path = "command_context_model.json"
+        model_path: str | Path = "_commands/context_inheritance_model.json"
     ) -> None:
         """Initialize the navigator stub generator.
 
         Args:
             navigators_root: Path to the navigators directory, defaults to "navigators"
             model_path: Path to the command context model JSON file, defaults to
-                "command_context_model.json"
+                "context_inheritance_model.json"
         """
         self.navigators_root = Path(navigators_root)
         self.model_path = Path(model_path)

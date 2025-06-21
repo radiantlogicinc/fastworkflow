@@ -7,7 +7,7 @@ from fastworkflow.build.inheritance_block_regenerator import InheritanceBlockReg
 import ast
 from fastworkflow.utils.logging import logger
 
-def generate_context_model(classes: Dict[str, ClassInfo], output_dir: str, file_name: str = "command_context_model.json", aggregation: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def generate_context_model(classes: Dict[str, ClassInfo], output_dir: str, file_name: str = "_commands/context_inheritance_model.json", aggregation: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Generate the simplified command context model JSON.
 
     New schema (v2):

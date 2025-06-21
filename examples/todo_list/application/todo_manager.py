@@ -94,6 +94,8 @@ class TodoListManager:
             for list_data in lists_data:
                 try:
                     todo_list = TodoList._from_dict(list_data)
+                    todo_list.parent = self
+                    self._set_parent_refs(todo_list)
                     self.lists[todo_list.id] = todo_list
                 except (KeyError, ValueError, TypeError) as e:
                     print(f"Warning: Skipping invalid todo list: {str(e)}")
@@ -102,6 +104,17 @@ class TodoListManager:
         except (IOError, json.JSONDecodeError) as e:
             self.lists = {}
             print(f"Warning: Error loading todo lists: {str(e)}")
+
+    def _set_parent_refs(self, todo_list: TodoList) -> None:
+        """Recursively set parent references for a todo list and its children.
+        
+        Args:
+            todo_list: The TodoList to process
+        """
+        for child in todo_list.children:
+            child.parent = todo_list
+            if isinstance(child, TodoList):
+                self._set_parent_refs(child)
 
     def save_lists(self) -> None:
         """Save todo lists to the JSON file."""
@@ -140,6 +153,7 @@ class TodoListManager:
             raise ValueError("description cannot be empty")
         list_id = self._get_next_id()
         todo_list = TodoList(id=list_id, description=description)
+        todo_list.parent = self
         self.lists[list_id] = todo_list
         self.save_lists()
         return todo_list
@@ -174,7 +188,7 @@ class TodoListManager:
         # Update fields
         if 'name' in fields:
             todo_list.name = fields['name']
-        self._save_lists()
+        self.save_lists()
         return True
 
     def delete_todo_list(self, id: int) -> bool:

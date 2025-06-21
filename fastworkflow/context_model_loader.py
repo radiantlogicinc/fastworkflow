@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Utility to load and validate a *v2* `command_context_model.json`.
+"""Utility to load and validate a *v2* `context_inheritance_model.json`.
 
 The v2 schema wraps *inheritance* and *aggregation* information in two top-level
 keys:
@@ -35,7 +35,7 @@ class ContextModelLoaderError(Exception):
 class ContextModelLoader:
     """Loads and validates a v2 *command context model* JSON file."""
 
-    def __init__(self, model_path: str | Path = "command_context_model.json") -> None:
+    def __init__(self, model_path: str | Path = "_commands/context_inheritance_model.json") -> None:
         self.model_path = Path(model_path)
         self._model_data: Optional[Dict[str, Any]] = None
 

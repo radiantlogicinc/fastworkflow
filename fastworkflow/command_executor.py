@@ -52,7 +52,6 @@ class CommandExecutor(CommandExecutorInterface):
             raise ValueError(
                 f"Response generation class not found for command name '{command_name}' "
             )
-
         response_generation_object = response_generation_class()
 
         if command_parameters_class := (
@@ -69,6 +68,9 @@ class CommandExecutor(CommandExecutorInterface):
         session: fastworkflow.Session,
         action: fastworkflow.Action,
     ) -> fastworkflow.CommandOutput:  # sourcery skip: extract-method
+        session.command_context_for_response_generation = \
+            session.current_command_context
+
         workflow_folderpath = session.workflow_snapshot.workflow_folderpath
         command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(workflow_folderpath)
 
@@ -135,15 +137,15 @@ class CommandExecutor(CommandExecutorInterface):
                 workitem_path=context,
                 command_name=tool_call.name,
                 command=tool_call.arguments.get('command', ''),
-                parameters={k: v for k, v in tool_call.arguments.items()}
+                parameters=dict(tool_call.arguments.items()),
             )
-        
+
             # Execute using existing perform_action method
             command_output = self.perform_action(session, action)
-            
+
             # Convert to MCP format
             return command_output.to_mcp_result()
-            
+
         except Exception as e:
             # Return error in MCP format
             return fastworkflow.MCPToolResult(

@@ -26,7 +26,7 @@ def test_generate_context_model():
         model_data = generate_context_model(classes, tmpdir)
         
         # Verify the file was also written
-        expected_file_path = os.path.join(tmpdir, "command_context_model.json")
+        expected_file_path = os.path.join(tmpdir, "_commands/context_inheritance_model.json")
         assert os.path.exists(expected_file_path), f"Expected context model file not found at {expected_file_path}"
 
         # Use the returned model_data for content assertions

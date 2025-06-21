@@ -23,14 +23,14 @@ class CommandStubGenerator:
     def __init__(
         self, 
         commands_root: str | Path = "_commands", 
-        model_path: str | Path = "command_context_model.json"
+        model_path: str | Path = "_commands/context_inheritance_model.json"
     ) -> None:
         """Initialize the command stub generator.
 
         Args:
             commands_root: Path to the commands directory, defaults to "_commands"
             model_path: Path to the command context model JSON file, defaults to
-                "command_context_model.json"
+                "context_inheritance_model.json"
         """
         self.commands_root = Path(commands_root)
         self.model_path = Path(model_path)

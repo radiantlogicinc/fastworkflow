@@ -724,7 +724,7 @@ class ResponseGenerator:
     ) -> CommandOutput:
         session.workflow_snapshot.is_complete = False
 
-        subject_session = session.workflow_snapshot.workflow_context["subject_session"]
+        subject_session = session.workflow_snapshot.workflow_context["subject_session"]   # type: fastworkflow.Session
         cmd_ctxt_obj_name = subject_session.current_command_context_name
         nlu_pipeline_stage = session.workflow_snapshot.workflow_context.get(
             "NLU_Pipeline_Stage", 
@@ -750,23 +750,27 @@ class ResponseGenerator:
             command_output.command_responses[0].artifacts["command_handled"] = True
             return command_output
         
-        cmd_ctxt_obj = subject_session.current_command_context            
         if nlu_pipeline_stage in {
                 NLUPipelineStage.INTENT_DETECTION,
                 NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION
             }:
+            subject_session.command_context_for_response_generation = \
+                subject_session.current_command_context
+
             if cnp_output.command_name is None:
                 while not cnp_output.command_name and \
-                    cmd_ctxt_obj is not None and \
-                        not fastworkflow.Session.is_current_context_root:
-                    cmd_ctxt_obj = subject_session.get_container_object(cmd_ctxt_obj)
+                    subject_session.command_context_for_response_generation is not None and \
+                        not subject_session.is_command_context_for_response_generation_root:
+                    subject_session.command_context_for_response_generation = \
+                        subject_session.get_parent(subject_session.command_context_for_response_generation)
                     cnp_output = predictor.predict(
-                        fastworkflow.Session.get_command_context_name(cmd_ctxt_obj), 
+                        fastworkflow.Session.get_command_context_name(subject_session.command_context_for_response_generation), 
                         command, nlu_pipeline_stage)
             
                 if not cnp_output.command_name:
                     session.workflow_snapshot.workflow_context["NLU_Pipeline_Stage"] = \
                         NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION
+
                     return CommandOutput(
                         command_responses=[
                             CommandResponse(
@@ -776,11 +780,7 @@ class ResponseGenerator:
                         ]
                     )
 
-            # context may have expanded. Set it!
-            # Note this means the tools exposed have changed (for MCP server)
-            subject_session.current_command_context = cmd_ctxt_obj
-
-                # move to the parameter extraction stage
+            # move to the parameter extraction stage
             workflow_context = session.workflow_snapshot.workflow_context
             workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.PARAMETER_EXTRACTION
             workflow_context["command_name"] = cnp_output.command_name

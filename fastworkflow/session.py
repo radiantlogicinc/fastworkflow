@@ -204,6 +204,7 @@ class Session:
         self._workflow_snapshot = workflow_snapshot
         self._root_command_context = None
         self._current_command_context = None
+        self._command_context_for_response_generation = None
 
     @property
     def current_command_context(self) -> object:
@@ -233,7 +234,7 @@ class Session:
         self._root_command_context = value
         self._current_command_context = value
 
-    def get_container_object(self, command_context_object: Optional[object] = None) -> Optional[object]:
+    def get_parent(self, command_context_object: Optional[object] = None) -> Optional[object]:
         if command_context_object == self._root_command_context or command_context_object is None:
             return self._root_command_context
 
@@ -244,11 +245,23 @@ class Session:
                 fastworkflow.ModuleType.CONTEXT_CLASS
         )
         if context_class:
-            command_context_object = context_class.get_container_object(command_context_object)
+            command_context_object = context_class.get_parent(command_context_object)
         else:
             command_context_object = None
 
         return command_context_object
+
+    @property
+    def command_context_for_response_generation(self) -> object:
+        return self._command_context_for_response_generation
+
+    @current_command_context.setter
+    def command_context_for_response_generation(self, value: Optional[object]) -> None:
+        self._command_context_for_response_generation = value
+
+    @property
+    def is_command_context_for_response_generation_root(self) -> bool:
+        return self._command_context_for_response_generation == self._root_command_context
 
     @staticmethod
     def get_command_context_name(command_context_object: Optional[object]) -> str:

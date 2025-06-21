@@ -23,7 +23,7 @@ def collect_command_files_and_context_model(
             if file.endswith('.py') and file != '__init__.py'
         )
     # Load context model
-    context_model_path = os.path.join(output_dir, 'command_context_model.json')
+    context_model_path = os.path.join(output_dir, '_commands/context_inheritance_model.json')
     context_model = None
     if not os.path.exists(context_model_path):
         error = f"Context model file not found at {context_model_path}"
@@ -211,7 +211,7 @@ def generate_readme_content(
 
     # --- Context Model Section ---
     readme.append("## Context Model\n")
-    readme.append("The `command_context_model.json` file maps application classes to command contexts, organizing commands by their class.\n")
+    readme.append("The `context_inheritance_model.json` file maps application classes to command contexts, organizing commands by their class.\n")
     readme.append("Structure example:\n")
     readme.append("```json\n{\n  \"context_name\": {\n    \"/\": [\"command1\", \"command2\", ...],\n    \"base\": [\"BaseClass1\", ...]\n  },\n  ...\n}\n```\n")
     readme.append("### Contexts and Commands\n")
@@ -250,7 +250,7 @@ def write_readme_file(output_dir: str, content: str) -> bool:
     Overwrites any existing README.md. Returns True on success, False on error.
     """
     try:
-        readme_path = os.path.join(output_dir, "README.md")
+        readme_path = os.path.join(output_dir, "_commands/README.md")
         with open(readme_path, "w", encoding="utf-8") as f:
             f.write(content)
         return True
