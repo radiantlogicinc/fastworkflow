@@ -131,7 +131,7 @@ def generate_readme_content(
     
     Args:
         command_metadata: List of command metadata dictionaries
-        context_model: Context model dictionary
+        context_model: Context model dictionary (flat structure with context classes at top level)
         source_dir: Path to the source directory
         
     Returns:
@@ -169,9 +169,10 @@ def generate_readme_content(
             return set()  # Prevent cycles
         visited.add(context)
 
-        # Get base classes from context model
-        inheritance_data = context_model.get('inheritance', {}).get(context, {})
-        base_classes = inheritance_data.get('base', [])
+        # Get base classes from context model - now directly at top level
+        base_classes = []
+        if context in context_model:
+            base_classes = context_model[context].get('base', [])
 
         # Collect commands from all base classes
         inherited_cmds = set()
@@ -236,8 +237,9 @@ def generate_readme_content(
         readme.append("")
 
     # Process each context from the context model
-    for context in sorted(context_model.get('inheritance', {}).keys()):
-        if context == "*":  # Skip global context, we handled it above
+    for context in sorted(context_model.keys()):
+        # Skip any special entries that might still be in the model
+        if context == "*":
             continue
 
         context_name = f"{context} Context"
@@ -291,7 +293,7 @@ def generate_readme_content(
             readme.append("No commands in this context.\n")
 
         # Show base classes
-        base_classes = context_model.get('inheritance', {}).get(context, {}).get('base', [])
+        base_classes = context_model.get(context, {}).get('base', [])
         if base_classes:
             readme.append(f"  - Base classes: {', '.join(base_classes)}")
         readme.append("")
@@ -300,12 +302,16 @@ def generate_readme_content(
     readme.append("## Context Model\n")
     readme.append("The `context_inheritance_model.json` file maps application classes to command contexts, organizing commands by their class.\n")
     readme.append("Structure example:\n")
-    readme.append("```json\n{\n  \"inheritance\": {\n    \"ClassA\": {\"base\": [\"BaseClass1\", ...]},\n    \"*\": {\"base\": []}\n  },\n  \"aggregation\": { ... }\n}\n```\n")
+    readme.append("```json\n{\n  \"ClassA\": {\"base\": [\"BaseClass1\", ...]},\n  \"ClassB\": {\"base\": []}\n}\n```\n")
     readme.append("### Contexts and Commands\n")
 
     # Process each context again for the context model section
-    for context in sorted(context_model.get('inheritance', {}).keys()):
-        context_name = "Global Context (*)" if context == "*" else f"{context} Context"
+    for context in sorted(context_model.keys()):
+        # Skip any special entries that might still be in the model
+        if context == "*":
+            continue
+            
+        context_name = f"{context} Context"
         readme.append(f"#### {context_name}")
 
         # Get own commands
@@ -328,7 +334,7 @@ def generate_readme_content(
             readme.append("No commands in this context.")
 
         # Show base classes
-        base_classes = context_model.get('inheritance', {}).get(context, {}).get('base', [])
+        base_classes = context_model.get(context, {}).get('base', [])
         if base_classes:
             readme.append(f"Base classes: {', '.join(base_classes)}")
         readme.append("")

@@ -45,18 +45,13 @@ def commands_dir(temp_dir):
 
 @pytest.fixture
 def valid_context_model():
-    """Create a valid context model with the new schema format."""
+    """Create a valid context model with the new flat schema format."""
     return {
-        "inheritance": {
-            "TodoList": {"base": ["BaseList"]},
-            "TodoItem": {"base": []},
-            "User": {"base": []},
-            "BaseList": {"base": []},
-            "*": {"base": []}
-        },
-        "aggregation": {
-            "TodoItem": {"container": ["TodoList"]}
-        }
+        "TodoList": {"base": ["BaseList"]},
+        "TodoItem": {"base": []},
+        "User": {"base": []},
+        "BaseList": {"base": []},
+        "*": {"base": []}
     }
 
 
@@ -91,20 +86,10 @@ def test_verify_valid_context_model(commands_dir, valid_context_model, classes_i
     assert not errors, f"Expected no errors, but got: {errors}"
 
 
-def test_missing_inheritance_block(commands_dir, classes_info):
-    """Test that a context model without an inheritance block fails verification."""
-    invalid_model = {
-        "aggregation": {}
-    }
-    errors = verify_commands_against_context_model(invalid_model, commands_dir, classes_info)
-    assert len(errors) == 1
-    assert "missing 'inheritance' block" in errors[0].lower()
-
-
 def test_missing_directory_for_context(commands_dir, valid_context_model, classes_info):
     """Test that a context in the model without a corresponding directory fails verification."""
     # Add a context to the model that doesn't have a directory
-    valid_context_model["inheritance"]["MissingContext"] = {"base": []}
+    valid_context_model["MissingContext"] = {"base": []}
     
     # Add the missing context to classes_info so we only test the directory check
     classes_info["MissingContext"] = ClassInfo("MissingContext", "application/missing_context.py")
@@ -129,13 +114,13 @@ def test_directory_without_context(commands_dir, valid_context_model, classes_in
 def test_invalid_base_class(commands_dir, valid_context_model, classes_info):
     """Test that a context with an invalid base class fails verification."""
     # Add InvalidBase to the model to avoid the directory check error
-    valid_context_model["inheritance"]["InvalidBase"] = {"base": []}
+    valid_context_model["InvalidBase"] = {"base": []}
     
     # Create a directory for InvalidBase to avoid the directory check error
     (commands_dir / "InvalidBase").mkdir(exist_ok=True)
     
     # Modify the model to include an invalid base class
-    valid_context_model["inheritance"]["TodoList"]["base"] = ["InvalidBase"]
+    valid_context_model["TodoList"]["base"] = ["InvalidBase"]
     
     # We expect two errors:
     # 1. InvalidBase is in the model but not in classes_info
@@ -155,7 +140,7 @@ def test_invalid_base_class(commands_dir, valid_context_model, classes_info):
 def test_context_not_in_classes_info(commands_dir, valid_context_model, classes_info):
     """Test that a context in the model that's not in classes_info fails verification."""
     # Add a context to the model that's not in classes_info
-    valid_context_model["inheritance"]["UnknownClass"] = {"base": []}
+    valid_context_model["UnknownClass"] = {"base": []}
     
     # Create a directory for UnknownClass to avoid the directory check error
     (commands_dir / "UnknownClass").mkdir(exist_ok=True)
@@ -183,7 +168,6 @@ def test_excluded_directories_ignored(commands_dir, valid_context_model, classes
     for excluded_dir in EXCLUDE_DIRS:
         (commands_dir / excluded_dir).mkdir(exist_ok=True)
     
-    # These should not cause errors because they're in EXCLUDE_DIRS
     errors = verify_commands_against_context_model(valid_context_model, commands_dir, classes_info)
     assert not errors, f"Expected no errors, but got: {errors}"
 

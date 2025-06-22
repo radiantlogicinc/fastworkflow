@@ -79,20 +79,16 @@ def test_analyzer_and_generators_on_all_files():
 
     # Now, context_data is the loaded dictionary, no need to open and json.load again
 
-    # Context model schema v2 validations
-    assert 'inheritance' in context_data, "Missing 'inheritance' block in context model"
-    inheritance_block = context_data['inheritance']
-
-    # '*' entry must exist
-    assert '*' in inheritance_block and inheritance_block['*']['base'] == [], "'*' entry missing or malformed in inheritance block"
+    # Global '*' context is optional in the new flat schema.
 
     for class_name, class_info in classes.items():
         expected_bases = [b for b in class_info.bases if b in all_class_names]
 
-        # All classes should appear in inheritance block, regardless of whether they have bases
-        assert class_name in inheritance_block, f"{class_name} missing from inheritance block"
-        assert inheritance_block[class_name]['base'] == expected_bases, f"Base for {class_name} should be {expected_bases}, got {inheritance_block[class_name]['base']}"
+        # All classes should appear in the context model
+        assert class_name in context_data, f"{class_name} missing from context model"
+        assert context_data[class_name]['base'] == expected_bases, (
+            f"Base for {class_name} should be {expected_bases}, got {context_data[class_name]['base']}"
+        )
 
-    # Ensure no old '/' keys exist anywhere
     json_as_str = json.dumps(context_data)
     assert '"/"' not in json_as_str, "Deprecated '/' key found in context model JSON" 

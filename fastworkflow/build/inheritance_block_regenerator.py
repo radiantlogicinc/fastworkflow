@@ -85,7 +85,8 @@ class InheritanceBlockRegenerator:
             logger.error(f"Error loading model file: {e}")
         
         # Return default model if file doesn't exist or is invalid
-        self._model_data = {"inheritance": {"*": {"base": []}}, "aggregation": {}}
+        # No longer using nested structure with inheritance/aggregation keys
+        self._model_data = {}
         return self._model_data
     
     def regenerate_inheritance(self, classes: Optional[Dict[str, ClassInfo]] = None) -> Dict[str, Any]:
@@ -96,13 +97,14 @@ class InheritanceBlockRegenerator:
                     If provided, inheritance relationships will be based on this data.
         
         Returns:
-            Dict[str, Any]: The updated context model with regenerated inheritance block
+            Dict[str, Any]: The updated context model with regenerated inheritance relationships
+                           in a flat structure (no "inheritance" wrapper key)
         """
         # Scan directory structure to identify contexts
         contexts = self.scan_contexts()
         
-        # Build inheritance map
-        inheritance: Dict[str, Dict[str, List[str]]] = {}
+        # Build inheritance map - now directly as the top-level structure
+        inheritance_map: Dict[str, Dict[str, List[str]]] = {}
         
         if classes:
             # Use class information to build inheritance relationships
@@ -112,34 +114,30 @@ class InheritanceBlockRegenerator:
             for class_name, class_info in classes.items():
                 # Only include base classes that are also in the analyzed set
                 base_contexts = [b for b in class_info.bases if b in all_class_names]
-                inheritance[class_name] = {"base": base_contexts}
+                inheritance_map[class_name] = {"base": base_contexts}
         else:
             # Without class info, we can't determine inheritance relationships,
             # so we'll just create empty entries for all contexts found in the directory
-            inheritance = {context: {"base": []} for context in contexts}
+            inheritance_map = {context: {"base": []} for context in contexts}
         
-        # Always include global context
-        inheritance['*'] = {"base": []}
-        
-        # Load existing model to preserve aggregation
+        # Load existing model to check for any existing entries we should preserve
         existing_model = self.load_existing_model()
         
-        # Create new model with updated inheritance and preserved aggregation
-        new_model = {
-            "inheritance": inheritance,
-            "aggregation": existing_model.get("aggregation", {})
-        }
+        # Preserve any existing entries not derived from class analysis
+        for context, data in existing_model.items():
+            if context not in inheritance_map and context != "*":
+                inheritance_map[context] = data
         
         # Write updated model back to file
-        self.write_model(new_model)
+        self.write_model(inheritance_map)
         
-        return new_model
+        return inheritance_map
     
     def write_model(self, model: Dict[str, Any]) -> None:
         """Write the updated model to file.
         
         Args:
-            model: The model data to write
+            model: The model data to write (flat structure, no inheritance/aggregation wrappers)
         """
         try:
             # Ensure parent directories exist

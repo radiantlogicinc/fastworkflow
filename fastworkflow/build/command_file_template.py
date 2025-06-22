@@ -9,7 +9,6 @@ from pydantic import BaseModel, Field
 
 def get_import_block():
     return (
-        f"from pydantic import ConfigDict\n\n"
         f"import fastworkflow\n"
         f"from fastworkflow import CommandOutput, CommandResponse\n"
         f"from fastworkflow.session import Session, WorkflowSnapshot\n"
@@ -19,56 +18,6 @@ def get_import_block():
         f"from typing import Any, Dict, Optional\n"
         f"from pydantic import BaseModel, Field\n"
     )
-
-COMMAND_FILE_TEMPLATE = Template('''
-${import_block}
-
-class Signature:
-    class Input(BaseModel):
-${input_fields}
-        model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
-
-    class Output(BaseModel):
-${output_fields}
-
-    plain_utterances = [
-${plain_utterances}
-    ]
-
-    template_utterances = [
-${template_utterances}
-    ]
-
-    @staticmethod
-    def generate_utterances(session: Session, command_name: str) -> list[str]:
-        utterance_definition = fastworkflow.UtteranceRegistry.get_definition(session.workflow_snapshot.workflow_folderpath)
-        utterances_obj = utterance_definition.get_command_utterances(command_name)
-        result = generate_diverse_utterances(utterances_obj.plain_utterances, command_name)
-        utterance_list: list[str] = [
-            command_name.split('/')[-1].lower().replace('_', ' ')
-        ] + result
-        return utterance_list
-
-    def process_extracted_parameters(self, workflow_snapshot: WorkflowSnapshot, command: str, cmd_parameters: "Signature.Input") -> None:
-        pass
-
-class ResponseGenerator:
-    def _process_command(self, session: Session, input: Signature.Input) -> Signature.Output:
-        """${docstring}"""
-        # Access the application class instance:
-        app_instance = session.command_context_for_response_generation  # type: ${app_class_name}
-${process_logic}
-        return Signature.Output(${output_return})
-
-    def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:
-        output = self._process_command(session, command_parameters)
-        return CommandOutput(
-            session_id=session.id,
-            command_responses=[
-                CommandResponse(response=output.model_dump_json())
-            ]
-        )
-''')
 
 def create_command_file(class_info, method_info, output_dir, file_name=None, is_property_getter=False, is_property_setter=False, is_get_all_properties=False, all_properties_for_template: Optional[List[PropertyInfo]] = None, is_set_all_properties: bool = False, settable_properties_for_template: Optional[List[PropertyInfo]] = None, source_dir=None, overwrite=False, class_name_to_module_map: Optional[Dict[str, str]] = None):
     """Generate a FastWorkflow command file matching the user's required structure."""
@@ -83,6 +32,8 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
     response_format = ""
     process_logic_str = "        # Default process logic if not overridden by specific command type" # Initialize process_logic_str
     docstring = method_info.docstring or f"Execute {method_info.name} method on {class_info.name}"
+    has_input = True  # Default to having input
+    needs_model_config = False  # Default to not needing model_config
 
     if is_property_getter and not is_get_all_properties: # Kept for potential individual getters, though get_properties is preferred
         input_fields = "        pass"
@@ -96,27 +47,28 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
         process_logic_str = f"        # Individual getter logic: retrieve app_instance.{actual_prop_name}"
         output_return = f"value=app_instance.{actual_prop_name}"
         response_format = "value={output.value}"
+        has_input = False  # Property getters don't need input
 
     elif is_property_setter and not is_set_all_properties: # Individual property setter
+        # Use the property name as the input parameter name
+        prop_name = method_info.name
         if method_info.parameters and len(method_info.parameters) > 0:
-            param_name = method_info.parameters[0]['name']
             param_type = method_info.parameters[0].get('annotation') or 'Any'
-            escaped_param_desc = (method_info.parameters[0].get('docstring') or f'New value for {method_info.name}').replace('"', '\\"')
-            input_fields = f'        {param_name}: {param_type} = Field(description="{escaped_param_desc}")'
+            escaped_param_desc = (method_info.parameters[0].get('docstring') or f'New value for {prop_name}').replace('"', '\\"')
+            input_fields = f'        {prop_name}: {param_type} = Field(description="{escaped_param_desc}")'
         else:
-            input_fields = "        value: Any = Field(description=\"New value\")"
-            param_name = "value"
+            input_fields = f"        {prop_name}: Any = Field(description=\"New value for {prop_name}\")"
 
         output_fields = '        success: bool = Field(default=True, description="Indicates successful execution.")'
 
         # Use attribute assignment for property setter
-        prop_name = method_info.name
-        process_logic_str = f"        # Set property using attribute assignment\n        todo_item.{prop_name} = input.{param_name}"
+        process_logic_str = f"        # Set property using attribute assignment\n        app_instance.{prop_name} = input.{prop_name}"
 
         output_return = "success=True"
         response_format = "success={output.success}"
 
     elif is_get_all_properties and all_properties_for_template:
+        has_input = False  # get_properties doesn't need input
         input_fields = "        pass" # No input for get_properties
         output_field_lines = []
         output_return_parts = []
@@ -152,6 +104,7 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
             input_field_lines.append(f"        {prop_info.name}: Optional[{prop_info.type_annotation}] = Field(default=None, description=\"{escaped_docstring}\")")
         if input_field_lines:
             input_fields = "\n".join(input_field_lines)
+            needs_model_config = True  # Need model_config for Optional fields
         else:
             input_fields = "        pass" 
 
@@ -189,6 +142,7 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
             input_fields = "\n".join(input_field_lines)
         else:
             input_fields = "        pass"
+            has_input = False  # No input needed for methods without parameters
 
         method_return_type = method_info.return_annotation or 'Any'
         regular_method_logic_lines = []
@@ -196,12 +150,18 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
         call_params = ', '.join([f"{p_name}=input.{p_name}" for p_name in param_names])
 
         if method_return_type.lower() == 'none' or not method_return_type:
-            regular_method_logic_lines.append(f"        app_instance.{method_info.name.lower()}({call_params})")
+            if param_names:
+                regular_method_logic_lines.append(f"        app_instance.{method_info.name.lower()}({call_params})")
+            else:
+                regular_method_logic_lines.append(f"        app_instance.{method_info.name.lower()}()")
             output_fields = '        success: bool = Field(default=True, description="Indicates successful execution.")'
             output_return = "success=True" 
             response_format = "success={output.success}"
         else:
-            regular_method_logic_lines.append(f"        result_val = app_instance.{method_info.name.lower()}({call_params})")
+            if param_names:
+                regular_method_logic_lines.append(f"        result_val = app_instance.{method_info.name.lower()}({call_params})")
+            else:
+                regular_method_logic_lines.append(f"        result_val = app_instance.{method_info.name.lower()}()")
             output_fields = f'        result: {method_return_type} = Field(description="Result of the method call")'
             output_return = "result=result_val" 
             response_format = "result={output.result}"
@@ -209,25 +169,77 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
 
     # Utterances
     plain_utterances = ",\n".join([f'        "{u}"' for u in generate_utterances(class_info.name, method_info.name, method_info.parameters)])
-    template_utterances = "        \"TODO: Add template utterances\""
+    template_utterances = "[]"
+
     # Use new import block logic
     if source_dir is None:
         raise ValueError("source_dir must be provided to create_command_file")
     import_block = get_import_block()
     import_block += generate_import_statements(class_info, source_dir, class_name_to_module_path=class_name_to_module_map)
-    # Fill the template
-    command_file_content = COMMAND_FILE_TEMPLATE.substitute(
-        import_block=import_block,
-        input_fields=input_fields,
-        output_fields=output_fields,
-        plain_utterances=plain_utterances,
-        template_utterances=template_utterances,
-        docstring=docstring,
-        process_logic=process_logic_str, # Added process_logic
-        output_return=output_return,
-        response_format=response_format,
-        app_class_name=app_class_name
-    )
+
+    # Prepare conditional sections
+    if has_input:
+        # Input class without model_config
+        input_class = f"    class Input(BaseModel):\n{input_fields}\n"
+        input_param_type = '"Signature.Input"'
+        input_param = ", input: Signature.Input"
+        call_param = ", command_parameters: Signature.Input"
+        call_arg = ", command_parameters"
+    else:
+        # No Input class
+        input_class = ""
+        input_param_type = "None"
+        input_param = ""
+        call_param = ""
+        call_arg = ""
+
+    # Build the command file content using string concatenation instead of template formatting
+    command_file_content = "\n" + import_block + "\n\n" + "class Signature:\n"
+
+    # Add Input class if needed
+    command_file_content += input_class
+
+    # Add Output class
+    command_file_content += f"    class Output(BaseModel):\n{output_fields}\n\n"
+
+    # Add utterances
+    command_file_content += f"    plain_utterances = [\n{plain_utterances}\n    ]\n\n"
+    command_file_content += f"    template_utterances = {template_utterances}\n\n"
+
+    # Add generate_utterances method
+    command_file_content += """    @staticmethod
+    def generate_utterances(session: Session, command_name: str) -> list[str]:
+        utterance_definition = fastworkflow.UtteranceRegistry.get_definition(session.workflow_snapshot.workflow_folderpath)
+        utterances_obj = utterance_definition.get_command_utterances(command_name)
+        result = generate_diverse_utterances(utterances_obj.plain_utterances, command_name)
+        utterance_list: list[str] = [
+            command_name.split('/')[-1].lower().replace('_', ' ')
+        ] + result
+        return utterance_list\n\n"""
+
+    # Add process_extracted_parameters method
+    command_file_content += f"    def process_extracted_parameters(self, workflow_snapshot: WorkflowSnapshot, command: str, cmd_parameters: {input_param_type}) -> None:\n"
+    command_file_content += "        pass\n\n"
+
+    # Add ResponseGenerator class
+    command_file_content += "class ResponseGenerator:\n"
+    command_file_content += f"    def _process_command(self, session: Session{input_param}) -> Signature.Output:\n"
+    command_file_content += f"        \"\"\"{docstring}\"\"\"\n"
+    command_file_content += f"        app_instance = session.command_context_for_response_generation  # type: {app_class_name}\n"
+    command_file_content += f"{process_logic_str}\n"
+    command_file_content += f"        return Signature.Output({output_return})\n\n"
+
+    # Add __call__ method
+    command_file_content += f"    def __call__(self, session: Session, command: str{call_param}) -> CommandOutput:\n"
+    command_file_content += f"        output = self._process_command(session{call_arg})\n"
+    command_file_content += """        return CommandOutput(
+            session_id=session.id,
+            command_responses=[
+                CommandResponse(response=output.model_dump_json())
+            ]
+        )
+"""
+
     # Write the command file
     if file_name is None:
         file_name = f"{class_info.name.lower()}_{method_info.name.lower()}.py"

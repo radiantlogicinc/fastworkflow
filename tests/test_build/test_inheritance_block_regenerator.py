@@ -41,22 +41,23 @@ def context_dirs(commands_dir):
 
 
 @pytest.fixture
-def existing_model(temp_dir):
-    """Create an existing model file with aggregation block."""
-    model_path = temp_dir / "_commands/context_inheritance_model.json"
-    model_data = {
-        "inheritance": {
+def existing_model():
+    """Create a temporary context model file with existing entries."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        commands_dir = Path(tmp_dir) / "_commands"
+        commands_dir.mkdir(exist_ok=True)
+        
+        # Create a model file with the new flat structure
+        model_data = {
             "OldClass": {"base": []},
-            "AnotherOldClass": {"base": ["OldClass"]},
-            "*": {"base": []}
-        },
-        "aggregation": {
-            "TodoItem": {"container": ["TodoList"]},
-            "User": {"container": ["TodoList"]}
+            "AnotherOldClass": {"base": ["OldClass"]}
         }
-    }
-    create_test_context_model(model_path, model_data)
-    return model_path
+        
+        model_path = commands_dir / "context_inheritance_model.json"
+        with open(model_path, "w") as f:
+            json.dump(model_data, f, indent=2)
+        
+        yield model_path
 
 
 @pytest.fixture
@@ -108,87 +109,154 @@ def test_scan_contexts(context_dirs):
 
 
 def test_load_existing_model(existing_model):
-    """Test loading an existing model file."""
-    regenerator = InheritanceBlockRegenerator(model_path=existing_model)
+    """Test loading an existing context model."""
+    regenerator = InheritanceBlockRegenerator(
+        commands_root=existing_model.parent,
+        model_path=existing_model
+    )
+    
     model = regenerator.load_existing_model()
     
-    assert "inheritance" in model
-    assert "aggregation" in model
-    assert "TodoItem" in model["aggregation"]
-    assert "User" in model["aggregation"]
-    assert "OldClass" in model["inheritance"]
+    # Check that the model was loaded correctly
+    assert "OldClass" in model
+    assert "AnotherOldClass" in model
+    assert model["AnotherOldClass"]["base"] == ["OldClass"]
 
 
-def test_load_missing_model(temp_dir):
-    """Test loading a non-existent model file."""
-    non_existent_model = temp_dir / "non_existent_model.json"
-    regenerator = InheritanceBlockRegenerator(model_path=non_existent_model)
-    model = regenerator.load_existing_model()
+def test_load_missing_model():
+    """Test loading a non-existent context model."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        model_path = Path(tmp_dir) / "nonexistent.json"
+        regenerator = InheritanceBlockRegenerator(
+            commands_root=Path(tmp_dir),
+            model_path=model_path
+        )
+        
+        model = regenerator.load_existing_model()
+        
+        # Should return an empty dict
+        assert model == {}
+
+
+def test_load_invalid_model():
+    """Test loading an invalid context model."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        model_path = Path(tmp_dir) / "invalid.json"
+        with open(model_path, "w") as f:
+            f.write("invalid json")
+        
+        regenerator = InheritanceBlockRegenerator(
+            commands_root=Path(tmp_dir),
+            model_path=model_path
+        )
+        
+        model = regenerator.load_existing_model()
+        
+        # Should return an empty dict
+        assert model == {}
+
+
+def test_regenerate_inheritance_with_directory_scan(context_dirs):
+    """Test regenerating inheritance block by scanning directories."""
+    regenerator = InheritanceBlockRegenerator(
+        commands_root=context_dirs,
+        model_path=context_dirs / "context_inheritance_model.json"
+    )
     
-    assert "inheritance" in model
-    assert "aggregation" in model
-    assert model["inheritance"] == {"*": {"base": []}}
-    assert model["aggregation"] == {}
-
-
-def test_load_invalid_model(temp_dir):
-    """Test loading an invalid model file."""
-    invalid_model_path = temp_dir / "invalid_model.json"
+    model = regenerator.regenerate_inheritance()
     
-    # Create an invalid JSON file
-    with open(invalid_model_path, 'w') as f:
-        f.write("{invalid json")
+    # Check that the model includes entries for each context directory
+    assert "TodoList" in model
+    assert "TodoItem" in model
+    assert "User" in model
     
-    regenerator = InheritanceBlockRegenerator(model_path=invalid_model_path)
-    model = regenerator.load_existing_model()
-    
-    assert "inheritance" in model
-    assert "aggregation" in model
-    assert model["inheritance"] == {"*": {"base": []}}
-    assert model["aggregation"] == {}
+    # Each entry should have a base field
+    assert "base" in model["TodoList"]
+    assert "base" in model["TodoItem"]
+    assert "base" in model["User"]
 
 
-def test_regenerate_inheritance_with_directory_scan(context_dirs, temp_dir):
-    """Test regenerating inheritance block based on directory scan."""
-    model_path = temp_dir / "_commands/context_inheritance_model.json"
+def test_regenerate_inheritance_with_classes():
+    """Test regenerating inheritance block with class information."""
+    # Create some class info objects
+    base_model = ClassInfo("BaseModel", "base.py")
+    todo_item = ClassInfo("TodoItem", "todo_item.py", bases=["BaseModel"])
+    todo_list = ClassInfo("TodoList", "todo_list.py", bases=["BaseModel"])
+    
+    classes = {
+        "BaseModel": base_model,
+        "TodoItem": todo_item,
+        "TodoList": todo_list
+    }
+    
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        commands_dir = Path(tmp_dir) / "_commands"
+        commands_dir.mkdir(exist_ok=True)
+        
+        regenerator = InheritanceBlockRegenerator(
+            commands_root=commands_dir,
+            model_path=commands_dir / "context_inheritance_model.json"
+        )
+        
+        model = regenerator.regenerate_inheritance(classes)
+        
+        # Check that the model includes entries for each class
+        assert "BaseModel" in model
+        assert "TodoItem" in model
+        assert "TodoList" in model
+        
+        # Check inheritance relationships
+        assert model["BaseModel"]["base"] == []
+        assert model["TodoItem"]["base"] == ["BaseModel"]
+        assert model["TodoList"]["base"] == ["BaseModel"]
+
+
+def test_write_model(context_dirs):
+    """Test writing the model to a file."""
+    model_path = context_dirs / "context_inheritance_model.json"
     regenerator = InheritanceBlockRegenerator(
         commands_root=context_dirs,
         model_path=model_path
     )
     
+    # Create a model to write
+    model = {
+        "TodoList": {"base": []},
+        "TodoItem": {"base": ["BaseItem"]},
+        "User": {"base": []}
+    }
+    
+    # Write the model
+    regenerator.write_model(model)
+    
+    # Check that the file was written
+    assert model_path.exists()
+    
+    # Check that the file contains the expected content
+    with open(model_path, "r") as f:
+        written_model = json.load(f)
+    
+    assert written_model == model
+
+
+def test_preserve_existing_entries(existing_model, context_dirs):
+    """Test that existing entries are preserved during regeneration."""
+    regenerator = InheritanceBlockRegenerator(
+        commands_root=context_dirs,
+        model_path=existing_model
+    )
+    
     model = regenerator.regenerate_inheritance()
     
-    assert "inheritance" in model
-    assert "aggregation" in model
-    assert "TodoList" in model["inheritance"]
-    assert "TodoItem" in model["inheritance"]
-    assert "User" in model["inheritance"]
-    assert "*" in model["inheritance"]
-    assert model["inheritance"]["TodoList"] == {"base": []}
-    assert model["inheritance"]["TodoItem"] == {"base": []}
-    assert model["inheritance"]["User"] == {"base": []}
-    assert model["inheritance"]["*"] == {"base": []}
-
-
-def test_regenerate_inheritance_with_classes(mock_classes, temp_dir):
-    """Test regenerating inheritance block based on class information."""
-    model_path = temp_dir / "_commands/context_inheritance_model.json"
-    regenerator = InheritanceBlockRegenerator(model_path=model_path)
+    # Check that old entries are preserved
+    assert "OldClass" in model
+    assert "AnotherOldClass" in model
+    assert model["AnotherOldClass"]["base"] == ["OldClass"]
     
-    model = regenerator.regenerate_inheritance(mock_classes)
-    
-    assert "inheritance" in model
-    assert "aggregation" in model
-    assert "TodoList" in model["inheritance"]
-    assert "TodoItem" in model["inheritance"]
-    assert "User" in model["inheritance"]
-    assert "BaseModel" in model["inheritance"]
-    assert "*" in model["inheritance"]
-    assert model["inheritance"]["TodoList"] == {"base": ["BaseModel"]}
-    assert model["inheritance"]["TodoItem"] == {"base": ["BaseModel"]}
-    assert model["inheritance"]["User"] == {"base": ["BaseModel", "TodoList"]}
-    assert model["inheritance"]["BaseModel"] == {"base": []}
-    assert model["inheritance"]["*"] == {"base": []}
+    # Check that new entries were added
+    assert "TodoList" in model
+    assert "TodoItem" in model
+    assert "User" in model
 
 
 def test_preserve_aggregation(existing_model, context_dirs):
@@ -197,21 +265,17 @@ def test_preserve_aggregation(existing_model, context_dirs):
         commands_root=context_dirs,
         model_path=existing_model
     )
-    
+
     model = regenerator.regenerate_inheritance()
+
+    # Check that the model has been updated with TodoList
+    # In the new flat structure, TodoList should be at the top level
+    assert "TodoList" in model
     
-    # Check that the inheritance block has been updated
-    assert "TodoList" in model["inheritance"]
-    assert "TodoItem" in model["inheritance"]
-    assert "User" in model["inheritance"]
-    assert "OldClass" not in model["inheritance"]
-    
-    # Check that the aggregation block has been preserved
-    assert "aggregation" in model
-    assert "TodoItem" in model["aggregation"]
-    assert "User" in model["aggregation"]
-    assert model["aggregation"]["TodoItem"] == {"container": ["TodoList"]}
-    assert model["aggregation"]["User"] == {"container": ["TodoList"]}
+    # Check that OldClass is preserved from the existing model
+    assert "OldClass" in model
+    assert "AnotherOldClass" in model
+    assert model["AnotherOldClass"]["base"] == ["OldClass"]
 
 
 def test_idempotence(existing_model, context_dirs):

@@ -26,6 +26,16 @@ def generate_command_files(classes: Dict[str, ClassInfo], output_dir: str, sourc
         for method_info in class_info.methods:
             file_name = f"{method_info.name.lower()}.py"
             file_path = os.path.join(class_output_dir, file_name)
+            
+            # Check if this method is a property setter
+            is_property_setter = False
+            if method_info.name in [prop.name for prop in class_info.all_settable_properties]:
+                is_property_setter = True
+                # For property setters, ensure the parameter name matches the property name
+                if method_info.parameters and len(method_info.parameters) > 0:
+                    # Replace the parameter name (usually 'value') with the property name
+                    method_info.parameters[0]['name'] = method_info.name
+            
             if generated_file_path := create_command_file(
                 class_info=class_info,
                 method_info=method_info,
@@ -34,6 +44,7 @@ def generate_command_files(classes: Dict[str, ClassInfo], output_dir: str, sourc
                 source_dir=source_dir,
                 overwrite=overwrite,
                 class_name_to_module_map=class_name_to_module_map,
+                is_property_setter=is_property_setter,
             ):
                 generated_files.append(generated_file_path)
 
@@ -217,8 +228,6 @@ def validate_command_file_components_in_dir(directory: str) -> list:
                         errors.append((file_path, 'Missing Input class in Signature'))
                     elif not input_inherits_basemodel:
                         errors.append((file_path, 'Input class does not inherit from BaseModel'))
-                    elif not has_model_config:
-                        errors.append((file_path, 'Input class missing model_config assignment'))
                     if not has_output:
                         errors.append((file_path, 'Missing Output class in Signature'))
                     elif not output_inherits_basemodel:
@@ -252,14 +261,13 @@ def verify_commands_against_context_model(
     Verifies that the context model and directory structure are in sync according to the new schema.
     
     Validation rules:
-    1. The context model must have an 'inheritance' block
-    2. Every context in the inheritance block (except '*') must have a corresponding directory
-    3. Every context directory must be listed in the inheritance block
-    4. Base classes referenced in the inheritance block must exist in the model
-    5. Classes in the inheritance block should exist in the analyzed class information
+    1. Every context in the model must have a corresponding directory
+    2. Every context directory must be listed in the model
+    3. Base classes referenced in the model must exist in the model
+    4. Classes in the model should exist in the analyzed class information
     
     Args:
-        context_model: The context model dictionary
+        context_model: The context model dictionary (flat structure with context classes at top level)
         commands_dir: Path to the commands directory
         classes_info: Dictionary mapping class names to ClassInfo objects
         
@@ -268,13 +276,8 @@ def verify_commands_against_context_model(
     """
     errors = []
     
-    # Check for inheritance block
-    if 'inheritance' not in context_model:
-        errors.append("Context model is missing 'inheritance' block")
-        return errors
-        
-    inheritance_block = context_model['inheritance']
-    context_model_classes = set(inheritance_block.keys())
+    # Get the context names from the model (excluding special entries)
+    context_model_classes = set(context_model.keys())
     context_model_classes.discard("*")  # Ignore the global '*' context for directory checks
     
     # Get directories from the filesystem
@@ -286,35 +289,35 @@ def verify_commands_against_context_model(
         if os.path.isdir(item_path):  # Item is a potential class directory
             present_class_dirs.add(item)
     
-    # Rule 2: Every context in the inheritance block must have a corresponding directory
+    # Rule 1: Every context in the model must have a corresponding directory
     for class_name in context_model_classes:
         if class_name not in present_class_dirs:
             errors.append(f"Class '{class_name}' is in context model but has no directory in {commands_dir}")
         
-        # Rule 5: Classes in inheritance block should exist in analyzed class information
+        # Rule 4: Classes in model should exist in analyzed class information
         if class_name not in classes_info:
             errors.append(f"Class '{class_name}' is in context model but not found in analyzed class information")
     
-    # Rule 3: Every context directory must be listed in the inheritance block
+    # Rule 2: Every context directory must be listed in the model
     for class_dir_name in present_class_dirs:
         if class_dir_name not in context_model_classes:
             # Check if this directory corresponds to a known class
             if class_dir_name in classes_info:
-                errors.append(f"Directory '{class_dir_name}' exists in {commands_dir} but the class is not in the context model's inheritance block")
+                errors.append(f"Directory '{class_dir_name}' exists in {commands_dir} but the class is not in the context model")
             else:
                 errors.append(f"Directory '{class_dir_name}' exists in {commands_dir} but does not correspond to any known class")
     
-    # Rule 4: Base classes referenced in the inheritance block must exist in the model
-    for class_name, inheritance_data in inheritance_block.items():
+    # Rule 3: Base classes referenced in the model must exist in the model
+    for class_name, class_data in context_model.items():
         if class_name == "*":  # Skip global context
             continue
             
-        base_classes = inheritance_data.get("base", [])
+        base_classes = class_data.get("base", [])
         if not base_classes:
             continue  # No base classes to check
             
         for base_class in base_classes:
-            if base_class not in inheritance_block and base_class != "*":
+            if base_class not in context_model and base_class != "*":
                 errors.append(f"Class '{class_name}' inherits from '{base_class}', but '{base_class}' is not in the context model")
             
             # Additional check for base class in class_info

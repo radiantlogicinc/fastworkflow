@@ -10,18 +10,15 @@ from fastworkflow.utils.logging import logger
 def generate_context_model(classes: Dict[str, ClassInfo], output_dir: str, file_name: str = "_commands/context_inheritance_model.json", aggregation: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Generate the simplified command context model JSON.
 
-    New schema (v2):
+    New schema (v3):
     {
-      "inheritance": {
-        "ClassA": {"base": ["Base1"]},
-        "*": {"base": []}
-      },
-      "aggregation": { ... }  # OPTIONAL – only if deterministically derived
+      "ClassA": {"base": ["Base1"]},
+      "ClassB": {"base": []}
     }
 
     • Per-class command lists are no longer included because command files are organised on disk in `_commands/<ClassName>/`.
-    • A special "*" entry is kept inside the inheritance map to preserve prior behaviour.
-    • The aggregation block is preserved if it exists in the previous model.
+    • The context model is now a flat structure with context classes at the top level.
+    • Each context has a "base" list containing its base classes.
     """
     logger.debug(f"Called generate_context_model with output_dir={output_dir}, file_name={file_name}")
     os.makedirs(output_dir, exist_ok=True)

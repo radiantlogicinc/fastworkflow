@@ -13,7 +13,7 @@ def make_class_and_method(class_name, method_name, params=None, docstring=None, 
     return class_info, method_info
 
 def test_create_command_file_simple():
-    class_info, method_info = make_class_and_method('User', 'get_details', docstring='Get user details.')
+    class_info, method_info = make_class_and_method('User', 'get_details', params=[{'name': 'user_id', 'annotation': 'int'}], docstring='Get user details.')
     with tempfile.TemporaryDirectory() as tmpdir:
         file_path = create_command_file(class_info, method_info, tmpdir, source_dir='.')
         assert os.path.exists(file_path)
@@ -89,7 +89,8 @@ def check_created_command_file(class_info, method_info_get_props, tmpdir):
     assert os.path.exists(file_path)
     content = pathlib.Path(file_path).read_text()
 
-    assert "class Input(BaseModel):\n        pass" in content
+    # No Input class should be present for get_properties
+    assert "class Input(BaseModel):" not in content
     assert "class Output(BaseModel):" in content
     assert "product_id: int = Field(description=\"The product ID.\")" in content
     assert "name: str = Field(description=\"The product name.\")" in content
@@ -98,6 +99,11 @@ def check_created_command_file(class_info, method_info_get_props, tmpdir):
     assert "# For get_properties, the primary logic is to gather attribute values" in content
     assert "return Signature.Output(product_id=app_instance.product_id, name=app_instance.name, price=app_instance.price)" in content
     assert "app_instance = session.command_context_for_response_generation" in content
+    
+    # Verify that _process_command doesn't expect an input parameter
+    assert "def _process_command(self, session: Session) -> Signature.Output:" in content
+    # Verify that __call__ doesn't expect command_parameters
+    assert "def __call__(self, session: Session, command: str) -> CommandOutput:" in content
 
 def test_create_command_file_set_properties():
     class_name = "InventoryItem"
@@ -137,6 +143,9 @@ def test_create_command_file_set_properties():
         assert "sku: Optional[str] = Field(default=None, description=\"Stock Keeping Unit.\")" in content
         assert "quantity: Optional[int] = Field(default=None, description=\"Current stock quantity.\")" in content
         assert "location: Optional[Optional[str]] = Field(default=None, description=\"Optional. New value for location.\")" in content
+        
+        # Verify model_config is NOT included for Optional fields (we've removed it)
+        assert "model_config = ConfigDict" not in content
 
         assert "class Output(BaseModel):\n        success: bool = Field(description=\"True if properties update was attempted.\")" in content
         
@@ -196,12 +205,17 @@ def test_property_setter_uses_attribute_assignment():
                 and isinstance(node.targets[0].value, ast.Name)
             )
             and (
-                node.targets[0].value.id == 'todo_item'
+                node.targets[0].value.id == 'app_instance'
                 and node.targets[0].attr == 'assign_to'
             )
             for node in ast.walk(process_command)
         )
         assert found_attribute_assignment, "Property setter should use attribute assignment"
+        
+        # Verify that property setter uses property name as input parameter name
+        content = pathlib.Path(file_path).read_text()
+        assert "assign_to: str = Field" in content
+        assert "app_instance.assign_to = input.assign_to" in content
 
 def test_response_uses_model_dump_json():
     """Test that response uses output.model_dump_json()."""
@@ -230,4 +244,38 @@ def test_response_uses_model_dump_json():
             and node.func.attr == 'model_dump_json'
             for node in ast.walk(call_method)
         )
-        assert found_model_dump_json, "Response should use output.model_dump_json()" 
+        assert found_model_dump_json, "Response should use output.model_dump_json()"
+
+def test_no_model_config_when_not_needed():
+    """Test that model_config is not included when not needed."""
+    class_info, method_info = make_class_and_method('User', 'get_details', docstring='Get user details.')
+    with tempfile.TemporaryDirectory() as tmpdir:
+        file_path = create_command_file(class_info, method_info, tmpdir, source_dir='.')
+        content = pathlib.Path(file_path).read_text()
+        
+        # model_config should not be included for simple Input classes
+        assert "model_config = ConfigDict" not in content
+
+def test_no_input_class_for_parameterless_methods():
+    """Test that Input class is not included for methods without parameters."""
+    class_info, method_info = make_class_and_method('User', 'refresh', docstring='Refresh user data.')
+    with tempfile.TemporaryDirectory() as tmpdir:
+        file_path = create_command_file(class_info, method_info, tmpdir, source_dir='.')
+        content = pathlib.Path(file_path).read_text()
+        
+        # Input class should not be included
+        assert "class Input(BaseModel):" not in content
+        
+        # _process_command and __call__ should not have input parameters
+        assert "def _process_command(self, session: Session) -> Signature.Output:" in content
+        assert "def __call__(self, session: Session, command: str) -> CommandOutput:" in content
+
+def test_no_unnecessary_comments():
+    """Test that unnecessary comments are not included."""
+    class_info, method_info = make_class_and_method('User', 'get_details', docstring='Get user details.')
+    with tempfile.TemporaryDirectory() as tmpdir:
+        file_path = create_command_file(class_info, method_info, tmpdir, source_dir='.')
+        content = pathlib.Path(file_path).read_text()
+        
+        # The comment "# Access the application class instance:" should not be present
+        assert "# Access the application class instance:" not in content 

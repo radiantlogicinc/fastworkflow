@@ -36,37 +36,18 @@ def test_generate_context_model():
         assert os.path.exists(expected_file_path), f"Expected context model file not found at {expected_file_path}"
 
         # Use the returned model_data for content assertions
-        # New schema checks
-        assert 'inheritance' in model_data
-        inheritance_block = model_data['inheritance']
-
-        # '*' must be present inside inheritance block
-        assert '*' in inheritance_block
-        assert inheritance_block['*']['base'] == []
-
-        # Now User should appear in inheritance block even with no base classes
-        assert 'User' in inheritance_block
-        assert inheritance_block['User']['base'] == []
+        # New schema checks - flat structure
+        assert 'User' in model_data
+        assert 'base' in model_data['User']
+        assert model_data['User']['base'] == []
 
         # No "/" keys should exist anywhere in the JSON
         json_as_str = json.dumps(model_data)
         assert '"/"' not in json_as_str, "Found deprecated '/' key in context model JSON"
-
-        # Aggregation block should exist but might be empty
-        assert 'aggregation' in model_data
-
-        # Legacy checks remain commented out as they are not applicable to the current context model structure.
         
-        # method_entry = next(e for e in model_data if e['type'] == 'method' and e['method_or_property'] == 'GetDetails')
-        # assert method_entry['command_file'] == 'user_getdetails.py'
-        # assert method_entry['input_model'] == 'UserGetdetailsInput'
-        # assert method_entry['output_model'] == 'UserGetdetailsOutput'
-        # assert 'Get details.' in method_entry['description']
-        # prop_entry = next(e for e in model_data if e['type'] == 'property')
-        # assert prop_entry['command_file'] == 'get_user_email.py'
-        # assert prop_entry['input_model'] == 'UserGet_EmailInput'
-        # assert prop_entry['output_model'] == 'UserGet_EmailOutput'
-        # assert 'User email' in prop_entry['description'] 
+        # No inheritance or aggregation keys should exist
+        assert 'inheritance' not in model_data
+        assert 'aggregation' not in model_data
 
 class TestContextModelGenerator:
     @pytest.fixture
@@ -129,31 +110,23 @@ class TestContextModelGenerator:
         return classes
     
     def test_generate_context_model_new_format(self, temp_dir, mock_classes):
-        # sourcery skip: class-extract-method, extract-duplicate-method
-        """Test that generate_context_model creates a model in the new format."""
+        """Test that generate_context_model creates a model in the new flat format."""
         # Generate the context model
         model = generate_context_model(mock_classes, temp_dir)
         
-        # Check the model structure
-        assert "inheritance" in model
-        assert "aggregation" in model
-        
-        # Check inheritance block
-        inheritance = model["inheritance"]
-        assert "*" in inheritance  # Global context should always be present
-        assert inheritance["*"] == {"base": []}  # Global context has no base classes
+        # Check the model structure - flat format, no inheritance/aggregation keys
+        assert "DerivedClass" in model
+        assert "BaseClass" in model
+        assert "StandaloneClass" in model
         
         # Check DerivedClass inherits from BaseClass
-        assert "DerivedClass" in inheritance
-        assert inheritance["DerivedClass"] == {"base": ["BaseClass"]}
+        assert model["DerivedClass"] == {"base": ["BaseClass"]}
         
         # Check BaseClass has no base classes
-        assert "BaseClass" in inheritance
-        assert inheritance["BaseClass"] == {"base": []}
+        assert model["BaseClass"] == {"base": []}
         
         # StandaloneClass should be in the model even with no base classes
-        assert "StandaloneClass" in inheritance
-        assert inheritance["StandaloneClass"] == {"base": []}
+        assert model["StandaloneClass"] == {"base": []}
         
         # Check that the file was written
         model_path = os.path.join(temp_dir, "_commands/context_inheritance_model.json")
@@ -165,23 +138,15 @@ class TestContextModelGenerator:
         
         assert file_model == model
     
-    def test_generate_context_model_preserves_aggregation(self, temp_dir, mock_classes):
-        # sourcery skip: extract-duplicate-method
-        """Test that generate_context_model preserves the aggregation block."""
-        # Create a pre-existing context model with an aggregation block
+    def test_generate_context_model_preserves_existing_entries(self, temp_dir, mock_classes):
+        """Test that generate_context_model preserves existing entries not in class analysis."""
+        # Create a pre-existing context model
         commands_dir = os.path.join(temp_dir, "_commands")
         os.makedirs(commands_dir, exist_ok=True)
         
         existing_model = {
-            "inheritance": {
-                "*": {"base": []},
-                "BaseClass": {"base": []}
-            },
-            "aggregation": {
-                "DerivedClass": {
-                    "container": ["BaseClass"]
-                }
-            }
+            "BaseClass": {"base": []},
+            "ExistingClass": {"base": ["BaseClass"]},  # This class is not in mock_classes
         }
         
         model_path = os.path.join(commands_dir, "context_inheritance_model.json")
@@ -191,15 +156,13 @@ class TestContextModelGenerator:
         # Generate the new context model
         model = generate_context_model(mock_classes, temp_dir)
         
-        # Check that the aggregation block was preserved
-        assert "aggregation" in model
-        assert "DerivedClass" in model["aggregation"]
-        assert model["aggregation"]["DerivedClass"] == {"container": ["BaseClass"]}
+        # Check that ExistingClass was preserved
+        assert "ExistingClass" in model
+        assert model["ExistingClass"] == {"base": ["BaseClass"]}
         
-        # Check that the inheritance block was updated
-        assert "inheritance" in model
-        assert "DerivedClass" in model["inheritance"]
-        assert model["inheritance"]["DerivedClass"] == {"base": ["BaseClass"]}
+        # Check that the new classes were added
+        assert "DerivedClass" in model
+        assert model["DerivedClass"] == {"base": ["BaseClass"]}
         
         # Read the file and verify its contents
         with open(model_path, "r") as f:
@@ -221,6 +184,6 @@ class TestContextModelGenerator:
             file_model = json.load(f)
         
         assert file_model == model
-        assert "inheritance" in file_model
-        assert "aggregation" in file_model
-        assert file_model["aggregation"] == {} 
+        assert "DerivedClass" in file_model
+        assert "BaseClass" in file_model
+        assert "StandaloneClass" in file_model 

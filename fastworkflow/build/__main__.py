@@ -241,11 +241,14 @@ def run_documentation(args):
     )
     # Use the _commands directory specifically
     commands_dir = os.path.join(args.context_model_dir or args.output_dir, '_commands')
-    command_files, _, _ = collect_command_files_and_context_model(commands_dir)
-    _, context_model, doc_error = collect_command_files_and_context_model(commands_dir)
+    command_files, context_model, doc_error = collect_command_files_and_context_model(commands_dir)
     
     if doc_error:
-        print(f"Documentation generation skipped: {doc_error}")
+        logger.error(f"Documentation generation error: {doc_error}")
+        return
+    
+    if not context_model:
+        logger.error("Documentation generation skipped: Context model is empty or invalid")
         return
     
     command_metadata = extract_command_metadata(command_files)
@@ -253,9 +256,9 @@ def run_documentation(args):
     
     # Write README.md directly to the _commands directory
     if write_readme_file(commands_dir, readme_content):
-        print(f"README.md generated in {commands_dir}")
+        logger.info(f"README.md generated in {commands_dir}")
     else:
-        print("Error: Failed to write README.md.")
+        logger.error("Failed to write README.md.")
 
 def generate_startup_command(output_dir: str, source_dir: str, overwrite: bool = False) -> bool:
     """Generate a startup command file in the _commands directory.
