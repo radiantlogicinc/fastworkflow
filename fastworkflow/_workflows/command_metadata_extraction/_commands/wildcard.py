@@ -1,4 +1,5 @@
 from enum import Enum
+import sys
 from typing import Dict, List, Optional, Type, Union
 import json
 import os
@@ -190,11 +191,11 @@ class CommandNamePrediction:
                     error_msg += "\n\nor type 'none of these' to see all commands\nor type 'abort' to cancel"
                     return CommandNamePrediction.Output(error_msg=error_msg)
 
-
                 # Process the selected command
                 count = self._get_count(self.cache_path)
-                utterance = self._read_utterance(self.cache_path, count-1)
-                store_utterance_cache(self.path, utterance, command_name, modelpipeline)
+                if count > 0:
+                    utterance = self._read_utterance(self.cache_path, count-1)
+                    store_utterance_cache(self.path, utterance, command_name, modelpipeline)
                 change_flag(self.path, 0)  # Reset flag
 
                 # If user selects none_of_these in constrained mode, show all valid commands
@@ -279,24 +280,27 @@ class CommandNamePrediction:
                     change_flag(self.path, 0)
 
         # Store the final command and classification
-        if command_name != "Core/misunderstood_intent":
-            count = self._store_utterance(self.cache_path, command, command_name)
+        if command_name:
+            if command_name != "Core/misunderstood_intent":
+                count = self._store_utterance(self.cache_path, command, command_name)
 
-        class ValidateCommandNameSignature(BaseModel):
-            command_name: str
-        command_parameters = ValidateCommandNameSignature(command_name=command_name)
-        is_valid, error_msg = self._validate_command_name(valid_command_names, command_parameters)
+            class ValidateCommandNameSignature(BaseModel):
+                command_name: str
+            command_parameters = ValidateCommandNameSignature(command_name=command_name)
+            is_valid, error_msg = self._validate_command_name(valid_command_names, command_parameters)
 
-        # If validation fails, set flag to 2 (misclassified)
-        if not is_valid:
-            self._store_suggested_commands(self.path, valid_command_names, 2)
-            change_flag(self.path, 2)
-            return CommandNamePrediction.Output(error_msg=error_msg)
+            # If validation fails, set flag to 2 (misclassified)
+            if not is_valid:
+                self._store_suggested_commands(self.path, valid_command_names, 2)
+                change_flag(self.path, 2)
+                return CommandNamePrediction.Output(error_msg=error_msg)
 
-        return CommandNamePrediction.Output(
-            command_name=command_parameters.command_name,
-            is_cme_command=command_parameters.command_name in cme_command_names
-        )
+            return CommandNamePrediction.Output(
+                command_name=command_parameters.command_name,
+                is_cme_command=command_parameters.command_name in cme_command_names
+            )
+        
+        return CommandNamePrediction.Output(command_name=None, is_cme_command=False)
 
     @staticmethod
     def _get_cache_path(session_id, convo_path):
@@ -364,7 +368,7 @@ class CommandNamePrediction:
     def _get_count(cache_path):
         db = Rdict(cache_path)
         try:
-            return db.get("utterance_count")
+            return db.get("utterance_count", 0)  # Default to 0 if key doesn't exist
         finally:
             db.close()
 
@@ -644,7 +648,12 @@ class ParameterExtraction:
         for field_name in all_fields:
             value = getattr(params, field_name, None)
 
-            if value is None or value == NOT_FOUND:
+            if value in [
+                NOT_FOUND, 
+                None,
+                -sys.maxsize,
+                -sys.float_info.max
+            ]:
                 continue
 
             display_name = " ".join(word.capitalize() for word in field_name.split('_'))

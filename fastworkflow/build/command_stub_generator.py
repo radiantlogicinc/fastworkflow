@@ -13,6 +13,7 @@ from typing import Dict, Any, Optional, List, Tuple, Set
 
 from fastworkflow.context_model_loader import ContextModelLoader
 from fastworkflow.utils.logging import logger
+from fastworkflow.utils.context_utils import get_context_names
 
 __all__ = ["CommandStubGenerator"]
 
@@ -55,46 +56,7 @@ class CommandStubGenerator:
         except Exception as e:
             logger.error(f"Error loading context model: {e}")
             # Return a minimal default model
-            return {"inheritance": {"*": {"base": []}}, "aggregation": {}}
-
-    def get_container_contexts(self, context: str) -> List[str]:
-        """Get the container contexts for a given context based on the context model.
-        
-        This checks only the aggregation information from the model.
-        
-        Args:
-            context: The context name
-            
-        Returns:
-            List[str]: List of container context names
-        """
-        if context == '*':
-            return []  # Global context has no containers
-        
-        model = self.load_context_model()
-        
-        # Check aggregation (containers)
-        aggregation = model.get("aggregation", {})
-        if context in aggregation:
-            return aggregation[context].get("container", [])
-        
-        return []
-
-    def get_contexts_with_containers(self) -> Set[str]:
-        """Get all contexts that have container contexts defined.
-        
-        Returns:
-            Set[str]: Set of context names that have container contexts
-        """
-        model = self.load_context_model()
-        contexts_with_containers = set()
-        
-        aggregation = model.get("aggregation", {})
-        for context, data in aggregation.items():
-            if data.get("container", []):
-                contexts_with_containers.add(context)
-        
-        return contexts_with_containers
+            return {}
 
     def get_command_file_path(self, context: str, command_name: str) -> Path:
         """Get the file path for a command in a specific context.
@@ -196,59 +158,6 @@ class CommandStubGenerator:
             logger.error(f"Error writing command stub file {file_path}: {e}")
             return None
 
-    def generate_handlers_file(self, context: str, force: bool = False) -> Optional[Path]:
-        """Generate a _fastworkflow_handlers.py file for a specific context.
-        
-        This file will only be generated if the context has container contexts defined
-        in the aggregation section of the context model.
-        
-        Args:
-            context: The context name (should not be '*' for global context)
-            force: If True, overwrite existing files
-            
-        Returns:
-            Optional[Path]: Path to the generated file, or None if:
-                - The file already exists and force is False
-                - The context has no container contexts defined
-                - The context is the global context ('*')
-        """
-        # Skip for global context
-        if context == '*':
-            logger.debug("Skipping handlers file generation for global context '*'")
-            return None
-        
-        # Check if the context has container contexts
-        container_contexts = self.get_container_contexts(context)
-        if not container_contexts:
-            logger.debug(f"Skipping handlers file generation for context '{context}' (no container contexts defined)")
-            return None
-        
-        # Determine file path
-        file_path = self.get_handlers_file_path(context)
-        
-        # Check if file exists
-        exists, reason = self.check_file_exists(file_path)
-        
-        if exists and not force:
-            logger.debug(f"Handlers file already exists: {file_path} - {reason}")
-            return None
-        
-        # Ensure parent directory exists
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Generate stub content
-        stub_content = self._generate_handlers_stub_content(context, container_contexts)
-        
-        # Write stub file
-        try:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(stub_content)
-            logger.debug(f"Generated handlers file: {file_path}")
-            return file_path
-        except Exception as e:
-            logger.error(f"Error writing handlers file {file_path}: {e}")
-            return None
-
     def generate_command_stubs_for_context(self, context: str, command_names: List[str], force: bool = False) -> List[Path]:
         """Generate command stub files for multiple commands in a context.
         
@@ -261,18 +170,17 @@ class CommandStubGenerator:
             List[Path]: List of paths to the generated files
         """
         generated_files = []
-        
+
         # Generate command stubs
         for command_name in command_names:
-            file_path = self.generate_command_stub(context, command_name, force)
-            if file_path:
+            if file_path := self.generate_command_stub(
+                context, command_name, force
+            ):
                 generated_files.append(file_path)
-        
-        # Generate handlers file if needed
-        handlers_path = self.generate_handlers_file(context, force)
-        if handlers_path:
+
+        if handlers_path := self.generate_handlers_file(context, force):
             generated_files.append(handlers_path)
-        
+
         return generated_files
 
     def generate_command_stubs_for_all_contexts(self, command_names: Dict[str, List[str]], force: bool = False) -> Dict[str, List[Path]]:

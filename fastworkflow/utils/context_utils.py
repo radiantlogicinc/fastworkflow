@@ -9,3 +9,14 @@ def list_context_names(workflow_folderpath: str, include_default: bool = False) 
     if not include_default and "*" in names:
         names.remove("*")
     return names 
+
+def get_context_names(model: dict) -> set[str]:
+    """Extract context names from a context model.
+    
+    Args:
+        model: The context model dictionary
+        
+    Returns:
+        Set of context names
+    """
+    return set(model.keys()) 

@@ -78,9 +78,11 @@ def run_command_generation(args):
     # Generate command files
     py_files = [f for f in glob.glob(os.path.join(args.source_dir, '**', '*.py'), recursive=True) if not f.endswith('__init__.py')]
     all_classes = {}
+    all_functions = {}
     for py_file in py_files:
-        classes = ast_class_extractor.analyze_python_file(py_file)
+        classes, functions = ast_class_extractor.analyze_python_file(py_file)
         all_classes |= classes
+        all_functions |= functions
 
     # Resolve inherited properties for all classes
     ast_class_extractor.resolve_inherited_properties(all_classes)
@@ -158,7 +160,7 @@ def run_command_generation(args):
             # Continue with command generation even if navigator generation fails
 
     # Generate command files
-    real_generate_command_files(all_classes, os.path.join(context_dir, '_commands'), args.source_dir, overwrite=args.overwrite)
+    real_generate_command_files(all_classes, os.path.join(context_dir, '_commands'), args.source_dir, overwrite=args.overwrite, functions=all_functions)
 
     return all_classes, context_model_data
 
@@ -198,7 +200,7 @@ def run_validation(args, all_classes, context_model_dict):
         for f in glob.glob(
             os.path.join(commands_dir, '**', '*.py'), recursive=True
         )
-        if not f.endswith('__init__.py') and not os.path.basename(f).startswith('_')
+        if not f.endswith('__init__.py') and not os.path.basename(f).startswith('_') and os.path.basename(f) != 'startup.py'
     ]:
         if syntax_errors := validate_python_syntax_in_dir(commands_dir):
             errors.append(f"Error: {len(syntax_errors)} syntax error(s) found in generated command files.")
@@ -245,10 +247,6 @@ def run_documentation(args):
     
     if doc_error:
         logger.error(f"Documentation generation error: {doc_error}")
-        return
-    
-    if not context_model:
-        logger.error("Documentation generation skipped: Context model is empty or invalid")
         return
     
     command_metadata = extract_command_metadata(command_files)

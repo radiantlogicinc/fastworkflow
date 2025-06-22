@@ -13,6 +13,7 @@ from typing import Dict, Any, Optional
 
 from fastworkflow.context_model_loader import ContextModelLoader
 from fastworkflow.utils.logging import logger
+from fastworkflow.utils.context_utils import get_context_names
 
 __all__ = ["ContextFolderGenerator"]
 
@@ -59,7 +60,7 @@ class ContextFolderGenerator:
     def generate_folders(self) -> Dict[str, Path]:
         """Generate context folders based on the model.
         
-        Creates a folder for each context in the inheritance block,
+        Creates a folder for each context in the model,
         except for the global "*" context. Also creates a _<ContextName>.py file
         in each context folder with a Context class and get_parent method.
         
@@ -73,8 +74,9 @@ class ContextFolderGenerator:
         self.commands_root.mkdir(exist_ok=True, parents=True)
 
         # Create context folders
-        contexts = set(context_model.get('inheritance', {}).keys())
-        contexts.discard('*')  # Global context doesn't need a folder
+        contexts = get_context_names(context_model)
+        if '*' in contexts:
+            contexts.remove('*')  # Global context doesn't need a folder
 
         created_folders = {}
 
@@ -92,7 +94,7 @@ class ContextFolderGenerator:
                 parent_import = ""
                 
                 # Get base classes for this context
-                base_classes = context_model.get('inheritance', {}).get(context, {}).get('base', [])
+                base_classes = context_model.get(context, {}).get('base', [])
                 if base_classes:
                     # Use first base class as parent type
                     parent_type = base_classes[0]

@@ -1,29 +1,24 @@
 from __future__ import annotations
 
-"""Utility to load and validate a *v2* `context_inheritance_model.json`.
+"""Utility to load and validate a flat `context_inheritance_model.json`.
 
-The v2 schema wraps *inheritance* and *aggregation* information in two top-level
-keys:
+The schema is a simple mapping of context names to their base classes:
 
 ```
 {
-  "inheritance": {
-      "*": {"base": []},
-      "Order": {"base": ["*"]}
-  },
-  "aggregation": {
-      "OrderLine": {"container": ["Order"]}
-  }
+  "*": {"base": []},
+  "Order": {"base": ["*"]},
+  "OrderLine": {"base": ["*"]},
 }
 ```
 
-Only ``inheritance`` is mandatory. If the JSON lacks an ``aggregation`` block
-we transparently add an empty one so callers can rely on its presence.
+Each context has a "base" list containing its base classes.
+An empty dict is valid and indicates no contexts are defined.
 """
 
 from pathlib import Path
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List, Set
 
 __all__ = ["ContextModelLoader", "ContextModelLoaderError"]
 
@@ -33,7 +28,7 @@ class ContextModelLoaderError(Exception):
 
 
 class ContextModelLoader:
-    """Loads and validates a v2 *command context model* JSON file."""
+    """Loads and validates a flat command context model JSON file."""
 
     def __init__(self, model_path: str | Path = "_commands/context_inheritance_model.json") -> None:
         self.model_path = Path(model_path)
@@ -64,17 +59,16 @@ class ContextModelLoader:
         if not isinstance(data, dict):
             raise ContextModelLoaderError("Root of context model must be a JSON object (dict).")
 
-        if "inheritance" not in data:
-            raise ContextModelLoaderError("Missing required 'inheritance' key in context model")
-
-        if not isinstance(data["inheritance"], dict):
-            raise ContextModelLoaderError("'inheritance' must map to an object/dictionary")
-
-        # Ensure aggregation present and sane
-        if "aggregation" not in data:
-            data["aggregation"] = {}
-        elif not isinstance(data["aggregation"], dict):
-            raise ContextModelLoaderError("'aggregation' must map to an object/dictionary")
+        # Validate context entries
+        for context_name, context_data in data.items():
+            if not isinstance(context_data, dict):
+                raise ContextModelLoaderError(f"Context '{context_name}' must map to an object/dictionary")
+            
+            if "base" not in context_data:
+                raise ContextModelLoaderError(f"Context '{context_name}' is missing required 'base' key")
+                
+            if not isinstance(context_data["base"], list):
+                raise ContextModelLoaderError(f"'base' for context '{context_name}' must be a list")
 
         self._model_data = data
         return data
@@ -84,18 +78,22 @@ class ContextModelLoader:
     # ------------------------------------------------------------------
 
     @property
-    def inheritance(self) -> Dict[str, Any]:
-        """Return the inheritance mapping; load the model if necessary."""
+    def contexts(self) -> Dict[str, Dict[str, Any]]:
+        """Return all contexts; load the model if necessary."""
         if self._model_data is None:
             self.load()
         # mypy hint
         assert self._model_data is not None
-        return self._model_data["inheritance"]
+        
+        return self._model_data
 
-    @property
-    def aggregation(self) -> Dict[str, Any]:
-        """Return the aggregation mapping (guaranteed to exist)."""
+    def bases(self, context: str) -> List[str]:
+        """Return the base classes for a given context."""
         if self._model_data is None:
             self.load()
         assert self._model_data is not None
-        return self._model_data["aggregation"] 
+        
+        if context not in self._model_data:
+            return []
+        
+        return self._model_data[context].get("base", [])

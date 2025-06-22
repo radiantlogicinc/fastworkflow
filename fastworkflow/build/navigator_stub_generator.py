@@ -4,7 +4,7 @@ from __future__ import annotations
 
 This module provides functionality to create skeleton navigator files for
 different contexts, including appropriate context expansion logic based on
-inheritance and aggregation relationships.
+inheritance relationships.
 """
 
 import os
@@ -13,6 +13,7 @@ from typing import Dict, Any, Optional, List, Set, Tuple
 
 from fastworkflow.context_model_loader import ContextModelLoader
 from fastworkflow.utils.logging import logger
+from fastworkflow.utils.context_utils import get_context_names
 
 __all__ = ["NavigatorStubGenerator"]
 
@@ -55,37 +56,7 @@ class NavigatorStubGenerator:
         except Exception as e:
             logger.error(f"Error loading context model: {e}")
             # Return a minimal default model
-            return {"inheritance": {"*": {"base": []}}, "aggregation": {}}
-
-    def get_parent_contexts(self, context: str) -> Dict[str, List[str]]:
-        """Get the parent contexts for a given context based on the context model.
-        
-        This separates inheritance and aggregation relationships.
-        
-        Args:
-            context: The context name
-            
-        Returns:
-            Dict[str, List[str]]: Dictionary with 'inheritance' and 'aggregation' keys
-                mapping to lists of parent context names
-        """
-        if context == '*':
-            return {"inheritance": [], "aggregation": []}  # Global context has no parents
-        
-        model = self.load_context_model()
-        result = {"inheritance": [], "aggregation": []}
-        
-        # Check inheritance (base classes)
-        inheritance = model.get("inheritance", {})
-        if context in inheritance:
-            result["inheritance"] = inheritance[context].get("base", [])
-        
-        # Check aggregation (containers)
-        aggregation = model.get("aggregation", {})
-        if context in aggregation:
-            result["aggregation"] = aggregation[context].get("container", [])
-        
-        return result
+            return {}
 
     def get_navigator_file_path(self, context: str) -> Path:
         """Get the file path for a navigator for a specific context.
@@ -165,7 +136,6 @@ class NavigatorStubGenerator:
         stub_content = self._generate_stub_content(
             context, 
             parent_contexts["inheritance"], 
-            parent_contexts["aggregation"]
         )
         
         # Write stub file
@@ -188,8 +158,9 @@ class NavigatorStubGenerator:
             Dict[str, Path]: Dictionary mapping context names to generated file paths
         """
         model = self.load_context_model()
-        contexts = set(model.get("inheritance", {}).keys())
-        contexts.discard("*")  # Global context doesn't need a navigator
+        contexts = get_context_names(model)
+        if '*' in contexts:
+            contexts.remove('*')  # Global context doesn't need a navigator
         
         generated_files = {}
         for context in contexts:
@@ -202,15 +173,13 @@ class NavigatorStubGenerator:
     def _generate_stub_content(
         self, 
         context: str, 
-        base_contexts: List[str], 
-        container_contexts: List[str]
+        base_contexts: List[str]
     ) -> str:
         """Generate the content for a navigator stub file.
         
         Args:
             context: The context name
             base_contexts: List of base contexts (inheritance)
-            container_contexts: List of container contexts (aggregation)
             
         Returns:
             str: The generated stub content
@@ -219,7 +188,7 @@ class NavigatorStubGenerator:
         stub = f'''"""Navigator for {context} context.
 
 This module provides navigation functionality for {context} objects,
-allowing movement between contexts based on inheritance and aggregation
+allowing movement between contexts based on inheritance
 relationships.
 """
 
@@ -250,7 +219,11 @@ class {context}Navigator(ContextExpander):
             return
 '''
         
-        # Add container context navigation if available
+        # NOTE: container context support was removed.  Keep an empty list so
+        # template variables still resolve without raising NameError.
+        container_contexts: list[str] = []
+
+        # Add container context navigation if available (currently disabled)
         if container_contexts:
             for container in container_contexts:
                 if container == '*':
@@ -317,3 +290,20 @@ class {context}Navigator(ContextExpander):
 '''
         
         return stub 
+
+    # -----------------------------------------------------------------
+    # Helper utilities (public so tests can call them directly)
+    # -----------------------------------------------------------------
+
+    def get_parent_contexts(self, context: str) -> dict:
+        """Return the list of immediate base contexts for *context*.
+
+        The loader works with the *flat* context-model schema where each
+        context maps to a dict that contains a ``base`` list.  We expose a
+        stable structure that older tests can also use (a dict with the
+        key ``"inheritance"``) so callers only need to look at
+        ``result["inheritance"]``.
+        """
+        model = self.load_context_model()
+        bases: list[str] = model.get(context, {}).get("base", [])
+        return {"inheritance": bases} 

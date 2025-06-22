@@ -1,6 +1,6 @@
 import ast
-from typing import Dict
-from fastworkflow.build.class_analysis_structures import ClassInfo, MethodInfo, PropertyInfo
+from typing import Dict, Tuple
+from fastworkflow.build.class_analysis_structures import ClassInfo, MethodInfo, PropertyInfo, FunctionInfo
 
 try:
     from ast import unparse as ast_unparse
@@ -50,10 +50,11 @@ def parse_google_docstring(docstring: str) -> dict:
         'returns': returns
     }
 
-def analyze_python_file(file_path: str) -> Dict[str, ClassInfo]:
+def analyze_python_file(file_path: str) -> Tuple[Dict[str, ClassInfo], Dict[str, FunctionInfo]]:
     with open(file_path, 'r') as f:
         node = ast.parse(f.read(), filename=file_path)
     classes = {}
+    functions = {}
 
     def extract_class(class_node, parent_path=None):
         class_name = class_node.name
@@ -136,11 +137,46 @@ def analyze_python_file(file_path: str) -> Dict[str, ClassInfo]:
         class_info._property_setters = property_setters
         return class_info
 
+    # Extract top-level functions
+    for item in node.body:
+        if isinstance(item, ast.FunctionDef):
+            # Skip private functions
+            if item.name.startswith('_'):
+                continue
+                
+            # Extract function parameters
+            params = []
+            for arg in item.args.args:
+                param_info = {'name': arg.arg}
+                param_info['annotation'] = ast_unparse(arg.annotation) if arg.annotation else None
+                params.append(param_info)
+                
+            # Extract docstring and return annotation
+            docstring = ast.get_docstring(item)
+            return_annotation = ast_unparse(item.returns) if item.returns else None
+            decorators = [ast_unparse(d) for d in item.decorator_list]
+            
+            # Create FunctionInfo
+            function_info = FunctionInfo(
+                name=item.name,
+                module_path=file_path,
+                parameters=params,
+                docstring=docstring,
+                return_annotation=return_annotation,
+                decorators=decorators,
+                docstring_parsed=parse_google_docstring(docstring)
+            )
+            
+            # Add to functions dict
+            functions[item.name] = function_info
+
+    # Extract classes
     for item in ast.walk(node):
-        if isinstance(item, ast.ClassDef):
+        if isinstance(item, ast.ClassDef) and item in node.body:  # Only top-level classes
             class_info = extract_class(item)
             classes[class_info.name] = class_info
-    return classes
+            
+    return classes, functions
 
 def resolve_inherited_properties(all_my_classes: Dict[str, ClassInfo]) -> None:
     """Update each ClassInfo object in all_my_classes to include inherited properties."""

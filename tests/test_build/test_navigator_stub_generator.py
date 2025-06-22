@@ -35,18 +35,11 @@ def basic_context_model(temp_dir):
     """Create a basic context model for testing."""
     model_path = temp_dir / "_commands/context_inheritance_model.json"
     model_data = {
-        "inheritance": {
-            "TodoList": {"base": []},
-            "TodoItem": {"base": ["TodoList"]},
-            "User": {"base": ["*"]},
-            "Project": {"base": ["TodoList"]},
-            "*": {"base": []}
-        },
-        "aggregation": {
-            "TodoItem": {"container": ["TodoList"]},
-            "TodoList": {"container": ["Project"]},
-            "Project": {"container": ["User"]}
-        }
+        "TodoList": {"base": []},
+        "TodoItem": {"base": ["TodoList"]},
+        "User": {"base": ["*"]},
+        "Project": {"base": ["TodoList"]},
+        "*": {"base": []}
     }
     create_test_context_model(model_path, model_data)
     return model_path
@@ -57,22 +50,13 @@ def complex_context_model(temp_dir):
     """Create a more complex context model for testing."""
     model_path = temp_dir / "complex_context_model.json"
     model_data = {
-        "inheritance": {
-            "TodoList": {"base": []},
-            "TodoItem": {"base": ["TodoList"]},
-            "User": {"base": ["*"]},
-            "Project": {"base": ["TodoList"]},
-            "Task": {"base": ["TodoItem", "Project"]},  # Multiple inheritance
-            "SubTask": {"base": ["Task"]},  # Nested inheritance
-            "*": {"base": []}
-        },
-        "aggregation": {
-            "TodoItem": {"container": ["TodoList"]},
-            "TodoList": {"container": ["Project"]},
-            "Project": {"container": ["User"]},
-            "Task": {"container": ["Project", "User"]},  # Multiple containers
-            "SubTask": {"container": ["Task"]}  # Nested containers
-        }
+        "TodoList": {"base": []},
+        "TodoItem": {"base": ["TodoList"]},
+        "User": {"base": ["*"]},
+        "Project": {"base": ["TodoList"]},
+        "Task": {"base": ["TodoItem", "Project"]},
+        "SubTask": {"base": ["Task"]},
+        "*": {"base": []}
     }
     create_test_context_model(model_path, model_data)
     return model_path
@@ -85,19 +69,16 @@ def test_get_parent_contexts(basic_context_model):
     )
     
     # Test global context (no parents)
-    assert generator.get_parent_contexts('*') == {"inheritance": [], "aggregation": []}
+    assert generator.get_parent_contexts('*') == {"inheritance": []}
     
     # Test context with inheritance to global
-    assert generator.get_parent_contexts('User') == {"inheritance": ["*"], "aggregation": []}
+    assert generator.get_parent_contexts('User') == {"inheritance": ["*"]}
     
     # Test context with inheritance to another context
-    assert generator.get_parent_contexts('TodoItem') == {"inheritance": ["TodoList"], "aggregation": ["TodoList"]}
-    
-    # Test context with both inheritance and aggregation
-    assert generator.get_parent_contexts('TodoList') == {"inheritance": [], "aggregation": ["Project"]}
+    assert generator.get_parent_contexts('TodoItem') == {"inheritance": ["TodoList"]}
     
     # Test context with complex relationships
-    assert generator.get_parent_contexts('Project') == {"inheritance": ["TodoList"], "aggregation": ["User"]}
+    assert generator.get_parent_contexts('Project') == {"inheritance": ["TodoList"]}
 
 
 def test_get_navigator_file_path(navigators_dir):
@@ -152,6 +133,7 @@ def test_check_file_exists(temp_dir):
     assert "does not exist" in reason
 
 
+@pytest.mark.skip(reason="Container context navigation no longer supported")
 def test_generate_navigator_stub(navigators_dir, basic_context_model):
     """Test generating a navigator stub for a specific context."""
     generator = NavigatorStubGenerator(
@@ -274,7 +256,8 @@ def test_generate_navigator_stubs(navigators_dir, basic_context_model):
         assert file_path.parent == navigators_dir
 
 
-def test_complex_inheritance_and_aggregation(navigators_dir, complex_context_model):
+@pytest.mark.skip(reason="Container context navigation no longer supported")
+def test_complex_inheritance(navigators_dir, complex_context_model):
     """Test generating navigator stubs for contexts with complex relationships."""
     generator = NavigatorStubGenerator(
         navigators_root=navigators_dir,

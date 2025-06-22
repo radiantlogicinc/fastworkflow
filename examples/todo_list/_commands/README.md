@@ -19,10 +19,6 @@ These commands can be used with FastWorkflow's orchestration and agent framework
 No commands in this context.
 
 
-### aggregation Context
-
-No commands in this context.
-
 
 ## Context Model
 
@@ -43,9 +39,6 @@ Structure example:
 ### Contexts and Commands
 
 #### inheritance Context
-No commands in this context.
-
-#### aggregation Context
 No commands in this context.
 
 ## Extending

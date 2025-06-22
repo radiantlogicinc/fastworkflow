@@ -33,7 +33,7 @@ def test_analyzer_and_generators_on_all_files():
     for fname in os.listdir(INPUT_FOLDER):
         if fname.endswith('.py') and fname != '__init__.py': # Exclude __init__.py if it doesn't contain relevant classes
             file_path = os.path.join(INPUT_FOLDER, fname)
-            file_classes = analyze_python_file(file_path)
+            file_classes, _ = analyze_python_file(file_path)
             for cname, cinfo in file_classes.items():
                 if cname in classes:
                     # This might be too strict if classes are intentionally split for organization.
@@ -90,5 +90,5 @@ def test_analyzer_and_generators_on_all_files():
             f"Base for {class_name} should be {expected_bases}, got {context_data[class_name]['base']}"
         )
 
-    json_as_str = json.dumps(context_data)
-    assert '"/"' not in json_as_str, "Deprecated '/' key found in context model JSON" 
+    # Ensure the deprecated '/' key is not present anywhere in the generated model
+    assert all('/' not in k for k in context_data.keys()) 

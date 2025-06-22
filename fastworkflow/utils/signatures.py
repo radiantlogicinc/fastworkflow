@@ -1,3 +1,4 @@
+import sys
 import dspy
 import os
 from typing import Annotated, Optional, Tuple, Union, Dict, Any, Type, List, get_args
@@ -149,7 +150,7 @@ Today's date is {today}.
     def create_signature_from_pydantic_model(
         pydantic_model: Type[BaseModel]
     ) -> Type[dspy.Signature]:
-        """
+            """
         Create a DSPy Signature class from a Pydantic model with type annotations.
         
         Args:
@@ -158,70 +159,78 @@ Today's date is {today}.
         Returns:
             A DSPy Signature class
         """
-        signature_components = {}
-        
-        signature_components["command"] = (str, dspy.InputField(desc="User's request"))
-        
-        steps = ["query: The original user query (Always include this)."]
-        field_num = 1
-        
-        for attribute_name, attribute_metadata in pydantic_model.model_fields.items():
-            is_optional = False
-            attribute_type = attribute_metadata.annotation
-            
-            if hasattr(attribute_type, "__origin__") and attribute_type.__origin__ is Union:
-                union_elements = get_args(attribute_type)
-                if type(None) in union_elements:
-                    is_optional = True
-                    attribute_type = next((elem for elem in union_elements if elem is not type(None)), str)
+            signature_components = {
+                "command": (str, dspy.InputField(desc="User's request"))
+            }
 
-            NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")            
-            default_value = NOT_FOUND if attribute_type is str else None
-            if (
-                attribute_metadata.default is not PydanticUndefined and 
-                attribute_metadata.default is not None and 
-                attribute_metadata.default != Ellipsis
-            ):
-                default_value = attribute_metadata.default
-            
-            info_text = attribute_metadata.description or f"The {attribute_name}"
-            
-            if attribute_name != "query": 
-                steps.append(f"Step {field_num}: Identify the {attribute_name} ({info_text}).")
-                field_num += 1
-            
-            if isinstance(attribute_type, type) and issubclass(attribute_type, Enum):
-                possible_values = [f"'{option.value}'" for option in attribute_type]
-                info_text += f". Valid values: {', '.join(possible_values)}"
-            
-            if attribute_metadata.examples:
-                sample_values = ", ".join([f"'{sample}'" for sample in attribute_metadata.examples])
-                info_text += f". Examples: {sample_values}"
-            
-            requirement_status = "Optional" if is_optional else "Required"
-            info_text += f". This field is {requirement_status}."
-            
-            if is_optional:
-                info_text += f" If not mentioned in the query, use: '{default_value or 'None'}'."
-            elif default_value is not None:
-                info_text += f" Default value: '{default_value}'."
-            
-            field_definition = dspy.OutputField(desc=info_text, default=default_value)
-            signature_components[attribute_name] = (attribute_metadata.annotation, field_definition)
-        
-        steps.append(f"Step {field_num}: Check for any missing details.")
-        steps.append("Return the default value for the parameters for which default value is specified.")
-        steps.append("For parameters specified as enums, return the default value if the parameter value is not explicitly specified in the query")
-        steps.append("Return None for the parameter value which is missing in the query")
-        steps.append("Always return the query in the output.")
-        
-        generated_docstring = f"""Extract structured parameters from a user query using step-by-step reasoning. Today's date is {date.today()}.
+            steps = ["query: The original user query (Always include this)."]
+            field_num = 1
+
+            for attribute_name, attribute_metadata in pydantic_model.model_fields.items():
+                is_optional = False
+                attribute_type = attribute_metadata.annotation
+
+                if hasattr(attribute_type, "__origin__") and attribute_type.__origin__ is Union:
+                    union_elements = get_args(attribute_type)
+                    if type(None) in union_elements:
+                        is_optional = True
+                        attribute_type = next((elem for elem in union_elements if elem is not type(None)), str)
+
+                NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
+                if attribute_type is str:            
+                    default_value = NOT_FOUND
+                elif attribute_type is int:
+                    default_value = -sys.maxsize
+                elif attribute_type is float:
+                    default_value = -sys.float_info.max
+                else:
+                    attribute_type = None
+                if (
+                    attribute_metadata.default is not PydanticUndefined and 
+                    attribute_metadata.default is not None and 
+                    attribute_metadata.default != Ellipsis
+                ):
+                    default_value = attribute_metadata.default
+
+                info_text = attribute_metadata.description or f"The {attribute_name}"
+
+                if attribute_name != "query": 
+                    steps.append(f"Step {field_num}: Identify the {attribute_name} ({info_text}).")
+                    field_num += 1
+
+                if isinstance(attribute_type, type) and issubclass(attribute_type, Enum):
+                    possible_values = [f"'{option.value}'" for option in attribute_type]
+                    info_text += f". Valid values: {', '.join(possible_values)}"
+
+                if attribute_metadata.examples:
+                    sample_values = ", ".join([f"'{sample}'" for sample in attribute_metadata.examples])
+                    info_text += f". Examples: {sample_values}"
+
+                requirement_status = "Optional" if is_optional else "Required"
+                info_text += f". This field is {requirement_status}."
+
+                if is_optional:
+                    info_text += f" If not mentioned in the query, use: '{default_value or 'None'}'."
+                elif default_value is not None:
+                    info_text += f" Default value: '{default_value}'."
+
+                field_definition = dspy.OutputField(desc=info_text, default=default_value)
+                signature_components[attribute_name] = (attribute_metadata.annotation, field_definition)
+
+            steps.extend((
+                f"Step {field_num}: Check for any missing details.",
+                "Return the default value for the parameters for which default value is specified.",
+                "For parameters specified as enums, return the default value if the parameter value is not explicitly specified in the query",
+                "Return None for the parameter value which is missing in the query",
+                "Always return the query in the output.",
+            ))
+            generated_docstring = f"""Extract structured parameters from a user query using step-by-step reasoning. Today's date is {date.today()}.
 
         {chr(10).join(steps)}
         """
-        instructions = generated_docstring
-        
-        return dspy.Signature(signature_components, instructions)
+            instructions = generated_docstring
+
+            return dspy.Signature(signature_components, instructions)
 
     @staticmethod
     def populate_defaults_dict(command_parameters_class):
@@ -237,11 +246,13 @@ Today's date is {today}.
             elif field_info.annotation == str:
                 default_params[field_name] = NOT_FOUND
             elif field_info.annotation == int:
-                default_params[field_name] = None
-            # Handle Optional[int]
+                default_params[field_name] = -sys.maxsize
+            elif field_info.annotation == float:
+                default_params[field_name] = -sys.float_info.max
+            # Handle Optional[int] and Optional[float]
             elif (hasattr(field_info.annotation, "__origin__") and
                   field_info.annotation.__origin__ is Union and
-                  int in field_info.annotation.__args__ and
+                  (int in field_info.annotation.__args__ or float in field_info.annotation.__args__) and
                   type(None) in field_info.annotation.__args__):
                 default_params[field_name] = None
             else:
@@ -350,7 +361,13 @@ Today's date is {today}.
                     is_required=False
 
             # Only add to missing fields if it's required AND has no value
-            if is_required and field_value in [NOT_FOUND, None]:
+            if is_required and \
+                field_value in [
+                    NOT_FOUND, 
+                    None,
+                    -sys.maxsize,
+                    -sys.float_info.max
+                ]:
                 missing_fields.append(field_name)
                 is_valid = False
 

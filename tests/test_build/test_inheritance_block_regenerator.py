@@ -259,25 +259,6 @@ def test_preserve_existing_entries(existing_model, context_dirs):
     assert "User" in model
 
 
-def test_preserve_aggregation(existing_model, context_dirs):
-    """Test that the aggregation block is preserved during regeneration."""
-    regenerator = InheritanceBlockRegenerator(
-        commands_root=context_dirs,
-        model_path=existing_model
-    )
-
-    model = regenerator.regenerate_inheritance()
-
-    # Check that the model has been updated with TodoList
-    # In the new flat structure, TodoList should be at the top level
-    assert "TodoList" in model
-    
-    # Check that OldClass is preserved from the existing model
-    assert "OldClass" in model
-    assert "AnotherOldClass" in model
-    assert model["AnotherOldClass"]["base"] == ["OldClass"]
-
-
 def test_idempotence(existing_model, context_dirs):
     """Test that running the regenerator multiple times produces the same result."""
     regenerator = InheritanceBlockRegenerator(

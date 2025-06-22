@@ -116,17 +116,9 @@ class TestManager:
         # Create a simple context model
         model_path = os.path.join(commands_dir, "context_inheritance_model.json")
         model_data = {
-            "inheritance": {
-                "TestContext": {
-                    "base": ["BaseContext"]
-                },
-                "BaseContext": {
-                    "base": []
-                },
-                "*": {
-                    "base": []
-                }
-            }
+            "TestContext": {"base": ["BaseContext"]},
+            "BaseContext": {"base": []},
+            "*": {"base": []}
         }
         
         with open(model_path, "w") as f:

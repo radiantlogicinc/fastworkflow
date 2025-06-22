@@ -28,15 +28,10 @@ def basic_context_model(temp_dir):
     """Create a basic context model for testing."""
     model_path = temp_dir / "_commands/context_inheritance_model.json"
     model_data = {
-        "inheritance": {
-            "TodoList": {"base": []},
-            "TodoItem": {"base": []},
-            "User": {"base": []},
-            "*": {"base": []}
-        },
-        "aggregation": {
-            "TodoItem": {"container": ["TodoList"]}
-        }
+        "TodoList": {"base": []},
+        "TodoItem": {"base": []},
+        "User": {"base": []},
+        "*": {"base": []}
     }
     create_test_context_model(model_path, model_data)
     return model_path
@@ -47,16 +42,11 @@ def inheritance_context_model(temp_dir):
     """Create a context model with inheritance relationships for testing."""
     model_path = temp_dir / "_commands/context_inheritance_model.json"
     model_data = {
-        "inheritance": {
-            "TodoList": {"base": ["BaseList"]},
-            "TodoItem": {"base": ["BaseItem"]},
-            "BaseList": {"base": []},
-            "BaseItem": {"base": []},
-            "*": {"base": []}
-        },
-        "aggregation": {
-            "TodoItem": {"container": ["TodoList"]}
-        }
+        "TodoList": {"base": ["BaseList"]},
+        "TodoItem": {"base": ["BaseItem"]},
+        "BaseList": {"base": []},
+        "BaseItem": {"base": []},
+        "*": {"base": []}
     }
     create_test_context_model(model_path, model_data)
     return model_path
@@ -249,9 +239,7 @@ def test_empty_model(temp_dir, commands_dir):
     
     # Create an empty model with just the required structure
     create_test_context_model(empty_model_path, {
-        "inheritance": {
-            "*": {"base": []}
-        }
+        "*": {"base": []}
     })
     
     generator = ContextFolderGenerator(
@@ -259,9 +247,9 @@ def test_empty_model(temp_dir, commands_dir):
         model_path=empty_model_path
     )
     
-    # The generator should not create any folders
-    created_folders = generator.generate_folders()
-    assert len(created_folders) == 0
+    # An empty model is valid in the new schema; no folders should be generated
+    created = generator.generate_folders()
+    assert created == {}
 
 
 def test_special_characters_in_context_names(temp_dir):
@@ -271,12 +259,10 @@ def test_special_characters_in_context_names(temp_dir):
     
     # Create a model with special characters in context names
     model_data = {
-        "inheritance": {
-            "Class-With-Hyphens": {"base": []},
-            "Class_With_Underscores": {"base": []},
-            "Class.With.Dots": {"base": []},
-            "*": {"base": []}
-        }
+        "Class-With-Hyphens": {"base": []},
+        "Class_With_Underscores": {"base": []},
+        "Class.With.Dots": {"base": []},
+        "*": {"base": []}
     }
     create_test_context_model(model_path, model_data)
     
@@ -301,9 +287,6 @@ def test_model_without_inheritance(temp_dir, commands_dir):
     
     # Create a model without an inheritance block
     create_test_context_model(model_path, {
-        "aggregation": {
-            "TodoItem": {"container": ["TodoList"]}
-        }
     })
     
     generator = ContextFolderGenerator(
@@ -311,6 +294,6 @@ def test_model_without_inheritance(temp_dir, commands_dir):
         model_path=model_path
     )
     
-    # The generator should raise an exception when the model lacks an inheritance block
-    with pytest.raises(ContextModelLoaderError):
-        generator.generate_folders() 
+    # An empty model is valid in the new schema; no folders should be generated
+    created = generator.generate_folders()
+    assert created == {} 

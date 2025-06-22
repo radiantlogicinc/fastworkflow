@@ -8,7 +8,7 @@ EXAMPLES_ROOT = './examples/todo_list/application'
 
 def test_analyze_python_file_todo_list():
     file_path = os.path.join(EXAMPLES_ROOT, 'todo_list.py')
-    classes = analyze_python_file(file_path)
+    classes, _ = analyze_python_file(file_path)
     assert isinstance(classes, dict)
     assert 'TodoList' in classes
     todo_list = classes['TodoList']
@@ -26,7 +26,7 @@ def test_analyze_python_file_todo_list():
 
 def test_analyze_python_file_todo_item():
     file_path = os.path.join(EXAMPLES_ROOT, 'todo_item.py')
-    classes = analyze_python_file(file_path)
+    classes, _ = analyze_python_file(file_path)
     assert 'TodoItem' in classes
     todo_item = classes['TodoItem']
     assert isinstance(todo_item, ClassInfo)
@@ -52,7 +52,7 @@ class Outer:
 '''
     file_path = tmp_path / 'nested.py'
     file_path.write_text(code)
-    classes = analyze_python_file(str(file_path))
+    classes, _ = analyze_python_file(str(file_path))
     assert 'Outer' in classes
     outer = classes['Outer']
     assert any(nc.name == 'Inner' for nc in outer.nested_classes)
@@ -78,7 +78,7 @@ class MyClass:
 '''
     file_path = tmp_path / 'props.py'
     file_path.write_text(code)
-    classes = analyze_python_file(str(file_path))
+    classes, _ = analyze_python_file(str(file_path))
     assert 'MyClass' in classes
     myclass = classes['MyClass']
     # Should detect one property
@@ -128,7 +128,7 @@ class MyClass:
 '''
     file_path = tmp_path / 'docstrings.py'
     file_path.write_text(code)
-    classes = analyze_python_file(str(file_path))
+    classes, _ = analyze_python_file(str(file_path))
     assert 'MyClass' in classes
     myclass = classes['MyClass']
     # Class docstring
@@ -168,7 +168,7 @@ class MyClass:
 '''
     file_path = tmp_path / 'classvars.py'
     file_path.write_text(code)
-    classes = analyze_python_file(str(file_path))
+    classes, _ = analyze_python_file(str(file_path))
     assert 'MyClass' in classes
     myclass = classes['MyClass']
     prop_types = {p.name: p.type_annotation for p in myclass.properties}
@@ -186,7 +186,7 @@ class Derived(Base):
 '''
     file_path = tmp_path / 'inheritance.py'
     file_path.write_text(code)
-    classes = analyze_python_file(str(file_path))
+    classes, _ = analyze_python_file(str(file_path))
     assert 'Derived' in classes
     derived = classes['Derived']
     assert derived.bases == ['Base'], f"Expected ['Base'], got {derived.bases}"

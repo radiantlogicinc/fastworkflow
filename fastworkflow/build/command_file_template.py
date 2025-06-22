@@ -3,7 +3,7 @@ import os
 from fastworkflow.build.pydantic_model_generator import generate_input_model_code, generate_output_model_code, generate_property_output_model_code
 from fastworkflow.build.utterance_generator import generate_utterances
 from fastworkflow.build.command_import_utils import generate_import_statements
-from fastworkflow.build.class_analysis_structures import PropertyInfo
+from fastworkflow.build.class_analysis_structures import PropertyInfo, FunctionInfo
 from typing import Optional, List, Dict
 from pydantic import BaseModel, Field
 
@@ -19,7 +19,130 @@ def get_import_block():
         f"from pydantic import BaseModel, Field\n"
     )
 
-def create_command_file(class_info, method_info, output_dir, file_name=None, is_property_getter=False, is_property_setter=False, is_get_all_properties=False, all_properties_for_template: Optional[List[PropertyInfo]] = None, is_set_all_properties: bool = False, settable_properties_for_template: Optional[List[PropertyInfo]] = None, source_dir=None, overwrite=False, class_name_to_module_map: Optional[Dict[str, str]] = None):
+def create_function_command_file(function_info: FunctionInfo, output_dir: str, file_name: str = None, source_dir: str = None, overwrite: bool = False) -> str:
+    """Generate a FastWorkflow command file for a global function."""
+    # Determine file path
+    if file_name is None:
+        file_name = f"{function_info.name}.py"
+    file_path = os.path.join(output_dir, file_name)
+    
+    # Check if file exists and overwrite is False
+    if not overwrite and os.path.exists(file_path):
+        return file_path
+    
+    # Initialize generation variables
+    input_fields = ""
+    output_fields = ""
+    output_return = ""
+    response_format = ""
+    process_logic_str = ""
+    docstring = function_info.docstring or f"Execute {function_info.name} function"
+    has_input = True  # Default to having input
+    
+    # Process parameters for input model
+    if function_info.parameters:
+        input_field_lines = []
+        for p in function_info.parameters:
+            param_type = p.get('annotation') or 'Any'
+            escaped_param_desc = (p.get('docstring') or f'Parameter {p["name"]}').replace('"', '\\"')
+            input_field_lines.append(f'        {p["name"]}: {param_type} = Field(description="{escaped_param_desc}")')
+        input_fields = "\n".join(input_field_lines)
+    else:
+        input_fields = "        pass"
+        has_input = False  # No input needed for functions without parameters
+    
+    # Process return type for output model
+    return_type = function_info.return_annotation or 'Any'
+    if return_type.lower() == 'none' or not return_type:
+        output_fields = '        success: bool = Field(default=True, description="Indicates successful execution.")'
+        output_return = "success=True"
+        response_format = "success={output.success}"
+    else:
+        output_fields = f'        result: {return_type} = Field(description="Result of the function call")'
+        output_return = "result=result_val"
+        response_format = "result={output.result}"
+    
+    # Generate process logic
+    param_names = [p['name'] for p in function_info.parameters] if function_info.parameters else []
+    call_params = ', '.join([f"{p_name}=input.{p_name}" for p_name in param_names])
+    
+    if return_type.lower() == 'none' or not return_type:
+        if param_names:
+            process_logic_str = f"        # Call the function\n        from ..{os.path.basename(source_dir)}.{os.path.basename(function_info.module_path).replace('.py', '')} import {function_info.name}\n        {function_info.name}({call_params})"
+        else:
+            process_logic_str = f"        # Call the function\n        from ..{os.path.basename(source_dir)}.{os.path.basename(function_info.module_path).replace('.py', '')} import {function_info.name}\n        {function_info.name}()"
+    else:
+        if param_names:
+            process_logic_str = f"        # Call the function\n        from ..{os.path.basename(source_dir)}.{os.path.basename(function_info.module_path).replace('.py', '')} import {function_info.name}\n        result_val = {function_info.name}({call_params})"
+        else:
+            process_logic_str = f"        # Call the function\n        from ..{os.path.basename(source_dir)}.{os.path.basename(function_info.module_path).replace('.py', '')} import {function_info.name}\n        result_val = {function_info.name}()"
+    
+    # Generate utterances
+    plain_utterances = ",\n".join([f'        "{u}"' for u in generate_utterances(None, function_info.name, function_info.parameters, is_function=True)])
+    
+    # Build the command file content
+    command_file_content = "\n" + get_import_block() + "\n\n" + "class Signature:\n"
+    
+    # Add Input class if needed
+    if has_input:
+        command_file_content += f"    class Input(BaseModel):\n{input_fields}\n\n"
+        input_param_type = '"Signature.Input"'
+        input_param = ", input: Signature.Input"
+        call_param = ", command_parameters: Signature.Input"
+        call_arg = ", command_parameters"
+    else:
+        input_param_type = "None"
+        input_param = ""
+        call_param = ""
+        call_arg = ""
+    
+    # Add Output class
+    command_file_content += f"    class Output(BaseModel):\n{output_fields}\n\n"
+    
+    # Add utterances
+    command_file_content += f"    plain_utterances = [\n{plain_utterances}\n    ]\n\n"
+    command_file_content += f"    template_utterances = []\n\n"
+    
+    # Add generate_utterances method
+    command_file_content += """    @staticmethod
+    def generate_utterances(session: Session, command_name: str) -> list[str]:
+        utterance_definition = fastworkflow.UtteranceRegistry.get_definition(session.workflow_snapshot.workflow_folderpath)
+        utterances_obj = utterance_definition.get_command_utterances(command_name)
+        result = generate_diverse_utterances(utterances_obj.plain_utterances, command_name)
+        utterance_list: list[str] = [
+            command_name.split('/')[-1].lower().replace('_', ' ')
+        ] + result
+        return utterance_list\n\n"""
+    
+    # Add process_extracted_parameters method
+    command_file_content += f"    def process_extracted_parameters(self, workflow_snapshot: WorkflowSnapshot, command: str, cmd_parameters: {input_param_type}) -> None:\n"
+    command_file_content += "        pass\n\n"
+    
+    # Add ResponseGenerator class
+    command_file_content += "class ResponseGenerator:\n"
+    command_file_content += f"    def _process_command(self, session: Session{input_param}) -> Signature.Output:\n"
+    command_file_content += f"        \"\"\"{docstring}\"\"\"\n"
+    command_file_content += f"{process_logic_str}\n"
+    command_file_content += f"        return Signature.Output({output_return})\n\n"
+    
+    # Add __call__ method
+    command_file_content += f"    def __call__(self, session: Session, command: str{call_param}) -> CommandOutput:\n"
+    command_file_content += f"        output = self._process_command(session{call_arg})\n"
+    command_file_content += """        return CommandOutput(
+            session_id=session.id,
+            command_responses=[
+                CommandResponse(response=output.model_dump_json())
+            ]
+        )
+"""
+    
+    # Write the command file
+    with open(file_path, 'w') as f:
+        f.write(command_file_content)
+    
+    return file_path
+
+def create_command_file(class_info, method_info, output_dir, file_name=None, is_property_getter=False, is_property_setter=False, is_get_all_properties=False, all_properties_for_template: Optional[List[PropertyInfo]] = None, is_set_all_properties: bool = False, settable_properties_for_template: Optional[List[PropertyInfo]] = None, source_dir=None, overwrite=False, class_name_to_module_map: Optional[Dict[str, str]] = None, is_global_function: bool = False):
     """Generate a FastWorkflow command file matching the user's required structure."""
     import textwrap
     # Determine application module path and class name

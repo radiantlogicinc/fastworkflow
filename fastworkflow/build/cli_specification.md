@@ -5,6 +5,7 @@ This document specifies the command-line interface (CLI) for the FastWorkflow bu
 
 ## Use Cases
 - Generate FastWorkflow command files and a context model for a Python application.
+- Generate global commands for top-level functions in the application.
 - Specify source and output directories.
 - Optionally preview actions (dry run), enable verbose logging, specify a custom context model name, and control file overwriting.
 

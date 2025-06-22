@@ -45,9 +45,8 @@ def test_generate_context_model():
         json_as_str = json.dumps(model_data)
         assert '"/"' not in json_as_str, "Found deprecated '/' key in context model JSON"
         
-        # No inheritance or aggregation keys should exist
+        # No inheritance should exist
         assert 'inheritance' not in model_data
-        assert 'aggregation' not in model_data
 
 class TestContextModelGenerator:
     @pytest.fixture
@@ -114,7 +113,7 @@ class TestContextModelGenerator:
         # Generate the context model
         model = generate_context_model(mock_classes, temp_dir)
         
-        # Check the model structure - flat format, no inheritance/aggregation keys
+        # Check the model structure - flat format, no inheritance keys
         assert "DerivedClass" in model
         assert "BaseClass" in model
         assert "StandaloneClass" in model

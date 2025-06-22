@@ -1,8 +1,8 @@
 import os
 import ast
-from typing import Dict, List
-from fastworkflow.build.class_analysis_structures import ClassInfo, MethodInfo, PropertyInfo
-from fastworkflow.build.command_file_template import create_command_file
+from typing import Dict, List, Tuple
+from fastworkflow.build.class_analysis_structures import ClassInfo, MethodInfo, PropertyInfo, FunctionInfo
+from fastworkflow.build.command_file_template import create_command_file, create_function_command_file
 from fastworkflow.utils.python_utils import get_module_import_path, find_module_dependencies
 from fastworkflow.command_context_model import CommandContextModel
 import importlib.util
@@ -10,14 +10,15 @@ import traceback
 import json
 from .ast_class_extractor import parse_google_docstring
 
-def generate_command_files(classes: Dict[str, ClassInfo], output_dir: str, source_dir: str, overwrite: bool = False) -> List[str]:
-    """Generate command files for all public methods and properties in the analyzed classes."""
+def generate_command_files(classes: Dict[str, ClassInfo], output_dir: str, source_dir: str, overwrite: bool = False, functions: Dict[str, FunctionInfo] = None) -> List[str]:
+    """Generate command files for all public methods, properties, and top-level functions in the analyzed code."""
     os.makedirs(output_dir, exist_ok=True)
     generated_files = []
 
     # Create a map from class names to their module paths
     class_name_to_module_map = {name: c_info.module_path for name, c_info in classes.items()}
-
+    
+    # Generate command files for classes
     for class_info in classes.values():
         class_output_dir = os.path.join(output_dir, class_info.name)
         os.makedirs(class_output_dir, exist_ok=True)
@@ -110,6 +111,24 @@ def generate_command_files(classes: Dict[str, ClassInfo], output_dir: str, sourc
                 overwrite=overwrite,  # Pass overwrite
             ):
                 generated_files.append(generated_set_all_path)
+    
+    # Generate command files for top-level functions
+    if functions:
+        # Global commands should be placed directly in the `output_dir` (which is the _commands folder)
+        commands_dir = output_dir  # Avoid creating nested _commands
+        
+        for function_info in functions.values():
+            file_name = f"{function_info.name}.py"
+            file_path = os.path.join(commands_dir, file_name)
+            
+            if generated_file_path := create_function_command_file(
+                function_info=function_info,
+                output_dir=commands_dir,
+                file_name=file_name,
+                source_dir=source_dir,
+                overwrite=overwrite
+            ):
+                generated_files.append(generated_file_path)
 
     return generated_files
 
@@ -147,13 +166,14 @@ def validate_command_file_components_in_dir(directory: str) -> list:
     Prints errors if any are found.
     
     Files starting with underscore (_) are skipped as they are not command files.
+    Files named 'startup.py' are also skipped as they have a different structure.
     """
     import ast
     errors = []
     for root, _, files in os.walk(directory):
         for file in files:
-            # Skip files starting with underscore and __init__.py
-            if file.startswith('_') or file == '__init__.py':
+            # Skip files starting with underscore, __init__.py, and startup.py
+            if file.startswith('_') or file == '__init__.py' or file == 'startup.py':
                 continue
             if file.endswith('.py'):
                 file_path = os.path.join(root, file)

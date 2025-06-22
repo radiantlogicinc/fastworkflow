@@ -147,16 +147,6 @@ class CommandRoutingDefinition(BaseModel):
         command_routing_definition.save()
         return command_routing_definition
 
-    def get_container_command_context(self, command_context: str) -> str:
-        """Return the container context name for the given command_context.
-        If none, returns '*' (global).
-        """
-        context_model_loader = ContextModelLoader(model_path=os.path.join(
-            self.workflow_folderpath, '_commands/context_inheritance_model.json'))
-        context_model = context_model_loader.load()
-        container_list = context_model.get('aggregation', {}).get(command_context, {}).get('container', [])
-        return container_list[0] if container_list else '*'
-
 
 class CommandRoutingRegistry:
     """

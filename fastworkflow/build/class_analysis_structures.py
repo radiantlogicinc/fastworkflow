@@ -23,6 +23,30 @@ class MethodInfo:
             'docstring_parsed': self.docstring_parsed,
         }
 
+class FunctionInfo:
+    def __init__(self, name: str, module_path: str, parameters: List[Dict[str, Any]], docstring: Optional[str] = None, return_annotation: Optional[str] = None, decorators: Optional[List[str]] = None, docstring_parsed: Optional[Dict] = None):
+        self.name = name
+        self.module_path = module_path
+        self.parameters = parameters
+        self.docstring = docstring
+        self.return_annotation = return_annotation
+        self.decorators = decorators or []
+        self.docstring_parsed = docstring_parsed
+
+    def __repr__(self):
+        return f"<FunctionInfo {self.name}({', '.join([p['name'] for p in self.parameters])})>"
+
+    def to_dict(self):
+        return {
+            'name': self.name,
+            'module_path': self.module_path,
+            'parameters': self.parameters,
+            'docstring': self.docstring,
+            'return_annotation': self.return_annotation,
+            'decorators': self.decorators,
+            'docstring_parsed': self.docstring_parsed,
+        }
+
 class PropertyInfo:
     def __init__(self, name: str, docstring: Optional[str] = None, type_annotation: Optional[str] = None, docstring_parsed: Optional[Dict] = None):
         self.name = name

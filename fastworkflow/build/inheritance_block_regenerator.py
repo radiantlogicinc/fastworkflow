@@ -3,8 +3,7 @@ from __future__ import annotations
 """Utility to regenerate only the inheritance block in the command context model.
 
 This module provides functionality to update the inheritance relationships in
-the context_inheritance_model.json file while preserving the aggregation block,
-which is maintained manually by developers.
+the context_inheritance_model.json file.
 """
 
 import os
@@ -14,6 +13,7 @@ from typing import Dict, Any, Set, Optional, List
 
 from fastworkflow.build.class_analysis_structures import ClassInfo
 from fastworkflow.utils.logging import logger
+from fastworkflow.utils.context_utils import get_context_names
 
 __all__ = ["InheritanceBlockRegenerator"]
 
@@ -85,7 +85,6 @@ class InheritanceBlockRegenerator:
             logger.error(f"Error loading model file: {e}")
         
         # Return default model if file doesn't exist or is invalid
-        # No longer using nested structure with inheritance/aggregation keys
         self._model_data = {}
         return self._model_data
     
@@ -125,7 +124,7 @@ class InheritanceBlockRegenerator:
         
         # Preserve any existing entries not derived from class analysis
         for context, data in existing_model.items():
-            if context not in inheritance_map and context != "*":
+            if context not in inheritance_map:
                 inheritance_map[context] = data
         
         # Write updated model back to file
@@ -137,7 +136,7 @@ class InheritanceBlockRegenerator:
         """Write the updated model to file.
         
         Args:
-            model: The model data to write (flat structure, no inheritance/aggregation wrappers)
+            model: The model data to write (flat structure, no inheritance wrappers)
         """
         try:
             # Ensure parent directories exist
