@@ -82,6 +82,36 @@
             ]
         },
         {
+            "name": "run_hello_world",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "fastworkflow.run",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/"
+            },
+            "args": [
+                "./examples/hello_world",
+                "./env/.env",
+                "./passwords/.env"
+            ]
+        },
+        {
+            "name": "train_hello_world",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "fastworkflow.train",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/"
+            },
+            "args": [
+                "./examples/hello_world",
+                "./env/.env",
+                "./passwords/.env"
+            ]
+        },
+        {
             "name": "train_fastworkflow",
             "type": "debugpy",
             "request": "launch",
