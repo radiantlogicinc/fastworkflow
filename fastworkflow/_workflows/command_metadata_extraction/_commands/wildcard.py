@@ -246,30 +246,32 @@ class CommandNamePrediction:
                     # If no cache match, use the model to predict
                     results = predict_single_sentence(modelpipeline, command, label_encoder_path)
                     command_name = results['label']
+                    if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION:
+                        # If confidence is low, treat as ambiguous command (type 1)
+                        if results['confidence'] < self.ambiguos_confidence_threshold:
+                            error_msg = self._formulate_ambiguous_command_error_message(results["topk_labels"])
+                            count = self._store_utterance(self.cache_path, command, command_name)
+                            # Store suggested commands and set flag to 1 (ambiguous)
+                            self._store_suggested_commands(self.path, results["topk_labels"], 1)
+                            change_flag(self.path, 1)
+                            return CommandNamePrediction.Output(error_msg=error_msg)
 
-                    # If confidence is low, treat as ambiguous command (type 1)
-                    if results['confidence'] < self.ambiguos_confidence_threshold:
-                        error_msg = self._formulate_ambiguous_command_error_message(results["topk_labels"])
-                        count = self._store_utterance(self.cache_path, command, command_name)
-                        # Store suggested commands and set flag to 1 (ambiguous)
-                        self._store_suggested_commands(self.path, results["topk_labels"], 1)
-                        change_flag(self.path, 1)
-                        return CommandNamePrediction.Output(error_msg=error_msg)
-
-                    # If model prediction is none_of_these, present all commands as options
-                    if command_name == "Core/misunderstood_intent":
-                        error_msg = self._formulate_misclassified_command_error_message(valid_command_names)
-                        # Set flag to 2 because model couldn't classify the command
-                        self._store_suggested_commands(self.path, valid_command_names, 2)
-                        change_flag(self.path, 2)
-                        return CommandNamePrediction.Output(error_msg=error_msg)
-                    else:
-                        flag = get_flag(self.path)
-                        if flag is not None and flag != 0:
-                            count = self._get_count(self.cache_path)
-                            utterance = self._read_utterance(self.cache_path, count-1)
-                            store_utterance_cache(self.path, utterance, command_name, modelpipeline)
-                            change_flag(self.path, 0)
+                        # If model prediction is none_of_these, present all commands as options
+                        if command_name == "Core/misunderstood_intent":
+                            error_msg = self._formulate_misclassified_command_error_message(valid_command_names)
+                            # Set flag to 2 because model couldn't classify the command
+                            self._store_suggested_commands(self.path, valid_command_names, 2)
+                            change_flag(self.path, 2)
+                            return CommandNamePrediction.Output(error_msg=error_msg)
+                        else:
+                            flag = get_flag(self.path)
+                            if flag is not None and flag != 0:
+                                count = self._get_count(self.cache_path)
+                                utterance = self._read_utterance(self.cache_path, count-1)
+                                store_utterance_cache(self.path, utterance, command_name, modelpipeline)
+                                change_flag(self.path, 0)
+                    elif results['confidence'] < self.ambiguos_confidence_threshold:
+                        command_name = None
             else:
                 # When the command_name is already determined
                 flag = get_flag(self.path)

@@ -20,7 +20,6 @@ class Signature:
 
     class Output(BaseModel):
         command_name: str
-        is_none: bool = Field(..., alias="None")
 
     @staticmethod
     def generate_utterances(session: Session, command_name: str) -> list[str]:
@@ -30,7 +29,7 @@ class Signature:
 class ResponseGenerator:
     def _process_command(self, session: Session) -> Signature.Output:
         session.workflow_snapshot.is_complete = True
-        return Signature.Output(command_name="misunderstood_intent", is_none=True)
+        return Signature.Output(command_name="misunderstood_intent")
 
     def __call__(self, session: Session, command: str) -> CommandOutput:
         output = self._process_command(session)
@@ -38,8 +37,8 @@ class ResponseGenerator:
             session_id=session.id,
             command_responses=[
                 CommandResponse(
-                    response="Ambiguous command",
-                    artifacts=output.model_dump(by_alias=True),
+                    response="Misunderstood intent",
+                    artifacts=output.model_dump(),
                 )
             ],
         ) 
