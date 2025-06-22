@@ -138,39 +138,39 @@ def cache_match(cache_path, utterance, model_pipeline, threshold=0.90, return_de
     try:
         # Get the cache dictionary
         cache = db.get("cache", {})
-        
+
         # If no entries, return None
         if not cache:
             return None
-        
+
         # Get embedding for the query utterance
         query_embedding = get_embedding(utterance, model_pipeline)
-        
+
         # Reshape query embedding for cosine_similarity
         query_embedding = query_embedding.reshape(1, -1)
-        
+
         # Check cache for similar utterances
         best_similarity = 0
         cache_match = None
-        
+
         # Find the best matching cached utterance
         for hash_key, entry in cache.items():
             # Skip entries without embeddings
             if not entry.get("embedding"):
                 continue
-                
+
             # Reshape cached embedding for cosine_similarity
             cached_embedding = np.array(entry["embedding"]).reshape(1, -1)
             similarity = cosine_similarity(query_embedding, cached_embedding)[0][0]
-            
+
             if similarity > best_similarity:
                 best_similarity = similarity
                 cache_match = hash_key
-        
+
         # If good cache match found, determine the best label
         if best_similarity >= threshold and cache_match is not None:
             command_mapping = cache[cache_match]["command_mapping"]
-            
+
             # If only one label, return it directly
             if len(command_mapping) == 1:
                 true_label = next(iter(command_mapping.keys()))
@@ -178,7 +178,7 @@ def cache_match(cache_path, utterance, model_pipeline, threshold=0.90, return_de
                 # Find label with highest frequency
                 max_frequency = 0
                 max_freq_labels = []
-                
+
                 for label, info in command_mapping.items():
                     freq = info["frequency"]
                     if freq > max_frequency:
@@ -186,7 +186,7 @@ def cache_match(cache_path, utterance, model_pipeline, threshold=0.90, return_de
                         max_freq_labels = [label]
                     elif freq == max_frequency:
                         max_freq_labels.append(label)
-                
+
                 # If multiple labels with same frequency, choose most recent one
                 if len(max_freq_labels) > 1:
                     true_label = max(
@@ -195,11 +195,8 @@ def cache_match(cache_path, utterance, model_pipeline, threshold=0.90, return_de
                     )
                 else:
                     true_label = max_freq_labels[0]
-            
-            if return_details:
-                return (true_label, best_similarity)
-            return true_label
-            
+
+            return (true_label, best_similarity) if return_details else true_label
         # No good match found
         return None
     finally:

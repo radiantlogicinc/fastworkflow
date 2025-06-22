@@ -64,44 +64,41 @@ class DatabaseValidator:
     
     @staticmethod
     def fuzzy_match(value: str, key_values: list[str], threshold: float = 0.2) -> Tuple[bool, Optional[str], List[str]]:
-        """
-        Find the closest matching value in the specified database.
-        """
+        """Find the closest matching value in the specified database."""
         global NOT_FOUND
         if not NOT_FOUND:
             NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
 
         if not value or value in [None, NOT_FOUND]:
             return False, None, []
-        
+
         if not key_values:
             return False, None, []     
-        
+
         best_match,_=find_best_match(value, key_values,threshold=0.7)
         if best_match:
-            return True, best_match, []
-        else:
-            normalized_value = value.lower()
-            
+                return True, best_match, []
+        normalized_value = value.lower()
+
+        for value in key_values:
+            if normalized_value == value.lower():
+                return True, value, []
+
+        matches = get_close_matches(normalized_value, 
+                                [val.lower() for val in key_values], 
+                                n=3, 
+                                cutoff=threshold)
+
+        original_matches = []
+        for match_lower in matches:
             for value in key_values:
-                if normalized_value == value.lower():
-                    return True, value, []
-            
-            matches = get_close_matches(normalized_value, 
-                                    [val.lower() for val in key_values], 
-                                    n=3, 
-                                    cutoff=threshold)
-            
-            original_matches = []
-            for match_lower in matches:
-                for value in key_values:
-                    if value.lower() == match_lower:
-                        original_matches.append(value)
-                        break
-            
-            if original_matches:
-                return False, None, original_matches
-        
+                if value.lower() == match_lower:
+                    original_matches.append(value)
+                    break
+
+        if original_matches:
+            return False, None, original_matches
+
         return False, None, []
 
 
