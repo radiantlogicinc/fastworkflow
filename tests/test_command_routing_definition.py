@@ -1,6 +1,7 @@
 import pytest
 from pathlib import Path
 from pydantic import BaseModel
+import os
 
 from fastworkflow.command_routing_definition import CommandRoutingRegistry, CommandRoutingDefinition, ModuleType
 
@@ -100,4 +101,17 @@ class TestCommandRoutingDefinition:
             command_name, ModuleType.COMMAND_PARAMETERS_CLASS
         )
         
-        assert param_class is None 
+        assert param_class is None
+
+
+def test_get_command_class_missing_input(sample_workflow_path):
+    """Ensure no exception is raised when a command lacks `Signature.Input` (regression)."""
+    routing_def = CommandRoutingDefinition.build(str(sample_workflow_path))
+
+    # Core/misunderstood_intent has no Signature.Input, so COMMAND_PARAMETERS_CLASS is absent.
+    cls = routing_def.get_command_class(
+        "Core/misunderstood_intent", ModuleType.COMMAND_PARAMETERS_CLASS
+    )
+
+    # The call should succeed and simply return None when the class is missing.
+    assert cls is None 

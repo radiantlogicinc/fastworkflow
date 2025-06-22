@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import json
 from enum import Enum
@@ -6,11 +8,9 @@ from typing import Any, Optional, Type
 from pydantic import BaseModel, PrivateAttr
 
 from fastworkflow import ModuleType
-from fastworkflow.command_directory import CommandDirectory
+from fastworkflow.command_directory import CommandDirectory, get_cached_command_directory
 from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.utils import python_utils
-
-from .context_model_loader import ContextModelLoader     
 
 
 class CommandRoutingDefinition(BaseModel):
@@ -67,12 +67,15 @@ class CommandRoutingDefinition(BaseModel):
         else:
             raise ValueError(f"Invalid module type '{module_type}'")
 
+        # If the command does not define the requested module/class (e.g. no Signature
+        # for parameter-extraction), bail out early.  Returning ``None`` signals to
+        # callers that the implementation is not available, which higher-level logic
+        # already handles gracefully.
         if not module_file_path or not module_class_name:
             return None
 
+        # Use the cached module loader
         module = python_utils.get_module(str(module_file_path), self.workflow_folderpath)
-        if not module:
-            return None
 
         # Handle nested classes like 'Signature.Input'
         if '.' in module_class_name:
@@ -80,8 +83,6 @@ class CommandRoutingDefinition(BaseModel):
             cls_obj = module
             for part in parts:
                 cls_obj = getattr(cls_obj, part, None)
-                if cls_obj is None:
-                    return None
             return cls_obj
         
         return getattr(module, module_class_name, None)
@@ -103,8 +104,8 @@ class CommandRoutingDefinition(BaseModel):
 
         data["workflow_folderpath"] = workflow_folderpath
 
-        command_directory = CommandDirectory.load(workflow_folderpath) or CommandDirectory(
-            workflow_folderpath=workflow_folderpath)
+        # Use cached command directory
+        command_directory = get_cached_command_directory(workflow_folderpath)
         data["command_directory"] = command_directory
 
         return cls.model_validate(data)
@@ -119,7 +120,8 @@ class CommandRoutingDefinition(BaseModel):
         in the format 'ContextName/command_name'. This method ensures these qualified names
         are properly handled when building the routing definition.
         """       
-        command_directory = CommandDirectory.load(workflow_folderpath)
+        # Use cached command directory to avoid repeated filesystem scanning
+        command_directory = get_cached_command_directory(workflow_folderpath)
         context_model = CommandContextModel.load(workflow_folderpath)
 
         # Use dynamically discovered core commands
@@ -170,3 +172,14 @@ class CommandRoutingRegistry:
     def clear_registry(cls):
         """Clears the registry. Useful for testing."""
         cls._definitions.clear()
+        
+        # Also clear the CommandDirectory cache to ensure fresh data on reload
+        import fastworkflow.command_directory
+        import functools
+        if hasattr(fastworkflow.command_directory.get_cached_command_directory, 'cache_clear'):
+            fastworkflow.command_directory.get_cached_command_directory.cache_clear()
+        
+        # Clear the python_utils module import cache
+        import fastworkflow.utils.python_utils
+        if hasattr(fastworkflow.utils.python_utils.get_module, 'cache_clear'):
+            fastworkflow.utils.python_utils.get_module.cache_clear()

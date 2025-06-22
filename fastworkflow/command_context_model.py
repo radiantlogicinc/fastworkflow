@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Optional, Type
 
 import fastworkflow
-from fastworkflow.command_directory import CommandDirectory
+from fastworkflow.command_directory import CommandDirectory, get_cached_command_directory
 from fastworkflow.utils import python_utils
 
 """Utility for loading and traversing the single-file workflow command context model.
@@ -61,61 +61,6 @@ class CommandContextModel:
         self._resolve_inheritance()
 
     @classmethod
-    def _discover_contexts_from_filesystem(
-        cls, workflow_path: Path
-    ) -> dict[str, dict[str, list[str]]]:
-        """
-        Scans the _commands directory to discover contexts (subdirectories)
-        and their commands (Python files within those subdirectories).
-        Returns a dictionary in the same format as context_inheritance_model.json contents.
-        """
-        discovered_contexts = {}
-        commands_root_dir = workflow_path / "_commands"
-
-        if not commands_root_dir.is_dir():
-            return discovered_contexts
-
-        # First, collect top-level commands (directly in _commands/)
-        top_level_commands = []
-        for command_file in commands_root_dir.glob("*.py"):
-            if (
-                command_file.is_file()
-                and command_file.suffix == ".py"
-                and not command_file.name.startswith("_")
-                and command_file.name != "__init__.py"
-            ):
-                command_name_str = command_file.stem
-                top_level_commands.append(command_name_str)
-        
-        # Add top-level commands to '*' context if any were found
-        if top_level_commands:
-            discovered_contexts["*"] = {"/": sorted(top_level_commands)}
-
-        # Then collect commands in subdirectories (contexts)
-        for item in commands_root_dir.iterdir():
-            if item.is_dir() and not item.name.startswith("_"):  # Treat directories as contexts
-                context_name = item.name
-                context_commands = []
-                
-                # Discover commands in this context directory using qualified names
-                for command_file in item.glob("*.py"):
-                    if (
-                        command_file.is_file()
-                        and command_file.suffix == ".py"
-                        and not command_file.name.startswith("_")
-                        and command_file.name != "__init__.py"
-                    ):
-                        command_name_str = command_file.stem
-                        # Use qualified name format: "ContextName/command_name"
-                        qualified_command_name = f"{context_name}/{command_name_str}"
-                        context_commands.append(qualified_command_name)
-                
-                # Add context even if it has no .py files, making it discoverable for 'base' inheritance.
-                discovered_contexts[context_name] = {"/": sorted(list(set(context_commands)))}
-        
-        return discovered_contexts
-
-    @classmethod
     def load(cls, workflow_path: str | Path) -> CommandContextModel:
         """Loads and validates the command context model from a workflow path,
         augmenting with contexts and commands discovered from the _commands directory."""
@@ -152,16 +97,15 @@ class CommandContextModel:
                         f"Context '{context_name_in_json}' in {json_model_path.name} "
                         f"is missing the required 'base' key. Context definitions in this file are for inheritance only."
                     )
-                if not context_def_in_json["base"] or \
-                       not isinstance(context_def_in_json["base"], list) or \
+                if not isinstance(context_def_in_json["base"], list) or \
                        not all(isinstance(b, str) for b in context_def_in_json["base"]):
                     raise CommandContextModelValidationError(
                         f"Key 'base' for context '{context_name_in_json}' in {json_model_path.name} "
                         f"must be a list of context name strings."
                     )
 
-        # 2. Use CommandDirectory to get filesystem-derived commands
-        cmd_dir = CommandDirectory.load(workflow_path)
+        # 2. Use cached CommandDirectory to get filesystem-derived commands
+        cmd_dir = get_cached_command_directory(str(workflow_path_obj))
 
         # Reconstruct the equivalent of discovered_contexts_from_fs using cmd_dir
         fs_derived_direct_commands = {}
@@ -178,6 +122,9 @@ class CommandContextModel:
                 if "*" not in fs_derived_direct_commands:
                     fs_derived_direct_commands["*"] = {"/": []}
                 fs_derived_direct_commands["*"]["/"].append(qualified_cmd_name)
+
+        # Optionally drop internal 'Core' context for external workflows
+        fs_derived_direct_commands.pop('Core', None)
 
         # Sort command lists for consistency
         for context_data in fs_derived_direct_commands.values():
@@ -288,7 +235,7 @@ class CommandContextModel:
             )
 
         # Load command directory for metadata
-        cmd_dir = CommandDirectory.load(self._workflow_path)
+        cmd_dir = get_cached_command_directory(self._workflow_path)
 
         try:
             context_metadata = cmd_dir.map_context_2_metadata[context_name]

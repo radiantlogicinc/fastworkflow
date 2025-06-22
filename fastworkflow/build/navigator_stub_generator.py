@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Set, Tuple
 
-from fastworkflow.context_model_loader import ContextModelLoader
+from fastworkflow.command_context_model import CommandContextModel, CommandContextModelValidationError
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils.context_utils import get_context_names
 
@@ -38,7 +38,7 @@ class NavigatorStubGenerator:
         self._model_data: Optional[Dict[str, Any]] = None
 
     def load_context_model(self) -> Dict[str, Any]:
-        """Load the context model using the ContextModelLoader.
+        """Load the context model using the JSON file if present or CommandContextModel fallback.
 
         Returns:
             Dict[str, Any]: The parsed context model
@@ -50,12 +50,27 @@ class NavigatorStubGenerator:
             return self._model_data  # Return cached model if available
 
         try:
-            loader = ContextModelLoader(self.model_path)
-            self._model_data = loader.load()
+            import json
+
+            if self.model_path.is_file():
+                with self.model_path.open("r", encoding="utf-8") as f:
+                    self._model_data = json.load(f) or {}
+                return self._model_data
+
+            if not self.model_path.exists():
+                raise FileNotFoundError(f"Context model file '{self.model_path}' not found.")
+
+            workflow_root = (
+                self.model_path.parent.parent
+                if self.model_path.parent.name == "_commands"
+                else self.model_path.parent
+            )
+            model_obj = CommandContextModel.load(workflow_root)
+            self._model_data = model_obj._command_contexts
             return self._model_data
-        except Exception as e:
+        except (CommandContextModelValidationError, Exception) as e:
             logger.error(f"Error loading context model: {e}")
-            # Return a minimal default model
+            # Return a minimal default model to avoid crashing generator code paths
             return {}
 
     def get_navigator_file_path(self, context: str) -> Path:

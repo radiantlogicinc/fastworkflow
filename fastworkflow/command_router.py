@@ -17,14 +17,24 @@ underscore are skipped (allowing helpers such as `__pycache__`).
 """
 
 from pathlib import Path
-from typing import Dict, Set
+from typing import Dict, Set, Optional
+
+from fastworkflow.command_directory import CommandDirectory, get_cached_command_directory
 
 __all__ = ["CommandRouter"]
 
 
 class CommandRouter:  # noqa: D101 – simple data container
-    def __init__(self, commands_root: str | Path = "_commands") -> None:
-        self.commands_root = Path(commands_root)
+    def __init__(self, workflow_path: str | Path, commands_root: Optional[str | Path] = None) -> None:
+        """
+        Initialize a CommandRouter for the given workflow path.
+        
+        Args:
+            workflow_path: Path to the workflow directory
+            commands_root: Optional path to the commands directory (defaults to "_commands" under workflow_path)
+        """
+        self.workflow_path = str(workflow_path)
+        self.commands_root = Path(commands_root) if commands_root else Path(workflow_path) / "_commands"
         # Maps context → commands (set)
         self.command_directory: Dict[str, Set[str]] = {"*": set()}
         # Maps command → contexts (set)
@@ -34,28 +44,30 @@ class CommandRouter:  # noqa: D101 – simple data container
     # Public helpers
     # ------------------------------------------------------------------
 
-    def scan(self) -> None:
-        """Populate `command_directory` and `routing_definition`."""
+    def scan(self, use_cache: bool = True) -> None:
+        """
+        Populate `command_directory` and `routing_definition` using the CommandDirectory.
+        
+        Args:
+            use_cache: Whether to use the cached CommandDirectory. Set to False for tests.
+        """
         self.command_directory = {"*": set()}
         self.routing_definition = {}
 
-        if not self.commands_root.exists():
-            # Nothing to scan – keep only global context entry
-            return
-
-        for item in self.commands_root.iterdir():
-            if item.is_file() and item.suffix == ".py":
-                # Global command
-                cmd_name = item.stem
-                self._add_mapping("*", cmd_name)
-            elif item.is_dir() and not item.name.startswith("_"):
-                context_name = item.name
-                self.command_directory.setdefault(context_name, set())
-                # Depth-1 scan: look only at files directly inside the folder
-                for cmd_file in item.iterdir():
-                    if cmd_file.is_file() and cmd_file.suffix == ".py":
-                        cmd_name = cmd_file.stem
-                        self._add_mapping(context_name, cmd_name)
+        # Get the CommandDirectory, using cache if requested
+        if use_cache:
+            cmd_dir = get_cached_command_directory(self.workflow_path)
+        else:
+            cmd_dir = CommandDirectory.load(self.workflow_path)
+        
+        # Process all qualified command names from CommandDirectory
+        for qualified_cmd_name in cmd_dir.map_command_2_metadata.keys():
+            if "/" in qualified_cmd_name:
+                # Extract context part from qualified name (e.g., "Core" from "Core/abort")
+                context_part, cmd_name = qualified_cmd_name.split("/", 1)
+                self._add_mapping(context_part, cmd_name)
+            else:  # Global command (e.g., "wildcard")
+                self._add_mapping("*", qualified_cmd_name)
 
     # ------------------------------------------------------------------
     # Lookup

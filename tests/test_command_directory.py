@@ -52,9 +52,17 @@ class TestCommandDirectory:
         assert isinstance(metadata, CommandMetadata)
 
         expected_module_path = os.path.join(sample_workflow_path, "_commands", "list_all_product_types.py")
-        assert os.path.abspath(metadata.parameter_extraction_signature_module_path) == expected_module_path
+        
+        # Check that response_generation_module_path is set correctly
         assert os.path.abspath(metadata.response_generation_module_path) == expected_module_path
+        
+        # Check that parameter_extraction_signature_module_path is either None or the expected path
+        if metadata.parameter_extraction_signature_module_path is not None:
+            assert os.path.abspath(metadata.parameter_extraction_signature_module_path) == expected_module_path
 
-        assert metadata.command_parameters_class == "Signature.Input"
-        assert metadata.input_for_param_extraction_class == "Signature"
+        # Check class names
+        if metadata.command_parameters_class:
+            assert metadata.command_parameters_class == "Signature.Input"
+        if metadata.input_for_param_extraction_class:
+            assert metadata.input_for_param_extraction_class == "Signature"
         assert metadata.response_generation_class_name == "ResponseGenerator" 

@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple, Set
 
-from fastworkflow.context_model_loader import ContextModelLoader
+from fastworkflow.command_context_model import CommandContextModel, CommandContextModelValidationError
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils.context_utils import get_context_names
 
@@ -50,10 +50,15 @@ class CommandStubGenerator:
             return self._model_data  # Return cached model if available
 
         try:
-            loader = ContextModelLoader(self.model_path)
-            self._model_data = loader.load()
+            workflow_root = (
+                self.model_path.parent.parent
+                if self.model_path.parent.name == "_commands"
+                else self.model_path.parent
+            )
+            model_obj = CommandContextModel.load(workflow_root)
+            self._model_data = model_obj._command_contexts
             return self._model_data
-        except Exception as e:
+        except (CommandContextModelValidationError, Exception) as e:
             logger.error(f"Error loading context model: {e}")
             # Return a minimal default model
             return {}
@@ -202,29 +207,6 @@ class CommandStubGenerator:
         
         return generated_files
 
-    def generate_all_handlers_files(self, force: bool = False) -> Dict[str, Path]:
-        """Generate _fastworkflow_handlers.py files for all contexts that have container contexts.
-        
-        Args:
-            force: If True, overwrite existing files
-            
-        Returns:
-            Dict[str, Path]: Dictionary mapping context names to generated file paths
-        """
-        generated_files = {}
-        
-        # Get all contexts with container contexts
-        contexts = self.get_contexts_with_containers()
-        
-        # Generate handlers files
-        for context in contexts:
-            if context != '*':  # Skip global context
-                file_path = self.generate_handlers_file(context, force)
-                if file_path:
-                    generated_files[context] = file_path
-        
-        return generated_files
-
     def _generate_command_stub_content(self, context: str, command_name: str) -> str:
         """Generate the content for a command stub file.
         
@@ -237,9 +219,8 @@ class CommandStubGenerator:
         """
         # Format command name for display (capitalize first letter)
         display_command = command_name.replace('_', ' ').capitalize()
-        
-        # Basic stub template - using regular string with .format() to avoid f-string issues
-        stub = """\"\"\"Command to {display_command_lower} in the {context} context.\"\"\"
+
+        return """\"\"\"Command to {display_command_lower} in the {context} context.\"\"\"
 
 from typing import Optional, Dict, Any
 from pydantic import BaseModel, ConfigDict
@@ -312,10 +293,8 @@ class ResponseGenerator:
             display_command_lower=display_command.lower(),
             display_command=display_command,
             context=context,
-            command_name=command_name
+            command_name=command_name,
         )
-        
-        return stub
 
     def _generate_handlers_stub_content(self, context: str, container_contexts: List[str]) -> str:
         """Generate the content for a _fastworkflow_handlers.py file.

@@ -1,6 +1,7 @@
 import os
 from typing import Optional
 from pathlib import Path
+from functools import lru_cache
 
 from pydantic import BaseModel, field_validator, model_validator, ConfigDict, Field, FieldValidationInfo
 
@@ -245,19 +246,21 @@ class CommandDirectory(BaseModel):
         )
         command_directory.register_command_metadata(command_name, metadata)
 
+        # Pass the already loaded module to avoid duplicate imports
         cls._populate_utterance_metadata_for_command(
-            command_directory, command_name, metadata, workflow_folderpath
+            command_directory, command_name, metadata, workflow_folderpath, module
         )
 
     @staticmethod
     def _populate_utterance_metadata_for_command(
-        command_directory, command_name, command_metadata, workflow_folderpath
+        command_directory, command_name, command_metadata, workflow_folderpath, module=None
     ):
         """Helper to extract utterance info from a command's Signature."""
-        module = python_utils.get_module(
-            command_metadata.response_generation_module_path,
-            command_metadata.workflow_folderpath or workflow_folderpath,
-        )
+        if module is None:
+            module = python_utils.get_module(
+                command_metadata.response_generation_module_path,
+                command_metadata.workflow_folderpath or workflow_folderpath,
+            )
         if not module:
             return
 
@@ -343,32 +346,10 @@ class CommandDirectory(BaseModel):
         import fastworkflow
         internal_wf_path = fastworkflow.get_internal_workflow_path("command_metadata_extraction")
         internal_cmd_root = os.path.join(internal_wf_path, "_commands")
-
-        # --------------------------------------------------------
-        # Deep-scan the internal workflow's _commands
-        # directory to build the union of all command names.
-        # --------------------------------------------------------
-        discovered_commands: set[str] = set()
-        for root, _dirs, files in os.walk(internal_cmd_root):
-            if not root.endswith('Core'):
-                continue
-
-            for filename in files:
-                if (
-                    filename.endswith(".py")
-                    and not filename.startswith("_")
-                    and filename != "__init__.py"
-                ):
-                    stem = os.path.splitext(filename)[0]
-                    if stem == "wildcard":
-                        continue  # rule 2 – skip 'wildcard'
-
-                    # Build qualified name relative to _commands root.
-                    rel_path = os.path.relpath(os.path.join(root, filename), internal_cmd_root)
-                    parts = os.path.splitext(rel_path)[0].split(os.sep)
-                    qualified_name = "/".join(parts) if len(parts) > 1 else parts[0]
-                    discovered_commands.add(qualified_name)
-
+        
+        # Get the discovered commands using the cached function
+        discovered_commands = CommandDirectory._discover_core_commands(internal_wf_path)
+        
         # Store sorted list
         command_directory.core_command_names.extend(sorted(discovered_commands))
 
@@ -407,8 +388,50 @@ class CommandDirectory(BaseModel):
 
             # Populate utterance metadata when available
             CommandDirectory._populate_utterance_metadata_for_command(
-                command_directory, qualified_cmd, metadata, internal_wf_path
+                command_directory, qualified_cmd, metadata, internal_wf_path, module
             )
+    
+    @staticmethod
+    @lru_cache(maxsize=1)  # Only need to cache one result since core commands are fixed
+    def _discover_core_commands(internal_wf_path: str) -> set[str]:
+        """
+        Discover core commands from the internal workflow.
+        This is cached to avoid repeated filesystem scanning.
+        
+        Args:
+            internal_wf_path: Path to the internal workflow
+            
+        Returns:
+            set[str]: Set of discovered core command names
+        """
+        internal_cmd_root = os.path.join(internal_wf_path, "_commands")
+        
+        # --------------------------------------------------------
+        # Deep-scan the internal workflow's _commands
+        # directory to build the union of all command names.
+        # --------------------------------------------------------
+        discovered_commands: set[str] = set()
+        for root, _dirs, files in os.walk(internal_cmd_root):
+            if not root.endswith('Core'):
+                continue
+
+            for filename in files:
+                if (
+                    filename.endswith(".py")
+                    and not filename.startswith("_")
+                    and filename != "__init__.py"
+                ):
+                    stem = os.path.splitext(filename)[0]
+                    if stem == "wildcard":
+                        continue  # rule 2 – skip 'wildcard'
+
+                    # Build qualified name relative to _commands root.
+                    rel_path = os.path.relpath(os.path.join(root, filename), internal_cmd_root)
+                    parts = os.path.splitext(rel_path)[0].split(os.sep)
+                    qualified_name = "/".join(parts) if len(parts) > 1 else parts[0]
+                    discovered_commands.add(qualified_name)
+                    
+        return discovered_commands
 
     @classmethod
     def _register_context_class(cls, command_directory: "CommandDirectory", context_name: str, context_dir: Path, workflow_folderpath: str):
@@ -466,3 +489,17 @@ class CommandDirectory(BaseModel):
             elif not isinstance(metadata_val, ContextMetadata):
                 raise ValueError(f"Invalid metadata for context key '{context_key}'")
         return v
+
+@lru_cache(maxsize=32)
+def get_cached_command_directory(workflow_folderpath: str) -> CommandDirectory:
+    """
+    Returns a cached CommandDirectory instance for the given workflow path.
+    This avoids repeated filesystem scans and module imports.
+    
+    Args:
+        workflow_folderpath: Path to the workflow directory
+        
+    Returns:
+        CommandDirectory: A cached CommandDirectory instance
+    """
+    return CommandDirectory.load(workflow_folderpath)

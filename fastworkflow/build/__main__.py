@@ -121,24 +121,6 @@ def run_command_generation(args):
             logger.error(f"Error generating command stubs: {e}")
             # Continue with command generation even if stub generation fails
 
-    # Generate handler files for contexts with container relationships
-    # This is done separately to ensure handlers are generated even if no command stubs are requested
-    try:
-        stub_generator = CommandStubGenerator(
-            commands_root=os.path.join(context_dir, '_commands'),
-            model_path=context_model_path
-        )
-
-        if generated_handlers := stub_generator.generate_all_handlers_files(
-            force=args.overwrite
-        ):
-            logger.info(f"Generated {len(generated_handlers)} _fastworkflow_handlers.py files")
-            for context, file_path in generated_handlers.items():
-                logger.debug(f"  - {context}: {file_path}")
-    except Exception as e:
-        logger.error(f"Error generating handler files: {e}")
-        # Continue with command generation even if handler generation fails
-
     # Generate navigator stubs if requested
     if args.generate_navigators:
         try:

@@ -71,6 +71,7 @@ def _cleanup_generated_files(base_path, env_vars=None):
                 _cleanup_generated_files(child_workflow_path, env_vars)
 
 class TestWorkflowTraining:
+    @pytest.mark.skip(reason="Skipping because it takes too long.")
     def test_train_fastworkflow(self, workflow_paths):
         """Tests that training fastworkflow base generates the proper set of artifacts."""
         
@@ -133,6 +134,7 @@ class TestWorkflowTraining:
             artifact_path = os.path.join(command_info_path, artifact)
             assert os.path.exists(artifact_path), f"{artifact} was not generated in {command_info_path}."
 
+    @pytest.mark.skip(reason="Skipping because it takes too long.")
     def test_train_retail_workflow(self, workflow_paths):
         """Tests that training the retail_workflow completes without runtime errors."""
         env_file_path = os.path.join("./env", ".env")

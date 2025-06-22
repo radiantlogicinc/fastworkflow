@@ -5,7 +5,7 @@ import pytest
 from pathlib import Path
 
 from fastworkflow.build.context_folder_generator import ContextFolderGenerator
-from fastworkflow.context_model_loader import ContextModelLoaderError
+from fastworkflow.command_context_model import CommandContextModel
 
 
 def create_test_context_model(path, model_data):
