@@ -18,7 +18,6 @@ class Signature:
         "never mind",
         "exit",
     ]
-    template_utterances = []
 
     @staticmethod
     def generate_utterances(session: Session, command_name: str) -> list[str]:

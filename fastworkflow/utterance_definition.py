@@ -1,6 +1,6 @@
 from pydantic import BaseModel, ConfigDict
 
-from fastworkflow.command_directory import CommandDirectory
+from fastworkflow.command_directory import CommandDirectory, UtteranceMetadata
 from fastworkflow.command_context_model import CommandContextModel
 
 
@@ -18,24 +18,23 @@ class UtteranceDefinition(BaseModel):
         """Gets the names of commands available in a given context."""
         return self.context_model.commands(context)
 
-    def get_command_utterances(self, command_name: str):
+    def get_command_utterances(self, command_name: str) -> UtteranceMetadata:
         """Gets the utterance metadata for a single, specific command."""
-        try:
-            return self.command_directory.get_utterance_metadata(command_name)
-        except KeyError as e:
-            raise ValueError(
-                f"Could not find utterance metadata for command '{command_name}'. "
-                "It might be missing from the _commands directory."
-            ) from e
+        if utterance_metadata := self.command_directory.get_utterance_metadata(
+            command_name
+        ):
+            return utterance_metadata
+
+        raise KeyError(
+            f"Could not find utterance metadata for command '{command_name}'. "
+            "It might be missing from the _commands directory."
+        )
 
     def get_sample_utterances(self, command_context: str) -> list[str]:
         """Gets a sample utterance for each command in the given context."""
         command_names = self.get_command_names(command_context)
         sample_utterances = []
         for command_name in command_names:
-            if command_name in {"wildcard", "abort", "misunderstood_intent"}:
-                continue
-
             command_utterances = self.get_command_utterances(command_name)
             if not command_utterances:
                 continue

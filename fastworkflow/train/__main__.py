@@ -59,8 +59,6 @@ def _generate_dspy_examples_helper(workflow_path, session):
     # json_path = "./examples/sample_workflow/___command_info/command_directory.json"
     commands = _get_commands_with_parameters(json_path)
     for command_name in commands.keys():
-        if command_name in ["wildcard"]:
-            continue
         command_metadata = commands[command_name]
         module_file_path = command_metadata["parameter_path"]
         module_class_name = command_metadata["parameters_class"]

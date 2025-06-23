@@ -1,3 +1,4 @@
+import contextlib
 import os
 from typing import Optional
 from pathlib import Path
@@ -143,7 +144,7 @@ class CommandDirectory(BaseModel):
         """Retrieve all utterance keys registered in the command directory."""
         return list(self.map_command_2_utterance_metadata.keys())
 
-    def get_utterance_metadata(self, command_key: str) -> UtteranceMetadata:
+    def get_utterance_metadata(self, command_key: str) -> Optional[UtteranceMetadata]:
         if meta := self.map_command_2_utterance_metadata.get(command_key):
             return meta
 
@@ -152,8 +153,8 @@ class CommandDirectory(BaseModel):
             self.ensure_command_hydrated(command_key)
             if meta := self.map_command_2_utterance_metadata.get(command_key):
                 return meta
-
-        raise KeyError(f"Command key '{command_key}' not found.")
+        
+        return None
 
     @classmethod
     def get_commandinfo_folderpath(cls, workflow_folderpath: str) -> str:
@@ -177,7 +178,8 @@ class CommandDirectory(BaseModel):
         commands_root_folder = Path(workflow_folderpath) / "_commands"
 
         if not commands_root_folder.is_dir():
-            cls._register_core_commands(command_directory)
+            if 'fastworkflow' not in workflow_folderpath:
+                raise RuntimeError(f"Internal error: workflow_folderpath '{workflow_folderpath}' does not contain '_commands'")
             return command_directory
 
         # Process files directly under _commands/ (global commands)
@@ -216,7 +218,12 @@ class CommandDirectory(BaseModel):
                 
                 # After processing commands, attempt to register context class implementation if present
                 cls._register_context_class(command_directory, context_name, context_dir, workflow_folderpath)
-        
+
+        # Populate utterance metadata when available
+        for command_key in command_directory.map_command_2_metadata:
+            if utterance_metadata := command_directory.get_utterance_metadata(command_key):
+                command_directory.register_utterance_metadata(command_key, utterance_metadata)
+
         cls._register_core_commands(command_directory)
         return command_directory
     
@@ -328,11 +335,6 @@ class CommandDirectory(BaseModel):
         Rules:
         1.  Core commands come from *all* python modules inside the internal
             ``command_metadata_extraction/_commands`` tree (recursively).
-        2.  The command named ``wildcard`` is *never* considered a core command
-            (it is handled separately at runtime).
-        3.  When this helper is invoked *for* the internal workflow itself, we
-            hard-code the core command list to {"abort", "misunderstood_intent"}, per
-            product requirements, and do **not** include ``wildcard``.
         """
         # Clear any previously populated list first
         command_directory.core_command_names.clear()
@@ -352,9 +354,6 @@ class CommandDirectory(BaseModel):
         # already registered in this directory build).
         # ------------------------------------------------------------
         for qualified_cmd in command_directory.core_command_names:
-            if qualified_cmd in command_directory.map_command_2_metadata:
-                continue  # already present (e.g. within same workflow)
-
             # Determine the actual file path inside the internal workflow
             # irrespective of current workflow.
             if "/" in qualified_cmd:
@@ -380,11 +379,6 @@ class CommandDirectory(BaseModel):
             )
             command_directory.register_command_metadata(qualified_cmd, metadata)
 
-            # Populate utterance metadata when available
-            CommandDirectory._populate_utterance_metadata_for_command(
-                command_directory, qualified_cmd, metadata, internal_wf_path, module
-            )
-    
     @staticmethod
     @lru_cache(maxsize=1)  # Only need to cache one result since core commands are fixed
     def _discover_core_commands(internal_wf_path: str) -> set[str]:
@@ -416,8 +410,6 @@ class CommandDirectory(BaseModel):
                     and filename != "__init__.py"
                 ):
                     stem = os.path.splitext(filename)[0]
-                    if stem == "wildcard":
-                        continue  # rule 2 – skip 'wildcard'
 
                     # Build qualified name relative to _commands root.
                     rel_path = os.path.relpath(os.path.join(root, filename), internal_cmd_root)
@@ -495,17 +487,30 @@ class CommandDirectory(BaseModel):
         thanks to the @lru_cache on the internal helper.
         """
 
-        metadata = self.map_command_2_metadata.get(command_name)
-        if metadata is None:
-            raise KeyError(f"Command '{command_name}' is not registered.")
+        command_metadata = self.map_command_2_metadata.get(command_name)
+        if command_metadata is None:
+            raise KeyError(f"Command '{command_name}' is not registered. command_metadata is missing")
+
+        utterance_metadata = self.map_command_2_utterance_metadata.get(command_name)
+        if utterance_metadata is None:
+            utterance_metadata = UtteranceMetadata(
+                workflow_folderpath = '',
+                plain_utterances = [],
+                template_utterances = [],
+                generated_utterances_module_filepath = 'dummy',
+                generated_utterances_func_name = 'dummy'               
+            )
 
         # If already hydrated we are done.
-        if metadata.parameter_extraction_signature_module_path is not None:
+        if command_metadata.response_generation_class_name is not None and (
+            command_metadata.input_for_param_extraction_class is not None and \
+            utterance_metadata.plain_utterances
+        ):
             return
 
         _lazy_hydrate_metadata(
-            metadata.response_generation_module_path,
-            metadata,
+            command_metadata.response_generation_module_path,
+            command_metadata,
             self,
             command_name,
         )
@@ -576,12 +581,8 @@ def get_cached_command_directory(workflow_folderpath: str) -> CommandDirectory:
 
         # Fast-path: load JSON if it is newer than any source file
         if cache_file.exists() and cache_file.stat().st_mtime > latest_src_mtime:
-            try:
+            with contextlib.suppress(Exception):
                 return CommandDirectory.model_validate_json(cache_file.read_text())
-            except Exception:
-                # Corrupted cache – fall through to rebuild
-                pass
-
         # (Re)build and persist
         directory = CommandDirectory.load(workflow_folderpath)
         directory.save()

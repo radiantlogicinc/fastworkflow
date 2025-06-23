@@ -16,7 +16,6 @@ class Signature:
         "Change command",
         "Different command",
     ]
-    template_utterances = []
 
     class Output(BaseModel):
         command_name: str

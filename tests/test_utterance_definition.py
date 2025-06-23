@@ -76,6 +76,7 @@ class TestUtteranceDefinition:
         assert utterance_metadata.generated_utterances_func_name == "Signature.generate_utterances"
 
     def test_get_sample_utterances_from_context(self, utterance_definition: UtteranceDefinition):
+        # sourcery skip: class-extract-method
         """Test that sample utterances can be retrieved for a whole context."""
         context = "*"
         sample_utterances = utterance_definition.get_sample_utterances(context)
@@ -99,7 +100,7 @@ class TestUtteranceDefinition:
 
     def test_get_utterances_for_nonexistent_command(self, utterance_definition: UtteranceDefinition):
         """Tests that requesting utterances for a command not in the directory raises a ValueError."""
-        with pytest.raises(ValueError, match="Could not find utterance metadata for command 'nonexistent_command'"):
+        with pytest.raises(KeyError, match="Could not find utterance metadata for command 'nonexistent_command'"):
             utterance_definition.get_command_utterances("nonexistent_command")
 
     def test_inheritance_in_sample_utterances(self, utterance_definition: UtteranceDefinition):

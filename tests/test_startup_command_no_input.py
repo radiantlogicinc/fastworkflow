@@ -20,5 +20,4 @@ def test_startup_command_has_no_input_and_no_utterances():
     assert metadata.command_parameters_class is None
 
     # And there should be no utterance metadata registered
-    with pytest.raises(KeyError):
-        cmd_dir.get_utterance_metadata("startup") 
+    assert cmd_dir.get_utterance_metadata("startup") is None 

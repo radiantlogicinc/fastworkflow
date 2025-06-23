@@ -1,13 +1,18 @@
 from pathlib import Path
 import os
 import pprint
+import uuid
+import pytest
+import shutil
 
 import fastworkflow
 from fastworkflow.command_router import CommandRouter
 from fastworkflow.command_directory import CommandDirectory
 
 
-def _create_commands(tmp_path: Path):
+# Helper to create a temporary _commands directory *inside* project root so that
+# python_utils.get_module does not reject module import paths during hydration.
+def _create_commands(root_dir: Path):
     """Create a sample _commands tree:
 
     _commands/
@@ -18,7 +23,7 @@ def _create_commands(tmp_path: Path):
         ctx2/
             _ctx2.py
     """
-    root = tmp_path / "_commands"
+    root = root_dir / "_commands"
     root.mkdir()
 
     # global command
@@ -41,17 +46,22 @@ def _create_commands(tmp_path: Path):
     return root
 
 
-def test_scan_and_lookup(tmp_path, add_temp_workflow_path):
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
+def test_scan_and_lookup(add_temp_workflow_path, tmp_path):
+    # sourcery skip: extract-method
+    # Build workspace for this test under the repository root so that
+    # fastworkflow.utils.python_utils.get_module allows dynamic imports.
+    project_root = Path(__file__).resolve().parents[1]
+    test_workspace = project_root / "__tmp_router_tests" / f"ws_{uuid.uuid4().hex}"
+    test_workspace.mkdir(parents=True, exist_ok=True)
 
-    cmd_root = _create_commands(tmp_path)
-    # Add the temporary path to sys.path
-    add_temp_workflow_path(tmp_path)
+    _create_commands(test_workspace)
+    # Add the temporary path to sys.path so modules can be imported
+    add_temp_workflow_path(test_workspace)
     
     # Debug: Check that the files were created correctly
     print(f"\nTest directory structure:")
-    for root, dirs, files in os.walk(tmp_path):
-        level = root.replace(str(tmp_path), '').count(os.sep)
+    for root, dirs, files in os.walk(test_workspace):
+        level = root.replace(str(test_workspace), '').count(os.sep)
         indent = ' ' * 4 * level
         print(f"{indent}{os.path.basename(root)}/")
         sub_indent = ' ' * 4 * (level + 1)
@@ -59,38 +69,42 @@ def test_scan_and_lookup(tmp_path, add_temp_workflow_path):
             print(f"{sub_indent}{f}")
 
     # First load the command directory directly to debug
-    cmd_dir = CommandDirectory.load(str(tmp_path))
+    cmd_dir = CommandDirectory.load(str(test_workspace))
     print("\nCommand Directory Metadata:")
     print(f"Commands: {cmd_dir.get_commands()}")
     
     # Now use the router
-    router = CommandRouter(tmp_path)
-    router.scan(use_cache=False)  # Bypass cache for tests
-    
-    print("\nRouter Command Directory:")
-    pprint.pprint(router.command_directory)
-    print("\nRouter Routing Definition:")
-    pprint.pprint(router.routing_definition)
+    router = CommandRouter(test_workspace)
+    try:
+        router.scan(use_cache=False)  # Bypass cache for tests
+        
+        print("\nRouter Command Directory:")
+        pprint.pprint(router.command_directory)
+        print("\nRouter Routing Definition:")
+        pprint.pprint(router.routing_definition)
 
-    # Command directory checks - need to account for core commands
-    assert "a" in router.get_commands_for_context("*")
-    assert "x" in router.get_commands_for_context("ctx1")
-    assert "y" in router.get_commands_for_context("ctx1")
-    assert "dummy" in router.get_commands_for_context("ctx2")
+        # Command directory checks - need to account for core commands
+        assert "a" in router.get_commands_for_context("*")
+        assert "x" in router.get_commands_for_context("ctx1")
+        assert "y" in router.get_commands_for_context("ctx1")
+        assert "dummy" in router.get_commands_for_context("ctx2")
 
-    # Routing definition checks
-    assert "*" in router.get_contexts_for_command("a")
-    assert "ctx1" in router.get_contexts_for_command("x")
-    assert "ctx1" in router.get_contexts_for_command("y")
-    assert "ctx2" in router.get_contexts_for_command("dummy")
-    assert router.get_contexts_for_command("unknown") == set()
+        # Routing definition checks
+        assert "*" in router.get_contexts_for_command("a")
+        assert "ctx1" in router.get_contexts_for_command("x")
+        assert "ctx1" in router.get_contexts_for_command("y")
+        assert "ctx2" in router.get_contexts_for_command("dummy")
+        assert router.get_contexts_for_command("unknown") == set()
+    finally:
+        # Clean up the temporary workspace to avoid leaving files in repo root
+        shutil.rmtree(test_workspace, ignore_errors=True)
 
 
 def test_missing_root_dir(tmp_path, add_temp_workflow_path):
-    add_temp_workflow_path(tmp_path)
+    # Expect router.scan to raise RuntimeError when the workflow path lacks a _commands folder.
+    add_temp_workflow_path(Path.cwd())
+
     router = CommandRouter(tmp_path / "nonexistent")
-    router.scan(use_cache=False)  # Bypass cache for tests
-    
-    # Check that we have the global context, but don't check for specific core commands
-    # as they might change in the future
-    assert "*" in router.command_directory 
+
+    with pytest.raises(RuntimeError):
+        router.scan(use_cache=False)  # Bypass cache for tests 

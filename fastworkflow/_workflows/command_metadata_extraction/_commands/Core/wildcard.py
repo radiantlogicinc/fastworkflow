@@ -19,6 +19,7 @@ from fastworkflow.model_pipeline_training import (
     get_artifact_path,
 )
 from fastworkflow.session import WorkflowSnapshot
+from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from fastworkflow.utils.fuzzy_match import find_best_match
 from fastworkflow.utils.signatures import InputForParamExtraction
 
@@ -281,9 +282,12 @@ class CommandNamePrediction:
                     store_utterance_cache(self.path, utterance, command_name, modelpipeline)
                     change_flag(self.path, 0)
 
+        if command_name == "Core/wildcard":
+            command_name=None
+
         # Store the final command and classification
         if command_name:
-            if command_name != "Core/misunderstood_intent":
+            if command_name == "Core/misunderstood_intent":
                 count = self._store_utterance(self.cache_path, command, command_name)
 
             class ValidateCommandNameSignature(BaseModel):
@@ -726,6 +730,22 @@ class ParameterExtraction:
                 return params
 
         return params    
+
+
+class Signature:
+    plain_utterances = [
+        "3",
+        "france",
+        "16.7,.002",
+        "John Doe, 56, 281-995-6423",
+        "/path/to/my/object",
+        "id=3636"
+    ]
+
+    @staticmethod
+    def generate_utterances(session: fastworkflow.Session, command_name: str) -> list[str]:
+        return generate_diverse_utterances(Signature.plain_utterances, command_name)
+
 
 class ResponseGenerator:
     def __call__(

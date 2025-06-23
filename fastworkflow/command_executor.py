@@ -168,7 +168,7 @@ class CommandExecutor(CommandExecutorInterface):
     ) -> CommandOutput:
         startup_action = Action(
             workitem_path="/command_metadata_extraction",
-            command_name="wildcard",
+            command_name="Core/wildcard",
             command=command,
         )
 

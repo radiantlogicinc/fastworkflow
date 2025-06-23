@@ -1,20 +1,19 @@
 from fastworkflow import CommandOutput, CommandResponse
 import fastworkflow
 from fastworkflow.session import WorkflowSnapshot
+from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 
 
 class Signature:  # noqa: D101
     """Reset the current context to the global context (*)."""
+    plain_utterances = [
+        "reset context",
+        "clear context",
+    ]
 
-    # Parameter-free command – future framework may introspect annotations
     @staticmethod
-    def generate_utterances(*_args, **_kwargs):  # noqa: D401
-        """Return generic reset utterances list."""
-        return [
-            "reset context",
-            "clear context",
-        ]
-
+    def generate_utterances(session: fastworkflow.Session, command_name: str) -> list[str]:
+        return generate_diverse_utterances(Signature.plain_utterances, command_name)
 
 class ResponseGenerator:  # noqa: D101
     """Handle command execution and craft the textual response."""

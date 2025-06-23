@@ -603,7 +603,7 @@ def train(session: fastworkflow.Session):
         # Ensure metadata is fully populated before inspection
         cmd_dir.ensure_command_hydrated(cmd_name)
         metadata = cmd_dir.get_command_metadata(cmd_name)
-        return bool(metadata.command_parameters_class)
+        return bool(metadata.input_for_param_extraction_class)
 
     def _get_utterances(cmd: str) -> list[str]:
         """Safely retrieve utterances for *cmd* when required.
@@ -615,6 +615,12 @@ def train(session: fastworkflow.Session):
             return []
 
         um = cmd_dir.get_utterance_metadata(cmd)
+        if not um:
+            raise KeyError(
+                f"Could not find utterance metadata for command '{cmd}'. "
+                "It might be missing from the _commands directory."
+            )
+
         func = um.get_generated_utterances_func(workflow_folderpath)
         return func(session, cmd) if func else []
 

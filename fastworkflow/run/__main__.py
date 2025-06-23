@@ -43,25 +43,29 @@ def print_command_output(command_output):
             body_renderables.append(Text(command_response.response, style="green"))
 
         if command_response.artifacts:
-            body_renderables.append(Text("Artifacts", style="bold cyan"))
-            body_renderables.append(_build_artifact_table(command_response.artifacts))
-
+            body_renderables.extend(
+                (
+                    Text("Artifacts", style="bold cyan"),
+                    _build_artifact_table(command_response.artifacts),
+                )
+            )
         if command_response.next_actions:
             actions_table = Table(show_header=False, box=None)
             for act in command_response.next_actions:
                 actions_table.add_row(Text(str(act), style="blue"))
-            body_renderables.append(Text("Next Actions", style="bold blue"))
-            body_renderables.append(actions_table)
-
+            body_renderables.extend(
+                (Text("Next Actions", style="bold blue"), actions_table)
+            )
         if command_response.recommendations:
             rec_table = Table(show_header=False, box=None)
             for rec in command_response.recommendations:
                 rec_table.add_row(Text(str(rec), style="magenta"))
-            body_renderables.append(Text("Recommendations", style="bold magenta"))
-            body_renderables.append(rec_table)
-
+            body_renderables.extend(
+                (Text("Recommendations", style="bold magenta"), rec_table)
+            )
         panel_title = f"[bold yellow]Session {session_id}[/bold yellow]"
-        console.print(Panel.fit(*body_renderables, title=panel_title, border_style="green"))
+        # for body_renderable in body_renderables:
+        console.print(Panel.fit(body_renderables[-1], title=panel_title, border_style="green"))
 
 
 parser = argparse.ArgumentParser(description="AI Assistant for workflow processing")

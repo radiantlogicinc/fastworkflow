@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import contextlib
+
+from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 """Core command that reports the current context name and optional properties."""
 
 import fastworkflow
@@ -9,15 +11,15 @@ from fastworkflow.session import WorkflowSnapshot
 
 class Signature:  # noqa: D101
     """Show the current context and its properties (if any)."""
+    plain_utterances = [
+        "what context am I in",
+        "current command context",
+        "where am I",
+    ]
 
     @staticmethod
-    def generate_utterances(*_args, **_kwargs):  # noqa: D401
-        return [
-            "what context am I in",
-            "current command context",
-            "where am I",
-        ]
-
+    def generate_utterances(session: fastworkflow.Session, command_name: str) -> list[str]:
+        return generate_diverse_utterances(Signature.plain_utterances, command_name)
 
 class ResponseGenerator:  # noqa: D101
     """Generate response describing the current context."""

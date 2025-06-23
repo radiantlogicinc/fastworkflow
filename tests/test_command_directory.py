@@ -40,6 +40,7 @@ class TestCommandDirectory:
             "return_delivered_order_items",
             "transfer_to_human_agents",
             "Core/misunderstood_intent",
+            "Core/wildcard",
         }
         # The commands are now stored with their context prefix for core commands
         assert command_keys == expected_commands
