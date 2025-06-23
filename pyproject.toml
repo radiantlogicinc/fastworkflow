@@ -28,6 +28,7 @@ mmh3 = "^5.1.0"
 python-levenshtein = "^0.27.1"
 colorama = "^0.4.6"
 torch = "^2.7.0"
+rich = "^13.7.1"
 
 [tool.poetry.group.dev.dependencies]
 isort = "^5.13.2"
