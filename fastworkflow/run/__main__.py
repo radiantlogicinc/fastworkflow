@@ -3,40 +3,67 @@ import json
 import os
 import queue
 from typing import Optional
+import contextlib
+
 from dotenv import dotenv_values
 
-from colorama import Fore, Style, init
+# Third-party CLI prettification libraries
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
 
 import fastworkflow
 from fastworkflow.command_executor import CommandExecutor
 
 
-# Initialize colorama
-init(autoreset=True)
+# Instantiate a global console for consistent styling
+console = Console()
+
+
+def _build_artifact_table(artifacts: dict[str, str]) -> Table:
+    """Return a rich.Table representation for artifact key-value pairs."""
+    table = Table(show_header=True, header_style="bold cyan", box=None)
+    table.add_column("Name", style="cyan", overflow="fold")
+    table.add_column("Value", style="white", overflow="fold")
+    for name, value in artifacts.items():
+        table.add_row(str(name), str(value))
+    return table
+
 
 def print_command_output(command_output):
+    """Pretty-print workflow output using rich panels and tables."""
     for command_response in command_output.command_responses:
         session_id = fastworkflow.WorkflowSession.get_active_session_id()
-        if command_response.response:   
-            print(
-                f"{Fore.GREEN}{Style.BRIGHT}{session_id} AI>{Style.RESET_ALL}{Fore.GREEN} {command_response.response}{Style.RESET_ALL}"
-        )
 
-        for artifact_name, artifact_value in command_response.artifacts.items():
-            print(
-                f"{Fore.CYAN}{Style.BRIGHT}{session_id} AI>{Style.RESET_ALL}{Fore.CYAN} Artifact: {artifact_name}={artifact_value}{Style.RESET_ALL}"
-            )
-        for action in command_response.next_actions:
-            print(
-                f"{Fore.BLUE}{Style.BRIGHT}{session_id} AI>{Style.RESET_ALL}{Fore.BLUE} Next Action: {action}{Style.RESET_ALL}"
-            )
-        for recommendation in command_response.recommendations:
-            print(
-                f"{Fore.MAGENTA}{Style.BRIGHT}{session_id} AI>{Style.RESET_ALL}{Fore.MAGENTA} Recommendation: {recommendation}{Style.RESET_ALL}"
-            )
+        # Collect body elements for the panel content
+        body_renderables = []
+
+        if command_response.response:
+            body_renderables.append(Text(command_response.response, style="green"))
+
+        if command_response.artifacts:
+            body_renderables.append(Text("Artifacts", style="bold cyan"))
+            body_renderables.append(_build_artifact_table(command_response.artifacts))
+
+        if command_response.next_actions:
+            actions_table = Table(show_header=False, box=None)
+            for act in command_response.next_actions:
+                actions_table.add_row(Text(str(act), style="blue"))
+            body_renderables.append(Text("Next Actions", style="bold blue"))
+            body_renderables.append(actions_table)
+
+        if command_response.recommendations:
+            rec_table = Table(show_header=False, box=None)
+            for rec in command_response.recommendations:
+                rec_table.add_row(Text(str(rec), style="magenta"))
+            body_renderables.append(Text("Recommendations", style="bold magenta"))
+            body_renderables.append(rec_table)
+
+        panel_title = f"[bold yellow]Session {session_id}[/bold yellow]"
+        console.print(Panel.fit(*body_renderables, title=panel_title, border_style="green"))
 
 
-import contextlib
 parser = argparse.ArgumentParser(description="AI Assistant for workflow processing")
 parser.add_argument("workflow_path", help="Path to the workflow folder")
 parser.add_argument("env_file_path", help="Path to the environment file")
@@ -57,17 +84,11 @@ parser.add_argument(
 args = parser.parse_args()
 
 if not os.path.isdir(args.workflow_path):
-    print(
-        f"{Fore.RED}Error: The specified workflow path '{args.workflow_path}' is not a valid directory.{Style.RESET_ALL}"
-    )
+    console.print(f"[bold red]Error:[/bold red] The specified workflow path '{args.workflow_path}' is not a valid directory.")
     exit(1)
 
-print(
-    f"{Fore.GREEN}{Style.BRIGHT}AI>{Style.RESET_ALL}{Fore.GREEN} Running fastWorkflow: {args.workflow_path}{Style.RESET_ALL}"
-)
-print(
-    f"{Fore.GREEN}{Style.BRIGHT}AI>{Style.RESET_ALL}{Fore.GREEN} Type 'exit' to quit the application.{Style.RESET_ALL}"
-)
+console.print(Panel(f"Running fastWorkflow: [bold]{args.workflow_path}[/bold]", title="[bold green]fastworkflow[/bold green]", border_style="green"))
+console.print("[bold green]Tip:[/bold green] Type 'exit' to quit the application.")
 
 if args.startup_command and args.startup_action:
     raise ValueError("Cannot provide both startup_command and startup_action")
@@ -107,9 +128,7 @@ with contextlib.suppress(queue.Empty):
     ):
         print_command_output(command_output)
 while not workflow_session.workflow_is_complete or args.keep_alive:
-    user_command = input(
-        f"{Fore.YELLOW}{Style.BRIGHT}User>{Style.RESET_ALL}{Fore.YELLOW} "
-    )
+    user_command = console.input("[bold yellow]User > [/bold yellow]")
     if user_command == "exit":
         break
 
