@@ -5,24 +5,6 @@ from typing import Any, Optional, Union
 from pydantic import BaseModel
 import mmh3
 
-# Optional dependency: speedict is not required in all environments (e.g., CI)
-try:
-    import speedict  # noqa: F401
-except ModuleNotFoundError:  # Provide fallback via the local stub if available
-    import sys, types, importlib
-    try:
-        speedict_stub = importlib.import_module("speedict")
-        sys.modules["speedict"] = speedict_stub  # ensure future imports succeed
-    except ModuleNotFoundError:
-        # As a last resort, create a dummy module with a dict-backed Rdict
-        stub = types.ModuleType("speedict")
-        class Rdict(dict):
-            def __enter__(self):
-                return self
-            def __exit__(self, exc_type, exc_val, exc_tb):
-                pass
-        stub.Rdict = Rdict
-        sys.modules["speedict"] = stub
 
 class Action(BaseModel):
     command_name: str
