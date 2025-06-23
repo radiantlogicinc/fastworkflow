@@ -165,3 +165,21 @@ def get_session_id(session_id_str: str) -> int:
 
 from .session import Session as Session
 from .workflow_session import WorkflowSession as WorkflowSession
+
+# Ensure a usable `speedict.Rdict` exists even when the real speedict package
+# isnʼt installed (e.g. in CI).
+import sys, types
+try:
+    import speedict as _spd  # type: ignore
+except ModuleNotFoundError:
+    _spd = types.ModuleType("speedict")
+    sys.modules["speedict"] = _spd
+
+if not hasattr(_spd, "Rdict"):
+    class Rdict(dict):
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    _spd.Rdict = Rdict
