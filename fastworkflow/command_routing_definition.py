@@ -4,6 +4,7 @@ import os
 import json
 from enum import Enum
 from typing import Any, Optional, Type
+from pathlib import Path
 
 from pydantic import BaseModel, PrivateAttr
 
@@ -50,6 +51,9 @@ class CommandRoutingDefinition(BaseModel):
     def _load_command_class(self, command_name: str, module_type: ModuleType) -> Optional[Type[Any]]:
         """Loads a command's class from its source file."""
         try:
+            # Lazily hydrate metadata so that Signature-related fields are available
+            self.command_directory.ensure_command_hydrated(command_name)
+
             command_metadata = self.command_directory.get_command_metadata(command_name)
         except KeyError:
             # This is the expected path for commands in the context model that have no .py file.
@@ -163,9 +167,35 @@ class CommandRoutingRegistry:
         Gets the command routing definition for a workflow.
         If it doesn't exist, it will be built and cached.
         """
-        if workflow_folderpath not in cls._definitions:
-            cls._definitions[workflow_folderpath] = CommandRoutingDefinition.build(workflow_folderpath)
-        
+        workflow_folderpath = str(Path(workflow_folderpath).resolve())
+
+        if workflow_folderpath in cls._definitions:
+            return cls._definitions[workflow_folderpath]
+
+        # ------------------------------------------------------------
+        # Try to load a persisted JSON definition if it is fresh enough
+        # compared to the underlying command sources.
+        # ------------------------------------------------------------
+        try:
+            cache_file = Path(CommandDirectory.get_commandinfo_folderpath(workflow_folderpath)) / "command_routing_definition.json"
+
+            if cache_file.exists():
+                commands_root = Path(workflow_folderpath) / "_commands"
+                if commands_root.exists():
+                    latest_src_mtime = max(p.stat().st_mtime for p in commands_root.rglob("*.py"))
+                else:
+                    latest_src_mtime = 0.0
+
+                if cache_file.stat().st_mtime > latest_src_mtime:
+                    definition = CommandRoutingDefinition.load(workflow_folderpath)
+                    cls._definitions[workflow_folderpath] = definition
+                    return definition
+        except Exception:
+            # Any issue falls back to build path
+            pass
+
+        # Fallback: build fresh definition and persist via .save()
+        cls._definitions[workflow_folderpath] = CommandRoutingDefinition.build(workflow_folderpath)
         return cls._definitions[workflow_folderpath]
 
     @classmethod

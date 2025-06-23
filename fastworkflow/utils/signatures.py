@@ -181,7 +181,8 @@ Today's date is {today}.
                 elif attribute_type is float:
                     default_value = -sys.float_info.max
                 else:
-                    attribute_type = None
+                    default_value = None
+
                 if (
                     attribute_metadata.default is not PydanticUndefined and 
                     attribute_metadata.default is not None and 

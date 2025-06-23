@@ -144,9 +144,16 @@ class CommandDirectory(BaseModel):
         return list(self.map_command_2_utterance_metadata.keys())
 
     def get_utterance_metadata(self, command_key: str) -> UtteranceMetadata:
-        if command_key not in self.map_command_2_utterance_metadata:
-            raise KeyError(f"Command key '{command_key}' not found.")
-        return self.map_command_2_utterance_metadata[command_key]
+        if meta := self.map_command_2_utterance_metadata.get(command_key):
+            return meta
+
+        # -------- lazy hydration --------
+        if command_key in self.map_command_2_metadata:
+            self.ensure_command_hydrated(command_key)
+            if meta := self.map_command_2_utterance_metadata.get(command_key):
+                return meta
+
+        raise KeyError(f"Command key '{command_key}' not found.")
 
     @classmethod
     def get_commandinfo_folderpath(cls, workflow_folderpath: str) -> str:
@@ -219,37 +226,24 @@ class CommandDirectory(BaseModel):
         """Helper method to register a command and its metadata"""
         command_filepath_str = str(command_file_path)
 
-        try:
-            module = python_utils.get_module(command_filepath_str, workflow_folderpath)
-        except Exception as e:
-            module = None
-            print(f"Warning: Could not load module for command {command_name} at {command_filepath_str}. Error: {e}")
-
-        signature_exists = hasattr(module, "Signature") if module else False
-        input_exists = bool(
-            signature_exists and hasattr(module.Signature, "Input")
-        )
+        # ------------------------------------------------------------
+        # Lazy-loading variant: we avoid importing the command module
+        # here.  Only the bare minimum metadata needed for routing is
+        # stored up-front; Signature/utterance data is hydrated the first
+        # time it is requested (see `ensure_command_hydrated`).
+        # ------------------------------------------------------------
 
         metadata = CommandMetadata(
-            workflow_folderpath=workflow_folderpath, 
-            parameter_extraction_signature_module_path=(
-                command_filepath_str if signature_exists else None
-            ),
-            input_for_param_extraction_class=(
-                "Signature" if signature_exists else None
-            ),
-            command_parameters_class=(
-                "Signature.Input" if input_exists else None
-            ),
+            workflow_folderpath=workflow_folderpath,
+            # Defer Signature import – fill these lazily
+            parameter_extraction_signature_module_path=None,
+            input_for_param_extraction_class=None,
+            command_parameters_class=None,
+            # Response generation path is still required immediately
             response_generation_module_path=command_filepath_str,
             response_generation_class_name="ResponseGenerator",
         )
         command_directory.register_command_metadata(command_name, metadata)
-
-        # Pass the already loaded module to avoid duplicate imports
-        cls._populate_utterance_metadata_for_command(
-            command_directory, command_name, metadata, workflow_folderpath, module
-        )
 
     @staticmethod
     def _populate_utterance_metadata_for_command(
@@ -490,16 +484,108 @@ class CommandDirectory(BaseModel):
                 raise ValueError(f"Invalid metadata for context key '{context_key}'")
         return v
 
+    # ------------------------------------------------------------------
+    # Lazy hydration helpers
+    # ------------------------------------------------------------------
+
+    def ensure_command_hydrated(self, command_name: str):
+        """Populate Signature-related metadata & utterances on demand.
+
+        This method is idempotent and inexpensive after the first call
+        thanks to the @lru_cache on the internal helper.
+        """
+
+        metadata = self.map_command_2_metadata.get(command_name)
+        if metadata is None:
+            raise KeyError(f"Command '{command_name}' is not registered.")
+
+        # If already hydrated we are done.
+        if metadata.parameter_extraction_signature_module_path is not None:
+            return
+
+        _lazy_hydrate_metadata(
+            metadata.response_generation_module_path,
+            metadata,
+            self,
+            command_name,
+        )
+
+
+# ------------------------------------------------------
+# Module-level helper with its own cache so that repeated
+# hydration calls across directories are cheap.
+# ------------------------------------------------------
+
+# We purposely do *not* cache by arguments because `metadata`/`directory` are
+# unhashable Pydantic objects.  The helper itself safeguards against running
+# twice for the same command by mutating `metadata` in-place.
+def _lazy_hydrate_metadata(module_path: str, metadata: CommandMetadata, directory: CommandDirectory, command_name: str):
+    """Load the command's module once and enrich its metadata object.
+
+    Note: `metadata` is mutated in place which is fine because the object
+    is unique within its `CommandDirectory` instance and, through the
+    outer LRU cache, this function will execute at most once per command.
+    """
+
+    module = python_utils.get_module(module_path, metadata.workflow_folderpath)
+    if not module:
+        return  # cannot hydrate
+
+    signature_cls = getattr(module, "Signature", None)
+    if not signature_cls:
+        return
+
+    metadata.parameter_extraction_signature_module_path = module_path
+    metadata.input_for_param_extraction_class = "Signature"
+    if hasattr(signature_cls, "Input"):
+        metadata.command_parameters_class = "Signature.Input"
+
+    # Utterance metadata (if not already registered)
+    if command_name not in directory.map_command_2_utterance_metadata:
+        CommandDirectory._populate_utterance_metadata_for_command(
+            directory,
+            command_name,
+            metadata,
+            metadata.workflow_folderpath or directory.workflow_folderpath,
+            module,
+        )
+
 @lru_cache(maxsize=32)
 def get_cached_command_directory(workflow_folderpath: str) -> CommandDirectory:
+    """Return a cached CommandDirectory, rebuilding only when sources change.
+
+    The cache key is the *resolved* workflow path so that duplicate relative
+    paths share the same entry.  We compare the modification time of the
+    persisted `command_directory.json` file against the most recent `.py`
+    timestamp in the `_commands` tree.  When the cache is fresh we deserialize
+    the JSON directly; otherwise we rebuild via `CommandDirectory.load()` and
+    persist the new snapshot.
     """
-    Returns a cached CommandDirectory instance for the given workflow path.
-    This avoids repeated filesystem scans and module imports.
-    
-    Args:
-        workflow_folderpath: Path to the workflow directory
-        
-    Returns:
-        CommandDirectory: A cached CommandDirectory instance
-    """
-    return CommandDirectory.load(workflow_folderpath)
+
+    workflow_folderpath = str(Path(workflow_folderpath).resolve())
+
+    cache_folder = Path(CommandDirectory.get_commandinfo_folderpath(workflow_folderpath))
+    cache_file = cache_folder / "command_directory.json"
+
+    try:
+        commands_root = Path(workflow_folderpath) / "_commands"
+        if commands_root.exists():
+            latest_src_mtime = max(p.stat().st_mtime for p in commands_root.rglob("*.py"))
+        else:
+            latest_src_mtime = 0.0
+
+        # Fast-path: load JSON if it is newer than any source file
+        if cache_file.exists() and cache_file.stat().st_mtime > latest_src_mtime:
+            try:
+                return CommandDirectory.model_validate_json(cache_file.read_text())
+            except Exception:
+                # Corrupted cache – fall through to rebuild
+                pass
+
+        # (Re)build and persist
+        directory = CommandDirectory.load(workflow_folderpath)
+        directory.save()
+        return directory
+    except Exception:
+        # Final fallback – live build without caching safeguards
+        return CommandDirectory.load(workflow_folderpath)

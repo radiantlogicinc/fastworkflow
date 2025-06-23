@@ -58,7 +58,9 @@ class CommandContextModel:
     )
 
     def __post_init__(self):
-        self._resolve_inheritance()
+        # Inheritance is resolved lazily on first `commands()` call to
+        # avoid upfront DFS across all contexts during cold-start.
+        pass
 
     @classmethod
     def load(cls, workflow_path: str | Path) -> CommandContextModel:

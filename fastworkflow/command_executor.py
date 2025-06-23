@@ -6,6 +6,7 @@ from fastworkflow import ModuleType
 from fastworkflow.utils.signatures import InputForParamExtraction
 from pathlib import Path
 from fastworkflow.command_router import CommandRouter
+from typing import Optional
 
 
 # ------------------------------------------------------------------
@@ -20,6 +21,13 @@ class CommandNotFoundError(Exception):
 
 
 class CommandExecutor(CommandExecutorInterface):
+    _singleton: Optional["CommandExecutor"] = None
+
+    def __new__(cls, *args, **kwargs):
+        if cls._singleton is None:
+            cls._singleton = super().__new__(cls)
+        return cls._singleton
+
     def invoke_command(
         self,
         workflow_session: 'fastworkflow.WorkflowSession',

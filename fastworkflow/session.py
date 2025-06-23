@@ -37,13 +37,15 @@ def enablecache(func):
 class WorkflowSnapshot:
     def __init__(self, session_id: int, 
                  workflow_folderpath: str, workflow_context: dict = None, 
-                 parent_session_id: Optional[int] = None):
+                 parent_session_id: Optional[int] = None,
+                 *, _auto_save: bool = True):
         self._session_id = session_id
         self._workflow_folderpath = workflow_folderpath
         self._workflow_context = {} if workflow_context is None else workflow_context
         self._parent_session_id = parent_session_id
         self._is_complete = False
-        self._save()
+        if _auto_save:
+            self._save()
 
     @property
     def session_id(self) -> int:
@@ -81,7 +83,7 @@ class WorkflowSnapshot:
         self._save()
 
     def _save(self) -> None:
-        """save the workflow snapshot"""
+        """save the workflow snapshot (as plain dict to avoid pickle)"""
         sessiondb_folderpath = Session._get_sessiondb_folderpath(
             session_id=self._session_id,
             parent_session_id=self._parent_session_id,
@@ -90,8 +92,31 @@ class WorkflowSnapshot:
         os.makedirs(sessiondb_folderpath, exist_ok=True)     
 
         keyvalue_db = Rdict(sessiondb_folderpath)
-        keyvalue_db["workflow_snapshot"] = self
+        keyvalue_db["workflow_snapshot"] = self.to_dict()
         keyvalue_db.close()
+
+    def to_dict(self) -> dict:
+        """Return a JSON-serialisable representation of the snapshot."""
+        return {
+            "session_id": self._session_id,
+            "workflow_folderpath": self._workflow_folderpath,
+            "workflow_context": self._workflow_context,
+            "parent_session_id": self._parent_session_id,
+            "is_complete": self._is_complete,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "WorkflowSnapshot":
+        """Reconstruct a WorkflowSnapshot from its dict form."""
+        obj = cls(
+            session_id=data["session_id"],
+            workflow_folderpath=data["workflow_folderpath"],
+            workflow_context=data.get("workflow_context", {}),
+            parent_session_id=data.get("parent_session_id"),
+            _auto_save=False,  # Avoid saving during reconstruction
+        )
+        obj._is_complete = data.get("is_complete", False)
+        return obj
 
 class Session:
     """Session class"""
@@ -169,8 +194,12 @@ class Session:
             raise ValueError(f"Session database folder path {sessiondb_folderpath} does not exist")
 
         keyvalue_db = Rdict(sessiondb_folderpath)
-        workflow_snapshot: WorkflowSnapshot = keyvalue_db["workflow_snapshot"]
+        raw_snapshot = keyvalue_db.get("workflow_snapshot", None)
         keyvalue_db.close()
+
+        if raw_snapshot is None:
+            raise ValueError("workflow_snapshot not found in session database")
+        workflow_snapshot = WorkflowSnapshot.from_dict(raw_snapshot)
 
         if context:
             workflow_snapshot.workflow_context = context
@@ -383,10 +412,19 @@ class Session:
             raise ValueError(f"Session {session_id} must have a children list even if it is empty")
 
         keyvalue_db = Rdict(sessiondb_folderpath)
-        workflow_snapshot: WorkflowSnapshot = keyvalue_db["workflow_snapshot"]
+        raw_snapshot = keyvalue_db.get("workflow_snapshot", None)
         keyvalue_db.close()
 
-        return (workflow_snapshot.parent_session_id, sessiondb_folderpath, children_list, workflow_snapshot.workflow_folderpath)
+        if raw_snapshot is None:
+            raise ValueError("workflow_snapshot not found in session database")
+        workflow_snapshot = WorkflowSnapshot.from_dict(raw_snapshot)
+
+        return (
+            workflow_snapshot.parent_session_id,
+            sessiondb_folderpath,
+            children_list,
+            workflow_snapshot.workflow_folderpath,
+        )
 
     @classmethod
     def _get_session_id_2_sessiondata_mapdir(cls) -> str:

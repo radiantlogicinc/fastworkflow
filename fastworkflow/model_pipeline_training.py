@@ -591,7 +591,29 @@ def train(session: fastworkflow.Session):
     cmd_dir = crd.command_directory
 
     # Helper to pull utterances for a command
+    def _requires_utterances(cmd_name: str) -> bool:
+        """Return True if *cmd_name* defines `Signature.Input` and therefore
+        needs utterance-based intent classification.
+
+        This is determined after lazy-hydrating the command so the metadata is
+        accurate.  A command with *no* `Signature.Input` is expected to be
+        dispatched exclusively via `perform_action` and should be excluded from
+        model training.
+        """
+        # Ensure metadata is fully populated before inspection
+        cmd_dir.ensure_command_hydrated(cmd_name)
+        metadata = cmd_dir.get_command_metadata(cmd_name)
+        return bool(metadata.command_parameters_class)
+
     def _get_utterances(cmd: str) -> list[str]:
+        """Safely retrieve utterances for *cmd* when required.
+
+        If the command does not have `Signature.Input`, we return an empty list
+        (no utterances needed) **without** calling `get_utterance_metadata`.
+        """
+        if not _requires_utterances(cmd):
+            return []
+
         um = cmd_dir.get_utterance_metadata(cmd)
         func = um.get_generated_utterances_func(workflow_folderpath)
         return func(session, cmd) if func else []
