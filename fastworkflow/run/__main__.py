@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+from rich.console import Group
 
 import fastworkflow
 from fastworkflow.command_executor import CommandExecutor
@@ -63,9 +64,13 @@ def print_command_output(command_output):
             body_renderables.extend(
                 (Text("Recommendations", style="bold magenta"), rec_table)
             )
+
         panel_title = f"[bold yellow]Session {session_id}[/bold yellow]"
-        # for body_renderable in body_renderables:
-        console.print(Panel.fit(body_renderables[-1], title=panel_title, border_style="green"))
+        # Group all renderables together
+        group = Group(*body_renderables)
+        # Use the group in the panel
+        panel = Panel.fit(group, title=panel_title, border_style="green")
+        console.print(panel)
 
 
 parser = argparse.ArgumentParser(description="AI Assistant for workflow processing")

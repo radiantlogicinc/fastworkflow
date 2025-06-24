@@ -122,7 +122,7 @@ Today's date is {today}.
             An instance of InputForParamExtraction   
         """
         subject_workflow_folderpath = subject_session.workflow_snapshot.workflow_folderpath
-        subject_command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(subject_workflow_folderpath)
+        subject_command_routing_definition = fastworkflow.RoutingRegistry.get_definition(subject_workflow_folderpath)
         
         input_for_param_extraction_class = subject_command_routing_definition.get_command_class(
             subject_command_name, ModuleType.INPUT_FOR_PARAM_EXTRACTION_CLASS)

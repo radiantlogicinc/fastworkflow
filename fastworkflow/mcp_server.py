@@ -8,7 +8,8 @@ to provide MCP-compliant tool execution.
 from typing import Dict, Any, List
 import fastworkflow
 from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.command_routing_definition import CommandRoutingDefinition, ModuleType
+from fastworkflow.command_directory import CommandDirectory
+from fastworkflow.command_routing import RoutingDefinition, ModuleType
 from uuid import uuid4
 
 
@@ -41,7 +42,7 @@ class FastWorkflowMCPServer:
 
         # Get available commands from workflow
         workflow_folderpath = self.workflow_session.session.workflow_snapshot.workflow_folderpath
-        routing = CommandRoutingDefinition.build(workflow_folderpath)
+        routing = RoutingDefinition.build(workflow_folderpath)
 
         # Get active context name from session, not workflow_snapshot
         active_ctx_name = self.workflow_session.session.current_command_context_name
@@ -213,7 +214,7 @@ def create_mcp_server_for_workflow(workflow_path: str) -> FastWorkflowMCPServer:
     fastworkflow.init({})
     
     # Recreate routing definition to guarantee it reflects the latest object model
-    CommandRoutingDefinition.build(workflow_path)
+    RoutingDefinition.build(workflow_path)
     
     # Create workflow session
     workflow_session = fastworkflow.WorkflowSession(

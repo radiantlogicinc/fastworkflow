@@ -5,8 +5,10 @@ from fastworkflow import Action, CommandOutput, WorkflowSession
 from fastworkflow import ModuleType
 from fastworkflow.utils.signatures import InputForParamExtraction
 from pathlib import Path
-from fastworkflow.command_router import CommandRouter
+from fastworkflow.command_routing import RoutingDefinition
 from typing import Optional
+from fastworkflow.command_context_model import CommandContextModel
+from fastworkflow.command_directory import CommandDirectory
 
 
 # ------------------------------------------------------------------
@@ -48,7 +50,7 @@ class CommandExecutor(CommandExecutorInterface):
 
         snapshot = workflow_session.session.workflow_snapshot
         workflow_folderpath = snapshot.workflow_folderpath
-        command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(
+        command_routing_definition = fastworkflow.RoutingRegistry.get_definition(
             workflow_folderpath
         )
 
@@ -80,7 +82,7 @@ class CommandExecutor(CommandExecutorInterface):
             session.current_command_context
 
         workflow_folderpath = session.workflow_snapshot.workflow_folderpath
-        command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(workflow_folderpath)
+        command_routing_definition = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
 
         response_generation_class = (
             command_routing_definition.get_command_class(
@@ -202,3 +204,13 @@ class CommandExecutor(CommandExecutorInterface):
 
         command_executor = CommandExecutor()
         return command_executor.perform_action(session, startup_action)
+
+    def _get_response_generator_class(self, command_name: str, workflow_folderpath: str):
+        # Get the command routing definition for the workflow
+        command_routing_definition = fastworkflow.RoutingRegistry.get_definition(
+            workflow_folderpath
+        )
+
+    def _get_parameter_extraction_class(self, command_name: str, workflow_folderpath: str):
+        """Get the parameter extraction class for a command."""
+        command_routing_definition = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)

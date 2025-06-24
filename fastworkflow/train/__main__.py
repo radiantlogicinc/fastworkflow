@@ -10,22 +10,21 @@ import fastworkflow
 from fastworkflow import ModuleType
 from fastworkflow.model_pipeline_training import train, get_route_layer_filepath_model
 from fastworkflow.utils.generate_param_examples import generate_dspy_examples
-from fastworkflow.command_routing_definition import CommandRoutingDefinition
-from fastworkflow.utterance_definition import UtteranceRegistry
+from fastworkflow.command_directory import CommandDirectory, get_cached_command_directory
+from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
 from fastworkflow.command_context_model import CommandContextModel
-from fastworkflow.command_directory import CommandDirectory
 
 
 def train_workflow(workflow_path: str):
     # Ensure context model is parsed so downstream helpers have contexts
     CommandContextModel.load(workflow_path)
-    CommandRoutingDefinition.build(workflow_path)
+    RoutingDefinition.build(workflow_path)
     # Ensure the command directory is persisted so that downstream helpers
     # (e.g. DSPy example generation) can read it from disk without first
     # needing to rebuild it in-memory.
     cmd_dir = CommandDirectory.load(workflow_path)
     cmd_dir.save()
-    UtteranceRegistry.get_definition(workflow_path)
+    RoutingRegistry.get_definition(workflow_path)
 
     #first, recursively train all child workflows
     workflows_dir = os.path.join(workflow_path, "_workflows")

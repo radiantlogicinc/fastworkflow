@@ -14,7 +14,7 @@ Key concepts
    * [context_model.py](mdc:fastworkflow/context_model.py)
 3. At load-time `fastworkflow/context_model.py` parses the file
 4. Command availability for a given path is the union of its `/` list **plus** all commands inherited via the `base` hierarchy.  
-5. `CommandRoutingDefinition` verifies that every declared command has an implementation file in _commands.
+5. `RoutingDefinition` verifies that every declared command has an implementation file in _commands.
 
 Practical navigation hints
 -------------------------

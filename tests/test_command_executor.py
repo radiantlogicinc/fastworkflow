@@ -30,8 +30,8 @@ def workflow_session(retail_workflow_path: str, command_executor: CommandExecuto
     }
     fastworkflow.init(env_vars)
     fastworkflow.CommandContextModel.load(retail_workflow_path)
-    fastworkflow.CommandRoutingRegistry.clear_registry()
-    fastworkflow.CommandRoutingRegistry.get_definition(retail_workflow_path)
+    fastworkflow.RoutingRegistry.clear_registry()
+    fastworkflow.RoutingRegistry.get_definition(retail_workflow_path)
 
     return WorkflowSession(
         command_executor,

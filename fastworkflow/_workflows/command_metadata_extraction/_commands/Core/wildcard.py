@@ -9,11 +9,11 @@ from pydantic_core import PydanticUndefined
 from speedict import Rdict
 
 import fastworkflow
-from fastworkflow import Action, CommandOutput, CommandResponse
+from fastworkflow import Action, CommandOutput, CommandResponse, ModuleType
 from fastworkflow.cache_matching import cache_match, change_flag, get_flag, store_utterance_cache
 from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.command_routing_definition import CommandRoutingDefinition, ModuleType
-import fastworkflow.command_routing_definition
+from fastworkflow.command_routing import RoutingDefinition
+import fastworkflow.command_routing
 from fastworkflow.model_pipeline_training import (
     predict_single_sentence,
     get_artifact_path,
@@ -97,7 +97,7 @@ class CommandNamePrediction:
 
     def predict(self, command_context_name: str, command: str, nlu_pipeline_stage: NLUPipelineStage) -> "CommandNamePrediction.Output":
         # sourcery skip: extract-duplicate-method
-        crd = fastworkflow.CommandRoutingRegistry.get_definition(
+        crd = fastworkflow.RoutingRegistry.get_definition(
             self.session.workflow_snapshot.workflow_folderpath)
         
         if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION:
@@ -105,7 +105,7 @@ class CommandNamePrediction:
             cme_command_names = crd.get_command_names('IntentDetection')
             label_encoder_path = get_artifact_path(self.sub_sess_workflow_folderpath, command_context_name, "label_encoder.pkl")
 
-            subject_crd = fastworkflow.CommandRoutingRegistry.get_definition(
+            subject_crd = fastworkflow.RoutingRegistry.get_definition(
                 self.sub_sess_workflow_folderpath)
             valid_command_names = (
                 set(cme_command_names) | 
@@ -498,7 +498,7 @@ class ParameterExtraction:
 
     def extract(self) -> "ParameterExtraction.Output":
         subject_workflow_folderpath = self.subject_session.workflow_snapshot.workflow_folderpath
-        subject_command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(subject_workflow_folderpath)
+        subject_command_routing_definition = fastworkflow.RoutingRegistry.get_definition(subject_workflow_folderpath)
 
         command_parameters_class = (
             subject_command_routing_definition.get_command_class(

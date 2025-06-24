@@ -43,10 +43,10 @@ def test_what_can_i_do_global(monkeypatch):
         context={"subject_session": subject_session}
     )
     
-    # Mock the UtteranceRegistry.get_definition method
+    # Mock the RoutingRegistry.get_definition method
     mock_utterance_def = MagicMock()
-    mock_utterance_def.get_sample_utterances.return_value = ["create_todo_list", "help"]
-    monkeypatch.setattr(fastworkflow.UtteranceRegistry, "get_definition", lambda _: mock_utterance_def)
+    mock_utterance_def.get_sample_utterances.return_value = ["Sample utterance 1", "Sample utterance 2"]
+    monkeypatch.setattr(fastworkflow.RoutingRegistry, "get_definition", lambda _: mock_utterance_def)
     
     # Call the __call__ method which is the current implementation
     generator = ResponseGenerator()
@@ -84,11 +84,11 @@ def test_what_can_i_do_context(monkeypatch):
         context={"subject_session": subject_session}
     )
     
-    # Mock the UtteranceRegistry.get_definition method
+    # Mock the RoutingRegistry.get_definition method
     mock_utterance_def = MagicMock()
     # First return context-specific commands, then return global commands after reset
     mock_utterance_def.get_sample_utterances.side_effect = [["create_todo_list", "help"], ["list_todo_lists", "help"]]
-    monkeypatch.setattr(fastworkflow.UtteranceRegistry, "get_definition", lambda _: mock_utterance_def)
+    monkeypatch.setattr(fastworkflow.RoutingRegistry, "get_definition", lambda _: mock_utterance_def)
     
     # Call the __call__ method which is the current implementation
     generator = ResponseGenerator()
@@ -103,4 +103,9 @@ def test_what_can_i_do_context(monkeypatch):
     
     # Check that after reset, we get global context
     resp2 = generator(mock_session, "what can i do")
-    assert "global" in resp2.command_responses[0].response.lower() or "*" in resp2.command_responses[0].response 
+    assert "global" in resp2.command_responses[0].response.lower() or "*" in resp2.command_responses[0].response
+
+    # Mock the RoutingRegistry.get_definition method
+    mock_utterance_def = MagicMock()
+    mock_utterance_def.get_sample_utterances.return_value = []
+    monkeypatch.setattr(fastworkflow.RoutingRegistry, "get_definition", lambda _: mock_utterance_def) 

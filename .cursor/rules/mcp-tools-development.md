@@ -11,7 +11,7 @@ All workflow commands in `_commands/` directories automatically become MCP tools
 ### Automatic MCP Tool Schema Generation
 ```python
 # Schema generated automatically from Pydantic command parameter classes
-command_parameters_class = command_routing_definition.get_command_class(
+command_parameters_class = routing_definition.get_command_class(
     active_workitem_path, 
     command_name, 
     CommandModuleType.COMMAND_PARAMETERS_CLASS

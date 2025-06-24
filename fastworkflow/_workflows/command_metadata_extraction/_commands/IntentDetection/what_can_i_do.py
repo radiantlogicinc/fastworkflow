@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 import fastworkflow
 from fastworkflow.session import WorkflowSnapshot
-from fastworkflow.command_router import CommandRouter
+from fastworkflow.command_routing import RoutingDefinition
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 class Signature:
     class Output(BaseModel):
@@ -30,7 +30,7 @@ class Signature:
 
     @staticmethod
     def generate_utterances(session: fastworkflow.Session, command_name: str) -> list[str]:
-        utterance_definition = fastworkflow.UtteranceRegistry.get_definition(session.workflow_snapshot.workflow_folderpath)
+        utterance_definition = fastworkflow.RoutingRegistry.get_definition(session.workflow_snapshot.workflow_folderpath)
         utterances_obj = utterance_definition.get_command_utterances(command_name)
         result = generate_diverse_utterances(utterances_obj.plain_utterances, command_name)
         
@@ -51,9 +51,13 @@ class ResponseGenerator:
         """
         # Get the current workitem type for the subject workflow snapshot
         sub_sess = session.workflow_snapshot.workflow_context["subject_session"]
-        utterance_definition = fastworkflow.UtteranceRegistry.get_definition(sub_sess.workflow_snapshot.workflow_folderpath)
+        utterance_definition = fastworkflow.RoutingRegistry.get_definition(sub_sess.workflow_snapshot.workflow_folderpath)
         cur_cmd_ctxt_cls_name = sub_sess.current_command_context_name
-        utterances = utterance_definition.get_sample_utterances(cur_cmd_ctxt_cls_name)
+        try:
+            utterances = utterance_definition.get_sample_utterances(cur_cmd_ctxt_cls_name)
+        except Exception as e:
+            print(f"Error getting sample utterances: {e}")
+            utterances = []
 
         return Signature.Output(
             command_context_name=cur_cmd_ctxt_cls_name, 
@@ -85,13 +89,12 @@ class ResponseGenerator:
                 )
             ]
         ) 
-    # def _ensure_router(self, snapshot: WorkflowSnapshot) -> CommandRouter:
-    #     """Get or build a CommandRouter attached to the snapshot."""
-    #     router: CommandRouter | None = getattr(snapshot, "_command_router", None)  # type: ignore[attr-defined]
+    # def _ensure_router(self, snapshot: WorkflowSnapshot) -> RoutingDefinition:
+    #     """Get or build a RoutingDefinition attached to the snapshot."""
+    #     router: RoutingDefinition | None = getattr(snapshot, "_command_router", None)  # type: ignore[attr-defined]
     #     if router is None:
-    #         # Assume commands live in `<workflow_path>/_commands`
-    #         commands_root = Path(snapshot.workflow_folderpath) / "_commands"
-    #         router = CommandRouter(commands_root)
+    #         commands_root = os.path.join(snapshot.workflow_folderpath, "_commands")
+    #         router = RoutingDefinition(commands_root)
     #         router.scan()
     #         setattr(snapshot, "_command_router", router)
     #     return router

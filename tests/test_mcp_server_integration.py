@@ -14,7 +14,7 @@ import uuid
 import fastworkflow
 from fastworkflow.mcp_server import FastWorkflowMCPServer, create_mcp_server_for_workflow
 from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.command_routing_definition import CommandRoutingDefinition
+from fastworkflow.command_routing import RoutingDefinition
 
 
 @pytest.fixture(scope="module")
@@ -35,7 +35,7 @@ def initialized_fastworkflow():
 def workflow_session(sample_workflow_path, initialized_fastworkflow):
     """Create a FastWorkflow session for the sample workflow."""
     # Build command routing definition once so that command metadata is ready
-    CommandRoutingDefinition.build(sample_workflow_path)
+    RoutingDefinition.build(sample_workflow_path)
     return fastworkflow.WorkflowSession(
         CommandExecutor(), sample_workflow_path, session_id_str=str(uuid.uuid4())
     )

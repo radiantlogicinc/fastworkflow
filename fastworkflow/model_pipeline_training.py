@@ -248,7 +248,7 @@ def find_optimal_threshold(tiny_stats, test_loader, pipeline):
 
 
 def get_route_layer_filepath_model(workflow_folderpath,model_name) -> str:
-    command_routing_definition = fastworkflow.CommandRoutingRegistry.get_definition(
+    command_routing_definition = fastworkflow.RoutingRegistry.get_definition(
         workflow_folderpath
     )
     cmddir = command_routing_definition.command_directory
@@ -510,10 +510,10 @@ def get_artifact_path(workflow_folderpath: str, context_name: str, filename: str
     The directory is created if it does not yet exist.  The special
     context name "*" is mapped to a folder named "_global".
     """
-    from fastworkflow import CommandRoutingRegistry
+    from fastworkflow import RoutingRegistry
 
     ctx_folder = context_name if context_name != "*" else _GLOBAL_CONTEXT_FOLDER
-    crd = CommandRoutingRegistry.get_definition(workflow_folderpath)
+    crd = RoutingRegistry.get_definition(workflow_folderpath)
     base_dir = Path(crd.command_directory.get_commandinfo_folderpath(workflow_folderpath)) / ctx_folder
     base_dir.mkdir(parents=True, exist_ok=True)
     return str(base_dir / filename)
@@ -587,7 +587,7 @@ def train(session: fastworkflow.Session):
     import time
 
     workflow_folderpath = session.workflow_snapshot.workflow_folderpath
-    crd = fastworkflow.CommandRoutingRegistry.get_definition(workflow_folderpath)
+    crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
     cmd_dir = crd.command_directory
 
     # Helper to pull utterances for a command

@@ -21,19 +21,22 @@ def test_command_not_found(monkeypatch, tmp_path):
     """Test that attempting to execute a non-existent command raises an appropriate error."""
     fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
     
-    # Create a session
+    # Get the path to the hello_world example directory
+    hello_world_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "hello_world")
+    
+    # Create a session with the hello_world workflow
     session = Session.create(
-        workflow_folderpath=str(tmp_path),
+        workflow_folderpath=hello_world_path,
         session_id_str="test-session-3"
     )
 
-    # Create a mock CommandRoutingDefinition
+    # Create a mock RoutingDefinition
     mock_routing_def = MagicMock()
     mock_routing_def.get_command_class.return_value = None  # No command class found
     
-    # Patch the CommandRoutingRegistry.get_definition to return our mock
+    # Patch the RoutingRegistry.get_definition to return our mock
     monkeypatch.setattr(
-        fastworkflow.CommandRoutingRegistry,
+        fastworkflow.RoutingRegistry,
         "get_definition",
         lambda _: mock_routing_def
     )
@@ -56,9 +59,12 @@ def test_invalid_action_parameters(monkeypatch, tmp_path):
     """Test that providing invalid parameters to a command raises an appropriate error."""
     fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
     
-    # Create a session
+    # Get the path to the hello_world example directory
+    hello_world_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "hello_world")
+    
+    # Create a session with the hello_world workflow
     session = Session.create(
-        workflow_folderpath=str(tmp_path),
+        workflow_folderpath=hello_world_path,
         session_id_str="test-session-4"
     )
 
@@ -67,25 +73,25 @@ def test_invalid_action_parameters(monkeypatch, tmp_path):
         def __call__(self, *args, **kwargs):
             return "mock response"
     
-    # Create a mock CommandRoutingDefinition
+    # Create a mock RoutingDefinition
     mock_routing_def = MagicMock()
     mock_routing_def.get_command_class.side_effect = lambda cmd_name, module_type: \
         MockResponseGenerator if module_type == fastworkflow.ModuleType.RESPONSE_GENERATION_INFERENCE else None
     
-    # Patch the CommandRoutingRegistry.get_definition to return our mock
+    # Patch the RoutingRegistry.get_definition to return our mock
     monkeypatch.setattr(
-        fastworkflow.CommandRoutingRegistry,
+        fastworkflow.RoutingRegistry,
         "get_definition",
         lambda _: mock_routing_def
     )
 
     executor = CommandExecutor()
     
-    # Create an Action with a command that exists but with no parameter class
+    # Create an Action with Core/wildcard command which has no parameter class
     action = fastworkflow.Action(
         workitem_path="*",  # Use global context
-        command_name="greet",
-        command="greet",
+        command_name="Core/wildcard",
+        command="Core/wildcard",
         parameters={"invalid_param": "value"}  # These parameters will be ignored since there's no parameter class
     )
 

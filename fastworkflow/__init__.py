@@ -80,19 +80,19 @@ class ModuleType(Enum):
 
 _env_vars: dict = {}
 CommandContextModel = None
-CommandRoutingRegistry = None
-UtteranceRegistry = None
+RoutingDefinition = None
+RoutingRegistry = None
 ModelPipelineRegistry=None
 
 
 def init(env_vars: dict):
-    global _env_vars, CommandContextModel, CommandRoutingRegistry, UtteranceRegistry, ModelPipelineRegistry, Session, WorkflowSession
+    global _env_vars, CommandContextModel, RoutingDefinition, RoutingRegistry, ModelPipelineRegistry
     _env_vars = env_vars
 
     # init before importing other modules so env vars are available
     from .command_context_model import CommandContextModel as CommandContextModelClass
-    from .command_routing_definition import CommandRoutingRegistry as CommandRoutingRegistryClass
-    from .utterance_definition import UtteranceRegistry as UtteranceRegistryClass
+    from .command_routing import RoutingDefinition as RoutingDefinitionClass
+    from .command_routing import RoutingRegistry as RoutingRegistryClass
     from .model_pipeline_training import ModelPipeline
 
     # from .session import Session as SessionClass
@@ -100,8 +100,8 @@ def init(env_vars: dict):
 
     # Assign to global variables
     CommandContextModel = CommandContextModelClass
-    CommandRoutingRegistry = CommandRoutingRegistryClass
-    UtteranceRegistry = UtteranceRegistryClass
+    RoutingDefinition = RoutingDefinitionClass
+    RoutingRegistry = RoutingRegistryClass
     ModelPipelineRegistry = ModelPipeline
     # Session = SessionClass
     # WorkflowSession = WorkflowSessionClass

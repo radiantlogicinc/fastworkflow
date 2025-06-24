@@ -14,18 +14,16 @@ class FaultyRG:  # noqa: D401
         raise RuntimeError("boom")
 
 
-class DummyCRD:  # minimal stand-in for CommandRoutingDefinition
+class DummyCRD:  # minimal stand-in for RoutingDefinition
     def get_command_class(self, name, module_type):  # noqa: D401
-        if name == "fail":
-            return FaultyRG
-        return None
+        return FaultyRG if name == "fail" else None
 
 
 def _monkey_registry(monkeypatch):
     monkeypatch.setattr(
-        fastworkflow.CommandRoutingRegistry,
+        fastworkflow.RoutingRegistry,
         "get_definition",
-        lambda _wf: DummyCRD(),
+        lambda _: DummyCRD(),
     )
 
 

@@ -4,9 +4,10 @@ import pprint
 import uuid
 import pytest
 import shutil
+import tempfile
 
 import fastworkflow
-from fastworkflow.command_router import CommandRouter
+from fastworkflow.command_routing import RoutingDefinition
 from fastworkflow.command_directory import CommandDirectory
 
 
@@ -74,27 +75,29 @@ def test_scan_and_lookup(add_temp_workflow_path, tmp_path):
     print(f"Commands: {cmd_dir.get_commands()}")
     
     # Now use the router
-    router = CommandRouter(test_workspace)
+    router = RoutingDefinition.build(test_workspace)
     try:
         router.scan(use_cache=False)  # Bypass cache for tests
         
         print("\nRouter Command Directory:")
-        pprint.pprint(router.command_directory)
+        pprint.pprint(router.command_directory_map)
         print("\nRouter Routing Definition:")
-        pprint.pprint(router.routing_definition)
+        pprint.pprint(router.routing_definition_map)
 
         # Command directory checks - need to account for core commands
-        assert "a" in router.get_commands_for_context("*")
-        assert "x" in router.get_commands_for_context("ctx1")
-        assert "y" in router.get_commands_for_context("ctx1")
-        assert "dummy" in router.get_commands_for_context("ctx2")
+        assert "a" in router.command_directory_map["*"]
+        assert "x" in router.command_directory_map["ctx1"]
+        assert "y" in router.command_directory_map["ctx1"]
+        assert "dummy" in router.command_directory_map["ctx2"]
 
         # Routing definition checks
-        assert "*" in router.get_contexts_for_command("a")
-        assert "ctx1" in router.get_contexts_for_command("x")
-        assert "ctx1" in router.get_contexts_for_command("y")
-        assert "ctx2" in router.get_contexts_for_command("dummy")
-        assert router.get_contexts_for_command("unknown") == set()
+        assert "*" in router.routing_definition_map["a"]
+        assert "ctx1" in router.routing_definition_map["x"]
+        assert "ctx1" in router.routing_definition_map["y"]
+        assert "ctx2" in router.routing_definition_map["dummy"]
+        
+        # Check nonexistent command - use get() to avoid KeyError
+        assert router.routing_definition_map.get("unknown", set()) == set()
     finally:
         # Clean up the temporary workspace to avoid leaving files in repo root
         shutil.rmtree(test_workspace, ignore_errors=True)
@@ -104,7 +107,96 @@ def test_missing_root_dir(tmp_path, add_temp_workflow_path):
     # Expect router.scan to raise RuntimeError when the workflow path lacks a _commands folder.
     add_temp_workflow_path(Path.cwd())
 
-    router = CommandRouter(tmp_path / "nonexistent")
+    router = RoutingDefinition.build(tmp_path / "nonexistent")
 
     with pytest.raises(RuntimeError):
-        router.scan(use_cache=False)  # Bypass cache for tests 
+        router.scan(use_cache=False)  # Bypass cache for tests
+
+
+def test_scan_with_commands_directory():
+    """Test that the router can scan a directory with commands."""
+    # Create a test workspace
+    test_workspace = os.path.join(os.path.dirname(__file__), "example_workflow")
+    
+    # Create a router and scan the directory
+    router = RoutingDefinition.build(test_workspace)
+    
+    # Check that the command directory is populated
+    assert len(router.command_directory_map) > 0
+    
+    # Check that the routing definition is populated
+    assert len(router.routing_definition_map) > 0
+    
+    # Check that the global context exists
+    assert "*" in router.command_directory_map
+    
+    # Check that commands in the global context are mapped correctly
+    for command in router.command_directory_map["*"]:
+        assert "*" in router.routing_definition_map[command]
+
+
+def test_get_commands_for_context():
+    """Test that get_commands_for_context returns the correct commands."""
+    # Create a test workspace
+    test_workspace = os.path.join(os.path.dirname(__file__), "example_workflow")
+    
+    # Create a router and scan the directory
+    router = RoutingDefinition.build(test_workspace)
+    
+    # Get commands for the global context
+    commands = router.get_commands_for_context("*")
+    
+    # Check that the commands are returned as a set
+    assert isinstance(commands, set)
+    
+    # Check that the commands are the same as in the command directory
+    assert commands == router.command_directory_map["*"]
+
+
+def test_get_contexts_for_command():
+    """Test that get_contexts_for_command returns the correct contexts."""
+    # Create a test workspace
+    test_workspace = os.path.join(os.path.dirname(__file__), "example_workflow")
+    
+    # Create a router and scan the directory
+    router = RoutingDefinition.build(test_workspace)
+    
+    # Ensure we have at least one command in the global context
+    if not router.command_directory_map["*"]:
+        router.command_directory_map["*"] = {"dummy_command"}
+        router.routing_definition_map["dummy_command"] = {"*"}
+    
+    # Get a command from the global context
+    command = next(iter(router.command_directory_map["*"]))
+    
+    # Get the contexts for the command
+    contexts = router.get_contexts_for_command(command)
+    
+    # Check that the contexts include the global context
+    assert "*" in contexts
+    
+    # Test with a nonexistent command
+    contexts = router.get_contexts_for_command("nonexistent_command")
+    assert contexts == set()
+
+
+def test_scan_with_nonexistent_directory():
+    """Test that the router handles a nonexistent directory gracefully."""
+    # Create a temporary directory that doesn't exist
+    with tempfile.TemporaryDirectory() as tmpdir:
+        nonexistent_dir = Path(tmpdir) / "nonexistent"
+        
+        # Create a router and scan the directory
+        # This should not raise an exception, but the command directory and routing definition should be empty
+        try:
+            router = RoutingDefinition.build(str(nonexistent_dir))
+            
+            # Check that the command directory is empty
+            assert len(router.command_directory_map) == 1  # Just the global context
+            assert router.command_directory_map["*"] == set()
+            
+            # Check that the routing definition is empty
+            assert len(router.routing_definition_map) == 0
+        except Exception as e:
+            # If an exception is raised, fail the test with the exception message
+            pytest.fail(f"RoutingDefinition.build raised an exception for a nonexistent directory: {str(e)}") 

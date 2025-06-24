@@ -1,3 +1,4 @@
+import os
 import fastworkflow
 from fastworkflow.session import WorkflowSnapshot, Session
 import pytest
@@ -16,13 +17,13 @@ def test_workflow_snapshot_has_context_methods(tmp_path):
     env_vars = {"SPEEDDICT_FOLDERNAME": "___workflow_contexts"}
     fastworkflow.init(env_vars=env_vars)
 
-    workflow_dir = tmp_path / "wf"
-    workflow_dir.mkdir()
-
-    # Create a session instead of directly using WorkflowSnapshot
+    # Get the path to the hello_world example directory
+    hello_world_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "hello_world")
+    
+    # Create a session with the hello_world workflow
     session = Session.create(
-        workflow_folderpath=str(workflow_dir),
-        session_id_str="test-session-42"
+        workflow_folderpath=hello_world_path,
+        session_id_str="test-session-3"
     )
     snapshot = session.workflow_snapshot
 
@@ -49,13 +50,13 @@ def test_dummy_expander(tmp_path):
     env_vars = {"SPEEDDICT_FOLDERNAME": "___workflow_contexts"}
     fastworkflow.init(env_vars=env_vars)
 
-    workflow_dir = tmp_path / "wf2"
-    workflow_dir.mkdir()
-
-    # Create a session instead of directly using WorkflowSnapshot
+    # Get the path to the hello_world example directory
+    hello_world_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "hello_world")
+    
+    # Create a session with the hello_world workflow
     session = Session.create(
-        workflow_folderpath=str(workflow_dir),
-        session_id_str="test-session-100"
+        workflow_folderpath=hello_world_path,
+        session_id_str="test-session-3"
     )
 
     # Set some context (simple, picklable object)
@@ -94,13 +95,13 @@ def test_object_level_move_to_parent(tmp_path):
     env_vars = {"SPEEDDICT_FOLDERNAME": "___workflow_contexts"}
     fastworkflow.init(env_vars=env_vars)
 
-    workflow_dir = tmp_path / "wf3"
-    workflow_dir.mkdir()
-
-    # Create a session instead of directly using WorkflowSnapshot
+    # Get the path to the hello_world example directory
+    hello_world_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "hello_world")
+    
+    # Create a session with the hello_world workflow
     session = Session.create(
-        workflow_folderpath=str(workflow_dir),
-        session_id_str="test-session-200"
+        workflow_folderpath=hello_world_path,
+        session_id_str="test-session-3"
     )
 
     parent = ParentCtx()
