@@ -13,7 +13,9 @@ class Signature:  # noqa: D101
 
     @staticmethod
     def generate_utterances(session: fastworkflow.Session, command_name: str) -> list[str]:
-        return generate_diverse_utterances(Signature.plain_utterances, command_name)
+        return [
+            command_name.split('/')[-1].lower().replace('_', ' ')
+        ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
 
 class ResponseGenerator:  # noqa: D101
     """Handle command execution and craft the textual response."""

@@ -33,7 +33,7 @@ def test_global_context():
     mock_session = fastworkflow.Session.create(
         workflow_folderpath=cme_workflow_folderpath,
         parent_session_id=subject_session.id,
-        context={"subject_session": subject_session}
+        workflow_context={"subject_session": subject_session}
     )
     
     # Call the __call__ method which is the current implementation
@@ -69,7 +69,7 @@ def test_context_no_properties():
     mock_session = fastworkflow.Session.create(
         workflow_folderpath=cme_workflow_folderpath,
         parent_session_id=subject_session.id,
-        context={"subject_session": subject_session}
+        workflow_context={"subject_session": subject_session}
     )
     
     # Call the __call__ method which is the current implementation
@@ -105,7 +105,7 @@ def test_context_with_properties():
     mock_session = fastworkflow.Session.create(
         workflow_folderpath=cme_workflow_folderpath,
         parent_session_id=subject_session.id,
-        context={"subject_session": subject_session}
+        workflow_context={"subject_session": subject_session}
     )
     
     # Call the __call__ method which is the current implementation

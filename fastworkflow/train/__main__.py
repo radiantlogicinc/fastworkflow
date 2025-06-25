@@ -147,7 +147,28 @@ def is_fast_workflow_trained(fastworkflow_folderpath: str):
         'ErrorCorrection'
     )
 
-    return "largemodel.pth" in os.listdir(cme_commandinfo_folderpath)
+    model_path = os.path.join(cme_commandinfo_folderpath, "largemodel.pth")
+    if not os.path.exists(model_path):
+        return False
+
+    model_mtime = os.path.getmtime(model_path)
+
+    commands_path = os.path.join(
+        fastworkflow_folderpath,
+        "_workflows",
+        "command_metadata_extraction",
+        "_commands",
+    )
+
+    for root, _, files in os.walk(commands_path):
+        for file in files:
+            if file.endswith(".pyc"):
+                continue
+            file_path = os.path.join(root, file)
+            if os.path.getmtime(file_path) > model_mtime:
+                return False
+
+    return True
 
 
 if __name__ == "__main__":

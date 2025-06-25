@@ -39,7 +39,7 @@ def test_what_can_i_do_global(monkeypatch):
     mock_session = fastworkflow.Session.create(
         workflow_folderpath=cme_workflow_folderpath,
         parent_session_id=subject_session.id,
-        context={"subject_session": subject_session}
+        workflow_context={"subject_session": subject_session}
     )
     
     # Mock the RoutingRegistry.get_definition method
@@ -80,7 +80,7 @@ def test_what_can_i_do_context(monkeypatch):
     mock_session = fastworkflow.Session.create(
         workflow_folderpath=cme_workflow_folderpath,
         parent_session_id=subject_session.id,
-        context={"subject_session": subject_session}
+        workflow_context={"subject_session": subject_session}
     )
     
     # Mock the RoutingRegistry.get_definition method

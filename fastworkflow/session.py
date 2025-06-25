@@ -37,9 +37,9 @@ def enablecache(func):
 class Session:
     """Session class"""
     @classmethod
-    def create(cls, workflow_folderpath: str, session_id_str: Optional[str] = None, parent_session_id: Optional[int] = None, context: dict = None, for_training_semantic_router: bool = False) -> "Session":
-        if context is None:
-            context = {}
+    def create(cls, workflow_folderpath: str, session_id_str: Optional[str] = None, parent_session_id: Optional[int] = None, workflow_context: dict = None, for_training_semantic_router: bool = False) -> "Session":
+        if workflow_context is None:
+            workflow_context = {}
         if session_id_str is None and parent_session_id is None:
             raise ValueError("Either session_id_str or parent_session_id must be provided")
 
@@ -51,7 +51,7 @@ class Session:
         else:
             session_id = cls._generate_child_session_id(parent_session_id, workflow_folderpath)
 
-        if session := cls.get_session(session_id, context):
+        if session := cls.get_session(session_id, workflow_context):
             return session
 
         if not os.path.exists(workflow_folderpath):
@@ -63,7 +63,7 @@ class Session:
         workflow_snapshot = {
             "session_id": session_id,
             "workflow_folderpath": workflow_folderpath,
-            "workflow_context": {} if context is None else context,
+            "workflow_context": workflow_context or {},
             "parent_session_id": parent_session_id,
             "is_complete": False
         }
@@ -137,7 +137,7 @@ class Session:
 
         self._id = workflow_snapshot["session_id"]
         self._workflow_folderpath = workflow_snapshot["workflow_folderpath"]
-        self._workflow_context = {}
+        self._workflow_context = workflow_snapshot.get("workflow_context", {}) 
         self._parent_id = workflow_snapshot.get("parent_session_id")
         self._is_complete = workflow_snapshot.get("is_complete", False)
 
@@ -164,7 +164,7 @@ class Session:
         return Session.get_command_context_name(self._current_command_context, for_display=True)
 
     @property
-    def is_current_context_root(self) -> bool:
+    def is_current_command_context_root(self) -> bool:
         return self._current_command_context == self._root_command_context
 
     @current_command_context.setter

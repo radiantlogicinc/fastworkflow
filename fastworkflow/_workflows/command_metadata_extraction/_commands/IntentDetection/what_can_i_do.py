@@ -29,13 +29,9 @@ class Signature:
 
     @staticmethod
     def generate_utterances(session: fastworkflow.Session, command_name: str) -> list[str]:
-        utterance_definition = fastworkflow.RoutingRegistry.get_definition(session.workflow_folderpath)
-        utterances_obj = utterance_definition.get_command_utterances(command_name)
-        result = generate_diverse_utterances(utterances_obj.plain_utterances, command_name)
-        
-        utterance_list: list[str] = [command_name] + result
-
-        return utterance_list
+        return [
+            command_name.split('/')[-1].lower().replace('_', ' ')
+        ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
 
 
 class ResponseGenerator:

@@ -110,7 +110,7 @@ class WorkflowSession:
             parent_session_id=parent_session_id,
             # user_message_queue=user_message_queue,
             # command_output_queue=command_output_queue,
-            context=context
+            workflow_context=context
         )
 
         self._status = SessionStatus.STOPPED

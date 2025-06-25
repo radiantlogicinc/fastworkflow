@@ -200,7 +200,7 @@ class CommandExecutor(CommandExecutorInterface):
                 cme_workflow_folderpath,
                 session_id_str=None,
                 parent_session_id=workflow_session.session.id,
-                context=workflow_context,
+                workflow_context=workflow_context,
             )
 
         command_executor = CommandExecutor()
