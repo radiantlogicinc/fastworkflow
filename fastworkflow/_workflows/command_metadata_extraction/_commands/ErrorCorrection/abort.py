@@ -10,13 +10,14 @@ class Signature:
         command_name: str
 
     plain_utterances = [
+        "abort",
         "cancel",
         "stop",
         "quit",
         "terminate",
         "end",
         "never mind",
-        "exit",
+        "exit"
     ]
 
     @staticmethod

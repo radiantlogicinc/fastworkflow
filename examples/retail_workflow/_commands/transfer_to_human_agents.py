@@ -49,7 +49,7 @@ class ResponseGenerator:
     def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:
         output = self._process_command(session, command_parameters)
         response = (
-            f'Context: {session.current_command_context_name}\n'
+            f'Context: {session.current_command_context_displayname}\n'
             f'Command: {command}\n'
             f'Command parameters: {command_parameters}\n'
             f'Response: transfer status: {output.status}'

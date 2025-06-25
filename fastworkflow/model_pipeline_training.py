@@ -499,7 +499,7 @@ def predict_single_sentence(
 # ---------------------------------------------------------------------
 # Helper utilities for artefact locations (per-context)
 # ---------------------------------------------------------------------
-_GLOBAL_CONTEXT_FOLDER = "_global"
+GLOBAL_CONTEXT_FOLDER = "global"
 
 def get_artifact_path(workflow_folderpath: str, context_name: str, filename: str) -> str:
     """Return the absolute path for a model/artefact for *context_name*.
@@ -512,7 +512,7 @@ def get_artifact_path(workflow_folderpath: str, context_name: str, filename: str
     """
     from fastworkflow import RoutingRegistry
 
-    ctx_folder = context_name if context_name != "*" else _GLOBAL_CONTEXT_FOLDER
+    ctx_folder = context_name if context_name != "*" else GLOBAL_CONTEXT_FOLDER
     crd = RoutingRegistry.get_definition(workflow_folderpath)
     base_dir = Path(crd.command_directory.get_commandinfo_folderpath(workflow_folderpath)) / ctx_folder
     base_dir.mkdir(parents=True, exist_ok=True)

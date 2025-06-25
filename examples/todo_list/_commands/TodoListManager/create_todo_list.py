@@ -54,9 +54,9 @@ class ResponseGenerator:
         app_instance = session.command_context_for_response_generation  # type: TodoListManager
         todo_list = app_instance.create_todo_list(description=input.description)
         
-        current_context = session.current_command_context_name
+        current_context = session.current_command_context_displayname
         session.current_command_context = todo_list
-        new_context=session.current_command_context_name
+        new_context=session.current_command_context_displayname
 
         return Signature.Output(
             current_context=current_context,

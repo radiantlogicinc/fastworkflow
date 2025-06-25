@@ -160,6 +160,10 @@ class Session:
         return Session.get_command_context_name(self._current_command_context)
 
     @property
+    def current_command_context_displayname(self) -> str:
+        return Session.get_command_context_name(self._current_command_context, for_display=True)
+
+    @property
     def is_current_context_root(self) -> bool:
         return self._current_command_context == self._root_command_context
 
@@ -209,10 +213,10 @@ class Session:
         return self._command_context_for_response_generation == self._root_command_context
 
     @staticmethod
-    def get_command_context_name(command_context_object: Optional[object]) -> str:
+    def get_command_context_name(command_context_object: Optional[object], for_display = False) -> str:
         if command_context_object:
             return command_context_object.__class__.__name__
-        return 'global'
+        return 'global' if for_display else '*'
 
     @property
     def id(self) -> int:

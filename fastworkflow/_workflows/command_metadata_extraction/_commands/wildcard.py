@@ -101,9 +101,9 @@ class CommandNamePrediction:
         crd = fastworkflow.RoutingRegistry.get_definition(
             self.session.workflow_folderpath)
 
+        cme_command_names = crd.get_command_names('IntentDetection')
         if nlu_pipeline_stage != NLUPipelineStage.PARAMETER_EXTRACTION:
             modelpipeline = self.modelpipeline
-            cme_command_names = crd.get_command_names('IntentDetection')
             label_encoder_path = get_artifact_path(self.sub_sess_workflow_folderpath, command_context_name, "label_encoder.pkl")
 
             subject_crd = fastworkflow.RoutingRegistry.get_definition(
@@ -121,7 +121,8 @@ class CommandNamePrediction:
                 fully_qualified_command_name.split('/')[-1]: fully_qualified_command_name 
                 for fully_qualified_command_name in valid_command_names
             }
-        else:
+
+        if nlu_pipeline_stage != NLUPipelineStage.INTENT_DETECTION:
             # abort is special. 
             # We will not predict, just match plain utterances with exact or fuzzy match
             command_name_dict = {
@@ -129,30 +130,30 @@ class CommandNamePrediction:
                 for plain_utterance in crd.command_directory.map_command_2_utterance_metadata['ErrorCorrection/abort'].plain_utterances
             }
 
-        # you_misunderstood is special. 
-        # We will not predict, just match plain utterances with exact or fuzzy match
-        for plain_utterance in crd.command_directory.map_command_2_utterance_metadata['ErrorCorrection/you_misunderstood'].plain_utterances:
-            command_name_dict[plain_utterance] = 'ErrorCorrection/you_misunderstood'
+        if nlu_pipeline_stage != NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION:
+            # you_misunderstood is special. 
+            # We will not predict, just match plain utterances with exact or fuzzy match
+            for plain_utterance in crd.command_directory.map_command_2_utterance_metadata['ErrorCorrection/you_misunderstood'].plain_utterances:
+                command_name_dict[plain_utterance] = 'ErrorCorrection/you_misunderstood'
 
         command_name = None
+        # See if the command starts with a command name followed by a space
+        tentative_command_name = command.split(" ", 1)[0]
+        normalized_command_name = tentative_command_name.lower()
+        if normalized_command_name in command_name_dict:
+            command_name = normalized_command_name
+            command = command.replace(f"{tentative_command_name}", "").strip().replace("  ", " ")
+
+        # Use Levenshtein distance for fuzzy matching with the full command part after @
+        matched_command, distance = find_best_match(
+            command,
+            command_name_dict.keys(),
+            threshold=0.3  # Adjust threshold as needed
+        )
+        if matched_command:
+            command_name = matched_command
+
         if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION:
-            # See if the command starts with a command name folowed by a space
-            tentative_command_name = command.split(" ", 1)[0]
-            normalized_command_name = tentative_command_name.lower()
-            if normalized_command_name in command_name_dict:
-                command_name = normalized_command_name
-                command = command.replace(f"{tentative_command_name}", "").strip().replace("  ", " ")
-
-            if not command_name:
-                # Use Levenshtein distance for fuzzy matching with the full command part after @
-                matched_command, distance = find_best_match(
-                    command,
-                    command_name_dict.keys(),
-                    threshold=0.3  # Adjust threshold as needed
-                )
-                if matched_command:
-                    command_name = matched_command
-
             if not command_name:
                 if cache_result := cache_match(self.path, command, modelpipeline, 0.85):
                     command_name = cache_result

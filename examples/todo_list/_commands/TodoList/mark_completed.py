@@ -49,7 +49,7 @@ class ResponseGenerator:
     def __call__(self, session: Session, command: str) -> CommandOutput:
         output = self._process_command(session)
         response = (
-            f'Context: {session.current_command_context_name}\n'
+            f'Context: {session.current_command_context_displayname}\n'
             f'Command: {command}\n'
             f'Response: {output.model_dump_json()}'
         )

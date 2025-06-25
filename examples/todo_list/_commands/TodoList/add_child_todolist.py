@@ -63,9 +63,9 @@ class ResponseGenerator:
             status=TodoItem.COMPLETE if input.is_complete else TodoItem.INCOMPLETE
         )
         
-        current_context = session.current_command_context_name
+        current_context = session.current_command_context_displayname
         session.current_command_context = todo_list
-        new_context=session.current_command_context_name
+        new_context=session.current_command_context_displayname
 
         return Signature.Output(
             current_context=current_context,

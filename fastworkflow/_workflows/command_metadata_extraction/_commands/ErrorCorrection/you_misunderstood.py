@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class Signature:
     plain_utterances = [
+        "you_misunderstood",
         "That is not what I meant",
         "Not what I asked",
         "You misunderstood",
