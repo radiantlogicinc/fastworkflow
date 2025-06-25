@@ -137,7 +137,7 @@ class Session:
 
         self._id = workflow_snapshot["session_id"]
         self._workflow_folderpath = workflow_snapshot["workflow_folderpath"]
-        self._workflow_context = workflow_snapshot.get("workflow_context", {})
+        self._workflow_context = {}
         self._parent_id = workflow_snapshot.get("parent_session_id")
         self._is_complete = workflow_snapshot.get("is_complete", False)
 
@@ -389,7 +389,6 @@ class Session:
             
             "session_id": keyvalue_db["session_id"],
             "workflow_folderpath": keyvalue_db["workflow_folderpath"],
-            "workflow_context": keyvalue_db["workflow_context"],
             "parent_session_id": keyvalue_db["parent_session_id"],
             "is_complete": keyvalue_db["is_complete"],
         }
@@ -416,7 +415,6 @@ class Session:
         return {
             "session_id": self._id,
             "workflow_folderpath": self._workflow_folderpath,
-            "workflow_context": self._workflow_context,
             "parent_session_id": self._parent_id,
             "is_complete": self._is_complete,
         }

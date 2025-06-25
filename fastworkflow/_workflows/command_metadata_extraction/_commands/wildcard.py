@@ -57,27 +57,6 @@ class CommandNamePrediction:
         self.cache_path = self._get_cache_path(self.sub_session_id, self.convo_path)
         self.path = self._get_cache_path_cache(self.convo_path)
 
-        # Determine current command context for the subject session.  The
-        # global context "*" maps to a folder named "_global".
-        ctx_name = self.sub_sess.current_command_context_name or "*"
-
-        tiny_path = get_artifact_path(self.sub_sess_workflow_folderpath, ctx_name, "tinymodel.pth")
-        large_path = get_artifact_path(self.sub_sess_workflow_folderpath, ctx_name, "largemodel.pth")
-        threshold_path = get_artifact_path(self.sub_sess_workflow_folderpath, ctx_name, "threshold.json")
-        ambiguous_threshold_path = get_artifact_path(self.sub_sess_workflow_folderpath, ctx_name, "ambiguous_threshold.json")
-        with open(threshold_path, 'r') as f:
-            data = json.load(f)
-            confidence_threshold = data['confidence_threshold']
-        with open(ambiguous_threshold_path, 'r') as f:
-            data = json.load(f)
-            self.ambiguos_confidence_threshold = data['confidence_threshold']
-
-        self.modelpipeline = fastworkflow.ModelPipelineRegistry(
-            tiny_model_path=tiny_path,
-            distil_model_path=large_path,
-            confidence_threshold=confidence_threshold
-        )
-
         cme_workflow_folderpath = self.session.workflow_folderpath
         tiny_path = get_artifact_path(cme_workflow_folderpath, "ErrorCorrection", "tinymodel.pth")
         large_path = get_artifact_path(cme_workflow_folderpath, "ErrorCorrection", "largemodel.pth")
@@ -98,6 +77,28 @@ class CommandNamePrediction:
 
     def predict(self, command_context_name: str, command: str, nlu_pipeline_stage: NLUPipelineStage) -> "CommandNamePrediction.Output":
         # sourcery skip: extract-duplicate-method
+
+        # Determine current command context for the subject session.  The
+        # global context "*" maps to a folder named "_global".
+        # ctx_name = self.sub_sess.current_command_context_name or "*"
+
+        tiny_path = get_artifact_path(self.sub_sess_workflow_folderpath, command_context_name, "tinymodel.pth")
+        large_path = get_artifact_path(self.sub_sess_workflow_folderpath, command_context_name, "largemodel.pth")
+        threshold_path = get_artifact_path(self.sub_sess_workflow_folderpath, command_context_name, "threshold.json")
+        ambiguous_threshold_path = get_artifact_path(self.sub_sess_workflow_folderpath, command_context_name, "ambiguous_threshold.json")
+        with open(threshold_path, 'r') as f:
+            data = json.load(f)
+            confidence_threshold = data['confidence_threshold']
+        with open(ambiguous_threshold_path, 'r') as f:
+            data = json.load(f)
+            self.ambiguos_confidence_threshold = data['confidence_threshold']
+
+        self.modelpipeline = fastworkflow.ModelPipelineRegistry(
+            tiny_model_path=tiny_path,
+            distil_model_path=large_path,
+            confidence_threshold=confidence_threshold
+        )
+
         crd = fastworkflow.RoutingRegistry.get_definition(
             self.session.workflow_folderpath)
 
@@ -195,61 +196,6 @@ class CommandNamePrediction:
             is_cme_command=is_cme_command
         )
 
-            # if nlu_pipeline_stage == NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION:
-            #     message_prefix = "The command is ambiguous"
-            # else: 
-            #     message_prefix = "The previous command was misclassified"
-
-            # else:
-            #     # User selected an option that wasn't in the suggested list
-            #     error_msg = f"{message_prefix}. Please select only from the provided command options:\n"
-            #     error_msg += "\n".join(f"@{name}" for name in suggested_commands if not name.startswith('Core'))
-            #     error_msg += "\n\nor type 'none of these' to see all commands\nor type 'abort' to cancel"
-            #     return CommandNamePrediction.Output(error_msg=error_msg)
-
-            # Process the selected command
-            # count = self._get_count(self.cache_path)
-            # if count > 0:
-            #     utterance = self._read_utterance(self.cache_path, count-1)
-            #     store_utterance_cache(self.path, utterance, command_name, modelpipeline)
-
-        # If user explicitly selects none_of_these, treat as misclassification
-        # elif "misunderstood_intent" in command_name:
-            # error_msg = self._formulate_misclassified_command_error_message(valid_command_names)
-            # Set flag to 2 because user is indicating previous command was misclassified
-            # self._store_suggested_commands(self.path, valid_command_names, 2)
-            # change_flag(self.path, 2)
-            # return CommandNamePrediction.Output(error_msg=error_msg)
-        # else:
-        #     # When the command_name is already determined
-        #     flag = get_flag(self.path)
-        #     if flag is not None and flag != 0:
-        #         count = self._get_count(self.cache_path)
-        #         utterance = self._read_utterance(self.cache_path, count-1)
-        #         store_utterance_cache(self.path, utterance, command_name, modelpipeline)
-        #         change_flag(self.path, 0)
-
-        # Store the final command and classification
-        # if command_name:
-            # if command_name == "misunderstood_intent":
-            #     count = self._store_utterance(self.cache_path, command, command_name)
-
-            # class ValidateCommandNameSignature(BaseModel):
-            #     command_name: str
-            # command_parameters = ValidateCommandNameSignature(command_name=command_name)
-            # is_valid, error_msg = self._validate_command_name(
-            #     nlu_pipeline_stage,
-            #     valid_command_names, 
-            #     command_parameters)
-
-            # If validation fails, set flag to 2 (misclassified)
-            # if not is_valid:
-            #     self._store_suggested_commands(self.path, valid_command_names, 2)
-            #     change_flag(self.path, 2)
-            #     return CommandNamePrediction.Output(error_msg=error_msg)
-
-        # return CommandNamePrediction.Output(command_name=None, is_cme_command=False)
-
     @staticmethod
     def _get_cache_path(session_id, convo_path):
         """
@@ -297,18 +243,6 @@ class CommandNamePrediction:
         db = Rdict(cache_path)
         try:
             return db.get("suggested_commands", [])
-        finally:
-            db.close()
-
-    # Get the flag type
-    @staticmethod
-    def _get_flag_type(cache_path):
-        """
-        Get the type of constraint (1=ambiguous, 2=misclassified)
-        """
-        db = Rdict(cache_path)
-        try:
-            return db.get("flag_type", 1)  # Default to ambiguous if not set
         finally:
             db.close()
 

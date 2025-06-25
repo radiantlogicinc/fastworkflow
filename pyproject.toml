@@ -15,6 +15,10 @@ authors = ["Dhar Rawal <drawal@radiantlogic.com>"]
 license = "Apache-2.0"
 readme = "README.md"
 keywords = ["fastworkflow", "ai", "workflow", "llm", "openai"]
+exclude = [
+    "**/___command_info",
+    "**/___workflow_contexts"
+]
 
 [tool.poetry.dependencies]
 python = ">=3.11,<3.13"

@@ -190,6 +190,8 @@ class CommandExecutor(CommandExecutorInterface):
         # Use the existing session **only** if it is not yet complete.
         if existing_session and not existing_session.is_complete:
             session = existing_session
+            if not session.workflow_context:
+                session.workflow_context = workflow_context
         else:
             # Either no previous session exists OR the previous session has
             # finished.  Create a fresh session (which will implicitly
