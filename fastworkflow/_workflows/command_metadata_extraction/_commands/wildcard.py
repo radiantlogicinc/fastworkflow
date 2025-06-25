@@ -712,7 +712,7 @@ class ResponseGenerator:
             else:
                 session.is_complete = True
                 workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.INTENT_DETECTION
-                workflow_context.pop("command")
+                workflow_context.pop("command", None)
             session.workflow_context = workflow_context
 
             startup_action = Action(
