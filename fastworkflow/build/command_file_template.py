@@ -106,13 +106,9 @@ def create_function_command_file(function_info: FunctionInfo, output_dir: str, f
     # Add generate_utterances method
     command_file_content += """    @staticmethod
     def generate_utterances(session: Session, command_name: str) -> list[str]:
-        utterance_definition = fastworkflow.RoutingRegistry.get_definition(session.workflow_folderpath)
-        utterances_obj = utterance_definition.get_command_utterances(command_name)
-        result = generate_diverse_utterances(utterances_obj.plain_utterances, command_name)
-        utterance_list: list[str] = [
+        return [
             command_name.split('/')[-1].lower().replace('_', ' ')
-        ] + result
-        return utterance_list\n\n"""
+        ] + generate_diverse_utterances(Signature.plain_utterances, command_name)\n\n"""
     
     # Add process_extracted_parameters method
     command_file_content += f"    def process_extracted_parameters(self, session: fastworkflow.Session, command: str, cmd_parameters: {input_param_type}) -> None:\n"
@@ -332,13 +328,9 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
     # Add generate_utterances method
     command_file_content += """    @staticmethod
     def generate_utterances(session: Session, command_name: str) -> list[str]:
-        utterance_definition = fastworkflow.RoutingRegistry.get_definition(session.workflow_folderpath)
-        utterances_obj = utterance_definition.get_command_utterances(command_name)
-        result = generate_diverse_utterances(utterances_obj.plain_utterances, command_name)
-        utterance_list: list[str] = [
+        return [
             command_name.split('/')[-1].lower().replace('_', ' ')
-        ] + result
-        return utterance_list\n\n"""
+        ] + generate_diverse_utterances(Signature.plain_utterances, command_name)\n\n"""
 
     # Add process_extracted_parameters method
     command_file_content += f"    def process_extracted_parameters(self, session: fastworkflow.Session, command: str, cmd_parameters: {input_param_type}) -> None:\n"
