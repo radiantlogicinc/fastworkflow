@@ -11,7 +11,7 @@ def get_import_block():
     return (
         f"import fastworkflow\n"
         f"from fastworkflow import CommandOutput, CommandResponse\n"
-        f"from fastworkflow.session import Session, WorkflowSnapshot\n"
+        f"from fastworkflow.session import Session\n"
         f"from fastworkflow.utils.signatures import InputForParamExtraction\n"
         f"from fastworkflow.train.generate_synthetic import generate_diverse_utterances\n"
         f"from fastworkflow.utils.context_utils import list_context_names\n"
@@ -106,7 +106,7 @@ def create_function_command_file(function_info: FunctionInfo, output_dir: str, f
     # Add generate_utterances method
     command_file_content += """    @staticmethod
     def generate_utterances(session: Session, command_name: str) -> list[str]:
-        utterance_definition = fastworkflow.RoutingRegistry.get_definition(session.workflow_snapshot.workflow_folderpath)
+        utterance_definition = fastworkflow.RoutingRegistry.get_definition(session.workflow_folderpath)
         utterances_obj = utterance_definition.get_command_utterances(command_name)
         result = generate_diverse_utterances(utterances_obj.plain_utterances, command_name)
         utterance_list: list[str] = [
@@ -115,7 +115,7 @@ def create_function_command_file(function_info: FunctionInfo, output_dir: str, f
         return utterance_list\n\n"""
     
     # Add process_extracted_parameters method
-    command_file_content += f"    def process_extracted_parameters(self, workflow_snapshot: WorkflowSnapshot, command: str, cmd_parameters: {input_param_type}) -> None:\n"
+    command_file_content += f"    def process_extracted_parameters(self, session: fastworkflow.Session, command: str, cmd_parameters: {input_param_type}) -> None:\n"
     command_file_content += "        pass\n\n"
     
     # Add ResponseGenerator class
@@ -332,7 +332,7 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
     # Add generate_utterances method
     command_file_content += """    @staticmethod
     def generate_utterances(session: Session, command_name: str) -> list[str]:
-        utterance_definition = fastworkflow.RoutingRegistry.get_definition(session.workflow_snapshot.workflow_folderpath)
+        utterance_definition = fastworkflow.RoutingRegistry.get_definition(session.workflow_folderpath)
         utterances_obj = utterance_definition.get_command_utterances(command_name)
         result = generate_diverse_utterances(utterances_obj.plain_utterances, command_name)
         utterance_list: list[str] = [
@@ -341,7 +341,7 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
         return utterance_list\n\n"""
 
     # Add process_extracted_parameters method
-    command_file_content += f"    def process_extracted_parameters(self, workflow_snapshot: WorkflowSnapshot, command: str, cmd_parameters: {input_param_type}) -> None:\n"
+    command_file_content += f"    def process_extracted_parameters(self, session: fastworkflow.Session, command: str, cmd_parameters: {input_param_type}) -> None:\n"
     command_file_content += "        pass\n\n"
 
     # Add ResponseGenerator class

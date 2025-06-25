@@ -1,7 +1,7 @@
 
 import fastworkflow
 from fastworkflow import CommandOutput, CommandResponse
-from fastworkflow.session import Session, WorkflowSnapshot
+from fastworkflow.session import Session
 from fastworkflow.utils.signatures import InputForParamExtraction
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from fastworkflow.utils.context_utils import list_context_names
@@ -11,11 +11,11 @@ from pydantic import BaseModel, Field
 
 class Signature:
     class Input(BaseModel):
-        a: float = Field(description="Parameter a")
-        b: float = Field(description="Parameter b")
+        first_num: float = Field(description="First number")
+        second_num: float = Field(description="Second number")
 
     class Output(BaseModel):
-        result: float = Field(description="Result of the function call")
+        sum_of_two_numbers: float = Field(description="The sum of the two provided numbers")
 
     plain_utterances = [
         "add two numbers",
@@ -27,7 +27,7 @@ class Signature:
 
     @staticmethod
     def generate_utterances(session: Session, command_name: str) -> list[str]:
-        utterance_definition = fastworkflow.RoutingRegistry.get_definition(session.workflow_snapshot.workflow_folderpath)
+        utterance_definition = fastworkflow.RoutingRegistry.get_definition(session.workflow_folderpath)
         utterances_obj = utterance_definition.get_command_utterances(command_name)
         result = generate_diverse_utterances(utterances_obj.plain_utterances, command_name)
         utterance_list: list[str] = [
@@ -35,7 +35,7 @@ class Signature:
         ] + result
         return utterance_list
 
-    def process_extracted_parameters(self, workflow_snapshot: WorkflowSnapshot, command: str, cmd_parameters: "Signature.Input") -> None:
+    def process_extracted_parameters(self, session: fastworkflow.Session, command: str, cmd_parameters: "Signature.Input") -> None:
         pass
 
 class ResponseGenerator:
@@ -43,14 +43,19 @@ class ResponseGenerator:
         """Execute add_two_numbers function"""
         # Call the function
         from ..application.add_two_numbers import add_two_numbers
-        result_val = add_two_numbers(a=input.a, b=input.b)
-        return Signature.Output(result=result_val)
+        sum_of_two_numbers = add_two_numbers(a=input.first_num, b=input.second_num)
+        return Signature.Output(sum_of_two_numbers=sum_of_two_numbers)
 
     def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:
         output = self._process_command(session, command_parameters)
+        response = (
+            f'Command: {command}\n'
+            f'Command parameters: {command_parameters}\n'
+            f'Response: {output.model_dump_json()}'
+        )
         return CommandOutput(
             session_id=session.id,
             command_responses=[
-                CommandResponse(response=output.model_dump_json())
+                CommandResponse(response=response)
             ]
         )

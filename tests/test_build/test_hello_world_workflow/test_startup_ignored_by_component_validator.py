@@ -33,7 +33,7 @@ class ResponseGenerator:
     valid_command_content = """
 import fastworkflow
 from fastworkflow import CommandOutput, CommandResponse
-from fastworkflow.session import Session, WorkflowSnapshot
+from fastworkflow.session import Session
 from typing import Any, Dict
 from pydantic import BaseModel, Field
 
@@ -54,7 +54,7 @@ class Signature:
     def generate_utterances(session: Session, command_name: str) -> list[str]:
         return ["valid command"]
     
-    def process_extracted_parameters(self, workflow_snapshot: WorkflowSnapshot, command: str, cmd_parameters: None) -> None:
+    def process_extracted_parameters(self, session: fastworkflow.Session, command: str, cmd_parameters: None) -> None:
         pass
 
 class ResponseGenerator:

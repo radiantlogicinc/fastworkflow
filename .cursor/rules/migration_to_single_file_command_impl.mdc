@@ -50,8 +50,8 @@ Convention inside the consolidated file
    * Optional helper: `generate_utterances` that calls
      `fastworkflow.train.generate_synthetic.generate_diverse_utterances`.
    * If present in old implementation, move these methods from `InputForParamExtraction`:
-     * `db_lookup(self, workflow_snapshot: WorkflowSnapshot, command: str) -> list[str]`
-     * `process_extracted_parameters(self, workflow_snapshot: WorkflowSnapshot, command: str, cmd_parameters: "Signature.Input") -> None`
+     * `db_lookup(self, session: fastworkflow.Session, command: str) -> list[str]`
+     * `process_extracted_parameters(self, session: fastworkflow.Session, command: str, cmd_parameters: "Signature.Input") -> None`
 2. Implement business logic in `ResponseGenerator._process_command`.
 3. Wrap that logic for chat runtime with `ResponseGenerator.__call__` which
    returns a `fastworkflow.CommandOutput`.

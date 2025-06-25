@@ -75,7 +75,7 @@ def test_scan_and_lookup(add_temp_workflow_path, tmp_path):
     print(f"Commands: {cmd_dir.get_commands()}")
     
     # Now use the router
-    router = RoutingDefinition.build(test_workspace)
+    router = RoutingDefinition.build(str(test_workspace))
     try:
         router.scan(use_cache=False)  # Bypass cache for tests
         
@@ -100,14 +100,14 @@ def test_scan_and_lookup(add_temp_workflow_path, tmp_path):
         assert router.routing_definition_map.get("unknown", set()) == set()
     finally:
         # Clean up the temporary workspace to avoid leaving files in repo root
-        shutil.rmtree(test_workspace, ignore_errors=True)
+        shutil.rmtree(project_root / "__tmp_router_tests", ignore_errors=True)
 
 
 def test_missing_root_dir(tmp_path, add_temp_workflow_path):
     # Expect router.scan to raise RuntimeError when the workflow path lacks a _commands folder.
     add_temp_workflow_path(Path.cwd())
 
-    router = RoutingDefinition.build(tmp_path / "nonexistent")
+    router = RoutingDefinition.build(str(tmp_path / "nonexistent"))
 
     with pytest.raises(RuntimeError):
         router.scan(use_cache=False)  # Bypass cache for tests

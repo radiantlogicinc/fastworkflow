@@ -1,6 +1,5 @@
 import os
 import fastworkflow
-from fastworkflow.session import WorkflowSnapshot, Session
 import pytest
 
 
@@ -8,12 +7,12 @@ import pytest
 class DummyExpander:
     """Simple implementation that always clears context."""
 
-    def get_parent_command_context(self, session: Session):  # noqa: D401
+    def get_parent_command_context(self, session: fastworkflow.Session):  # noqa: D401
         """Clear the context of the provided session."""
         session.current_command_context = None
 
 
-def test_workflow_snapshot_has_context_methods(tmp_path):
+def test_session_has_context_methods(tmp_path):
     env_vars = {"SPEEDDICT_FOLDERNAME": "___workflow_contexts"}
     fastworkflow.init(env_vars=env_vars)
 
@@ -21,16 +20,10 @@ def test_workflow_snapshot_has_context_methods(tmp_path):
     hello_world_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "hello_world")
     
     # Create a session with the hello_world workflow
-    session = Session.create(
+    session = fastworkflow.Session.create(
         workflow_folderpath=hello_world_path,
         session_id_str="test-session-3"
     )
-    snapshot = session.workflow_snapshot
-
-    # Check that we can set and get context via the session
-    # Skip if set_context is available on the snapshot (old implementation)
-    if hasattr(snapshot, "set_context"):
-        pytest.skip("Using old implementation with set_context on WorkflowSnapshot")
     
     # Initially, context should be None
     assert session.current_command_context is None
@@ -54,7 +47,7 @@ def test_dummy_expander(tmp_path):
     hello_world_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "hello_world")
     
     # Create a session with the hello_world workflow
-    session = Session.create(
+    session = fastworkflow.Session.create(
         workflow_folderpath=hello_world_path,
         session_id_str="test-session-3"
     )
@@ -85,7 +78,7 @@ class ChildCtx:
     def __init__(self, parent):
         self._parent = parent
 
-    def get_parent_command_context(self, session: Session):  # noqa: D401
+    def get_parent_command_context(self, session: fastworkflow.Session):  # noqa: D401
         """Set the session's context to this object's parent context."""
         session.current_command_context = self._parent
 
@@ -99,7 +92,7 @@ def test_object_level_move_to_parent(tmp_path):
     hello_world_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "hello_world")
     
     # Create a session with the hello_world workflow
-    session = Session.create(
+    session = fastworkflow.Session.create(
         workflow_folderpath=hello_world_path,
         session_id_str="test-session-3"
     )

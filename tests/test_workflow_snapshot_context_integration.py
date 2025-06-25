@@ -12,7 +12,7 @@ def test_context_helpers_todo_list(tmp_path):
     workflow_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "examples", "todo_list"))
     assert os.path.isdir(workflow_dir), "examples/todo_list directory should exist"
 
-    # Create a session instead of directly using WorkflowSnapshot
+    # Create a session instead of directly
     session = Session.create(
         workflow_folderpath=workflow_dir,
         session_id_str="test-session-999"

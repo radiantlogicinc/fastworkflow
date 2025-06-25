@@ -5,7 +5,6 @@ from unittest.mock import MagicMock
 import pytest
 import fastworkflow
 from fastworkflow.command_executor import CommandExecutor, CommandNotFoundError
-from fastworkflow.session import WorkflowSnapshot, Session
 
 
 # ---------------------------------------------------------------------------
@@ -25,7 +24,7 @@ def test_command_not_found(monkeypatch, tmp_path):
     hello_world_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "hello_world")
     
     # Create a session with the hello_world workflow
-    session = Session.create(
+    session = fastworkflow.Session.create(
         workflow_folderpath=hello_world_path,
         session_id_str="test-session-3"
     )
@@ -45,7 +44,6 @@ def test_command_not_found(monkeypatch, tmp_path):
     
     # Create an Action with a non-existent command
     action = fastworkflow.Action(
-        workitem_path="*",  # Use global context
         command_name="non_existent_command",
         command="This command doesn't exist",
     )
@@ -63,7 +61,7 @@ def test_invalid_action_parameters(monkeypatch, tmp_path):
     hello_world_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "hello_world")
     
     # Create a session with the hello_world workflow
-    session = Session.create(
+    session = fastworkflow.Session.create(
         workflow_folderpath=hello_world_path,
         session_id_str="test-session-4"
     )
@@ -87,11 +85,10 @@ def test_invalid_action_parameters(monkeypatch, tmp_path):
 
     executor = CommandExecutor()
     
-    # Create an Action with Core/wildcard command which has no parameter class
+    # Create an Action with wildcard command which has no parameter class
     action = fastworkflow.Action(
-        workitem_path="*",  # Use global context
-        command_name="Core/wildcard",
-        command="Core/wildcard",
+        command_name="wildcard",
+        command="wildcard",
         parameters={"invalid_param": "value"}  # These parameters will be ignored since there's no parameter class
     )
 

@@ -202,7 +202,7 @@ def _create_individual_query_tool(tool_def: Dict, workflow_session_obj: fastwork
     tool_name = tool_def['name']
     tool_desc = tool_def['description']
 
-    example_query = f'@{tool_name}'
+    example_query = f'{tool_name}'
     param_name_value_list = []
     for param_name, param_dict in tool_def['inputSchema']['properties'].items():
         param_name_value_list.append((param_name, f"<replace with {param_dict.get('description', 'value')} or '{param_dict.get('default', 'null')}'>"))

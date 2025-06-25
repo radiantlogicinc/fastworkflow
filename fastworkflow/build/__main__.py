@@ -303,7 +303,7 @@ class ResponseGenerator:
         # Initialize your application's root context here
         # This is typically a manager class that provides access to all functionality
         filepath = (
-            f'{{session.workflow_snapshot.workflow_folderpath}}/'
+            f'{{session.workflow_folderpath}}/'
             '{app_module}/'
             'data.json'  # Replace with your application's data file if needed
         )

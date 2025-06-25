@@ -41,15 +41,12 @@ class FastWorkflowMCPServer:
         NOT_FOUND = fastworkflow.get_env_var('NOT_FOUND')
 
         # Get available commands from workflow
-        workflow_folderpath = self.workflow_session.session.workflow_snapshot.workflow_folderpath
+        workflow_folderpath = self.workflow_session.session.workflow_folderpath
         routing = RoutingDefinition.build(workflow_folderpath)
 
-        # Get active context name from session, not workflow_snapshot
+        # Get active context name from session
         active_ctx_name = self.workflow_session.session.current_command_context_name
-        if active_ctx_name not in routing.contexts:
-            active_ctx = '*'
-        else:
-            active_ctx = active_ctx_name
+        active_ctx = active_ctx_name if active_ctx_name in routing.contexts else '*'
         command_names = routing.get_command_names(active_ctx)
 
         tools = []
@@ -145,7 +142,7 @@ class FastWorkflowMCPServer:
         return self.command_executor.perform_mcp_tool_call(
             self.workflow_session.session,
             tool_call,
-            command_context=self._resolve_workitem_path_for_call()
+            command_context=self._resolve_context_for_call()
         )
     
     def handle_json_rpc_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
@@ -191,12 +188,12 @@ class FastWorkflowMCPServer:
             }
 
     # ---------------------------------------------------------------------
-    def _resolve_workitem_path_for_call(self) -> str:
-        """Return a workitem path that has registered commands.
+    def _resolve_context_for_call(self) -> str:
+        """Return the context that has registered commands.
 
-        Falls back to the first available path if the active workitem has none.
+        Falls back to the first available path if the active context is none.
         """
-        return '*'
+        return self.workflow_session.session.current_command_context_name
 
 
 # Example usage

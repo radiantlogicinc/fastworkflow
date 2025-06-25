@@ -1,7 +1,6 @@
 import os
 import pytest
 import fastworkflow
-from fastworkflow.session import WorkflowSnapshot, Session
 from fastworkflow._workflows.command_metadata_extraction._commands.IntentDetection.what_is_current_context import ResponseGenerator
 from examples.todo_list.application.todo_manager import TodoListManager
 from examples.todo_list.application.todo_list import TodoList
@@ -21,7 +20,7 @@ def test_global_context():
     assert os.path.isdir(workflow_dir), "examples/todo_list directory should exist"
     
     # Create a subject session
-    subject_session = Session.create(
+    subject_session = fastworkflow.Session.create(
         workflow_folderpath=workflow_dir,
         session_id_str="test-subject-session-3"
     )
@@ -31,7 +30,7 @@ def test_global_context():
     cme_workflow_folderpath = fastworkflow.get_internal_workflow_path(workflow_type)
     
     # Create a child session with the subject_session in its context
-    mock_session = Session.create(
+    mock_session = fastworkflow.Session.create(
         workflow_folderpath=cme_workflow_folderpath,
         parent_session_id=subject_session.id,
         context={"subject_session": subject_session}
@@ -54,7 +53,7 @@ def test_context_no_properties():
     assert os.path.isdir(workflow_dir), "examples/todo_list directory should exist"
     
     # Create a subject session
-    subject_session = Session.create(
+    subject_session = fastworkflow.Session.create(
         workflow_folderpath=workflow_dir,
         session_id_str="test-subject-session-4"
     )
@@ -67,7 +66,7 @@ def test_context_no_properties():
     cme_workflow_folderpath = fastworkflow.get_internal_workflow_path(workflow_type)
     
     # Create a child session with the subject_session in its context
-    mock_session = Session.create(
+    mock_session = fastworkflow.Session.create(
         workflow_folderpath=cme_workflow_folderpath,
         parent_session_id=subject_session.id,
         context={"subject_session": subject_session}
@@ -89,7 +88,7 @@ def test_context_with_properties():
     assert os.path.isdir(workflow_dir), "examples/todo_list directory should exist"
     
     # Create a subject session
-    subject_session = Session.create(
+    subject_session = fastworkflow.Session.create(
         workflow_folderpath=workflow_dir,
         session_id_str="test-subject-session-5"
     )
@@ -103,7 +102,7 @@ def test_context_with_properties():
     cme_workflow_folderpath = fastworkflow.get_internal_workflow_path(workflow_type)
     
     # Create a child session with the subject_session in its context
-    mock_session = Session.create(
+    mock_session = fastworkflow.Session.create(
         workflow_folderpath=cme_workflow_folderpath,
         parent_session_id=subject_session.id,
         context={"subject_session": subject_session}

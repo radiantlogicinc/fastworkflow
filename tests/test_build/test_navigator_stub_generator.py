@@ -150,7 +150,7 @@ def test_generate_navigator_stub(navigators_dir, basic_context_model):
     # Check that the file contains the expected content
     content = file_path.read_text()
     assert 'class TodoListNavigator(ContextExpander):' in content
-    assert 'def move_to_parent_context(self, snapshot: WorkflowSnapshot)' in content
+    assert 'def move_to_parent_context(self, session: fastworkflow.Session)' in content
     assert 'Project' in content  # Should mention container context
     
     # Test generating a stub for global context (should return None)

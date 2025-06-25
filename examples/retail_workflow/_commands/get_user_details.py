@@ -35,7 +35,7 @@ class Signature:
 
     @staticmethod
     def generate_utterances(session: fastworkflow.Session, command_name: str) -> List[str]:
-        utterance_definition = fastworkflow.RoutingRegistry.get_definition(session.workflow_snapshot.workflow_folderpath)
+        utterance_definition = fastworkflow.RoutingRegistry.get_definition(session.workflow_folderpath)
         utterances_obj = utterance_definition.get_command_utterances(command_name)
         from fastworkflow.train.generate_synthetic import generate_diverse_utterances
         return generate_diverse_utterances(utterances_obj.plain_utterances, command_name)
@@ -44,9 +44,14 @@ class Signature:
 class ResponseGenerator:
     def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:
         output = self._process_command(session, command_parameters)
+        response = (
+            f'Command: {command}\n'
+            f'Command parameters: {command_parameters}\n'
+            f'Response: {output.status}'
+        )
         return CommandOutput(
             session_id=session.id,
-            command_responses=[CommandResponse(response=f"User details: {output.status}")],
+            command_responses=[CommandResponse(response=response)],
         )
 
     def _process_command(self, session: Session, input: Signature.Input) -> Signature.Output:

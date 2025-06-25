@@ -115,7 +115,7 @@ class CommandContextModel:
         # Process all qualified command names from CommandDirectory
         for qualified_cmd_name in cmd_dir.map_command_2_metadata.keys():
             if "/" in qualified_cmd_name:
-                # Extract context part from qualified name (e.g., "Core" from "Core/abort")
+                # Extract context part from qualified name
                 context_part, _ = qualified_cmd_name.split("/", 1)
                 if context_part not in fs_derived_direct_commands:
                     fs_derived_direct_commands[context_part] = {"/": []}

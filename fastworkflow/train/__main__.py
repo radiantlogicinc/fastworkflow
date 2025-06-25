@@ -24,7 +24,7 @@ def train_workflow(workflow_path: str):
     # needing to rebuild it in-memory.
     cmd_dir = CommandDirectory.load(workflow_path)
     cmd_dir.save()
-    RoutingRegistry.get_definition(workflow_path)
+    RoutingRegistry.get_definition(workflow_path, load_cached=False)
 
     #first, recursively train all child workflows
     workflows_dir = os.path.join(workflow_path, "_workflows")
@@ -53,7 +53,7 @@ def train_workflow(workflow_path: str):
     session.close()
 
 def _generate_dspy_examples_helper(workflow_path, session):
-    workflow_folderpath = session.workflow_snapshot.workflow_folderpath
+    workflow_folderpath = session.workflow_folderpath
     json_path=get_route_layer_filepath_model(workflow_folderpath,"command_directory.json")
     # json_path = "./examples/sample_workflow/___command_info/command_directory.json"
     commands = _get_commands_with_parameters(json_path)

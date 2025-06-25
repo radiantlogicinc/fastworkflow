@@ -45,10 +45,11 @@ class CommandExecutor(CommandExecutorInterface):
         if command_output.command_handled or not command_output.success:
             return command_output
 
+        command = command_output.command_responses[0].artifacts["command"]
         command_name = command_output.command_responses[0].artifacts["command_name"]
         input_obj = command_output.command_responses[0].artifacts["cmd_parameters"]
 
-        snapshot = workflow_session.session.workflow_snapshot
+        snapshot = workflow_session.session
         workflow_folderpath = snapshot.workflow_folderpath
         command_routing_definition = fastworkflow.RoutingRegistry.get_definition(
             workflow_folderpath
@@ -81,7 +82,7 @@ class CommandExecutor(CommandExecutorInterface):
         session.command_context_for_response_generation = \
             session.current_command_context
 
-        workflow_folderpath = session.workflow_snapshot.workflow_folderpath
+        workflow_folderpath = session.workflow_folderpath
         command_routing_definition = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
 
         response_generation_class = (
@@ -110,7 +111,7 @@ class CommandExecutor(CommandExecutorInterface):
 
             input_for_param_extraction = InputForParamExtraction(command=action.command)
             is_valid, error_msg, _ = input_for_param_extraction.validate_parameters(
-                session.workflow_snapshot, action.command_name, input_obj
+                session, action.command_name, input_obj
             )
             if not is_valid:
                 raise ValueError(f"Invalid action parameters for command '{action.command_name}'\n{error_msg}")
@@ -144,7 +145,6 @@ class CommandExecutor(CommandExecutorInterface):
 
             # Convert MCP tool call to FastWorkflow Action using helper method
             action = fastworkflow.Action(
-                workitem_path=context,
                 command_name=tool_call.name,
                 command=tool_call.arguments.get('command', ''),
                 parameters=dict(tool_call.arguments.items()),
@@ -169,8 +169,7 @@ class CommandExecutor(CommandExecutorInterface):
         command: str,
     ) -> CommandOutput:
         startup_action = Action(
-            workitem_path="/command_metadata_extraction",
-            command_name="Core/wildcard",
+            command_name="wildcard",
             command=command,
         )
 
@@ -189,7 +188,7 @@ class CommandExecutor(CommandExecutorInterface):
         existing_session = fastworkflow.Session.get_session(child_session_id)
 
         # Use the existing session **only** if it is not yet complete.
-        if existing_session and not existing_session.workflow_snapshot.is_complete:
+        if existing_session and not existing_session.is_complete:
             session = existing_session
         else:
             # Either no previous session exists OR the previous session has

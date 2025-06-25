@@ -209,7 +209,7 @@ relationships.
 
 from typing import Optional
 
-from fastworkflow.session import WorkflowSnapshot
+
 from fastworkflow.context import ContextExpander
 
 
@@ -219,7 +219,7 @@ class {context}Navigator(ContextExpander):
     Implements context delegation for {context} objects.
     """
     
-    def move_to_parent_context(self, snapshot: WorkflowSnapshot) -> None:
+    def move_to_parent_context(self, session: fastworkflow.Session) -> None:
         """Move from {context} to parent context.
         
         Args:

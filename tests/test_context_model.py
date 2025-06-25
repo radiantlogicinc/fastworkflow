@@ -40,6 +40,7 @@ def test_star_context_commands(sample_workflow_path):
         "modify_user_address",
         "return_delivered_order_items",
         "transfer_to_human_agents",
+        "wildcard",
     }
 
     assert set(commands) == expected

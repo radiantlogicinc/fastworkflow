@@ -67,7 +67,7 @@ class Signature:
 
     @staticmethod
     def generate_utterances(session: fastworkflow.Session, command_name: str) -> list[str]:
-        utterance_definition = fastworkflow.RoutingRegistry.get_definition(session.workflow_snapshot.workflow_folderpath)
+        utterance_definition = fastworkflow.RoutingRegistry.get_definition(session.workflow_folderpath)
         utterances_obj = utterance_definition.get_command_utterances(command_name)
 
         command_name = os.path.splitext(os.path.basename(__file__))[0]

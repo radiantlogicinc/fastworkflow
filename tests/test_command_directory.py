@@ -23,7 +23,6 @@ class TestCommandDirectory:
         command_keys = set(command_directory.get_commands())
         
         # Based on the file structure of sample_workflow/_commands
-        # and the Core/misunderstood_intent command from the internal workflow
         expected_commands = {
             "cancel_pending_order",
             "exchange_delivered_order_items",
@@ -39,8 +38,10 @@ class TestCommandDirectory:
             "modify_user_address",
             "return_delivered_order_items",
             "transfer_to_human_agents",
-            "Core/misunderstood_intent",
-            "Core/wildcard",
+            "wildcard",
+            "IntentDetection/what_can_i_do",
+            "IntentDetection/reset_context",
+            "IntentDetection/what_is_current_context",
         }
         # The commands are now stored with their context prefix for core commands
         assert command_keys == expected_commands

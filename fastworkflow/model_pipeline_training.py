@@ -586,8 +586,8 @@ def train(session: fastworkflow.Session):
 
     import time
 
-    workflow_folderpath = session.workflow_snapshot.workflow_folderpath
-    crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
+    workflow_folderpath = session.workflow_folderpath
+    crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath, load_cached=False)
     cmd_dir = crd.command_directory
 
     # Helper to pull utterances for a command
@@ -631,7 +631,7 @@ def train(session: fastworkflow.Session):
     internal_contexts = set(fastworkflow.CommandContextModel.load(internal_wf_path)._command_contexts.keys())
 
     if "command_metadata_extraction" in workflow_folderpath:
-        context_set_for_training = (set(internal_contexts) - {'Core', '*'})
+        context_set_for_training = (set(internal_contexts) - {'ErrorCorrection', 'ErrorCorrection'})
     else:
         context_set_for_training = (set(crd.contexts.keys()) - internal_contexts) | {'*'}
 

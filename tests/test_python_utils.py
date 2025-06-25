@@ -44,13 +44,13 @@ def test_get_module_internal_workflow():
     """Test the get_module function with an internal workflow path."""
     # Get the path to an internal workflow module
     internal_wf_path = fastworkflow.get_internal_workflow_path("command_metadata_extraction")
-    module_path = os.path.join(internal_wf_path, "_commands", "Core", "misunderstood_intent.py")
+    module_path = os.path.join(internal_wf_path, "_commands", "ErrorCorrection", "you_misunderstood.py")
     
     # Ensure the file exists
     assert os.path.exists(module_path), f"Test file not found: {module_path}"
     
     # Get the module using the function
-    module = python_utils.get_module(module_path, internal_wf_path)
+    module = python_utils.get_module(module_path)
     
     # Verify the module was loaded
     assert module is not None

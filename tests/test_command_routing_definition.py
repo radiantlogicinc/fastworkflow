@@ -134,9 +134,9 @@ def test_get_command_class_missing_input(sample_workflow_path):
     """Ensure no exception is raised when a command lacks `Signature.Input` (regression)."""
     routing_def = RoutingDefinition.build(str(sample_workflow_path))
 
-    # Core/misunderstood_intent has no Signature.Input, so COMMAND_PARAMETERS_CLASS is absent.
+    # ErrorCorrection/you_misunderstood_intent has no Signature.Input, so COMMAND_PARAMETERS_CLASS is absent.
     cls = routing_def.get_command_class(
-        "Core/misunderstood_intent", ModuleType.COMMAND_PARAMETERS_CLASS
+        "ErrorCorrection/you_misunderstood", ModuleType.COMMAND_PARAMETERS_CLASS
     )
 
     # The call should succeed and simply return None when the class is missing.

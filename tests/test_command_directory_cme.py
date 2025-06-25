@@ -16,12 +16,9 @@ def test_cme_command_directory_populates_metadata(cme_workflow_path):
 
     # Expected contexts and their commands (hard-coded – these should remain stable)
     expected_mapping: dict[str, list[str]] = {
-        "Core": [
-            "misunderstood_intent",
-            "wildcard",
-        ],
         "ErrorCorrection": [
             "abort",
+            "you_misunderstood",
         ],
         "IntentDetection": [
             "reset_context",
@@ -58,4 +55,8 @@ def test_cme_command_directory_populates_metadata(cme_workflow_path):
     # ---- Context metadata ----
     # map_context_2_metadata can be empty if no context callback classes exist.
     # We simply assert that the attribute exists and is a dictionary.
-    assert isinstance(cmd_dir.map_context_2_metadata, dict) 
+    assert isinstance(cmd_dir.map_context_2_metadata, dict)
+
+    # Verify that 'wildcard' exists as a global command
+    assert "wildcard" in cmd_dir.map_command_2_metadata, "Missing CommandMetadata for 'wildcard'"
+    assert "wildcard" in cmd_dir.map_command_2_utterance_metadata, "Missing UtteranceMetadata for 'wildcard'" 

@@ -6,26 +6,6 @@ from speedict import Rdict
 import mmh3  # mmh33 implementation
 from datetime import datetime
 
-def get_flag(cache_path):
-    """
-    Read a specific utterance from the database
-    """
-    db = Rdict(cache_path)
-    try:
-        return db.get("flag")
-    finally:
-        db.close()
-
-def change_flag(cache_path, value):
-    """
-    Read a specific utterance from the database
-    """
-    db = Rdict(cache_path)
-    try:
-        db["flag"] = value
-    finally:
-        db.close()
-
 def store_utterance_cache(cache_path, utterance, label, model_pipeline=None):
     """
     Store utterance in the new format with mmh3 and command mapping
@@ -42,10 +22,6 @@ def store_utterance_cache(cache_path, utterance, label, model_pipeline=None):
     # Open the database
     db = Rdict(cache_path)
     try:
-        # Check if this is a new database by looking for flag
-        if "flag" not in db:
-            db["flag"] = 0
-            
         # Generate hash for utterance using mmh3
         utterance_hash = str(mmh3.hash(utterance))
         

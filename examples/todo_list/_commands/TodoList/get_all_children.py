@@ -3,7 +3,7 @@ from pydantic import ConfigDict
 
 import fastworkflow
 from fastworkflow import CommandOutput, CommandResponse
-from fastworkflow.session import Session, WorkflowSnapshot
+from fastworkflow.session import Session
 from fastworkflow.utils.signatures import InputForParamExtraction
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from fastworkflow.utils.context_utils import list_context_names
@@ -28,7 +28,7 @@ class Signature:
 
     @staticmethod
     def generate_utterances(session: Session, command_name: str) -> list[str]:
-        utterance_definition = fastworkflow.RoutingRegistry.get_definition(session.workflow_snapshot.workflow_folderpath)
+        utterance_definition = fastworkflow.RoutingRegistry.get_definition(session.workflow_folderpath)
         utterances_obj = utterance_definition.get_command_utterances(command_name)
         result = generate_diverse_utterances(utterances_obj.plain_utterances, command_name)
         utterance_list: list[str] = [
@@ -36,7 +36,7 @@ class Signature:
         ] + result
         return utterance_list
 
-    def process_extracted_parameters(self, workflow_snapshot: WorkflowSnapshot, command: str, cmd_parameters: "Signature.Input") -> None:
+    def process_extracted_parameters(self, session: fastworkflow.Session, command: str, cmd_parameters: "Signature.Input") -> None:
         pass
 
 class ResponseGenerator:
@@ -49,9 +49,13 @@ class ResponseGenerator:
 
     def __call__(self, session: Session, command: str) -> CommandOutput:
         output = self._process_command(session)
+        response = (
+            f'Command: {command}\n'
+            f'Response: {output.model_dump_json()}'
+        )
         return CommandOutput(
             session_id=session.id,
             command_responses=[
-                CommandResponse(response=output.model_dump_json())
+                CommandResponse(response=response)
             ]
         )

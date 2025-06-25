@@ -163,11 +163,11 @@ class WorkflowSession:
 
     @property
     def workflow_is_complete(self) -> bool:
-        return self._session.workflow_snapshot.is_complete
+        return self._session.is_complete
     
     @workflow_is_complete.setter
     def workflow_is_complete(self, value: bool) -> None:
-        self._session.workflow_snapshot.is_complete = value
+        self._session.is_complete = value
 
     @property
     def command_executor(self) -> CommandExecutorInterface:
@@ -241,7 +241,7 @@ class WorkflowSession:
             mcp_result = self._command_executor.perform_mcp_tool_call(
                 self._session, 
                 tool_call, 
-                workitem_path=self._session.current_command_context_name
+                context=self._session.current_command_context_name
             )
             
             # Convert MCPToolResult back to CommandOutput for consistency

@@ -6,7 +6,7 @@ from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 """Core command that reports the current context name and optional properties."""
 
 import fastworkflow
-from fastworkflow.session import WorkflowSnapshot
+
 
 
 class Signature:  # noqa: D101
@@ -29,12 +29,16 @@ class ResponseGenerator:  # noqa: D101
         session: fastworkflow.Session,
         command: str,
     ) -> fastworkflow.CommandOutput:
-        subject_session = session.workflow_snapshot.workflow_context["subject_session"]
+        subject_session = session.workflow_context["subject_session"]
+        current_context = (
+            'global' if subject_session.current_command_context_name == '*'
+            else subject_session.current_command_context_name
+        )
         return fastworkflow.CommandOutput(
             session_id=session.id,
             command_responses=[
                 fastworkflow.CommandResponse(
-                    response=subject_session.current_command_context_name,
+                    response = f"Current context is '{current_context}'"
                 )
             ],
         )

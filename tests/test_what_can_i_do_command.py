@@ -4,7 +4,6 @@ from unittest.mock import MagicMock
 
 import pytest
 import fastworkflow
-from fastworkflow.session import WorkflowSnapshot, Session
 from fastworkflow._workflows.command_metadata_extraction._commands.IntentDetection.what_can_i_do import ResponseGenerator
 from fastworkflow._workflows.command_metadata_extraction._commands.IntentDetection.reset_context import ResponseGenerator as ResetGen
 
@@ -27,7 +26,7 @@ def test_what_can_i_do_global(monkeypatch):
     assert os.path.isdir(workflow_dir), "examples/todo_list directory should exist"
     
     # Create a subject session
-    subject_session = Session.create(
+    subject_session = fastworkflow.Session.create(
         workflow_folderpath=workflow_dir,
         session_id_str="test-subject-session-1"
     )
@@ -37,7 +36,7 @@ def test_what_can_i_do_global(monkeypatch):
     cme_workflow_folderpath = fastworkflow.get_internal_workflow_path(workflow_type)
     
     # Create a child session with the subject_session in its context
-    mock_session = Session.create(
+    mock_session = fastworkflow.Session.create(
         workflow_folderpath=cme_workflow_folderpath,
         parent_session_id=subject_session.id,
         context={"subject_session": subject_session}
@@ -64,7 +63,7 @@ def test_what_can_i_do_context(monkeypatch):
     assert os.path.isdir(workflow_dir), "examples/todo_list directory should exist"
     
     # Create a subject session
-    subject_session = Session.create(
+    subject_session = fastworkflow.Session.create(
         workflow_folderpath=workflow_dir,
         session_id_str="test-subject-session-2"
     )
@@ -78,7 +77,7 @@ def test_what_can_i_do_context(monkeypatch):
     cme_workflow_folderpath = fastworkflow.get_internal_workflow_path(workflow_type)
     
     # Create a child session with the subject_session in its context
-    mock_session = Session.create(
+    mock_session = fastworkflow.Session.create(
         workflow_folderpath=cme_workflow_folderpath,
         parent_session_id=subject_session.id,
         context={"subject_session": subject_session}

@@ -26,7 +26,7 @@ class Signature:
 
 class ResponseGenerator:
     def _process_command(self, session: Session, command: str) -> Signature.Output:
-        session.workflow_snapshot.is_complete = True
+        session.is_complete = True
         return Signature.Output(command=command, command_name="abort")
 
     def __call__(self, session: Session, command: str) -> CommandOutput:

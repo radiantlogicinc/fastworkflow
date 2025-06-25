@@ -71,7 +71,7 @@ class RoutingDefinition(BaseModel):
         # Process all qualified command names from CommandDirectory
         for qualified_cmd_name in self.command_directory.map_command_2_metadata.keys():
             if "/" in qualified_cmd_name:
-                # Extract context part from qualified name (e.g., "Core" from "Core/abort")
+                # Extract context part from qualified name
                 context_part, cmd_name = qualified_cmd_name.split("/", 1)
                 self._add_mapping(context_part, cmd_name)
             else:  # Global command (e.g., "wildcard")
@@ -314,35 +314,22 @@ class RoutingRegistry:
     _definitions: dict[str, RoutingDefinition] = {}
 
     @classmethod
-    def get_definition(cls, workflow_folderpath: str) -> RoutingDefinition:
+    def get_definition(cls, workflow_folderpath: str, load_cached: bool = True) -> RoutingDefinition:
         """
         Gets the routing definition for a workflow.
         If it doesn't exist, it will be built and cached.
         """
         workflow_folderpath = str(Path(workflow_folderpath).resolve())
 
-        if workflow_folderpath in cls._definitions:
-            return cls._definitions[workflow_folderpath]
+        if load_cached:
+            if workflow_folderpath in cls._definitions:
+                return cls._definitions[workflow_folderpath]
 
-        # ------------------------------------------------------------
-        # Try to load a persisted JSON definition if it is fresh enough
-        # compared to the underlying command sources.
-        # ------------------------------------------------------------
-        with contextlib.suppress(Exception):
-            cache_file = Path(CommandDirectory.get_commandinfo_folderpath(workflow_folderpath)) / "routing_definition.json"
-
-            if cache_file.exists():
-                commands_root = Path(workflow_folderpath) / "_commands"
-                latest_src_mtime = (
-                    max(p.stat().st_mtime for p in commands_root.rglob("*.py"))
-                    if commands_root.exists()
-                    else 0.0
-                )
-                if cache_file.stat().st_mtime > latest_src_mtime:
-                    definition = RoutingDefinition.load(workflow_folderpath)
-                    cls._definitions[workflow_folderpath] = definition
-                    return definition
-        # Fallback: build fresh definition and persist via .save()
+            definition = RoutingDefinition.load(workflow_folderpath)
+            cls._definitions[workflow_folderpath] = definition
+            return definition
+        
+        # build fresh definition and persist via .save()
         cls._definitions[workflow_folderpath] = RoutingDefinition.build(workflow_folderpath)
         return cls._definitions[workflow_folderpath]
 

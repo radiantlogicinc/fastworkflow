@@ -10,7 +10,7 @@ from speedict import Rdict
 
 import fastworkflow
 from fastworkflow import Action, CommandOutput, CommandResponse, ModuleType
-from fastworkflow.cache_matching import cache_match, change_flag, get_flag, store_utterance_cache
+from fastworkflow.cache_matching import cache_match, store_utterance_cache
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.command_routing import RoutingDefinition
 import fastworkflow.command_routing
@@ -18,7 +18,7 @@ from fastworkflow.model_pipeline_training import (
     predict_single_sentence,
     get_artifact_path,
 )
-from fastworkflow.session import WorkflowSnapshot
+
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from fastworkflow.utils.fuzzy_match import find_best_match
 from fastworkflow.utils.signatures import InputForParamExtraction
@@ -37,7 +37,8 @@ class NLUPipelineStage(Enum):
     """Specifies the stages of the NLU Pipeline processing."""
     INTENT_DETECTION = 0
     INTENT_AMBIGUITY_CLARIFICATION = 1
-    PARAMETER_EXTRACTION = 2
+    INTENT_MISUNDERSTANDING_CLARIFICATION = 2
+    PARAMETER_EXTRACTION = 3
 
 
 class CommandNamePrediction:
@@ -48,8 +49,8 @@ class CommandNamePrediction:
 
     def __init__(self, session: fastworkflow.Session):
         self.session = session
-        self.sub_sess = session.workflow_snapshot.workflow_context["subject_session"]
-        self.sub_sess_workflow_folderpath = self.sub_sess.workflow_snapshot.workflow_folderpath
+        self.sub_sess = session.workflow_context["subject_session"]
+        self.sub_sess_workflow_folderpath = self.sub_sess.workflow_folderpath
         self.sub_session_id = self.sub_sess.id
 
         self.convo_path = os.path.join(self.sub_sess_workflow_folderpath, "___convo_info")
@@ -77,7 +78,7 @@ class CommandNamePrediction:
             confidence_threshold=confidence_threshold
         )
 
-        cme_workflow_folderpath = self.session.workflow_snapshot.workflow_folderpath
+        cme_workflow_folderpath = self.session.workflow_folderpath
         tiny_path = get_artifact_path(cme_workflow_folderpath, "ErrorCorrection", "tinymodel.pth")
         large_path = get_artifact_path(cme_workflow_folderpath, "ErrorCorrection", "largemodel.pth")
         threshold_path = get_artifact_path(cme_workflow_folderpath, "ErrorCorrection", "threshold.json")
@@ -98,215 +99,155 @@ class CommandNamePrediction:
     def predict(self, command_context_name: str, command: str, nlu_pipeline_stage: NLUPipelineStage) -> "CommandNamePrediction.Output":
         # sourcery skip: extract-duplicate-method
         crd = fastworkflow.RoutingRegistry.get_definition(
-            self.session.workflow_snapshot.workflow_folderpath)
-        
-        if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION:
+            self.session.workflow_folderpath)
+
+        if nlu_pipeline_stage != NLUPipelineStage.PARAMETER_EXTRACTION:
             modelpipeline = self.modelpipeline
             cme_command_names = crd.get_command_names('IntentDetection')
             label_encoder_path = get_artifact_path(self.sub_sess_workflow_folderpath, command_context_name, "label_encoder.pkl")
 
             subject_crd = fastworkflow.RoutingRegistry.get_definition(
                 self.sub_sess_workflow_folderpath)
-            valid_command_names = (
-                set(cme_command_names) | 
-                set(subject_crd.get_command_names(command_context_name))
-            )
-        else:
-        # if stage is INTENT_AMBIGUITY_CLARIFICATION or PARAMETER_EXTRACTION
-            modelpipeline = self.err_corr_modelpipeline
-            cme_workflow_folderpath = self.session.workflow_snapshot.workflow_folderpath
-            label_encoder_path = get_artifact_path(cme_workflow_folderpath, "ErrorCorrection", "label_encoder.pkl")
-            cme_command_names = crd.get_command_names('ErrorCorrection')
-            valid_command_names = crd.get_command_names('ErrorCorrection')
-
-        # Check if the entire command is a valid command name
-        normalized_command = command.replace(" ", "_").lower()
-        command_name = next(
-            (
-                name
-                for name in valid_command_names
-                if normalized_command == name.lower()
-            ),
-            None,
-        )
-
-        flag = get_flag(self.path)
-
-        # Check if we're in constrained mode (flag != 0)
-        if flag not in [0, None]:
-            flag_type = self._get_flag_type(self.path)
-
-            # Special cases: allow abort or "None of these" without @ prefix
-            if command.lower() == "abort" or normalized_command == "abort":
-                command_name = "Core/abort"
-                change_flag(self.path, 0)  # Reset flag
-            elif any(phrase in command.lower() for phrase in [
-                "none of these",
-                "none of the above", 
-                "neither",
-                "none",
-                "misunderstood"
-            ]):
-                # User wants to see all options instead of the top 3
-                error_msg = self._formulate_misclassified_command_error_message(valid_command_names)
-                # Set flag to 2 because user is indicating none of the suggestions match
-                self._store_suggested_commands(self.path, valid_command_names, 2)
-                change_flag(self.path, 2)
-                return CommandNamePrediction.Output(error_msg=error_msg)
+            
+            if nlu_pipeline_stage == NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION:
+                valid_command_names = self._get_suggested_commands(self.path)
             else:
-                # Only accept commands prefixed with @ that match the suggested commands
-                suggested_commands = self._get_suggested_commands(self.path)
+                valid_command_names = (
+                    set(cme_command_names) | 
+                    set(subject_crd.get_command_names(command_context_name))
+                ) - {'wildcard'}
 
-                # Create appropriate message based on flag type
-                message_prefix = "The command is ambiguous" if flag_type == 1 else "The previous command was misclassified"
+            command_name_dict = {
+                fully_qualified_command_name.split('/')[-1]: fully_qualified_command_name 
+                for fully_qualified_command_name in valid_command_names
+            }
+        else:
+            # abort is special. 
+            # We will not predict, just match plain utterances with exact or fuzzy match
+            command_name_dict = {
+                plain_utterance: 'ErrorCorrection/abort' 
+                for plain_utterance in crd.command_directory.map_command_2_utterance_metadata['ErrorCorrection/abort'].plain_utterances
+            }
 
-                if "@" in command:
-                    # Extract everything after @ until the next @ or end of string
-                    full_command_text = command.split("@", 1)[1]
-                    after_at = full_command_text.split("@", 1)[0] if "@" in full_command_text else full_command_text
-                    after_at = after_at.strip()
+        # you_misunderstood is special. 
+        # We will not predict, just match plain utterances with exact or fuzzy match
+        for plain_utterance in crd.command_directory.map_command_2_utterance_metadata['ErrorCorrection/you_misunderstood'].plain_utterances:
+            command_name_dict[plain_utterance] = 'ErrorCorrection/you_misunderstood'
 
-                    # Get the first part for reference (still needed for command parts)
-                    tentative_command_name = after_at.split()[0] if " " in after_at else after_at
+        command_name = None
+        if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION:
+            # See if the command starts with a command name folowed by a space
+            tentative_command_name = command.split(" ", 1)[0]
+            normalized_command_name = tentative_command_name.lower()
+            if normalized_command_name in command_name_dict:
+                command_name = normalized_command_name
+                command = command.replace(f"{tentative_command_name}", "").strip().replace("  ", " ")
 
-                # Try different matching strategies in order of strictness
-                valid_choice = False
-                matched_command = None
-
+            if not command_name:
                 # Use Levenshtein distance for fuzzy matching with the full command part after @
                 matched_command, distance = find_best_match(
                     command,
-                    suggested_commands,
+                    command_name_dict.keys(),
                     threshold=0.3  # Adjust threshold as needed
                 )
-                valid_choice = matched_command is not None
-
-                if valid_choice:
+                if matched_command:
                     command_name = matched_command
-                    # Remove the entire @command part from the input
-                    command = command
-                else:
-                    # User selected an option that wasn't in the suggested list
-                    error_msg = f"{message_prefix}. Please select only from the provided command options:\n"
-                    error_msg += "\n".join(f"@{name}" for name in suggested_commands)
-                    error_msg += "\n\nor type 'none of these' to see all commands\nor type 'abort' to cancel"
-                    return CommandNamePrediction.Output(error_msg=error_msg)
-
-                # Process the selected command
-                count = self._get_count(self.cache_path)
-                if count > 0:
-                    utterance = self._read_utterance(self.cache_path, count-1)
-                    store_utterance_cache(self.path, utterance, command_name, modelpipeline)
-                change_flag(self.path, 0)  # Reset flag
-
-                # If user selects none_of_these in constrained mode, show all valid commands
-                if command_name == "Core/misunderstood_intent":
-                    error_msg = self._formulate_misclassified_command_error_message(valid_command_names)
-                    # Set flag to 2 because this is explicitly a misclassification case
-                    self._store_suggested_commands(self.path, valid_command_names, 2)
-                    change_flag(self.path, 2)
-                    return CommandNamePrediction.Output(error_msg=error_msg)
-        else:
-            # Normal flow (not in constrained mode)
-
-            # If user explicitly selects none_of_these, treat as misclassification
-            if command_name == "Core/misunderstood_intent":
-                error_msg = self._formulate_misclassified_command_error_message(valid_command_names)
-                # Set flag to 2 because user is indicating previous command was misclassified
-                self._store_suggested_commands(self.path, valid_command_names, 2)
-                change_flag(self.path, 2)
-                return CommandNamePrediction.Output(error_msg=error_msg)
-
-            if command.startswith('@'):
-                tentative_command_name = command.split("@")[1].split()[0].rstrip(':-')
-                normalized_command_name = tentative_command_name.lower()
-                for name in valid_command_names:
-                    if normalized_command_name == name.lower():
-                        command_name = name
-                        command = command.replace(f"@{tentative_command_name}", "").strip().replace("  ", " ")
-                        break
-                if command_name == "Core/misunderstood_intent":
-                    error_msg = self._formulate_misclassified_command_error_message(valid_command_names)
-                    # Set flag to 2 because user is indicating previous command was misclassified
-                    self._store_suggested_commands(self.path, valid_command_names, 2)
-                    change_flag(self.path, 2)
-                    return CommandNamePrediction.Output(error_msg=error_msg)
 
             if not command_name:
-                if cache_result := cache_match(
-                    self.path, command, modelpipeline, 0.85
-                ):
+                if cache_result := cache_match(self.path, command, modelpipeline, 0.85):
                     command_name = cache_result
-                    flag = get_flag(self.path)
-                    if flag is not None and flag != 0:
-                        count = self._get_count(self.cache_path)
-                        utterance = self._read_utterance(self.cache_path, count-1)
-                        store_utterance_cache(self.path, utterance, command_name, modelpipeline)
-                        change_flag(self.path, 0)
                 else:
                     # If no cache match, use the model to predict
                     results = predict_single_sentence(modelpipeline, command, label_encoder_path)
-                    command_name = results['label']
-                    if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION:
-                        # If confidence is low, treat as ambiguous command (type 1)
-                        if results['confidence'] < self.ambiguos_confidence_threshold:
-                            error_msg = self._formulate_ambiguous_command_error_message(results["topk_labels"])
-                            count = self._store_utterance(self.cache_path, command, command_name)
-                            # Store suggested commands and set flag to 1 (ambiguous)
-                            self._store_suggested_commands(self.path, results["topk_labels"], 1)
-                            change_flag(self.path, 1)
-                            return CommandNamePrediction.Output(error_msg=error_msg)
+                    # If confidence is low, treat as ambiguous command (type 1)
+                    if results['confidence'] < self.ambiguos_confidence_threshold:
+                        error_msg = self._formulate_ambiguous_command_error_message(results["topk_labels"])
+                        # count = self._store_utterance(self.cache_path, command, command_name)
+                        # Store suggested commands
+                        self._store_suggested_commands(self.path, results["topk_labels"], 1)
+                        return CommandNamePrediction.Output(error_msg=error_msg)
 
-                        # If model prediction is none_of_these, present all commands as options
-                        if command_name == "Core/misunderstood_intent":
-                            error_msg = self._formulate_misclassified_command_error_message(valid_command_names)
-                            # Set flag to 2 because model couldn't classify the command
-                            self._store_suggested_commands(self.path, valid_command_names, 2)
-                            change_flag(self.path, 2)
-                            return CommandNamePrediction.Output(error_msg=error_msg)
-                        else:
-                            flag = get_flag(self.path)
-                            if flag is not None and flag != 0:
-                                count = self._get_count(self.cache_path)
-                                utterance = self._read_utterance(self.cache_path, count-1)
-                                store_utterance_cache(self.path, utterance, command_name, modelpipeline)
-                                change_flag(self.path, 0)
-                    elif results['confidence'] < self.ambiguos_confidence_threshold:
-                        command_name = None
+                    if results['label'] is not None:
+                        command_name = results['label'].split('/')[-1]
+        elif nlu_pipeline_stage in (
+            NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
+            NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
+        ):
+            if command_name:
+                command = self.session.workflow_context["command"]
+                store_utterance_cache(self.path, command, command_name, modelpipeline)
             else:
-                # When the command_name is already determined
-                flag = get_flag(self.path)
-                if flag is not None and flag != 0:
-                    count = self._get_count(self.cache_path)
-                    utterance = self._read_utterance(self.cache_path, count-1)
-                    store_utterance_cache(self.path, utterance, command_name, modelpipeline)
-                    change_flag(self.path, 0)
+                command_name = 'You misunderstood'
 
-        if command_name == "Core/wildcard":
-            command_name=None
+        if not command_name or command_name == "wildcard":
+            fully_qualified_command_name=None
+            is_cme_command=False
+        else:
+            fully_qualified_command_name = command_name_dict[command_name]
+            is_cme_command=(
+                fully_qualified_command_name in cme_command_names or 
+                fully_qualified_command_name in crd.get_command_names('ErrorCorrection')
+            )
+
+        return CommandNamePrediction.Output(
+            command_name=fully_qualified_command_name,
+            is_cme_command=is_cme_command
+        )
+
+            # if nlu_pipeline_stage == NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION:
+            #     message_prefix = "The command is ambiguous"
+            # else: 
+            #     message_prefix = "The previous command was misclassified"
+
+            # else:
+            #     # User selected an option that wasn't in the suggested list
+            #     error_msg = f"{message_prefix}. Please select only from the provided command options:\n"
+            #     error_msg += "\n".join(f"@{name}" for name in suggested_commands if not name.startswith('Core'))
+            #     error_msg += "\n\nor type 'none of these' to see all commands\nor type 'abort' to cancel"
+            #     return CommandNamePrediction.Output(error_msg=error_msg)
+
+            # Process the selected command
+            # count = self._get_count(self.cache_path)
+            # if count > 0:
+            #     utterance = self._read_utterance(self.cache_path, count-1)
+            #     store_utterance_cache(self.path, utterance, command_name, modelpipeline)
+
+        # If user explicitly selects none_of_these, treat as misclassification
+        # elif "misunderstood_intent" in command_name:
+            # error_msg = self._formulate_misclassified_command_error_message(valid_command_names)
+            # Set flag to 2 because user is indicating previous command was misclassified
+            # self._store_suggested_commands(self.path, valid_command_names, 2)
+            # change_flag(self.path, 2)
+            # return CommandNamePrediction.Output(error_msg=error_msg)
+        # else:
+        #     # When the command_name is already determined
+        #     flag = get_flag(self.path)
+        #     if flag is not None and flag != 0:
+        #         count = self._get_count(self.cache_path)
+        #         utterance = self._read_utterance(self.cache_path, count-1)
+        #         store_utterance_cache(self.path, utterance, command_name, modelpipeline)
+        #         change_flag(self.path, 0)
 
         # Store the final command and classification
-        if command_name:
-            if command_name == "Core/misunderstood_intent":
-                count = self._store_utterance(self.cache_path, command, command_name)
+        # if command_name:
+            # if command_name == "misunderstood_intent":
+            #     count = self._store_utterance(self.cache_path, command, command_name)
 
-            class ValidateCommandNameSignature(BaseModel):
-                command_name: str
-            command_parameters = ValidateCommandNameSignature(command_name=command_name)
-            is_valid, error_msg = self._validate_command_name(valid_command_names, command_parameters)
+            # class ValidateCommandNameSignature(BaseModel):
+            #     command_name: str
+            # command_parameters = ValidateCommandNameSignature(command_name=command_name)
+            # is_valid, error_msg = self._validate_command_name(
+            #     nlu_pipeline_stage,
+            #     valid_command_names, 
+            #     command_parameters)
 
             # If validation fails, set flag to 2 (misclassified)
-            if not is_valid:
-                self._store_suggested_commands(self.path, valid_command_names, 2)
-                change_flag(self.path, 2)
-                return CommandNamePrediction.Output(error_msg=error_msg)
+            # if not is_valid:
+            #     self._store_suggested_commands(self.path, valid_command_names, 2)
+            #     change_flag(self.path, 2)
+            #     return CommandNamePrediction.Output(error_msg=error_msg)
 
-            return CommandNamePrediction.Output(
-                command_name=command_parameters.command_name,
-                is_cme_command=command_parameters.command_name in cme_command_names
-            )
-        
-        return CommandNamePrediction.Output(command_name=None, is_cme_command=False)
+        # return CommandNamePrediction.Output(command_name=None, is_cme_command=False)
 
     @staticmethod
     def _get_cache_path(session_id, convo_path):
@@ -433,6 +374,7 @@ class CommandNamePrediction:
 
     @staticmethod
     def _validate_command_name(
+        nlu_pipeline_stage: NLUPipelineStage,
         valid_command_names: list[str],
         command_parameters: "CommandNamePrediction.ValidateCommandNameSignature"
     ) -> tuple[bool, str]:
@@ -442,15 +384,11 @@ class CommandNamePrediction:
         if command_parameters.command_name in valid_command_names:
             return (True, None)
 
-        if not command_parameters.command_name and "*" in valid_command_names:
-            command_parameters.command_name = "*"
-            return (True, None)
-
-        command_list = "\n".join(f"@{name}" for name in valid_command_names)
+        command_list = "\n".join(f"@{name}" for name in valid_command_names if not name.startswith('Core'))
         return (
             False,
             "Please select the correct command from the list below:\n"
-            f"{command_list}\n\nor type 'abort' to cancel"
+            f"{command_list}"
         )
 
     @staticmethod
@@ -469,20 +407,6 @@ class CommandNamePrediction:
             "or type 'abort' to cancel"
         )
 
-    @staticmethod
-    def _formulate_misclassified_command_error_message(route_choice_list: list[str]) -> str:
-        command_list = (
-            "\n".join([
-                f"@{route_choice}"
-                for route_choice in route_choice_list
-            ])
-        )
-
-        return (
-            "Please select the correct command from the list below:\n"
-            f"{command_list}\n\nor type 'abort' to cancel"
-        )
-
 class ParameterExtraction:
     class Output(BaseModel):
         parameters_are_valid: bool
@@ -497,7 +421,7 @@ class ParameterExtraction:
         self.command = command
 
     def extract(self) -> "ParameterExtraction.Output":
-        subject_workflow_folderpath = self.subject_session.workflow_snapshot.workflow_folderpath
+        subject_workflow_folderpath = self.subject_session.workflow_folderpath
         subject_command_routing_definition = fastworkflow.RoutingRegistry.get_definition(subject_workflow_folderpath)
 
         command_parameters_class = (
@@ -555,16 +479,16 @@ class ParameterExtraction:
 
     @staticmethod
     def _get_stored_parameters(session):
-        return session.workflow_snapshot.workflow_context.get("stored_parameters")
+        return session.workflow_context.get("stored_parameters")
 
     @staticmethod
     def _store_parameters(session, parameters):
-        session.workflow_snapshot.workflow_context["stored_parameters"] = parameters
+        session.workflow_context["stored_parameters"] = parameters
 
     @staticmethod
     def _clear_parameters(session):
-        if "stored_parameters" in session.workflow_snapshot.workflow_context:
-            del session.workflow_snapshot.workflow_context["stored_parameters"]
+        if "stored_parameters" in session.workflow_context:
+            del session.workflow_context["stored_parameters"]
 
     @staticmethod
     def _extract_missing_fields(input_for_param_extraction, sws, command_name, stored_params):
@@ -739,7 +663,22 @@ class Signature:
         "16.7,.002",
         "John Doe, 56, 281-995-6423",
         "/path/to/my/object",
-        "id=3636"
+        "id=3636",
+        "The quick brown fox jumps over the lazy dog",
+        "Can you recommend a good Italian restaurant nearby?",
+        "Yesterday's thunderstorm was intense but refreshing",
+        "Bitcoin prices fluctuated dramatically last week",
+        "I need to book a flight to Tokyo next spring",
+        "My favorite movie is playing on television tonight",
+        "Please set a reminder for my dentist appointment tomorrow at 3 PM",
+        "The Lakers won their game by a narrow margin",
+        "How do I reset my router to factory settings?",
+        "She finished reading the novel in just two days",
+        "The garden needs watering before the sun gets too hot",
+        "Upload the quarterly sales report to the shared drive",
+        "Will it snow in Chicago this weekend?",
+        "The concert tickets sold out in under an hour",
+        "I'm attending a pottery class on Saturday afternoon"
     ]
 
     @staticmethod
@@ -752,12 +691,12 @@ class ResponseGenerator:
         self, 
         session: fastworkflow.Session, 
         command: str,
-    ) -> CommandOutput:
-        session.workflow_snapshot.is_complete = False
+    ) -> CommandOutput:  # sourcery skip: hoist-if-from-if
+        session.is_complete = False
 
-        subject_session = session.workflow_snapshot.workflow_context["subject_session"]   # type: fastworkflow.Session
+        subject_session = session.workflow_context["subject_session"]   # type: fastworkflow.Session
         cmd_ctxt_obj_name = subject_session.current_command_context_name
-        nlu_pipeline_stage = session.workflow_snapshot.workflow_context.get(
+        nlu_pipeline_stage = session.workflow_context.get(
             "NLU_Pipeline_Stage", 
             NLUPipelineStage.INTENT_DETECTION)
 
@@ -765,11 +704,18 @@ class ResponseGenerator:
         cnp_output = predictor.predict(cmd_ctxt_obj_name, command, nlu_pipeline_stage)
 
         if cnp_output.is_cme_command:
-            session.workflow_snapshot.is_complete = True
-            session.workflow_snapshot.workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.INTENT_DETECTION
+            workflow_context = session.workflow_context
+            if cnp_output.command_name == 'ErrorCorrection/you_misunderstood':
+                workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
+                if command not in workflow_context:
+                    workflow_context["command"] = command
+            else:
+                session.is_complete = True
+                workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.INTENT_DETECTION
+                workflow_context.pop("command")
+            session.workflow_context = workflow_context
 
             startup_action = Action(
-                workitem_path="/command_metadata_extraction",
                 command_name=cnp_output.command_name,
                 command=command,
             )
@@ -783,7 +729,8 @@ class ResponseGenerator:
         
         if nlu_pipeline_stage in {
                 NLUPipelineStage.INTENT_DETECTION,
-                NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION
+                NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
+                NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
             }:
             subject_session.command_context_for_response_generation = \
                 subject_session.current_command_context
@@ -798,9 +745,24 @@ class ResponseGenerator:
                         fastworkflow.Session.get_command_context_name(subject_session.command_context_for_response_generation), 
                         command, nlu_pipeline_stage)
             
-                if not cnp_output.command_name:
-                    session.workflow_snapshot.workflow_context["NLU_Pipeline_Stage"] = \
-                        NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION
+                if cnp_output.command_name is None:
+                    if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION:
+                        # out of scope commands
+                        workflow_context = session.workflow_context
+                        workflow_context["NLU_Pipeline_Stage"] = \
+                            NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
+                        if command not in workflow_context:
+                            workflow_context["command"] = command
+                        session.workflow_context = workflow_context
+
+                        startup_action = Action(
+                            command_name='ErrorCorrection/you_misunderstood',
+                            command=command,
+                        )
+                        command_executor = CommandExecutor()
+                        command_output = command_executor.perform_action(session, startup_action)
+                        command_output.command_responses[0].artifacts["command_handled"] = True
+                        return command_output
 
                     return CommandOutput(
                         command_responses=[
@@ -812,13 +774,13 @@ class ResponseGenerator:
                     )
 
             # move to the parameter extraction stage
-            workflow_context = session.workflow_snapshot.workflow_context
+            workflow_context = session.workflow_context
             workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.PARAMETER_EXTRACTION
             workflow_context["command_name"] = cnp_output.command_name
             workflow_context["command"] = command
-            session.workflow_snapshot.workflow_context = workflow_context
+            session.workflow_context = workflow_context
 
-        command_name = session.workflow_snapshot.workflow_context["command_name"]
+        command_name = session.workflow_context["command_name"]
         extractor = ParameterExtraction(session, subject_session, command_name, command)
         pe_output = extractor.extract()
         if not pe_output.parameters_are_valid:
@@ -834,8 +796,8 @@ class ResponseGenerator:
                 ]
             )
 
-        session.workflow_snapshot.is_complete = True
-        session.workflow_snapshot.workflow_context["NLU_Pipeline_Stage"] = \
+        session.is_complete = True
+        session.workflow_context["NLU_Pipeline_Stage"] = \
             NLUPipelineStage.INTENT_DETECTION
 
         return CommandOutput(
@@ -843,6 +805,7 @@ class ResponseGenerator:
                 CommandResponse(
                     response="",
                     artifacts={
+                        "command": session.workflow_context["command"],
                         "command_name": command_name,
                         "cmd_parameters": pe_output.cmd_parameters,
                     },

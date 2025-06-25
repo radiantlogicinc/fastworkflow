@@ -400,7 +400,7 @@ class CommandDirectory(BaseModel):
         # --------------------------------------------------------
         discovered_commands: set[str] = set()
         for root, _dirs, files in os.walk(internal_cmd_root):
-            if not root.endswith('Core'):
+            if root.endswith('ErrorCorrection'):
                 continue
 
             for filename in files:

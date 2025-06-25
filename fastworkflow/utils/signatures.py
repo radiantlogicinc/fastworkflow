@@ -6,7 +6,7 @@ from enum import Enum
 from pydantic import BaseModel, Field, ValidationError, field_validator, ConfigDict
 from pydantic_core import PydanticUndefined
 import fastworkflow
-from fastworkflow.session import WorkflowSnapshot
+
 from datetime import date
 import re
 import inspect
@@ -121,7 +121,7 @@ Today's date is {today}.
         Returns:
             An instance of InputForParamExtraction   
         """
-        subject_workflow_folderpath = subject_session.workflow_snapshot.workflow_folderpath
+        subject_workflow_folderpath = subject_session.workflow_folderpath
         subject_command_routing_definition = fastworkflow.RoutingRegistry.get_definition(subject_workflow_folderpath)
         
         input_for_param_extraction_class = subject_command_routing_definition.get_command_class(
@@ -131,7 +131,7 @@ Today's date is {today}.
         if input_for_param_extraction_class and input_for_param_extraction_class is not cls and hasattr(input_for_param_extraction_class, 'create'):
             try:
                 input_for_param_extraction = input_for_param_extraction_class.create(
-                    subject_session.workflow_snapshot, subject_command_name, subject_command)
+                    subject_session, subject_command_name, subject_command)
             except Exception as e:
                 logger.warning(f"Failed to create input_for_param_extraction: {e}")
         
@@ -341,7 +341,7 @@ Today's date is {today}.
 
         # check if the input for parameter extraction class is defined in the registary then call the process_parameters function on the instance.
         if hasattr(self.input_for_param_extraction, 'process_extracted_parameters'):
-            self.input_for_param_extraction.process_extracted_parameters(subject_session.workflow_snapshot, subject_command_name, cmd_parameters)
+            self.input_for_param_extraction.process_extracted_parameters(subject_session, subject_command_name, cmd_parameters)
 
         # Check required fields
         for field_name, field_info in type(cmd_parameters).model_fields.items():
@@ -412,7 +412,7 @@ Today's date is {today}.
             if is_db_lookup:
                 if not self.input_for_param_extraction:
                     raise ValueError("input_for_param_extraction is not set.")
-                key_values=self.input_for_param_extraction.db_lookup(subject_session.workflow_snapshot, subject_command_name) 
+                key_values=self.input_for_param_extraction.db_lookup(subject_session, subject_command_name) 
                 matched, corrected_value, field_suggestions = DatabaseValidator.fuzzy_match(field_value, key_values)
 
                 if matched:

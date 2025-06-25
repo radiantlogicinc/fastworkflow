@@ -225,7 +225,7 @@ class CommandStubGenerator:
 from typing import Optional, Dict, Any
 from pydantic import BaseModel, ConfigDict
 
-from fastworkflow.session import WorkflowSnapshot
+
 
 
 class Signature:
@@ -256,7 +256,7 @@ class Signature:
         return []
     
     @staticmethod
-    def process_extracted_parameters(snapshot: WorkflowSnapshot, parameters: Dict[str, Any]) -> Dict[str, Any]:
+    def process_extracted_parameters(session: fastworkflow.Session, parameters: Dict[str, Any]) -> Dict[str, Any]:
         \"\"\"Process extracted parameters before command execution.\"\"\"
         # TODO: Add parameter processing logic if needed
         return parameters
@@ -312,14 +312,14 @@ class ResponseGenerator:
 This file contains ContextExpander implementation for {context} context.
 \"\"\"
 
-from fastworkflow.session import WorkflowSnapshot
+
 from fastworkflow.context import ContextExpander
 
 
 class ContextExpander(ContextExpander):
     \"\"\"Implements context delegation for {context} context.\"\"\"
     
-    def move_to_parent_context(self, snapshot: WorkflowSnapshot):
+    def move_to_parent_context(self, session: fastworkflow.Session):
         \"\"\"Move from {context} to parent context.
         
         Args:

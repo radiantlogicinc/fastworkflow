@@ -46,7 +46,6 @@ class TestCommandExecutor:
     def test_perform_action_simple_command(self, command_executor: CommandExecutor, workflow_session: WorkflowSession):
         """Ensure a parameter-free command can be executed successfully."""
         action = fastworkflow.Action(
-            workitem_path="*",
             command_name="list_all_product_types",
             command="List all the product categories you have.",
             parameters={},
@@ -61,7 +60,6 @@ class TestCommandExecutor:
     def test_perform_action_with_parameters(self, command_executor: CommandExecutor, workflow_session: WorkflowSession):
         """Execute a command that expects parameters and verify validation passes."""
         action = fastworkflow.Action(
-            workitem_path="*",
             command_name="find_user_id_by_email",
             command="Find the user id for john.doe@example.com",
             parameters={"email": "john.doe@example.com"},

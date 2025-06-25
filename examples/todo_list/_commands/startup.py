@@ -5,7 +5,7 @@ from ..application.todo_manager import TodoListManager
 class ResponseGenerator:
     def __call__(self, session: fastworkflow.Session, command: str) -> CommandOutput:
         filepath = (
-            f'{session.workflow_snapshot.workflow_folderpath}/'
+            f'{session.workflow_folderpath}/'
             'application/'
             'todo_list.json'
         )

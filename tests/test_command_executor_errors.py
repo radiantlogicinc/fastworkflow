@@ -38,7 +38,7 @@ def test_perform_action_wraps_error(monkeypatch):
         session_id_str="errs_pa",
     )
 
-    action = fastworkflow.Action(workitem_path="/", command_name="fail", command="fail")
+    action = fastworkflow.Action(command_name="fail", command="fail")
 
     with pytest.raises(RuntimeError):
         executor.perform_action(session, action)
@@ -61,7 +61,7 @@ def test_invoke_command_wraps_error(monkeypatch):
     def _stub_extract(self, ws, cmd):
         co = CommandOutput(
             command_responses=[
-                CommandResponse(response="stub", artifacts={"command_name": "fail", "cmd_parameters": None})
+                CommandResponse(response="stub", artifacts={"command_name": "fail", "cmd_parameters": None, "command": cmd})
             ],
             success=True,
             command_handled=False
