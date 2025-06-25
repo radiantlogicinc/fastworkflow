@@ -212,7 +212,7 @@ class Session:
     def get_command_context_name(command_context_object: Optional[object]) -> str:
         if command_context_object:
             return command_context_object.__class__.__name__
-        return '*'
+        return 'global'
 
     @property
     def id(self) -> int:

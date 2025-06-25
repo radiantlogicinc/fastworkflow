@@ -26,7 +26,7 @@ class ResponseGenerator:  # noqa: D101
             session_id=session.id,
             command_responses=[
                 CommandResponse(
-                    response="Context is now 'global'",
+                    response=f"Context is now '{subject_session.current_command_context_name}'",
                 )
             ],
         ) 

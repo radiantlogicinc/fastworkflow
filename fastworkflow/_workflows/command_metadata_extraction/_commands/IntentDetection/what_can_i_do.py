@@ -58,7 +58,7 @@ class ResponseGenerator:
 
         fully_qualified_command_names = (
             set(cme_command_names) | 
-            set(subject_crd.get_command_names(session.current_command_context_name))
+            set(subject_crd.get_command_names(sub_sess.current_command_context_name))
         ) - {'wildcard'}
 
         valid_command_names = [

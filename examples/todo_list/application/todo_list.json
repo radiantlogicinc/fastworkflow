@@ -1,1 +1,10 @@
-[]
+[
+  {
+    "id": 1,
+    "description": "groceries",
+    "assign_to": "",
+    "status": "INCOMPLETE",
+    "type": "TodoList",
+    "children": []
+  }
+]

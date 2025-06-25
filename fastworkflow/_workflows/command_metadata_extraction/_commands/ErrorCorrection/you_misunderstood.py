@@ -27,7 +27,7 @@ class Signature:
 
 class ResponseGenerator:
     def _process_command(self, session: Session) -> Signature.Output:
-        sub_sess = session.workflow_context["subject_session"]
+        sub_sess = session.workflow_context["subject_session"]  #type: fastworkflow.Session
         subject_crd = fastworkflow.RoutingRegistry.get_definition(
             sub_sess.workflow_folderpath)
         
@@ -37,7 +37,7 @@ class ResponseGenerator:
 
         fully_qualified_command_names = (
             set(cme_command_names) | 
-            set(subject_crd.get_command_names(session.current_command_context_name))
+            set(subject_crd.get_command_names(sub_sess.current_command_context_name))
         ) - {'wildcard'}
 
         valid_command_names = [

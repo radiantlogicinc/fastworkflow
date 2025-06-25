@@ -30,8 +30,11 @@ class Signature:
         )
 
     class Output(BaseModel):
-        success: bool = Field(
-            description="True if item was added, False otherwise"
+        current_context: str = Field(
+            description="The current context is TodoList"
+        )
+        new_context: str = Field(
+            description="Context will be switched to the newly created child TodoItem"
         )
 
     plain_utterances = [
@@ -58,15 +61,23 @@ class ResponseGenerator:
             assign_to=input.assign_to, 
             status=TodoItem.COMPLETE if input.is_complete else TodoItem.INCOMPLETE
         )
+        
+        current_context = session.current_command_context_name
         session.current_command_context = todoitem
-        return Signature.Output(success=True)
+        new_context=session.current_command_context_name
+
+        return Signature.Output(
+            current_context=current_context,
+            new_context=new_context
+        )
 
     def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:
         output = self._process_command(session, command_parameters)
         response = (
+            f'Context: {output.current_context}\n'
             f'Command: {command}\n'
             f'Command parameters: {command_parameters}\n'
-            f'Response: {output.model_dump_json()}'
+            f'Response: {output.model_dump_json(include={"new_context"})}'
         )
         return CommandOutput(
             session_id=session.id,
