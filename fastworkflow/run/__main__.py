@@ -73,75 +73,78 @@ def print_command_output(command_output):
         console.print(panel)
 
 
-parser = argparse.ArgumentParser(description="AI Assistant for workflow processing")
-parser.add_argument("workflow_path", help="Path to the workflow folder")
-parser.add_argument("env_file_path", help="Path to the environment file")
-parser.add_argument("passwords_file_path", help="Path to the passwords file")
-parser.add_argument(
-    "--context_file_path", help="Optional context file path", default=""
-)
-parser.add_argument(
-    "--startup_command", help="Optional startup command", default=""
-)
-parser.add_argument(
-    "--startup_action", help="Optional startup action", default=""
-)
-parser.add_argument(
-    "--keep_alive", help="Optional keep_alive", default=True
-)
+def run_main(args):
+    """Main function to run the workflow."""
+    if not os.path.isdir(args.workflow_path):
+        console.print(f"[bold red]Error:[/bold red] The specified workflow path '{args.workflow_path}' is not a valid directory.")
+        exit(1)
 
-args = parser.parse_args()
+    console.print(Panel(f"Running fastWorkflow: [bold]{args.workflow_path}[/bold]", title="[bold green]fastworkflow[/bold green]", border_style="green"))
+    console.print("[bold green]Tip:[/bold green] Type 'exit' to quit the application.")
 
-if not os.path.isdir(args.workflow_path):
-    console.print(f"[bold red]Error:[/bold red] The specified workflow path '{args.workflow_path}' is not a valid directory.")
-    exit(1)
+    if args.startup_command and args.startup_action:
+        raise ValueError("Cannot provide both startup_command and startup_action")
 
-console.print(Panel(f"Running fastWorkflow: [bold]{args.workflow_path}[/bold]", title="[bold green]fastworkflow[/bold green]", border_style="green"))
-console.print("[bold green]Tip:[/bold green] Type 'exit' to quit the application.")
+    env_vars = {
+        **dotenv_values(args.env_file_path),
+        **dotenv_values(args.passwords_file_path)
+    }
 
-if args.startup_command and args.startup_action:
-    raise ValueError("Cannot provide both startup_command and startup_action")
+    fastworkflow.init(env_vars=env_vars)
 
-env_vars = {
-    **dotenv_values(args.env_file_path),
-    **dotenv_values(args.passwords_file_path)
-}
+    startup_action: Optional[fastworkflow.Action] = None
+    if args.startup_action:
+        with open(args.startup_action, 'r') as file:
+            startup_action_dict = json.load(file)
+        startup_action = fastworkflow.Action(**startup_action_dict)
 
-fastworkflow.init(env_vars=env_vars)
+    context_dict = {}
+    if args.context_file_path:
+        with open(args.context_file_path, 'r') as file:
+            context_dict = json.load(file)
 
-startup_action: Optional[fastworkflow.Action] = None
-if args.startup_action:
-    with open(args.startup_action, 'r') as file:
-        startup_action_dict = json.load(file)
-    startup_action = fastworkflow.Action(**startup_action_dict)
+    workflow_session = fastworkflow.WorkflowSession(
+        CommandExecutor(),
+        args.workflow_path, 
+        session_id_str=f"run_{args.workflow_path}",
+        context=context_dict,
+        startup_command=args.startup_command, 
+        startup_action=startup_action, 
+        keep_alive=args.keep_alive
+    )
 
-context_dict = {}
-if args.context_file_path:
-    with open(args.context_file_path, 'r') as file:
-        context_dict = json.load(file)
+    workflow_session.start()
+    with contextlib.suppress(queue.Empty):
+        if command_output := workflow_session.command_output_queue.get(
+            timeout=1.0
+        ):
+            print_command_output(command_output)
+    while not workflow_session.workflow_is_complete or args.keep_alive:
+        user_command = console.input("[bold yellow]User > [/bold yellow]")
+        if user_command == "exit":
+            break
 
-workflow_session = fastworkflow.WorkflowSession(
-    CommandExecutor(),
-    args.workflow_path, 
-    session_id_str=f"run_{args.workflow_path}",
-    context=context_dict,
-    startup_command=args.startup_command, 
-    startup_action=startup_action, 
-    keep_alive=args.keep_alive
-)
+        workflow_session.user_message_queue.put(user_command)
 
-workflow_session.start()
-with contextlib.suppress(queue.Empty):
-    if command_output := workflow_session.command_output_queue.get(
-        timeout=1.0
-    ):
+        command_output = workflow_session.command_output_queue.get()
         print_command_output(command_output)
-while not workflow_session.workflow_is_complete or args.keep_alive:
-    user_command = console.input("[bold yellow]User > [/bold yellow]")
-    if user_command == "exit":
-        break
 
-    workflow_session.user_message_queue.put(user_command)
-
-    command_output = workflow_session.command_output_queue.get()
-    print_command_output(command_output)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="AI Assistant for workflow processing")
+    parser.add_argument("workflow_path", help="Path to the workflow folder")
+    parser.add_argument("env_file_path", help="Path to the environment file")
+    parser.add_argument("passwords_file_path", help="Path to the passwords file")
+    parser.add_argument(
+        "--context_file_path", help="Optional context file path", default=""
+    )
+    parser.add_argument(
+        "--startup_command", help="Optional startup command", default=""
+    )
+    parser.add_argument(
+        "--startup_action", help="Optional startup action", default=""
+    )
+    parser.add_argument(
+        "--keep_alive", help="Optional keep_alive", default=True
+    )
+    args = parser.parse_args()
+    run_main(args)

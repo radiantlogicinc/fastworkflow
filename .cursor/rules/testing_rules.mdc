@@ -6,7 +6,6 @@ alwaysApply: true
 # Testing Patterns for FastWorkflow
 
 - Don't use Mock fixtures. All our tests are integration tests
-- Always activate conda env fastworkflow before running pytests
 - Do not remove pytest tests without explicit user approval
 
 ## MCP Integration Testing

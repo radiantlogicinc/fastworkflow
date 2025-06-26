@@ -24,12 +24,12 @@ def parse_args():
     )
     parser.add_argument('--source-dir', '-s', required=True, help='Path to the source directory of the target application')
     parser.add_argument('--output-dir', '-o', required=True, help='Path to save the generated command files')
-    parser.add_argument("--env_file_path", '-e', help="Path to the environment file")
-    parser.add_argument("--passwords_file_path", '-p', help="Path to the passwords file")
+    parser.add_argument("--env_file_path", '-e', required=True, help="Path to the environment file")
+    parser.add_argument("--passwords_file_path", '-p', required=True, help="Path to the passwords file")
     parser.add_argument('--dry-run', action='store_true', help='Do not write files, just print actions')
     parser.add_argument('--verbose', '-v', action='store_true', help='Print detailed logs')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite files in output directory if present')
-    parser.add_argument('--context-model-dir', required=False, help='Directory to save the generated command context JSON (default: output directory)')
+    parser.add_argument('--context-model-dir', required=True, help='Directory to save the generated command context JSON')
     parser.add_argument('--generate-stubs', action='store_true', help='Generate command stub files for contexts')
     parser.add_argument('--stub-commands', help='Comma-separated list of command names to generate stubs for')
     parser.add_argument('--generate-navigators', action='store_true', help='Generate navigator stub files for contexts')
@@ -334,6 +334,20 @@ class ResponseGenerator:
 
 def main():
     args = parse_args()
+    initialize_environment(args)
+    validate_directories(args)
+    all_classes_data, ctx_model_data = run_command_generation(args)
+    if errors := run_validation(args, all_classes_data, ctx_model_data):
+        print('\n'.join(errors))
+        sys.exit(1)
+    else:
+        print(f"Successfully generated FastWorkflow commands in {args.output_dir}")
+    run_documentation(args)
+
+# Add this function to be imported by cli.py
+def build_main(args):
+    """Entry point for the CLI build command."""
+    # Skip parsing args since they're provided by the CLI
     initialize_environment(args)
     validate_directories(args)
     all_classes_data, ctx_model_data = run_command_generation(args)

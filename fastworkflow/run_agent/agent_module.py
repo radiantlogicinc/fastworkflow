@@ -11,41 +11,41 @@ from colorama import Fore, Style # For logging within the agent tool
 import fastworkflow # For WorkflowSession type hint and get_env_var
 from fastworkflow.mcp_server import FastWorkflowMCPServer
 
-def clear_dspy_cache():
-    """
-    Clear DSPy LLM cache completely by disabling both disk and memory cache.
-    Call this before initializing agents if you want fresh LLM calls every time.
-    """
-    dspy.configure_cache(
-        enable_disk_cache=False,
-        enable_memory_cache=False,
-        enable_litellm_cache=False
-    )
+# def clear_dspy_cache():
+#     """
+#     Clear DSPy LLM cache completely by disabling both disk and memory cache.
+#     Call this before initializing agents if you want fresh LLM calls every time.
+#     """
+#     dspy.configure_cache(
+#         enable_disk_cache=False,
+#         enable_memory_cache=False,
+#         enable_litellm_cache=False
+#     )
 
-def configure_dspy_cache(enable_cache: bool = True, cache_dir: Optional[str] = None):
-    """
-    Configure DSPy caching behavior.
+# def configure_dspy_cache(enable_cache: bool = True, cache_dir: Optional[str] = None):
+#     """
+#     Configure DSPy caching behavior.
     
-    Args:
-        enable_cache: Whether to enable caching (True) or disable it completely (False)
-        cache_dir: Optional custom cache directory
-    """
-    if not enable_cache:
-        clear_dspy_cache()
-        return
+#     Args:
+#         enable_cache: Whether to enable caching (True) or disable it completely (False)
+#         cache_dir: Optional custom cache directory
+#     """
+#     if not enable_cache:
+#         clear_dspy_cache()
+#         return
     
-    cache_config = {
-        "enable_disk_cache": True,
-        "enable_memory_cache": True,
-        "enable_litellm_cache": False
-    }
+#     cache_config = {
+#         "enable_disk_cache": True,
+#         "enable_memory_cache": True,
+#         "enable_litellm_cache": False
+#     }
     
-    if cache_dir:
-        cache_config["disk_cache_dir"] = cache_dir
+#     if cache_dir:
+#         cache_config["disk_cache_dir"] = cache_dir
     
-    print(f"{Fore.BLUE}{Style.BRIGHT}🔧 Configuring DSPy cache: {cache_config}{Style.RESET_ALL}")
-    dspy.configure_cache(**cache_config)
-    print(f"{Fore.GREEN}✅ DSPy cache configured{Style.RESET_ALL}")
+#     print(f"{Fore.BLUE}{Style.BRIGHT}🔧 Configuring DSPy cache: {cache_config}{Style.RESET_ALL}")
+#     dspy.configure_cache(**cache_config)
+#     print(f"{Fore.GREEN}✅ DSPy cache configured{Style.RESET_ALL}")
 
 # DSPy Signature for the Agent
 class PlanningAgentSignature(dspy.Signature):
@@ -356,11 +356,11 @@ def initialize_dspy_agent(workflow_session: fastworkflow.WorkflowSession, LLM_AG
         raise EnvironmentError("DSPy Language Model name not provided.")
 
     # 🗑️ Clear cache if requested
-    if clear_cache:
-        clear_dspy_cache()
-    else:
-        # Configure cache with defaults (enabled)
-        configure_dspy_cache(enable_cache=True)
+    # if clear_cache:
+    #     clear_dspy_cache()
+    # else:
+    #     # Configure cache with defaults (enabled)
+    #     configure_dspy_cache(enable_cache=True)
 
     lm = dspy.LM(model=LLM_AGENT, api_key=LITELLM_API_KEY_AGENT)
     dspy.settings.configure(lm=lm)

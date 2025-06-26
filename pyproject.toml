@@ -19,11 +19,15 @@ exclude = [
     "**/___command_info",
     "**/___workflow_contexts"
 ]
+include = ["examples/"]
+
+[tool.poetry.scripts]
+fastworkflow = "fastworkflow.cli:main"
 
 [tool.poetry.dependencies]
 python = ">=3.11,<3.13"
 pydantic = "^2.9.2"
-dspy-ai = "2.5.36"
+dspy-ai = "2.6.27"
 speedict = "^0.3.12"
 python-dotenv = "^1.0.1"
 scikit-learn = "^1.6.1"
@@ -31,7 +35,8 @@ transformers = "^4.48.2"
 mmh3 = "^5.1.0"
 python-levenshtein = "^0.27.1"
 colorama = "^0.4.6"
-torch = "^2.7.0"
+dspy = "2.6.27"
+torch = {version = "^2.7.1", extras = ["cpu"], python = ">=3.11,<3.13", platform = "linux"}
 
 [tool.poetry.group.dev.dependencies]
 isort = "^5.13.2"

@@ -196,3 +196,4 @@ tasks/
 .taskmaster/config.json
 .taskmaster/state.json
 .taskmaster/reports/task-complexity-report.json
+docs/chats/cursor_review_codebase_for_performance.md

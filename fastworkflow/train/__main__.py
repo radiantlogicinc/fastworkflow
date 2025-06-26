@@ -170,16 +170,8 @@ def is_fast_workflow_trained(fastworkflow_folderpath: str):
 
     return True
 
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Train the intent detection pipeline for a workflow"
-    )
-    parser.add_argument("workflow_folderpath", help="Path to the workflow folder")
-    parser.add_argument("env_file_path", help="Path to the environment file")
-    parser.add_argument("passwords_file_path", help="Path to the passwords file")
-    args = parser.parse_args()
-
+def train_main(args):
+    """Main function to train the workflow."""
     if not os.path.isdir(args.workflow_folderpath):
         print(
             f"{Fore.RED}Error: The specified workflow path '{args.workflow_folderpath}' is not a valid directory.{Style.RESET_ALL}"
@@ -201,3 +193,13 @@ if __name__ == "__main__":
         train_workflow(fastworkflow_folderpath)
 
     train_workflow(args.workflow_folderpath)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Train the intent detection pipeline for a workflow"
+    )
+    parser.add_argument("workflow_folderpath", help="Path to the workflow folder")
+    parser.add_argument("env_file_path", help="Path to the environment file")
+    parser.add_argument("passwords_file_path", help="Path to the passwords file")
+    args = parser.parse_args()
+    train_main(args)
