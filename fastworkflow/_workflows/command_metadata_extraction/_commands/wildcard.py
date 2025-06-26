@@ -599,28 +599,14 @@ class Signature:
         "John Doe, 56, 281-995-6423",
         "/path/to/my/object",
         "id=3636",
-        "The quick brown fox jumps over the lazy dog",
-        "Can you recommend a good Italian restaurant nearby?",
-        "Yesterday's thunderstorm was intense but refreshing",
-        "Bitcoin prices fluctuated dramatically last week",
-        "I need to book a flight to Tokyo next spring",
-        "My favorite movie is playing on television tonight",
-        "Please set a reminder for my dentist appointment tomorrow at 3 PM",
-        "The Lakers won their game by a narrow margin",
-        "How do I reset my router to factory settings?",
-        "She finished reading the novel in just two days",
-        "The garden needs watering before the sun gets too hot",
-        "Upload the quarterly sales report to the shared drive",
-        "Will it snow in Chicago this weekend?",
-        "The concert tickets sold out in under an hour",
-        "I'm attending a pottery class on Saturday afternoon"
+        "25.73 and Howard St",
     ]
 
     @staticmethod
     def generate_utterances(session: fastworkflow.Session, command_name: str) -> list[str]:
         return [
             command_name.split('/')[-1].lower().replace('_', ' ')
-        ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
+        ] + Signature.plain_utterances
 
 
 class ResponseGenerator:

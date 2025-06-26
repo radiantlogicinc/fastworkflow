@@ -39,6 +39,7 @@ class TestCommandDirectory:
             "return_delivered_order_items",
             "transfer_to_human_agents",
             "wildcard",
+            "IntentDetection/go_up",
             "IntentDetection/what_can_i_do",
             "IntentDetection/reset_context",
             "IntentDetection/what_is_current_context",

@@ -56,6 +56,9 @@ class CommandContextModel:
     _resolved_commands: dict[str, list[str]] = field(
         default_factory=dict, init=False
     )
+    _resolved_ancestors: dict[str, list[str]] = field(
+        default_factory=dict, init=False
+    )
 
     def __post_init__(self):
         # Inheritance is resolved lazily on first `commands()` call to
@@ -67,9 +70,9 @@ class CommandContextModel:
         """Loads and validates the command context model from a workflow path,
         augmenting with contexts and commands discovered from the _commands directory."""
         workflow_path_obj = Path(workflow_path)
+        
+        # 1. Load command inheritance from JSON file (if it exists)
         json_model_path = workflow_path_obj / "_commands/context_inheritance_model.json"
-
-        # 1. Load from JSON file (if it exists)
         raw_contexts_from_json = {}
         if json_model_path.is_file():
             try:
@@ -84,20 +87,16 @@ class CommandContextModel:
                     f"Context model root in {json_model_path} must be a dictionary, "
                     f"but found {type(raw_contexts_from_json)}"
                 )
-
-            # Validate structure of each entry in raw_contexts_from_json
             for context_name_in_json, context_def_in_json in raw_contexts_from_json.items():
                 if "/" in context_def_in_json:
                     raise CommandContextModelValidationError(
                         f"Context '{context_name_in_json}' in {json_model_path.name} "
-                        f"must not contain a '/' key. Direct commands are discovered from the filesystem. "
-                        f"Only 'base' key is allowed for context definitions in this file."
+                        f"must not contain a '/' key. Only 'base' key is allowed."
                     )
-                # If a context is defined in JSON, it must be for defining 'base'
                 if "base" not in context_def_in_json:
                     raise CommandContextModelValidationError(
                         f"Context '{context_name_in_json}' in {json_model_path.name} "
-                        f"is missing the required 'base' key. Context definitions in this file are for inheritance only."
+                        f"is missing the required 'base' key."
                     )
                 if not isinstance(context_def_in_json["base"], list) or \
                        not all(isinstance(b, str) for b in context_def_in_json["base"]):
@@ -105,68 +104,117 @@ class CommandContextModel:
                         f"Key 'base' for context '{context_name_in_json}' in {json_model_path.name} "
                         f"must be a list of context name strings."
                     )
-
+        
         # 2. Use cached CommandDirectory to get filesystem-derived commands
         cmd_dir = get_cached_command_directory(str(workflow_path_obj))
-
-        # Reconstruct the equivalent of discovered_contexts_from_fs using cmd_dir
         fs_derived_direct_commands = {}
-
-        # Process all qualified command names from CommandDirectory
         for qualified_cmd_name in cmd_dir.map_command_2_metadata.keys():
             if "/" in qualified_cmd_name:
-                # Extract context part from qualified name
                 context_part, _ = qualified_cmd_name.split("/", 1)
                 if context_part not in fs_derived_direct_commands:
                     fs_derived_direct_commands[context_part] = {"/": []}
                 fs_derived_direct_commands[context_part]["/"].append(qualified_cmd_name)
-            else:  # Global command (e.g., "wildcard")
+            else:
                 if "*" not in fs_derived_direct_commands:
                     fs_derived_direct_commands["*"] = {"/": []}
                 fs_derived_direct_commands["*"]["/"].append(qualified_cmd_name)
-
-        # Optionally drop internal 'Core' context for external workflows
         fs_derived_direct_commands.pop('Core', None)
-
-        # Sort command lists for consistency
         for context_data in fs_derived_direct_commands.values():
             context_data["/"] = sorted(list(set(context_data["/"])))
 
         # 3. Merge JSON-defined inheritance with Filesystem-derived direct commands
         merged_contexts = {}
-        # Combine context names from JSON and those with actual commands found by CommandDirectory
         all_context_names = set(raw_contexts_from_json.keys()) | set(fs_derived_direct_commands.keys())
-
         for name in all_context_names:
-            json_def = raw_contexts_from_json.get(name, {})  # Contains only 'base' if present
-            fs_def = fs_derived_direct_commands.get(name, {})  # Contains only '/' from CommandDirectory data
-
+            json_def = raw_contexts_from_json.get(name, {})
+            fs_def = fs_derived_direct_commands.get(name, {})
             current_context_definition: dict[str, list[str]] = {}
-
-            # 'base' comes ONLY from JSON
             if "base" in json_def:
                 current_context_definition["base"] = json_def["base"]
-
-            # '/' commands come ONLY from CommandDirectory's data for this context 'name'
-            current_context_definition["/"] = fs_def["/"] if "/" in fs_def else []
-            # Validate that each context has either:
-            # 1. Direct commands from filesystem ('/' key with non-empty list)
-            # 2. OR is used as a base in JSON ('base' key)
+            current_context_definition["/"] = fs_def.get("/", [])
             if not current_context_definition.get("/") and "base" not in current_context_definition:
-                # This is a context with no commands and no inheritance role
                 raise CommandContextModelValidationError(
-                    f"Context '{name}' has no commands and is not used as a base for inheritance. "
-                    f"Each context must either contain command files or be used as a base."
+                    f"Context '{name}' has no commands and is not used as a base for inheritance."
                 )
-
             merged_contexts[name] = current_context_definition
 
-        return cls(_workflow_path=str(workflow_path_obj), _command_contexts=merged_contexts)
+        # Create the instance with the merged command contexts
+        instance = cls(_workflow_path=str(workflow_path_obj), _command_contexts=merged_contexts)
+
+        # 4. Load and resolve the context hierarchy (for parent relationships)
+        hierarchy_data = instance._load_context_hierarchy()
+        instance._resolve_ancestry(hierarchy_data)
+        
+        return instance
+
+    def _load_context_hierarchy(self) -> dict:
+        """Loads and validates the context hierarchy model from the workflow path."""
+        hierarchy_model_path = Path(self._workflow_path) / "context_hierarchy_model.json"
+        if not hierarchy_model_path.is_file():
+            return {}
+        
+        with hierarchy_model_path.open("r") as f:
+            hierarchy_data = json.load(f)
+            
+        return hierarchy_data
+
+    def _resolve_ancestry(self, hierarchy: dict[str, dict[str, list[str]]]) -> None:
+        """Resolves the complete ancestry for each context and detects cycles."""
+        all_contexts = set(self._command_contexts.keys()) | set(hierarchy.keys())
+        for context_name in all_contexts:
+            if context_name not in self._resolved_ancestors:
+                self.get_ancestor_contexts(context_name, _hierarchy=hierarchy)
+
+    def get_ancestor_contexts(
+        self, 
+        context_name: str, 
+        visiting: set[str] | None = None,
+        _hierarchy: dict[str, dict[str, list[str]]] | None = None
+    ) -> list[str]:
+        """
+        Returns the effective list of ancestor contexts for a given context.
+        This includes the full parent chain up to the root.
+        """
+        if context_name in self._resolved_ancestors:
+            return self._resolved_ancestors[context_name]
+
+        if _hierarchy is None:
+            _hierarchy = self._load_context_hierarchy()
+
+        if visiting is None:
+            visiting = set()
+
+        if context_name in visiting:
+            raise CommandContextModelValidationError(
+                f"Context hierarchy cycle detected: {' -> '.join(list(visiting) + [context_name])}"
+            )
+
+        visiting.add(context_name)
+
+        context_def = _hierarchy.get(context_name, {})
+        parent_contexts = context_def.get("parent", [])
+
+        if not isinstance(parent_contexts, list) or not all(isinstance(p, str) for p in parent_contexts):
+            raise CommandContextModelValidationError(
+                f"Key 'parent' for context '{context_name}' in context_hierarchy_model.json "
+                f"must be a list of context name strings."
+            )
+
+        all_ancestors = set()
+        for parent in parent_contexts:
+            all_ancestors.add(parent)
+            grandparents = self.get_ancestor_contexts(parent, visiting.copy(), _hierarchy)
+            all_ancestors.update(grandparents)
+        
+        final_ancestors = sorted(list(all_ancestors))
+        self._resolved_ancestors[context_name] = final_ancestors
+        
+        visiting.remove(context_name)
+
+        return final_ancestors
 
     def _resolve_inheritance(self) -> None:
         """Resolves command inheritance and detects cycles."""
-        # The core of this is a topological sort.
-        # We can do this with a simple depth-first traversal.
         for context_name in self._command_contexts:
             self.commands(context_name)
 
@@ -176,8 +224,11 @@ class CommandContextModel:
             return self._resolved_commands[context_name]
 
         if context_name not in self._command_contexts:
+            # A context must be defined either by having command files
+            # or by being part of a command inheritance structure. If it's not
+            # in _command_contexts, it's an unknown/invalid context.
             raise CommandContextModelValidationError(f"Context '{context_name}' not found in model.")
-
+            
         if visiting is None:
             visiting = set()
 
@@ -188,36 +239,28 @@ class CommandContextModel:
 
         visiting.add(context_name)
 
-        context_def = self._command_contexts[context_name]
-        own_commands_list = context_def.get("/") or []  # Qualified names from FS
+        context_def = self._command_contexts.get(context_name, {})
+        own_commands_list = context_def.get("/") or []
 
-        # Track which simple command names have been added and their qualified names
-        # This mapping helps us track which command has been added for each simple name
         simple_to_qualified = {}
 
-        # 1. Add own commands (highest precedence)
-        # Own commands are typically already sorted by _discover_contexts_from_filesystem
-        # but iterating explicitly maintains their relative order if any.
         for own_cmd_qualified in own_commands_list:
             own_cmd_simple = own_cmd_qualified.split('/')[-1]
             simple_to_qualified[own_cmd_simple] = own_cmd_qualified
 
-        # 2. Add commands from base contexts (in order of definition in the "base" list)
         base_contexts_list = context_def.get("base") or []
-        for base_context_name in base_contexts_list: # Process in defined order for precedence
-            # Pass a copy of 'visiting' for the recursive call
+        for base_context_name in base_contexts_list:
             inherited_commands_qualified_list = self.commands(base_context_name, visiting.copy()) 
 
             for inherited_cmd_qualified in inherited_commands_qualified_list:
                 inherited_cmd_simple = inherited_cmd_qualified.split('/')[-1]
-                # Only add if we haven't seen this simple name yet (derived context overrides base)
                 if inherited_cmd_simple not in simple_to_qualified:
                     simple_to_qualified[inherited_cmd_simple] = inherited_cmd_qualified
 
         final_effective_commands_list = sorted(simple_to_qualified.values())
         self._resolved_commands[context_name] = final_effective_commands_list
 
-        visiting.remove(context_name) # Remove after processing and caching for this context_name
+        visiting.remove(context_name)
 
         return final_effective_commands_list
 

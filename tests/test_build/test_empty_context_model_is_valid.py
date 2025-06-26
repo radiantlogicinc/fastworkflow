@@ -26,6 +26,7 @@ def test_empty_context_model_is_valid(tmp_path):
     assert model._command_contexts["*"]["/"] == expected_global_commands
     
     expected_intent_commands = [
+        "IntentDetection/go_up",
         "IntentDetection/reset_context",
         "IntentDetection/what_can_i_do",
         "IntentDetection/what_is_current_context"

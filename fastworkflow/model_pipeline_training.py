@@ -19,6 +19,8 @@ from typing import List, Dict, Tuple,Union
 import pickle
 from pathlib import Path
 
+from fastworkflow.command_routing import RoutingDefinition
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 dataset=None
@@ -574,24 +576,16 @@ def calculate_ndcg_at_k(logits, true_labels, k=3):
     ndcg = dcg / idcg
     return ndcg.mean().item()
 
-def train(session: fastworkflow.Session):
-    """Train intent-classification models **per command context**.
+def _get_utterances(session: fastworkflow.Session,
+                    workflow_folderpath: str, 
+                    cmd_dir: object, cmd: str) -> list[str]:
+    """Safely retrieve utterances for *cmd* when required.
 
-    A separate Tiny-/Distil-BERT pair (and label-encoder / thresholds) is
-    produced inside ``___command_info/<context_name>/`` for every context in
-    the application workflow.  The dataset for a context is built from:
-
-        effective_commands(context) ∪ core_commands  – {"wildcard"}
+    If the command does not have `Signature.Input`, we return an empty list
+    (no utterances needed) **without** calling `get_utterance_metadata`.
     """
-
-    import time
-
-    workflow_folderpath = session.workflow_folderpath
-    crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath, load_cached=False)
-    cmd_dir = crd.command_directory
-
-    # Helper to pull utterances for a command
-    def _requires_utterances(cmd_name: str) -> bool:
+    
+    def _requires_utterances(cmd_dir: object, cmd_name: str) -> bool:
         """Return True if *cmd_name* defines `Signature.Input` and therefore
         needs utterance-based intent classification.
 
@@ -605,24 +599,78 @@ def train(session: fastworkflow.Session):
         metadata = cmd_dir.get_command_metadata(cmd_name)
         return bool(metadata.input_for_param_extraction_class)
 
-    def _get_utterances(cmd: str) -> list[str]:
-        """Safely retrieve utterances for *cmd* when required.
+    if not _requires_utterances(cmd_dir, cmd):
+        return []
 
-        If the command does not have `Signature.Input`, we return an empty list
-        (no utterances needed) **without** calling `get_utterance_metadata`.
-        """
-        if not _requires_utterances(cmd):
-            return []
+    um = cmd_dir.get_utterance_metadata(cmd)
+    if not um:
+        raise KeyError(
+            f"Could not find utterance metadata for command '{cmd}'. "
+            "It might be missing from the _commands directory."
+        )
 
-        um = cmd_dir.get_utterance_metadata(cmd)
-        if not um:
-            raise KeyError(
-                f"Could not find utterance metadata for command '{cmd}'. "
-                "It might be missing from the _commands directory."
-            )
+    func = um.get_generated_utterances_func(workflow_folderpath)
+    return func(session, cmd) if func else []
 
-        func = um.get_generated_utterances_func(workflow_folderpath)
-        return func(session, cmd) if func else []
+def get_wildcard_utterances(
+    context_name: str, 
+    crd: RoutingDefinition, 
+    session: fastworkflow.Session,
+    cache: dict
+) -> list[str]:
+    """
+    Collects utterances for the 'wildcard' context.
+    
+    This includes the base 'wildcard' command's utterances, plus all utterances
+    from every command (except 'wildcard') belonging to any of the current 
+    context's ancestors.
+    """
+    workflow_folderpath = session.workflow_folderpath
+    cmd_dir = crd.command_directory
+
+    # 1. Start with the base utterances from the global 'wildcard' command.
+    if 'wildcard_utterances' in cache:
+        wildcard_utterances = cache['wildcard_utterances']
+    else:
+        wildcard_utterances = set(_get_utterances(session, workflow_folderpath, cmd_dir, 'wildcard'))
+        cache['wildcard_utterances'] = wildcard_utterances
+
+    utterances_for_this_context = set()
+    commands_for_this_context = crd.context_model.commands(context_name)
+    for cmd in commands_for_this_context:
+        if cmd.split('/')[-1] == 'wildcard':
+            continue   
+        utterances = _get_utterances(session, workflow_folderpath, cmd_dir, cmd)
+        utterances_for_this_context.update(utterances)
+
+    ancestor_utterances = set()
+    ancestor_contexts = crd.context_model.get_ancestor_contexts(context_name)
+    for ancestor_ctx in ancestor_contexts:
+        if ancestor_ctx in cache:
+            ancestor_utterances.update(cache[ancestor_ctx])
+            continue
+ 
+        ancestor_commands = crd.context_model.commands(ancestor_ctx)
+        for cmd in ancestor_commands:
+            if cmd.split('/')[-1] == 'wildcard':
+                continue
+            
+            utterances = _get_utterances(session, workflow_folderpath, cmd_dir, cmd)    
+            ancestor_utterances.update(utterances)
+
+    cache[context_name] = (ancestor_utterances - utterances_for_this_context) | wildcard_utterances
+    return cache[context_name]
+
+def train(session: fastworkflow.Session):
+    """Train intent-classification models **per command context**."""
+
+    import time
+
+    workflow_folderpath = session.workflow_folderpath
+    crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath, load_cached=False)
+    cmd_dir = crd.command_directory
+
+    wildcard_utterance_cache = {}
 
     core_cmds = set(cmd_dir.core_command_names)
 
@@ -638,7 +686,7 @@ def train(session: fastworkflow.Session):
     # Only iterate through contexts defined in this specific workflow
     for ctx_name in context_set_for_training:
         ctx_cmd_list = crd.contexts[ctx_name]
-        print(f"\n\n=== Training model for context: {ctx_name} ===\n")
+        print(f"\n\n=== Training model for workflow_folderpath: {workflow_folderpath.split('/')[-1]} and context: {ctx_name} ===\n")
         
         # Build the label set for this context
         train_cmds: set[str] = set(ctx_cmd_list) | core_cmds
@@ -648,7 +696,13 @@ def train(session: fastworkflow.Session):
 
         utterance_command_tuples: list[tuple[str, str]] = []
         for cmd_name in sorted(train_cmds):
-            utterance_list = _get_utterances(cmd_name)
+            if cmd_name == 'wildcard':
+                utterance_list = get_wildcard_utterances(
+                    ctx_name, crd, session, wildcard_utterance_cache
+                )
+            else:
+                utterance_list = _get_utterances(session, workflow_folderpath, cmd_dir, cmd_name)
+            
             utterance_command_tuples.extend(zip(utterance_list, [cmd_name] * len(utterance_list)))
 
         if not utterance_command_tuples:
