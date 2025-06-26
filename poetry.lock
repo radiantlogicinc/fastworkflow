@@ -340,17 +340,6 @@ urllib3 = {version = ">=1.25.4,<2.2.0 || >2.2.0,<3", markers = "python_version >
 crt = ["awscrt (==0.23.8)"]
 
 [[package]]
-name = "cachetools"
-version = "5.5.2"
-description = "Extensible memoizing collections and decorators"
-optional = false
-python-versions = ">=3.7"
-files = [
-    {file = "cachetools-5.5.2-py3-none-any.whl", hash = "sha256:d26a22bcc62eb95c3beabd9f1ee5e820d3d2704fe2967cbe350e20c8ffcd3f0a"},
-    {file = "cachetools-5.5.2.tar.gz", hash = "sha256:1a661caa9175d26759571b2e19580f9d6393969e5dfca11fdb1f947a23e640d4"},
-]
-
-[[package]]
 name = "certifi"
 version = "2024.8.30"
 description = "Python package for providing Mozilla's CA Bundle."
@@ -488,17 +477,6 @@ files = [
 
 [package.dependencies]
 colorama = {version = "*", markers = "platform_system == \"Windows\""}
-
-[[package]]
-name = "cloudpickle"
-version = "3.1.1"
-description = "Pickler class to extend the standard pickle.Pickler functionality"
-optional = false
-python-versions = ">=3.8"
-files = [
-    {file = "cloudpickle-3.1.1-py3-none-any.whl", hash = "sha256:c8c5a44295039331ee9dad40ba100a9c7297b6f988e50e87ccdf3765a668350e"},
-    {file = "cloudpickle-3.1.1.tar.gz", hash = "sha256:b216fa8ae4019d5482a8ac3c95d8f6346115d8835911fd4aefd1a445e4242c64"},
-]
 
 [[package]]
 name = "colorama"
@@ -688,45 +666,54 @@ files = [
 
 [[package]]
 name = "dspy"
-version = "2.6.24"
+version = "2.5.36"
 description = "DSPy"
 optional = false
-python-versions = "<3.13,>=3.9"
+python-versions = ">=3.9"
 files = [
-    {file = "dspy-2.6.24-py3-none-any.whl", hash = "sha256:54e82648e95a37bce1951ae9cf23b9504512b03287e7dd20322723a402a8337d"},
-    {file = "dspy-2.6.24.tar.gz", hash = "sha256:8f8d38c5369a687d22628f700e8a290ff62fad65ec00d2010ad5a1ef0a60e549"},
+    {file = "dspy-2.5.36-py3-none-any.whl", hash = "sha256:531549b1da4cec00ec63bfea2083283bdff1e23cba53d96c07be3dcd22bbefb2"},
+    {file = "dspy-2.5.36.tar.gz", hash = "sha256:5bcd06e592e98d2f6aef50d23c1cbd3ab0f2af4d87ca131be0a5f084b43aa439"},
 ]
 
 [package.dependencies]
 anyio = "*"
 asyncer = "0.0.8"
-backoff = ">=2.2"
-cachetools = ">=5.5.0"
-cloudpickle = ">=3.0.0"
-datasets = ">=2.14.6"
-diskcache = ">=5.6.0"
+backoff = "*"
+datasets = "*"
+diskcache = "*"
+httpx = "*"
 joblib = ">=1.3,<2.0"
-json-repair = ">=0.30.0"
-litellm = ">=1.60.3"
-magicattr = ">=0.1.6"
-numpy = {version = ">=1.26.0", markers = "python_version >= \"3.10\""}
-openai = ">=0.28.1"
-optuna = ">=3.4.0"
-pandas = ">=2.1.1"
-pydantic = ">=2.0"
-regex = ">=2023.10.3"
-requests = ">=2.31.0"
-rich = ">=13.7.1"
+json-repair = "*"
+litellm = "1.51.0"
+magicattr = ">=0.1.6,<0.2.0"
+openai = "*"
+optuna = "*"
+pandas = "*"
+pydantic = ">=2.0,<3.0"
+regex = "*"
+requests = "*"
 tenacity = ">=8.2.3"
-tqdm = ">=4.66.1"
-ujson = ">=5.8.0"
+tqdm = "*"
+ujson = "*"
 
 [package.extras]
-anthropic = ["anthropic (>=0.18.0,<1.0.0)"]
-aws = ["boto3 (>=1.34.78,<1.35.0)"]
-dev = ["build (>=1.0.3)", "datamodel_code_generator (>=0.26.3)", "litellm (>=1.60.3)", "litellm[proxy] (>=1.60.3)", "mcp (>=1.5.0)", "pillow (>=10.1.0)", "pre-commit (>=3.7.0)", "pytest (>=6.2.5)", "pytest-asyncio (>=0.26.0)", "pytest-mock (>=3.12.0)", "ruff (>=0.3.0)"]
-mcp = ["mcp"]
-weaviate = ["weaviate-client (>=4.5.4,<4.6.0)"]
+chromadb = ["chromadb (>=0.4.14,<0.5.0)"]
+faiss-cpu = ["faiss-cpu", "sentence-transformers"]
+falkordb = ["async-timeout", "falkordb", "redis"]
+fastembed = ["fastembed"]
+google-vertex-ai = ["google-cloud-aiplatform (==1.43.0)"]
+groq = ["groq (>=0.8.0,<0.9.0)"]
+lancedb = ["lancedb (>=0.11.0,<0.12.0)"]
+langfuse = ["langfuse (>=2.36.1,<2.37.0)"]
+marqo = ["marqo (>=3.1.0,<3.2.0)"]
+milvus = ["pymilvus (>=2.3.7,<2.4.0)"]
+mongodb = ["pymongo (>=3.12.0,<3.13.0)"]
+myscale = ["clickhouse-connect"]
+pgvector = ["pgvector (>=0.2.5,<0.3.0)", "psycopg2 (>=2.9.9,<2.10.0)"]
+pinecone = ["pinecone-client (>=2.2.4,<2.3.0)"]
+qdrant = ["fastembed", "qdrant-client"]
+snowflake = ["snowflake-snowpark-python"]
+weaviate = ["weaviate-client (>=4.6.5,<4.7.0)"]
 
 [[package]]
 name = "dspy-ai"
@@ -1429,31 +1416,31 @@ rapidfuzz = ">=3.9.0,<4.0.0"
 
 [[package]]
 name = "litellm"
-version = "1.67.5"
+version = "1.51.0"
 description = "Library to easily interface with LLM API providers"
 optional = false
 python-versions = "!=2.7.*,!=3.0.*,!=3.1.*,!=3.2.*,!=3.3.*,!=3.4.*,!=3.5.*,!=3.6.*,!=3.7.*,>=3.8"
 files = [
-    {file = "litellm-1.67.5-py3-none-any.whl", hash = "sha256:bd3329731a36200539293521d312adf4f05fc4a6312a84baff2ce5a8b1507a43"},
-    {file = "litellm-1.67.5.tar.gz", hash = "sha256:a9c73feed05aba33b3f2879658f57bb3480b43404ae693ebc827f1c157affde5"},
+    {file = "litellm-1.51.0-py3-none-any.whl", hash = "sha256:0b2c20d116834166c8440e5698d7d927dbcc78fcaa08ce0c5cbea2d0de55ec6c"},
+    {file = "litellm-1.51.0.tar.gz", hash = "sha256:8bf648677ee145a8fe5054a2e3f3a34895b9ab65a6015e4b94efca7ef406f466"},
 ]
 
 [package.dependencies]
 aiohttp = "*"
 click = "*"
-httpx = ">=0.23.0"
 importlib-metadata = ">=6.8.0"
 jinja2 = ">=3.1.2,<4.0.0"
 jsonschema = ">=4.22.0,<5.0.0"
-openai = ">=1.68.2"
+openai = ">=1.52.0"
 pydantic = ">=2.0.0,<3.0.0"
 python-dotenv = ">=0.2.0"
+requests = ">=2.31.0,<3.0.0"
 tiktoken = ">=0.7.0"
 tokenizers = "*"
 
 [package.extras]
-extra-proxy = ["azure-identity (>=1.15.0,<2.0.0)", "azure-keyvault-secrets (>=4.8.0,<5.0.0)", "google-cloud-kms (>=2.21.3,<3.0.0)", "prisma (==0.11.0)", "redisvl (>=0.4.1,<0.5.0)", "resend (>=0.8.0,<0.9.0)"]
-proxy = ["PyJWT (>=2.8.0,<3.0.0)", "apscheduler (>=3.10.4,<4.0.0)", "backoff", "boto3 (==1.34.34)", "cryptography (>=43.0.1,<44.0.0)", "fastapi (>=0.115.5,<0.116.0)", "fastapi-sso (>=0.16.0,<0.17.0)", "gunicorn (>=23.0.0,<24.0.0)", "litellm-proxy-extras (==0.1.13)", "mcp (==1.5.0)", "orjson (>=3.9.7,<4.0.0)", "pynacl (>=1.5.0,<2.0.0)", "python-multipart (>=0.0.18,<0.0.19)", "pyyaml (>=6.0.1,<7.0.0)", "rq", "uvicorn (>=0.29.0,<0.30.0)", "uvloop (>=0.21.0,<0.22.0)", "websockets (>=13.1.0,<14.0.0)"]
+extra-proxy = ["azure-identity (>=1.15.0,<2.0.0)", "azure-keyvault-secrets (>=4.8.0,<5.0.0)", "google-cloud-kms (>=2.21.3,<3.0.0)", "prisma (==0.11.0)", "resend (>=0.8.0,<0.9.0)"]
+proxy = ["PyJWT (>=2.8.0,<3.0.0)", "apscheduler (>=3.10.4,<4.0.0)", "backoff", "cryptography (>=42.0.5,<43.0.0)", "fastapi (>=0.111.0,<0.112.0)", "fastapi-sso (>=0.10.0,<0.11.0)", "gunicorn (>=22.0.0,<23.0.0)", "orjson (>=3.9.7,<4.0.0)", "pynacl (>=1.5.0,<2.0.0)", "python-multipart (>=0.0.9,<0.0.10)", "pyyaml (>=6.0.1,<7.0.0)", "rq", "uvicorn (>=0.22.0,<0.23.0)"]
 
 [[package]]
 name = "magicattr"
@@ -4413,4 +4400,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.11,<3.13"
-content-hash = "3c4c2aec0b00666716bfe9f010f8c17f1d7f96044f3dbf4e1619b66274d7e6dd"
+content-hash = "72c9f76d1ecdd4e289793e25df25dbc6f437184b5eb24f6c6fef3ae00ded8fc5"

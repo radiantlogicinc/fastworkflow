@@ -19,6 +19,10 @@ exclude = [
     "**/___command_info",
     "**/___workflow_contexts"
 ]
+include = ["examples/"]
+
+[tool.poetry.scripts]
+fastworkflow = "fastworkflow.cli:main"
 
 [tool.poetry.dependencies]
 python = ">=3.11,<3.13"
@@ -32,6 +36,7 @@ mmh3 = "^5.1.0"
 python-levenshtein = "^0.27.1"
 colorama = "^0.4.6"
 torch = "^2.7.0"
+dspy = "2.5.36"
 
 [tool.poetry.group.dev.dependencies]
 isort = "^5.13.2"
