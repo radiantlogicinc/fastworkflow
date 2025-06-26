@@ -17,6 +17,7 @@ import fastworkflow.command_routing
 from fastworkflow.model_pipeline_training import (
     predict_single_sentence,
     get_artifact_path,
+    CommandRouter
 )
 
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
@@ -57,6 +58,24 @@ class CommandNamePrediction:
         self.cache_path = self._get_cache_path(self.sub_session_id, self.convo_path)
         self.path = self._get_cache_path_cache(self.convo_path)
 
+        # cme_workflow_folderpath = self.session.workflow_folderpath
+        # tiny_path = get_artifact_path(cme_workflow_folderpath, "ErrorCorrection", "tinymodel.pth")
+        # large_path = get_artifact_path(cme_workflow_folderpath, "ErrorCorrection", "largemodel.pth")
+        # threshold_path = get_artifact_path(cme_workflow_folderpath, "ErrorCorrection", "threshold.json")
+        # ambiguous_threshold_path = get_artifact_path(cme_workflow_folderpath, "ErrorCorrection", "ambiguous_threshold.json")
+        # with open(threshold_path, 'r') as f:
+        #     data = json.load(f)
+        #     confidence_threshold = data['confidence_threshold']
+        # with open(ambiguous_threshold_path, 'r') as f:
+        #     data = json.load(f)
+        #     self.ambiguos_confidence_threshold = data['confidence_threshold']
+
+        # self.err_corr_modelpipeline = fastworkflow.ModelPipelineRegistry(
+        #     tiny_model_path=tiny_path,
+        #     distil_model_path=large_path,
+        #     confidence_threshold=confidence_threshold
+        # )
+
     def predict(self, command_context_name: str, command: str, nlu_pipeline_stage: NLUPipelineStage) -> "CommandNamePrediction.Output":
         # sourcery skip: extract-duplicate-method
 
@@ -65,21 +84,27 @@ class CommandNamePrediction:
         # ctx_name = self.sub_sess.current_command_context_name or "*"
 
         tiny_path = get_artifact_path(self.sub_sess_workflow_folderpath, command_context_name, "tinymodel.pth")
-        large_path = get_artifact_path(self.sub_sess_workflow_folderpath, command_context_name, "largemodel.pth")
-        threshold_path = get_artifact_path(self.sub_sess_workflow_folderpath, command_context_name, "threshold.json")
-        ambiguous_threshold_path = get_artifact_path(self.sub_sess_workflow_folderpath, command_context_name, "ambiguous_threshold.json")
-        with open(threshold_path, 'r') as f:
-            data = json.load(f)
-            confidence_threshold = data['confidence_threshold']
-        with open(ambiguous_threshold_path, 'r') as f:
-            data = json.load(f)
-            self.ambiguos_confidence_threshold = data['confidence_threshold']
+        # large_path = get_artifact_path(self.sub_sess_workflow_folderpath, command_context_name, "largemodel.pth")
+        # threshold_path = get_artifact_path(self.sub_sess_workflow_folderpath, command_context_name, "threshold.json")
+        # ambiguous_threshold_path = get_artifact_path(self.sub_sess_workflow_folderpath, command_context_name, "ambiguous_threshold.json")
+        # with open(threshold_path, 'r') as f:
+        #     data = json.load(f)
+        #     confidence_threshold = data['confidence_threshold']
+        # with open(ambiguous_threshold_path, 'r') as f:
+        #     data = json.load(f)
+        #     self.ambiguos_confidence_threshold = data['confidence_threshold']
 
+        # self.modelpipeline = fastworkflow.ModelPipelineRegistry(
+        #     tiny_model_path=tiny_path,
+        #     distil_model_path=large_path,
+        #     confidence_threshold=confidence_threshold
+        model_artifact_path = f"{self.sub_sess_workflow_folderpath}/___command_info/{command_context_name}"
+        command_router= CommandRouter(model_artifact_path)
         self.modelpipeline = fastworkflow.ModelPipelineRegistry(
-            tiny_model_path=tiny_path,
-            distil_model_path=large_path,
-            confidence_threshold=confidence_threshold
-        )
+            tiny_model_path=command_router.tiny_path,
+            distil_model_path=command_router.large_path,
+            confidence_threshold=command_router.confidence_threshold)
+        
 
         crd = fastworkflow.RoutingRegistry.get_definition(
             self.session.workflow_folderpath)
@@ -141,18 +166,18 @@ class CommandNamePrediction:
                 if cache_result := cache_match(self.path, command, modelpipeline, 0.85):
                     command_name = cache_result
                 else:
-                    # If no cache match, use the model to predict
-                    results = predict_single_sentence(modelpipeline, command, label_encoder_path)
+                    predictions=command_router.predict(command)
+                    
+                    if len(predictions)==1:
+                        command_name = predictions[0].split('/')[-1]
+
                     # If confidence is low, treat as ambiguous command (type 1)
-                    if results['confidence'] < self.ambiguos_confidence_threshold:
-                        error_msg = self._formulate_ambiguous_command_error_message(results["topk_labels"])
-                        # count = self._store_utterance(self.cache_path, command, command_name)
+                    else:
+                        error_msg = self._formulate_ambiguous_command_error_message(predictions)
                         # Store suggested commands
-                        self._store_suggested_commands(self.path, results["topk_labels"], 1)
+                        self._store_suggested_commands(self.path, predictions, 1)
                         return CommandNamePrediction.Output(error_msg=error_msg)
 
-                    if results['label'] is not None:
-                        command_name = results['label'].split('/')[-1]
         elif nlu_pipeline_stage in (
             NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
             NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
@@ -608,6 +633,22 @@ class ResponseGenerator:
         predictor = CommandNamePrediction(session)           
         cnp_output = predictor.predict(cmd_ctxt_obj_name, command, nlu_pipeline_stage)
 
+        if cnp_output.error_msg:
+            workflow_context = session.workflow_context
+            workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION
+            session.workflow_context = workflow_context
+            return CommandOutput(
+                command_responses=[
+                    CommandResponse(
+                        response=(
+                            f"Ambiguous intent error for command '{command}'\n"
+                            f"{cnp_output.error_msg}"
+                        ),
+                        success=False
+                    )
+                ]
+            )
+        
         if cnp_output.is_cme_command:
             workflow_context = session.workflow_context
             if cnp_output.command_name == 'ErrorCorrection/you_misunderstood':
