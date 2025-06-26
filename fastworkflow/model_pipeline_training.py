@@ -258,7 +258,51 @@ def get_route_layer_filepath_model(workflow_folderpath,model_name) -> str:
         cmddir.get_commandinfo_folderpath(workflow_folderpath),
         model_name
     )
+class CommandRouter:
+    def __init__(self, model_artifacts_folderpath: str):
+        if '*' in model_artifacts_folderpath:
+            model_artifacts_folderpath = model_artifacts_folderpath.replace('*', GLOBAL_CONTEXT_FOLDER)
+            
+        self.tiny_path = f"{model_artifacts_folderpath}/tinymodel.pth"
+        self.large_path = f"{model_artifacts_folderpath}/largemodel.pth"
+        threshold_path = f"{model_artifacts_folderpath}/threshold.json"
+        tiny_ambiguous_threshold_path = f"{model_artifacts_folderpath}/tiny_ambiguous_threshold.json"
+        large_ambiguous_threshold_path = f"{model_artifacts_folderpath}/large_ambiguous_threshold.json"
+        self.label_encoder_path = f"{model_artifacts_folderpath}/label_encoder.pkl"
+        with open(threshold_path, 'r') as f:
+            data = json.load(f)
+            self.confidence_threshold = data['confidence_threshold']
+            
+        with open(tiny_ambiguous_threshold_path, 'r') as f:
+            data = json.load(f)
+            self.tiny_ambiguous_confidence_threshold = data['confidence_threshold']
+        with open(large_ambiguous_threshold_path, 'r') as f:
+            data = json.load(f)
+            self.large_ambiguous_confidence_threshold = data['confidence_threshold']
 
+        self.modelpipeline = ModelPipeline(
+            tiny_model_path=self.tiny_path,
+            distil_model_path=self.large_path,
+            confidence_threshold=self.confidence_threshold
+        )
+
+    def predict(self, command: str) -> list[str]:
+        """
+        if we are confident we will return a single label otherwise we will return a list
+        """
+        results = predict_single_sentence(self.modelpipeline, command, self.label_encoder_path)
+        if results['used_distil']:
+            if results['confidence'] > self.large_ambiguous_confidence_threshold:
+                return [results['label']]
+            else:
+                return results['topk_labels']
+        else:
+            if results['confidence'] > self.tiny_ambiguous_confidence_threshold:
+                return [results['label']]
+            else:
+                return results['topk_labels']
+            
+        
 class ModelPipeline:
     def __init__(
         self,
@@ -634,32 +678,33 @@ def get_wildcard_utterances(
     else:
         wildcard_utterances = set(_get_utterances(session, workflow_folderpath, cmd_dir, 'wildcard'))
         cache['wildcard_utterances'] = wildcard_utterances
+    return cache['wildcard_utterances']
 
-    utterances_for_this_context = set()
-    commands_for_this_context = crd.context_model.commands(context_name)
-    for cmd in commands_for_this_context:
-        if cmd.split('/')[-1] == 'wildcard':
-            continue   
-        utterances = _get_utterances(session, workflow_folderpath, cmd_dir, cmd)
-        utterances_for_this_context.update(utterances)
+    # utterances_for_this_context = set()
+    # commands_for_this_context = crd.context_model.commands(context_name)
+    # for cmd in commands_for_this_context:
+    #     if cmd.split('/')[-1] == 'wildcard':
+    #         continue   
+    #     utterances = _get_utterances(session, workflow_folderpath, cmd_dir, cmd)
+    #     utterances_for_this_context.update(utterances)
 
-    ancestor_utterances = set()
-    ancestor_contexts = crd.context_model.get_ancestor_contexts(context_name)
-    for ancestor_ctx in ancestor_contexts:
-        if ancestor_ctx in cache:
-            ancestor_utterances.update(cache[ancestor_ctx])
-            continue
+    # ancestor_utterances = set()
+    # ancestor_contexts = crd.context_model.get_ancestor_contexts(context_name)
+    # for ancestor_ctx in ancestor_contexts:
+    #     if ancestor_ctx in cache:
+    #         ancestor_utterances.update(cache[ancestor_ctx])
+    #         continue
  
-        ancestor_commands = crd.context_model.commands(ancestor_ctx)
-        for cmd in ancestor_commands:
-            if cmd.split('/')[-1] == 'wildcard':
-                continue
+    #     ancestor_commands = crd.context_model.commands(ancestor_ctx)
+    #     for cmd in ancestor_commands:
+    #         if cmd.split('/')[-1] == 'wildcard':
+    #             continue
             
-            utterances = _get_utterances(session, workflow_folderpath, cmd_dir, cmd)    
-            ancestor_utterances.update(utterances)
+    #         utterances = _get_utterances(session, workflow_folderpath, cmd_dir, cmd)    
+    #         ancestor_utterances.update(utterances)
 
-    cache[context_name] = (ancestor_utterances - utterances_for_this_context) | wildcard_utterances
-    return cache[context_name]
+    # cache[context_name] = (ancestor_utterances - utterances_for_this_context) | wildcard_utterances
+    # return cache[context_name]
 
 def train(session: fastworkflow.Session):
     """Train intent-classification models **per command context**."""
@@ -927,6 +972,46 @@ def train(session: fastworkflow.Session):
         else:
             print("Median Confidence: N/A")
 
+        print("\nAnalyzing DistilBERT confidence patterns...")
+        large_stats, large_confidences, large_predictions, large_labels, large_failed = analyze_model_confidence(large_model, tiny_test_loader, device, "DistilBERT")
+
+        print("\nTinyBERT Confidence Statistics:")
+        print("\nFalse Classifications:")
+        if large_stats['failed']['min'] is not None:
+            print(f"Minimum Confidence: {large_stats['failed']['min']:.4f}")
+        else:
+            print("Minimum Confidence: N/A")
+        if large_stats['failed']['max'] is not None:
+            print(f"Maximum Confidence: {large_stats['failed']['max']:.4f}")
+        else:
+            print("Maximum Confidence: N/A")
+        if large_stats['failed']['mean'] is not None:
+            print(f"Mean Confidence: {large_stats['failed']['mean']:.4f}")
+        else:
+            print("Mean Confidence: N/A")
+        if large_stats['failed']['median'] is not None:
+            print(f"Median Confidence: {large_stats['failed']['median']:.4f}")
+        else:
+            print("Median Confidence: N/A")
+
+        print("\nTrue Classifications:")
+        if large_stats['successful']['min'] is not None:
+            print(f"Minimum Confidence: {large_stats['successful']['min']:.4f}")
+        else:
+            print("Minimum Confidence: N/A")
+        if large_stats['successful']['max'] is not None:
+            print(f"Maximum Confidence: {large_stats['successful']['max']:.4f}")
+        else:
+            print("Maximum Confidence: N/A")
+        if large_stats['successful']['mean'] is not None:
+            print(f"Mean Confidence: {large_stats['successful']['mean']:.4f}")
+        else:
+            print("Mean Confidence: N/A")
+        if large_stats['successful']['median'] is not None:
+            print(f"Median Confidence: {large_stats['successful']['median']:.4f}")
+        else:
+            print("Median Confidence: N/A")
+
         print("\nFinding optimal threshold...")
         best_result, all_results = find_optimal_threshold(tiny_stats, tiny_test_loader, pipeline)
         print("\nOptimal Threshold Results:")
@@ -953,31 +1038,27 @@ def train(session: fastworkflow.Session):
         print(f"DistilBERT Usage: {stats['distil_percentage']:.2f}%")
         print(f"TinyBERT Usage: {stats['tiny_percentage']:.2f}%")
 
-        model = AutoModelForSequenceClassification.from_pretrained(tiny_path).to(device)
 
-        optimal_threshold, best_metrics = find_optimal_confidence_threshold(
-            model, 
-            tiny_test_loader, 
-            device,
-            min_threshold=pipeline.confidence_threshold,
-            max_top3_usage=0.3,
-            k_val=k_val
-        )
-        ambiguous_threshold = optimal_threshold or 0.0
-
+        
+        if large_stats['failed']['mean'] is not None:
+            large_ambiguous_threshold = large_stats['failed']['mean']
+        else:
+            large_ambiguous_threshold = 0.0
         # Save paths updated to use context-specific folders
-        ambiguous_threshold_path = get_artifact_path(workflow_folderpath, ctx_name, "ambiguous_threshold.json")
-        with open(ambiguous_threshold_path, 'w') as f:
-            json.dump({'confidence_threshold': ambiguous_threshold}, f)
+        large_ambiguous_threshold_path = get_artifact_path(workflow_folderpath, ctx_name, "large_ambiguous_threshold.json")
+        with open(large_ambiguous_threshold_path, 'w') as f:
+            json.dump({'confidence_threshold': large_ambiguous_threshold}, f)
+        
+        if tiny_stats['failed']['mean'] is not None:
+            tiny_ambiguous_threshold = tiny_stats['failed']['mean']
+        else:
+            tiny_ambiguous_threshold = 0.0
+        # Save paths updated to use context-specific folders
+        tiny_ambiguous_threshold_path = get_artifact_path(workflow_folderpath, ctx_name, "tiny_ambiguous_threshold.json")
+        with open(tiny_ambiguous_threshold_path, 'w') as f:
+            json.dump({'confidence_threshold': tiny_ambiguous_threshold}, f)
 
-        if ambiguous_threshold > 0.0:
-            print("\nOptimal Threshold Results:")
-            print(f"Threshold: {best_metrics['threshold']:.3f}")
-            print(f"F1 Score: {best_metrics['f1_score']:.3f}")
-            print(f"Top-3 Usage: {best_metrics['top3_usage']:.3f}")
-            print(f"Top-1 Accuracy: {best_metrics['top1_accuracy']:.3f}")
-            print(f"Top-3 Accuracy: {best_metrics['top3_accuracy']:.3f}")
-
+    
         text = "list commands"
         try:
             result = predict_single_sentence(pipeline, text, label_path)
