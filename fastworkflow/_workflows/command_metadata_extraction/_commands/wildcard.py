@@ -57,24 +57,6 @@ class CommandNamePrediction:
         self.cache_path = self._get_cache_path(self.sub_session_id, self.convo_path)
         self.path = self._get_cache_path_cache(self.convo_path)
 
-        cme_workflow_folderpath = self.session.workflow_folderpath
-        tiny_path = get_artifact_path(cme_workflow_folderpath, "ErrorCorrection", "tinymodel.pth")
-        large_path = get_artifact_path(cme_workflow_folderpath, "ErrorCorrection", "largemodel.pth")
-        threshold_path = get_artifact_path(cme_workflow_folderpath, "ErrorCorrection", "threshold.json")
-        ambiguous_threshold_path = get_artifact_path(cme_workflow_folderpath, "ErrorCorrection", "ambiguous_threshold.json")
-        with open(threshold_path, 'r') as f:
-            data = json.load(f)
-            confidence_threshold = data['confidence_threshold']
-        with open(ambiguous_threshold_path, 'r') as f:
-            data = json.load(f)
-            self.ambiguos_confidence_threshold = data['confidence_threshold']
-
-        self.err_corr_modelpipeline = fastworkflow.ModelPipelineRegistry(
-            tiny_model_path=tiny_path,
-            distil_model_path=large_path,
-            confidence_threshold=confidence_threshold
-        )
-
     def predict(self, command_context_name: str, command: str, nlu_pipeline_stage: NLUPipelineStage) -> "CommandNamePrediction.Output":
         # sourcery skip: extract-duplicate-method
 
