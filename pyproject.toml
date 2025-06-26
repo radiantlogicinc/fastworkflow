@@ -35,8 +35,8 @@ transformers = "^4.48.2"
 mmh3 = "^5.1.0"
 python-levenshtein = "^0.27.1"
 colorama = "^0.4.6"
-torch = "^2.7.0"
 dspy = "2.6.27"
+torch = {version = "^2.7.1", extras = ["cpu"], python = ">=3.11,<3.13", platform = "linux"}
 
 [tool.poetry.group.dev.dependencies]
 isort = "^5.13.2"
