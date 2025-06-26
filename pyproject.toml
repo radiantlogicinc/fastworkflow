@@ -27,7 +27,7 @@ fastworkflow = "fastworkflow.cli:main"
 [tool.poetry.dependencies]
 python = ">=3.11,<3.13"
 pydantic = "^2.9.2"
-dspy-ai = "2.5.36"
+dspy-ai = "2.6.27"
 speedict = "^0.3.12"
 python-dotenv = "^1.0.1"
 scikit-learn = "^1.6.1"
@@ -36,7 +36,7 @@ mmh3 = "^5.1.0"
 python-levenshtein = "^0.27.1"
 colorama = "^0.4.6"
 torch = "^2.7.0"
-dspy = "2.5.36"
+dspy = "2.6.27"
 
 [tool.poetry.group.dev.dependencies]
 isort = "^5.13.2"

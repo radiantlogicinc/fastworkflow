@@ -1,10 +1,44 @@
 from typing import Annotated, Type, Union, get_args, get_origin
 
 import dspy
-from dspy import InputField, OutputField, Signature
+from dspy import Signature
 from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
+
+# We define lightweight `InputField` and `OutputField` helpers locally.  The
+# official DSPy helpers were removed in recent releases; our versions simply
+# wrap `pydantic.Field` while adding metadata DSPy expects (field type, desc,
+# prefix).  Since we do not need to support older DSPy versions, we always use
+# these shims instead of conditionally importing from `dspy`.
+
+from pydantic import Field as _PydanticField
+
+
+def _build_field(field_type: str, desc: str = ""):
+    """Return a pydantic Field carrying DSPy-specific metadata."""
+
+    return _PydanticField(  # type: ignore[arg-type]
+        default=None,
+        json_schema_extra={
+            "__dspy_field_type": field_type,
+            "desc": desc,
+            "prefix": "",
+        },
+        description=desc,
+    )
+
+
+def InputField(*, desc: str = ""):
+    """Replacement for the deprecated `dspy.InputField`."""
+
+    return _build_field("input", desc)
+
+
+def OutputField(*, desc: str = ""):
+    """Replacement for the deprecated `dspy.OutputField`."""
+
+    return _build_field("output", desc)
 
 
 class TypedPredictorSignature:
@@ -53,7 +87,7 @@ class TypedPredictorSignature:
             else:
                 field.validate_default = False
 
-            input_field = dspy.InputField(desc=field.description)
+            input_field = InputField(desc=field.description)
             dspy_fields[field_name] = (field.annotation, input_field)
 
         for (
@@ -84,7 +118,7 @@ class TypedPredictorSignature:
                     "Change the field to be Optional or specify a default value."
                 )
 
-            output_field = dspy.OutputField(
+            output_field = OutputField(
                 desc=field.description or ""
             )
             dspy_fields[field_name] = (field.annotation, output_field)
