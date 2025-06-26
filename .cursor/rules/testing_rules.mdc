@@ -1,0 +1,32 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Testing Patterns for FastWorkflow
+
+- Don't use Mock fixtures. All our tests are integration tests
+- Always activate conda env fastworkflow before running pytests
+- Do not remove pytest tests without explicit user approval
+
+## MCP Integration Testing
+
+### Test Structure
+- **./tests** - Folder with all the tests
+- **[tests/conftest.py](mdc:tests/conftest.py)** - Pytest configuration and shared fixtures
+- **[tests/README.md](mdc:tests/README.md)** - Testing documentation and usage guide
+
+### Testing Best Practices
+
+#### Integration Testing Philosophy
+```python
+# ✅ DO: Use real test workflows
+workflow_path = os.path.join("tests", "example_workflow") 
+workflow_path = os.path.join("tests", "hello_world_workflow") 
+
+# ✅ DO: Test end-to-end functionality
+result = mcp_server.call_tool("get_user_details", {"user_id": "sara_doe_496"})
+
+# ❌ DON'T: Mock FastWorkflow components
+# ❌ DON'T: Use fake data when real data is available
+```
