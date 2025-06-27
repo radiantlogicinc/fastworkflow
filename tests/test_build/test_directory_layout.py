@@ -82,7 +82,7 @@ class TestManager:
         # Verify the ResponseGenerator class exists
         assert "class ResponseGenerator:" in content
         assert "__call__" in content
-        assert "session.root_command_context =" in content
+        assert "workflow.root_command_context =" in content
         
         # Verify it doesn't overwrite existing file
         with open(startup_py, "w") as f:

@@ -7,7 +7,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.workflow_session import WorkflowSession
+from fastworkflow.chat_session import ChatSession
 
 
 @pytest.fixture(scope="module")
@@ -16,14 +16,9 @@ def retail_workflow_path() -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "examples", "retail_workflow"))
 
 
-@pytest.fixture(scope="module")
-def command_executor() -> CommandExecutor:
-    return CommandExecutor()
-
-
 @pytest.fixture(scope="function")
-def workflow_session(retail_workflow_path: str, command_executor: CommandExecutor):
-    """Spin up an in-memory workflow session for each test so state cannot leak."""
+def chat_session(retail_workflow_path: str):
+    """Spin up an in-memory chat session for each test so state cannot leak."""
     env_vars = {
         **dotenv_values("./env/.env"),
         **dotenv_values("./passwords/.env")
@@ -33,17 +28,16 @@ def workflow_session(retail_workflow_path: str, command_executor: CommandExecuto
     fastworkflow.RoutingRegistry.clear_registry()
     fastworkflow.RoutingRegistry.get_definition(retail_workflow_path)
 
-    return WorkflowSession(
-        command_executor,
+    return ChatSession(
         retail_workflow_path,
-        session_id_str=str(uuid.uuid4())
+        workflow_id_str=str(uuid.uuid4())
     )
 
 
 class TestCommandExecutor:
     """Basic sanity checks for the refactored CommandExecutor.perform_action."""
 
-    def test_perform_action_simple_command(self, command_executor: CommandExecutor, workflow_session: WorkflowSession):
+    def test_perform_action_simple_command(self, chat_session: ChatSession):
         """Ensure a parameter-free command can be executed successfully."""
         action = fastworkflow.Action(
             command_name="list_all_product_types",
@@ -51,13 +45,13 @@ class TestCommandExecutor:
             parameters={},
         )
 
-        result = command_executor.perform_action(workflow_session.session, action)
+        result = CommandExecutor.perform_action(chat_session.app_workflow, action)
 
         assert isinstance(result, fastworkflow.CommandOutput)
         assert result.success is True
         assert any("product" in resp.response.lower() for resp in result.command_responses)
 
-    def test_perform_action_with_parameters(self, command_executor: CommandExecutor, workflow_session: WorkflowSession):
+    def test_perform_action_with_parameters(self, chat_session: ChatSession):
         """Execute a command that expects parameters and verify validation passes."""
         action = fastworkflow.Action(
             command_name="find_user_id_by_email",
@@ -65,7 +59,7 @@ class TestCommandExecutor:
             parameters={"email": "john.doe@example.com"},
         )
 
-        result = command_executor.perform_action(workflow_session.session, action)
+        result = CommandExecutor.perform_action(chat_session.app_workflow, action)
 
         assert isinstance(result, fastworkflow.CommandOutput)
         # Response text should contain a user id (pattern xyz_xyz_\d+)

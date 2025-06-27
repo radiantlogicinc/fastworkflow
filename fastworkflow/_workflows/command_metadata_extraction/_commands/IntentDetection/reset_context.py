@@ -12,7 +12,7 @@ class Signature:  # noqa: D101
     ]
 
     @staticmethod
-    def generate_utterances(session: fastworkflow.Session, command_name: str) -> list[str]:
+    def generate_utterances(workflow: fastworkflow.Workflow, command_name: str) -> list[str]:
         return [
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
@@ -20,15 +20,15 @@ class Signature:  # noqa: D101
 class ResponseGenerator:  # noqa: D101
     """Handle command execution and craft the textual response."""
 
-    def __call__(self, session: fastworkflow.Session, command: str) -> CommandOutput:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str) -> CommandOutput:
         # Clear the current context so subsequent commands operate at global level
-        subject_session = session.workflow_context["subject_session"]
-        subject_session.current_command_context = subject_session.root_command_context
+        app_workflow = workflow.context["app_workflow"]
+        app_workflow.current_command_context = app_workflow.root_command_context
         return CommandOutput(
-            session_id=session.id,
+            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(
-                    response=f"Context is now '{subject_session.current_command_context_name}'",
+                    response=f"Context is now '{app_workflow.current_command_context_name}'",
                 )
             ],
         ) 

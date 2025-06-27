@@ -32,19 +32,19 @@ def initialized_fastworkflow():
 
 
 @pytest.fixture
-def workflow_session(sample_workflow_path, initialized_fastworkflow):
-    """Create a FastWorkflow session for the sample workflow."""
+def chat_session(sample_workflow_path, initialized_fastworkflow):
+    """Create a chat session for the sample workflow."""
     # Build command routing definition once so that command metadata is ready
     RoutingDefinition.build(sample_workflow_path)
-    return fastworkflow.WorkflowSession(
-        CommandExecutor(), sample_workflow_path, session_id_str=str(uuid.uuid4())
+    return fastworkflow.ChatSession(
+        sample_workflow_path, workflow_id_str=str(uuid.uuid4())
     )
 
 
 @pytest.fixture
-def mcp_server(workflow_session):
+def mcp_server(chat_session):
     """Create an MCP server instance."""
-    return FastWorkflowMCPServer(workflow_session)
+    return FastWorkflowMCPServer(chat_session)
 
 
 class TestFastWorkflowMCPServer:
@@ -53,8 +53,7 @@ class TestFastWorkflowMCPServer:
     def test_server_initialization(self, mcp_server):
         """Test that MCP server initializes correctly."""
         assert mcp_server is not None
-        assert mcp_server.workflow_session is not None
-        assert mcp_server.command_executor is not None
+        assert mcp_server.chat_session is not None
 
     def test_list_tools_returns_valid_schema(self, mcp_server):
         """Test that list_tools returns valid MCP tool definitions."""
@@ -331,7 +330,7 @@ class TestMCPServerCreation:
         server = create_mcp_server_for_workflow(sample_workflow_path)
         
         assert isinstance(server, FastWorkflowMCPServer)
-        assert server.workflow_session is not None
+        assert server.chat_session is not None
         
         # Test that it can list tools
         tools = server.list_tools()

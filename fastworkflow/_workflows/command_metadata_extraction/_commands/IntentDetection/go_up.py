@@ -19,7 +19,7 @@ class Signature:  # noqa: D101
     ]
 
     @staticmethod
-    def generate_utterances(session: fastworkflow.Session, command_name: str) -> list[str]:
+    def generate_utterances(workflow: fastworkflow.Workflow, command_name: str) -> list[str]:
         return [
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
@@ -27,13 +27,13 @@ class Signature:  # noqa: D101
 
 class ResponseGenerator:  # noqa: D101
     """Handle command execution and craft the textual response."""
-    def __call__(self, session: fastworkflow.Session, command: str) -> CommandOutput:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str) -> CommandOutput:
         # Move the context to its parent.
-        subject_session = session.workflow_context["subject_session"]   #type: fastworkflow.Session
+        app_workflow = workflow.context["app_workflow"]   #type: fastworkflow.Workflow
 
-        if subject_session.is_current_command_context_root:
+        if app_workflow.is_current_command_context_root:
             return CommandOutput(
-                session_id=session.id,
+                workflow_id=workflow.id,
                 command_responses=[
                     CommandResponse(
                         response="Already at the top-level 'global' context.",
@@ -41,14 +41,14 @@ class ResponseGenerator:  # noqa: D101
                 ],
             )
 
-        parent_context = subject_session.get_parent(subject_session.current_command_context)
-        subject_session.current_command_context = parent_context
+        parent_context = app_workflow.get_parent(app_workflow.current_command_context)
+        app_workflow.current_command_context = parent_context
 
         return CommandOutput(
-            session_id=session.id,
+            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(
-                    response=f"Context is now '{subject_session.current_command_context_displayname}'",
+                    response=f"Context is now '{app_workflow.current_command_context_displayname}'",
                 )
             ],
         ) 

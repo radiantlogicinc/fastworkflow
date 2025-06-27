@@ -1,6 +1,6 @@
 # common imports
 from pydantic import BaseModel
-from fastworkflow.session import Session
+from fastworkflow.workflow import Workflow
 
 # For command metadata extraction
 import os
@@ -66,8 +66,8 @@ class Signature:
     template_utterances = []
 
     @staticmethod
-    def generate_utterances(session: fastworkflow.Session, command_name: str) -> list[str]:
-        utterance_definition = fastworkflow.RoutingRegistry.get_definition(session.workflow_folderpath)
+    def generate_utterances(workflow: fastworkflow.Workflow, command_name: str) -> list[str]:
+        utterance_definition = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
         utterances_obj = utterance_definition.get_command_utterances(command_name)
 
         command_name = os.path.splitext(os.path.basename(__file__))[0]
@@ -79,20 +79,20 @@ class Signature:
 class ResponseGenerator:
     def __call__(
         self,
-        session: Session,
+        workflow: Workflow,
         command: str,
         command_parameters: Signature.Input
     ) -> CommandOutput:
-        output = self._process_command(session, command_parameters)
+        output = self._process_command(workflow, command_parameters)
         return CommandOutput(
-            session_id=session.id,
+            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(response=f"current status is: {output.status}")
             ]
         )
 
     def _process_command(self,
-        session: Session, input: Signature.Input
+        workflow: Workflow, input: Signature.Input
     ) -> Signature.Output:
         """
         get the review status of the entitlements in this workitem.

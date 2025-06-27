@@ -17,9 +17,9 @@ import fastworkflow
 from fastworkflow import CommandOutput, CommandResponse
 
 class ResponseGenerator:
-    def __call__(self, session: fastworkflow.Session, command: str) -> CommandOutput:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str) -> CommandOutput:
         return CommandOutput(
-            session_id=session.id,
+            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(response="Startup executed")
             ]
@@ -33,7 +33,7 @@ class ResponseGenerator:
     valid_command_content = """
 import fastworkflow
 from fastworkflow import CommandOutput, CommandResponse
-from fastworkflow.session import Session
+from fastworkflow.workflow import Workflow
 from typing import Any, Dict
 from pydantic import BaseModel, Field
 
@@ -51,20 +51,20 @@ class Signature:
     template_utterances = []
     
     @staticmethod
-    def generate_utterances(session: Session, command_name: str) -> list[str]:
+    def generate_utterances(workflow: Workflow, command_name: str) -> list[str]:
         return ["valid command"]
     
-    def process_extracted_parameters(self, session: fastworkflow.Session, command: str, cmd_parameters: None) -> None:
+    def process_extracted_parameters(self, workflow: fastworkflow.Workflow, command: str, cmd_parameters: None) -> None:
         pass
 
 class ResponseGenerator:
-    def _process_command(self, session: Session) -> Signature.Output:
+    def _process_command(self, workflow: Workflow) -> Signature.Output:
         return Signature.Output(result="Valid command executed")
     
-    def __call__(self, session: Session, command: str) -> CommandOutput:
-        output = self._process_command(session)
+    def __call__(self, workflow: Workflow, command: str) -> CommandOutput:
+        output = self._process_command(workflow)
         return CommandOutput(
-            session_id=session.id,
+            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(response=output.model_dump_json())
             ]

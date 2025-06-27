@@ -23,10 +23,10 @@ def test_command_not_found(monkeypatch, tmp_path):
     # Get the path to the hello_world example directory
     hello_world_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "hello_world")
     
-    # Create a session with the hello_world workflow
-    session = fastworkflow.Session.create(
+    # Create a workflow with the hello_world workflow
+    workflow = fastworkflow.Workflow.create(
         workflow_folderpath=hello_world_path,
-        session_id_str="test-session-3"
+        workflow_id_str="test-workflow-3"
     )
 
     # Create a mock RoutingDefinition
@@ -39,8 +39,6 @@ def test_command_not_found(monkeypatch, tmp_path):
         "get_definition",
         lambda _: mock_routing_def
     )
-
-    executor = CommandExecutor()
     
     # Create an Action with a non-existent command
     action = fastworkflow.Action(
@@ -50,7 +48,7 @@ def test_command_not_found(monkeypatch, tmp_path):
 
     # Expect a ValueError when trying to perform this action
     with pytest.raises(ValueError):
-        executor.perform_action(session, action)
+        CommandExecutor.perform_action(workflow, action)
 
 
 def test_invalid_action_parameters(monkeypatch, tmp_path):
@@ -60,10 +58,10 @@ def test_invalid_action_parameters(monkeypatch, tmp_path):
     # Get the path to the hello_world example directory
     hello_world_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "hello_world")
     
-    # Create a session with the hello_world workflow
-    session = fastworkflow.Session.create(
+    # Create a workflow with the hello_world workflow
+    workflow = fastworkflow.Workflow.create(
         workflow_folderpath=hello_world_path,
-        session_id_str="test-session-4"
+        workflow_id_str="test-workflow-4"
     )
 
     # Create a mock ResponseGenerator class
@@ -82,8 +80,6 @@ def test_invalid_action_parameters(monkeypatch, tmp_path):
         "get_definition",
         lambda _: mock_routing_def
     )
-
-    executor = CommandExecutor()
     
     # Create an Action with wildcard command which has no parameter class
     action = fastworkflow.Action(
@@ -93,5 +89,5 @@ def test_invalid_action_parameters(monkeypatch, tmp_path):
     )
 
     # This should execute without error since we're not validating parameters
-    result = executor.perform_action(session, action)
+    result = CommandExecutor.perform_action(workflow, action)
     assert result is not None 

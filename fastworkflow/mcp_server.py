@@ -21,15 +21,14 @@ class FastWorkflowMCPServer:
     the existing FastWorkflow command execution infrastructure.
     """
     
-    def __init__(self, workflow_session: fastworkflow.WorkflowSession):
+    def __init__(self, chat_session: fastworkflow.ChatSession):
         """
         Initialize the MCP server.
         
         Args:
-            workflow_session: Active FastWorkflow session
+            chat_session: Active FastWorkflow chat session
         """
-        self.workflow_session = workflow_session
-        self.command_executor = CommandExecutor()
+        self.chat_session = chat_session
     
     def list_tools(self) -> List[Dict[str, Any]]:
         """
@@ -41,11 +40,11 @@ class FastWorkflowMCPServer:
         NOT_FOUND = fastworkflow.get_env_var('NOT_FOUND')
 
         # Get available commands from workflow
-        workflow_folderpath = self.workflow_session.session.workflow_folderpath
+        workflow_folderpath = self.chat_session.app_workflow.folderpath
         routing = RoutingDefinition.build(workflow_folderpath)
 
-        # Get active context name from session
-        active_ctx_name = self.workflow_session.session.current_command_context_name
+        # Get active context name from chat session
+        active_ctx_name = self.chat_session.app_workflow.current_command_context_name
         active_ctx = active_ctx_name if active_ctx_name in routing.contexts else '*'
         command_names = routing.get_command_names(active_ctx)
 
@@ -139,8 +138,8 @@ class FastWorkflowMCPServer:
         )
         
         # Execute using MCP-compliant method
-        return self.command_executor.perform_mcp_tool_call(
-            self.workflow_session.session,
+        return CommandExecutor.perform_mcp_tool_call(
+            self.chat_session.app_workflow,
             tool_call,
             command_context=self._resolve_context_for_call()
         )
@@ -193,7 +192,7 @@ class FastWorkflowMCPServer:
 
         Falls back to the first available path if the active context is none.
         """
-        return self.workflow_session.session.current_command_context_name
+        return self.chat_session.app_workflow.current_command_context_name
 
 
 # Example usage
@@ -213,11 +212,9 @@ def create_mcp_server_for_workflow(workflow_path: str) -> FastWorkflowMCPServer:
     # Recreate routing definition to guarantee it reflects the latest object model
     RoutingDefinition.build(workflow_path)
     
-    # Create workflow session
-    workflow_session = fastworkflow.WorkflowSession(
-        CommandExecutor(),
+    # Create workflow chat session
+    chat_session = fastworkflow.ChatSession(
         workflow_path,
-        session_id_str=str(uuid4())
     )
     
-    return FastWorkflowMCPServer(workflow_session) 
+    return FastWorkflowMCPServer(chat_session) 

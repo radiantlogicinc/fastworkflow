@@ -299,23 +299,23 @@ from fastworkflow import CommandOutput, CommandResponse
 {manager_import}
 
 class ResponseGenerator:
-    def __call__(self, session: fastworkflow.Session, command: str) -> CommandOutput:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str) -> CommandOutput:
         # Initialize your application's root context here
         # This is typically a manager class that provides access to all functionality
         filepath = (
-            f'{{session.workflow_folderpath}}/'
+            f'{{workflow.folderpath}}/'
             '{app_module}/'
             'data.json'  # Replace with your application's data file if needed
         )
-        session.root_command_context = {manager_class}(filepath)
+        workflow.root_command_context = {manager_class}(filepath)
         
         response = {{
             "message": "Application initialized.",
-            "context": session.current_command_context_name
+            "context": workflow.current_command_context_name
         }}
 
         return CommandOutput(
-            session_id=session.id,
+            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(response=str(response))
             ]

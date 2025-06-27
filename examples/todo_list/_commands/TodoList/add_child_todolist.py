@@ -3,7 +3,7 @@ from pydantic import ConfigDict
 
 import fastworkflow
 from fastworkflow import CommandOutput, CommandResponse
-from fastworkflow.session import Session
+from fastworkflow.workflow import Workflow
 from fastworkflow.utils.signatures import InputForParamExtraction
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from fastworkflow.utils.context_utils import list_context_names
@@ -43,33 +43,33 @@ class Signature:
 
 
     @staticmethod
-    def generate_utterances(session: Session, command_name: str) -> list[str]:
+    def generate_utterances(workflow: Workflow, command_name: str) -> list[str]:
         return [
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
 
 class ResponseGenerator:
-    def _process_command(self, session: Session, input: Signature.Input) -> Signature.Output:
+    def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         """Add a new TodoList as a child to this TodoList."""
         # Access the application class instance:
-        app_instance = session.command_context_for_response_generation  # type: TodoList
+        app_instance = workflow.command_context_for_response_generation  # type: TodoList
         todo_list = app_instance.add_child_todolist(
             description=input.description, 
             assign_to=input.assign_to, 
             status=TodoItem.COMPLETE if input.is_complete else TodoItem.INCOMPLETE
         )
         
-        current_context = session.current_command_context_displayname
-        session.current_command_context = todo_list
-        new_context=session.current_command_context_displayname
+        current_context = workflow.current_command_context_displayname
+        workflow.current_command_context = todo_list
+        new_context=workflow.current_command_context_displayname
 
         return Signature.Output(
             current_context=current_context,
             new_context=new_context
         )
 
-    def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:
-        output = self._process_command(session, command_parameters)
+    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> CommandOutput:
+        output = self._process_command(workflow, command_parameters)
         response = (
             f'Context: {output.current_context}\n'
             f'Command: {command}\n'
@@ -77,7 +77,7 @@ class ResponseGenerator:
             f'Response: {output.model_dump_json(include={"new_context"})}'
         )
         return CommandOutput(
-            session_id=session.id,
+            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(response=response)
             ]

@@ -3,7 +3,7 @@ from typing import List
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow.session import Session
+from fastworkflow.workflow import Workflow
 from fastworkflow import CommandOutput, CommandResponse
 
 # Import business-logic helper
@@ -38,8 +38,8 @@ class Signature:
     template_utterances: List[str] = []
 
     @staticmethod
-    def generate_utterances(session: fastworkflow.Session, command_name: str) -> List[str]:
-        utterance_definition = fastworkflow.RoutingRegistry.get_definition(session.workflow_folderpath)
+    def generate_utterances(workflow: fastworkflow.Workflow, command_name: str) -> List[str]:
+        utterance_definition = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
         utterances_obj = utterance_definition.get_command_utterances(command_name)
 
         from fastworkflow.train.generate_synthetic import generate_diverse_utterances
@@ -50,19 +50,19 @@ class Signature:
 class ResponseGenerator:
     def __call__(
         self,
-        session: Session,
+        workflow: Workflow,
         command: str,
         command_parameters: Signature.Input | None = None,
     ) -> CommandOutput:
-        output = self._process_command(session)
+        output = self._process_command(workflow)
         return CommandOutput(
-            session_id=session.id,
+            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(response=f"list of product types: {output.status}")
             ],
         )
 
-    def _process_command(self, session: Session) -> Signature.Output:
+    def _process_command(self, workflow: Workflow) -> Signature.Output:
         """Run domain logic and wrap into `Signature.Output`."""
         data = load_data()
         result = ListAllProductTypes.invoke(data=data)

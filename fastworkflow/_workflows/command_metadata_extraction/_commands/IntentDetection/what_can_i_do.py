@@ -28,7 +28,7 @@ class Signature:
     ]
 
     @staticmethod
-    def generate_utterances(session: fastworkflow.Session, command_name: str) -> list[str]:
+    def generate_utterances(workflow: fastworkflow.Workflow, command_name: str) -> list[str]:
         return [
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
@@ -36,7 +36,7 @@ class Signature:
 
 class ResponseGenerator:
     def _process_command(
-        self, session: fastworkflow.Session
+        self, workflow: fastworkflow.Workflow
     ) -> Signature.Output:
         """
         Provides helpful information about this type of work-item.
@@ -44,17 +44,17 @@ class ResponseGenerator:
 
         :param input: The input parameters for the function.
         """
-        sub_sess = session.workflow_context["subject_session"]
+        app_workflow = workflow.context["app_workflow"]
         subject_crd = fastworkflow.RoutingRegistry.get_definition(
-            sub_sess.workflow_folderpath)
+            app_workflow.folderpath)
         
         crd = fastworkflow.RoutingRegistry.get_definition(
-            session.workflow_folderpath)
+            workflow.folderpath)
         cme_command_names = crd.get_command_names('IntentDetection')
 
         fully_qualified_command_names = (
             set(cme_command_names) | 
-            set(subject_crd.get_command_names(sub_sess.current_command_context_name))
+            set(subject_crd.get_command_names(app_workflow.current_command_context_name))
         ) - {'wildcard'}
 
         valid_command_names = [
@@ -66,15 +66,15 @@ class ResponseGenerator:
 
     def __call__(
         self,
-        session: fastworkflow.Session,
+        workflow: fastworkflow.Workflow,
         command: str,
     ) -> fastworkflow.CommandOutput:
-        output = self._process_command(session)
+        output = self._process_command(workflow)
 
-        subject_session = session.workflow_context["subject_session"]
+        app_workflow = workflow.context["app_workflow"]
         context_name = (
-            'global' if subject_session.current_command_context_name == '*'
-            else subject_session.current_command_context_name
+            'global' if app_workflow.current_command_context_name == '*'
+            else app_workflow.current_command_context_name
         )
 
         response = "\n".join([f"{cmd}" for cmd in output.valid_command_names])
@@ -84,7 +84,7 @@ class ResponseGenerator:
         )
 
         return fastworkflow.CommandOutput(
-            session_id=session.id,
+            workflow_id=workflow.id,
             command_responses=[
                 fastworkflow.CommandResponse(
                     response=response,

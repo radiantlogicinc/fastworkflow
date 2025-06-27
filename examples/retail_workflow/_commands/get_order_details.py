@@ -2,7 +2,7 @@ from typing import List
 
 import fastworkflow
 from pydantic import BaseModel, Field, ConfigDict
-from fastworkflow.session import Session
+from fastworkflow.workflow import Workflow
 from fastworkflow import CommandOutput, CommandResponse
 
 # Domain helpers
@@ -39,8 +39,8 @@ class Signature:
     template_utterances: List[str] = []
 
     @staticmethod
-    def generate_utterances(session: fastworkflow.Session, command_name: str) -> List[str]:
-        utterance_definition = fastworkflow.RoutingRegistry.get_definition(session.workflow_folderpath)
+    def generate_utterances(workflow: fastworkflow.Workflow, command_name: str) -> List[str]:
+        utterance_definition = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
         utterances_obj = utterance_definition.get_command_utterances(command_name)
 
         from fastworkflow.train.generate_synthetic import generate_diverse_utterances
@@ -51,19 +51,19 @@ class Signature:
 class ResponseGenerator:
     def __call__(
         self,
-        session: Session,
+        workflow: Workflow,
         command: str,
         command_parameters: Signature.Input,
     ) -> CommandOutput:
-        output = self._process_command(session, command_parameters)
+        output = self._process_command(workflow, command_parameters)
         return CommandOutput(
-            session_id=session.id,
+            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(response=f"Order details: {output.status}")
             ],
         )
 
-    def _process_command(self, session: Session, input: Signature.Input) -> Signature.Output:
+    def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         data = load_data()
         result = GetOrderDetails.invoke(data=data, order_id=input.order_id)
         return Signature.Output(status=result) 

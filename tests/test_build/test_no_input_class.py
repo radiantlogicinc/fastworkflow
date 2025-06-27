@@ -80,9 +80,9 @@ def test_no_parameters_no_input_class(temp_dir, todo_list_class):
     
     assert process_command is not None, "Could not find _process_command method"
     
-    # Check that _process_command has only one parameter (session)
-    assert len(process_command.args.args) == 2, "_process_command should have only 'self' and 'session' parameters"
-    assert process_command.args.args[1].arg == 'session', "Second parameter should be 'session'"
+    # Check that _process_command has only one parameter (workflow)
+    assert len(process_command.args.args) == 2, "_process_command should have only 'self' and 'workflow' parameters"
+    assert process_command.args.args[1].arg == 'workflow', "Second parameter should be 'workflow'"
     
     # Check that __call__ doesn't have a command_parameters parameter
     call_method = None
@@ -93,13 +93,13 @@ def test_no_parameters_no_input_class(temp_dir, todo_list_class):
     
     assert call_method is not None, "Could not find __call__ method"
     
-    # Check that __call__ has only self, session, and command parameters
-    assert len(call_method.args.args) == 3, "__call__ should have only 'self', 'session', and 'command' parameters"
-    assert call_method.args.args[1].arg == 'session', "Second parameter should be 'session'"
+    # Check that __call__ has only self, workflow, and command parameters
+    assert len(call_method.args.args) == 3, "__call__ should have only 'self', 'workflow', and 'command' parameters"
+    assert call_method.args.args[1].arg == 'workflow', "Second parameter should be 'workflow'"
     assert call_method.args.args[2].arg == 'command', "Third parameter should be 'command'"
     
     # Check that the call to _process_command doesn't pass an input argument
     for node in ast.walk(call_method):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == '_process_command':
-            assert len(node.args) == 1, "_process_command call should have only one argument (session)"
+            assert len(node.args) == 1, "_process_command call should have only one argument (workflow)"
             break 

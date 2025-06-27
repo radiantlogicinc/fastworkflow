@@ -25,8 +25,8 @@ def test_create_command_file_simple():
         # Verify new format for generate_utterances
         assert "command_name.split('/')[-1].lower().replace('_', ' ')" in content
         
-        # Verify app_instance is retrieved from session.command_context_for_response_generation
-        assert "app_instance = session.command_context_for_response_generation" in content
+        # Verify app_instance is retrieved from workflow.command_context_for_response_generation
+        assert "app_instance = workflow.command_context_for_response_generation" in content
         
         # Verify response uses output.model_dump_json()
         assert "CommandResponse(response=output.model_dump_json())" in content
@@ -98,12 +98,12 @@ def check_created_command_file(class_info, method_info_get_props, tmpdir):
 
     assert "# For get_properties, the primary logic is to gather attribute values" in content
     assert "return Signature.Output(product_id=app_instance.product_id, name=app_instance.name, price=app_instance.price)" in content
-    assert "app_instance = session.command_context_for_response_generation" in content
+    assert "app_instance = workflow.command_context_for_response_generation" in content
     
     # Verify that _process_command doesn't expect an input parameter
-    assert "def _process_command(self, session: Session) -> Signature.Output:" in content
+    assert "def _process_command(self, workflow: Workflow) -> Signature.Output:" in content
     # Verify that __call__ doesn't expect command_parameters
-    assert "def __call__(self, session: Session, command: str) -> CommandOutput:" in content
+    assert "def __call__(self, workflow: Workflow, command: str) -> CommandOutput:" in content
 
 def test_create_command_file_set_properties():
     class_name = "InventoryItem"
@@ -162,7 +162,7 @@ def test_create_command_file_set_properties():
         assert f"app_instance.status = {class_name}.COMPLETE if input.is_complete else {class_name}.INCOMPLETE" in content
         
         assert "return Signature.Output(success=True)" in content
-        assert "app_instance = session.command_context_for_response_generation" in content
+        assert "app_instance = workflow.command_context_for_response_generation" in content
 
 def test_property_setter_uses_attribute_assignment():
     # sourcery skip: extract-method, use-next
@@ -267,8 +267,8 @@ def test_no_input_class_for_parameterless_methods():
         assert "class Input(BaseModel):" not in content
         
         # _process_command and __call__ should not have input parameters
-        assert "def _process_command(self, session: Session) -> Signature.Output:" in content
-        assert "def __call__(self, session: Session, command: str) -> CommandOutput:" in content
+        assert "def _process_command(self, workflow: Workflow) -> Signature.Output:" in content
+        assert "def __call__(self, workflow: Workflow, command: str) -> CommandOutput:" in content
 
 def test_no_unnecessary_comments():
     """Test that unnecessary comments are not included."""

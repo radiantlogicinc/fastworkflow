@@ -5,7 +5,7 @@ class CommandExecutorInterface(ABC):
     @abstractmethod
     def invoke_command(
         self,
-        workflow_session: 'fastworkflow.WorkflowSession',
+        chat_session: 'fastworkflow.ChatSession',
         command: str,
     ) -> fastworkflow.CommandOutput:
         pass
@@ -13,7 +13,7 @@ class CommandExecutorInterface(ABC):
     @abstractmethod
     def perform_action(
         self,
-        session: fastworkflow.Session,
+        workflow: fastworkflow.Workflow,
         action: fastworkflow.Action,
     ) -> fastworkflow.CommandOutput:
         pass

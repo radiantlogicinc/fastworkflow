@@ -27,6 +27,9 @@ NOT_FOUND = None
 LLM_PARAM_EXTRACTION = None
 LITELLM_API_KEY_PARAM_EXTRACTION = None
 
+INVALID_INT_VALUE = -sys.maxsize
+INVALID_FLOAT_VALUE = -sys.float_info.max
+
 
 def get_trainset(subject_command_name,workflow_folderpath) -> List[Dict[str, Any]]:
         """Load labeled trainset from the command specific JSON file for LabeledFewShot"""
@@ -111,7 +114,7 @@ Today's date is {today}.
     model_config = ConfigDict(arbitrary_types_allowed=True)
     
     @classmethod
-    def create(cls, subject_session: fastworkflow.Session, subject_command_name: str, subject_command: str):
+    def create(cls, app_workflow: fastworkflow.Workflow, subject_command_name: str, subject_command: str):
         """
         Create an instance of InputForParamExtraction with a command string.
         
@@ -121,7 +124,7 @@ Today's date is {today}.
         Returns:
             An instance of InputForParamExtraction   
         """
-        subject_workflow_folderpath = subject_session.workflow_folderpath
+        subject_workflow_folderpath = app_workflow.folderpath
         subject_command_routing_definition = fastworkflow.RoutingRegistry.get_definition(subject_workflow_folderpath)
         
         input_for_param_extraction_class = subject_command_routing_definition.get_command_class(
@@ -131,7 +134,7 @@ Today's date is {today}.
         if input_for_param_extraction_class and input_for_param_extraction_class is not cls and hasattr(input_for_param_extraction_class, 'create'):
             try:
                 input_for_param_extraction = input_for_param_extraction_class.create(
-                    subject_session, subject_command_name, subject_command)
+                    app_workflow, subject_command_name, subject_command)
             except Exception as e:
                 logger.warning(f"Failed to create input_for_param_extraction: {e}")
         
@@ -177,7 +180,7 @@ Today's date is {today}.
                 if attribute_type is str:            
                     default_value = NOT_FOUND
                 elif attribute_type is int:
-                    default_value = -sys.maxsize
+                    default_value = INVALID_INT_VALUE
                 elif attribute_type is float:
                     default_value = -sys.float_info.max
                 else:
@@ -244,9 +247,9 @@ Today's date is {today}.
             elif field_info.annotation == str:
                 default_params[field_name] = NOT_FOUND
             elif field_info.annotation == int:
-                default_params[field_name] = -sys.maxsize
+                default_params[field_name] = INVALID_INT_VALUE
             elif field_info.annotation == float:
-                default_params[field_name] = -sys.float_info.max
+                default_params[field_name] = INVALID_FLOAT_VALUE
             # Handle Optional[int] and Optional[float]
             elif (hasattr(field_info.annotation, "__origin__") and
                   field_info.annotation.__origin__ is Union and
@@ -320,7 +323,7 @@ Today's date is {today}.
         return params
     
     def validate_parameters(self,
-                            subject_session: fastworkflow.Session, 
+                            app_workflow: fastworkflow.Workflow, 
                             subject_command_name: str,
                             cmd_parameters: BaseModel) -> Tuple[bool, str, Dict[str, List[str]]]:
         """
@@ -341,7 +344,7 @@ Today's date is {today}.
 
         # check if the input for parameter extraction class is defined in the registary then call the process_parameters function on the instance.
         if hasattr(self.input_for_param_extraction, 'process_extracted_parameters'):
-            self.input_for_param_extraction.process_extracted_parameters(subject_session, subject_command_name, cmd_parameters)
+            self.input_for_param_extraction.process_extracted_parameters(app_workflow, subject_command_name, cmd_parameters)
 
         # Check required fields
         for field_name, field_info in type(cmd_parameters).model_fields.items():
@@ -363,8 +366,8 @@ Today's date is {today}.
                 field_value in [
                     NOT_FOUND, 
                     None,
-                    -sys.maxsize,
-                    -sys.float_info.max
+                    INVALID_INT_VALUE,
+                    INVALID_FLOAT_VALUE
                 ]:
                 missing_fields.append(field_name)
                 is_valid = False
@@ -412,7 +415,7 @@ Today's date is {today}.
             if is_db_lookup:
                 if not self.input_for_param_extraction:
                     raise ValueError("input_for_param_extraction is not set.")
-                key_values=self.input_for_param_extraction.db_lookup(subject_session, subject_command_name) 
+                key_values=self.input_for_param_extraction.db_lookup(app_workflow, subject_command_name) 
                 matched, corrected_value, field_suggestions = DatabaseValidator.fuzzy_match(field_value, key_values)
 
                 if matched:

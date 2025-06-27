@@ -256,7 +256,7 @@ class Signature:
         return []
     
     @staticmethod
-    def process_extracted_parameters(session: fastworkflow.Session, parameters: Dict[str, Any]) -> Dict[str, Any]:
+    def process_extracted_parameters(workflow: fastworkflow.Workflow, parameters: Dict[str, Any]) -> Dict[str, Any]:
         \"\"\"Process extracted parameters before command execution.\"\"\"
         # TODO: Add parameter processing logic if needed
         return parameters
@@ -265,11 +265,11 @@ class Signature:
 class ResponseGenerator:
     \"\"\"Generates response for the command.\"\"\"
     
-    def __call__(self, session, command, input_obj=None):
+    def __call__(self, workflow, command, input_obj=None):
         \"\"\"Execute the command and generate a response.
         
         Args:
-            session: The workflow session
+            workflow: The workflow
             command: The original command text
             input_obj: The parsed input parameters
             
@@ -319,7 +319,7 @@ from fastworkflow.context import ContextExpander
 class ContextExpander(ContextExpander):
     \"\"\"Implements context delegation for {context} context.\"\"\"
     
-    def move_to_parent_context(self, session: fastworkflow.Session):
+    def move_to_parent_context(self, workflow: fastworkflow.Workflow):
         \"\"\"Move from {context} to parent context.
         
         Args:

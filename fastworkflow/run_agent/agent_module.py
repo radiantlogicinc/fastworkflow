@@ -8,7 +8,7 @@ import traceback # Keep for now, might be used by other parts or future debuggin
 import dspy
 from colorama import Fore, Style # For logging within the agent tool
 
-import fastworkflow # For WorkflowSession type hint and get_env_var
+import fastworkflow # For ChatSession type hint and get_env_var
 from fastworkflow.mcp_server import FastWorkflowMCPServer
 
 # def clear_dspy_cache():
@@ -145,10 +145,10 @@ def _build_assistant_tool_documentation(available_tools: List[Dict]) -> str:
 
     return main_agent_guidance + "\n".join(tool_docs)
 
-# def _create_individual_mcp_tool(tool_def: Dict, workflow_session_obj: fastworkflow.WorkflowSession):
+# def _create_individual_mcp_tool(tool_def: Dict, chat_session_obj: fastworkflow.ChatSession):
 #     """Create a DSPy tool function for a specific MCP tool.
 #     This tool expects a single string argument 'mcp_json_payload' containing the full MCP JSON for the specific tool.
-#     It then passes this payload to _execute_workflow_command_tool for processing by the WorkflowSession.
+#     It then passes this payload to _execute_workflow_command_tool for processing by the ChatSession.
 #     """
 #     tool_name = tool_def['name']
 #     tool_desc = tool_def['description']
@@ -187,17 +187,17 @@ def _build_assistant_tool_documentation(available_tools: List[Dict]) -> str:
 
 #     def individual_tool(mcp_json_payload: str) -> str:
 #         """Receives a complete MCP JSON string for the '{tool_name}' tool and passes it to the core workflow execution."""
-#         return _execute_workflow_mcp_tool(mcp_json_payload=mcp_json_payload, workflow_session_obj=workflow_session_obj)
+#         return _execute_workflow_mcp_tool(mcp_json_payload=mcp_json_payload, chat_session_obj=chat_session_obj)
     
 #     individual_tool.__name__ = tool_name 
 #     individual_tool.__doc__ = tool_docstring
     
 #     return individual_tool
 
-def _create_individual_query_tool(tool_def: Dict, workflow_session_obj: fastworkflow.WorkflowSession):
+def _create_individual_query_tool(tool_def: Dict, chat_session_obj: fastworkflow.ChatSession):
     """Create a DSPy tool function for a specific MCP tool.
     This tool expects a single string argument 'query' for the specific tool.
-    It then passes this command to _execute_workflow_command_tool for processing by the WorkflowSession.
+    It then passes this command to _execute_workflow_command_tool for processing by the ChatSession.
     """
     tool_name = tool_def['name']
     tool_desc = tool_def['description']
@@ -224,7 +224,7 @@ def _create_individual_query_tool(tool_def: Dict, workflow_session_obj: fastwork
 
     def individual_tool(query: str) -> str:
         """Receives a query string for the '{tool_name}' tool and passes it to the core workflow execution."""
-        return _execute_workflow_query_tool(query=query, workflow_session_obj=workflow_session_obj)
+        return _execute_workflow_query_tool(query=query, chat_session_obj=chat_session_obj)
     
     individual_tool.__name__ = tool_name 
     individual_tool.__doc__ = tool_docstring
@@ -242,18 +242,18 @@ def initialize_workflow_tool_agent(mcp_server: FastWorkflowMCPServer, max_iters:
         print(f"{Fore.YELLOW}Warning: No MCP tools available for individual tool agent{Style.RESET_ALL}")
         return None
     
-    workflow_session_obj = mcp_server.workflow_session # Get workflow_session from mcp_server
-    if not workflow_session_obj:
+    chat_session_obj = mcp_server.chat_session # Get chat_session from mcp_server
+    if not chat_session_obj:
         # This should ideally not happen if mcp_server is correctly initialized
-        print(f"{Fore.RED}Error: WorkflowSession not found in MCP Server. Cannot create individual tools.{Style.RESET_ALL}")
+        print(f"{Fore.RED}Error: ChatSession not found in MCP Server. Cannot create individual tools.{Style.RESET_ALL}")
         return None
 
     individual_tools = []
     for tool_def in available_tools:
         if tool_def['name'] == "transfer_to_human_agents":
             continue
-        # tool_func = _create_individual_mcp_tool(tool_def, workflow_session_obj) # Pass workflow_session_obj
-        tool_func = _create_individual_query_tool(tool_def, workflow_session_obj) # Pass workflow_session_obj
+        # tool_func = _create_individual_mcp_tool(tool_def, chat_session_obj) # Pass chat_session_obj
+        tool_func = _create_individual_query_tool(tool_def, chat_session_obj) # Pass chat_session_obj
         individual_tools.append(tool_func)
     
     return dspy.ReAct(
@@ -262,34 +262,34 @@ def initialize_workflow_tool_agent(mcp_server: FastWorkflowMCPServer, max_iters:
         max_iters=max_iters,
     )
 
-# def _execute_workflow_mcp_tool(mcp_json_payload: str, *, workflow_session_obj: fastworkflow.WorkflowSession) -> str:
+# def _execute_workflow_mcp_tool(mcp_json_payload: str, *, chat_session_obj: fastworkflow.ChatSession) -> str:
 #     """
 #     Process JSON MCP tool call query.
 #     This function is intended to be used as a tool by a DSPy agent.
 #     """
 #     print(f"{Fore.CYAN}{Style.BRIGHT}Workflow Assistant -> Workflow>{Style.RESET_ALL}{Fore.CYAN} {mcp_json_payload}{Style.RESET_ALL}")
     
-#     workflow_session_obj.user_message_queue.put(mcp_json_payload)
+#     chat_session_obj.user_message_queue.put(mcp_json_payload)
     
 #     # Get response and format
-#     command_output = workflow_session_obj.command_output_queue.get()
+#     command_output = chat_session_obj.command_output_queue.get()
 #     formatted_output = _format_workflow_output_for_agent(command_output)
     
 #     # Log the truncated workflow response to the agent
 #     print(f"{Fore.CYAN}{Style.BRIGHT}Workflow -> Workflow Assistant>{Style.RESET_ALL}{Fore.CYAN} {formatted_output.replace(os.linesep, ' ')}{Style.RESET_ALL}")
 #     return formatted_output
 
-def _execute_workflow_query_tool(query: str, *, workflow_session_obj: fastworkflow.WorkflowSession) -> str:
+def _execute_workflow_query_tool(query: str, *, chat_session_obj: fastworkflow.ChatSession) -> str:
     """
     Process plain utterance query.
     This function is intended to be used as a tool by a DSPy agent.
     """
     print(f"{Fore.CYAN}{Style.BRIGHT}Workflow Assistant -> Workflow>{Style.RESET_ALL}{Fore.CYAN} {query}{Style.RESET_ALL}")
     
-    workflow_session_obj.user_message_queue.put(query)
+    chat_session_obj.user_message_queue.put(query)
     
     # Get response and format
-    command_output = workflow_session_obj.command_output_queue.get()
+    command_output = chat_session_obj.command_output_queue.get()
     formatted_output = _format_workflow_output_for_agent(command_output)
     
     # Log the truncated workflow response to the agent
@@ -334,12 +334,12 @@ def _ask_user_tool(prompt: str) -> str:
     print(f"{Fore.GREEN}User response received: {user_response}{Style.RESET_ALL}")
     return user_response
 
-def initialize_dspy_agent(workflow_session: fastworkflow.WorkflowSession, LLM_AGENT: str, LITELLM_API_KEY_AGENT: Optional[str] = None, max_iters: int = 25, clear_cache: bool = False):
+def initialize_dspy_agent(chat_session: fastworkflow.ChatSession, LLM_AGENT: str, LITELLM_API_KEY_AGENT: Optional[str] = None, max_iters: int = 25, clear_cache: bool = False):
     """
     Configures and returns a DSPy ReAct agent.
     
     Args:
-        workflow_session: WorkflowSession instance
+        chat_session: ChatSession instance
         LLM_AGENT: Language model name
         LITELLM_API_KEY_AGENT: API key for the language model
         max_iters: Maximum iterations for the ReAct agent
@@ -366,7 +366,7 @@ def initialize_dspy_agent(workflow_session: fastworkflow.WorkflowSession, LLM_AG
     dspy.settings.configure(lm=lm)
 
     # --- Initialize MCP Server and get available tools ---
-    mcp_server = FastWorkflowMCPServer(workflow_session)
+    mcp_server = FastWorkflowMCPServer(chat_session)
     available_tools = mcp_server.list_tools()
 
     # --- Initialize MCP Tool Agent ---

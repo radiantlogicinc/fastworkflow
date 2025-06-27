@@ -18,7 +18,7 @@ class Signature:  # noqa: D101
     ]
 
     @staticmethod
-    def generate_utterances(session: fastworkflow.Session, command_name: str) -> list[str]:
+    def generate_utterances(workflow: fastworkflow.Workflow, command_name: str) -> list[str]:
         return [
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
@@ -28,16 +28,16 @@ class ResponseGenerator:  # noqa: D101
 
     def __call__(
         self,
-        session: fastworkflow.Session,
+        workflow: fastworkflow.Workflow,
         command: str,
     ) -> fastworkflow.CommandOutput:
-        subject_session = session.workflow_context["subject_session"]
+        app_workflow = workflow.context["app_workflow"]
         current_context = (
-            'global' if subject_session.current_command_context_name == '*'
-            else subject_session.current_command_context_name
+            'global' if app_workflow.current_command_context_name == '*'
+            else app_workflow.current_command_context_name
         )
         return fastworkflow.CommandOutput(
-            session_id=session.id,
+            workflow_id=workflow.id,
             command_responses=[
                 fastworkflow.CommandResponse(
                     response = f"Current context is '{current_context}'"

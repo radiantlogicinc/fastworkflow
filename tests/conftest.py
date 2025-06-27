@@ -34,7 +34,7 @@ def setup_test_environment():
 def add_workflow_paths_to_syspath():
     """
     Add workflow paths to sys.path to enable relative imports in workflow modules.
-    This simulates what Session class does in production code.
+    This simulates what Workflow class does in production code.
     """
     # Store original sys.path to restore later
     original_sys_path = list(sys.path)

@@ -5,7 +5,7 @@ This PRD defines the new **Context Callback Module** feature for FastWorkflow. T
 # Core Features  
 - Discover context callback modules located at `_commands/<ContextName>/_<ContextName>.py`.  
 - Store discovery results in `command_directory.json` under a new `map_context_2_metadata` key.  
-- Expose the resolved callback class through `CommandContextModel.get_context_class()` and make it available to `Session.get_container_object()`.  
+- Expose the resolved callback class through `CommandContextModel.get_context_class()` and make it available to `Workflow.get_container_object()`.  
 - Skip underscore-prefixed files when building command metadata unless they exactly match the `_ContextName.py` pattern.  
 
 # User Experience  
@@ -22,7 +22,7 @@ This PRD defines the new **Context Callback Module** feature for FastWorkflow. T
 # Development Roadmap  
 - Phase 1: Command discovery update & metadata persistence.  
 - Phase 2: ContextModel API surface (`get_context_class`).  
-- Phase 3: Update core runtime (`Session`) to utilise new API (already wired).  
+- Phase 3: Update core runtime (`Workflow`) to utilise new API (already wired).  
 - Phase 4: Documentation & examples (this PRD, README updates).  
 
 # Logical Dependency Chain  

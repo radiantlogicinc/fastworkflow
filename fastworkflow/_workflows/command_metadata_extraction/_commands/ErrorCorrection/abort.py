@@ -1,5 +1,5 @@
 from fastworkflow import CommandOutput, CommandResponse
-from fastworkflow.session import Session
+from fastworkflow.workflow import Workflow
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from pydantic import BaseModel, ConfigDict
 
@@ -10,6 +10,7 @@ class Signature:
         command_name: str
 
     plain_utterances = [
+        "abort",
         "cancel",
         "stop",
         "quit",
@@ -20,21 +21,21 @@ class Signature:
     ]
 
     @staticmethod
-    def generate_utterances(session: Session, command_name: str) -> list[str]:
+    def generate_utterances(workflow: Workflow, command_name: str) -> list[str]:
         return [
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
 
 
 class ResponseGenerator:
-    def _process_command(self, session: Session, command: str) -> Signature.Output:
-        session.is_complete = True
+    def _process_command(self, workflow: Workflow, command: str) -> Signature.Output:
+        workflow.is_complete = True
         return Signature.Output(command=command, command_name="abort")
 
-    def __call__(self, session: Session, command: str) -> CommandOutput:
-        output = self._process_command(session, command)
+    def __call__(self, workflow: Workflow, command: str) -> CommandOutput:
+        output = self._process_command(workflow, command)
         return CommandOutput(
-            session_id=session.id,
+            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(
                     response="command aborted",

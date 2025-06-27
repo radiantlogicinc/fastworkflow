@@ -219,7 +219,7 @@ class {context}Navigator(ContextExpander):
     Implements context delegation for {context} objects.
     """
     
-    def move_to_parent_context(self, session: fastworkflow.Session) -> None:
+    def move_to_parent_context(self, workflow: fastworkflow.Workflow) -> None:
         """Move from {context} to parent context.
         
         Args:

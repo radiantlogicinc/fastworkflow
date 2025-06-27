@@ -17,6 +17,10 @@ def test_build_generates_global_function_command(hello_world_app_dir, hello_worl
         str(hello_world_build_dir),
         "--context-model-dir",
         str(hello_world_build_dir),
+        "--env_file_path",
+        "./env/.env",
+        "--passwords_file_path",
+        "./passwords/.env",
         "--overwrite"
     ]
     
@@ -36,7 +40,7 @@ def test_build_generates_global_function_command(hello_world_app_dir, hello_worl
     assert "class Input(BaseModel):" in content
     assert "class Output(BaseModel):" in content
     assert "class ResponseGenerator:" in content
-    assert "def __call__(self, session: Session, command: str" in content
+    assert "def __call__(self, workflow: Workflow, command: str" in content
     
     # Check for function parameters
     assert "a: float" in content

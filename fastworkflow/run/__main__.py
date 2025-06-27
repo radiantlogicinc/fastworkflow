@@ -35,7 +35,7 @@ def _build_artifact_table(artifacts: dict[str, str]) -> Table:
 def print_command_output(command_output):
     """Pretty-print workflow output using rich panels and tables."""
     for command_response in command_output.command_responses:
-        session_id = fastworkflow.WorkflowSession.get_active_session_id()
+        workflow_id = fastworkflow.ChatSession.get_active_workflow_id()
 
         # Collect body elements for the panel content
         body_renderables = []
@@ -65,7 +65,7 @@ def print_command_output(command_output):
                 (Text("Recommendations", style="bold magenta"), rec_table)
             )
 
-        panel_title = f"[bold yellow]Session {session_id}[/bold yellow]"
+        panel_title = f"[bold yellow]Workflow {workflow_id}[/bold yellow]"
         # Group all renderables together
         group = Group(*body_renderables)
         # Use the group in the panel
@@ -98,35 +98,33 @@ def run_main(args):
             startup_action_dict = json.load(file)
         startup_action = fastworkflow.Action(**startup_action_dict)
 
-    context_dict = {}
+    context_dict = None
     if args.context_file_path:
         with open(args.context_file_path, 'r') as file:
             context_dict = json.load(file)
 
-    workflow_session = fastworkflow.WorkflowSession(
-        CommandExecutor(),
+    chat_session = fastworkflow.ChatSession(
         args.workflow_path, 
-        session_id_str=f"run_{args.workflow_path}",
-        context=context_dict,
+        workflow_context=context_dict,
         startup_command=args.startup_command, 
         startup_action=startup_action, 
         keep_alive=args.keep_alive
     )
 
-    workflow_session.start()
+    chat_session.start()
     with contextlib.suppress(queue.Empty):
-        if command_output := workflow_session.command_output_queue.get(
+        if command_output := chat_session.command_output_queue.get(
             timeout=1.0
         ):
             print_command_output(command_output)
-    while not workflow_session.workflow_is_complete or args.keep_alive:
+    while not chat_session.workflow_is_complete or args.keep_alive:
         user_command = console.input("[bold yellow]User > [/bold yellow]")
         if user_command == "exit":
             break
 
-        workflow_session.user_message_queue.put(user_command)
+        chat_session.user_message_queue.put(user_command)
 
-        command_output = workflow_session.command_output_queue.get()
+        command_output = chat_session.command_output_queue.get()
         print_command_output(command_output)
 
 if __name__ == "__main__":

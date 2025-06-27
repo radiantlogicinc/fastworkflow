@@ -6,11 +6,29 @@ from pydantic import BaseModel
 import mmh3
 
 
+class NLUPipelineStage(Enum):
+    """Specifies the stages of the NLU Pipeline processing."""
+    INTENT_DETECTION = 0
+    INTENT_AMBIGUITY_CLARIFICATION = 1
+    INTENT_MISUNDERSTANDING_CLARIFICATION = 2
+    PARAMETER_EXTRACTION = 3
+
 class Action(BaseModel):
     command_name: str
     command: str = ""   # only use is to display autocomplete item in the UI
     parameters: dict[str, Optional[Union[str, bool, int, float, BaseModel]]] = {}
-    session_id: Optional[int] = None    # when creating a new action, this is set by the workflow session
+    workflow_id: Optional[int] = None    # when creating a new action, this is set by the workflow
+
+class Recommendation(BaseModel):
+    summary: str
+    suggested_actions: list[Action] = []
+
+class CommandResponse(BaseModel):
+    response: str
+    success: bool = True
+    artifacts: dict[str, Any] = {}
+    next_actions: list[Action] = []
+    recommendations: list[Recommendation] = []
 
 # MCP-compliant classes
 class MCPToolCall(BaseModel):
@@ -28,17 +46,6 @@ class MCPToolResult(BaseModel):
     """MCP-compliant tool result format"""
     content: list[MCPContent]
     isError: bool = False
-
-class Recommendation(BaseModel):
-    summary: str
-    suggested_actions: list[Action] = []
-
-class CommandResponse(BaseModel):
-    response: str
-    success: bool = True
-    artifacts: dict[str, Any] = {}
-    next_actions: list[Action] = []
-    recommendations: list[Recommendation] = []
 
 class CommandOutput(BaseModel):
     command_responses: list[CommandResponse]
@@ -95,16 +102,11 @@ def init(env_vars: dict):
     from .command_routing import RoutingRegistry as RoutingRegistryClass
     from .model_pipeline_training import ModelPipeline
 
-    # from .session import Session as SessionClass
-    # from .workflow_session import WorkflowSession as WorkflowSessionClass
-
     # Assign to global variables
     CommandContextModel = CommandContextModelClass
     RoutingDefinition = RoutingDefinitionClass
     RoutingRegistry = RoutingRegistryClass
     ModelPipelineRegistry = ModelPipeline
-    # Session = SessionClass
-    # WorkflowSession = WorkflowSessionClass
 
 def get_env_var(var_name: str, var_type: type = str, default: Optional[Union[str, int, float, bool]] = None) -> Union[str, int, float, bool]:
     """get the environment variable"""
@@ -160,8 +162,8 @@ def get_internal_workflow_path(workflow_name: str) -> str:
     """
     return os.path.join(get_fastworkflow_package_path(), "_workflows", workflow_name)
 
-def get_session_id(session_id_str: str) -> int:
-    return int(mmh3.hash(session_id_str))
+def get_workflow_id(workflow_id_str: str) -> int:
+    return int(mmh3.hash(workflow_id_str))
 
-from .session import Session as Session
-from .workflow_session import WorkflowSession as WorkflowSession
+from .workflow import Workflow as Workflow
+from .chat_session import ChatSession as ChatSession

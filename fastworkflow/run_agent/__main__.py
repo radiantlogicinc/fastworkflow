@@ -16,26 +16,26 @@ init(autoreset=True)
 
 def print_command_output(command_output):
     for command_response in command_output.command_responses:
-        session_id = "UnknownSession"
+        workflow_id = "UnknownSession"
         with contextlib.suppress(Exception):
-            session_id = fastworkflow.WorkflowSession.get_active_session_id()
+            workflow_id = fastworkflow.ChatSession.get_active_workflow_id()
 
         if command_response.response:
             print(
-                f"{Fore.GREEN}{Style.BRIGHT}{session_id} AI>{Style.RESET_ALL}{Fore.GREEN} {command_response.response}{Style.RESET_ALL}"
+                f"{Fore.GREEN}{Style.BRIGHT}{workflow_id} AI>{Style.RESET_ALL}{Fore.GREEN} {command_response.response}{Style.RESET_ALL}"
             )
 
         for artifact_name, artifact_value in command_response.artifacts.items():
             print(
-                f"{Fore.CYAN}{Style.BRIGHT}{session_id} AI>{Style.RESET_ALL}{Fore.CYAN} Artifact: {artifact_name}={artifact_value}{Style.RESET_ALL}"
+                f"{Fore.CYAN}{Style.BRIGHT}{workflow_id} AI>{Style.RESET_ALL}{Fore.CYAN} Artifact: {artifact_name}={artifact_value}{Style.RESET_ALL}"
             )
         for action in command_response.next_actions:
             print(
-                f"{Fore.BLUE}{Style.BRIGHT}{session_id} AI>{Style.RESET_ALL}{Fore.BLUE} Next Action: {action}{Style.RESET_ALL}"
+                f"{Fore.BLUE}{Style.BRIGHT}{workflow_id} AI>{Style.RESET_ALL}{Fore.BLUE} Next Action: {action}{Style.RESET_ALL}"
             )
         for recommendation in command_response.recommendations:
             print(
-                f"{Fore.MAGENTA}{Style.BRIGHT}{session_id} AI>{Style.RESET_ALL}{Fore.MAGENTA} Recommendation: {recommendation}{Style.RESET_ALL}"
+                f"{Fore.MAGENTA}{Style.BRIGHT}{workflow_id} AI>{Style.RESET_ALL}{Fore.MAGENTA} Recommendation: {recommendation}{Style.RESET_ALL}"
             )
 
 def main():
@@ -94,16 +94,14 @@ def main():
             startup_action_dict = json.load(file)
         startup_action = fastworkflow.Action(**startup_action_dict)
 
-    context_dict = {}
+    context_dict = None
     if args.context_file_path:
         with open(args.context_file_path, 'r') as file:
             context_dict = json.load(file)
 
-    workflow_session = fastworkflow.WorkflowSession(
-        CommandExecutor(),
+    chat_session = fastworkflow.ChatSession(
         args.workflow_path,
-        session_id_str=f"run_{args.workflow_path}",
-        context=context_dict,
+        workflow_context=context_dict,
         startup_command=args.startup_command, 
         startup_action=startup_action, 
         keep_alive=args.keep_alive
@@ -111,7 +109,7 @@ def main():
 
     try:
         react_agent = initialize_dspy_agent(
-            workflow_session, 
+            chat_session, 
             LLM_AGENT, 
             LITELLM_API_KEY_AGENT,
             clear_cache=True
@@ -120,9 +118,9 @@ def main():
         print(f"{Fore.RED}Failed to initialize DSPy agent: {e}{Style.RESET_ALL}")
         exit(1)
 
-    workflow_session.start()
+    chat_session.start()
     with contextlib.suppress(queue.Empty):
-        if command_output := workflow_session.command_output_queue.get(
+        if command_output := chat_session.command_output_queue.get(
             timeout=0.1
         ):
             print(f"{Fore.WHITE}{Style.DIM}--- Startup Command Output ---{Style.RESET_ALL}")
@@ -130,7 +128,7 @@ def main():
             print(f"{Fore.WHITE}{Style.DIM}--- End Startup Command Output ---{Style.RESET_ALL}")
     
     while True: 
-        if not args.keep_alive and workflow_session.workflow_is_complete:
+        if not args.keep_alive and chat_session.workflow_is_complete:
             print(f"{Fore.BLUE}Workflow complete and keep_alive is false. Exiting...{Style.RESET_ALL}")
             break
 

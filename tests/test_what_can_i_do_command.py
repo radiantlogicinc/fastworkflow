@@ -25,21 +25,21 @@ def test_what_can_i_do_global(monkeypatch):
     workflow_dir = get_example_workflow_path()
     assert os.path.isdir(workflow_dir), "examples/todo_list directory should exist"
     
-    # Create a subject session
-    subject_session = fastworkflow.Session.create(
+    # Create a app workflow
+    app_workflow = fastworkflow.Workflow.create(
         workflow_folderpath=workflow_dir,
-        session_id_str="test-subject-session-1"
+        workflow_id_str="test-subject-workflow-1"
     )
     
-    # Create a command metadata extraction session
+    # Create a command metadata extraction workflow
     workflow_type = "command_metadata_extraction"
     cme_workflow_folderpath = fastworkflow.get_internal_workflow_path(workflow_type)
     
-    # Create a child session with the subject_session in its context
-    mock_session = fastworkflow.Session.create(
+    # Create a child workflow with the app_workflow in its context
+    mock_workflow = fastworkflow.Workflow.create(
         workflow_folderpath=cme_workflow_folderpath,
-        parent_session_id=subject_session.id,
-        workflow_context={"subject_session": subject_session}
+        parent_workflow_id=app_workflow.id,
+        workflow_context={"app_workflow": app_workflow}
     )
     
     # Mock the RoutingRegistry.get_definition method
@@ -49,7 +49,7 @@ def test_what_can_i_do_global(monkeypatch):
     
     # Call the __call__ method which is the current implementation
     generator = ResponseGenerator()
-    response = generator(mock_session, "what can i do")
+    response = generator(mock_workflow, "what can i do")
     
     # Check that the response contains commands
     assert "commands" in response.command_responses[0].response.lower()
@@ -62,25 +62,25 @@ def test_what_can_i_do_context(monkeypatch):
     workflow_dir = get_example_workflow_path()
     assert os.path.isdir(workflow_dir), "examples/todo_list directory should exist"
     
-    # Create a subject session
-    subject_session = fastworkflow.Session.create(
+    # Create a app workflow
+    app_workflow = fastworkflow.Workflow.create(
         workflow_folderpath=workflow_dir,
-        session_id_str="test-subject-session-2"
+        workflow_id_str="test-subject-workflow-2"
     )
     
     # Use TodoListManager as context
     from examples.todo_list.application.todo_manager import TodoListManager
-    subject_session.current_command_context = TodoListManager()
+    app_workflow.current_command_context = TodoListManager()
     
-    # Create a command metadata extraction session
+    # Create a command metadata extraction workflow
     workflow_type = "command_metadata_extraction"
     cme_workflow_folderpath = fastworkflow.get_internal_workflow_path(workflow_type)
     
-    # Create a child session with the subject_session in its context
-    mock_session = fastworkflow.Session.create(
+    # Create a child workflow with the app_workflow in its context
+    mock_workflow = fastworkflow.Workflow.create(
         workflow_folderpath=cme_workflow_folderpath,
-        parent_session_id=subject_session.id,
-        workflow_context={"subject_session": subject_session}
+        parent_workflow_id=app_workflow.id,
+        workflow_context={"app_workflow": app_workflow}
     )
     
     # Mock the RoutingRegistry.get_definition method
@@ -91,17 +91,17 @@ def test_what_can_i_do_context(monkeypatch):
     
     # Call the __call__ method which is the current implementation
     generator = ResponseGenerator()
-    response = generator(mock_session, "what can i do")
+    response = generator(mock_workflow, "what can i do")
     
     # Check that the response contains commands and mentions TodoListManager
     assert "TodoListManager" in response.command_responses[0].response
     
     # Test reset_context functionality
     reset_gen = ResetGen()
-    reset_gen(mock_session, "reset context")
+    reset_gen(mock_workflow, "reset context")
     
     # Check that after reset, we get global context
-    resp2 = generator(mock_session, "what can i do")
+    resp2 = generator(mock_workflow, "what can i do")
     assert "global" in resp2.command_responses[0].response.lower() or "*" in resp2.command_responses[0].response
 
     # Mock the RoutingRegistry.get_definition method

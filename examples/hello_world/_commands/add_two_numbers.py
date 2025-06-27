@@ -1,7 +1,7 @@
 
 import fastworkflow
 from fastworkflow import CommandOutput, CommandResponse
-from fastworkflow.session import Session
+from fastworkflow.workflow import Workflow
 from fastworkflow.utils.signatures import InputForParamExtraction
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from fastworkflow.utils.context_utils import list_context_names
@@ -26,32 +26,32 @@ class Signature:
     template_utterances = []
 
     @staticmethod
-    def generate_utterances(session: Session, command_name: str) -> list[str]:
+    def generate_utterances(workflow: Workflow, command_name: str) -> list[str]:
         return [
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
 
-    def process_extracted_parameters(self, session: fastworkflow.Session, command: str, cmd_parameters: "Signature.Input") -> None:
+    def process_extracted_parameters(self, workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input") -> None:
         pass
 
 class ResponseGenerator:
-    def _process_command(self, session: Session, input: Signature.Input) -> Signature.Output:
+    def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         """Execute add_two_numbers function"""
         # Call the function
         from ..application.add_two_numbers import add_two_numbers
         sum_of_two_numbers = add_two_numbers(a=input.first_num, b=input.second_num)
         return Signature.Output(sum_of_two_numbers=sum_of_two_numbers)
 
-    def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:
-        output = self._process_command(session, command_parameters)
+    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> CommandOutput:
+        output = self._process_command(workflow, command_parameters)
         response = (
-            f'Context: {session.current_command_context_displayname}\n'
+            f'Context: {workflow.current_command_context_displayname}\n'
             f'Command: {command}\n'
             f'Command parameters: {command_parameters}\n'
             f'Response: {output.model_dump_json()}'
         )
         return CommandOutput(
-            session_id=session.id,
+            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(response=response)
             ]

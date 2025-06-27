@@ -8,7 +8,7 @@ import fastworkflow
 from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
 from fastworkflow.command_directory import CommandDirectory
 from fastworkflow.command_context_model import CommandContextModel
-from fastworkflow.model_pipeline_training import train, get_artifact_path, _get_utterances, get_wildcard_utterances
+from fastworkflow.model_pipeline_training import train, get_artifact_path, _get_utterances, cache_ancestor_utterances
 
 
 @pytest.fixture
@@ -20,21 +20,11 @@ def example_workflow_path():
 @pytest.fixture
 def mock_context_model():
     """Create a mock context model with a hierarchy for testing wildcard inheritance."""
-    # Define a context hierarchy:
-    # TodoList inherits from TodoItem (as in the actual example workflow)
-    # TodoListManager is standalone
-    context_model = {
-        "TodoList": {
-            "base": ["TodoItem"]
-        },
-        "TodoItem": {
-            "base": []
-        },
-        "TodoListManager": {
-            "base": []
-        }
+    return {
+        "TodoList": {"base": ["TodoItem"]},
+        "TodoItem": {"base": []},
+        "TodoListManager": {"base": []},
     }
-    return context_model
 
 
 @pytest.fixture
@@ -127,27 +117,27 @@ def test_wildcard_inheritance(example_workflow_path, mock_context_model, mock_wi
     
     # Patch RoutingRegistry.get_definition to return our mock
     with patch.object(RoutingRegistry, 'get_definition', return_value=mock_routing_def):
-        # Create a session
-        session = fastworkflow.Session.create(
+        # Create a workflow
+        workflow = fastworkflow.Workflow.create(
             workflow_folderpath=example_workflow_path,
-            session_id_str="test-wildcard-inheritance"
+            workflow_id_str="test-wildcard-inheritance"
         )
         
         # Create a function to simulate what happens in the train function
         # This is the code we're testing, extracted from model_pipeline_training.py
-        wildcard_utterance_cache = {}
+        context_utterance_cache = {}
         
         def get_wildcard_utterances(context_name: str) -> list[str]:
             """Recursively collect wildcard utterances from the current context and its parent contexts."""
             # Check cache first to avoid redundant calculations
-            if context_name in wildcard_utterance_cache:
-                return wildcard_utterance_cache[context_name]
+            if context_name in context_utterance_cache:
+                return context_utterance_cache[context_name]
                 
             # Get the wildcard's own utterances for this context
             cmd_name = f"{context_name}/wildcard" if context_name != "*" else "wildcard"
             um = mock_cmd_dir.get_utterance_metadata(cmd_name)
             func = um.get_generated_utterances_func(example_workflow_path)
-            utterances = set(func(session, cmd_name))
+            utterances = set(func(workflow, cmd_name))
             
             # Find parent contexts from the context model
             if context_name in mock_context._command_contexts:
@@ -161,7 +151,7 @@ def test_wildcard_inheritance(example_workflow_path, mock_context_model, mock_wi
             
             # Convert back to list and cache the result
             result = list(utterances)
-            wildcard_utterance_cache[context_name] = result
+            context_utterance_cache[context_name] = result
             return result
         
         # Test wildcard utterance inheritance for TodoList
@@ -186,7 +176,7 @@ def test_wildcard_inheritance(example_workflow_path, mock_context_model, mock_wi
         # Second call should use cached results
         cached_todolist_utterances = get_wildcard_utterances("TodoList")
         assert todolist_utterances == cached_todolist_utterances
-        assert "TodoList" in wildcard_utterance_cache
+        assert "TodoList" in context_utterance_cache
 
 
 def test_wildcard_inheritance_deeper_hierarchy():
@@ -234,26 +224,26 @@ def test_wildcard_inheritance_deeper_hierarchy():
     
     # Patch RoutingRegistry.get_definition to return our mock
     with patch.object(RoutingRegistry, 'get_definition', return_value=mock_routing_def):
-        # Create a session
-        session = fastworkflow.Session.create(
+        # Create a workflow
+        workflow = fastworkflow.Workflow.create(
             workflow_folderpath="/tmp",
-            session_id_str="test-wildcard-inheritance-deep"
+            workflow_id_str="test-wildcard-inheritance-deep"
         )
         
         # Create the function to test
-        wildcard_utterance_cache = {}
+        context_utterance_cache = {}
         
         def get_wildcard_utterances(context_name: str) -> list[str]:
             """Recursively collect wildcard utterances from the current context and its parent contexts."""
             # Check cache first to avoid redundant calculations
-            if context_name in wildcard_utterance_cache:
-                return wildcard_utterance_cache[context_name]
+            if context_name in context_utterance_cache:
+                return context_utterance_cache[context_name]
                 
             # Get the wildcard's own utterances for this context
             cmd_name = f"{context_name}/wildcard" if context_name != "*" else "wildcard"
             um = mock_cmd_dir.get_utterance_metadata(cmd_name)
             func = um.get_generated_utterances_func("/tmp")
-            utterances = set(func(session, cmd_name))
+            utterances = set(func(workflow, cmd_name))
             
             # Find parent contexts from the context model
             if context_name in mock_context._command_contexts:
@@ -267,7 +257,7 @@ def test_wildcard_inheritance_deeper_hierarchy():
             
             # Convert back to list and cache the result
             result = list(utterances)
-            wildcard_utterance_cache[context_name] = result
+            context_utterance_cache[context_name] = result
             return result
         
         # Test GrandChild context - should inherit from all ancestors
@@ -295,11 +285,11 @@ def test_wildcard_inheritance_deeper_hierarchy():
         assert set(root_utterances) == set(wildcard_utterances["Root"])
         
         # Test that the cache is working
-        assert len(wildcard_utterance_cache) == 4  # All contexts should be cached
-        assert "GrandChild" in wildcard_utterance_cache
-        assert "Child" in wildcard_utterance_cache
-        assert "Parent" in wildcard_utterance_cache
-        assert "Root" in wildcard_utterance_cache
+        assert len(context_utterance_cache) == 4  # All contexts should be cached
+        assert "GrandChild" in context_utterance_cache
+        assert "Child" in context_utterance_cache
+        assert "Parent" in context_utterance_cache
+        assert "Root" in context_utterance_cache
 
 
 def test_wildcard_inheritance_with_duplicates():
@@ -336,26 +326,26 @@ def test_wildcard_inheritance_with_duplicates():
     
     # Patch RoutingRegistry.get_definition to return our mock
     with patch.object(RoutingRegistry, 'get_definition', return_value=mock_routing_def):
-        # Create a session
-        session = fastworkflow.Session.create(
+        # Create a workflow
+        workflow = fastworkflow.Workflow.create(
             workflow_folderpath="/tmp",
-            session_id_str="test-wildcard-inheritance-duplicates"
+            workflow_id_str="test-wildcard-inheritance-duplicates"
         )
         
         # Create the function to test
-        wildcard_utterance_cache = {}
+        context_utterance_cache = {}
         
         def get_wildcard_utterances(context_name: str) -> list[str]:
             """Recursively collect wildcard utterances from the current context and its parent contexts."""
             # Check cache first to avoid redundant calculations
-            if context_name in wildcard_utterance_cache:
-                return wildcard_utterance_cache[context_name]
+            if context_name in context_utterance_cache:
+                return context_utterance_cache[context_name]
                 
             # Get the wildcard's own utterances for this context
             cmd_name = f"{context_name}/wildcard" if context_name != "*" else "wildcard"
             um = mock_cmd_dir.get_utterance_metadata(cmd_name)
             func = um.get_generated_utterances_func("/tmp")
-            utterances = set(func(session, cmd_name))
+            utterances = set(func(workflow, cmd_name))
             
             # Find parent contexts from the context model
             if context_name in mock_context._command_contexts:
@@ -369,7 +359,7 @@ def test_wildcard_inheritance_with_duplicates():
             
             # Convert back to list and cache the result
             result = list(utterances)
-            wildcard_utterance_cache[context_name] = result
+            context_utterance_cache[context_name] = result
             return result
         
         # Test Child context - should inherit from Parent but deduplicate
@@ -415,43 +405,43 @@ def test_train_function_wildcard_inheritance(mock_model_pipeline, mock_predict, 
             "base": []
         }
     }
-    
+
     # Create utterances with some duplicates
     wildcard_utterances = {
         "*": ["global 1", "global 2"],
         "Parent": ["parent 1", "duplicate utterance", "parent 2"],
         "Child": ["child 1", "duplicate utterance", "child 2"]
     }
-    
+
     # Create mock objects
     mock_context = MagicMock(spec=CommandContextModel)
     mock_context._command_contexts = context_model
-    
+
     mock_cmd_dir = MockCommandDirectory(wildcard_utterances)
-    
+
     # Add some non-wildcard commands for testing
     mock_cmd_dir.map_command_2_utterance_metadata["Parent/command1"] = MockUtteranceMetadata("Parent", ["command1 utterance"])
     mock_cmd_dir.map_command_2_utterance_metadata["Child/command2"] = MockUtteranceMetadata("Child", ["command2 utterance"])
-    
+
     mock_routing_def = MockRoutingDefinition(mock_context, mock_cmd_dir)
     mock_routing_def.contexts = {
         "*": ["wildcard"],
         "Parent": ["wildcard", "command1"],
         "Child": ["wildcard", "command2"]
     }
-    
+
     # Mock the model training related functions
     mock_find_threshold.return_value = ({"threshold": 0.65, "f1": 0.9, "ndcg": 0.8, "distil_usage": 10}, [])
     mock_find_optimal.return_value = (0.7, {"threshold": 0.7, "f1_score": 0.9, "top3_usage": 0.2, 
                                           "top1_accuracy": 0.8, "top3_accuracy": 0.95})
-    
-    # Create a session
-    session = MagicMock(spec=fastworkflow.Session)
-    session.workflow_folderpath = "/tmp"
-    
+
+    # Create a workflow
+    workflow = MagicMock(spec=fastworkflow.Workflow)
+    workflow.folderpath = "/tmp"
+
     # Set up the utterance_command_tuples collector to capture what would be passed to training
     utterance_command_tuples_collector = {}
-    
+
     # Patch the train function to capture the utterance_command_tuples
     def mock_train_loader_side_effect(*args, **kwargs):
         # Extract the dataset from the args
@@ -463,40 +453,40 @@ def test_train_function_wildcard_inheritance(mock_model_pipeline, mock_predict, 
         mock_loader = MagicMock()
         mock_loader.__iter__ = lambda _: iter([])
         return mock_loader
-    
+
     # Apply the side effect to the DataLoader mock
     mock_dataloader.side_effect = lambda dataset, **kwargs: mock_train_loader_side_effect(dataset, **kwargs)
-    
+
     # Patch open for JSON files
     mock_open = MagicMock()
     mock_open.return_value.__enter__.return_value.read.return_value = '{"confidence_threshold": 0.65}'
-    
+
     # Create a mock for the _get_utterances function
-    def mock_get_utterances(cmd_dir, cmd_name, session, workflow_folderpath):
+    def mock_get_utterances(cmd_dir, cmd_name, workflow, workflow_folderpath):
         """Mock the standalone _get_utterances function."""
         # For wildcard, we'll return an empty list as the real function
         # will be calling get_wildcard_utterances
         if cmd_name == 'wildcard':
             return []
-        
+
         # For other commands, return mock utterances
-        if cmd_name == 'command1' or cmd_name == 'Parent/command1':
+        if cmd_name in ['command1', 'Parent/command1']:
             return ["command1 utterance"]
-        elif cmd_name == 'command2' or cmd_name == 'Child/command2':
+        elif cmd_name in ['command2', 'Child/command2']:
             return ["command2 utterance"]
-        
+
         return []
-    
+
     # Mock the RoutingRegistry class and its get_definition method
     mock_routing_registry = MagicMock()
     mock_routing_registry.get_definition.return_value = mock_routing_def
-    
+
     # Mock the CommandContextModel class and its load method
     mock_context_model_class = MagicMock()
     mock_context_model_instance = MagicMock()
     mock_context_model_instance._command_contexts = {}
     mock_context_model_class.load.return_value = mock_context_model_instance
-    
+
     # Patch RoutingRegistry to return our mock
     with patch('fastworkflow.RoutingRegistry', mock_routing_registry), \
          patch('fastworkflow.CommandContextModel', mock_context_model_class), \
@@ -505,9 +495,9 @@ def test_train_function_wildcard_inheritance(mock_model_pipeline, mock_predict, 
          patch('os.path.exists', return_value=True), \
          patch('os.makedirs'), \
          patch('fastworkflow.model_pipeline_training._get_utterances', side_effect=mock_get_utterances):
-        
+
         # Run the train function
-        train(session)
+        train(workflow)
         
         # Since we've mocked most of the training process, we can't directly verify
         # that wildcard utterances were properly inherited. However, this test
@@ -515,11 +505,11 @@ def test_train_function_wildcard_inheritance(mock_model_pipeline, mock_predict, 
 
 
 @pytest.fixture
-def mock_session():
-    """Provides a mock session object."""
-    session = MagicMock(spec=fastworkflow.Session)
-    session.workflow_folderpath = "/tmp/mock_workflow"
-    return session
+def mock_workflow():
+    """Provides a mock workflow object."""
+    workflow = MagicMock(spec=fastworkflow.Workflow)
+    workflow.folderpath = "/tmp/mock_workflow"
+    return workflow
 
 @pytest.fixture
 def mock_crd():
@@ -553,7 +543,7 @@ def mock_crd():
     
     return crd
 
-def test_get_wildcard_utterances_aggregation(mock_session, mock_crd):
+def test_get_wildcard_utterances_aggregation(mock_workflow, mock_crd):
     """
     Tests that get_wildcard_utterances correctly aggregates utterances from:
     1. The base 'wildcard' command.
@@ -568,18 +558,17 @@ def test_get_wildcard_utterances_aggregation(mock_session, mock_crd):
         "TodoListManager/delete_list": ["delete a list", "remove list"],
     }
 
-    def get_utterances_side_effect(session, workflow_path, cmd_dir_mock, cmd_name):
+    def get_utterances_side_effect(workflow, workflow_path, cmd_dir_mock, cmd_name):
         return utterance_map.get(cmd_name, [])
 
     # --- Test Execution ---
     with patch('fastworkflow.model_pipeline_training._get_utterances', side_effect=get_utterances_side_effect):
         
         cache = {}
-        result_utterances = get_wildcard_utterances("TodoItem", mock_crd, mock_session, cache)
+        result_utterances = cache_ancestor_utterances("TodoItem", mock_crd, mock_workflow, cache)
 
         # --- Assertions ---
         expected_utterances = {
-            "wildcard utterance 1", "wildcard utterance 2",
             "add a todo", "new item",
             "remove a todo", "delete item",
             "create a new list", "make list",
@@ -600,5 +589,11 @@ def test_get_wildcard_utterances_aggregation(mock_session, mock_crd):
         assert mock_crd.context_model.commands.call_count == 3
         
         # Verify cache was populated
-        assert "TodoItem" in cache
-        assert set(cache["TodoItem"]) == expected_utterances 
+        assert "TodoList" in cache
+
+        # --- Assertions ---
+        expected_utterances = {
+            "add a todo", "new item",
+            "remove a todo", "delete item"
+        }
+        assert set(cache["TodoList"]) == expected_utterances 

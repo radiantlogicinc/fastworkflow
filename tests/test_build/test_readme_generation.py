@@ -55,11 +55,11 @@ class Signature:
     template_utterances = []
 
 class ResponseGenerator:
-    def _process_command(self, session):
+    def _process_command(self, workflow):
         return Signature.Output(success=True)
     
-    def __call__(self, session, command):
-        output = self._process_command(session)
+    def __call__(self, workflow, command):
+        output = self._process_command(workflow)
         return output
 """
     

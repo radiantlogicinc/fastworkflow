@@ -291,16 +291,15 @@ class CommandRouter:
         if we are confident we will return a single label otherwise we will return a list
         """
         results = predict_single_sentence(self.modelpipeline, command, self.label_encoder_path)
-        if results['used_distil']:
-            if results['confidence'] > self.large_ambiguous_confidence_threshold:
-                return [results['label']]
-            else:
-                return results['topk_labels']
+        if (
+            results['used_distil']
+            and results['confidence'] > self.large_ambiguous_confidence_threshold
+            or not results['used_distil']
+            and results['confidence'] > self.tiny_ambiguous_confidence_threshold
+        ):
+            return [results['label']]
         else:
-            if results['confidence'] > self.tiny_ambiguous_confidence_threshold:
-                return [results['label']]
-            else:
-                return results['topk_labels']
+            return results['topk_labels']
             
         
 class ModelPipeline:
@@ -620,7 +619,7 @@ def calculate_ndcg_at_k(logits, true_labels, k=3):
     ndcg = dcg / idcg
     return ndcg.mean().item()
 
-def _get_utterances(session: fastworkflow.Session,
+def _get_utterances(workflow: fastworkflow.Workflow,
                     workflow_folderpath: str, 
                     cmd_dir: object, cmd: str) -> list[str]:
     """Safely retrieve utterances for *cmd* when required.
@@ -654,12 +653,12 @@ def _get_utterances(session: fastworkflow.Session,
         )
 
     func = um.get_generated_utterances_func(workflow_folderpath)
-    return func(session, cmd) if func else []
+    return func(workflow, cmd) if func else []
 
-def get_wildcard_utterances(
+def cache_ancestor_utterances(
     context_name: str, 
     crd: RoutingDefinition, 
-    session: fastworkflow.Session,
+    workflow: fastworkflow.Workflow,
     cache: dict
 ) -> list[str]:
     """
@@ -669,53 +668,38 @@ def get_wildcard_utterances(
     from every command (except 'wildcard') belonging to any of the current 
     context's ancestors.
     """
-    workflow_folderpath = session.workflow_folderpath
+    workflow_folderpath = workflow.folderpath
     cmd_dir = crd.command_directory
 
-    # 1. Start with the base utterances from the global 'wildcard' command.
-    if 'wildcard_utterances' in cache:
-        wildcard_utterances = cache['wildcard_utterances']
-    else:
-        wildcard_utterances = set(_get_utterances(session, workflow_folderpath, cmd_dir, 'wildcard'))
-        cache['wildcard_utterances'] = wildcard_utterances
-    return cache['wildcard_utterances']
+    ancestor_utterances = set()
+    ancestor_contexts = crd.context_model.get_ancestor_contexts(context_name)
+    for ancestor_ctx in ancestor_contexts:
+        if ancestor_ctx in cache:
+            for cmd_name in cache[ancestor_ctx]:
+                ancestor_utterances |= set(cache[ancestor_ctx][cmd_name])    
+            continue
+        cache[ancestor_ctx] = {}
+        ancestor_commands = crd.context_model.commands(ancestor_ctx)
+        for cmd in ancestor_commands:
+            if cmd.split('/')[-1] == 'wildcard':
+                continue            
+            utterances = _get_utterances(workflow, workflow_folderpath, 
+                                         cmd_dir, cmd)    
+            cache[ancestor_ctx][cmd] = utterances   
+            ancestor_utterances |= set(utterances)    
 
-    # utterances_for_this_context = set()
-    # commands_for_this_context = crd.context_model.commands(context_name)
-    # for cmd in commands_for_this_context:
-    #     if cmd.split('/')[-1] == 'wildcard':
-    #         continue   
-    #     utterances = _get_utterances(session, workflow_folderpath, cmd_dir, cmd)
-    #     utterances_for_this_context.update(utterances)
+    return ancestor_utterances
 
-    # ancestor_utterances = set()
-    # ancestor_contexts = crd.context_model.get_ancestor_contexts(context_name)
-    # for ancestor_ctx in ancestor_contexts:
-    #     if ancestor_ctx in cache:
-    #         ancestor_utterances.update(cache[ancestor_ctx])
-    #         continue
- 
-    #     ancestor_commands = crd.context_model.commands(ancestor_ctx)
-    #     for cmd in ancestor_commands:
-    #         if cmd.split('/')[-1] == 'wildcard':
-    #             continue
-            
-    #         utterances = _get_utterances(session, workflow_folderpath, cmd_dir, cmd)    
-    #         ancestor_utterances.update(utterances)
-
-    # cache[context_name] = (ancestor_utterances - utterances_for_this_context) | wildcard_utterances
-    # return cache[context_name]
-
-def train(session: fastworkflow.Session):
+def train(workflow: fastworkflow.Workflow):
     """Train intent-classification models **per command context**."""
 
     import time
 
-    workflow_folderpath = session.workflow_folderpath
+    workflow_folderpath = workflow.folderpath
     crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath, load_cached=False)
     cmd_dir = crd.command_directory
 
-    wildcard_utterance_cache = {}
+    context_utterance_cache = {}
 
     core_cmds = set(cmd_dir.core_command_names)
 
@@ -728,6 +712,9 @@ def train(session: fastworkflow.Session):
     else:
         context_set_for_training = (set(crd.contexts.keys()) - internal_contexts) | {'*'}
 
+    wildcard_utterances = set(_get_utterances(
+        workflow, workflow.folderpath, crd.command_directory, 'wildcard'))
+
     # Only iterate through contexts defined in this specific workflow
     for ctx_name in context_set_for_training:
         ctx_cmd_list = crd.contexts[ctx_name]
@@ -739,20 +726,42 @@ def train(session: fastworkflow.Session):
             print(f"Skipping context {ctx_name} - no commands to train")
             continue  # nothing to train
 
+        context_utterances = set()
         utterance_command_tuples: list[tuple[str, str]] = []
-        for cmd_name in sorted(train_cmds):
-            if cmd_name == 'wildcard':
-                utterance_list = get_wildcard_utterances(
-                    ctx_name, crd, session, wildcard_utterance_cache
+        if ctx_name in context_utterance_cache:
+            map_cmd_2_uttlist = context_utterance_cache[ctx_name]
+            for cmd_name in train_cmds:
+                if cmd_name in map_cmd_2_uttlist:
+                    utterance_command_tuples.extend(
+                        list(zip(map_cmd_2_uttlist[cmd_name], [cmd_name] * len(context_utterances)))
+                    )
+                    context_utterances |= set(map_cmd_2_uttlist[cmd_name])
+        else:
+            context_utterance_cache[ctx_name] = {}
+            for cmd_name in train_cmds:
+                if cmd_name == 'wildcard':
+                    continue
+                context_utterance_list = _get_utterances(
+                    workflow, workflow_folderpath, cmd_dir, cmd_name)            
+                utterance_command_tuples.extend(
+                    list(zip(context_utterance_list, [cmd_name] * len(context_utterances)))
                 )
-            else:
-                utterance_list = _get_utterances(session, workflow_folderpath, cmd_dir, cmd_name)
-            
-            utterance_command_tuples.extend(zip(utterance_list, [cmd_name] * len(utterance_list)))
+                context_utterance_cache[ctx_name][cmd_name] = context_utterance_list           
+                context_utterances |= set(context_utterance_list)
 
-        if not utterance_command_tuples:
+        if not context_utterances:
             print(f"Skipping context {ctx_name} - no utterances available")
             continue  # skip empty
+
+        ancestor_utterances = cache_ancestor_utterances(
+            ctx_name, crd, workflow, context_utterance_cache
+        )         
+        net_ancestor_plus_wildcard_utterances = (
+            (ancestor_utterances - context_utterances) | wildcard_utterances
+        )
+        utterance_command_tuples.extend(
+            list(zip(net_ancestor_plus_wildcard_utterances, ['wildcard'] * len(context_utterances)))
+        )
             
         # ==================================================================================
         # Original training procedure below, with only artefact paths changed to per-context

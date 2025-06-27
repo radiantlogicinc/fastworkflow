@@ -1,6 +1,6 @@
 import os
 import fastworkflow
-from fastworkflow.session import Session
+from fastworkflow.workflow import Workflow
 
 
 def test_context_helpers_todo_list(tmp_path):
@@ -12,18 +12,18 @@ def test_context_helpers_todo_list(tmp_path):
     workflow_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "examples", "todo_list"))
     assert os.path.isdir(workflow_dir), "examples/todo_list directory should exist"
 
-    # Create a session instead of directly
-    session = Session.create(
+    # Create a workflow instead of directly
+    workflow = Workflow.create(
         workflow_folderpath=workflow_dir,
-        session_id_str="test-session-999"
+        workflow_id_str="test-workflow-999"
     )
 
     # Basic sanity checks
-    assert session.current_command_context is None
+    assert workflow.current_command_context is None
 
     dummy_obj = object()
-    session.current_command_context = dummy_obj
-    assert session.current_command_context is dummy_obj
+    workflow.current_command_context = dummy_obj
+    assert workflow.current_command_context is dummy_obj
 
-    session.current_command_context = None
-    assert session.current_command_context is None 
+    workflow.current_command_context = None
+    assert workflow.current_command_context is None 

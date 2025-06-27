@@ -19,26 +19,26 @@ def test_global_context():
     workflow_dir = get_example_workflow_path()
     assert os.path.isdir(workflow_dir), "examples/todo_list directory should exist"
     
-    # Create a subject session
-    subject_session = fastworkflow.Session.create(
+    # Create a app workflow
+    app_workflow = fastworkflow.Workflow.create(
         workflow_folderpath=workflow_dir,
-        session_id_str="test-subject-session-3"
+        workflow_id_str="test-subject-workflow-3"
     )
     
-    # Create a command metadata extraction session
+    # Create a command metadata extraction workflow
     workflow_type = "command_metadata_extraction"
     cme_workflow_folderpath = fastworkflow.get_internal_workflow_path(workflow_type)
     
-    # Create a child session with the subject_session in its context
-    mock_session = fastworkflow.Session.create(
+    # Create a child workflow with the app_workflow in its context
+    mock_workflow = fastworkflow.Workflow.create(
         workflow_folderpath=cme_workflow_folderpath,
-        parent_session_id=subject_session.id,
-        workflow_context={"subject_session": subject_session}
+        parent_workflow_id=app_workflow.id,
+        workflow_context={"app_workflow": app_workflow}
     )
     
     # Call the __call__ method which is the current implementation
     gen = ResponseGenerator()
-    response = gen(mock_session, "what context am I in")
+    response = gen(mock_workflow, "what context am I in")
     
     # Check that the response indicates the global context
     assert "global" in response.command_responses[0].response.lower() or "*" in response.command_responses[0].response
@@ -52,28 +52,28 @@ def test_context_no_properties():
     workflow_dir = get_example_workflow_path()
     assert os.path.isdir(workflow_dir), "examples/todo_list directory should exist"
     
-    # Create a subject session
-    subject_session = fastworkflow.Session.create(
+    # Create a app workflow
+    app_workflow = fastworkflow.Workflow.create(
         workflow_folderpath=workflow_dir,
-        session_id_str="test-subject-session-4"
+        workflow_id_str="test-subject-workflow-4"
     )
     
     # Use TodoListManager as context
-    subject_session.current_command_context = TodoListManager()
+    app_workflow.current_command_context = TodoListManager()
     
-    # Create a command metadata extraction session
+    # Create a command metadata extraction workflow
     workflow_type = "command_metadata_extraction"
     cme_workflow_folderpath = fastworkflow.get_internal_workflow_path(workflow_type)
     
-    # Create a child session with the subject_session in its context
-    mock_session = fastworkflow.Session.create(
+    # Create a child workflow with the app_workflow in its context
+    mock_workflow = fastworkflow.Workflow.create(
         workflow_folderpath=cme_workflow_folderpath,
-        parent_session_id=subject_session.id,
-        workflow_context={"subject_session": subject_session}
+        parent_workflow_id=app_workflow.id,
+        workflow_context={"app_workflow": app_workflow}
     )
     
     # Call the __call__ method which is the current implementation
-    response = ResponseGenerator()(mock_session, "what context am I in")
+    response = ResponseGenerator()(mock_workflow, "what context am I in")
     
     # Check that the response contains the context name
     assert "TodoListManager" in response.command_responses[0].response
@@ -87,29 +87,29 @@ def test_context_with_properties():
     workflow_dir = get_example_workflow_path()
     assert os.path.isdir(workflow_dir), "examples/todo_list directory should exist"
     
-    # Create a subject session
-    subject_session = fastworkflow.Session.create(
+    # Create a app workflow
+    app_workflow = fastworkflow.Workflow.create(
         workflow_folderpath=workflow_dir,
-        session_id_str="test-subject-session-5"
+        workflow_id_str="test-subject-workflow-5"
     )
     
     # Create a TodoList with some properties
     todo_list = TodoList(id=1, description="Test List")
-    subject_session.current_command_context = todo_list
+    app_workflow.current_command_context = todo_list
     
-    # Create a command metadata extraction session
+    # Create a command metadata extraction workflow
     workflow_type = "command_metadata_extraction"
     cme_workflow_folderpath = fastworkflow.get_internal_workflow_path(workflow_type)
     
-    # Create a child session with the subject_session in its context
-    mock_session = fastworkflow.Session.create(
+    # Create a child workflow with the app_workflow in its context
+    mock_workflow = fastworkflow.Workflow.create(
         workflow_folderpath=cme_workflow_folderpath,
-        parent_session_id=subject_session.id,
-        workflow_context={"subject_session": subject_session}
+        parent_workflow_id=app_workflow.id,
+        workflow_context={"app_workflow": app_workflow}
     )
     
     # Call the __call__ method which is the current implementation
-    response = ResponseGenerator()(mock_session, "what context am I in")
+    response = ResponseGenerator()(mock_workflow, "what context am I in")
     
     # Check that the response contains the context name
     assert "TodoList" in response.command_responses[0].response 

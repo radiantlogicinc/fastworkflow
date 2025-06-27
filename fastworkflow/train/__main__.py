@@ -40,31 +40,29 @@ def train_workflow(workflow_path: str):
     if "fastworkflow" in workflow_path and "_workflows" not in workflow_path:
         return
     
-    # create a session and train the main workflow
-    session = fastworkflow.Session.create(
+    # create a workflow and train the main workflow
+    workflow = fastworkflow.Workflow.create(
         workflow_path, 
-        session_id_str=f"train_{workflow_path}", 
-        for_training_semantic_router=True
+        workflow_id_str=f"train_{workflow_path}"
     )
 
-    _generate_dspy_examples_helper(workflow_path, session)
+    _generate_dspy_examples_helper(workflow)
     
-    train(session)
-    session.close()
+    train(workflow)
+    workflow.close()
 
-def _generate_dspy_examples_helper(workflow_path, session):
-    workflow_folderpath = session.workflow_folderpath
-    json_path=get_route_layer_filepath_model(workflow_folderpath,"command_directory.json")
+def _generate_dspy_examples_helper(workflow):
+    json_path=get_route_layer_filepath_model(workflow.folderpath,"command_directory.json")
     # json_path = "./examples/sample_workflow/___command_info/command_directory.json"
     commands = _get_commands_with_parameters(json_path)
     for command_name in commands.keys():
         command_metadata = commands[command_name]
         module_file_path = command_metadata["parameter_path"]
-        module_class_name = command_metadata["parameters_class"]
+        if module := python_utils.get_module(
+            module_file_path, workflow.folderpath
+        ):
+            module_class_name = command_metadata["parameters_class"]
 
-        # Import the module dynamically
-        module = python_utils.get_module(module_file_path, workflow_path)
-        if module:
             if "." in module_class_name:
                 (outer, inner) = module_class_name.split(".")
                 outer_cls = getattr(module, outer)
@@ -80,14 +78,14 @@ def _generate_dspy_examples_helper(workflow_path, session):
             )
             output_dir = os.path.join(workflow_path, "___command_info")
             os.makedirs(output_dir, exist_ok=True)
-            
+
             # Format the examples for JSON
             examples_data = {
                 "command_name": command_name,
                 "valid_examples": examples,
                 "rejected_examples": rejected_examples
             }
-            
+
             # Save to JSON file
             output_file = os.path.join(output_dir, f"{command_name}_param_labeled.json")
             with open(output_file, 'w') as f:

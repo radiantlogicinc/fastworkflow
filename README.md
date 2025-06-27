@@ -15,7 +15,7 @@ A framework for rapidly building large-scale, deterministic, interactive workflo
 | ✅ You are building back-office tools that benefit from multi-step, interactive command sequences (e.g., inventory management, data review). | ❌ Your system requires ultra-low latency (1k+ TPS) where any NLP overhead is unacceptable. |
 | ✅ You prefer a *convention-over-configuration* approach and want to auto-generate boilerplate for your CLI/agent interface. | ❌ Your project requires every API endpoint to be handcrafted with bespoke JSON payloads and manual routing. |
 
-> **See it in Action**: A live terminal session of the `hello_world` example is available at [docs/assets/hello_world_demo.gif](docs/assets/hello_world_demo.gif).
+> **See it in Action**: A live terminal chat session of the `hello_world` example is available at [docs/assets/hello_world_demo.gif](docs/assets/hello_world_demo.gif).
 
 ---
 
@@ -89,7 +89,7 @@ You will be greeted with a `User >` prompt. Try it out!
 
 ```
 User > greet from fastWorkflow
-> Session 12345 AI> Artifact: result=Hello, fastWorkflow!
+> Workflow 12345 AI> Artifact: result=Hello, fastWorkflow!
 ```
 To see other available examples, run `fastworkflow examples list`.
 
@@ -178,9 +178,9 @@ class Signature:
 
 # The ResponseGenerator contains the logic to execute the command.
 class ResponseGenerator:
-    def __call__(self, session: fastworkflow.Session, command_parameters: Signature.Input) -> fastworkflow.CommandOutput:
-        # Get the instance of your application class from the session
-        app_instance: Greeter = session.command_context_for_response_generation
+    def __call__(self, workflow: fastworkflow.Workflow, command_parameters: Signature.Input) -> fastworkflow.CommandOutput:
+        # Get the instance of your application class from the workflow
+        app_instance: Greeter = workflow.command_context_for_response_generation
         
         # Call your application's method
         greeting_result = app_instance.greet(name=command_parameters.name)

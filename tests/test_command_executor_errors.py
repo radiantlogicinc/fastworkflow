@@ -32,16 +32,15 @@ def test_perform_action_wraps_error(monkeypatch):
 
     _monkey_registry(monkeypatch)
 
-    executor = CommandExecutor()
-    session = fastworkflow.Session.create(
+    workflow = fastworkflow.Workflow.create(
         workflow_folderpath=fastworkflow.get_fastworkflow_package_path(),
-        session_id_str="errs_pa",
+        workflow_id_str="errs_pa",
     )
 
     action = fastworkflow.Action(command_name="fail", command="fail")
 
     with pytest.raises(RuntimeError):
-        executor.perform_action(session, action)
+        CommandExecutor.perform_action(workflow, action)
 
 
 def test_invoke_command_wraps_error(monkeypatch):
@@ -49,10 +48,8 @@ def test_invoke_command_wraps_error(monkeypatch):
 
     _monkey_registry(monkeypatch)
 
-    executor = CommandExecutor()
-
     # Skip this test if _invoke_command_metadata_extraction_workflow doesn't exist
-    if not hasattr(executor, "_invoke_command_metadata_extraction_workflow"):
+    if not hasattr(CommandExecutor, "_invoke_command_metadata_extraction_workflow"):
         pytest.skip("_invoke_command_metadata_extraction_workflow method not available in current implementation")
 
     # Monkeypatch _invoke_command_metadata_extraction_workflow to bypass CME workflow.
@@ -70,12 +67,11 @@ def test_invoke_command_wraps_error(monkeypatch):
 
     monkeypatch.setattr(CommandExecutor, "_invoke_command_metadata_extraction_workflow", _stub_extract, raising=True)
 
-    # Build minimal WorkflowSession (no actual _commands needed)
-    ws = fastworkflow.WorkflowSession(
-        executor,
+    # Build minimal ChatSession (no actual _commands needed)
+    ws = fastworkflow.ChatSession(
         workflow_folderpath=fastworkflow.get_fastworkflow_package_path(),
-        session_id_str="err_ivk",
+        workflow_id_str="err_ivk",
     )
 
     with pytest.raises(RuntimeError):
-        executor.invoke_command(ws, "fail") 
+        CommandExecutor.invoke_command(ws, "fail") 

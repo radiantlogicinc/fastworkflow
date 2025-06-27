@@ -11,7 +11,7 @@ def get_import_block():
     return (
         f"import fastworkflow\n"
         f"from fastworkflow import CommandOutput, CommandResponse\n"
-        f"from fastworkflow.session import Session\n"
+        f"from fastworkflow.workflow import Workflow\n"
         f"from fastworkflow.utils.signatures import InputForParamExtraction\n"
         f"from fastworkflow.train.generate_synthetic import generate_diverse_utterances\n"
         f"from fastworkflow.utils.context_utils import list_context_names\n"
@@ -105,27 +105,27 @@ def create_function_command_file(function_info: FunctionInfo, output_dir: str, f
     
     # Add generate_utterances method
     command_file_content += """    @staticmethod
-    def generate_utterances(session: Session, command_name: str) -> list[str]:
+    def generate_utterances(workflow: Workflow, command_name: str) -> list[str]:
         return [
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)\n\n"""
     
     # Add process_extracted_parameters method
-    command_file_content += f"    def process_extracted_parameters(self, session: fastworkflow.Session, command: str, cmd_parameters: {input_param_type}) -> None:\n"
+    command_file_content += f"    def process_extracted_parameters(self, workflow: fastworkflow.Workflow, command: str, cmd_parameters: {input_param_type}) -> None:\n"
     command_file_content += "        pass\n\n"
     
     # Add ResponseGenerator class
     command_file_content += "class ResponseGenerator:\n"
-    command_file_content += f"    def _process_command(self, session: Session{input_param}) -> Signature.Output:\n"
+    command_file_content += f"    def _process_command(self, workflow: Workflow{input_param}) -> Signature.Output:\n"
     command_file_content += f"        \"\"\"{docstring}\"\"\"\n"
     command_file_content += f"{process_logic_str}\n"
     command_file_content += f"        return Signature.Output({output_return})\n\n"
     
     # Add __call__ method
-    command_file_content += f"    def __call__(self, session: Session, command: str{call_param}) -> CommandOutput:\n"
-    command_file_content += f"        output = self._process_command(session{call_arg})\n"
+    command_file_content += f"    def __call__(self, workflow: Workflow, command: str{call_param}) -> CommandOutput:\n"
+    command_file_content += f"        output = self._process_command(workflow{call_arg})\n"
     command_file_content += """        return CommandOutput(
-            session_id=session.id,
+            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(response=output.model_dump_json())
             ]
@@ -327,28 +327,28 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
 
     # Add generate_utterances method
     command_file_content += """    @staticmethod
-    def generate_utterances(session: Session, command_name: str) -> list[str]:
+    def generate_utterances(workflow: Workflow, command_name: str) -> list[str]:
         return [
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)\n\n"""
 
     # Add process_extracted_parameters method
-    command_file_content += f"    def process_extracted_parameters(self, session: fastworkflow.Session, command: str, cmd_parameters: {input_param_type}) -> None:\n"
+    command_file_content += f"    def process_extracted_parameters(self, workflow: fastworkflow.Workflow, command: str, cmd_parameters: {input_param_type}) -> None:\n"
     command_file_content += "        pass\n\n"
 
     # Add ResponseGenerator class
     command_file_content += "class ResponseGenerator:\n"
-    command_file_content += f"    def _process_command(self, session: Session{input_param}) -> Signature.Output:\n"
+    command_file_content += f"    def _process_command(self, workflow: Workflow{input_param}) -> Signature.Output:\n"
     command_file_content += f"        \"\"\"{docstring}\"\"\"\n"
-    command_file_content += f"        app_instance = session.command_context_for_response_generation  # type: {app_class_name}\n"
+    command_file_content += f"        app_instance = workflow.command_context_for_response_generation  # type: {app_class_name}\n"
     command_file_content += f"{process_logic_str}\n"
     command_file_content += f"        return Signature.Output({output_return})\n\n"
 
     # Add __call__ method
-    command_file_content += f"    def __call__(self, session: Session, command: str{call_param}) -> CommandOutput:\n"
-    command_file_content += f"        output = self._process_command(session{call_arg})\n"
+    command_file_content += f"    def __call__(self, workflow: Workflow, command: str{call_param}) -> CommandOutput:\n"
+    command_file_content += f"        output = self._process_command(workflow{call_arg})\n"
     command_file_content += """        return CommandOutput(
-            session_id=session.id,
+            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(response=output.model_dump_json())
             ]

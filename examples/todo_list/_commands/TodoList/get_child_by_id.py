@@ -3,7 +3,7 @@ from pydantic import ConfigDict
 
 import fastworkflow
 from fastworkflow import CommandOutput, CommandResponse
-from fastworkflow.session import Session
+from fastworkflow.workflow import Workflow
 from fastworkflow.utils.signatures import InputForParamExtraction
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from fastworkflow.utils.context_utils import list_context_names
@@ -32,31 +32,31 @@ class Signature:
     ]
 
     @staticmethod
-    def generate_utterances(session: Session, command_name: str) -> list[str]:
+    def generate_utterances(workflow: Workflow, command_name: str) -> list[str]:
         return [
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
 
 class ResponseGenerator:
-    def _process_command(self, session: Session, input: Signature.Input) -> Signature.Output:
+    def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         """Get a child by its ID."""
         # Access the application class instance:
-        app_instance = session.command_context_for_response_generation  # type: TodoList
+        app_instance = workflow.command_context_for_response_generation  # type: TodoList
         if todoitem := app_instance.get_child_by_id(child_id=input.todoitem_id):
-            session.current_command_context = todoitem
+            workflow.current_command_context = todoitem
             return Signature.Output(description=todoitem.description)
         return Signature.Output(description='NOT_FOUND')
 
-    def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:
-        output = self._process_command(session, command_parameters)
+    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> CommandOutput:
+        output = self._process_command(workflow, command_parameters)
         response = (
-            f'Context: {session.current_command_context_displayname}\n'
+            f'Context: {workflow.current_command_context_displayname}\n'
             f'Command: {command}\n'
             f'Command parameters: {command_parameters}\n'
             f'Response: {output.model_dump_json()}'
         )
         return CommandOutput(
-            session_id=session.id,
+            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(response=response)
             ]

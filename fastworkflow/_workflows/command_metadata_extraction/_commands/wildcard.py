@@ -1,3 +1,4 @@
+import contextlib
 from enum import Enum
 import sys
 from typing import Dict, List, Optional, Type, Union
@@ -9,7 +10,7 @@ from pydantic_core import PydanticUndefined
 from speedict import Rdict
 
 import fastworkflow
-from fastworkflow import Action, CommandOutput, CommandResponse, ModuleType
+from fastworkflow import Action, CommandOutput, CommandResponse, ModuleType, NLUPipelineStage
 from fastworkflow.cache_matching import cache_match, store_utterance_cache
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.command_routing import RoutingDefinition
@@ -25,21 +26,14 @@ from fastworkflow.utils.fuzzy_match import find_best_match
 from fastworkflow.utils.signatures import InputForParamExtraction
 
 
-INVALID_INT_VALUE = fastworkflow.get_env_var("INVALID_INT_VALUE")
-INVALID_FLOAT_VALUE = fastworkflow.get_env_var("INVALID_FLOAT_VALUE")
+INVALID_INT_VALUE = -sys.maxsize
+INVALID_FLOAT_VALUE = -sys.float_info.max
 
 MISSING_INFORMATION_ERRMSG = fastworkflow.get_env_var("MISSING_INFORMATION_ERRMSG")
 INVALID_INFORMATION_ERRMSG = fastworkflow.get_env_var("INVALID_INFORMATION_ERRMSG")
 
 NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
 INVALID = fastworkflow.get_env_var("INVALID")
-
-class NLUPipelineStage(Enum):
-    """Specifies the stages of the NLU Pipeline processing."""
-    INTENT_DETECTION = 0
-    INTENT_AMBIGUITY_CLARIFICATION = 1
-    INTENT_MISUNDERSTANDING_CLARIFICATION = 2
-    PARAMETER_EXTRACTION = 3
 
 
 class CommandNamePrediction:
@@ -48,101 +42,66 @@ class CommandNamePrediction:
         error_msg: Optional[str] = None
         is_cme_command: bool = False
 
-    def __init__(self, session: fastworkflow.Session):
-        self.session = session
-        self.sub_sess = session.workflow_context["subject_session"]
-        self.sub_sess_workflow_folderpath = self.sub_sess.workflow_folderpath
-        self.sub_session_id = self.sub_sess.id
+    def __init__(self, cme_workflow: fastworkflow.Workflow):
+        self.cme_workflow = cme_workflow
+        self.app_workflow = cme_workflow.context["app_workflow"]
+        self.app_workflow_folderpath = self.app_workflow.folderpath
+        self.app_workflow_id = self.app_workflow.id
 
-        self.convo_path = os.path.join(self.sub_sess_workflow_folderpath, "___convo_info")
-        self.cache_path = self._get_cache_path(self.sub_session_id, self.convo_path)
+        self.convo_path = os.path.join(self.app_workflow_folderpath, "___convo_info")
+        self.cache_path = self._get_cache_path(self.app_workflow_id, self.convo_path)
         self.path = self._get_cache_path_cache(self.convo_path)
-
-        # cme_workflow_folderpath = self.session.workflow_folderpath
-        # tiny_path = get_artifact_path(cme_workflow_folderpath, "ErrorCorrection", "tinymodel.pth")
-        # large_path = get_artifact_path(cme_workflow_folderpath, "ErrorCorrection", "largemodel.pth")
-        # threshold_path = get_artifact_path(cme_workflow_folderpath, "ErrorCorrection", "threshold.json")
-        # ambiguous_threshold_path = get_artifact_path(cme_workflow_folderpath, "ErrorCorrection", "ambiguous_threshold.json")
-        # with open(threshold_path, 'r') as f:
-        #     data = json.load(f)
-        #     confidence_threshold = data['confidence_threshold']
-        # with open(ambiguous_threshold_path, 'r') as f:
-        #     data = json.load(f)
-        #     self.ambiguos_confidence_threshold = data['confidence_threshold']
-
-        # self.err_corr_modelpipeline = fastworkflow.ModelPipelineRegistry(
-        #     tiny_model_path=tiny_path,
-        #     distil_model_path=large_path,
-        #     confidence_threshold=confidence_threshold
-        # )
 
     def predict(self, command_context_name: str, command: str, nlu_pipeline_stage: NLUPipelineStage) -> "CommandNamePrediction.Output":
         # sourcery skip: extract-duplicate-method
 
-        # Determine current command context for the subject session.  The
-        # global context "*" maps to a folder named "_global".
-        # ctx_name = self.sub_sess.current_command_context_name or "*"
-
-        tiny_path = get_artifact_path(self.sub_sess_workflow_folderpath, command_context_name, "tinymodel.pth")
-        # large_path = get_artifact_path(self.sub_sess_workflow_folderpath, command_context_name, "largemodel.pth")
-        # threshold_path = get_artifact_path(self.sub_sess_workflow_folderpath, command_context_name, "threshold.json")
-        # ambiguous_threshold_path = get_artifact_path(self.sub_sess_workflow_folderpath, command_context_name, "ambiguous_threshold.json")
-        # with open(threshold_path, 'r') as f:
-        #     data = json.load(f)
-        #     confidence_threshold = data['confidence_threshold']
-        # with open(ambiguous_threshold_path, 'r') as f:
-        #     data = json.load(f)
-        #     self.ambiguos_confidence_threshold = data['confidence_threshold']
-
-        # self.modelpipeline = fastworkflow.ModelPipelineRegistry(
-        #     tiny_model_path=tiny_path,
-        #     distil_model_path=large_path,
-        #     confidence_threshold=confidence_threshold
-        model_artifact_path = f"{self.sub_sess_workflow_folderpath}/___command_info/{command_context_name}"
+        model_artifact_path = f"{self.app_workflow_folderpath}/___command_info/{command_context_name}"
         command_router= CommandRouter(model_artifact_path)
-        self.modelpipeline = fastworkflow.ModelPipelineRegistry(
+        modelpipeline = fastworkflow.ModelPipelineRegistry(
             tiny_model_path=command_router.tiny_path,
             distil_model_path=command_router.large_path,
             confidence_threshold=command_router.confidence_threshold)
-        
 
         crd = fastworkflow.RoutingRegistry.get_definition(
-            self.session.workflow_folderpath)
-
+            self.cme_workflow.folderpath)
         cme_command_names = crd.get_command_names('IntentDetection')
-        if nlu_pipeline_stage != NLUPipelineStage.PARAMETER_EXTRACTION:
-            modelpipeline = self.modelpipeline
-            label_encoder_path = get_artifact_path(self.sub_sess_workflow_folderpath, command_context_name, "label_encoder.pkl")
 
-            subject_crd = fastworkflow.RoutingRegistry.get_definition(
-                self.sub_sess_workflow_folderpath)
-            
-            if nlu_pipeline_stage == NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION:
-                valid_command_names = self._get_suggested_commands(self.path)
-            else:
-                valid_command_names = (
-                    set(cme_command_names) | 
-                    set(subject_crd.get_command_names(command_context_name))
-                ) - {'wildcard'}
+        valid_command_names = set()
+        if nlu_pipeline_stage == NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION:
+            valid_command_names = self._get_suggested_commands(self.path)
+        elif nlu_pipeline_stage in (
+                NLUPipelineStage.INTENT_DETECTION, NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION):
+            app_crd = fastworkflow.RoutingRegistry.get_definition(
+                self.app_workflow_folderpath)
+            valid_command_names = (
+                set(cme_command_names) | 
+                set(app_crd.get_command_names(command_context_name))
+            ) - {'wildcard'}
 
-            command_name_dict = {
-                fully_qualified_command_name.split('/')[-1]: fully_qualified_command_name 
-                for fully_qualified_command_name in valid_command_names
-            }
+        command_name_dict = {
+            fully_qualified_command_name.split('/')[-1]: fully_qualified_command_name 
+            for fully_qualified_command_name in valid_command_names
+        }
 
         if nlu_pipeline_stage != NLUPipelineStage.INTENT_DETECTION:
             # abort is special. 
             # We will not predict, just match plain utterances with exact or fuzzy match
-            command_name_dict = {
-                plain_utterance: 'ErrorCorrection/abort' 
-                for plain_utterance in crd.command_directory.map_command_2_utterance_metadata['ErrorCorrection/abort'].plain_utterances
+            command_name_dict |= {
+                plain_utterance: 'ErrorCorrection/abort'
+                for plain_utterance in crd.command_directory.map_command_2_utterance_metadata[
+                    'ErrorCorrection/abort'
+                ].plain_utterances
             }
 
         if nlu_pipeline_stage != NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION:
             # you_misunderstood is special. 
             # We will not predict, just match plain utterances with exact or fuzzy match
-            for plain_utterance in crd.command_directory.map_command_2_utterance_metadata['ErrorCorrection/you_misunderstood'].plain_utterances:
-                command_name_dict[plain_utterance] = 'ErrorCorrection/you_misunderstood'
+            command_name_dict |= {
+                plain_utterance: 'ErrorCorrection/you_misunderstood'
+                for plain_utterance in crd.command_directory.map_command_2_utterance_metadata[
+                    'ErrorCorrection/you_misunderstood'
+                ].plain_utterances
+            }
 
         command_name = None
         # See if the command starts with a command name followed by a space
@@ -167,12 +126,11 @@ class CommandNamePrediction:
                     command_name = cache_result
                 else:
                     predictions=command_router.predict(command)
-                    
+
                     if len(predictions)==1:
                         command_name = predictions[0].split('/')[-1]
-
-                    # If confidence is low, treat as ambiguous command (type 1)
                     else:
+                    # If confidence is low, treat as ambiguous command (type 1)
                         error_msg = self._formulate_ambiguous_command_error_message(predictions)
                         # Store suggested commands
                         self._store_suggested_commands(self.path, predictions, 1)
@@ -181,12 +139,13 @@ class CommandNamePrediction:
         elif nlu_pipeline_stage in (
             NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
             NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
-        ):
+        ) and command_name != 'abort':
             if command_name:
-                command = self.session.workflow_context["command"]
+                command = self.cme_workflow.context["command"]
                 store_utterance_cache(self.path, command, command_name, modelpipeline)
             else:
-                command_name = 'You misunderstood'
+                error_msg = "Enter a valid command"
+                return CommandNamePrediction.Output(error_msg=error_msg)
 
         if not command_name or command_name == "wildcard":
             fully_qualified_command_name=None
@@ -204,19 +163,19 @@ class CommandNamePrediction:
         )
 
     @staticmethod
-    def _get_cache_path(session_id, convo_path):
+    def _get_cache_path(workflow_id, convo_path):
         """
-        Generate cache file path based on session ID
+        Generate cache file path based on workflow ID
         """
         base_dir = convo_path
         # Create directory if it doesn't exist
         os.makedirs(base_dir, exist_ok=True)
-        return os.path.join(base_dir, f"{session_id}.db")
+        return os.path.join(base_dir, f"{workflow_id}.db")
 
     @staticmethod
     def _get_cache_path_cache(convo_path):
         """
-        Generate cache file path based on session ID
+        Generate cache file path based on workflow ID
         """
         base_dir = convo_path
         # Create directory if it doesn't exist
@@ -315,30 +274,11 @@ class CommandNamePrediction:
             db.close()
 
     @staticmethod
-    def _validate_command_name(
-        nlu_pipeline_stage: NLUPipelineStage,
-        valid_command_names: list[str],
-        command_parameters: "CommandNamePrediction.ValidateCommandNameSignature"
-    ) -> tuple[bool, str]:
-        """
-        Validate if the command name is valid and get the required parameters.
-        """
-        if command_parameters.command_name in valid_command_names:
-            return (True, None)
-
-        command_list = "\n".join(f"@{name}" for name in valid_command_names if not name.startswith('Core'))
-        return (
-            False,
-            "Please select the correct command from the list below:\n"
-            f"{command_list}"
-        )
-
-    @staticmethod
     def _formulate_ambiguous_command_error_message(route_choice_list: list[str]) -> str:
         command_list = (
             "\n".join([
-                f"@{route_choice}"
-                for route_choice in route_choice_list
+                f"{route_choice}"
+                for route_choice in route_choice_list if route_choice != 'wildcard'
             ])
         )
 
@@ -356,30 +296,30 @@ class ParameterExtraction:
         error_msg: Optional[str] = None
         suggestions: Optional[Dict[str, List[str]]] = None
 
-    def __init__(self, session: fastworkflow.Session, subject_session: fastworkflow.Session, command_name: str, command: str):
-        self.session = session
-        self.subject_session = subject_session
+    def __init__(self, cme_workflow: fastworkflow.Workflow, app_workflow: fastworkflow.Workflow, command_name: str, command: str):
+        self.cme_workflow = cme_workflow
+        self.app_workflow = app_workflow
         self.command_name = command_name
         self.command = command
 
     def extract(self) -> "ParameterExtraction.Output":
-        subject_workflow_folderpath = self.subject_session.workflow_folderpath
-        subject_command_routing_definition = fastworkflow.RoutingRegistry.get_definition(subject_workflow_folderpath)
+        app_workflow_folderpath = self.app_workflow.folderpath
+        app_command_routing_definition = fastworkflow.RoutingRegistry.get_definition(app_workflow_folderpath)
 
         command_parameters_class = (
-            subject_command_routing_definition.get_command_class(
+            app_command_routing_definition.get_command_class(
                 self.command_name, ModuleType.COMMAND_PARAMETERS_CLASS
             )
         )
         if not command_parameters_class:
             return self.Output(parameters_are_valid=True)
 
-        stored_params = self._get_stored_parameters(self.session)
+        stored_params = self._get_stored_parameters(self.cme_workflow)
 
-        input_for_param_extraction = InputForParamExtraction.create(self.subject_session, self.command_name, self.command)
+        input_for_param_extraction = InputForParamExtraction.create(self.app_workflow, self.command_name, self.command)
 
         if stored_params:
-            _, _, _, stored_missing_fields = self._extract_missing_fields(input_for_param_extraction, self.subject_session, self.command_name, stored_params)
+            _, _, _, stored_missing_fields = self._extract_missing_fields(input_for_param_extraction, self.app_workflow, self.command_name, stored_params)
         else:
             stored_missing_fields = []
 
@@ -388,7 +328,7 @@ class ParameterExtraction:
             command_parameters_class,
             stored_missing_fields,
             self.command_name,
-            subject_workflow_folderpath
+            app_workflow_folderpath
         )
 
         if stored_params:
@@ -396,10 +336,10 @@ class ParameterExtraction:
         else:
             merged_params = new_params
 
-        self._store_parameters(self.session, merged_params)
+        self._store_parameters(self.cme_workflow, merged_params)
 
         is_valid, error_msg, suggestions = input_for_param_extraction.validate_parameters(
-            self.subject_session, self.command_name, merged_params
+            self.app_workflow, self.command_name, merged_params
         )
 
         if not is_valid:
@@ -414,23 +354,23 @@ class ParameterExtraction:
                 cmd_parameters=merged_params,
                 suggestions=suggestions)
 
-        self._clear_parameters(self.session)
+        self._clear_parameters(self.cme_workflow)
         return self.Output(
             parameters_are_valid=True,
             cmd_parameters=merged_params)
 
     @staticmethod
-    def _get_stored_parameters(session):
-        return session.workflow_context.get("stored_parameters")
+    def _get_stored_parameters(cme_workflow: fastworkflow.Workflow):
+        return cme_workflow.context.get("stored_parameters")
 
     @staticmethod
-    def _store_parameters(session, parameters):
-        session.workflow_context["stored_parameters"] = parameters
+    def _store_parameters(cme_workflow: fastworkflow.Workflow, parameters):
+        cme_workflow.context["stored_parameters"] = parameters
 
     @staticmethod
-    def _clear_parameters(session):
-        if "stored_parameters" in session.workflow_context:
-            del session.workflow_context["stored_parameters"]
+    def _clear_parameters(cme_workflow: fastworkflow.Workflow):
+        if "stored_parameters" in cme_workflow.context:
+            del cme_workflow.context["stored_parameters"]
 
     @staticmethod
     def _extract_missing_fields(input_for_param_extraction, sws, command_name, stored_params):
@@ -441,10 +381,10 @@ class ParameterExtraction:
 
         if not is_valid:
             if MISSING_INFORMATION_ERRMSG in error_msg:
-                missing_fields_str = error_msg.split(f"{MISSING_INFORMATION_ERRMSG}\n")[1].split("\n")[0]
+                missing_fields_str = error_msg.split(f"{MISSING_INFORMATION_ERRMSG}")[1].split("\n")[0]
                 stored_missing_fields = [f.strip() for f in missing_fields_str.split(",")]
             if INVALID_INFORMATION_ERRMSG in error_msg:
-                invalid_section = error_msg.split(f"{INVALID_INFORMATION_ERRMSG}\n")[1]
+                invalid_section = error_msg.split(f"{INVALID_INFORMATION_ERRMSG}")[1]
                 if "\n" in invalid_section:
                     invalid_fields_str = invalid_section.split("\n")[0]
                     stored_missing_fields.extend(
@@ -476,10 +416,12 @@ class ParameterExtraction:
                         setattr(merged, field_name, new_value)
 
                     elif isinstance(old_value, int) and old_value == INVALID_INT_VALUE:
-                        setattr(merged, field_name, new_value)
+                        with contextlib.suppress(ValueError, TypeError):
+                            setattr(merged, field_name, int(new_value))
 
                     elif isinstance(old_value, float) and old_value == INVALID_FLOAT_VALUE:
-                        setattr(merged, field_name, new_value)
+                        with contextlib.suppress(ValueError, TypeError):
+                            setattr(merged, field_name, float(new_value))
 
                     elif (field_name in missing_fields and
                           hasattr(merged.model_fields.get(field_name), "json_schema_extra") and
@@ -523,8 +465,8 @@ class ParameterExtraction:
             if value in [
                 NOT_FOUND, 
                 None,
-                -sys.maxsize,
-                -sys.float_info.max
+                INVALID_INT_VALUE,
+                INVALID_FLOAT_VALUE
             ]:
                 continue
 
@@ -549,8 +491,8 @@ class ParameterExtraction:
         input_for_param_extraction: BaseModel,
         command_parameters_class: Type[BaseModel],
         missing_fields: list = None,
-        subject_command_name: str = None,
-        subject_workflow_folderpath: str = None,
+        app_command_name: str = None,
+        app_workflow_folderpath: str = None,
     ) -> BaseModel:
         """
         Extract command parameters from user input.
@@ -562,7 +504,7 @@ class ParameterExtraction:
             return ParameterExtraction._apply_missing_fields(
                 input_for_param_extraction.command, default_params, missing_fields)
 
-        return input_for_param_extraction.extract_parameters(command_parameters_class, subject_command_name, subject_workflow_folderpath)
+        return input_for_param_extraction.extract_parameters(command_parameters_class, app_command_name, app_workflow_folderpath)
 
     @staticmethod
     def _apply_missing_fields(command: str, default_params: BaseModel, missing_fields: list):
@@ -610,7 +552,7 @@ class Signature:
     ]
 
     @staticmethod
-    def generate_utterances(session: fastworkflow.Session, command_name: str) -> list[str]:
+    def generate_utterances(workflow: fastworkflow.Workflow, command_name: str) -> list[str]:
         return [
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + Signature.plain_utterances
@@ -619,24 +561,24 @@ class Signature:
 class ResponseGenerator:
     def __call__(
         self, 
-        session: fastworkflow.Session, 
+        workflow: fastworkflow.Workflow, 
         command: str,
     ) -> CommandOutput:  # sourcery skip: hoist-if-from-if
-        session.is_complete = False
+        workflow.is_complete = False
 
-        subject_session = session.workflow_context["subject_session"]   # type: fastworkflow.Session
-        cmd_ctxt_obj_name = subject_session.current_command_context_name
-        nlu_pipeline_stage = session.workflow_context.get(
+        app_workflow = workflow.context["app_workflow"]   # type: fastworkflow.Workflow
+        cmd_ctxt_obj_name = app_workflow.current_command_context_name
+        nlu_pipeline_stage = workflow.context.get(
             "NLU_Pipeline_Stage", 
             NLUPipelineStage.INTENT_DETECTION)
 
-        predictor = CommandNamePrediction(session)           
+        predictor = CommandNamePrediction(workflow)           
         cnp_output = predictor.predict(cmd_ctxt_obj_name, command, nlu_pipeline_stage)
 
         if cnp_output.error_msg:
-            workflow_context = session.workflow_context
+            workflow_context = workflow.context
             workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION
-            session.workflow_context = workflow_context
+            workflow.context = workflow_context
             return CommandOutput(
                 command_responses=[
                     CommandResponse(
@@ -650,26 +592,22 @@ class ResponseGenerator:
             )
         
         if cnp_output.is_cme_command:
-            workflow_context = session.workflow_context
+            workflow_context = workflow.context
             if cnp_output.command_name == 'ErrorCorrection/you_misunderstood':
                 workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
                 if command not in workflow_context:
                     workflow_context["command"] = command
             else:
-                session.is_complete = True
+                workflow.is_complete = True
                 workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.INTENT_DETECTION
                 workflow_context.pop("command", None)
-            session.workflow_context = workflow_context
+            workflow.context = workflow_context
 
             startup_action = Action(
                 command_name=cnp_output.command_name,
                 command=command,
             )
-            command_executor = CommandExecutor()
-            command_output = command_executor.perform_action(session, startup_action)
-            if len(command_output.command_responses) > 1:
-                raise ValueError("Multiple command responses returned from command_metadata_extraction workflow")    
-            # set command_handled to true
+            command_output = CommandExecutor.perform_action(workflow, startup_action)
             command_output.command_responses[0].artifacts["command_handled"] = True
             return command_output
         
@@ -678,35 +616,34 @@ class ResponseGenerator:
                 NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
                 NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
             }:
-            subject_session.command_context_for_response_generation = \
-                subject_session.current_command_context
+            app_workflow.command_context_for_response_generation = \
+                app_workflow.current_command_context
 
             if cnp_output.command_name is None:
                 while not cnp_output.command_name and \
-                    subject_session.command_context_for_response_generation is not None and \
-                        not subject_session.is_command_context_for_response_generation_root:
-                    subject_session.command_context_for_response_generation = \
-                        subject_session.get_parent(subject_session.command_context_for_response_generation)
+                    app_workflow.command_context_for_response_generation is not None and \
+                        not app_workflow.is_command_context_for_response_generation_root:
+                    app_workflow.command_context_for_response_generation = \
+                        app_workflow.get_parent(app_workflow.command_context_for_response_generation)
                     cnp_output = predictor.predict(
-                        fastworkflow.Session.get_command_context_name(subject_session.command_context_for_response_generation), 
+                        fastworkflow.Workflow.get_command_context_name(app_workflow.command_context_for_response_generation), 
                         command, nlu_pipeline_stage)
             
                 if cnp_output.command_name is None:
                     if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION:
                         # out of scope commands
-                        workflow_context = session.workflow_context
+                        workflow_context = workflow.context
                         workflow_context["NLU_Pipeline_Stage"] = \
                             NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
                         if command not in workflow_context:
                             workflow_context["command"] = command
-                        session.workflow_context = workflow_context
+                        workflow.context = workflow_context
 
                         startup_action = Action(
                             command_name='ErrorCorrection/you_misunderstood',
                             command=command,
                         )
-                        command_executor = CommandExecutor()
-                        command_output = command_executor.perform_action(session, startup_action)
+                        command_output = CommandExecutor.perform_action(workflow, startup_action)
                         command_output.command_responses[0].artifacts["command_handled"] = True
                         return command_output
 
@@ -720,14 +657,14 @@ class ResponseGenerator:
                     )
 
             # move to the parameter extraction stage
-            workflow_context = session.workflow_context
+            workflow_context = workflow.context
             workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.PARAMETER_EXTRACTION
             workflow_context["command_name"] = cnp_output.command_name
             workflow_context["command"] = command
-            session.workflow_context = workflow_context
+            workflow.context = workflow_context
 
-        command_name = session.workflow_context["command_name"]
-        extractor = ParameterExtraction(session, subject_session, command_name, command)
+        command_name = workflow.context["command_name"]
+        extractor = ParameterExtraction(workflow, app_workflow, command_name, command)
         pe_output = extractor.extract()
         if not pe_output.parameters_are_valid:
             return CommandOutput(
@@ -742,8 +679,8 @@ class ResponseGenerator:
                 ]
             )
 
-        session.is_complete = True
-        session.workflow_context["NLU_Pipeline_Stage"] = \
+        workflow.is_complete = True
+        workflow.context["NLU_Pipeline_Stage"] = \
             NLUPipelineStage.INTENT_DETECTION
 
         return CommandOutput(
@@ -751,7 +688,7 @@ class ResponseGenerator:
                 CommandResponse(
                     response="",
                     artifacts={
-                        "command": session.workflow_context["command"],
+                        "command": workflow.context["command"],
                         "command_name": command_name,
                         "cmd_parameters": pe_output.cmd_parameters,
                     },

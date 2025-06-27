@@ -34,25 +34,22 @@ def enablecache(func):
 
     return wrapper
 
-class Session:
-    """Session class"""
+class Workflow:
+    """Workflow class"""
     @classmethod
-    def create(cls, workflow_folderpath: str, session_id_str: Optional[str] = None, parent_session_id: Optional[int] = None, workflow_context: dict = None, for_training_semantic_router: bool = False) -> "Session":
-        if workflow_context is None:
-            workflow_context = {}
-        if session_id_str is None and parent_session_id is None:
-            raise ValueError("Either session_id_str or parent_session_id must be provided")
+    def create(cls, workflow_folderpath: str, workflow_id_str: Optional[str] = None, parent_workflow_id: Optional[int] = None, workflow_context: dict = None) -> "Workflow":
+        if workflow_id_str is not None and parent_workflow_id is not None:
+            raise ValueError("workflow_id_str and parent_workflow_id cannot both be provided")
 
-        if session_id_str is not None and parent_session_id is not None:
-            raise ValueError("session_id_str and parent_session_id cannot both be provided")
-
-        if session_id_str:
-            session_id = fastworkflow.get_session_id(session_id_str)
+        if workflow_id_str:
+            workflow_id = fastworkflow.get_workflow_id(workflow_id_str)
         else:
-            session_id = cls._generate_child_session_id(parent_session_id, workflow_folderpath)
+            workflow_id = cls.generate_child_workflow_id(workflow_folderpath, parent_workflow_id)
 
-        if session := cls.get_session(session_id, workflow_context):
-            return session
+        if workflow := cls.get_workflow(workflow_id):
+            if workflow_context is not None:
+                workflow.context = workflow_context
+            return workflow
 
         if not os.path.exists(workflow_folderpath):
             raise ValueError(f"The folder path {workflow_folderpath} does not exist")
@@ -61,85 +58,84 @@ class Session:
             raise ValueError(f"{workflow_folderpath} must be a directory")
 
         workflow_snapshot = {
-            "session_id": session_id,
+            "workflow_id": workflow_id,
             "workflow_folderpath": workflow_folderpath,
             "workflow_context": workflow_context or {},
-            "parent_session_id": parent_session_id,
+            "parent_workflow_id": parent_workflow_id,
             "is_complete": False
         }
-        session = Session(cls.__create_key, workflow_snapshot)
+        workflow = Workflow(cls.__create_key, workflow_snapshot)
 
-        session_db_folderpath = Session._get_sessiondb_folderpath(
-            session_id=session_id,
-            parent_session_id=parent_session_id,
+        session_db_folderpath = Workflow._get_sessiondb_folderpath(
+            workflow_id=workflow_id,
+            parent_workflow_id=parent_workflow_id,
             workflow_folderpath=workflow_folderpath
         )
 
-        sessionid_2_sessiondata_mapdir = Session._get_session_id_2_sessiondata_mapdir()
-        map_sessionid_2_session_db = Rdict(sessionid_2_sessiondata_mapdir)       
+        workflowid_2_sessiondata_mapdir = Workflow._get_workflow_id_2_sessiondata_mapdir()
+        map_workflowid_2_session_db = Rdict(workflowid_2_sessiondata_mapdir)       
 
-        map_sessionid_2_session_db[session.id] = {
+        map_workflowid_2_session_db[workflow.id] = {
             "sessiondb_folderpath": session_db_folderpath,
             "children": []
         }
-        if session.parent_id:
-            parent_session_data = map_sessionid_2_session_db[session.parent_id]
+        if workflow.parent_id:
+            parent_session_data = map_workflowid_2_session_db[workflow.parent_id]
             sibling_list = parent_session_data["children"]
-            if session.id not in sibling_list:
-                sibling_list.append(session.id)
+            if workflow.id not in sibling_list:
+                sibling_list.append(workflow.id)
                 parent_session_data["children"] = sibling_list
-                map_sessionid_2_session_db[session.parent_id] = parent_session_data
+                map_workflowid_2_session_db[workflow.parent_id] = parent_session_data
 
-        map_sessionid_2_session_db.close()
-        return session
+        map_workflowid_2_session_db.close()
+        return workflow
 
     @classmethod
-    def get_session(cls, 
-             session_id: int, 
-             context: Optional[dict] = None) -> Optional["Session"]:
-        """load the session"""
-        sessionid_2_sessiondata_mapdir = Session._get_session_id_2_sessiondata_mapdir()
-        map_sessionid_2_session_db = Rdict(sessionid_2_sessiondata_mapdir)
-        sessiondata_dict = map_sessionid_2_session_db.get(session_id, None)
-        map_sessionid_2_session_db.close()
+    def get_workflow(cls, workflow_id: int) -> Optional["Workflow"]:
+        """load the workflow"""
+        workflowid_2_sessiondata_mapdir = Workflow._get_workflow_id_2_sessiondata_mapdir()
+        map_workflowid_2_session_db = Rdict(workflowid_2_sessiondata_mapdir)
+        sessiondata_dict = map_workflowid_2_session_db.get(workflow_id, None)
+        map_workflowid_2_session_db.close()
 
         if not sessiondata_dict:
             return None
 
         sessiondb_folderpath = sessiondata_dict["sessiondb_folderpath"]
         if not os.path.exists(sessiondb_folderpath):
-            raise ValueError(f"Session database folder path {sessiondb_folderpath} does not exist")
+            raise ValueError(f"Workflow database folder path {sessiondb_folderpath} does not exist")
 
-        workflow_snapshot = Session._load(sessiondb_folderpath)
-        if context:
-            workflow_snapshot["workflow_context"] = context
+        workflow_snapshot = Workflow._load(sessiondb_folderpath)
 
-        return Session(
+        return Workflow(
             cls.__create_key,
             workflow_snapshot,
         )
 
     @classmethod
-    def _generate_child_session_id(cls, parent_session_id: int, workflow_folderpath: str) -> int:
-        """generate a child session id"""
+    def generate_child_workflow_id(cls, workflow_folderpath: str, parent_workflow_id: Optional[int] = None) -> int:
+        """generate a child workflow id"""
         workflow_type = os.path.basename(workflow_folderpath).rstrip("/")
-        session_id_str = f"{parent_session_id}{workflow_type}"
-        return fastworkflow.get_session_id(session_id_str)
+        workflow_id_str = f"{parent_workflow_id}{workflow_type}" \
+                         if parent_workflow_id \
+                         else f"{workflow_type}"
 
-    # enforce session creation exclusively using Session.create_session
+        return fastworkflow.get_workflow_id(workflow_id_str)
+
+    # enforce workflow creation exclusively using Workflow.create
     # https://stackoverflow.com/questions/8212053/private-constructor-in-python
     __create_key = object()
    
     def __init__(self, create_key, workflow_snapshot: dict[str, str|int|bool]):
-        """initialize the Session class"""
-        if create_key is not Session.__create_key:
-            raise ValueError("Session objects must be created using Session.create")
+        """initialize the Workflow class"""
+        if create_key is not Workflow.__create_key:
+            raise ValueError("Workflow objects must be created using Workflow.create")
 
-        self._id = workflow_snapshot["session_id"]
-        self._workflow_folderpath = workflow_snapshot["workflow_folderpath"]
-        self._workflow_context = workflow_snapshot.get("workflow_context", {}) 
-        self._parent_id = workflow_snapshot.get("parent_session_id")
+        self._id = workflow_snapshot["workflow_id"]
+        self._folderpath = workflow_snapshot["workflow_folderpath"]
+        self._parent_id = workflow_snapshot.get("parent_workflow_id")
         self._is_complete = workflow_snapshot.get("is_complete", False)
+        self._context = workflow_snapshot.get("workflow_context", {}) 
 
         self._root_command_context = None
         self._current_command_context = None
@@ -147,9 +143,9 @@ class Session:
 
         self._save()
 
-        if self._workflow_folderpath not in sys.path:
+        if self._folderpath not in sys.path:
             # THIS IS IMPORTANT: it allows relative import of modules in the code inside workflow_folderpath
-            sys.path.insert(0, self._workflow_folderpath)
+            sys.path.insert(0, self._folderpath)
 
     @property
     def current_command_context(self) -> object:
@@ -157,11 +153,11 @@ class Session:
 
     @property
     def current_command_context_name(self) -> str:
-        return Session.get_command_context_name(self._current_command_context)
+        return Workflow.get_command_context_name(self._current_command_context)
 
     @property
     def current_command_context_displayname(self) -> str:
-        return Session.get_command_context_name(self._current_command_context, for_display=True)
+        return Workflow.get_command_context_name(self._current_command_context, for_display=True)
 
     @property
     def is_current_command_context_root(self) -> bool:
@@ -178,7 +174,7 @@ class Session:
     @root_command_context.setter
     def root_command_context(self, value: Optional[object]) -> None:
         if self._root_command_context:
-            raise ValueError("Root command context can only be set once per Session")
+            raise ValueError("Root command context can only be set once per Workflow")
 
         self._root_command_context = value
         self._current_command_context = value
@@ -188,9 +184,9 @@ class Session:
             return self._root_command_context
 
         crd = fastworkflow.CommandContextModel.load(
-            self._workflow_folderpath)
+            self._folderpath)
         context_class = crd.get_context_class(
-                Session.get_command_context_name(command_context_object),
+                Workflow.get_command_context_name(command_context_object),
                 fastworkflow.ModuleType.CONTEXT_CLASS
         )
         if context_class:
@@ -220,30 +216,30 @@ class Session:
 
     @property
     def id(self) -> int:
-        """get the session id"""
+        """get the workflow id"""
         return self._id
     
     @property
     def parent_id(self) -> Optional[int]:
-        """get the parent session id"""
+        """get the parent workflow id"""
         return self._parent_id
 
     @property
-    def workflow_folderpath(self) -> str:
-        return self._workflow_folderpath
+    def folderpath(self) -> str:
+        return self._folderpath
 
-    @workflow_folderpath.setter
-    def workflow_folderpath(self, value: str) -> None:
-        self._workflow_folderpath = value
+    @folderpath.setter
+    def folderpath(self, value: str) -> None:
+        self._folderpath = value
         self._save()
 
     @property
-    def workflow_context(self) -> dict:
-        return self._workflow_context
+    def context(self) -> dict:
+        return self._context
     
-    @workflow_context.setter
-    def workflow_context(self, value: dict) -> None:
-        self._workflow_context = value
+    @context.setter
+    def context(self, value: dict) -> None:
+        self._context = value
         self._save()
 
     @property
@@ -260,17 +256,17 @@ class Session:
         if self.parent_id:
             raise ValueError("close should only be called on the root session")
 
-        sessionid_2_sessiondata_mapdir = Session._get_session_id_2_sessiondata_mapdir()
-        map_sessionid_2_session_db = Rdict(sessionid_2_sessiondata_mapdir)
+        workflowid_2_sessiondata_mapdir = Workflow._get_workflow_id_2_sessiondata_mapdir()
+        map_workflowid_2_session_db = Rdict(workflowid_2_sessiondata_mapdir)
 
         # collect all descendants
         descendant_list = []
-        to_process = map_sessionid_2_session_db[self.id]["children"][:]  # Create a shallow copy
+        to_process = map_workflowid_2_session_db[self.id]["children"][:]  # Create a shallow copy
         while to_process:
             current_id = to_process.pop()
-            child_session_data = Session._get_session_data(
+            child_session_data = Workflow._get_session_data(
                 current_id,
-                map_sessionid_2_session_db=map_sessionid_2_session_db
+                map_workflowid_2_session_db=map_workflowid_2_session_db
             )
             descendant_list.append(current_id)
             if child_session_data[3] in sys.path:
@@ -279,20 +275,20 @@ class Session:
             to_process.extend(child_session_data[2])
 
         # process all descendants
-        for descendant_session_id in descendant_list:
-            del map_sessionid_2_session_db[descendant_session_id]
+        for descendant_workflow_id in descendant_list:
+            del map_workflowid_2_session_db[descendant_workflow_id]
 
-        sys.path.remove(self._workflow_folderpath)
-        # remove ourselves from the sessionid_2_sessiondata_map
-        del map_sessionid_2_session_db[self.id]
+        sys.path.remove(self._folderpath)
+        # remove ourselves from the workflowid_2_sessiondata_map
+        del map_workflowid_2_session_db[self.id]
 
-        map_sessionid_2_session_db.close()
+        map_workflowid_2_session_db.close()
 
         try:
-            sessiondb_folderpath = Session._get_sessiondb_folderpath(
-                session_id=self._id,
-                parent_session_id=self._parent_id,
-                workflow_folderpath=self._workflow_folderpath
+            sessiondb_folderpath = Workflow._get_sessiondb_folderpath(
+                workflow_id=self._id,
+                parent_workflow_id=self._parent_id,
+                workflow_folderpath=self._folderpath
             )
             shutil.rmtree(sessiondb_folderpath, ignore_errors=True)
         except OSError as e:
@@ -304,29 +300,29 @@ class Session:
     @classmethod
     def _get_sessiondb_folderpath(
         cls, 
-        session_id: int, 
-        parent_session_id: Optional[int] = None,
+        workflow_id: int, 
+        parent_workflow_id: Optional[int] = None,
         workflow_folderpath: Optional[str] = None
     ) -> str:
         """get the db folder path"""
-        if parent_session_id is None and workflow_folderpath is None:
-            raise ValueError("parent_session_id or workflow_folderpath must be provided")
+        if parent_workflow_id is None and workflow_folderpath is None:
+            raise ValueError("parent_workflow_id or workflow_folderpath must be provided")
 
-        if parent_session_id:
+        if parent_workflow_id:
             parent_session_folder = ""
 
-            sessionid_2_sessiondata_mapdir = Session._get_session_id_2_sessiondata_mapdir()
-            map_sessionid_2_session_db = Rdict(sessionid_2_sessiondata_mapdir)       
+            workflowid_2_sessiondata_mapdir = Workflow._get_workflow_id_2_sessiondata_mapdir()
+            map_workflowid_2_session_db = Rdict(workflowid_2_sessiondata_mapdir)       
             
-            while parent_session_id:
-                parent_session_data = Session._get_session_data(
-                    parent_session_id,
-                    map_sessionid_2_session_db=map_sessionid_2_session_db
+            while parent_workflow_id:
+                parent_session_data = Workflow._get_session_data(
+                    parent_workflow_id,
+                    map_workflowid_2_session_db=map_workflowid_2_session_db
                 )
-                parent_session_id = parent_session_data[0]
+                parent_workflow_id = parent_session_data[0]
                 parent_session_folder = os.path.join(parent_session_data[1], parent_session_folder)
             
-            map_sessionid_2_session_db.close()
+            map_workflowid_2_session_db.close()
         else:
             speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
             parent_session_folder = os.path.join(
@@ -334,49 +330,49 @@ class Session:
                 speedict_foldername
             )
     
-        session_id_str = str(session_id).replace("-", "_")
-        return os.path.join(parent_session_folder, session_id_str)
+        workflow_id_str = str(workflow_id).replace("-", "_")
+        return os.path.join(parent_session_folder, workflow_id_str)
 
     @classmethod
-    def _get_session_data(cls, session_id: int, map_sessionid_2_session_db: Rdict) -> tuple[int, str, list, str]:
+    def _get_session_data(cls, workflow_id: int, map_workflowid_2_session_db: Rdict) -> tuple[int, str, list, str]:
         """get the parent id, the session db folder path, the children list, and the workflow folderpath"""
-        sessiondata_dict = map_sessionid_2_session_db.get(session_id, None)
+        sessiondata_dict = map_workflowid_2_session_db.get(workflow_id, None)
 
         if not sessiondata_dict:
-            raise ValueError(f"Session {session_id} not found")
+            raise ValueError(f"Workflow {workflow_id} not found")
 
         sessiondb_folderpath = sessiondata_dict["sessiondb_folderpath"]
         if not os.path.exists(sessiondb_folderpath):
-            raise ValueError(f"Session database folder path {sessiondb_folderpath} does not exist")
+            raise ValueError(f"Workflow database folder path {sessiondb_folderpath} does not exist")
 
         children_list = sessiondata_dict["children"]
         if children_list is None:
-            raise ValueError(f"Session {session_id} must have a children list even if it is empty")
+            raise ValueError(f"Workflow {workflow_id} must have a children list even if it is empty")
 
-        workflow_snapshot = Session._load(sessiondb_folderpath)
+        workflow_snapshot = Workflow._load(sessiondb_folderpath)
         return (
-            workflow_snapshot["parent_session_id"],
+            workflow_snapshot["parent_workflow_id"],
             sessiondb_folderpath,
             children_list,
-            workflow_snapshot["workflow_folderpath"],
+            workflow_snapshot["workflow_folderpath"]
         )
 
     @classmethod
-    def _get_session_id_2_sessiondata_mapdir(cls) -> str:
-        """get the sessionid_2_sessiondata_map folder path"""
+    def _get_workflow_id_2_sessiondata_mapdir(cls) -> str:
+        """get the workflowid_2_sessiondata_map folder path"""
         speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
-        sessionid_2_sessiondata_mapdir = os.path.join(
+        workflowid_2_sessiondata_mapdir = os.path.join(
             speedict_foldername,
-            "sessionid_2_sessiondata_map"
+            "workflowid_2_sessiondata_map"
         )
-        os.makedirs(sessionid_2_sessiondata_mapdir, exist_ok=True)
-        return sessionid_2_sessiondata_mapdir
+        os.makedirs(workflowid_2_sessiondata_mapdir, exist_ok=True)
+        return workflowid_2_sessiondata_mapdir
 
     def get_cachedb_folderpath(self, function_name: str) -> str:
         """Get the cache database folder path for a specific function"""
         speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
         return os.path.join(
-            self._workflow_folderpath,
+            self._folderpath,
             speedict_foldername,
             f"function_cache/{function_name}",
         )
@@ -387,10 +383,11 @@ class Session:
         keyvalue_db = Rdict(sessiondb_folderpath)
         workflow_snapshot = {
             
-            "session_id": keyvalue_db["session_id"],
+            "workflow_id": keyvalue_db["workflow_id"],
             "workflow_folderpath": keyvalue_db["workflow_folderpath"],
-            "parent_session_id": keyvalue_db["parent_session_id"],
+            "parent_workflow_id": keyvalue_db["parent_workflow_id"],
             "is_complete": keyvalue_db["is_complete"],
+            "workflow_context": keyvalue_db["workflow_context"]
         }
         keyvalue_db.close()
 
@@ -398,10 +395,10 @@ class Session:
 
     def _save(self) -> None:
         """save the workflow snapshot (as plain dict to avoid pickle)"""
-        sessiondb_folderpath = Session._get_sessiondb_folderpath(
-            session_id=self._id,
-            parent_session_id=self._parent_id,
-            workflow_folderpath=self._workflow_folderpath
+        sessiondb_folderpath = Workflow._get_sessiondb_folderpath(
+            workflow_id=self._id,
+            parent_workflow_id=self._parent_id,
+            workflow_folderpath=self._folderpath
         )
         os.makedirs(sessiondb_folderpath, exist_ok=True)     
 
@@ -411,10 +408,11 @@ class Session:
         keyvalue_db.close()
 
     def _to_dict(self) -> dict[str, str|int|bool]:
-        """Return a JSON-serialisable representation of the session."""
+        """Return a JSON-serialisable representation of the workflow."""
         return {
-            "session_id": self._id,
-            "workflow_folderpath": self._workflow_folderpath,
-            "parent_session_id": self._parent_id,
+            "workflow_id": self._id,
+            "workflow_folderpath": self._folderpath,
+            "parent_workflow_id": self._parent_id,
             "is_complete": self._is_complete,
+            "workflow_context": self._context
         }

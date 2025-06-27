@@ -29,7 +29,7 @@ configure_dspy_cache(enable_cache=True)   # Enable caching (default)
 ```python
 # Clear cache when initializing agent
 react_agent = initialize_dspy_agent(
-    workflow_session, 
+    chat_session, 
     LLM_AGENT, 
     LITELLM_API_KEY_AGENT,
     clear_cache=True  # 🗑️ This clears cache before initialization
@@ -111,7 +111,7 @@ dspy.configure_cache(
 
 ## 🚀 Usage Examples
 
-### **Fresh Testing Session**
+### **Fresh Testing Workflow**
 ```python
 from fastworkflow.run_agent.agent_module import initialize_dspy_agent, clear_dspy_cache
 
@@ -119,7 +119,7 @@ from fastworkflow.run_agent.agent_module import initialize_dspy_agent, clear_dsp
 clear_dspy_cache()
 
 # Your testing code here...
-agent = initialize_dspy_agent(workflow_session, LLM_AGENT, API_KEY)
+agent = initialize_dspy_agent(chat_session, LLM_AGENT, API_KEY)
 response = agent(user_query="test query")
 ```
 
@@ -131,7 +131,7 @@ import os
 is_development = os.getenv("ENVIRONMENT") == "development"
 
 agent = initialize_dspy_agent(
-    workflow_session, 
+    chat_session, 
     LLM_AGENT, 
     API_KEY,
     clear_cache=is_development
@@ -149,7 +149,7 @@ clear_dspy_cache()
 response = agent(user_query="debug this behavior")
 
 # Check what actually happened
-show_dspy_traces(n=10, label="Debug Session")
+show_dspy_traces(n=10, label="Debug Workflow")
 ```
 
 ## 🔧 Integration with Your Workflow
@@ -166,7 +166,7 @@ parser.add_argument("--clear-cache", action="store_true",
 # Then in main():
 try:
     react_agent = initialize_dspy_agent(
-        workflow_session, 
+        chat_session, 
         LLM_AGENT, 
         LITELLM_API_KEY_AGENT,
         clear_cache=args.clear_cache
@@ -181,7 +181,7 @@ Then run with:
 python -m fastworkflow.run_agent workflow/ env.env passwords.env --clear-cache
 ```
 
-### **Per-Session Cache Control**
+### **Per-Workflow Cache Control**
 
 ```python
 # Clear cache for specific sessions

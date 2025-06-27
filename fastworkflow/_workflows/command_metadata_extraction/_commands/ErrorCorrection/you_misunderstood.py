@@ -1,6 +1,6 @@
 import fastworkflow
 from fastworkflow import CommandOutput, CommandResponse
-from fastworkflow.session import Session
+from fastworkflow.workflow import Workflow
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -22,25 +22,25 @@ class Signature:
         valid_command_names: list[str]
 
     @staticmethod
-    def generate_utterances(session: Session, command_name: str) -> list[str]:
+    def generate_utterances(workflow: Workflow, command_name: str) -> list[str]:
         return [
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
 
 
 class ResponseGenerator:
-    def _process_command(self, session: Session) -> Signature.Output:
-        sub_sess = session.workflow_context["subject_session"]  #type: fastworkflow.Session
+    def _process_command(self, workflow: Workflow) -> Signature.Output:
+        app_workflow = workflow.context["app_workflow"]  #type: fastworkflow.Workflow
         subject_crd = fastworkflow.RoutingRegistry.get_definition(
-            sub_sess.workflow_folderpath)
+            app_workflow.folderpath)
         
         crd = fastworkflow.RoutingRegistry.get_definition(
-            session.workflow_folderpath)
+            workflow.folderpath)
         cme_command_names = crd.get_command_names('IntentDetection')
 
         fully_qualified_command_names = (
             set(cme_command_names) | 
-            set(subject_crd.get_command_names(sub_sess.current_command_context_name))
+            set(subject_crd.get_command_names(app_workflow.current_command_context_name))
         ) - {'wildcard'}
 
         valid_command_names = [
@@ -50,8 +50,8 @@ class ResponseGenerator:
 
         return Signature.Output(valid_command_names=sorted(valid_command_names))
 
-    def __call__(self, session: Session, command: str) -> CommandOutput:
-        output = self._process_command(session)
+    def __call__(self, workflow: Workflow, command: str) -> CommandOutput:
+        output = self._process_command(workflow)
 
         response = (
             "\n".join([
@@ -65,7 +65,7 @@ class ResponseGenerator:
         )
 
         return CommandOutput(
-            session_id=session.id,
+            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(
                     response=response,

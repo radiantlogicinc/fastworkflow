@@ -95,7 +95,7 @@ This document provides a detailed reference for interacting with Taskmaster, cov
     *   `status`: `Show only Taskmaster tasks matching this status, e.g., 'pending' or 'done'.` (CLI: `-s, --status <status>`)
     *   `withSubtasks`: `Include subtasks indented under their parent tasks in the list.` (CLI: `--with-subtasks`)
     *   `file`: `Path to your Taskmaster 'tasks.json' file. Default relies on auto-detection.` (CLI: `-f, --file <file>`)
-*   **Usage:** Get an overview of the project status, often used at the start of a work session.
+*   **Usage:** Get an overview of the project status, often used at the start of a work workflow.
 
 ### 4. Get Next Task (`next_task`)
 

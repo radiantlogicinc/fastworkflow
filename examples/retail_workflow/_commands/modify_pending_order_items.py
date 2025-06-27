@@ -2,7 +2,7 @@ from typing import List
 
 import fastworkflow
 from pydantic import BaseModel, Field, ConfigDict
-from fastworkflow.session import Session
+from fastworkflow.workflow import Workflow
 from fastworkflow import CommandOutput, CommandResponse
 
 from ..retail_data import load_data
@@ -50,28 +50,28 @@ class Signature:
     template_utterances: List[str] = []
 
     @staticmethod
-    def generate_utterances(session: fastworkflow.Session, command_name: str) -> List[str]:
-        utterance_definition = fastworkflow.RoutingRegistry.get_definition(session.workflow_folderpath)
+    def generate_utterances(workflow: fastworkflow.Workflow, command_name: str) -> List[str]:
+        utterance_definition = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
         utterances_obj = utterance_definition.get_command_utterances(command_name)
         from fastworkflow.train.generate_synthetic import generate_diverse_utterances
         return generate_diverse_utterances(utterances_obj.plain_utterances, command_name)
 
 
 class ResponseGenerator:
-    def __call__(self, session: Session, command: str, command_parameters: Signature.Input) -> CommandOutput:
-        output = self._process_command(session, command_parameters)
+    def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> CommandOutput:
+        output = self._process_command(workflow, command_parameters)
         response = (
-            f'Context: {session.current_command_context_displayname}\n'
+            f'Context: {workflow.current_command_context_displayname}\n'
             f'Command: {command}\n'
             f'Command parameters: {command_parameters}\n'
             f'Response: Modified details: {output.status}'
         )
         return CommandOutput(
-            session_id=session.id,
+            workflow_id=workflow.id,
             command_responses=[CommandResponse(response=response)],
         )
 
-    def _process_command(self, session: Session, input: Signature.Input) -> Signature.Output:
+    def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         data = load_data()
         result = ModifyPendingOrderItems.invoke(
             data=data,

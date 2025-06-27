@@ -7,60 +7,60 @@ import pytest
 class DummyExpander:
     """Simple implementation that always clears context."""
 
-    def get_parent_command_context(self, session: fastworkflow.Session):  # noqa: D401
-        """Clear the context of the provided session."""
-        session.current_command_context = None
+    def get_parent_command_context(self, workflow: fastworkflow.Workflow):  # noqa: D401
+        """Clear the context of the provided workflow."""
+        workflow.current_command_context = None
 
 
-def test_session_has_context_methods(tmp_path):
+def test_workflow_has_context_methods(tmp_path):
     env_vars = {"SPEEDDICT_FOLDERNAME": "___workflow_contexts"}
     fastworkflow.init(env_vars=env_vars)
 
     # Get the path to the hello_world example directory
     hello_world_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "hello_world")
     
-    # Create a session with the hello_world workflow
-    session = fastworkflow.Session.create(
+    # Create a workflow with the hello_world workflow
+    workflow = fastworkflow.Workflow.create(
         workflow_folderpath=hello_world_path,
-        session_id_str="test-session-3"
+        workflow_id_str="test-workflow-3"
     )
     
     # Initially, context should be None
-    assert session.current_command_context is None
+    assert workflow.current_command_context is None
 
     # Set a dummy context object and verify getter returns it
     dummy_obj = object()
-    session.current_command_context = dummy_obj
-    assert session.current_command_context is dummy_obj
+    workflow.current_command_context = dummy_obj
+    assert workflow.current_command_context is dummy_obj
 
     # Reset context to None and verify
-    session.current_command_context = None
-    assert session.current_command_context is None
+    workflow.current_command_context = None
+    assert workflow.current_command_context is None
 
 
 def test_dummy_expander(tmp_path):
-    """Test that DummyExpander can clear a session's context."""
+    """Test that DummyExpander can clear a workflow's context."""
     env_vars = {"SPEEDDICT_FOLDERNAME": "___workflow_contexts"}
     fastworkflow.init(env_vars=env_vars)
 
     # Get the path to the hello_world example directory
     hello_world_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "hello_world")
     
-    # Create a session with the hello_world workflow
-    session = fastworkflow.Session.create(
+    # Create a workflow with the hello_world workflow
+    workflow = fastworkflow.Workflow.create(
         workflow_folderpath=hello_world_path,
-        session_id_str="test-session-3"
+        workflow_id_str="test-workflow-3"
     )
 
     # Set some context (simple, picklable object)
     ctx = {"foo": "bar"}
-    session.current_command_context = ctx
-    assert session.current_command_context is ctx
+    workflow.current_command_context = ctx
+    assert workflow.current_command_context is ctx
 
     # Use the updated DummyExpander to clear the context
     expander = DummyExpander()
-    expander.get_parent_command_context(session)
-    assert session.current_command_context is None
+    expander.get_parent_command_context(workflow)
+    assert workflow.current_command_context is None
 
 
 # ---------------------------------------------------------------------------
@@ -78,9 +78,9 @@ class ChildCtx:
     def __init__(self, parent):
         self._parent = parent
 
-    def get_parent_command_context(self, session: fastworkflow.Session):  # noqa: D401
-        """Set the session's context to this object's parent context."""
-        session.current_command_context = self._parent
+    def get_parent_command_context(self, workflow: fastworkflow.Workflow):  # noqa: D401
+        """Set the workflow's context to this object's parent context."""
+        workflow.current_command_context = self._parent
 
 
 def test_object_level_move_to_parent(tmp_path):
@@ -91,19 +91,19 @@ def test_object_level_move_to_parent(tmp_path):
     # Get the path to the hello_world example directory
     hello_world_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "hello_world")
     
-    # Create a session with the hello_world workflow
-    session = fastworkflow.Session.create(
+    # Create a workflow with the hello_world workflow
+    workflow = fastworkflow.Workflow.create(
         workflow_folderpath=hello_world_path,
-        session_id_str="test-session-3"
+        workflow_id_str="test-workflow-3"
     )
 
     parent = ParentCtx()
     child = ChildCtx(parent)
 
-    # Set the context using the session
-    session.current_command_context = child
-    assert session.current_command_context is child
+    # Set the context using the workflow
+    workflow.current_command_context = child
+    assert workflow.current_command_context is child
 
     # Use the child's get_parent_command_context method to navigate to parent
-    child.get_parent_command_context(session)
-    assert session.current_command_context is parent 
+    child.get_parent_command_context(workflow)
+    assert workflow.current_command_context is parent 
