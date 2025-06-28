@@ -4,6 +4,7 @@ ___command_info*
 ___convo_info*
 .roo*
 tests/example_workflow/
+/examples
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
