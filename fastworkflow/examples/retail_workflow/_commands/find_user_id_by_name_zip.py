@@ -6,8 +6,8 @@ from fastworkflow.workflow import Workflow
 from fastworkflow import CommandOutput, CommandResponse
 
 # Domain helpers
-from retail_data import load_data
-from tools.find_user_id_by_name_zip import FindUserIdByNameZip
+from ..retail_data import load_data
+from ..tools.find_user_id_by_name_zip import FindUserIdByNameZip
 
 
 class Signature:

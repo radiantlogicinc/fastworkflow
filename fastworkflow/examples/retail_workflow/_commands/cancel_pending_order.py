@@ -11,8 +11,8 @@ from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 
 # For response generation
 from fastworkflow import CommandOutput, CommandResponse
-from retail_data import load_data 
-from tools.cancel_pending_order import CancelPendingOrder
+from ..retail_data import load_data 
+from ..tools.cancel_pending_order import CancelPendingOrder
 
 
 class Signature:

@@ -7,8 +7,8 @@ from fastworkflow.workflow import Workflow
 from fastworkflow import CommandOutput, CommandResponse
 
 # Import business-logic helper
-from retail_data import load_data
-from tools.list_all_product_types import ListAllProductTypes
+from ..retail_data import load_data
+from ..tools.list_all_product_types import ListAllProductTypes
 
 
 class Signature:

@@ -65,33 +65,101 @@ uv pip install fastworkflow
 
 This is the fastest way to see `fastWorkflow` in action.
 
-### Step 1: Fetch and Train the `hello_world` Example
+### Step 1: Fetch the `hello_world` Example
 
-The `fastworkflow` command-line tool can fetch bundled examples and train them for you in one step.
+The `fastworkflow` command-line tool can fetch bundled examples:
+
+```sh
+fastworkflow examples fetch hello_world
+```
+This command will:
+1. Copy the `hello_world` example into a new `./examples/hello_world/` directory.
+2. Copy the environment files to `./examples/fastworkflow.env` and `./examples/fastworkflow.passwords.env`.
+
+### Step 2: Add Your API Keys
+
+The example workflows require API keys for the LLM models. Edit the `./examples/fastworkflow.passwords.env` file:
+
+```sh
+# Edit the passwords file to add your API keys
+nano ./examples/fastworkflow.passwords.env
+```
+
+You'll need to add at least:
+```
+LITELLM_API_KEY_SYNDATA_GEN=your-mistral-api-key
+LITELLM_API_KEY_PARAM_EXTRACTION=your-mistral-api-key
+LITELLM_API_KEY_RESPONSE_GEN=your-mistral-api-key
+LITELLM_API_KEY_AGENT=your-mistral-api-key
+```
+
+You can get a free API key from [Mistral AI](https://mistral.ai) - the example is configured to use the `mistral-small-latest` model which is available on their free tier.
+
+### Step 3: Train the Example
+
+Train the intent-detection models for the workflow:
 
 ```sh
 fastworkflow examples train hello_world
 ```
-This command will:
-1. Copy the `hello_world` example into a new `./examples/hello_world/` directory.
-2. Create dummy `.env` and `passwords.env` files if they don't exist.
-3. Train the intent-detection models for the workflow.
 
-### Step 2: Run the Example
+This step builds the NLP models that help the workflow understand user commands.
+
+### Step 4: Run the Example
 
 Once training is complete, run the interactive assistant:
 
 ```sh
-fastworkflow run examples/hello_world .env passwords.env --startup_command startup
+fastworkflow examples run hello_world
 ```
 
-You will be greeted with a `User >` prompt. Try it out!
+You will be greeted with a `User >` prompt. Try it out by asking "what can you do?" or "add 49 + 51"!
 
-```
-User > greet from fastWorkflow
-> Workflow 12345 AI> Artifact: result=Hello, fastWorkflow!
-```
 To see other available examples, run `fastworkflow examples list`.
+
+---
+
+## CLI Command Reference
+
+The `fastworkflow` CLI provides several commands to help you work with workflows:
+
+### Examples Management
+
+```sh
+# List available examples
+fastworkflow examples list
+
+# Fetch an example to your local directory
+fastworkflow examples fetch <example_name>
+
+# Train an example workflow
+fastworkflow examples train <example_name>
+
+# Run an example workflow
+fastworkflow examples run <example_name>
+```
+
+### Workflow Operations
+
+```sh
+# Build a workflow from your Python application
+fastworkflow build --source-dir <app_dir> --output-dir <workflow_dir>/_commands --context-model-dir <workflow_dir>
+
+# Train a workflow's intent detection models
+fastworkflow train <workflow_dir> <env_file> <passwords_file>
+
+# Run a workflow
+fastworkflow run <workflow_dir> <env_file> <passwords_file>
+```
+
+Each command has additional options that can be viewed with the `--help` flag:
+
+```sh
+fastworkflow examples --help
+fastworkflow build --help
+fastworkflow train --help
+fastworkflow run --help
+```
 
 ---
 
@@ -286,12 +354,20 @@ This single command will generate the `greet.py` command, `get_properties` and `
 
 | Variable | Purpose | When Needed | Default |
 |:---|:---|:---|:---|
-| `LLM_SYNDATA_GEN` | LiteLLM model string for synthetic utterance generation. | `train` | `ollama/mistral` |
-| `LITELLM_API_KEY_SYNDATA_GEN`| API key for the `LLM_SYNDATA_GEN` model. | `train` | `ollama` |
-| `LLM_AGENT` | LiteLLM model string for the DSPy agent. | `run_agent` | *none* |
-| `NOT_FOUND` | Placeholder value for missing parameters during extraction. | Always | `"NOT_FOUND"` |
-| `MISSING_INFORMATION_ERRMSG` | Error message prefix for missing parameters. | Always | `"Missing required..."` |
-| `INVALID_INFORMATION_ERRMSG` | Error message prefix for invalid parameters. | Always | `"Invalid information..."` |
+| `SPEEDDICT_FOLDERNAME` | Directory name for workflow contexts | Always | `___workflow_contexts` |
+| `LLM_SYNDATA_GEN` | LiteLLM model string for synthetic utterance generation | `train` | `mistral/mistral-small-latest` |
+| `LLM_PARAM_EXTRACTION` | LiteLLM model string for parameter extraction | `train`, `run` | `mistral/mistral-small-latest` |
+| `LLM_RESPONSE_GEN` | LiteLLM model string for response generation | `run` | `mistral/mistral-small-latest` |
+| `LLM_AGENT` | LiteLLM model string for the DSPy agent | `run_agent` | `mistral/mistral-small-latest` |
+| `LITELLM_API_KEY_SYNDATA_GEN`| API key for the `LLM_SYNDATA_GEN` model | `train` | *required* |
+| `LITELLM_API_KEY_PARAM_EXTRACTION`| API key for the `LLM_PARAM_EXTRACTION` model | `train`, `run` | *required* |
+| `LITELLM_API_KEY_RESPONSE_GEN`| API key for the `LLM_RESPONSE_GEN` model | `run` | *required* |
+| `LITELLM_API_KEY_AGENT`| API key for the `LLM_AGENT` model | `run_agent` | *required* |
+| `NOT_FOUND` | Placeholder value for missing parameters during extraction | Always | `"NOT_FOUND"` |
+| `MISSING_INFORMATION_ERRMSG` | Error message prefix for missing parameters | Always | `"Missing required..."` |
+| `INVALID_INFORMATION_ERRMSG` | Error message prefix for invalid parameters | Always | `"Invalid information..."` |
+
+The example workflows are configured to use Mistral's models by default. You can get a free API key from [Mistral AI](https://mistral.ai) that works with the `mistral-small-latest` model.
 
 ---
 
@@ -305,6 +381,9 @@ This single command will generate the `greet.py` command, `get_properties` and `
 
 > **Slow Training on CPU**
 > The first run may be slow due to model downloads from Hugging Face. Subsequent runs will be faster. Set `export HF_HOME=/path/to/cache` to control where models are stored. Training a small workflow takes ~5-8 minutes on a modern CPU.
+
+> **Missing API Keys**
+> If you see errors about missing environment variables or API keys, make sure you've added your API keys to the `fastworkflow.passwords.env` file as described in the Quick Start guide.
 
 ---
 

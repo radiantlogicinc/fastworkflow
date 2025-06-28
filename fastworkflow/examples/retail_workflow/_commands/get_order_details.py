@@ -6,8 +6,8 @@ from fastworkflow.workflow import Workflow
 from fastworkflow import CommandOutput, CommandResponse
 
 # Domain helpers
-from retail_data import load_data
-from tools.get_order_details import GetOrderDetails
+from ..retail_data import load_data
+from ..tools.get_order_details import GetOrderDetails
 
 
 class Signature:

@@ -5,8 +5,8 @@ from pydantic import BaseModel, Field, ConfigDict
 from fastworkflow.workflow import Workflow
 from fastworkflow import CommandOutput, CommandResponse
 
-from retail_data import load_data
-from tools.modify_pending_order_address import ModifyPendingOrderAddress
+from ..retail_data import load_data
+from ..tools.modify_pending_order_address import ModifyPendingOrderAddress
 
 
 class Signature:

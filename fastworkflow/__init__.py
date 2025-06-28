@@ -107,6 +107,12 @@ def init(env_vars: dict):
     RoutingDefinition = RoutingDefinitionClass
     RoutingRegistry = RoutingRegistryClass
     ModelPipelineRegistry = ModelPipeline
+    
+    # Ensure DSPy logging is properly configured after all imports
+    # This needs to happen after DSPy is imported by other modules
+    import logging
+    logging.getLogger("dspy").setLevel(logging.ERROR)
+    logging.getLogger("dspy.adapters.json_adapter").setLevel(logging.ERROR)
 
 def get_env_var(var_name: str, var_type: type = str, default: Optional[Union[str, int, float, bool]] = None) -> Union[str, int, float, bool]:
     """get the environment variable"""

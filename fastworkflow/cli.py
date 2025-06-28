@@ -73,7 +73,38 @@ def fetch_example(args):
     ignore_patterns = shutil.ignore_patterns('___command_info', '__pycache__', '*.pyc')
 
     try:
+        # Copy the example directory
         shutil.copytree(source_path, target_path, ignore=ignore_patterns, dirs_exist_ok=True)
+        
+        # Also copy the environment files from the examples directory
+        env_file = examples_dir / "fastworkflow.env"
+        passwords_file = examples_dir / "fastworkflow.passwords.env"
+        
+        if env_file.exists():
+            shutil.copy2(env_file, target_root / "fastworkflow.env")
+            print(f"✅ Copied environment file to '{target_root / 'fastworkflow.env'}'")
+            
+            # Remind users to add their API keys
+            print("\nNOTE: You need to add your API keys to the passwords file before training.")
+            print(f"      Edit '{target_root / 'fastworkflow.passwords.env'}' with your API keys.")
+        else:
+            print(f"⚠️ Warning: Environment file not found at '{env_file}'")
+        
+        if passwords_file.exists():
+            shutil.copy2(passwords_file, target_root / "fastworkflow.passwords.env")
+            print(f"✅ Copied passwords file to '{target_root / 'fastworkflow.passwords.env'}'")
+        else:
+            print(f"⚠️ Warning: Passwords file not found at '{passwords_file}'")
+            
+            # Create a template passwords file if the original doesn't exist
+            with open(target_root / "fastworkflow.passwords.env", "w") as f:
+                f.write("# Add your API keys below\n")
+                f.write("LITELLM_API_KEY_SYNDATA_GEN=<API KEY for synthetic data generation model>\n")
+                f.write("LITELLM_API_KEY_PARAM_EXTRACTION=<API KEY for parameter extraction model>\n")
+                f.write("LITELLM_API_KEY_RESPONSE_GEN=<API KEY for response generation model>\n")
+                f.write("LITELLM_API_KEY_AGENT=<API KEY for the agent model>\n")
+            print(f"✅ Created template passwords file at '{target_root / 'fastworkflow.passwords.env'}'")
+        
         print(f"✅ Example '{args.name}' copied to '{target_path}'")
         return target_path
     except Exception as e:
@@ -81,55 +112,43 @@ def fetch_example(args):
         sys.exit(1)
 
 def train_example(args):
-    """Fetch and then train an example."""
-    print(f"Fetching example '{args.name}'...")
-
-    # Check if example already exists and handle accordingly
-    examples_dir, is_package = find_examples_dir()
-    if not examples_dir:
-        print("Error: Could not find the bundled 'examples' directory.", file=sys.stderr)
+    """Train an existing example workflow."""
+    # Check if example exists in the local examples directory
+    local_examples_dir = Path("./examples")
+    example_path = local_examples_dir / args.name
+    
+    if not example_path.is_dir():
+        print(f"Error: Example '{args.name}' not found in '{local_examples_dir}'.", file=sys.stderr)
+        print(f"Use 'fastworkflow examples fetch {args.name}' to fetch the example first.")
+        print("Or use 'fastworkflow examples list' to see available examples.")
         sys.exit(1)
 
-    source_path = examples_dir / args.name
-    if not source_path.is_dir():
-        print(f"Error: Example '{args.name}' not found.", file=sys.stderr)
-        print("Use 'fastworkflow examples list' to see available examples.")
-        sys.exit(1)
-
-    # If examples are only found locally, use the local path directly
-    if not is_package:
-        target_path = source_path
-        print("Note: Using example from local examples directory.")
-    else:
-        # Otherwise, fetch the example from the package
-        target_path = fetch_example(args)
-
-    print(f"\nTraining example in '{target_path}'...")
+    print(f"Training example in '{example_path}'...")
 
     # Get the appropriate env files for this example workflow
-    env_file_path, passwords_file_path = find_default_env_files(target_path)
+    env_file_path, passwords_file_path = find_default_env_files(example_path)
 
     # Check if the files exist
     env_file = Path(env_file_path)
     passwords_file = Path(passwords_file_path)
 
     if not env_file.exists() or not passwords_file.exists():
-        print("Warning: Default env files not found at expected paths:")
-        print(f"  - {env_file}")
-        print(f"  - {passwords_file}")
-        print("Using empty files to proceed. Please ensure API keys are set if needed.")
-
-        # Create empty files if they don't exist
-        env_file = Path(".env")
-        passwords_file = Path("passwords.env")
-        env_file.touch()
-        passwords_file.touch()
+        print(f"Error: Required environment files not found:", file=sys.stderr)
+        if not env_file.exists():
+            print(f"  - {env_file} (not found)")
+        if not passwords_file.exists():
+            print(f"  - {passwords_file} (not found)")
+        print("\nPlease run the following command to fetch the example and its environment files:")
+        print(f"  fastworkflow examples fetch {args.name}")
+        print("\nAfter fetching, edit the passwords file to add your API keys:")
+        print(f"  {local_examples_dir}/fastworkflow.passwords.env")
+        sys.exit(1)
 
     # The `train` script needs the path to the workflow, and the env files
     cmd = [
         sys.executable,
         "-m", "fastworkflow.train",
-        str(target_path),
+        str(example_path),
         str(env_file),
         str(passwords_file)
     ]
@@ -147,7 +166,7 @@ def train_example(args):
 
         if process.returncode == 0:
             print(f"\n✅ Successfully trained example '{args.name}'.")
-            print(f"You can now run it with:\npython -m fastworkflow.run {target_path}")
+            print(f"You can now run it with:\npython -m fastworkflow.run {example_path}")
         else:
             print(f"\n❌ Training failed with exit code {process.returncode}.", file=sys.stderr)
             sys.exit(1)
@@ -162,7 +181,7 @@ def train_example(args):
 def find_default_env_files(workflow_path=None):
     """Find the appropriate default env files based on context.
     
-    If the workflow path is within the examples directory, use the bundled examples env files.
+    If the workflow path is within the examples directory, use the local examples env files.
     Otherwise, use local .env files in the current directory.
     
     Args:
@@ -178,15 +197,24 @@ def find_default_env_files(workflow_path=None):
     # If workflow_path is provided and seems to be an example workflow
     if workflow_path:
         workflow_path = Path(workflow_path)
-        examples_dir, _ = find_examples_dir()
+        examples_dir, is_package = find_examples_dir()
         
         if examples_dir and (
             str(workflow_path).startswith(str(examples_dir)) or
             "/examples/" in str(workflow_path) or
             "\\examples\\" in str(workflow_path)
         ):
-            # This appears to be an example workflow, use bundled env files
-            return "fastworkflow/examples/fastworkflow.env", "fastworkflow/examples/passwords.env"
+            # For example workflows, check for the env files in the local examples directory
+            local_examples_dir = Path("./examples")
+            local_env = local_examples_dir / "fastworkflow.env"
+            local_passwords = local_examples_dir / "fastworkflow.passwords.env"
+            
+            if local_env.exists() and local_passwords.exists():
+                return str(local_env), str(local_passwords)
+            
+            # If not found locally, return the expected paths anyway
+            # (the calling function will handle the error appropriately)
+            return str(local_env), str(local_passwords)
     
     # For user workflows, use local env files
     return default_env, default_passwords
@@ -248,6 +276,35 @@ def train_with_defaults(args):
     if args.passwords_file_path is None:
         args.passwords_file_path = default_passwords
 
+    # Check if the files exist and provide helpful error messages
+    if not os.path.exists(args.env_file_path):
+        print(f"Error: Environment file not found at: {args.env_file_path}", file=sys.stderr)
+        
+        # Check if this is an example workflow
+        if "/examples/" in str(args.workflow_folderpath) or "\\examples\\" in str(args.workflow_folderpath):
+            example_name = os.path.basename(args.workflow_folderpath)
+            print("\nThis appears to be an example workflow. Please run:")
+            print(f"  fastworkflow examples fetch {example_name}")
+            print(f"  fastworkflow examples train {example_name}")
+        else:
+            print("\nPlease ensure this file exists with required environment variables.")
+            print("You can create a basic .env file in your current directory.")
+        sys.exit(1)
+        
+    if not os.path.exists(args.passwords_file_path):
+        print(f"Error: Passwords file not found at: {args.passwords_file_path}", file=sys.stderr)
+        
+        # Check if this is an example workflow
+        if "/examples/" in str(args.workflow_folderpath) or "\\examples\\" in str(args.workflow_folderpath):
+            example_name = os.path.basename(args.workflow_folderpath)
+            print("\nThis appears to be an example workflow. Please run:")
+            print(f"  fastworkflow examples fetch {example_name}")
+            print(f"  fastworkflow examples train {example_name}")
+        else:
+            print("\nPlease ensure this file exists with required API keys.")
+            print("You can create a basic passwords.env file in your current directory.")
+        sys.exit(1)
+
     return train_main(args)
 
 def run_with_defaults(args):
@@ -259,7 +316,100 @@ def run_with_defaults(args):
     if args.passwords_file_path is None:
         args.passwords_file_path = default_passwords
 
+    # Check if the files exist and provide helpful error messages
+    if not os.path.exists(args.env_file_path):
+        print(f"Error: Environment file not found at: {args.env_file_path}", file=sys.stderr)
+        
+        # Check if this is an example workflow
+        if "/examples/" in str(args.workflow_path) or "\\examples\\" in str(args.workflow_path):
+            example_name = os.path.basename(args.workflow_path)
+            print("\nThis appears to be an example workflow. Please run:")
+            print(f"  fastworkflow examples fetch {example_name}")
+            print(f"  fastworkflow examples train {example_name}")
+        else:
+            print("\nPlease ensure this file exists with required environment variables.")
+            print("You can create a basic .env file in your current directory.")
+        sys.exit(1)
+        
+    if not os.path.exists(args.passwords_file_path):
+        print(f"Error: Passwords file not found at: {args.passwords_file_path}", file=sys.stderr)
+        
+        # Check if this is an example workflow
+        if "/examples/" in str(args.workflow_path) or "\\examples\\" in str(args.workflow_path):
+            example_name = os.path.basename(args.workflow_path)
+            print("\nThis appears to be an example workflow. Please run:")
+            print(f"  fastworkflow examples fetch {example_name}")
+            print(f"  fastworkflow examples train {example_name}")
+        else:
+            print("\nPlease ensure this file exists with required API keys.")
+            print("You can create a basic passwords.env file in your current directory.")
+        sys.exit(1)
+
     return run_main(args)
+
+def run_example(args):
+    """Run an existing example workflow."""
+    # Check if example exists in the local examples directory
+    local_examples_dir = Path("./examples")
+    example_path = local_examples_dir / args.name
+    
+    if not example_path.is_dir():
+        print(f"Error: Example '{args.name}' not found in '{local_examples_dir}'.", file=sys.stderr)
+        print(f"Use 'fastworkflow examples fetch {args.name}' to fetch the example first.")
+        print("Or use 'fastworkflow examples list' to see available examples.")
+        sys.exit(1)
+
+    print(f"Running example '{args.name}'...")
+
+    # Get the appropriate env files for this example workflow
+    env_file_path, passwords_file_path = find_default_env_files(example_path)
+
+    # Check if the files exist
+    env_file = Path(env_file_path)
+    passwords_file = Path(passwords_file_path)
+
+    if not env_file.exists() or not passwords_file.exists():
+        print(f"Error: Required environment files not found:", file=sys.stderr)
+        if not env_file.exists():
+            print(f"  - {env_file} (not found)")
+        if not passwords_file.exists():
+            print(f"  - {passwords_file} (not found)")
+        print("\nPlease run the following command to fetch the example and its environment files:")
+        print(f"  fastworkflow examples fetch {args.name}")
+        print("\nAfter fetching, edit the passwords file to add your API keys:")
+        print(f"  {local_examples_dir}/fastworkflow.passwords.env")
+        print("\nThen train the example before running it:")
+        print(f"  fastworkflow examples train {args.name}")
+        sys.exit(1)
+
+    # Check if the example has been trained
+    command_info_dir = example_path / "___command_info"
+    if not command_info_dir.exists() or not any(command_info_dir.iterdir()):
+        print(f"Warning: Example '{args.name}' does not appear to be trained yet.", file=sys.stderr)
+        print(f"Please train the example first with:")
+        print(f"  fastworkflow examples train {args.name}")
+        response = input("Do you want to continue anyway? [y/N] ")
+        if response.lower() != 'y':
+            print("Operation cancelled.")
+            sys.exit(0)
+
+    # For interactive applications, we need to use os.execvp to replace the current process
+    # This ensures that stdin/stdout/stderr are properly connected for interactive use
+    cmd = [
+        sys.executable,
+        "-m", "fastworkflow.run",
+        str(example_path),
+        str(env_file),
+        str(passwords_file)
+    ]
+    
+    try:
+        # Replace the current process with the run command
+        # This ensures that the interactive prompt works correctly
+        os.execvp(sys.executable, cmd)
+    except Exception as e:
+        print(f"An unexpected error occurred while running the example: {e}", file=sys.stderr)
+        sys.exit(1)
 
 def main():
     """Main function for the fastworkflow CLI."""
@@ -283,10 +433,14 @@ def main():
     parser_fetch.set_defaults(func=fetch_example)
     
     # 'examples train' command
-    parser_train_example = examples_subparsers.add_parser("train", help="Fetch and train a specific example")
-    parser_train_example.add_argument("name", help="The name of the example to fetch and train")
-    parser_train_example.add_argument("--force", action="store_true", help="Force overwrite if example already exists")
+    parser_train_example = examples_subparsers.add_parser("train", help="Train a specific example")
+    parser_train_example.add_argument("name", help="The name of the example to train")
     parser_train_example.set_defaults(func=train_example)
+    
+    # 'examples run' command
+    parser_run_example = examples_subparsers.add_parser("run", help="Run a specific example")
+    parser_run_example.add_argument("name", help="The name of the example to run")
+    parser_run_example.set_defaults(func=run_example)
     
     # Add top-level commands
     add_build_parser(subparsers)

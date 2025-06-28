@@ -9,7 +9,7 @@ repository = "https://github.com/radiantlogicinc/fastworkflow"
 
 [tool.poetry]
 name = "fastworkflow"
-version = "2.8.3"
+version = "2.8.7"
 description = "A framework for rapidly building large-scale, deterministic, interactive workflows with a fault-tolerant, conversational UX"
 authors = ["Dhar Rawal <drawal@radiantlogic.com>"]
 license = "Apache-2.0"
@@ -38,7 +38,7 @@ mmh3 = "^5.1.0"
 python-levenshtein = "^0.27.1"
 colorama = "^0.4.6"
 dspy = "2.6.27"
-torch = {version = "^2.7.1", extras = ["cpu"], python = ">=3.11,<3.13", platform = "linux"}
+torch = "^2.7.1"
 
 [tool.poetry.group.dev.dependencies]
 isort = "^5.13.2"

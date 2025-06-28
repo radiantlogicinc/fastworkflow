@@ -1,6 +1,6 @@
 import fastworkflow
 from fastworkflow import CommandOutput, CommandResponse
-from application.todo_manager import TodoListManager    #type: ignore
+from ..application.todo_manager import TodoListManager
 
 class ResponseGenerator:
     def __call__(self, workflow: fastworkflow.Workflow, command: str) -> CommandOutput:

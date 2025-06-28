@@ -5,8 +5,8 @@ from pydantic import BaseModel, Field, ConfigDict
 from fastworkflow.workflow import Workflow
 from fastworkflow import CommandOutput, CommandResponse
 
-from retail_data import load_data
-from tools.get_user_details import GetUserDetails
+from ..retail_data import load_data
+from ..tools.get_user_details import GetUserDetails
 
 
 class Signature:

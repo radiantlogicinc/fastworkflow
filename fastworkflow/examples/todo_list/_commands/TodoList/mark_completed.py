@@ -10,8 +10,8 @@ from typing import Any, Dict, Optional
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional, Union
 from pydantic import BaseModel, Field
-from application.todo_list import TodoList
-from application.todo_item import TodoItem
+from ...application.todo_list import TodoList
+from ...application.todo_item import TodoItem
 
 class Signature:
     """Mark this TodoList and all children as complete"""

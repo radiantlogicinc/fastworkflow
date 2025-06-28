@@ -10,8 +10,8 @@ from typing import Any, Dict, Optional
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional, Union
 from pydantic import BaseModel, Field
-from application.todo_list import TodoList
-from application.todo_item import TodoItem
+from ...application.todo_list import TodoList
+from ...application.todo_item import TodoItem
 
 class Signature:
     """Update the status of this TodoList based on its children"""

@@ -11,8 +11,8 @@ from typing import Any, Dict, Optional
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional, Union
 from pydantic import BaseModel, Field
-from application.todo_manager import TodoListManager
-from application.todo_list import TodoList
+from ...application.todo_manager import TodoListManager
+from ...application.todo_list import TodoList
 
 class Signature:
     """Create a top-level todolist and set it as the current command context"""

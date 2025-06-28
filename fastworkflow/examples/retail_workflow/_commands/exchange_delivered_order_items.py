@@ -5,8 +5,8 @@ from pydantic import BaseModel, Field, ConfigDict
 from fastworkflow.workflow import Workflow
 from fastworkflow import CommandOutput, CommandResponse
 
-from retail_data import load_data
-from tools.exchange_delivered_order_items import ExchangeDeliveredOrderItems
+from ..retail_data import load_data
+from ..tools.exchange_delivered_order_items import ExchangeDeliveredOrderItems
 
 
 class Signature:

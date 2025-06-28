@@ -54,6 +54,11 @@ def get_module(module_path: str, search_root: Optional[str] = None) -> Any:
             # importable as a top-level package (e.g. ``import todo_list``).
             if project_root not in sys.path:
                 sys.path.insert(0, project_root)
+            # Also ensure the workflow folder itself is on sys.path to match
+            # fastworkflow.Workflow behavior and enable absolute imports
+            search_root_abs = os.path.abspath(search_root)
+            if search_root_abs not in sys.path:
+                sys.path.insert(0, search_root_abs)
         else:
             # Fallback: repository root (two levels up from this util file)
             project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))

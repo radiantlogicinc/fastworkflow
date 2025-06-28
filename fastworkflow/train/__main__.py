@@ -180,6 +180,11 @@ def train_main(args):
         **dotenv_values(args.env_file_path),
         **dotenv_values(args.passwords_file_path)
     }
+    if not env_vars.get("SPEEDDICT_FOLDERNAME"):
+        raise ValueError("Env file is missing or path is incorrect")
+    if not env_vars.get("LITELLM_API_KEY_SYNDATA_GEN"):
+        raise ValueError("Password env file is missing or path is incorrect")
+
     fastworkflow.init(env_vars=env_vars)
 
     # Check if fastworkflow has been trained, and train it if not

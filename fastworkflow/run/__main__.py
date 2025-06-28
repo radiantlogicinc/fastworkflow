@@ -83,8 +83,10 @@ def run_main(args):
         **dotenv_values(args.env_file_path),
         **dotenv_values(args.passwords_file_path)
     }
-    if not env_vars:
-        raise ValueError("Env and password env files are missing or path is incorrect")
+    if not env_vars.get("SPEEDDICT_FOLDERNAME"):
+        raise ValueError("Env file is missing or path is incorrect")
+    if not env_vars.get("LITELLM_API_KEY_SYNDATA_GEN"):
+        raise ValueError("Password env file is missing or path is incorrect")
 
     if args.startup_command and args.startup_action:
         raise ValueError("Cannot provide both startup_command and startup_action")
