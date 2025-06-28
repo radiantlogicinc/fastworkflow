@@ -136,10 +136,9 @@ venv.bak/
 
 # Environment variables
 /.env
-# But allow example workflow .env files
-!examples/*/*.env
-!fastworkflow/examples/*.env
-!tests/*/.env
+# But allow specific example workflow .env files
+!fastworkflow/examples/fastworkflow.env
+!fastworkflow/examples/fastworkflow.passwords.env
 
 # Spyder project settings
 .spyderproject
