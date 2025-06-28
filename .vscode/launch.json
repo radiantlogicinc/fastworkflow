@@ -14,7 +14,7 @@
                 "PYTHONPATH": "${workspaceFolder}/"
             },
             "args": [
-                "./examples/retail_workflow",
+                "./fastworkflow/examples/retail_workflow",
                 "./env/.env",
                 "./passwords/.env"
             ]
@@ -29,7 +29,7 @@
                 "PYTHONPATH": "${workspaceFolder}/"
             },
             "args": [
-                "./examples/retail_workflow",
+                "./fastworkflow/examples/retail_workflow",
                 "./env/.env",
                 "./passwords/.env"
             ]
@@ -44,7 +44,7 @@
                 "PYTHONPATH": "${workspaceFolder}/"
             },
             "args": [
-                "./examples/retail_workflow",
+                "./fastworkflow/examples/retail_workflow",
                 "./env/.env",
                 "./passwords/.env"
             ]
@@ -59,7 +59,7 @@
                 "PYTHONPATH": "${workspaceFolder}/"
             },
             "args": [
-                "./examples/todo_list",
+                "./fastworkflow/examples/todo_list",
                 "./env/.env",
                 "./passwords/.env",
                 "--startup_action",
@@ -76,7 +76,7 @@
                 "PYTHONPATH": "${workspaceFolder}/"
             },
             "args": [
-                "./examples/todo_list",
+                "./fastworkflow/examples/todo_list",
                 "./env/.env",
                 "./passwords/.env"
             ]
@@ -91,7 +91,7 @@
                 "PYTHONPATH": "${workspaceFolder}/"
             },
             "args": [
-                "./examples/hello_world",
+                "./fastworkflow/examples/hello_world",
                 "./env/.env",
                 "./passwords/.env"
             ]
@@ -106,7 +106,7 @@
                 "PYTHONPATH": "${workspaceFolder}/"
             },
             "args": [
-                "./examples/hello_world",
+                "./fastworkflow/examples/hello_world",
                 "./env/.env",
                 "./passwords/.env"
             ]
@@ -137,9 +137,9 @@
                 "LOG_LEVEL": "DEBUG"
             },
             "args": [
-                "--source-dir", "./examples/todo_list/application",
-                "--output-dir", "./examples/todo_list/_commands",
-                "--context-model-dir", "./examples/todo_list",
+                "--source-dir", "./fastworkflow/examples/todo_list/application",
+                "--output-dir", "./fastworkflow/examples/todo_list/_commands",
+                "--context-model-dir", "./fastworkflow/examples/todo_list",
                 "--overwrite"
             ]
         },

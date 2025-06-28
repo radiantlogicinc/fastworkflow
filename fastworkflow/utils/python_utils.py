@@ -32,18 +32,58 @@ def get_module(module_path: str, search_root: Optional[str] = None) -> Any:
         # Normalise to absolute paths
         abs_module_path = os.path.abspath(module_path)
 
-        # Determine project root as the repository root (two levels up from this util file)
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        # Determine project root used for building the importable dotted path.
+        #
+        # * When `search_root` is provided it usually points to **the workflow
+        #   folder itself** (e.g. ``.../examples/todo_list``).  The modules we
+        #   load live *inside* that folder (e.g. ``_commands/startup.py``).
+        #   We **include** the workflow folder name as the first package segment
+        #   so that intra-workflow relative imports (like
+        #   ``from ..application.todo_manager import ...``) resolve correctly.
+        #   Therefore we treat the *parent* of ``search_root`` as the project
+        #   root when computing the dotted path – this yields an import path
+        #   such as ``todo_list._commands.startup`` instead of
+        #   ``_commands.startup``.
+        #
+        # * If `search_root` is not provided we fall back to the repository
+        #   root (two levels up from this util file) which preserves existing
+        #   behaviour for library code.
+        if search_root:
+            project_root = os.path.abspath(os.path.join(search_root, os.pardir))
+            # Ensure parent dir is on sys.path so that the workflow folder is
+            # importable as a top-level package (e.g. ``import todo_list``).
+            if project_root not in sys.path:
+                sys.path.insert(0, project_root)
+        else:
+            # Fallback: repository root (two levels up from this util file)
+            project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-        if not abs_module_path.startswith(project_root):
+        # Accept module paths that are either within the workflow-specific
+        # `project_root` (parent of ``search_root``) *or* within the main
+        # FastWorkflow package itself.  The latter is required for loading
+        # internal helper workflows that live under
+        # ``fastworkflow/_workflows``.
+
+        fw_pkg_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+
+        if not (abs_module_path.startswith(project_root) or abs_module_path.startswith(fw_pkg_root)):
             raise ImportError(
-                f"Module {abs_module_path} is outside of project root {project_root}")
+                f"Module {abs_module_path} is outside of permitted roots: {project_root} or {fw_pkg_root}")
 
         # Build import path relative to project root
         relative_path = os.path.relpath(abs_module_path, project_root)
         module_pythonic_path = relative_path.replace(os.sep, ".").rsplit(".py", 1)[0]
 
-        return importlib.import_module(module_pythonic_path)
+        # Use spec_from_file_location for dynamic loading from file paths
+        spec = importlib.util.spec_from_file_location(module_pythonic_path, abs_module_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Cannot create module spec for {abs_module_path}")
+        
+        module = importlib.util.module_from_spec(spec)
+        # Add to sys.modules before executing to support relative imports
+        sys.modules[module_pythonic_path] = module
+        spec.loader.exec_module(module)
+        return module
 
     except ImportError as e:
         # re-raise with clearer context
@@ -107,11 +147,11 @@ def find_module_dependencies(class_info) -> set:
     Considers base classes, method parameter/return types, and property types.
     Returns a set of custom type names (as strings).
     """
-    dependencies = set()
-    # 1. Inheritance (base classes)
-    for base in getattr(class_info, 'bases', []):
-        if base not in {'object'}:
-            dependencies.add(base)
+    dependencies = {
+        base
+        for base in getattr(class_info, 'bases', [])
+        if base not in {'object'}
+    }
     # 2. Methods: parameter and return type annotations
     for method in getattr(class_info, 'methods', []):
         for param in getattr(method, 'parameters', []):

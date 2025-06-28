@@ -20,7 +20,7 @@ from fastworkflow.command_routing import RoutingDefinition
 @pytest.fixture(scope="module")
 def sample_workflow_path():
     """Get the path to the sample workflow example."""
-    return os.path.join(os.path.dirname(__file__), "..", "examples", "retail_workflow")
+    return os.path.join(os.path.dirname(__file__), "..", "fastworkflow", "examples", "retail_workflow")
 
 
 @pytest.fixture(scope="module")

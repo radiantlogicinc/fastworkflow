@@ -2,13 +2,13 @@ import os
 import pytest
 import fastworkflow
 from fastworkflow._workflows.command_metadata_extraction._commands.IntentDetection.what_is_current_context import ResponseGenerator
-from examples.todo_list.application.todo_manager import TodoListManager
-from examples.todo_list.application.todo_list import TodoList
+from fastworkflow.examples.todo_list.application.todo_manager import TodoListManager
+from fastworkflow.examples.todo_list.application.todo_list import TodoList
 
 
 def get_example_workflow_path():
     """Get the path to the examples/todo_list workflow."""
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "examples", "todo_list"))
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "fastworkflow", "examples", "todo_list"))
 
 
 def test_global_context():

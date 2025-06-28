@@ -12,8 +12,8 @@ def workflow_paths():
     """Define paths for fastworkflow and sample_workflow."""
     return {
         "fastworkflow_package_path": fastworkflow.get_fastworkflow_package_path(),
-        "sample_workflow_path": "./examples/sample_workflow",
-        "retail_workflow_path": "./examples/retail_workflow"
+        "sample_workflow_path": "./fastworkflow/examples/sample_workflow",
+        "retail_workflow_path": "./fastworkflow/examples/retail_workflow"
     }
 
 def training_artifacts():

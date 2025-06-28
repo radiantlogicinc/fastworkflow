@@ -17,11 +17,11 @@ from .run.__main__ import run_main
 def find_examples_dir():
     """Finds the bundled examples directory using importlib.resources."""
     with contextlib.suppress(ModuleNotFoundError, FileNotFoundError):
-        # Use files() context manager for robust path handling with importlib.resources
-        with importlib.resources.files('fastworkflow') as resources_path:
-            examples_path = resources_path / 'examples'
-            if examples_path.is_dir():
-                return examples_path, True  # True indicates package examples
+        # Use files() for robust path handling with importlib.resources
+        resources_path = importlib.resources.files('fastworkflow')
+        examples_path = resources_path / 'examples'
+        if examples_path.is_dir():
+            return examples_path, True  # True indicates package examples
     # If not found in the package, look in the project root
     project_root = Path.cwd()
     examples_path = project_root / 'examples'
@@ -106,13 +106,22 @@ def train_example(args):
 
     print(f"\nTraining example in '{target_path}'...")
 
-    # Check for env files in the CWD, not the target path
-    env_file = Path(".env")
-    passwords_file = Path("passwords.env")
+    # Get the appropriate env files for this example workflow
+    env_file_path, passwords_file_path = find_default_env_files(target_path)
+
+    # Check if the files exist
+    env_file = Path(env_file_path)
+    passwords_file = Path(passwords_file_path)
 
     if not env_file.exists() or not passwords_file.exists():
-        print("Warning: '.env' or 'passwords.env' not found in the current directory.")
-        print("Creating empty files to proceed. Please populate them if your workflow requires API keys.")
+        print("Warning: Default env files not found at expected paths:")
+        print(f"  - {env_file}")
+        print(f"  - {passwords_file}")
+        print("Using empty files to proceed. Please ensure API keys are set if needed.")
+
+        # Create empty files if they don't exist
+        env_file = Path(".env")
+        passwords_file = Path("passwords.env")
         env_file.touch()
         passwords_file.touch()
 
@@ -138,7 +147,7 @@ def train_example(args):
 
         if process.returncode == 0:
             print(f"\n✅ Successfully trained example '{args.name}'.")
-            print(f"You can now run it with:\npython -m fastworkflow.run {target_path} .env passwords.env --startup_command startup")
+            print(f"You can now run it with:\npython -m fastworkflow.run {target_path}")
         else:
             print(f"\n❌ Training failed with exit code {process.returncode}.", file=sys.stderr)
             sys.exit(1)
@@ -150,13 +159,47 @@ def train_example(args):
         print(f"An unexpected error occurred during training: {e}", file=sys.stderr)
         sys.exit(1)
 
+def find_default_env_files(workflow_path=None):
+    """Find the appropriate default env files based on context.
+    
+    If the workflow path is within the examples directory, use the bundled examples env files.
+    Otherwise, use local .env files in the current directory.
+    
+    Args:
+        workflow_path: Optional path to the workflow directory
+        
+    Returns:
+        tuple: (env_file_path, passwords_file_path)
+    """
+    # Default to local env files for user workflows
+    default_env = ".env"
+    default_passwords = "passwords.env"
+    
+    # If workflow_path is provided and seems to be an example workflow
+    if workflow_path:
+        workflow_path = Path(workflow_path)
+        examples_dir, _ = find_examples_dir()
+        
+        if examples_dir and (
+            str(workflow_path).startswith(str(examples_dir)) or
+            "/examples/" in str(workflow_path) or
+            "\\examples\\" in str(workflow_path)
+        ):
+            # This appears to be an example workflow, use bundled env files
+            return "fastworkflow/examples/fastworkflow.env", "fastworkflow/examples/passwords.env"
+    
+    # For user workflows, use local env files
+    return default_env, default_passwords
+
 def add_build_parser(subparsers):
     """Add subparser for the 'build' command."""
     parser_build = subparsers.add_parser("build", help="Generate FastWorkflow command files and context model from a Python application.", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser_build.add_argument('--source-dir', '-s', required=True, help='Path to the source directory of the target application')
     parser_build.add_argument('--output-dir', '-o', required=True, help='Path to save the generated command files')
-    parser_build.add_argument("--env_file_path", '-e', required=True, help="Path to the environment file")
-    parser_build.add_argument("--passwords_file_path", '-p', required=True, help="Path to the passwords file")
+    parser_build.add_argument("--env_file_path", '-e', required=False, default=".env", 
+                             help="Path to the environment file (default: .env in current directory)")
+    parser_build.add_argument("--passwords_file_path", '-p', required=False, default="passwords.env", 
+                             help="Path to the passwords file (default: passwords.env in current directory)")
     parser_build.add_argument('--dry-run', action='store_true', help='Do not write files, just print actions')
     parser_build.add_argument('--verbose', '-v', action='store_true', help='Print detailed logs')
     parser_build.add_argument('--overwrite', action='store_true', help='Overwrite files in output directory if present')
@@ -172,21 +215,51 @@ def add_train_parser(subparsers):
     """Add subparser for the 'train' command."""
     parser_train = subparsers.add_parser("train", help="Train the intent detection pipeline for a workflow.")
     parser_train.add_argument("workflow_folderpath", help="Path to the workflow folder")
-    parser_train.add_argument("env_file_path", help="Path to the environment file")
-    parser_train.add_argument("passwords_file_path", help="Path to the passwords file")
-    parser_train.set_defaults(func=train_main)
+    
+    # Default env files will be determined at runtime based on the workflow path
+    parser_train.add_argument("env_file_path", nargs='?', default=None,
+                             help="Path to the environment file (default: .env in current directory, or bundled env file for examples)")
+    parser_train.add_argument("passwords_file_path", nargs='?', default=None,
+                             help="Path to the passwords file (default: passwords.env in current directory, or bundled env file for examples)")
+    parser_train.set_defaults(func=lambda args: train_with_defaults(args))
 
 def add_run_parser(subparsers):
     """Add subparser for the 'run' command."""
     parser_run = subparsers.add_parser("run", help="Run a workflow's interactive assistant.")
     parser_run.add_argument("workflow_path", help="Path to the workflow folder")
-    parser_run.add_argument("env_file_path", help="Path to the environment file")
-    parser_run.add_argument("passwords_file_path", help="Path to the passwords file")
+    
+    # Default env files will be determined at runtime based on the workflow path
+    parser_run.add_argument("env_file_path", nargs='?', default=None,
+                           help="Path to the environment file (default: .env in current directory, or bundled env file for examples)")
+    parser_run.add_argument("passwords_file_path", nargs='?', default=None,
+                           help="Path to the passwords file (default: passwords.env in current directory, or bundled env file for examples)")
     parser_run.add_argument("--context_file_path", help="Optional context file path", default="")
     parser_run.add_argument("--startup_command", help="Optional startup command", default="")
     parser_run.add_argument("--startup_action", help="Optional startup action", default="")
     parser_run.add_argument("--keep_alive", help="Optional keep_alive", default=True)
-    parser_run.set_defaults(func=run_main)
+    parser_run.set_defaults(func=lambda args: run_with_defaults(args))
+
+def train_with_defaults(args):
+    """Wrapper for train_main that sets default env file paths based on context."""
+    if args.env_file_path is None or args.passwords_file_path is None:
+        default_env, default_passwords = find_default_env_files(args.workflow_folderpath)
+    if args.env_file_path is None:
+        args.env_file_path = default_env
+    if args.passwords_file_path is None:
+        args.passwords_file_path = default_passwords
+
+    return train_main(args)
+
+def run_with_defaults(args):
+    """Wrapper for run_main that sets default env file paths based on context."""
+    if args.env_file_path is None or args.passwords_file_path is None:
+        default_env, default_passwords = find_default_env_files(args.workflow_path)
+    if args.env_file_path is None:
+        args.env_file_path = default_env
+    if args.passwords_file_path is None:
+        args.passwords_file_path = default_passwords
+
+    return run_main(args)
 
 def main():
     """Main function for the fastworkflow CLI."""

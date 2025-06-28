@@ -9,8 +9,8 @@ def test_context_helpers_todo_list(tmp_path):
     fastworkflow.init(env_vars=env_vars)
 
     # Use the real workflow directory from the repo
-    workflow_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "examples", "todo_list"))
-    assert os.path.isdir(workflow_dir), "examples/todo_list directory should exist"
+    workflow_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "fastworkflow", "examples", "todo_list"))
+    assert os.path.isdir(workflow_dir), "fastworkflow/examples/todo_list directory should exist"
 
     # Create a workflow instead of directly
     workflow = Workflow.create(

@@ -9,7 +9,7 @@ def test_startup_command_has_no_input_and_no_utterances():
     not advertise a `command_parameters_class`.  Attempting to fetch
     utterances should raise `KeyError`.
     """
-    workflow_path = "./examples/todo_list"
+    workflow_path = "./fastworkflow/examples/todo_list"
     cmd_dir = CommandDirectory.load(workflow_path)
 
     # Hydrate so metadata is fully populated before assertions

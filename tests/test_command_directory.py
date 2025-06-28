@@ -6,7 +6,7 @@ from fastworkflow.command_directory import CommandDirectory, CommandMetadata
 def sample_workflow_path():
     """Get the path to the sample workflow example."""
     # Construct an absolute path to the sample_workflow directory
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "examples", "retail_workflow"))
+    return os.path.join("fastworkflow", "examples", "retail_workflow")
 
 class TestCommandDirectory:
     def test_load_command_directory(self, sample_workflow_path):
@@ -57,11 +57,11 @@ class TestCommandDirectory:
         expected_module_path = os.path.join(sample_workflow_path, "_commands", "list_all_product_types.py")
         
         # Check that response_generation_module_path is set correctly
-        assert os.path.abspath(metadata.response_generation_module_path) == expected_module_path
+        assert metadata.response_generation_module_path == expected_module_path
         
         # Check that parameter_extraction_signature_module_path is either None or the expected path
         if metadata.parameter_extraction_signature_module_path is not None:
-            assert os.path.abspath(metadata.parameter_extraction_signature_module_path) == expected_module_path
+            assert metadata.parameter_extraction_signature_module_path == expected_module_path
 
         # Check class names
         if metadata.command_parameters_class:

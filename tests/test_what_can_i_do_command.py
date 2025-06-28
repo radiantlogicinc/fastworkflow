@@ -15,7 +15,7 @@ class Ctx:
 
 def get_example_workflow_path():
     """Get the path to the examples/todo_list workflow."""
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "examples", "todo_list"))
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "fastworkflow", "examples", "todo_list"))
 
 
 def test_what_can_i_do_global(monkeypatch):
@@ -69,7 +69,7 @@ def test_what_can_i_do_context(monkeypatch):
     )
     
     # Use TodoListManager as context
-    from examples.todo_list.application.todo_manager import TodoListManager
+    from fastworkflow.examples.todo_list.application.todo_manager import TodoListManager
     app_workflow.current_command_context = TodoListManager()
     
     # Create a command metadata extraction workflow

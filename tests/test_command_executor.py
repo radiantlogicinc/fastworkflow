@@ -13,7 +13,7 @@ from fastworkflow.chat_session import ChatSession
 @pytest.fixture(scope="module")
 def retail_workflow_path() -> str:
     """Absolute path to the retail workflow example used by the integration tests."""
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "examples", "retail_workflow"))
+    return os.path.join("fastworkflow", "examples", "retail_workflow")
 
 
 @pytest.fixture(scope="function")

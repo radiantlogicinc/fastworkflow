@@ -128,12 +128,18 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-/.env
 .venv
 venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Environment variables
+/.env
+# But allow example workflow .env files
+!examples/*/*.env
+!fastworkflow/examples/*.env
+!tests/*/.env
 
 # Spyder project settings
 .spyderproject
@@ -176,8 +182,6 @@ yarn-error.log*
 dev-debug.log
 # Dependency directories
 node_modules/
-# Environment variables
-.env
 # Editor directories and files
 .idea
 *.suo

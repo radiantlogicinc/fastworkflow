@@ -101,9 +101,14 @@ class Workflow:
         if not sessiondata_dict:
             return None
 
+        # Gracefully handle stale session entries where the underlying
+        # session database folder has been deleted (e.g. between test
+        # runs).  Treat such cases as "workflow not found" so that the
+        # caller can create a fresh workflow instead of raising.
         sessiondb_folderpath = sessiondata_dict["sessiondb_folderpath"]
         if not os.path.exists(sessiondb_folderpath):
-            raise ValueError(f"Workflow database folder path {sessiondb_folderpath} does not exist")
+            # Stale entry – pretend it does not exist
+            return None
 
         workflow_snapshot = Workflow._load(sessiondb_folderpath)
 

@@ -3,7 +3,8 @@ import pytest
 from fastworkflow.build.dir_scanner import find_python_files, EXCLUDE_DIRS
 from fastworkflow.utils.python_utils import get_module_import_path
 
-EXAMPLES_ROOT = './examples/todo_list/application'
+# Define the root directory for examples
+EXAMPLES_ROOT = './fastworkflow/examples/todo_list/application'
 
 
 def test_find_python_files_basic():
@@ -88,4 +89,11 @@ def test_module_path_invalid_identifier(tmp_path):
     src.mkdir()
     f = make_file(src, "123abc.py")
     with pytest.raises(ValueError):
-        get_module_import_path(f, src) 
+        get_module_import_path(f, src)
+
+
+def test_find_python_files():
+    """Test that the function finds Python files in the examples directory."""
+    files = find_python_files(EXAMPLES_ROOT)
+    assert len(files) > 0
+    assert all(f.endswith('.py') for f in files) 

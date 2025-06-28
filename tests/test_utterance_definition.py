@@ -10,7 +10,7 @@ from fastworkflow.command_directory import UtteranceMetadata
 @pytest.fixture(scope="module")
 def sample_workflow_path() -> Path:
     """Get the path to the sample workflow example."""
-    return Path(__file__).parent.parent / "examples" / "retail_workflow"
+    return Path(__file__).parent.parent / "fastworkflow" / "examples" / "retail_workflow"
 
 
 @pytest.fixture

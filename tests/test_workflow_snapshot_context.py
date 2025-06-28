@@ -12,8 +12,8 @@ def test_current_context_object_property(tmp_path):
     env_vars = {"SPEEDDICT_FOLDERNAME": "___workflow_contexts"}
     fastworkflow.init(env_vars=env_vars)
 
-    # Get the path to the hello_world example directory
-    hello_world_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "hello_world")
+    # Get the path to the hello_world example directory in tests
+    hello_world_path = os.path.join(os.path.dirname(__file__), "hello_world_workflow")
     
     # Create a workflow with the hello_world workflow
     workflow = Workflow.create(

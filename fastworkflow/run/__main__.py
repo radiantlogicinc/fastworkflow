@@ -79,16 +79,18 @@ def run_main(args):
         console.print(f"[bold red]Error:[/bold red] The specified workflow path '{args.workflow_path}' is not a valid directory.")
         exit(1)
 
-    console.print(Panel(f"Running fastWorkflow: [bold]{args.workflow_path}[/bold]", title="[bold green]fastworkflow[/bold green]", border_style="green"))
-    console.print("[bold green]Tip:[/bold green] Type 'exit' to quit the application.")
-
-    if args.startup_command and args.startup_action:
-        raise ValueError("Cannot provide both startup_command and startup_action")
-
     env_vars = {
         **dotenv_values(args.env_file_path),
         **dotenv_values(args.passwords_file_path)
     }
+    if not env_vars:
+        raise ValueError("Env and password env files are missing or path is incorrect")
+
+    if args.startup_command and args.startup_action:
+        raise ValueError("Cannot provide both startup_command and startup_action")
+
+    console.print(Panel(f"Running fastWorkflow: [bold]{args.workflow_path}[/bold]", title="[bold green]fastworkflow[/bold green]", border_style="green"))
+    console.print("[bold green]Tip:[/bold green] Type 'exit' to quit the application.")
 
     fastworkflow.init(env_vars=env_vars)
 

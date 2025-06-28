@@ -11,7 +11,7 @@ from fastworkflow.command_context_model import CommandContextModel
 @pytest.fixture(scope="module")
 def sample_workflow_path() -> Path:
     """Provides the path to the sample workflow example."""
-    return Path(__file__).parent.parent / "examples" / "retail_workflow"
+    return Path(__file__).parent.parent / "fastworkflow" / "examples" / "retail_workflow"
 
 
 @pytest.fixture

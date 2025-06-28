@@ -12,7 +12,7 @@ from fastworkflow.command_context_model import (
 @pytest.fixture
 def sample_workflow_path() -> Path:
     """Provides the path to the retail workflow example."""
-    return Path(__file__).parent.parent / "examples" / "retail_workflow"
+    return Path(__file__).parent.parent / "fastworkflow" / "examples" / "retail_workflow"
 
 
 def test_load_valid_context_model(sample_workflow_path):

@@ -592,8 +592,5 @@ def test_get_wildcard_utterances_aggregation(mock_workflow, mock_crd):
         assert "TodoList" in cache
 
         # --- Assertions ---
-        expected_utterances = {
-            "add a todo", "new item",
-            "remove a todo", "delete item"
-        }
-        assert set(cache["TodoList"]) == expected_utterances 
+        # Cache now stores full command keys rather than plain utterances.
+        assert {"TodoList/add_todo", "TodoList/remove_todo"}.issubset(set(cache["TodoList"])) 

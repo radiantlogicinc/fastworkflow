@@ -17,7 +17,7 @@ def test_workflow_has_context_methods(tmp_path):
     fastworkflow.init(env_vars=env_vars)
 
     # Get the path to the hello_world example directory
-    hello_world_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "hello_world")
+    hello_world_path = os.path.join(os.path.dirname(__file__), "hello_world_workflow")
     
     # Create a workflow with the hello_world workflow
     workflow = fastworkflow.Workflow.create(
@@ -44,7 +44,7 @@ def test_dummy_expander(tmp_path):
     fastworkflow.init(env_vars=env_vars)
 
     # Get the path to the hello_world example directory
-    hello_world_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "hello_world")
+    hello_world_path = os.path.join(os.path.dirname(__file__), "hello_world_workflow")
     
     # Create a workflow with the hello_world workflow
     workflow = fastworkflow.Workflow.create(
@@ -89,7 +89,7 @@ def test_object_level_move_to_parent(tmp_path):
     fastworkflow.init(env_vars=env_vars)
 
     # Get the path to the hello_world example directory
-    hello_world_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "hello_world")
+    hello_world_path = os.path.join(os.path.dirname(__file__), "hello_world_workflow")
     
     # Create a workflow with the hello_world workflow
     workflow = fastworkflow.Workflow.create(
