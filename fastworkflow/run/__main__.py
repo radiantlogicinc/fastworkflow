@@ -15,6 +15,7 @@ from rich.text import Text
 from rich.console import Group
 
 import fastworkflow
+from fastworkflow.utils.logging import logger
 from fastworkflow.command_executor import CommandExecutor
 
 
@@ -79,14 +80,19 @@ def run_main(args):
         console.print(f"[bold red]Error:[/bold red] The specified workflow path '{args.workflow_path}' is not a valid directory.")
         exit(1)
 
+    commands_dir = os.path.join(args.workflow_path, "_commands")
+    if not os.path.isdir(commands_dir):
+        logger.info(f"No _commands directory found at {args.workflow_path}, existing...")
+        return
+
     env_vars = {
         **dotenv_values(args.env_file_path),
         **dotenv_values(args.passwords_file_path)
     }
     if not env_vars.get("SPEEDDICT_FOLDERNAME"):
-        raise ValueError("Env file is missing or path is incorrect")
+        raise ValueError(f"Env file {args.env_file_path} is missing or path is incorrect")
     if not env_vars.get("LITELLM_API_KEY_SYNDATA_GEN"):
-        raise ValueError("Password env file is missing or path is incorrect")
+        raise ValueError(f"Password env file {args.passwords_file_path} is missing or path is incorrect")
 
     if args.startup_command and args.startup_action:
         raise ValueError("Cannot provide both startup_command and startup_action")

@@ -297,7 +297,7 @@ class Workflow:
             )
             shutil.rmtree(sessiondb_folderpath, ignore_errors=True)
         except OSError as e:
-            logger.error(f"Error closing session: {e}")
+            logger.error(f"Error closing session: {e}", stack_info=True)
             return False
 
         return True

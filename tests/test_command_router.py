@@ -107,10 +107,8 @@ def test_missing_root_dir(tmp_path, add_temp_workflow_path):
     # Expect router.scan to raise RuntimeError when the workflow path lacks a _commands folder.
     add_temp_workflow_path(Path.cwd())
 
-    router = RoutingDefinition.build(str(tmp_path / "nonexistent"))
-
     with pytest.raises(RuntimeError):
-        router.scan(use_cache=False)  # Bypass cache for tests
+        router = RoutingDefinition.build(str(tmp_path / "nonexistent"))
 
 
 def test_scan_with_commands_directory():
@@ -186,17 +184,5 @@ def test_scan_with_nonexistent_directory():
     with tempfile.TemporaryDirectory() as tmpdir:
         nonexistent_dir = Path(tmpdir) / "nonexistent"
         
-        # Create a router and scan the directory
-        # This should not raise an exception, but the command directory and routing definition should be empty
-        try:
-            router = RoutingDefinition.build(str(nonexistent_dir))
-            
-            # Check that the command directory is empty
-            assert len(router.command_directory_map) == 1  # Just the global context
-            assert router.command_directory_map["*"] == set()
-            
-            # Check that the routing definition is empty
-            assert len(router.routing_definition_map) == 0
-        except Exception as e:
-            # If an exception is raised, fail the test with the exception message
-            pytest.fail(f"RoutingDefinition.build raised an exception for a nonexistent directory: {str(e)}") 
+    with pytest.raises(RuntimeError):
+        router = RoutingDefinition.build(str(nonexistent_dir))

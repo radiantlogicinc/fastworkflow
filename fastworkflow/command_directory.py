@@ -178,7 +178,7 @@ class CommandDirectory(BaseModel):
         commands_root_folder = Path(workflow_folderpath) / "_commands"
 
         if not commands_root_folder.is_dir():
-            if 'fastworkflow' not in workflow_folderpath:
+            if not workflow_folderpath.endswith('fastworkflow'):
                 raise RuntimeError(f"Internal error: workflow_folderpath '{workflow_folderpath}' does not contain '_commands'")
             return command_directory
 
@@ -416,7 +416,10 @@ class CommandDirectory(BaseModel):
                     parts = os.path.splitext(rel_path)[0].split(os.sep)
                     qualified_name = "/".join(parts) if len(parts) > 1 else parts[0]
                     discovered_commands.add(qualified_name)
-                    
+
+        if not discovered_commands:
+            raise RuntimeError("No core commands discovered in internal workflow: {internal_wf_path}")
+
         return discovered_commands
 
     @classmethod
@@ -572,21 +575,18 @@ def get_cached_command_directory(workflow_folderpath: str) -> CommandDirectory:
     cache_folder = Path(CommandDirectory.get_commandinfo_folderpath(workflow_folderpath))
     cache_file = cache_folder / "command_directory.json"
 
-    try:
-        commands_root = Path(workflow_folderpath) / "_commands"
-        if commands_root.exists():
-            latest_src_mtime = max(p.stat().st_mtime for p in commands_root.rglob("*.py"))
-        else:
-            latest_src_mtime = 0.0
+    commands_root = Path(workflow_folderpath) / "_commands"
+    if commands_root.exists():
+        # Use a generator expression with a default to handle empty directories
+        latest_src_mtime = max((p.stat().st_mtime for p in commands_root.rglob("*.py")), default=0.0)
+    else:
+        latest_src_mtime = 0.0
 
-        # Fast-path: load JSON if it is newer than any source file
-        if cache_file.exists() and cache_file.stat().st_mtime > latest_src_mtime:
-            with contextlib.suppress(Exception):
-                return CommandDirectory.model_validate_json(cache_file.read_text())
-        # (Re)build and persist
-        directory = CommandDirectory.load(workflow_folderpath)
-        directory.save()
-        return directory
-    except Exception:
-        # Final fallback – live build without caching safeguards
-        return CommandDirectory.load(workflow_folderpath)
+    # Fast-path: load JSON if it is newer than any source file
+    if cache_file.exists() and cache_file.stat().st_mtime > latest_src_mtime:
+        return CommandDirectory.model_validate_json(cache_file.read_text())
+            
+    # (Re)build and persist
+    directory = CommandDirectory.load(workflow_folderpath)
+    directory.save()
+    return directory

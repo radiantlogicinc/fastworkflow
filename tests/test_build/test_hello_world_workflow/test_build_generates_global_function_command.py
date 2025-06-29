@@ -47,7 +47,7 @@ def test_build_generates_global_function_command(hello_world_app_dir, hello_worl
     assert "b: float" in content
     
     # Check for import of the function
-    assert "from application.add_two_numbers import add_two_numbers" in content
+    assert "from ..application.add_two_numbers import add_two_numbers" in content
     
     # Check for function call
     assert "result_val = add_two_numbers(" in content 

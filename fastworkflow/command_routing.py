@@ -26,6 +26,7 @@ from fastworkflow import ModuleType
 from fastworkflow.command_directory import CommandDirectory, UtteranceMetadata, get_cached_command_directory
 from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.utils import python_utils
+from fastworkflow.utils.logging import logger
 
 
 class RoutingDefinition(BaseModel):
@@ -237,36 +238,36 @@ class RoutingDefinition(BaseModel):
         in the format 'ContextName/command_name'. This method ensures these qualified names
         are properly handled when building the routing definition.
         """       
-        try:
-            # Use cached command directory to avoid repeated filesystem scanning
-            command_directory = get_cached_command_directory(workflow_folderpath)
-            context_model = CommandContextModel.load(workflow_folderpath)
+        # Use cached command directory to avoid repeated filesystem scanning
+        command_directory = get_cached_command_directory(workflow_folderpath)
+        context_model = CommandContextModel.load(workflow_folderpath)
 
-            # Use dynamically discovered core commands
-            core_commands = command_directory.core_command_names
+        # Use dynamically discovered core commands
+        core_commands = command_directory.core_command_names
+        logger.debug(f"Core commands: {str(core_commands)}, Workflow folderpath {workflow_folderpath}")
 
-            resolved_contexts = {}
-            for context_name in context_model._command_contexts:
-                # Get commands for this context from the context model
-                context_commands = context_model.commands(context_name)
+        resolved_contexts = {}
+        for context_name in context_model._command_contexts:
+            # Get commands for this context from the context model
+            context_commands = context_model.commands(context_name)
 
-                # Add core commands to every context
-                resolved_contexts[context_name] = sorted(set(context_commands) | set(core_commands))
+            # Add core commands to every context
+            resolved_contexts[context_name] = sorted(set(context_commands) | set(core_commands))
 
-            # Ensure global context '*' also exists with core commands (if not in model)
-            if '*' not in resolved_contexts:
-                resolved_contexts['*'] = sorted(core_commands)
-        except Exception as e:
-            # Handle errors gracefully for tests expecting this behavior
-            # This matches the behavior of the original CommandRouter
-            if "_commands" not in str(e) and "does not exist" not in str(e):
-                # Re-raise unexpected errors
-                raise
+        # Ensure global context '*' also exists with core commands (if not in model)
+        if '*' not in resolved_contexts:
+            resolved_contexts['*'] = sorted(core_commands)
+        # except Exception as e:
+        #     # Handle errors gracefully for tests expecting this behavior
+        #     # This matches the behavior of the original CommandRouter
+        #     if "_commands" not in str(e) and "does not exist" not in str(e):
+        #         # Re-raise unexpected errors
+        #         raise
 
             # For missing directories, return an empty definition
-            command_directory = CommandDirectory(workflow_folderpath=workflow_folderpath)
-            context_model = CommandContextModel(_workflow_path=workflow_folderpath, _command_contexts={})
-            resolved_contexts = {"*": []}
+            # command_directory = CommandDirectory(workflow_folderpath=workflow_folderpath)
+            # context_model = CommandContextModel(_workflow_path=workflow_folderpath, _command_contexts={})
+            # resolved_contexts = {"*": []}
 
         routing_definition = cls(
             workflow_folderpath=workflow_folderpath,
@@ -275,10 +276,12 @@ class RoutingDefinition(BaseModel):
             contexts=resolved_contexts,
         )
 
-        with contextlib.suppress(Exception):
-            # Only save if we were able to build successfully
-            if resolved_contexts != {"*": []}:
-                routing_definition.save()
+        # Only save if we were able to build successfully
+        if resolved_contexts != {"*": []}:
+            routing_definition.save()
+        else:
+            logger.error(f"Could not build command_routing_definition.json for workflow folderpath {workflow_folderpath}")
+
         return routing_definition
 
     def scan(self, use_cache=True):

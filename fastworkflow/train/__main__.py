@@ -5,8 +5,10 @@ import shutil
 from dotenv import dotenv_values
 
 from colorama import Fore, Style
-from fastworkflow.utils import python_utils
+
 import fastworkflow
+from fastworkflow.utils.logging import logger
+from fastworkflow.utils import python_utils
 from fastworkflow import ModuleType
 from fastworkflow.model_pipeline_training import train, get_route_layer_filepath_model
 from fastworkflow.utils.generate_param_examples import generate_dspy_examples
@@ -16,6 +18,11 @@ from fastworkflow.command_context_model import CommandContextModel
 
 
 def train_workflow(workflow_path: str):
+    commands_dir = os.path.join(workflow_path, "_commands")
+    if not os.path.isdir(commands_dir):
+        logger.info(f"No _commands directory found at {workflow_path}, skipping training")
+        return
+
     # Ensure context model is parsed so downstream helpers have contexts
     CommandContextModel.load(workflow_path)
     RoutingDefinition.build(workflow_path)
@@ -37,7 +44,7 @@ def train_workflow(workflow_path: str):
                 print(f"{Fore.YELLOW}Training child workflow: {child_workflow_path}{Style.RESET_ALL}")
                 train_workflow(child_workflow_path)
 
-    if "fastworkflow" in workflow_path and "_workflows" not in workflow_path:
+    if "fastworkflow/fastworkflow" in workflow_path and "_workflows" not in workflow_path:
         return
     
     # create a workflow and train the main workflow
@@ -76,7 +83,7 @@ def _generate_dspy_examples_helper(workflow):
             num_examples=15,
             validation_threshold=0.3  # You can adjust this threshold as needed
             )
-            output_dir = os.path.join(workflow_path, "___command_info")
+            output_dir = os.path.join(workflow.folderpath, "___command_info")
             os.makedirs(output_dir, exist_ok=True)
 
             # Format the examples for JSON
@@ -181,9 +188,11 @@ def train_main(args):
         **dotenv_values(args.passwords_file_path)
     }
     if not env_vars.get("SPEEDDICT_FOLDERNAME"):
-        raise ValueError("Env file is missing or path is incorrect")
+        print(f'Env file path: {args.env_file_path}')
+        raise ValueError("SPEEDDICT_FOLDERNAME env var not found! Is the env file missing? or path is incorrect?")
     if not env_vars.get("LITELLM_API_KEY_SYNDATA_GEN"):
-        raise ValueError("Password env file is missing or path is incorrect")
+        print(f'Password env file path: {args.passwords_file_path}')
+        raise ValueError("LITELLM_API_KEY_SYNDATA_GEN password env var not found! Is the password env file missing? or path is incorrect?")
 
     fastworkflow.init(env_vars=env_vars)
 

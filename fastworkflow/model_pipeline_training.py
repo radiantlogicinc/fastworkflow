@@ -1069,13 +1069,10 @@ def train(workflow: fastworkflow.Workflow):
 
     
         text = "list commands"
-        try:
-            result = predict_single_sentence(pipeline, text, label_path)
-            print(f"Predicted label: {result['label']}")
-            print(f"Confidence: {result['confidence']:.4f}")
-            print(f"Used DistilBERT: {'Yes' if result['used_distil'] else 'No'}")
-        except ValueError as e:
-            print(f"Error: {e}")
+        result = predict_single_sentence(pipeline, text, label_path)
+        print(f"Predicted label: {result['label']}")
+        print(f"Confidence: {result['confidence']:.4f}")
+        print(f"Used DistilBERT: {'Yes' if result['used_distil'] else 'No'}")
             
     # End of context loop
     return None
