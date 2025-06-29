@@ -3,19 +3,32 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![CI](https://img.shields.io/badge/ci-passing-brightgreen)](<LINK_TO_CI>)
 
-A framework for rapidly building large-scale, deterministic, interactive workflows on top of existing Python applications, featuring a fault-tolerant, conversational UX and AI-powered recommendations.
+Build agents and assistants for complex workflows and large-scale Python applications, with deterministic or AI-powered business logic.
 
 ---
 
-### Who is this for?
+### Why fastWorkflow?
 
-| `fastWorkflow` is a great fit if... | `fastWorkflow` might be overkill if... |
-| :--- | :--- |
-| ✅ You have an existing Python domain model and want to add a conversational or agentic interface **without** rewriting business logic. | ❌ You just need a standard CRUD REST or GraphQL API. |
-| ✅ You are building back-office tools that benefit from multi-step, interactive command sequences (e.g., inventory management, data review). | ❌ Your system requires ultra-low latency (1k+ TPS) where any NLP overhead is unacceptable. |
-| ✅ You prefer a *convention-over-configuration* approach and want to auto-generate boilerplate for your CLI/agent interface. | ❌ Your project requires every API endpoint to be handcrafted with bespoke JSON payloads and manual routing. |
+- ✅ **Unlimited Tool Scaling**: fastworkflow can scale to an unlimited number of tools
+- ✅ **Cost-Effective Performance**: fastWorkFlow with small, free models can match the quality of large expensive models
+- ✅ **Reliable Tool Execution**: fastworkflow validation pipeline virtually eliminates incorrect tool calling or parameter extraction, ensuring a reliable tool response
+- ✅ **Adaptive Learning**: 1-shot learning from intent detection mistakes. It learns your conversational vocabulary as you interact with it
+- ✅ **Interface Flexibility**: Support programmatic, assistant-driven and agent-driven interfaces with the same codebase
+- ✅ **Deep Code Understanding**: fastworkflow understands classes, methods, inheritance and aggregation so you can quickly 'AI-enable' large-scale Python applications
 
-> **See it in Action**: A live terminal chat session of the `hello_world` example is available at [docs/assets/hello_world_demo.gif](docs/assets/hello_world_demo.gif).
+---
+
+### Key Concepts
+
+**Adaptive Intent Understanding**: Misunderstandings are a given in any conversation, no matter how intelligent the participants. Natural language applications should have intent clarification and parameter validation built-in. We have the ability to 1-shot adapt our semantic understanding of words and sentences based on the context of the conversation and clarifications of intent. Applications should also be able to do the same.
+
+**Contextual Hierarchies**: Communication is always within a context. And not just one concept but layers of contexts. Interpretation starts with the narrowest context and expands to larger contexts if the narrow context does not 'fit' the interpretation. In programming languages, we express contexts as classes, tools as methods and context hierarchies using inheritance and aggregation. Natural language applications should understand classes, methods, inheritance and aggregation out-of-the-box.
+
+**Signatures**: Signatures (ALA Pydantic and DSPy) are the most efficient way of mapping natural language commands to tool implementations, whether programmatic or GenAI. We use signatures as a backbone for implementing commands, enabling seamless integration with DSPy for producing LLM-content within a deterministic programming framework.
+
+**Code Generation**: AI-enabling large-scale, complex applications is non-trivial. Build tools that can quickly map natural language commands to application classes and methods are critical if we are to build more than prototypes and demos.
+
+**Context Navigation at Runtime**: Classes maintain state, not just methods. Method behaviors can change based on state. These capabilities are the building blocks for creating complex finite-state-machines on which non-trivial workflows are built. We need to support dynamically enabling/disabling methods along with the ability to navigate object instance hierarchies at run-time, if we want to build complex workflows.
 
 ---
 
@@ -24,7 +37,7 @@ A framework for rapidly building large-scale, deterministic, interactive workflo
 `fastWorkflow` separates the build-time, train-time, and run-time concerns. The `build` tool creates a command interface from your code, the `train` tool builds NLP models to understand commands, and the `run` scripts execute the workflow.
 
 ```mermaid
-graph TD
+graph LR
     subgraph A[Build-Time]
         A1(Your Python App Source) --> A2{fastworkflow.build};
         A2 --> A3(Generated _commands);
@@ -58,6 +71,8 @@ pip install fastworkflow
 # Or with uv
 uv pip install fastworkflow
 ```
+
+**Note:** `fastWorkflow` installs PyTorch as a dependency. If you don't already have PyTorch installed, this could take 20-30 minutes depending on your internet connection and system.
 
 ---
 
@@ -376,11 +391,8 @@ The example workflows are configured to use Mistral's models by default. You can
 > **`PARAMETER EXTRACTION ERROR`**
 > This means the LLM failed to extract the required parameters from your command. The error message will list the missing or invalid fields. Rephrase your command to be more specific.
 
-> **`speedict` Permission Denied**
-> This can happen if the cache files in `___command_info/` become corrupted. Delete the `___command_info` directory and retrain the workflow.
-
-> **Slow Training on CPU**
-> The first run may be slow due to model downloads from Hugging Face. Subsequent runs will be faster. Set `export HF_HOME=/path/to/cache` to control where models are stored. Training a small workflow takes ~5-8 minutes on a modern CPU.
+> **Slow Training**
+> Training involves generating synthetic utterances, which requires multiple LLM calls, making it inherently time-consuming. The first run may also be slow due to model downloads from Hugging Face. Subsequent runs will be faster. Set `export HF_HOME=/path/to/cache` to control where models are stored. Training a small workflow takes ~5-8 minutes on a modern CPU.
 
 > **Missing API Keys**
 > If you see errors about missing environment variables or API keys, make sure you've added your API keys to the `fastworkflow.passwords.env` file as described in the Quick Start guide.
@@ -392,7 +404,7 @@ The example workflows are configured to use Mistral's models by default. You can
 Interested in contributing to `fastWorkflow` itself? Great!
 
 1.  **Clone the repository:** `git clone https://github.com/your-repo/fastworkflow.git`
-2.  **Set up the Conda environment:** `conda create --name fastworkflow python=3.11 -y && conda activate fastworkflow`
+2.  **Set up the environment:** Create a virtual environment using your preferred tool (venv, uv, conda, poetry, etc.) with Python 3.11+
 3.  **Install in editable mode with dev dependencies:** `pip install -e ".[dev]"`
 
 Please see `CONTRIBUTING.md` for our contribution guidelines and code of conduct.
