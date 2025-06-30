@@ -18,11 +18,6 @@ from fastworkflow.command_context_model import CommandContextModel
 
 
 def train_workflow(workflow_path: str):
-    commands_dir = os.path.join(workflow_path, "_commands")
-    if not os.path.isdir(commands_dir):
-        logger.info(f"No _commands directory found at {workflow_path}, skipping training")
-        return
-
     # Ensure context model is parsed so downstream helpers have contexts
     CommandContextModel.load(workflow_path)
     RoutingDefinition.build(workflow_path)
@@ -44,7 +39,9 @@ def train_workflow(workflow_path: str):
                 print(f"{Fore.YELLOW}Training child workflow: {child_workflow_path}{Style.RESET_ALL}")
                 train_workflow(child_workflow_path)
 
-    if "fastworkflow/fastworkflow" in workflow_path and "_workflows" not in workflow_path:
+    commands_dir = os.path.join(workflow_path, "_commands")
+    if not os.path.isdir(commands_dir):
+        logger.info(f"No _commands directory found at {workflow_path}, skipping training")
         return
     
     # create a workflow and train the main workflow
