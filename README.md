@@ -208,7 +208,7 @@ fastworkflow examples run <example_name>
 
 ```sh
 # Build a workflow from your Python application
-fastworkflow build --source-dir <app_dir> --output-dir <workflow_dir>/_commands --context-model-dir <workflow_dir>
+fastworkflow build --app-dir <app_dir> --workflow-folderpath <workflow_dir>
 
 # Train a workflow's intent detection models
 fastworkflow train <workflow_dir> <env_file> <passwords_file>
@@ -258,7 +258,7 @@ my-project/
      └── fastworkflow.passwords.env
 ```
 -   Your application code (`greeter_application/`) remains untouched.
--   The `fastWorkflow` definition (`greeter_fastworkflow/`) contains all the generated files and trained models. The build tool (`--source-dir`) points to your app code, while the output flags (`--output-dir`, `--context-model-dir`) point inside the workflow directory.
+-   The `fastWorkflow` definition (`greeter_fastworkflow/`) contains all the generated files and trained models. The build tool (`--app-dir`) points to your app code, while the output flag (`--workflow-folderpath`) points to the workflow directory.
 
 ---
 

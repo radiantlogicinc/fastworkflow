@@ -13,16 +13,16 @@ This document specifies the command-line interface (CLI) for the FastWorkflow bu
 
 | Argument         | Short | Type    | Required | Description                                      |
 |------------------|-------|---------|----------|--------------------------------------------------|
-| --source-dir     | -s    | string  | Yes      | Source code directory to analyze                 |
-| --output-dir     | -o    | string  | Yes      | Where to place generated files                   |
+| --app-dir     | -s    | string  | Yes      | Source code directory to analyze                 |
+| --workflow-folderpath     | -o    | string  | Yes      | Where to place generated files                   |
 | --dry-run        |       | flag    | No       | Do not write files, just print actions           |
 | --verbose        | -v    | flag    | No       | Print detailed logs                              |
 | --context-name   |       | string  | No       | Name for the context model JSON                  |
 | --overwrite      |       | flag    | No       | Overwrite files in output directory if present   |
 
 ## Argument Details
-- **--source-dir, -s**: Path to the target application's source directory. Must exist and be readable.
-- **--output-dir, -o**: Path to the output directory for generated files. Must exist and be writable.
+- **--app-dir, -s**: Path to the target application's source directory. Must exist and be readable.
+- **--workflow-folderpath, -o**: Path to the output directory for generated files. Must exist and be writable.
 - **--dry-run**: If set, the tool will not write any files but will print the actions it would take.
 - **--verbose, -v**: If set, the tool will print detailed logs for debugging and transparency.
 - **--context-name**: If provided, specifies the name of the generated context model JSON file. Must be a valid filename.
@@ -37,7 +37,7 @@ This document specifies the command-line interface (CLI) for the FastWorkflow bu
 
 **Basic usage:**
 ```sh
-python -m fastworkflow.build --source-dir my_app/ --output-dir my_app/build/
+python -m fastworkflow.build --app-dir my_app/ --workflow-folderpath my_app/build/
 ```
 
 **With optional arguments:**
@@ -53,15 +53,15 @@ python -m fastworkflow.build --help
 
 ## Help Text Example
 ```
-usage: fastworkflow.build [-h] --source-dir SOURCE_DIR --output-dir OUTPUT_DIR [--dry-run] [--verbose] [--context-name CONTEXT_NAME] [--overwrite]
+usage: fastworkflow.build [-h] --app-dir SOURCE_DIR --workflow-folderpath OUTPUT_DIR [--dry-run] [--verbose] [--context-name CONTEXT_NAME] [--overwrite]
 
 Generate FastWorkflow command files and context model from a Python application.
 
 optional arguments:
   -h, --help            show this help message and exit
-  --source-dir SOURCE_DIR, -s SOURCE_DIR
+  --app-dir SOURCE_DIR, -s SOURCE_DIR
                         Path to the source directory of the target application
-  --output-dir OUTPUT_DIR, -o OUTPUT_DIR
+  --workflow-folderpath OUTPUT_DIR, -o OUTPUT_DIR
                         Path to save the generated command files and context model
   --dry-run             Do not write files, just print actions
   --verbose, -v         Print detailed logs

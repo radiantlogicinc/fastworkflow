@@ -202,20 +202,10 @@ def find_default_env_files(workflow_path):
 def add_build_parser(subparsers):
     """Add subparser for the 'build' command."""
     parser_build = subparsers.add_parser("build", help="Generate FastWorkflow command files and context model from a Python application.", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser_build.add_argument('--source-dir', '-s', required=True, help='Path to the source directory of the target application')
-    parser_build.add_argument('--output-dir', '-o', required=True, help='Path to save the generated command files')
-    parser_build.add_argument("--env_file_path", '-e', required=False, default=".env", 
-                             help="Path to the environment file (default: .env in current directory)")
-    parser_build.add_argument("--passwords_file_path", '-p', required=False, default="passwords.env", 
-                             help="Path to the passwords file (default: passwords.env in current directory)")
-    parser_build.add_argument('--dry-run', action='store_true', help='Do not write files, just print actions')
-    parser_build.add_argument('--verbose', '-v', action='store_true', help='Print detailed logs')
+    parser_build.add_argument('--app-dir', '-s', required=True, help='Path to the source code directory of the application')
+    parser_build.add_argument('--workflow-folderpath', '-w', required=True, help='Path to the workflow folder where commands will be generated')
     parser_build.add_argument('--overwrite', action='store_true', help='Overwrite files in output directory if present')
-    parser_build.add_argument('--context-model-dir', required=True, help='Directory to save the generated command context JSON')
-    parser_build.add_argument('--generate-stubs', action='store_true', help='Generate command stub files for contexts')
     parser_build.add_argument('--stub-commands', help='Comma-separated list of command names to generate stubs for')
-    parser_build.add_argument('--generate-navigators', action='store_true', help='Generate navigator stub files for contexts')
-    parser_build.add_argument('--navigators-dir', help='Directory to save the generated navigator files (default: "navigators" in the output directory)')
     parser_build.add_argument('--no-startup', action='store_true', help='Skip generating the startup.py file')
     parser_build.set_defaults(func=build_main)
 

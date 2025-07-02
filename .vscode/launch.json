@@ -137,9 +137,8 @@
                 "LOG_LEVEL": "DEBUG"
             },
             "args": [
-                "--source-dir", "./fastworkflow/examples/todo_list/application",
-                "--output-dir", "./fastworkflow/examples/todo_list/_commands",
-                "--context-model-dir", "./fastworkflow/examples/todo_list",
+                "--app-dir", "./fastworkflow/examples/todo_list/application",
+                "--workflow-folderpath", "./fastworkflow/examples/todo_list/_commands",
                 "--overwrite"
             ]
         },

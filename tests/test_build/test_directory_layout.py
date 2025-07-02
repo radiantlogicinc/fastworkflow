@@ -41,9 +41,9 @@ class TestManager:
     def test_validate_directories_creates_commands_dir(self, temp_dirs):
         """Test that validate_directories creates _commands directory and __init__.py."""
         class Args:
-            def __init__(self, source_dir, output_dir):
-                self.source_dir = source_dir
-                self.output_dir = output_dir
+            def __init__(self, app_dir, workflow_folderpath):
+                self.app_dir = app_dir
+                self.workflow_folderpath = workflow_folderpath
         
         args = Args(temp_dirs["source"], temp_dirs["output"])
         validate_directories(args)
@@ -64,7 +64,7 @@ class TestManager:
         os.makedirs(commands_dir, exist_ok=True)
         
         # Generate startup command
-        result = generate_startup_command(temp_dirs["output"], temp_dirs["source"])
+        result = generate_startup_command(workflow_folderpath=temp_dirs["output"], app_dir=temp_dirs["source"])
         
         # Check that startup.py was created
         startup_py = os.path.join(commands_dir, "startup.py")
@@ -89,7 +89,7 @@ class TestManager:
             f.write("# Custom content")
         
         # Try to generate again without overwrite
-        result = generate_startup_command(temp_dirs["output"], temp_dirs["source"])
+        result = generate_startup_command(workflow_folderpath=temp_dirs["output"], app_dir=temp_dirs["source"])
         assert result == True
         
         # Content should not have changed
@@ -98,7 +98,7 @@ class TestManager:
         assert content == "# Custom content"
         
         # Try to generate again with overwrite
-        result = generate_startup_command(temp_dirs["output"], temp_dirs["source"], overwrite=True)
+        result = generate_startup_command(workflow_folderpath=temp_dirs["output"], app_dir=temp_dirs["source"], overwrite=True)
         assert result == True
         
         # Content should have changed

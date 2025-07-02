@@ -11,16 +11,10 @@ def test_build_generates_global_function_command(hello_world_app_dir, hello_worl
         sys.executable,
         "-m",
         "fastworkflow.build",
-        "--source-dir",
+        "--app-dir",
         hello_world_app_dir,
-        "--output-dir",
+        "--workflow-folderpath",
         str(hello_world_build_dir),
-        "--context-model-dir",
-        str(hello_world_build_dir),
-        "--env_file_path",
-        "./env/.env",
-        "--passwords_file_path",
-        "./passwords/.env",
         "--overwrite"
     ]
     
