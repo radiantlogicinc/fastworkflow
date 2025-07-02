@@ -1,8 +1,12 @@
 <!-- Logo and Title -->
-<p align="left" style="display: flex; align-items: center; gap: 12px;">
-  <img src="logo.png" alt="fastWorkflow Logo" style="height: 5em; vertical-align: middle; display: inline-block; margin-right: 8px;"/>
-  <span style="font-size: 2em; font-weight: bold; vertical-align: middle; display: inline-block;">fastWorkflow</span>
-</p>
+<table style="border: none;"><tr>
+<td style="vertical-align: middle; padding-right: 12px; border: none;">
+  <img src="logo.png" alt="fastWorkflow Logo" style="height: 64px; width: auto; display: block;"/>
+</td>
+<td style="vertical-align: middle; border: none;">
+  <span style="font-size: 48px; font-weight: bold; line-height: 1;">fastWorkflow</span>
+</td>
+</tr></table>
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![CI](https://img.shields.io/badge/ci-passing-brightgreen)](<LINK_TO_CI>)
