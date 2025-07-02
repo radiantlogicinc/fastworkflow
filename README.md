@@ -1,15 +1,7 @@
 <!-- Logo and Title -->
-<table style="border: none;"><tr>
-<td style="vertical-align: middle; padding-right: 12px; border: none;">
-  <img src="logo.png" alt="fastWorkflow Logo" style="height: 64px; width: auto; display: block;"/>
-</td>
-<td style="vertical-align: middle; border: none;">
-  <span style="font-size: 48px; font-weight: bold; line-height: 1;">fastWorkflow</span>
-</td>
-</tr></table>
+<img src="logo.png" height="64" alt="fastWorkflow Logo and Title">
 
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
-[![CI](https://img.shields.io/badge/ci-passing-brightgreen)](<LINK_TO_CI>)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE) [![CI](https://img.shields.io/badge/ci-passing-brightgreen)](<LINK_TO_CI>)
 
 Build agents and assistants for complex workflows and large-scale Python applications, with deterministic or AI-powered business logic.
 
