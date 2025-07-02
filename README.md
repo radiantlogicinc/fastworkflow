@@ -262,166 +262,20 @@ my-project/
 
 ---
 
-## Building Your First Workflow: The Manual Approach
-
-Before using the build tool, it's helpful to understand what it does by creating a simple workflow by hand. This will teach you the core concepts.
-
-### Step 1: Design Your Application
-
-Create a simple Python class.
-
-```python
-# my_app/greeter.py
-class Greeter:
-    """A simple class to greet someone."""
-    def greet(self, name: str) -> str:
-        """Greets the given name."""
-        return f"Hello, {name}!"
-```
-
-### Step 2: Create the Workflow Directory
-
-Set up the directory structure for your workflow UI.
-
-```sh
-mkdir -p my_workflow_ui/_commands/Greeter
-touch my_workflow_ui/__init__.py
-touch my_workflow_ui/_commands/__init__.py
-touch my_workflow_ui/_commands/Greeter/__init__.py
-```
-
-### Step 3: Write the Command File
-
-Create a file named `my_workflow_ui/_commands/Greeter/greet.py`. This file tells `fastWorkflow` how to handle the `greet` command for the `Greeter` context.
-
-```python
-# my_workflow_ui/_commands/Greeter/greet.py
-import fastworkflow
-from pydantic import BaseModel, Field
-
-# The Signature defines the command's interface
-class Signature:
-    # The Input model defines the parameters the command accepts.
-    class Input(BaseModel):
-        name: str = Field(description="The name of the person to greet.")
-
-    # The Output model defines the structure of the command's result.
-    class Output(BaseModel):
-        result: str = Field(description="The complete greeting.")
-
-    # Plain utterances are used to train the intent detection model.
-    plain_utterances = [
-        "greet {name}",
-        "say hello to {name}"
-    ]
-
-# The ResponseGenerator contains the logic to execute the command.
-class ResponseGenerator:
-    def __call__(self, workflow: fastworkflow.Workflow, command_parameters: Signature.Input) -> fastworkflow.CommandOutput:
-        # Get the instance of your application class from the workflow
-        app_instance: Greeter = workflow.command_context_for_response_generation
-        
-        # Call your application's method
-        greeting_result = app_instance.greet(name=command_parameters.name)
-        
-        # Format the output
-        output = Signature.Output(result=greeting_result)
-        
-        return fastworkflow.CommandOutput(
-            command_responses=[
-                fastworkflow.CommandResponse(response=output.model_dump_json())
-            ]
-        )
-```
-
-### Step 4: Create the Context Model
-
-Create `my_workflow_ui/context_inheritance_model.json`. This file defines the contexts and their inheritance. For our simple case, it's just the `Greeter`.
-
-```json
-{
-  "Greeter": {
-    "base": []
-  }
-}
-```
-
-### Step 5: Train and Run
-
-Your manual workflow is ready!
-```sh
-# Train the workflow
-fastworkflow train my_workflow_ui/ .env passwords.env
-
-# Run the workflow
-fastworkflow run my_workflow_ui/ .env passwords.env --startup_command startup
-```
-*(Note: You would need to create a `startup.py` command to initialize the `Greeter` instance in a real scenario).*
-
----
-
-## Refining Your Workflow
-
-### Adding Inheritance
-
-Let's add a new class that inherits from `Greeter`.
-
-```python
-# my_app/greeter.py
-class LoudGreeter(Greeter):
-    def greet(self, name: str) -> str:
-        return f"HELLO, {name.upper()}!"
-```
-
-Update `context_inheritance_model.json` to reflect the inheritance:
-```json
-{
-  "Greeter": {
-    "base": []
-  },
-  "LoudGreeter": {
-    "base": ["Greeter"]
-  }
-}
-```
-Now, if you retrain the model, the `LoudGreeter` context will automatically have access to the `greet` command.
-
-### Adding Context Hierarchies
-
-For applications where objects contain other objects (e.g., a `Project` containing `TodoItem`s), you need to tell `fastWorkflow` how to navigate the hierarchy.
-
-Create a file named `my_workflow_ui/_commands/Greeter/_Greeter.py`:
-```python
-# my_workflow_ui/_commands/Greeter/_Greeter.py
-from typing import Optional
-
-class Context:
-    @classmethod
-    def get_parent(cls, command_context_object: "Greeter") -> Optional[object]:
-        # Return the parent object if it exists, otherwise None.
-        return getattr(command_context_object, 'parent', None)
-```
-This `get_parent` method provides the hook `fastWorkflow` needs to navigate up from a child context to its parent, enabling command resolution in nested contexts.
-
----
-
-## Rapidly Building Workflows with the Build Tool
-
-After understanding the manual process, you can use the `fastworkflow build` command to automate everything. It introspects your code and generates all the necessary files.
-
-Delete your manually created `_commands` directory and run:
-```sh
-fastworkflow build \
-  --source-dir my_app/ \
-  --output-dir my_workflow_ui/_commands/ \
-  --context-model-dir my_workflow_ui/ \
-  --overwrite
-```
-This single command will generate the `greet.py` command, `get_properties` and `set_properties` for any properties, the `context_inheritance_model.json`, and more, accomplishing in seconds what we did manually.
+> [!tip]
+> **Add to your `.gitignore`:**  
+> Add the following folders to your `.gitignore` to avoid committing generated files or sensitive data:
+> ```
+> ___workflow_contexts
+> ___command_info
+> ___convo_info
+> ```
 
 ---
 
 ## Environment Variables Reference
+
+### Environment Variables
 
 | Variable | Purpose | When Needed | Default |
 |:---|:---|:---|:---|
@@ -430,13 +284,18 @@ This single command will generate the `greet.py` command, `get_properties` and `
 | `LLM_PARAM_EXTRACTION` | LiteLLM model string for parameter extraction | `train`, `run` | `mistral/mistral-small-latest` |
 | `LLM_RESPONSE_GEN` | LiteLLM model string for response generation | `run` | `mistral/mistral-small-latest` |
 | `LLM_AGENT` | LiteLLM model string for the DSPy agent | `run_agent` | `mistral/mistral-small-latest` |
+| `NOT_FOUND` | Placeholder value for missing parameters during extraction | Always | `"NOT_FOUND"` |
+| `MISSING_INFORMATION_ERRMSG` | Error message prefix for missing parameters | Always | `"Missing required..."` |
+| `INVALID_INFORMATION_ERRMSG` | Error message prefix for invalid parameters | Always | `"Invalid information..."` |
+
+### Password/API Key Variables
+
+| Variable | Purpose | When Needed | Default |
+|:---|:---|:---|:---|
 | `LITELLM_API_KEY_SYNDATA_GEN`| API key for the `LLM_SYNDATA_GEN` model | `train` | *required* |
 | `LITELLM_API_KEY_PARAM_EXTRACTION`| API key for the `LLM_PARAM_EXTRACTION` model | `train`, `run` | *required* |
 | `LITELLM_API_KEY_RESPONSE_GEN`| API key for the `LLM_RESPONSE_GEN` model | `run` | *required* |
 | `LITELLM_API_KEY_AGENT`| API key for the `LLM_AGENT` model | `run_agent` | *required* |
-| `NOT_FOUND` | Placeholder value for missing parameters during extraction | Always | `"NOT_FOUND"` |
-| `MISSING_INFORMATION_ERRMSG` | Error message prefix for missing parameters | Always | `"Missing required..."` |
-| `INVALID_INFORMATION_ERRMSG` | Error message prefix for invalid parameters | Always | `"Invalid information..."` |
 
 > [!tip]
 > The example workflows are configured to use Mistral's models by default. You can get a free API key from [Mistral AI](https://mistral.ai) that works with the `mistral-small-latest` model.
