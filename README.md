@@ -531,9 +531,8 @@ After understanding the manual process, you can use the `fastworkflow build` com
 Delete your manually created `_commands` directory and run:
 ```sh
 fastworkflow build \
-  --source-dir my_app/ \
-  --output-dir my_workflow_ui/_commands/ \
-  --context-model-dir my_workflow_ui/ \
+  --app-dir my_app/ \
+  --workflow-folderpath my_workflow_ui/ \
   --overwrite
 ```
 This single command will generate the `greet.py` command, `get_properties` and `set_properties` for any properties, the `context_inheritance_model.json`, and more, accomplishing in seconds what we did manually.
