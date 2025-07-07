@@ -3,74 +3,13 @@ import contextlib
 import json
 import os
 import queue
+import time
+import threading
 from typing import Optional
 from dotenv import dotenv_values
 
-# Third-party CLI prettification libraries
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
-from rich.text import Text
-from rich.console import Group
-
-# Progress bar helper (light import)
-from fastworkflow.utils.startup_progress import StartupProgress
-
-# NOTE: heavy fastworkflow / DSPy imports moved into main()
-
 # Instantiate a global console for consistent styling
-console = Console()
-
-def _build_artifact_table(artifacts: dict[str, str]) -> Table:
-    """Return a rich.Table representation for artifact key-value pairs."""
-    table = Table(show_header=True, header_style="bold cyan", box=None)
-    table.add_column("Name", style="cyan", overflow="fold")
-    table.add_column("Value", style="white", overflow="fold")
-    for name, value in artifacts.items():
-        table.add_row(str(name), str(value))
-    return table
-
-def print_command_output(command_output):
-    """Pretty-print workflow output using rich panels and tables."""
-    for command_response in command_output.command_responses:
-        workflow_id = "UnknownSession"
-        with contextlib.suppress(Exception):
-            workflow_id = fastworkflow.ChatSession.get_active_workflow_id()
-
-        # Collect body elements for the panel content
-        body_renderables = []
-
-        if command_response.response:
-            body_renderables.append(Text(command_response.response, style="green"))
-
-        if command_response.artifacts:
-            body_renderables.extend(
-                (
-                    Text("Artifacts", style="bold cyan"),
-                    _build_artifact_table(command_response.artifacts),
-                )
-            )
-        if command_response.next_actions:
-            actions_table = Table(show_header=False, box=None)
-            for act in command_response.next_actions:
-                actions_table.add_row(Text(str(act), style="blue"))
-            body_renderables.extend(
-                (Text("Next Actions", style="bold blue"), actions_table)
-            )
-        if command_response.recommendations:
-            rec_table = Table(show_header=False, box=None)
-            for rec in command_response.recommendations:
-                rec_table.add_row(Text(str(rec), style="magenta"))
-            body_renderables.extend(
-                (Text("Recommendations", style="bold magenta"), rec_table)
-            )
-
-        panel_title = f"[bold yellow]Workflow {workflow_id}[/bold yellow]"
-        # Group all renderables together
-        group = Group(*body_renderables)
-        # Use the group in the panel
-        panel = Panel.fit(group, title=panel_title, border_style="green")
-        console.print(panel)
+console = None
 
 def check_workflow_trained(workflow_path: str) -> bool:
     """
@@ -93,6 +32,75 @@ def check_workflow_trained(workflow_path: str) -> bool:
     return os.path.exists(threshold_file_path)
 
 def main():
+    # Third-party CLI prettification libraries
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+    from rich.console import Group
+
+    import fastworkflow
+    from fastworkflow.command_executor import CommandExecutor
+    from .agent_module import initialize_dspy_agent
+
+    # Progress bar helper
+    from fastworkflow.utils.startup_progress import StartupProgress
+
+    # Instantiate a global console for consistent styling
+    global console
+    console = Console()
+
+    def _build_artifact_table(artifacts: dict[str, str]) -> Table:
+        """Return a rich.Table representation for artifact key-value pairs."""
+        table = Table(show_header=True, header_style="bold cyan", box=None)
+        table.add_column("Name", style="cyan", overflow="fold")
+        table.add_column("Value", style="white", overflow="fold")
+        for name, value in artifacts.items():
+            table.add_row(str(name), str(value))
+        return table
+
+    def print_command_output(command_output):
+        """Pretty-print workflow output using rich panels and tables."""
+        for command_response in command_output.command_responses:
+            workflow_id = "UnknownSession"
+            with contextlib.suppress(Exception):
+                workflow_id = fastworkflow.ChatSession.get_active_workflow_id()
+
+            # Collect body elements for the panel content
+            body_renderables = []
+
+            if command_response.response:
+                body_renderables.append(Text(command_response.response, style="green"))
+
+            if command_response.artifacts:
+                body_renderables.extend(
+                    (
+                        Text("Artifacts", style="bold cyan"),
+                        _build_artifact_table(command_response.artifacts),
+                    )
+                )
+            if command_response.next_actions:
+                actions_table = Table(show_header=False, box=None)
+                for act in command_response.next_actions:
+                    actions_table.add_row(Text(str(act), style="blue"))
+                body_renderables.extend(
+                    (Text("Next Actions", style="bold blue"), actions_table)
+                )
+            if command_response.recommendations:
+                rec_table = Table(show_header=False, box=None)
+                for rec in command_response.recommendations:
+                    rec_table.add_row(Text(str(rec), style="magenta"))
+                body_renderables.extend(
+                    (Text("Recommendations", style="bold magenta"), rec_table)
+                )
+
+            panel_title = f"[bold yellow]Workflow {workflow_id}[/bold yellow]"
+            # Group all renderables together
+            group = Group(*body_renderables)
+            # Use the group in the panel
+            panel = Panel.fit(group, title=panel_title, border_style="green")
+            console.print(panel)
+
     parser = argparse.ArgumentParser(description="AI Assistant for workflow processing")
     parser.add_argument("workflow_path", help="Path to the workflow folder")
     parser.add_argument("env_file_path", help="Path to the environment file")
@@ -116,18 +124,18 @@ def main():
         console.print(f"[bold red]Error:[/bold red] The specified workflow path '{args.workflow_path}' is not a valid directory.")
         exit(1)
 
-    # ------------------------------------------------------------------
-    # Startup progress bar – start early
-    # ------------------------------------------------------------------
-    StartupProgress.begin(total=4)  # coarse steps; will add more later
-
     console.print(Panel(f"Running fastWorkflow: [bold]{args.workflow_path}[/bold]", title="[bold green]fastworkflow[/bold green]", border_style="green"))
     console.print("[bold green]Tip:[/bold green] Type 'exit' to quit the application.")
 
-    # Heavy imports AFTER progress bar
-    global fastworkflow
-    import fastworkflow  # noqa: F401
-    from fastworkflow.command_executor import CommandExecutor  # noqa: F401
+    # ------------------------------------------------------------------
+    # Startup progress bar ------------------------------------------------
+    # ------------------------------------------------------------------
+    command_info_root = os.path.join(args.workflow_path, "___command_info")
+    subdir_count = 0
+    if os.path.isdir(command_info_root):
+        subdir_count = len([d for d in os.listdir(command_info_root) if os.path.isdir(os.path.join(command_info_root, d))])
+
+    StartupProgress.begin(total=3)
 
     StartupProgress.advance("Imported fastworkflow modules")
 
@@ -135,9 +143,9 @@ def main():
         **dotenv_values(args.env_file_path),
         **dotenv_values(args.passwords_file_path)
     }
+    StartupProgress.advance("fastworkflow.init complete")
 
     fastworkflow.init(env_vars=env_vars)
-    StartupProgress.advance("fastworkflow.init complete")
 
     LLM_AGENT = fastworkflow.get_env_var("LLM_AGENT")
     if not LLM_AGENT:
@@ -179,12 +187,7 @@ def main():
     )
 
     StartupProgress.advance("ChatSession ready")
-
-    # Import DSPy-related agent lazily (may be heavy)
-    from .agent_module import initialize_dspy_agent
-
-    StartupProgress.add_total(1)
-    StartupProgress.advance("Initializing DSPy agent")
+    StartupProgress.end()
 
     try:
         react_agent = initialize_dspy_agent(
@@ -195,10 +198,7 @@ def main():
         )
     except (EnvironmentError, RuntimeError) as e:
         console.print(f"[bold red]Failed to initialize DSPy agent:[/bold red] {e}")
-        StartupProgress.end()
         exit(1)
-
-    StartupProgress.end()
 
     chat_session.start()
     with contextlib.suppress(queue.Empty):
@@ -220,10 +220,42 @@ def main():
             break
 
         try:
-            agent_response = react_agent(user_query=user_input_str)
-            console.print(Panel(agent_response.final_answer, title="[bold green]Agent Response[/bold green]", border_style="green"))
+            # Use a thread-safe way to store the agent response
+            agent_response_container = {"response": None, "error": None}
+            
+            # Function to run agent processing in a separate thread
+            def process_agent_query():
+                try:
+                    agent_response_container["response"] = react_agent(user_query=user_input_str)
+                except Exception as e:
+                    agent_response_container["error"] = e
+            
+            # Start processing thread
+            agent_thread = threading.Thread(target=process_agent_query)
+            agent_thread.daemon = True
+            agent_thread.start()
+            
+            # Show spinner while waiting for agent to process
+            with console.status("[bold cyan]Processing command...[/bold cyan]", spinner="dots") as status:
+                counter = 0
+                while agent_thread.is_alive():
+                    time.sleep(0.5)
+                    counter += 1
+                    if counter % 2 == 0:  # Update message every second
+                        status.update(f"[bold cyan]Processing command... ({counter//2}s)[/bold cyan]")
+            
+            # Check for errors or display response
+            if agent_response_container["error"]:
+                raise agent_response_container["error"]
+            
+            if agent_response_container["response"]:
+                console.print(Panel(agent_response_container["response"].final_answer, 
+                                   title="[bold green]Agent Response[/bold green]", 
+                                   border_style="green"))
+            
         except Exception as e: # pylint: disable=broad-except
             console.print(f"[bold red]Agent Error:[/bold red] An error occurred during agent processing: {e}")
 
 if __name__ == "__main__":
+    print("Loading fastWorkflow...\n")
     main()
