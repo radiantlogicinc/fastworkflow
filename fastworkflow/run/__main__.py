@@ -14,10 +14,10 @@ from rich.table import Table
 from rich.text import Text
 from rich.console import Group
 
-import fastworkflow
-from fastworkflow.utils.logging import logger
-from fastworkflow.command_executor import CommandExecutor
+# Progress bar helper (light import)
+from fastworkflow.utils.startup_progress import StartupProgress
 
+# NOTE: heavy fastworkflow imports moved into run_main to avoid start-up delay
 
 # Instantiate a global console for consistent styling
 console = Console()
@@ -80,11 +80,6 @@ def run_main(args):
         console.print(f"[bold red]Error:[/bold red] The specified workflow path '{args.workflow_path}' is not a valid directory.")
         exit(1)
 
-    commands_dir = os.path.join(args.workflow_path, "_commands")
-    if not os.path.isdir(commands_dir):
-        logger.info(f"No _commands directory found at {args.workflow_path}, existing...")
-        return
-
     env_vars = {
         **dotenv_values(args.env_file_path),
         **dotenv_values(args.passwords_file_path)
@@ -97,10 +92,32 @@ def run_main(args):
     if args.startup_command and args.startup_action:
         raise ValueError("Cannot provide both startup_command and startup_action")
 
+    # ------------------------------------------------------------------
+    # Startup progress bar – must start *before* heavy imports -----------
+    # ------------------------------------------------------------------
+    StartupProgress.begin(total=3)  # initial coarse steps (will grow later)
+
     console.print(Panel(f"Running fastWorkflow: [bold]{args.workflow_path}[/bold]", title="[bold green]fastworkflow[/bold green]", border_style="green"))
     console.print("[bold green]Tip:[/bold green] Type 'exit' to quit the application.")
 
+    # ---------------------------------
+    # Heavy imports after progress bar
+    # ---------------------------------
+    global fastworkflow
+    import fastworkflow  # noqa: F401 – heavy
+    from fastworkflow.utils.logging import logger
+
+    StartupProgress.advance("Imported fastworkflow modules")
+
+    # Validate commands directory now that logger is available
+    commands_dir = os.path.join(args.workflow_path, "_commands")
+    if not os.path.isdir(commands_dir):
+        logger.info(f"No _commands directory found at {args.workflow_path}, exiting...")
+        StartupProgress.end()
+        return
+
     fastworkflow.init(env_vars=env_vars)
+    StartupProgress.advance("fastworkflow.init complete")
 
     startup_action: Optional[fastworkflow.Action] = None
     if args.startup_action:
@@ -120,6 +137,9 @@ def run_main(args):
         startup_action=startup_action, 
         keep_alive=args.keep_alive
     )
+
+    StartupProgress.advance("ChatSession ready")
+    StartupProgress.end()
 
     chat_session.start()
     with contextlib.suppress(queue.Empty):

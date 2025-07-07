@@ -5,6 +5,50 @@ import torch
 from speedict import Rdict
 import mmh3  # mmh33 implementation
 from datetime import datetime
+from functools import lru_cache
+
+# ---------------------------------------------------------------------
+# In-process memoisation for expensive DistilBERT embeddings.
+# Key = (id(model_pipeline), text).  The cache is deliberately small –
+# only the last 256 distinct (pipeline, text) pairs – to keep memory
+# bounded while covering the overwhelmingly common repeat utterances
+# seen during ambiguity clarification loops.
+# ---------------------------------------------------------------------
+
+_MAX_EMBED_CACHE_SIZE = 256
+
+@lru_cache(maxsize=_MAX_EMBED_CACHE_SIZE)
+def _cached_embedding(model_id: int, text: str):
+    """Return embedding array for *text* using model_pipeline with *model_id*."""
+    pipeline = _MODEL_ID_2_REF[model_id]()  # weakref
+    if pipeline is None:
+        # The pipeline object has been GC'd – recompute via a dummy call
+        raise RuntimeError("ModelPipeline instance no longer alive; cache invalid.")
+    return _compute_embedding(text, pipeline)
+
+import weakref
+_MODEL_ID_2_REF: dict[int, weakref.ReferenceType] = {}
+
+
+def _compute_embedding(text: str, model_pipeline):
+    """Actual embedding computation (was body of old get_embedding)."""
+    model = model_pipeline.distil_model
+    tokenizer = model_pipeline.distil_tokenizer
+    device = model_pipeline.device
+    model = model.distilbert
+
+    model.eval()
+    with torch.no_grad():
+        inputs = tokenizer(
+            text,
+            padding=True,
+            truncation=True,
+            max_length=128,
+            return_tensors="pt"
+        ).to(device)
+
+        outputs = model(**inputs)
+        return outputs.last_hidden_state[:, 0, :].cpu().numpy()
 
 def store_utterance_cache(cache_path, utterance, label, model_pipeline=None):
     """
@@ -73,25 +117,16 @@ def store_utterance_cache(cache_path, utterance, label, model_pipeline=None):
         # Always close the database
         db.close()
 
-def get_embedding(text, model_pipeline):
-    """Get DistilBERT embedding for a text using the model pipeline"""
-    model = model_pipeline.distil_model
-    tokenizer = model_pipeline.distil_tokenizer
-    device = model_pipeline.device
-    model = model.distilbert
-    
-    model.eval()
-    with torch.no_grad():
-        inputs = tokenizer(
-            text,
-            padding=True,
-            truncation=True,
-            max_length=128,
-            return_tensors="pt"
-        ).to(device)
-        
-        outputs = model(**inputs)
-        return outputs.last_hidden_state[:, 0, :].cpu().numpy()
+def get_embedding(text: str, model_pipeline):
+    """Return (possibly cached) embedding for *text* using *model_pipeline*."""
+    model_id = id(model_pipeline)
+    if model_id not in _MODEL_ID_2_REF:
+        _MODEL_ID_2_REF[model_id] = weakref.ref(model_pipeline)
+    try:
+        return _cached_embedding(model_id, text)
+    except RuntimeError:
+        # Pipeline was garbage-collected; recompute and re-cache.
+        return _compute_embedding(text, model_pipeline)
 
 def cache_match(cache_path, utterance, model_pipeline, threshold=0.90, return_details=False):
     """

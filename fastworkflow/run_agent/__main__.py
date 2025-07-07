@@ -13,9 +13,10 @@ from rich.table import Table
 from rich.text import Text
 from rich.console import Group
 
-import fastworkflow
-from fastworkflow.command_executor import CommandExecutor
-from .agent_module import initialize_dspy_agent
+# Progress bar helper (light import)
+from fastworkflow.utils.startup_progress import StartupProgress
+
+# NOTE: heavy fastworkflow / DSPy imports moved into main()
 
 # Instantiate a global console for consistent styling
 console = Console()
@@ -115,17 +116,28 @@ def main():
         console.print(f"[bold red]Error:[/bold red] The specified workflow path '{args.workflow_path}' is not a valid directory.")
         exit(1)
 
+    # ------------------------------------------------------------------
+    # Startup progress bar – start early
+    # ------------------------------------------------------------------
+    StartupProgress.begin(total=4)  # coarse steps; will add more later
+
     console.print(Panel(f"Running fastWorkflow: [bold]{args.workflow_path}[/bold]", title="[bold green]fastworkflow[/bold green]", border_style="green"))
     console.print("[bold green]Tip:[/bold green] Type 'exit' to quit the application.")
 
-    if args.startup_command and args.startup_action:
-        raise ValueError("Cannot provide both startup_command and startup_action")
+    # Heavy imports AFTER progress bar
+    global fastworkflow
+    import fastworkflow  # noqa: F401
+    from fastworkflow.command_executor import CommandExecutor  # noqa: F401
+
+    StartupProgress.advance("Imported fastworkflow modules")
 
     env_vars = {
         **dotenv_values(args.env_file_path),
         **dotenv_values(args.passwords_file_path)
     }
+
     fastworkflow.init(env_vars=env_vars)
+    StartupProgress.advance("fastworkflow.init complete")
 
     LLM_AGENT = fastworkflow.get_env_var("LLM_AGENT")
     if not LLM_AGENT:
@@ -166,6 +178,14 @@ def main():
         keep_alive=args.keep_alive
     )
 
+    StartupProgress.advance("ChatSession ready")
+
+    # Import DSPy-related agent lazily (may be heavy)
+    from .agent_module import initialize_dspy_agent
+
+    StartupProgress.add_total(1)
+    StartupProgress.advance("Initializing DSPy agent")
+
     try:
         react_agent = initialize_dspy_agent(
             chat_session, 
@@ -175,7 +195,10 @@ def main():
         )
     except (EnvironmentError, RuntimeError) as e:
         console.print(f"[bold red]Failed to initialize DSPy agent:[/bold red] {e}")
+        StartupProgress.end()
         exit(1)
+
+    StartupProgress.end()
 
     chat_session.start()
     with contextlib.suppress(queue.Empty):

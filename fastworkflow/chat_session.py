@@ -4,9 +4,13 @@ from threading import Thread, Lock
 from typing import ClassVar, Optional
 from collections import deque
 import json
+import contextlib
 
 import fastworkflow
 from fastworkflow.utils.logging import logger
+from pathlib import Path
+from fastworkflow.model_pipeline_training import CommandRouter
+from fastworkflow.utils.startup_progress import StartupProgress
 
 
 class SessionStatus(Enum):
@@ -124,6 +128,36 @@ class ChatSession:
 
         # Register chat session
         ChatSession._map_workflow_id_2_chat_session[self._app_workflow.id] = self
+
+        # ------------------------------------------------------------
+        # Eager warm-up of CommandRouter / ModelPipeline
+        # ------------------------------------------------------------
+        # Loading transformer checkpoints and moving them to device is
+        # expensive (~1 s).  We do it here *once* for every model artifact
+        # directory so that the first user message does not pay the cost.
+        try:
+            command_info_root = Path(self._app_workflow.folderpath) / "___command_info"
+            if command_info_root.is_dir():
+                subdirs = [d for d in command_info_root.iterdir() if d.is_dir()]
+
+                # Tell the progress bar how many extra steps we are going to
+                # perform (one per directory plus one for the wildcard "*").
+                StartupProgress.add_total(len(subdirs) + 1)
+
+                for subdir in subdirs:
+                    # Instantiating CommandRouter triggers ModelPipeline
+                    # construction and caches it process-wide.
+                    with contextlib.suppress(Exception):
+                        CommandRouter(str(subdir))
+                    StartupProgress.advance(f"Warm-up {subdir.name}")
+
+                # Also warm-up the global-context artefacts, which live in a
+                # pseudo-folder named '*' in some workflows.
+                with contextlib.suppress(Exception):
+                    CommandRouter(str(command_info_root / '*'))
+                StartupProgress.advance("Warm-up global")
+        except Exception as warm_err:  # pragma: no cover – warm-up must never fail
+            logger.debug(f"Model warm-up skipped due to error: {warm_err}")
 
         # create the command metadata extraction workflow
         self._cme_workflow = fastworkflow.Workflow.create(
@@ -261,7 +295,10 @@ class ChatSession:
             # Put in output queue if needed
             if (not command_output.success or self._keep_alive) and self.command_output_queue:
                 self.command_output_queue.put(command_output)
-                
+
+            # Flush on successful or failed tool call – state may have changed.
+            self._app_workflow.flush()
+            
             return command_output
             
         except Exception as e:
@@ -279,18 +316,120 @@ class ChatSession:
         command_output._mcp_source = mcp_result  # Mark for special formatting
         return command_output
     
+    def profile_invoke_command(self, message: str):
+        """
+        Profile the invoke_command method with detailed focus on performance issues.
+        
+        Args:
+            message: The message to process
+            output_file: Name of the profile output file
+            
+        Returns:
+            The result of the invoke_command call
+        """
+        import os
+        from datetime import datetime
+        
+        # Generate a unique filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_file = f"invoke_command_{timestamp}.prof"        
+
+        import cProfile
+        import pstats
+        import io
+        import os
+        import time
+        
+        # Create a Profile object
+        profiler = cProfile.Profile()
+        
+        # Enable profiling
+        profiler.enable()
+        
+        # Execute invoke_command and time it
+        start_time = time.time()
+        result = self._CommandExecutor.invoke_command(self, message)
+        elapsed = time.time() - start_time
+        
+        # Disable profiling
+        profiler.disable()
+        
+        # Save profile results to file
+        profiler.dump_stats(output_file)
+        print(f"\nProfile data saved to {os.path.abspath(output_file)}")
+        print(f"invoke_command execution took {elapsed:.4f} seconds")
+        
+        # Create summary report
+        report_file = f"{os.path.splitext(output_file)[0]}_report.txt"
+        with open(report_file, "w") as f:
+            # Overall summary by cumulative time
+            s = io.StringIO()
+            ps = pstats.Stats(profiler, stream=s)
+            ps.sort_stats('cumulative').print_stats(30)
+            f.write(f"=== CUMULATIVE TIME SUMMARY (TOP 30) === Execution time: {elapsed:.4f}s\n")
+            f.write(s.getvalue())
+            f.write("\n\n")
+            
+            # Internal time summary
+            s = io.StringIO()
+            ps = pstats.Stats(profiler, stream=s)
+            ps.sort_stats('time').print_stats(30)
+            f.write("=== INTERNAL TIME SUMMARY (TOP 30) ===\n")
+            f.write(s.getvalue())
+            f.write("\n\n")
+            
+            # Most called functions
+            s = io.StringIO()
+            ps = pstats.Stats(profiler, stream=s)
+            ps.sort_stats('calls').print_stats(30)
+            f.write("=== MOST CALLED FUNCTIONS (TOP 30) ===\n")
+            f.write(s.getvalue())
+            
+            # Focus areas for issues 3-7
+            focus_areas = [
+                ('lock_contention', ['lock', 'acquire', 'release'], 'time'),
+                ('model_operations', ['torch', 'nn', 'model'], 'cumulative'),
+                ('command_extraction', ['wildcard.py', 'extract', 'predict'], 'cumulative'),
+                ('file_io', ['_get_sessiondb_folderpath', '_load', '_save'], 'cumulative'),
+                ('frequent_operations', ['startswith', 'isinstance', 'get'], 'calls')
+            ]
+            
+            for name, patterns, sort_by in focus_areas:
+                f.write(f"\n\n=== {name.upper()} ===\n")
+                for pattern in patterns:
+                    s = io.StringIO()
+                    ps = pstats.Stats(profiler, stream=s)
+                    ps.sort_stats(sort_by).print_stats(pattern, 10)
+                    f.write(f"\nPattern: '{pattern}'\n")
+                    f.write(s.getvalue())
+        
+        print(f"Detailed report saved to {os.path.abspath(report_file)}")
+        
+        return result
+
     def _process_message(self, message: str) -> fastworkflow.CommandOutput:
         """Process a single message"""
+        # Use our specialized profiling method
+        # command_output = self.profile_invoke_command(message)
+        
         command_output = self._CommandExecutor.invoke_command(self, message)
         if (not command_output.success or self._keep_alive) and \
             self.command_output_queue:
             self.command_output_queue.put(command_output)
+
+        # Persist workflow state changes lazily accumulated during message processing.
+        self._app_workflow.flush()
+
         return command_output
-    
+
     def _process_action(self, action: fastworkflow.Action) -> fastworkflow.CommandOutput:
         """Process a startup action"""
         command_output = self._CommandExecutor.perform_action(self._app_workflow, action)
         if (not command_output.success or self._keep_alive) and \
             self.command_output_queue:
             self.command_output_queue.put(command_output)
+
+        # Flush any pending workflow updates triggered by this startup action.
+        self._app_workflow.flush()
+
         return command_output

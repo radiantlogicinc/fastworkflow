@@ -114,6 +114,17 @@ def init(env_vars: dict):
     logging.getLogger("dspy").setLevel(logging.ERROR)
     logging.getLogger("dspy.adapters.json_adapter").setLevel(logging.ERROR)
 
+    # ------------------------------------------------------------
+    # Eager imports for heavy libraries that otherwise trigger lock
+    # contention during the first wildcard command.  Importing them
+    # once here (at server start-up) shifts the cost out of the
+    # request path and takes advantage of Python's module cache.
+    # ------------------------------------------------------------
+    try:
+        import datasets  # noqa: F401 – pre-load Hugging Face datasets
+    except Exception:  # pragma: no cover – safe fallback
+        pass
+
 def get_env_var(var_name: str, var_type: type = str, default: Optional[Union[str, int, float, bool]] = None) -> Union[str, int, float, bool]:
     """get the environment variable"""
     global _env_vars

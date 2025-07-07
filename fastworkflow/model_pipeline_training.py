@@ -1,5 +1,5 @@
 import os
-from typing import Optional
+from typing import Optional, ClassVar
 from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification
 from torch.optim import AdamW
 from sklearn.decomposition import PCA
@@ -259,7 +259,27 @@ def get_route_layer_filepath_model(workflow_folderpath,model_name) -> str:
         model_name
     )
 class CommandRouter:
+    _instances_cache: ClassVar[dict[str, "CommandRouter"]] = {}
+
+    def __new__(cls, model_artifacts_folderpath: str):
+        """Return a cached instance if we've already created a CommandRouter for *model_artifacts_folderpath*.
+        The path is normalised (the '*' replacement) so logically identical paths map to the same key.
+        This avoids re-reading JSON threshold files **and**, more importantly, re-building the underlying
+        ModelPipeline with expensive model loading.
+        """
+        # Normalise the path in the same way __init__ will do so that the cache key matches.
+        normalised_path = model_artifacts_folderpath.replace('*', GLOBAL_CONTEXT_FOLDER)
+        cached = cls._instances_cache.get(normalised_path)
+        if cached is not None:
+            return cached
+        instance = super().__new__(cls)
+        cls._instances_cache[normalised_path] = instance
+        return instance
+
     def __init__(self, model_artifacts_folderpath: str):
+        # Avoid re-initialising if we are returning a cached instance.
+        if getattr(self, "_initialised", False):
+            return
         if '*' in model_artifacts_folderpath:
             model_artifacts_folderpath = model_artifacts_folderpath.replace('*', GLOBAL_CONTEXT_FOLDER)
             
@@ -286,6 +306,8 @@ class CommandRouter:
             confidence_threshold=self.confidence_threshold
         )
 
+        self._initialised = True
+
     def predict(self, command: str) -> list[str]:
         """
         if we are confident we will return a single label otherwise we will return a list
@@ -303,6 +325,24 @@ class CommandRouter:
             
         
 class ModelPipeline:
+    # ------------------------------------------------------------------
+    # Singleton-like caching ------------------------------------------------
+    # ------------------------------------------------------------------
+    _instances_cache: ClassVar[dict[tuple[str, str, float, str], "ModelPipeline"]] = {}
+
+    def __new__(cls,
+                tiny_model_path: str,
+                distil_model_path: str,
+                confidence_threshold: float = 0.65,
+                device: str = 'cuda' if torch.cuda.is_available() else 'cpu'):
+        key = (tiny_model_path, distil_model_path, confidence_threshold, device)
+        existing = cls._instances_cache.get(key)
+        if existing is not None:
+            return existing
+        instance = super().__new__(cls)
+        cls._instances_cache[key] = instance
+        return instance
+
     def __init__(
         self,
         tiny_model_path: str,
@@ -310,6 +350,11 @@ class ModelPipeline:
         confidence_threshold: float = 0.65,
         device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
     ):
+        # __init__ will be called every time __new__ returns an instance – including
+        # when we served a cached instance.  Guard against double-initialisation.
+        if getattr(self, "_initialised", False):
+            return
+
         self.device = device
         self.confidence_threshold = confidence_threshold
 
@@ -330,8 +375,10 @@ class ModelPipeline:
         self.distil_model.eval()
 
         # Determine top-k value once for this pipeline (≤3, but never > num_labels)
-        num_labels = AutoModelForSequenceClassification.from_pretrained(tiny_model_path).config.num_labels
+        num_labels = self.tiny_model.config.num_labels
         self.k_val = min(3, num_labels)
+
+        self._initialised = True
 
     def calculate_ndcg_at_k(self, batch_top_k_preds: List[List[int]], batch_top_k_scores: List[List[float]], true_labels: List[int], k: int = 3) -> float:
         batch_ndcg = 0.0

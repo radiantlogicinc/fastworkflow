@@ -56,11 +56,13 @@ class CommandNamePrediction:
         # sourcery skip: extract-duplicate-method
 
         model_artifact_path = f"{self.app_workflow_folderpath}/___command_info/{command_context_name}"
-        command_router= CommandRouter(model_artifact_path)
-        modelpipeline = fastworkflow.ModelPipelineRegistry(
-            tiny_model_path=command_router.tiny_path,
-            distil_model_path=command_router.large_path,
-            confidence_threshold=command_router.confidence_threshold)
+        command_router = CommandRouter(model_artifact_path)
+
+        # Re-use the already-built ModelPipeline attached to the router
+        # instead of instantiating a fresh one.  This avoids reloading HF
+        # checkpoints and transferring tensors each time we see a new
+        # message for the same context.
+        modelpipeline = command_router.modelpipeline
 
         crd = fastworkflow.RoutingRegistry.get_definition(
             self.cme_workflow.folderpath)

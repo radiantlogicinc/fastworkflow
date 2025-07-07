@@ -146,7 +146,15 @@ class Workflow:
         self._current_command_context = None
         self._command_context_for_response_generation = None
 
+        # ------------------------------------------------------------------
+        # Persistence control
+        # ------------------------------------------------------------------
+        # ``_dirty`` tracks whether state has changed since the last flush.
+        # We persist the freshly-constructed workflow immediately so that it
+        # exists on disk, then mark it clean.
+        self._dirty: bool = False
         self._save()
+        self._dirty = False
 
         if self._folderpath not in sys.path:
             # THIS IS IMPORTANT: it allows relative import of modules in the code inside workflow_folderpath
@@ -236,7 +244,7 @@ class Workflow:
     @folderpath.setter
     def folderpath(self, value: str) -> None:
         self._folderpath = value
-        self._save()
+        self._mark_dirty()
 
     @property
     def context(self) -> dict:
@@ -245,7 +253,7 @@ class Workflow:
     @context.setter
     def context(self, value: dict) -> None:
         self._context = value
-        self._save()
+        self._mark_dirty()
 
     @property
     def is_complete(self) -> bool:
@@ -254,7 +262,7 @@ class Workflow:
     @is_complete.setter
     def is_complete(self, value: bool) -> None:
         self._is_complete = value
-        self._save()
+        self._mark_dirty()
 
     def close(self) -> bool:
         """close the session"""
@@ -421,3 +429,17 @@ class Workflow:
             "is_complete": self._is_complete,
             "workflow_context": self._context
         }
+
+    # ------------------------------------------------------------------
+    # Deferred-save helpers
+    # ------------------------------------------------------------------
+
+    def _mark_dirty(self) -> None:
+        """Flag that the workflow state has changed and needs persistence."""
+        self._dirty = True
+
+    def flush(self) -> None:
+        """Write pending state changes to disk if necessary."""
+        if self._dirty:
+            self._save()
+            self._dirty = False
