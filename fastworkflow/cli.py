@@ -184,30 +184,27 @@ def train_example(args):
     """Train an existing example workflow."""
     # Create a spinner for the initial check
     spinner = Spinner("dots", text="[bold green]Preparing to train example...[/bold green]")
-    
+
     with Live(spinner, refresh_per_second=10):
         # Check if example exists in the local examples directory
         local_examples_dir = Path("./examples")
         workflow_path = local_examples_dir / args.name
-        
-        if not workflow_path.is_dir():
-            # Exit the Live context before showing error
-            pass
-        else:
+
+        if workflow_path.is_dir():
             # Get the appropriate env files for this example workflow
             env_file_path, passwords_file_path = find_default_env_files(local_examples_dir)
-            
+
             # Check if the files exist
             env_file = Path(env_file_path)
             passwords_file = Path(passwords_file_path)
-            
+
             # Create args object for train_main
             train_args = argparse.Namespace(
                 workflow_folderpath=str(workflow_path),
                 env_file_path=str(env_file),
                 passwords_file_path=str(passwords_file)
             )
-    
+
     # After the spinner, handle any errors or proceed with training
     if not workflow_path.is_dir():
         rprint(f"[bold red]Error:[/bold red] Example '{args.name}' not found in '{local_examples_dir}'.")
@@ -232,10 +229,10 @@ def train_example(args):
     try:
         # Call train_main directly instead of using subprocess
         result = train_main(train_args)
-        
+
         if result is None or result == 0:
             rprint(f"\n✅ Successfully trained example '{args.name}'.")
-            rprint(f"You can now run it with:\npython -m fastworkflow.run {workflow_path}")
+            rprint(f"You can now run it with:\nfastworkflow examples run {args.name}")
         else:
             rprint(f"\n❌ Training failed.")
             sys.exit(1)
