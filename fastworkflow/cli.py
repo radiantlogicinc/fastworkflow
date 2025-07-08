@@ -8,53 +8,88 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 import importlib.resources
+from rich import print as rprint
+from rich.console import Console
+from rich.live import Live
+from rich.spinner import Spinner
 from .build.__main__ import build_main
 from .train.__main__ import train_main
 from .run.__main__ import run_main
 
+_examples_dir_cache = None
+
 def find_examples_dir():
     """Finds the bundled examples directory using importlib.resources."""
+    global _examples_dir_cache
+    
+    # Return cached result if available
+    if _examples_dir_cache is not None:
+        return _examples_dir_cache
+        
     with contextlib.suppress(ModuleNotFoundError, FileNotFoundError):
         # Use files() for robust path handling with importlib.resources
         resources_path = importlib.resources.files('fastworkflow')
         examples_path = resources_path / 'examples'
         if examples_path.is_dir():
-            return examples_path, True  # True indicates package examples
+            _examples_dir_cache = (examples_path, True)  # True indicates package examples
+            return _examples_dir_cache
+    
     # If not found in the package, look in the project root
     project_root = Path.cwd()
     examples_path = project_root / 'examples'
-    return (examples_path, False) if examples_path.is_dir() else (None, False)
+    
+    if examples_path.is_dir():
+        _examples_dir_cache = (examples_path, False)
+    else:
+        _examples_dir_cache = (None, False)
+        
+    return _examples_dir_cache
 
 def list_examples(args):
     """List available bundled examples."""
-    examples_dir, is_package = find_examples_dir()
+    # Create a spinner for searching
+    spinner = Spinner("dots", text="[bold green]Searching for examples...[/bold green]")
+    
+    # Use Live display for the spinner
+    with Live(spinner, refresh_per_second=10):
+        # Add a small delay to show the spinner (the actual search is very fast if cached)
+        time.sleep(1)
+        examples_dir, is_package = find_examples_dir()
+
     if not examples_dir:
-        print("Error: Could not find the bundled 'examples' directory.", file=sys.stderr)
+        rprint("[bold red]Error:[/bold red] Could not find the bundled 'examples' directory.")
         sys.exit(1)
 
-    print("Available examples:")
+    rprint("\n[bold]Available examples:[/bold]")
     for item in sorted(examples_dir.iterdir()):
         if item.is_dir() and not item.name.startswith('_'):
-            print(f"- {item.name}")
+            rprint(f"- {item.name}")
 
 def fetch_example(args):
     """Fetch a bundled example and copy it to the local filesystem."""
-    examples_dir, is_package = find_examples_dir()
+    # Create a spinner for searching
+    spinner = Spinner("dots", text="[bold green]Fetching example...[/bold green]")
+    
+    # Use Live display for the spinner
+    with Live(spinner, refresh_per_second=10):
+        examples_dir, is_package = find_examples_dir()
+
     if not examples_dir:
-        print("Error: Could not find the bundled 'examples' directory.", file=sys.stderr)
+        rprint("[bold red]Error:[/bold red] Could not find the bundled 'examples' directory.")
         sys.exit(1)
 
     source_path = examples_dir / args.name
     if not source_path.is_dir():
-        print(f"Error: Example '{args.name}' not found.", file=sys.stderr)
-        print("Use 'fastworkflow examples list' to see available examples.")
+        rprint(f"[bold red]Error:[/bold red] Example '{args.name}' not found.")
+        rprint("Use 'fastworkflow examples list' to see available examples.")
         sys.exit(1)
 
     # If examples are only found locally (not in package), skip the fetch operation
     if not is_package:
-        print(f"Note: Example '{args.name}' is already in the local examples directory.")
+        rprint(f"Note: Example '{args.name}' is already in the local examples directory.")
         return source_path
 
     target_root = Path("./examples")
@@ -64,7 +99,7 @@ def fetch_example(args):
         # Ask user for confirmation before overwriting
         response = input(f"Target directory '{target_path}' already exists. Overwrite? [y/N] ")
         if response.lower() != 'y':
-            print("Operation cancelled.")
+            rprint("Operation cancelled.")
             sys.exit(0)
         
     target_root.mkdir(exist_ok=True)
@@ -73,113 +108,140 @@ def fetch_example(args):
     ignore_patterns = shutil.ignore_patterns('___command_info', '__pycache__', '*.pyc')
 
     try:
-        # Copy the example directory
-        shutil.copytree(source_path, target_path, ignore=ignore_patterns, dirs_exist_ok=True)
+        # Create a spinner for copying
+        copy_spinner = Spinner("dots", text="[bold green]Copying files...[/bold green]")
         
-        # Also copy the environment files from the examples directory if they don't exist locally
-        env_file = examples_dir / "fastworkflow.env"
-        passwords_file = examples_dir / "fastworkflow.passwords.env"
-        
-        local_env_file = target_root / "fastworkflow.env"
-        local_passwords_file = target_root / "fastworkflow.passwords.env"
-        
-        # Check if env file exists locally before copying
-        if env_file.exists():
-            if not local_env_file.exists():
-                shutil.copy2(env_file, local_env_file)
-                print(f"✅ Copied environment file to '{local_env_file}'")
-            else:
-                print(f"⚠️ Environment file already exists at '{local_env_file}', skipping copy")
+        # Use Live display for the spinner
+        with Live(copy_spinner, refresh_per_second=10):
+            # Copy the example directory
+            shutil.copytree(source_path, target_path, ignore=ignore_patterns, dirs_exist_ok=True)
             
-            # Remind users to add their API keys
-            print("\nNOTE: You need to add your API keys to the passwords file before training.")
-            print(f"      Edit '{local_passwords_file}' with your API keys.")
-        else:
-            print(f"⚠️ Warning: Environment file not found at '{env_file}'")
-        
-        # Check if passwords file exists locally before copying
-        if passwords_file.exists():
-            if not local_passwords_file.exists():
-                shutil.copy2(passwords_file, local_passwords_file)
-                print(f"✅ Copied passwords file to '{local_passwords_file}'")
-            else:
-                print(f"⚠️ Passwords file already exists at '{local_passwords_file}', skipping copy")
-        else:
-            print(f"⚠️ Warning: Passwords file not found at '{passwords_file}'")
+            # Also copy the environment files from the examples directory if they don't exist locally
+            env_file = examples_dir / "fastworkflow.env"
+            passwords_file = examples_dir / "fastworkflow.passwords.env"
             
-            # Create a template passwords file if the original doesn't exist and local one doesn't exist
-            if not local_passwords_file.exists():
+            local_env_file = target_root / "fastworkflow.env"
+            local_passwords_file = target_root / "fastworkflow.passwords.env"
+            
+            # Check if env file exists locally before copying
+            if env_file.exists():
+                if not local_env_file.exists():
+                    shutil.copy2(env_file, local_env_file)
+                    time.sleep(0.5)  # Small delay to show the spinner
+            
+            # Check if passwords file exists locally before copying
+            if passwords_file.exists():
+                if not local_passwords_file.exists():
+                    shutil.copy2(passwords_file, local_passwords_file)
+                    time.sleep(0.5)  # Small delay to show the spinner
+            elif not local_passwords_file.exists():
+                # Create a template passwords file if the original doesn't exist and local one doesn't exist
                 with open(local_passwords_file, "w") as f:
                     f.write("# Add your API keys below\n")
                     f.write("LITELLM_API_KEY_SYNDATA_GEN=<API KEY for synthetic data generation model>\n")
                     f.write("LITELLM_API_KEY_PARAM_EXTRACTION=<API KEY for parameter extraction model>\n")
                     f.write("LITELLM_API_KEY_RESPONSE_GEN=<API KEY for response generation model>\n")
                     f.write("LITELLM_API_KEY_AGENT=<API KEY for the agent model>\n")
-                print(f"✅ Created template passwords file at '{local_passwords_file}'")
-            else:
-                print(f"⚠️ Using existing passwords file at '{local_passwords_file}'")
         
-        print(f"✅ Example '{args.name}' copied to '{target_path}'")
+        # After copying, show the results
+        if env_file.exists():
+            if not local_env_file.exists():
+                rprint(f"✅ Copied environment file to '{local_env_file}'")
+            else:
+                rprint(f"⚠️ Environment file already exists at '{local_env_file}', skipping copy")
+            
+            # Remind users to add their API keys
+            rprint("\n[bold]NOTE:[/bold] You need to add your API keys to the passwords file before training.")
+            rprint(f"      Edit '{local_passwords_file}' with your API keys.")
+        else:
+            rprint(f"⚠️ [yellow]Warning:[/yellow] Environment file not found at '{env_file}'")
+        
+        # Check if passwords file exists locally before copying
+        if passwords_file.exists():
+            if not local_passwords_file.exists():
+                rprint(f"✅ Copied passwords file to '{local_passwords_file}'")
+            else:
+                rprint(f"⚠️ Passwords file already exists at '{local_passwords_file}', skipping copy")
+        else:
+            rprint(f"⚠️ [yellow]Warning:[/yellow] Passwords file not found at '{passwords_file}'")
+            
+            # Create a template passwords file if the original doesn't exist and local one doesn't exist
+            if not local_passwords_file.exists():
+                rprint(f"✅ Created template passwords file at '{local_passwords_file}'")
+            else:
+                rprint(f"⚠️ Using existing passwords file at '{local_passwords_file}'")
+        
+        rprint(f"\n✅ Example '{args.name}' copied to '{target_path}'")
         return target_path
     except Exception as e:
-        print(f"Error copying example: {e}", file=sys.stderr)
+        rprint(f"[bold red]Error copying example:[/bold red] {e}")
         import traceback
         traceback.print_exc(file=sys.stderr)
         sys.exit(1)
 
 def train_example(args):
+    # sourcery skip: extract-duplicate-method, extract-method, remove-redundant-fstring, split-or-ifs
     """Train an existing example workflow."""
-    # Check if example exists in the local examples directory
-    local_examples_dir = Path("./examples")
-    workflow_path = local_examples_dir / args.name
+    # Create a spinner for the initial check
+    spinner = Spinner("dots", text="[bold green]Preparing to train example...[/bold green]")
     
+    with Live(spinner, refresh_per_second=10):
+        # Check if example exists in the local examples directory
+        local_examples_dir = Path("./examples")
+        workflow_path = local_examples_dir / args.name
+        
+        if not workflow_path.is_dir():
+            # Exit the Live context before showing error
+            pass
+        else:
+            # Get the appropriate env files for this example workflow
+            env_file_path, passwords_file_path = find_default_env_files(local_examples_dir)
+            
+            # Check if the files exist
+            env_file = Path(env_file_path)
+            passwords_file = Path(passwords_file_path)
+            
+            # Create args object for train_main
+            train_args = argparse.Namespace(
+                workflow_folderpath=str(workflow_path),
+                env_file_path=str(env_file),
+                passwords_file_path=str(passwords_file)
+            )
+    
+    # After the spinner, handle any errors or proceed with training
     if not workflow_path.is_dir():
-        print(f"Error: Example '{args.name}' not found in '{local_examples_dir}'.", file=sys.stderr)
-        print(f"Use 'fastworkflow examples fetch {args.name}' to fetch the example first.")
-        print("Or use 'fastworkflow examples list' to see available examples.")
+        rprint(f"[bold red]Error:[/bold red] Example '{args.name}' not found in '{local_examples_dir}'.")
+        rprint(f"Use 'fastworkflow examples fetch {args.name}' to fetch the example first.")
+        rprint("Or use 'fastworkflow examples list' to see available examples.")
         sys.exit(1)
-
-    print(f"Training example in '{workflow_path}'...")
-
-    # Get the appropriate env files for this example workflow
-    env_file_path, passwords_file_path = find_default_env_files(local_examples_dir)
-
-    # Check if the files exist
-    env_file = Path(env_file_path)
-    passwords_file = Path(passwords_file_path)
 
     if not env_file.exists() or not passwords_file.exists():
-        print(f"Error: Required environment files not found:", file=sys.stderr)
+        rprint(f"[bold red]Error:[/bold red] Required environment files not found:")
         if not env_file.exists():
-            print(f"  - {env_file} (not found)")
+            rprint(f"  - {env_file} (not found)")
         if not passwords_file.exists():
-            print(f"  - {passwords_file} (not found)")
-        print("\nPlease run the following command to fetch the example and its environment files:")
-        print(f"  fastworkflow examples fetch {args.name}")
-        print("\nAfter fetching, edit the passwords file to add your API keys:")
-        print(f"  {local_examples_dir}/fastworkflow.passwords.env")
+            rprint(f"  - {passwords_file} (not found)")
+        rprint("\nPlease run the following command to fetch the example and its environment files:")
+        rprint(f"  fastworkflow examples fetch {args.name}")
+        rprint("\nAfter fetching, edit the passwords file to add your API keys:")
+        rprint(f"  {local_examples_dir}/fastworkflow.passwords.env")
         sys.exit(1)
 
-    # Create args object for train_main
-    train_args = argparse.Namespace(
-        workflow_folderpath=str(workflow_path),
-        env_file_path=str(env_file),
-        passwords_file_path=str(passwords_file)
-    )
+    rprint(f"[bold green]Training example[/bold green] '{args.name}' in '{workflow_path}'...")
 
     try:
         # Call train_main directly instead of using subprocess
         result = train_main(train_args)
         
         if result is None or result == 0:
-            print(f"\n✅ Successfully trained example '{args.name}'.")
-            print(f"You can now run it with:\npython -m fastworkflow.run {workflow_path}")
+            rprint(f"\n✅ Successfully trained example '{args.name}'.")
+            rprint(f"You can now run it with:\npython -m fastworkflow.run {workflow_path}")
         else:
-            print(f"\n❌ Training failed.", file=sys.stderr)
+            rprint(f"\n❌ Training failed.")
             sys.exit(1)
 
     except Exception as e:
-        print(f"An unexpected error occurred during training: {e}", file=sys.stderr)
+        rprint(f"[bold red]An unexpected error occurred during training:[/bold red] {e}")
         import traceback
         traceback.print_exc(file=sys.stderr)
         sys.exit(1)
@@ -237,7 +299,7 @@ def add_run_parser(subparsers):
     parser_run.add_argument("--keep_alive", help="Optional keep_alive", default=True)
     parser_run.set_defaults(func=lambda args: run_with_defaults(args))
 
-def train_with_defaults(args):
+def train_with_defaults(args):  # sourcery skip: extract-duplicate-method
     """Wrapper for train_main that sets default env file paths based on context."""
     if args.env_file_path is None or args.passwords_file_path is None:
         default_env, default_passwords = find_default_env_files(args.workflow_folderpath)
@@ -277,7 +339,7 @@ def train_with_defaults(args):
 
     return train_main(args)
 
-def run_with_defaults(args):
+def run_with_defaults(args):  # sourcery skip: extract-duplicate-method
     """Wrapper for run_main that sets default env file paths based on context."""
     if args.env_file_path is None or args.passwords_file_path is None:
         default_env, default_passwords = find_default_env_files(args.workflow_path)
@@ -318,50 +380,62 @@ def run_with_defaults(args):
     return run_main(args)
 
 def run_example(args):
+    # sourcery skip: extract-duplicate-method, extract-method, remove-redundant-fstring, split-or-ifs
     """Run an existing example workflow."""
-    # Check if example exists in the local examples directory
-    local_examples_dir = Path("./examples")
-    workflow_path = local_examples_dir / args.name
+    # Create a spinner for the initial check
+    spinner = Spinner("dots", text="[bold green]Preparing to run example...[/bold green]")
     
+    with Live(spinner, refresh_per_second=10):
+        # Check if example exists in the local examples directory
+        local_examples_dir = Path("./examples")
+        workflow_path = local_examples_dir / args.name
+        
+        if not workflow_path.is_dir():
+            # Exit the Live context before showing error
+            pass
+        else:
+            # Get the appropriate env files for this example workflow
+            env_file_path, passwords_file_path = find_default_env_files(local_examples_dir)
+            
+            # Check if the files exist
+            env_file = Path(env_file_path)
+            passwords_file = Path(passwords_file_path)
+            
+            # Check if the example has been trained
+            command_info_dir = workflow_path / "___command_info"
+    
+    # After the spinner, handle any errors or proceed with running
     if not workflow_path.is_dir():
-        print(f"Error: Example '{args.name}' not found in '{local_examples_dir}'.", file=sys.stderr)
-        print(f"Use 'fastworkflow examples fetch {args.name}' to fetch the example first.")
-        print("Or use 'fastworkflow examples list' to see available examples.")
+        rprint(f"[bold red]Error:[/bold red] Example '{args.name}' not found in '{local_examples_dir}'.")
+        rprint(f"Use 'fastworkflow examples fetch {args.name}' to fetch the example first.")
+        rprint("Or use 'fastworkflow examples list' to see available examples.")
         sys.exit(1)
 
-    print(f"Running example '{args.name}'...")
-
-    # Get the appropriate env files for this example workflow
-    env_file_path, passwords_file_path = find_default_env_files(local_examples_dir)
-
-    # Check if the files exist
-    env_file = Path(env_file_path)
-    passwords_file = Path(passwords_file_path)
-
     if not env_file.exists() or not passwords_file.exists():
-        print(f"Error: Required environment files not found:", file=sys.stderr)
+        rprint(f"[bold red]Error:[/bold red] Required environment files not found:")
         if not env_file.exists():
-            print(f"  - {env_file} (not found)")
+            rprint(f"  - {env_file} (not found)")
         if not passwords_file.exists():
-            print(f"  - {passwords_file} (not found)")
-        print("\nPlease run the following command to fetch the example and its environment files:")
-        print(f"  fastworkflow examples fetch {args.name}")
-        print("\nAfter fetching, edit the passwords file to add your API keys:")
-        print(f"  {local_examples_dir}/fastworkflow.passwords.env")
-        print("\nThen train the example before running it:")
-        print(f"  fastworkflow examples train {args.name}")
+            rprint(f"  - {passwords_file} (not found)")
+        rprint("\nPlease run the following command to fetch the example and its environment files:")
+        rprint(f"  fastworkflow examples fetch {args.name}")
+        rprint("\nAfter fetching, edit the passwords file to add your API keys:")
+        rprint(f"  {local_examples_dir}/fastworkflow.passwords.env")
+        rprint("\nThen train the example before running it:")
+        rprint(f"  fastworkflow examples train {args.name}")
         sys.exit(1)
 
     # Check if the example has been trained
-    command_info_dir = workflow_path / "___command_info"
     if not command_info_dir.exists() or not any(command_info_dir.iterdir()):
-        print(f"Warning: Example '{args.name}' does not appear to be trained yet.", file=sys.stderr)
-        print(f"Please train the example first with:")
-        print(f"  fastworkflow examples train {args.name}")
+        rprint(f"[bold yellow]Warning:[/bold yellow] Example '{args.name}' does not appear to be trained yet.")
+        rprint(f"Please train the example first with:")
+        rprint(f"  fastworkflow examples train {args.name}")
         response = input("Do you want to continue anyway? [y/N] ")
         if response.lower() != 'y':
-            print("Operation cancelled.")
+            rprint("Operation cancelled.")
             sys.exit(0)
+
+    rprint(f"[bold green]Running example[/bold green] '{args.name}'...")
 
     # For interactive applications, we need to use os.execvp to replace the current process
     # This ensures that stdin/stdout/stderr are properly connected for interactive use
@@ -374,17 +448,19 @@ def run_example(args):
     ]
     
     try:
+        rprint(f"[bold green]Starting interactive session...[/bold green]")
         # Replace the current process with the run command
         # This ensures that the interactive prompt works correctly
         os.execvp(sys.executable, cmd)
     except Exception as e:
-        print(f"An unexpected error occurred while running the example: {e}", file=sys.stderr)
+        rprint(f"[bold red]An unexpected error occurred while running the example:[/bold red] {e}")
         import traceback
         traceback.print_exc(file=sys.stderr)
         sys.exit(1)
 
 def main():
     """Main function for the fastworkflow CLI."""
+    
     parser = argparse.ArgumentParser(
         description="fastWorkflow CLI tool for building, training, and running workflows."
     )
@@ -419,8 +495,15 @@ def main():
     add_train_parser(subparsers)
     add_run_parser(subparsers)
 
-    args = parser.parse_args()
-    args.func(args)
+    try:
+        args = parser.parse_args()
+        args.func(args)
+    except KeyboardInterrupt:
+        rprint("\n[bold yellow]Operation cancelled by user.[/bold yellow]")
+        sys.exit(0)
+    except Exception as e:
+        rprint(f"[bold red]Error:[/bold red] {str(e)}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main() 

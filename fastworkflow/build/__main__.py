@@ -325,7 +325,7 @@ class ResponseGenerator:
         logger.error(f"Error writing startup command file: {e}")
         return False
 
-def main():
+def main():  # sourcery skip: extract-method
     try:
         args = parse_args()
         fastworkflow.init(env_vars={})  # Initialize with empty environment variables
@@ -347,6 +347,8 @@ def main():
 # Add this function to be imported by cli.py
 def build_main(args):
     """Entry point for the CLI build command."""
+    print("Building fastworkflow...\n")
+
     try:
         # Skip parsing args since they're provided by the CLI
         fastworkflow.init(env_vars={})  # Initialize with empty environment variables

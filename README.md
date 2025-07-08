@@ -119,7 +119,10 @@ pip install fastworkflow
 uv pip install fastworkflow
 ```
 
-**Note:** `fastWorkflow` installs PyTorch as a dependency. If you don't already have PyTorch installed, this could take a few minutes depending on your internet speed.
+**Notes:**
+- `fastWorkflow` currently works on Linux and MacOS only. On windows, use WSL.
+- `fastWorkflow` installs PyTorch as a dependency. If you don't already have PyTorch installed, this could take a few minutes depending on your internet speed.
+- `fastWorkflow` requires Python 3.11+ or higher.
 
 ---
 
