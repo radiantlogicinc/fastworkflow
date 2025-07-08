@@ -783,7 +783,8 @@ def train(workflow: fastworkflow.Workflow):
                         list(zip(map_cmd_2_uttlist[cmd_name], [cmd_name] * len(map_cmd_2_uttlist[cmd_name])))
                     )
                     context_utterances |= set(map_cmd_2_uttlist[cmd_name])
-        else:
+        
+        if not context_utterances:
             context_utterance_cache[ctx_name] = {}
             for cmd_name in train_cmds:
                 if cmd_name == 'wildcard':
@@ -796,19 +797,19 @@ def train(workflow: fastworkflow.Workflow):
                 context_utterance_cache[ctx_name][cmd_name] = context_utterance_list           
                 context_utterances |= set(context_utterance_list)
 
+        if not context_utterances:
+            print(f"Skipping context {ctx_name} - no utterances available")
+            continue  # skip empty
+
         ancestor_utterances = cache_ancestor_utterances(
             ctx_name, crd, workflow, context_utterance_cache
-        )
+        )         
         net_ancestor_plus_wildcard_utterances = (
             (ancestor_utterances - context_utterances) | wildcard_utterances
         )
         utterance_command_tuples.extend(
             list(zip(net_ancestor_plus_wildcard_utterances, ['wildcard'] * len(net_ancestor_plus_wildcard_utterances)))
         )
-
-        if not utterance_command_tuples:
-            print(f"Skipping context {ctx_name} - no utterances available")
-            continue  # skip empty
             
         # ==================================================================================
         # Original training procedure below, with only artefact paths changed to per-context
