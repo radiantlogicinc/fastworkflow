@@ -780,7 +780,7 @@ def train(workflow: fastworkflow.Workflow):
             for cmd_name in train_cmds:
                 if cmd_name in map_cmd_2_uttlist:
                     utterance_command_tuples.extend(
-                        list(zip(map_cmd_2_uttlist[cmd_name], [cmd_name] * len(context_utterances)))
+                        list(zip(map_cmd_2_uttlist[cmd_name], [cmd_name] * len(map_cmd_2_uttlist[cmd_name])))
                     )
                     context_utterances |= set(map_cmd_2_uttlist[cmd_name])
         else:
@@ -791,24 +791,24 @@ def train(workflow: fastworkflow.Workflow):
                 context_utterance_list = _get_utterances(
                     workflow, workflow_folderpath, cmd_dir, cmd_name)            
                 utterance_command_tuples.extend(
-                    list(zip(context_utterance_list, [cmd_name] * len(context_utterances)))
+                    list(zip(context_utterance_list, [cmd_name] * len(context_utterance_list)))
                 )
                 context_utterance_cache[ctx_name][cmd_name] = context_utterance_list           
                 context_utterances |= set(context_utterance_list)
 
-        if not context_utterances:
-            print(f"Skipping context {ctx_name} - no utterances available")
-            continue  # skip empty
-
         ancestor_utterances = cache_ancestor_utterances(
             ctx_name, crd, workflow, context_utterance_cache
-        )         
+        )
         net_ancestor_plus_wildcard_utterances = (
             (ancestor_utterances - context_utterances) | wildcard_utterances
         )
         utterance_command_tuples.extend(
-            list(zip(net_ancestor_plus_wildcard_utterances, ['wildcard'] * len(context_utterances)))
+            list(zip(net_ancestor_plus_wildcard_utterances, ['wildcard'] * len(net_ancestor_plus_wildcard_utterances)))
         )
+
+        if not utterance_command_tuples:
+            print(f"Skipping context {ctx_name} - no utterances available")
+            continue  # skip empty
             
         # ==================================================================================
         # Original training procedure below, with only artefact paths changed to per-context

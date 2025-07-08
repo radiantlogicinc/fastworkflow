@@ -52,17 +52,35 @@ class ResponseGenerator:
             workflow.folderpath)
         cme_command_names = crd.get_command_names('IntentDetection')
 
-        fully_qualified_command_names = (
-            set(cme_command_names) | 
-            set(subject_crd.get_command_names(app_workflow.current_command_context_name))
-        ) - {'wildcard'}
+        # ------------------------------------------------------------------
+        # Build the union of command names that *should* be visible, then
+        # filter out any command that (a) is the special wildcard helper or
+        # (b) has no user-facing utterances in *any* command directory.
+        # ------------------------------------------------------------------
 
-        valid_command_names = [
-            fully_qualified_command_name.split('/')[-1] 
-            for fully_qualified_command_name in fully_qualified_command_names
+        candidate_commands: set[str] = (
+            set(cme_command_names)
+            | set(subject_crd.get_command_names(app_workflow.current_command_context_name))
+        )
+
+        def _has_utterances(fq_cmd: str) -> bool:
+            """Return True if *fq_cmd* has at least one utterance definition in
+            either the subject workflow or the CME workflow."""
+            return (
+                subject_crd.command_directory.get_utterance_metadata(fq_cmd) is not None
+                or crd.command_directory.get_utterance_metadata(fq_cmd) is not None
+            )
+
+        visible_commands = [
+            fq_cmd for fq_cmd in candidate_commands
+            if fq_cmd != "wildcard" and _has_utterances(fq_cmd)
         ]
 
-        return Signature.Output(valid_command_names=sorted(valid_command_names))
+        valid_command_names = [
+            cmd.split("/")[-1] for cmd in sorted(visible_commands)
+        ]
+
+        return Signature.Output(valid_command_names=valid_command_names)
 
     def __call__(
         self,
@@ -77,7 +95,7 @@ class ResponseGenerator:
             else app_workflow.current_command_context_name
         )
 
-        response = "\n".join([f"{cmd}" for cmd in output.valid_command_names])
+        response = "\n".join(output.valid_command_names)
         response = (
             f"Commands available in the current context ({context_name}):\n"
             f"{response}\n"

@@ -237,18 +237,6 @@ class RoutingDefinition(BaseModel):
         # Ensure global context '*' also exists with core commands (if not in model)
         if '*' not in resolved_contexts:
             resolved_contexts['*'] = sorted(core_commands)
-        # except Exception as e:
-        #     # Handle errors gracefully for tests expecting this behavior
-        #     # This matches the behavior of the original CommandRouter
-        #     if "_commands" not in str(e) and "does not exist" not in str(e):
-        #         # Re-raise unexpected errors
-        #         raise
-
-            # For missing directories, return an empty definition
-            # command_directory = CommandDirectory(workflow_folderpath=workflow_folderpath)
-            # context_model = CommandContextModel(_workflow_path=workflow_folderpath, _command_contexts={})
-            # resolved_contexts = {"*": []}
-
         routing_definition = cls(
             workflow_folderpath=workflow_folderpath,
             command_directory=command_directory,
@@ -284,7 +272,7 @@ class RoutingDefinition(BaseModel):
         # Only save if we were able to build successfully
         if resolved_contexts != {"*": []}:
             routing_definition.save()
-        else:
+        elif not workflow_folderpath.endswith('fastworkflow'):
             logger.error(f"Could not build command_routing_definition.json for workflow folderpath {workflow_folderpath}")
 
         return routing_definition
