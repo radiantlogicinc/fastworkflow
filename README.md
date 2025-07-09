@@ -11,7 +11,7 @@ If you have tried AI enabling non-trivial applications, you have struggled with 
 - Hallucinations in parameter extraction for tool calls
 - Challenges supporting humans, agents, and client code at the same time
 
-While [DSPy](https://dspy.ai) is an amazing framework for optimizing LLM generation, we need an application framework that understands the concepts of DSPy (signatures, modules, optimization) and layers functionality on top to address the above challenges.
+While [DSPy](https://dspy.ai) ([Why DSPy](https://x.com/lateinteraction/status/1921565300690149759)) is an amazing framework for optimizing LLM generation, we need an application framework that understands the concepts of DSPy (signatures, modules, optimization) and layers functionality on top to address the above challenges.
 
 ---
 
