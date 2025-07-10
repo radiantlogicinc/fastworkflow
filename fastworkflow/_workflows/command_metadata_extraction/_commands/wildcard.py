@@ -325,13 +325,10 @@ class ParameterExtraction:
         else:
             stored_missing_fields = []
 
-        new_params = self._extract_command_parameters_from_input(
-            input_for_param_extraction,
-            command_parameters_class,
-            stored_missing_fields,
-            self.command_name,
-            app_workflow_folderpath
-        )
+        new_params = input_for_param_extraction.extract_parameters(
+            command_parameters_class, 
+            self.command_name, 
+            app_workflow_folderpath)
 
         if stored_params:
             merged_params = self._merge_parameters(stored_params, new_params, stored_missing_fields)
@@ -487,26 +484,6 @@ class ParameterExtraction:
             else:  # Handle enum types
                 lines.append(f"{display_name}: {value.value}")
         return "\n".join(lines)
-
-    @staticmethod
-    def _extract_command_parameters_from_input(
-        input_for_param_extraction: BaseModel,
-        command_parameters_class: Type[BaseModel],
-        missing_fields: list = None,
-        app_command_name: str = None,
-        app_workflow_folderpath: str = None,
-    ) -> BaseModel:
-        """
-        Extract command parameters from user input.
-        This implementation handles any parameter type.
-        """
-        if missing_fields:
-            default_params = InputForParamExtraction.populate_defaults_dict(
-                command_parameters_class)
-            return ParameterExtraction._apply_missing_fields(
-                input_for_param_extraction.command, default_params, missing_fields)
-
-        return input_for_param_extraction.extract_parameters(command_parameters_class, app_command_name, app_workflow_folderpath)
 
     @staticmethod
     def _apply_missing_fields(command: str, default_params: BaseModel, missing_fields: list):

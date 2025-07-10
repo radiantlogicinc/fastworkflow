@@ -232,34 +232,6 @@ Today's date is {today}.
             instructions = generated_docstring
 
             return dspy.Signature(signature_components, instructions)
-
-    @staticmethod
-    def populate_defaults_dict(command_parameters_class):
-        default_params = {}
-        for field_name, field_info in command_parameters_class.model_fields.items():
-            if (
-                field_info.default is not PydanticUndefined and 
-                field_info.default is not None and 
-                field_info.default is not Ellipsis
-            ):
-                default_params[field_name] = field_info.default
-            # Handle strings
-            elif field_info.annotation == str:
-                default_params[field_name] = NOT_FOUND
-            elif field_info.annotation == int:
-                default_params[field_name] = INVALID_INT_VALUE
-            elif field_info.annotation == float:
-                default_params[field_name] = INVALID_FLOAT_VALUE
-            # Handle Optional[int] and Optional[float]
-            elif (hasattr(field_info.annotation, "__origin__") and
-                  field_info.annotation.__origin__ is Union and
-                  (int in field_info.annotation.__args__ or float in field_info.annotation.__args__) and
-                  type(None) in field_info.annotation.__args__):
-                default_params[field_name] = None
-            else:
-                default_params[field_name] = None
-
-        return command_parameters_class(**default_params)
     
     def extract_parameters(self, CommandParameters: Type[BaseModel] = None, subject_command_name: str = None, workflow_folderpath: str = None) -> BaseModel:
         """
@@ -315,12 +287,11 @@ Today's date is {today}.
             except Exception as exc:
                 logger.warning(PARAMETER_EXTRACTION_ERROR_MSG.format(error=exc))
 
-        try:            
-            params = model_class(**param_dict)
-        except ValidationError:
-            params = self.populate_defaults_dict(model_class)
-
-        return params
+        # IMPORTANT: Do *not* instantiate the original model via the regular
+        # constructor – that would invoke full validation including regex
+        # pattern checks.  Instead use `model_construct`, which builds the
+        # object in-place without any validation.
+        return model_class.model_construct(**param_dict)  # type: ignore[arg-type]
     
     def validate_parameters(self,
                             app_workflow: fastworkflow.Workflow, 

@@ -765,7 +765,7 @@ def train(workflow: fastworkflow.Workflow):
     # Only iterate through contexts defined in this specific workflow
     for ctx_name in context_set_for_training:
         ctx_cmd_list = crd.contexts[ctx_name]
-        print(f"\n\n=== Training model for workflow_folderpath: {workflow_folderpath.split('/')[-1]} and context: {ctx_name} ===\n")
+        print(f"\n=== Training model for workflow_folderpath: {workflow_folderpath.split('/')[-1]} and context: {ctx_name} ===\n")
         
         # Build the label set for this context
         train_cmds: set[str] = set(ctx_cmd_list) | core_cmds
@@ -778,6 +778,7 @@ def train(workflow: fastworkflow.Workflow):
         if ctx_name in context_utterance_cache:
             map_cmd_2_uttlist = context_utterance_cache[ctx_name]
             for cmd_name in train_cmds:
+                print(f"Getting cached utterances for context: {ctx_name}, command: {cmd_name}\n")
                 if cmd_name in map_cmd_2_uttlist:
                     utterance_command_tuples.extend(
                         list(zip(map_cmd_2_uttlist[cmd_name], [cmd_name] * len(map_cmd_2_uttlist[cmd_name])))
@@ -789,6 +790,7 @@ def train(workflow: fastworkflow.Workflow):
             for cmd_name in train_cmds:
                 if cmd_name == 'wildcard':
                     continue
+                print(f"Generating utterances for context: {ctx_name}, command: {cmd_name} ...\n")
                 context_utterance_list = _get_utterances(
                     workflow, workflow_folderpath, cmd_dir, cmd_name)            
                 utterance_command_tuples.extend(
@@ -811,6 +813,8 @@ def train(workflow: fastworkflow.Workflow):
             list(zip(net_ancestor_plus_wildcard_utterances, ['wildcard'] * len(net_ancestor_plus_wildcard_utterances)))
         )
             
+        print("Utterances generation complete! Beginning model pipeline training\n")
+
         # ==================================================================================
         # Original training procedure below, with only artefact paths changed to per-context
         # ==================================================================================
@@ -823,7 +827,6 @@ def train(workflow: fastworkflow.Workflow):
         print(f"\nLoading {model_name}...")
         tiny_tokenizer = AutoTokenizer.from_pretrained(model_name)
         tiny_model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num).to(device)
-
 
         model_name = "distilbert-base-uncased"
         print(f"Loading {model_name}...")
