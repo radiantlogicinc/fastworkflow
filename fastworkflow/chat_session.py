@@ -164,7 +164,7 @@ class ChatSession:
             fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
             parent_workflow_id = self._app_workflow.id,
             workflow_context = {
-                "nlu_pipeline_stage": fastworkflow.NLUPipelineStage.INTENT_DETECTION,
+                "NLU_Pipeline_Stage": fastworkflow.NLUPipelineStage.INTENT_DETECTION,
                 "app_workflow": self._app_workflow
             }
         )

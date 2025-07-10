@@ -85,6 +85,16 @@ class CommandNamePrediction:
             for fully_qualified_command_name in valid_command_names
         }
 
+        if nlu_pipeline_stage == NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION:
+            # what_can_i_do is special in INTENT_AMBIGUITY_CLARIFICATION
+            # We will not predict, just match plain utterances with exact or fuzzy match
+            command_name_dict |= {
+                plain_utterance: 'IntentDetection/what_can_i_do'
+                for plain_utterance in crd.command_directory.map_command_2_utterance_metadata[
+                    'IntentDetection/what_can_i_do'
+                ].plain_utterances
+            }
+
         if nlu_pipeline_stage != NLUPipelineStage.INTENT_DETECTION:
             # abort is special. 
             # We will not predict, just match plain utterances with exact or fuzzy match
@@ -141,13 +151,8 @@ class CommandNamePrediction:
         elif nlu_pipeline_stage in (
             NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
             NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
-        ) and command_name != 'abort':
-            if command_name:
-                command = self.cme_workflow.context["command"]
-                store_utterance_cache(self.path, command, command_name, modelpipeline)
-            else:
-                error_msg = "Enter a valid command"
-                return CommandNamePrediction.Output(error_msg=error_msg)
+        ) and not command_name:
+            command_name = "what_can_i_do"
 
         if not command_name or command_name == "wildcard":
             fully_qualified_command_name=None
@@ -158,6 +163,17 @@ class CommandNamePrediction:
                 fully_qualified_command_name in cme_command_names or 
                 fully_qualified_command_name in crd.get_command_names('ErrorCorrection')
             )
+
+        if nlu_pipeline_stage in (
+            NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
+            NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
+        ) and not (
+            fully_qualified_command_name.endswith('abort') or
+            fully_qualified_command_name.endswith('what_can_i_do') or
+            fully_qualified_command_name.endswith('you_misunderstood')
+        ):
+            command = self.cme_workflow.context["command"]
+            store_utterance_cache(self.path, command, command_name, modelpipeline)
 
         return CommandNamePrediction.Output(
             command_name=fully_qualified_command_name,
@@ -279,7 +295,7 @@ class CommandNamePrediction:
     def _formulate_ambiguous_command_error_message(route_choice_list: list[str]) -> str:
         command_list = (
             "\n".join([
-                f"{route_choice}"
+                f"{route_choice.split('/')[-1].lower()}"
                 for route_choice in route_choice_list if route_choice != 'wildcard'
             ])
         )
@@ -287,7 +303,7 @@ class CommandNamePrediction:
         return (
             "The command is ambiguous. Please select from these possible options:\n"
             f"{command_list}\n\n"
-            "or type 'none of these' to see all commands\n"
+            "or type 'what can i do' to see all commands\n"
             "or type 'abort' to cancel"
         )
 
@@ -557,6 +573,8 @@ class ResponseGenerator:
         if cnp_output.error_msg:
             workflow_context = workflow.context
             workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION
+            if command not in workflow_context:
+                workflow_context["command"] = command
             workflow.context = workflow_context
             return CommandOutput(
                 command_responses=[
