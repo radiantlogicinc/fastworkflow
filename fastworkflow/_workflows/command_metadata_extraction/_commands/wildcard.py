@@ -22,7 +22,7 @@ from fastworkflow.model_pipeline_training import (
 )
 
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
-from fastworkflow.utils.fuzzy_match import find_best_match
+from fastworkflow.utils.fuzzy_match import find_best_matches
 from fastworkflow.utils.signatures import InputForParamExtraction
 
 
@@ -115,22 +115,22 @@ class CommandNamePrediction:
                 ].plain_utterances
             }
 
-        command_name = None
         # See if the command starts with a command name followed by a space
         tentative_command_name = command.split(" ", 1)[0]
         normalized_command_name = tentative_command_name.lower()
+        command_name = None
         if normalized_command_name in command_name_dict:
             command_name = normalized_command_name
             command = command.replace(f"{tentative_command_name}", "").strip().replace("  ", " ")
-
-        # Use Levenshtein distance for fuzzy matching with the full command part after @
-        matched_command, distance = find_best_match(
-            command,
-            command_name_dict.keys(),
-            threshold=0.3  # Adjust threshold as needed
-        )
-        if matched_command:
-            command_name = matched_command
+        else:
+            # Use Levenshtein distance for fuzzy matching with the full command part after @
+            best_matched_commands, _ = find_best_matches(
+                command.replace(" ", "_"),
+                command_name_dict.keys(),
+                threshold=0.3  # Adjust threshold as needed
+            )
+            if best_matched_commands:
+                command_name = best_matched_commands[0]
 
         if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION:
             if not command_name:
@@ -142,7 +142,7 @@ class CommandNamePrediction:
                     if len(predictions)==1:
                         command_name = predictions[0].split('/')[-1]
                     else:
-                    # If confidence is low, treat as ambiguous command (type 1)
+                        # If confidence is low, treat as ambiguous command (type 1)
                         error_msg = self._formulate_ambiguous_command_error_message(predictions)
                         # Store suggested commands
                         self._store_suggested_commands(self.path, predictions, 1)
@@ -164,13 +164,15 @@ class CommandNamePrediction:
                 fully_qualified_command_name in crd.get_command_names('ErrorCorrection')
             )
 
-        if nlu_pipeline_stage in (
-            NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
-            NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
-        ) and not (
-            fully_qualified_command_name.endswith('abort') or
-            fully_qualified_command_name.endswith('what_can_i_do') or
-            fully_qualified_command_name.endswith('you_misunderstood')
+        if (
+            nlu_pipeline_stage
+            in (
+                NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
+                NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION,
+            )
+            and not fully_qualified_command_name.endswith('abort')
+            and not fully_qualified_command_name.endswith('what_can_i_do')
+            and not fully_qualified_command_name.endswith('you_misunderstood')
         ):
             command = self.cme_workflow.context["command"]
             store_utterance_cache(self.path, command, command_name, modelpipeline)

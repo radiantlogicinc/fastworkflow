@@ -1,23 +1,20 @@
 import sys
 import dspy
 import os
-from typing import Annotated, Optional, Tuple, Union, Dict, Any, Type, List, get_args
+from typing import Optional, Tuple, Union, Dict, Any, Type, List, get_args
 from enum import Enum
-from pydantic import BaseModel, Field, ValidationError, field_validator, ConfigDict
+from pydantic import BaseModel, ConfigDict
 from pydantic_core import PydanticUndefined
 import fastworkflow
 
 from datetime import date
 import re
-import inspect
 from difflib import get_close_matches
 from fastworkflow import ModuleType
-from fastworkflow.utils.pydantic_model_2_dspy_signature_class import TypedPredictorSignature
-from dspy.teleprompt import LabeledFewShot
 import json
 from fastworkflow.utils.logging import logger
-from fastworkflow.model_pipeline_training import train,get_route_layer_filepath_model
-from fastworkflow.utils.fuzzy_match import find_best_match
+from fastworkflow.model_pipeline_training import get_route_layer_filepath_model
+from fastworkflow.utils.fuzzy_match import find_best_matches
 
 MISSING_INFORMATION_ERRMSG = None
 INVALID_INFORMATION_ERRMSG = None
@@ -78,26 +75,29 @@ class DatabaseValidator:
         if not key_values:
             return False, None, []     
 
-        best_match,_=find_best_match(value, key_values,threshold=0.7)
-        if best_match:
-                return True, best_match, []
-        normalized_value = value.lower()
+        match = next((v for v in key_values if value.lower() == v.lower()), None)
+        if match is not None:
+            return True, match, []
 
-        for value in key_values:
-            if normalized_value == value.lower():
-                return True, value, []
+        best_matches, _ = find_best_matches(value, key_values, threshold = 0.7)
+        if len(best_matches) == 1:
+            return True, best_matches[0], []
+        elif len(best_matches) > 1:
+            return False, None, best_matches
 
-        matches = get_close_matches(normalized_value, 
-                                [val.lower() for val in key_values], 
-                                n=3, 
-                                cutoff=threshold)
+        lowercase_matches = get_close_matches(
+            value.lower(), 
+            [val.lower() for val in key_values], 
+            n = 3, 
+            cutoff = threshold
+        )
 
-        original_matches = []
-        for match_lower in matches:
-            for value in key_values:
-                if value.lower() == match_lower:
-                    original_matches.append(value)
-                    break
+        original_matches = [
+            value 
+            for match in lowercase_matches 
+            for value in key_values 
+            if value.lower() == match
+        ]
 
         if original_matches:
             return False, None, original_matches
@@ -110,6 +110,7 @@ class InputForParamExtraction(BaseModel):
 Today's date is {today}.
 """  
     command: str
+    input_for_param_extraction_class: Optional[Type[Any]] = None
     input_for_param_extraction: Optional[Any] = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
     
@@ -143,6 +144,7 @@ Today's date is {today}.
         
         return cls(
             command=subject_command,
+            input_for_param_extraction_class=input_for_param_extraction_class,
             input_for_param_extraction=input_for_param_extraction
         )
     
@@ -384,10 +386,13 @@ Today's date is {today}.
                 is_db_lookup = field_info.json_schema_extra.get("db_lookup")
 
             if is_db_lookup:
-                if not self.input_for_param_extraction:
-                    raise ValueError("input_for_param_extraction is not set.")
-                key_values=self.input_for_param_extraction.db_lookup(app_workflow, subject_command_name) 
-                matched, corrected_value, field_suggestions = DatabaseValidator.fuzzy_match(field_value, key_values)
+                if not self.input_for_param_extraction_class:
+                    raise ValueError("input_for_param_extraction_class is not set.")
+                matched, corrected_value, field_suggestions = (
+                    self.input_for_param_extraction_class.db_lookup(
+                        app_workflow, field_name, field_value)
+                ) 
+                # matched, corrected_value, field_suggestions = DatabaseValidator.fuzzy_match(field_value, key_values)
 
                 if matched:
                     setattr(cmd_parameters, field_name, corrected_value)
@@ -414,7 +419,7 @@ Today's date is {today}.
                 if is_format_instruction:
                     message += f"\n{field}: {', '.join(suggestions)}"
                 else:
-                    message += f"\nDid you mean one of these {field}s? {', '.join(suggestions)}"
+                    message += f"Did you mean one of these {field}s? {', '.join(suggestions)}\n"
 
         combined_fields = []
         if missing_fields:
