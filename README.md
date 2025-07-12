@@ -396,15 +396,15 @@ fastworkflow run ./messaging_app_1 ./messaging_app_1/fastworkflow.env ./messagin
 
 ### Calling class methods and initializing the class instance to set the context
 
-- TODO: See the medium article
+- [Building stateful AI agents with fastworkflow - from functions to classes](https://medium.com/@drawal_70062/building-stateful-ai-agents-with-fastworkflow-from-functions-to-classes-5a066298969d)
 
 ### Adding class inheritance with command_context_model.json
 
-- TODO: See the medium article
+- [Leveraging class inheritance in fastWorkflow - building advanced AI agents](https://medium.com/@drawal_70062/leveraging-class-inheritance-in-fastworkflow-building-advanced-ai-agents-acba3789a8eb)
 
 ### Adding context hierarchies with context_inheritance_model.json
 
-- TODO: See the medium article
+- [Building complex context hierarchies in fastWorkflow - Advanced AI agents](https://medium.com/@drawal_70062/building-complex-context-hierarchies-in-fastworkflow-advanced-ai-agents-c5858fa4dd80)
 
 ### Using DSPy for Response Generation
 
