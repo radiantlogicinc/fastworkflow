@@ -406,6 +406,8 @@ fastworkflow run ./messaging_app_1 ./messaging_app_1/fastworkflow.env ./messagin
 
 - [Building complex context hierarchies in fastWorkflow - Advanced AI agents](https://medium.com/@drawal_70062/building-complex-context-hierarchies-in-fastworkflow-advanced-ai-agents-c5858fa4dd80)
 
+---
+
 ### Using DSPy for Response Generation
 
 fastWorkflow integrates seamlessly with DSPy to leverage LLM capabilities for response generation. The `dspy_utils.py` module provides a convenient bridge between Pydantic models and DSPy signatures:
