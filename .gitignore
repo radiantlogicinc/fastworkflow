@@ -201,3 +201,7 @@ tasks/
 .taskmaster/state.json
 .taskmaster/reports/task-complexity-report.json
 docs/chats/cursor_review_codebase_for_performance.md
+fastworkflow-medium-article-1.md
+fastworkflow-medium-article-2.md
+fastworkflow-medium-article-3.md
+fastworkflow-medium-article-4.md
