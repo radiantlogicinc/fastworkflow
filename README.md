@@ -53,7 +53,7 @@ While [DSPy](https://dspy.ai) ([Why DSPy](https://x.com/lateinteraction/status/1
 - [Architecture Overview](#architecture-overview)
 - [Installation](#installation)
 - [Quick Start: Running an Example in 5 Minutes](#quick-start-running-an-example-in-5-minutes)
-    - [Step 1: Fetch the `hello_world` Example](#step-1-fetch-the-hello_world-example)
+    - [Step 1: Fetch the `hello_world` Example](#step-1-fetch-the_hello_world-example)
     - [Step 2: Add Your API Keys](#step-2-add-your-api-keys)
     - [Step 3: Train the Example](#step-3-train-the-example)
     - [Step 4: Run the Example](#step-4-run-the-example)
@@ -62,16 +62,22 @@ While [DSPy](https://dspy.ai) ([Why DSPy](https://x.com/lateinteraction/status/1
     - [Workflow Operations](#workflow-operations)
 - [Understanding the Directory Structure](#understanding-the-directory-structure)
 - [Building Your First Workflow: The Manual Approach](#building-your-first-workflow-the-manual-approach)
-    - [Step 1: Design Your Application](#step-1-design-your-application)
-    - [Step 2: Create the Workflow Directory](#step-2-create-the-workflow-directory)
-    - [Step 3: Write the Command File](#step-3-write-the-command-file)
-    - [Step 4: Create the Context Model](#step-4-create-the-context-model)
-    - [Step 5: Train and Run](#step-5-train-and-run)
+    - [Step 1: Create a new project directory](#step-1-create-a-new-project-directory)
+    - [Step 2: Create a new application directory](#step-2-create-a-new-application-directory)
+    - [Step 3: Design Your Application](#step-3-design-your-application)
+    - [Step 4: Write the Command File](#step-4-write-the-command-file)
+    - [Step 5: Setup the env and password files](#step-5-setup-the-env-and-password-files)
+    - [Step 6: Train and Run](#step-6-train-and-run)
 - [Refining Your Workflow](#refining-your-workflow)
-    - [Adding Inheritance](#adding-inheritance)
-    - [Adding Context Hierarchies](#adding-context-hierarchies)
+    - [Calling class methods and initializing the class instance to set the context](#calling-class-methods-and-initializing-the-class-instance-to-set-the-context)
+    - [Adding class inheritance with command_context_model.json](#adding-class-inheritance-with-command_context_modeljson)
+    - [Adding context hierarchies with context_inheritance_model.json](#adding-context-hierarchies-with-context_inheritance_modeljson)
+    - [Using DSPy for Response Generation](#using-dspy-for-response-generation)
+    - [Using Startup Commands and Actions](#using-startup-commands-and-actions)
 - [Rapidly Building Workflows with the Build Tool](#rapidly-building-workflows-with-the-build-tool)
 - [Environment Variables Reference](#environment-variables-reference)
+    - [Environment Variables](#environment-variables)
+    - [Password/API Key Variables](#passwordapi-key-variables)
 - [Troubleshooting / FAQ](#troubleshooting--faq)
 - [For Contributors](#for-contributors)
 - [License](#license)
@@ -396,15 +402,15 @@ fastworkflow run ./messaging_app_1 ./messaging_app_1/fastworkflow.env ./messagin
 
 ### Calling class methods and initializing the class instance to set the context
 
-- [Building stateful AI agents with fastworkflow - from functions to classes](https://medium.com/@drawal_70062/building-stateful-ai-agents-with-fastworkflow-from-functions-to-classes-5a066298969d)
+- [Building stateful AI agents with fastworkflow - from functions to classes](fastworkflow-article-2.md)
 
 ### Adding class inheritance with command_context_model.json
 
-- [Leveraging class inheritance in fastWorkflow - building advanced AI agents](https://medium.com/@drawal_70062/leveraging-class-inheritance-in-fastworkflow-building-advanced-ai-agents-acba3789a8eb)
+- [Leveraging class inheritance in fastWorkflow - building advanced AI agents](fastworkflow-article-3.md)
 
 ### Adding context hierarchies with context_inheritance_model.json
 
-- [Building complex context hierarchies in fastWorkflow - Advanced AI agents](https://medium.com/@drawal_70062/building-complex-context-hierarchies-in-fastworkflow-advanced-ai-agents-c5858fa4dd80)
+- [Building complex context hierarchies in fastWorkflow - Advanced AI agents](fastworkflow-article-4.md)
 
 ---
 
