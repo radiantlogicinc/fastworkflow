@@ -286,6 +286,9 @@ fastworkflow.passwords.env          # <-- Passwords (copy from hello_world examp
 
 Before we automate everything with the build tool, let’s *hand-craft* the smallest possible workflow. Walking through each file once will make the generated output much easier to understand.
 
+> [!tip]
+> You can fetch messaging_app_1 code using `fastworkflow examples fetch messaging_app_1` if you want to skip writing the code 
+
 ### Step 1: Create a new project directory
 
 ```sh

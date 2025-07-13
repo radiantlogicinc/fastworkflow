@@ -160,6 +160,9 @@ You’ll be greeted with a `User >` prompt. Try asking it "what can you do?" or 
 
 Before we automate everything, let’s hand-craft the smallest possible workflow. Walking through each file will make the generated output from the build tool much easier to understand later.
 
+> [!tip]
+> You can fetch messaging_app_1 code using `fastworkflow examples fetch messaging_app_1` if you want to skip writing the code 
+
 ### Step 1: Create Project Directories
 
 First, create the main directory for your workflow and a subdirectory for your application code.
@@ -291,4 +294,4 @@ The real power of `fastWorkflow` shines when you move beyond standalone function
 
 This is the first of a four-part series designed to take you from the basics to building advanced AI agents. In our next article, we will take a major step forward and explore how to AI-enable class methods, manage state, and set context in your workflows.
 
-**Next up: [Part 2: Calling Class Methods in fastWorkflow](https://medium.com/p/your-next-article-link-here)** 
+**Next up: [Part 2: Calling Class Methods in fastWorkflow](./fastworkflow-article-2.md)** 

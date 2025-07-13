@@ -4,7 +4,7 @@
 
 ---
 
-*This is the second article in our four-part series on building AI agents with fastWorkflow. [Read Part 1 here](https://medium.com/p/your-first-article-link-here) if you haven't already.*
+*This is the second article in our four-part series on building AI agents with fastWorkflow. [Read Part 1 here](./fastworkflow-article-1.md) if you haven't already.*
 
 In our previous article, we built a simple messaging workflow using a standalone function. While this approach works well for basic commands, real-world applications are rarely that simple. Most applications maintain state, have complex object models, and require navigating between different contexts.
 
@@ -29,6 +29,9 @@ We'll transform our simple messaging app from the previous article into a class-
 1. A `User` class that maintains the sender's name
 2. A startup command that initializes the user context
 3. A send_message command that operates on the user instance
+
+> [!tip]
+> You can fetch messaging_app_2 code using `fastworkflow examples fetch messaging_app_2` if you want to skip writing the code 
 
 Let's start by comparing the application code between the two versions.
 
@@ -299,7 +302,7 @@ All of this is possible because `fastWorkflow` understands your application's ob
 
 We've taken a significant step forward by moving from standalone functions to stateful class methods. In the next article, we'll explore how to build even more sophisticated applications using inheritance and context hierarchies.
 
-**Next up: [Part 3: Building Context Hierarchies with Inheritance in fastWorkflow](https://medium.com/p/your-next-article-link-here)**
+**Next up: [Part 3: Building Context Hierarchies with Inheritance in fastWorkflow](./fastworkflow-article-3.md)**
 
 ---
 

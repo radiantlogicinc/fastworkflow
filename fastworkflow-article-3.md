@@ -4,7 +4,7 @@
 
 ---
 
-*This is the third article in our four-part series on building AI agents with fastWorkflow. [Read Part 2 here](https://medium.com/p/your-second-article-link-here) if you haven't already.*
+*This is the third article in our four-part series on building AI agents with fastWorkflow. [Read Part 2 here](./fastworkflow-article-2) if you haven't already.*
 
 In our previous article, we transformed our simple function-based messaging application into a class-based one, introducing state management and context awareness. Now, it's time to take our application to the next level by leveraging one of the most powerful features of object-oriented programming: inheritance.
 
@@ -30,6 +30,9 @@ We'll enhance our messaging app from the previous article to support different t
 2. Add a premium-only feature (`send_priority_message`)
 3. Configure the inheritance model so `fastWorkflow` understands the relationship
 4. Update the initialization process to support both user types
+
+> [!tip]
+> You can fetch messaging_app_3 code using `fastworkflow examples fetch messaging_app_3` if you want to skip writing the code 
 
 Let's start by comparing the application code between the two versions.
 
@@ -396,7 +399,7 @@ All of this is possible because `fastWorkflow` understands your application's cl
 
 We've now seen how to leverage inheritance to create more sophisticated AI agents. In the final article of this series, we'll explore how to build complex context hierarchies with nested objects, allowing your AI agent to navigate between different parts of your application.
 
-**Next up: [Part 4: Building Complex Context Hierarchies in fastWorkflow](https://medium.com/p/your-next-article-link-here)**
+**Next up: [Part 4: Building Complex Context Hierarchies in fastWorkflow](./fastworkflow-article-4.md)**
 
 ---
 

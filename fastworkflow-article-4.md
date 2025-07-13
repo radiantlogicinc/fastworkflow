@@ -4,7 +4,7 @@
 
 ---
 
-*This is the final article in our four-part series on building AI agents with fastWorkflow. [Read Part 3 here](https://medium.com/p/your-third-article-link-here) if you haven't already.*
+*This is the final article in our four-part series on building AI agents with fastWorkflow. [Read Part 3 here](./fastworkflow-article-3.md) if you haven't already.*
 
 In our previous articles, we've progressed from simple function-based commands to stateful classes and inheritance hierarchies. Now, we're ready to tackle the most powerful feature of `fastWorkflow`: complex context hierarchies with bidirectional navigation.
 
@@ -31,6 +31,9 @@ We'll enhance our messaging app from the previous article to support a full chat
 3. Enable navigation between contexts (from user to chatroom and back)
 4. Add commands for managing users and broadcasting messages
 5. Implement advanced features like database validation for parameter extraction
+
+> [!tip]
+> You can fetch messaging_app_4 code using `fastworkflow examples fetch messaging_app_4` if you want to skip writing the code 
 
 Let's start by comparing the application code between the two versions.
 
