@@ -449,10 +449,10 @@ To run our context hierarchy workflow, we follow the same steps as before, but n
 
 ```sh
 # Train the workflow
-fastworkflow train ./examples/messaging_app_4 ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env
+fastworkflow train ./messaging_app_4 ./messaging_app_4/fastworkflow.env ./messaging_app_4/fastworkflow.passwords.env
 
 # Run the workflow with the startup action
-fastworkflow run ./examples/messaging_app_4 ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env --startup_action ./examples/messaging_app_4/startup_action.json
+fastworkflow run ./messaging_app_4 ./messaging_app_4/fastworkflow.env ./messaging_app_4/fastworkflow.passwords.env --startup_action ./messaging_app_4/startup_action.json
 ```
 
 Let's walk through a typical interaction with our new workflow:
