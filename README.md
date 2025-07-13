@@ -542,7 +542,7 @@ fastworkflow build \
 This single command will generate the `greet.py` command, `get_properties` and `set_properties` for any properties, the `context_inheritance_model.json`, and more, accomplishing in seconds what we did manually.
 
 > [!tip]
-> The build tool is a work in progress and is currently a one-shot tool. The plan is to morph it into a Copilot for building workflows. We can use fastWorkflow itself to implement this Copilot. Reach out if building this interests you.
+> The build tool is a work in progress and is currently a one-shot tool. It also requires manually correcting the generated code. The plan is to morph it into a Copilot for building workflows. We can use fastWorkflow itself to implement this Copilot. Reach out if building this interests you.
 
 ---
 

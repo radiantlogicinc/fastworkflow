@@ -68,6 +68,7 @@ graph LR
         A1(Your Python App Source) --> A2{fastworkflow.build};
         A2 --> A3(Generated _commands);
         A3 --> A4(context_inheritance_model.json);
+        A4 --> A5(Manual cleanup of generated code)
     end
 
     subgraph B[Train-Time]
