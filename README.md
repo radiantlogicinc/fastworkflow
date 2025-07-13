@@ -589,6 +589,12 @@ This single command will generate the `greet.py` command, `get_properties` and `
 > **Missing API Keys**
 > If you see errors about missing environment variables or API keys, make sure you've added your API keys to the `fastworkflow.passwords.env` file as described in the Quick Start guide.
 
+> **Commands are not recognized**
+> Check the command implementation for import or syntax errors. If the command module cannot be loaded, it will not show up
+
+> [!tip]
+> To debug command files and fastWorkflow code, set up vscode launch.json, set `justmycode` to False, add breakpoints, and run in debug mode
+
 ---
 
 ## For Contributors
