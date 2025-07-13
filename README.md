@@ -603,12 +603,11 @@ Interested in contributing to `fastWorkflow` itself? Great!
 
 1.  **Clone the repository:** `git clone https://github.com/your-repo/fastworkflow.git`
 2.  **Set up the environment:** Create a virtual environment using your preferred tool (venv, uv, conda, poetry, etc.) with Python 3.11+
-3.  **Install in editable mode with dev dependencies:** `pip install -e ".[dev]"`
-
-Please see `CONTRIBUTING.md` for our contribution guidelines and code of conduct.
+3.  **Install in editable mode with dev dependencies:** `pip install -e .` or `uv pip install -e ".[dev]"`
+4.  **[Join our Discord](https://discord.gg/CCpNujh2):** Ask questions, discuss functionality, showcase your fastWorkflows
 
 ---
 
 ## License
 
-`fastWorkflow` is released under the Apache License 2.0. See [LICENSE](LICENSE) for details.
+`fastWorkflow` is released under the Apache License 2.0
