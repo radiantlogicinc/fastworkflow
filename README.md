@@ -608,6 +608,28 @@ Interested in contributing to `fastWorkflow` itself? Great!
 
 ---
 
+## Our work
+
+- [Optimizing intent classifiction with a sentence transformer pipeline architecture - 1/2](https://medium.com/@adihbhatt04/optimizing-intent-classification-with-a-sentence-transformer-pipeline-architecture-part-2-pca-f353e68696ab)
+
+- [Optimizing intent classifiction with a sentence transformer pipeline architecture - 2/2](https://medium.com/@adihbhatt04/optimizing-intent-classification-with-a-sentence-transformer-pipeline-architecture-part-1-586192b25d42)
+
+- [Structured understanding - A comparative study of parameter extraction across leading llms](https://medium.com/@sanchitsatija55/structured-understanding-a-comparative-study-of-parameter-extraction-across-leading-llms-8e65b0333ddf)
+
+- [A generalized parameter extraction framework](https://medium.com/@sanchitsatija55/a-generalized-parameter-extraction-framework-dab9adfd1eef)
+
+---
+
+## References
+
+- [DSPy - Compiling Declarative Language Model Calls into Self-Improving Pipelines](https://arxiv.org/abs/2310.03714)
+
+- [Position: LLMs Can’t Plan, But Can Help Planning in LLM-Modulo Frameworks](https://openreview.net/forum?id=Th8JPEmH4z)
+
+- [Coherence statistics, self-generated experience and why young humans are much smarter than current AI](https://neurips.cc/virtual/2023/invited-talk/73992)
+
+---
+
 ## License
 
 `fastWorkflow` is released under the Apache License 2.0
