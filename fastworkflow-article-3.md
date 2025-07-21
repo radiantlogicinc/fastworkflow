@@ -191,9 +191,6 @@ class ResponseGenerator:
         )
 
         response = (
-            f'Context: {workflow.current_command_context_displayname}\n'
-            f'Command: {command}\n'
-            f'Command parameters: {command_parameters}\n'
             f"Root context set to User('{command_parameters.name}')."
             f"Now you can call commands exposed in this context."
         )
@@ -272,9 +269,6 @@ class ResponseGenerator:
         self._process_command(workflow, command_parameters)
         
         response = (
-            f'Context: {workflow.current_command_context_displayname}\n'
-            f'Command: {command}\n'
-            f'Command parameters: {command_parameters}\n'
             f'Response: The message was printed to the screen'
         )
 

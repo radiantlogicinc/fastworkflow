@@ -38,7 +38,7 @@ class ResponseGenerator:
             workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(
-                    response="command aborted",
+                    response="command aborted\n",
                     artifacts=output.model_dump(),
                 )
             ],

@@ -37,8 +37,9 @@ class Signature:
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
 
-    def process_extracted_parameters(self, workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input") -> None:
-        pass
+    @staticmethod
+    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input") -> tuple[bool, str]:
+        return (True, '')
 
 class ResponseGenerator:
     def _process_command(self, workflow: Workflow) -> Signature.Output:
@@ -54,8 +55,6 @@ class ResponseGenerator:
     def __call__(self, workflow: Workflow, command: str) -> CommandOutput:
         output = self._process_command(workflow)
         response = (
-            f'Context: {workflow.current_command_context_displayname}\n'
-            f'Command: {command}\n'
             f'Response: {output.model_dump_json()}'
         )
         return CommandOutput(

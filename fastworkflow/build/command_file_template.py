@@ -110,9 +110,10 @@ def create_function_command_file(function_info: FunctionInfo, output_dir: str, f
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)\n\n"""
     
-    # Add process_extracted_parameters method
-    command_file_content += f"    def process_extracted_parameters(self, workflow: fastworkflow.Workflow, command: str, cmd_parameters: {input_param_type}) -> None:\n"
-    command_file_content += "        pass\n\n"
+    # Add validate_extracted_parameters method
+    command_file_content +=  "    @staticmethod"
+    command_file_content += f"    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: {input_param_type}) -> tuple[bool, str]:\n"
+    command_file_content += "        return (True, '')\n\n"
     
     # Add ResponseGenerator class
     command_file_content += "class ResponseGenerator:\n"
@@ -332,8 +333,8 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)\n\n"""
 
-    # Add process_extracted_parameters method
-    command_file_content += f"    def process_extracted_parameters(self, workflow: fastworkflow.Workflow, command: str, cmd_parameters: {input_param_type}) -> None:\n"
+    # Add validate_extracted_parameters method
+    command_file_content += f"    def validate_extracted_parameters(self, workflow: fastworkflow.Workflow, command: str, cmd_parameters: {input_param_type}) -> None:\n"
     command_file_content += "        pass\n\n"
 
     # Add ResponseGenerator class

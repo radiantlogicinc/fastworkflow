@@ -64,7 +64,8 @@ def main():
         for command_response in command_output.command_responses:
             workflow_id = "UnknownSession"
             with contextlib.suppress(Exception):
-                workflow_id = fastworkflow.ChatSession.get_active_workflow_id()
+                workflow = fastworkflow.ChatSession.get_active_workflow()
+                workflow_id = workflow.id if workflow else "UnknownSession"
 
             # Collect body elements for the panel content
             body_renderables = []
@@ -178,7 +179,11 @@ def main():
         with open(args.context_file_path, 'r') as file:
             context_dict = json.load(file)
 
-    chat_session = fastworkflow.ChatSession(
+    # Create the chat session
+    fastworkflow.chat_session = fastworkflow.ChatSession()
+    
+    # Start the workflow within the chat session
+    fastworkflow.chat_session.start_workflow(
         args.workflow_path,
         workflow_context=context_dict,
         startup_command=args.startup_command, 
@@ -191,7 +196,7 @@ def main():
 
     try:
         react_agent = initialize_dspy_agent(
-            chat_session, 
+            fastworkflow.chat_session, 
             LLM_AGENT, 
             LITELLM_API_KEY_AGENT,
             clear_cache=True
@@ -200,9 +205,8 @@ def main():
         console.print(f"[bold red]Failed to initialize DSPy agent:[/bold red] {e}")
         exit(1)
 
-    chat_session.start()
     with contextlib.suppress(queue.Empty):
-        if command_output := chat_session.command_output_queue.get(
+        if command_output := fastworkflow.chat_session.command_output_queue.get(
             timeout=0.1
         ):
             console.print(Panel("Startup Command Output", border_style="dim"))
@@ -210,7 +214,7 @@ def main():
             console.print(Panel("End Startup Command Output", border_style="dim"))
     
     while True: 
-        if not args.keep_alive and chat_session.workflow_is_complete:
+        if not args.keep_alive and fastworkflow.chat_session.workflow_is_complete:
             console.print("[blue]Workflow complete and keep_alive is false. Exiting...[/blue]")
             break
 

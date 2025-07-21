@@ -607,7 +607,9 @@ class ResponseGenerator:
                 command=command,
             )
             command_output = CommandExecutor.perform_action(workflow, startup_action)
-            command_output.command_responses[0].artifacts["command_handled"] = True
+            command_output.command_responses[0].artifacts["command_handled"] = True     
+            # Set the additional attributes
+            command_output.command_name = cnp_output.command_name
             return command_output
         
         if nlu_pipeline_stage in {

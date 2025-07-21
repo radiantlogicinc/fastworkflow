@@ -1,3 +1,4 @@
+import contextlib
 from enum import Enum
 import os
 from typing import Any, Optional, Union
@@ -30,7 +31,6 @@ class CommandResponse(BaseModel):
     next_actions: list[Action] = []
     recommendations: list[Recommendation] = []
 
-# MCP-compliant classes
 class MCPToolCall(BaseModel):
     """MCP-compliant tool call request format"""
     name: str
@@ -49,6 +49,10 @@ class MCPToolResult(BaseModel):
 
 class CommandOutput(BaseModel):
     command_responses: list[CommandResponse]
+    workflow_name: str = ""
+    context: str = ""
+    command_name: str = ""
+    command_parameters: str = ""
 
     @property
     def success(self) -> bool:
@@ -85,6 +89,22 @@ class ModuleType(Enum):
     RESPONSE_GENERATION_INFERENCE = 2
     CONTEXT_CLASS = 3
 
+_chat_session: Optional["ChatSession"] = None
+class ChatSessionDescriptor:
+    """Descriptor for accessing the global chat session.""" 
+    def __get__(self, obj, objtype = None):
+        global _chat_session
+        return _chat_session
+    
+    def __set__(self, obj, value):
+        global _chat_session
+        if _chat_session:
+            raise RuntimeError("Cannot set chat session. It is already set.")
+        _chat_session = value
+# Create the descriptor instance
+chat_session = ChatSessionDescriptor()
+
+
 _env_vars: dict = {}
 CommandContextModel = None
 RoutingDefinition = None
@@ -107,7 +127,7 @@ def init(env_vars: dict):
     RoutingDefinition = RoutingDefinitionClass
     RoutingRegistry = RoutingRegistryClass
     ModelPipelineRegistry = ModelPipeline
-    
+
     # Ensure DSPy logging is properly configured after all imports
     # This needs to happen after DSPy is imported by other modules
     import logging
@@ -120,10 +140,8 @@ def init(env_vars: dict):
     # once here (at server start-up) shifts the cost out of the
     # request path and takes advantage of Python's module cache.
     # ------------------------------------------------------------
-    try:
+    with contextlib.suppress(Exception):
         import datasets  # noqa: F401 – pre-load Hugging Face datasets
-    except Exception:  # pragma: no cover – safe fallback
-        pass
 
 def get_env_var(var_name: str, var_type: type = str, default: Optional[Union[str, int, float, bool]] = None) -> Union[str, int, float, bool]:
     """get the environment variable"""

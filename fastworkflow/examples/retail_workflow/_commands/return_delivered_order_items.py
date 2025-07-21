@@ -58,9 +58,6 @@ class ResponseGenerator:
     def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> CommandOutput:
         output = self._process_command(workflow, command_parameters)
         response = (
-            f'Context: {workflow.current_command_context_displayname}\n'
-            f'Command: {command}\n'
-            f'Command parameters: {command_parameters}\n'
             f'Response: return status is: {output.status}'
         )
         return CommandOutput(

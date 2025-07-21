@@ -315,10 +315,6 @@ Today's date is {today}.
         invalid_fields = []
         all_suggestions = {}
 
-        # check if the input for parameter extraction class is defined in the registary then call the process_parameters function on the instance.
-        if hasattr(self.input_for_param_extraction, 'process_extracted_parameters'):
-            self.input_for_param_extraction.process_extracted_parameters(app_workflow, subject_command_name, cmd_parameters)
-
         # Check required fields
         for field_name, field_info in type(cmd_parameters).model_fields.items():
             field_value = getattr(cmd_parameters, field_name, None)
@@ -402,10 +398,18 @@ Today's date is {today}.
                     is_valid = False
 
         if is_valid:
-            return (True, "All required parameters are valid.", {})
+            if not (
+                self.input_for_param_extraction_class and \
+                hasattr(self.input_for_param_extraction_class, 'validate_extracted_parameters')
+            ):
+                return (True, "All required parameters are valid.", {})
+            
+            is_valid, message = self.input_for_param_extraction_class.validate_extracted_parameters(app_workflow, subject_command_name, cmd_parameters)
+            if is_valid:
+                return (True, "All required parameters are valid.", {})
+            return (False, message, {})
 
-        message = ""
-
+        message = ''
         if missing_fields:
             message += f"{MISSING_INFORMATION_ERRMSG}" + ", ".join(missing_fields) + "\n"
 

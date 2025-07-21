@@ -89,15 +89,9 @@ class ResponseGenerator:
     ) -> fastworkflow.CommandOutput:
         output = self._process_command(workflow)
 
-        app_workflow = workflow.context["app_workflow"]
-        context_name = (
-            'global' if app_workflow.current_command_context_name == '*'
-            else app_workflow.current_command_context_name
-        )
-
         response = "\n".join(output.valid_command_names)
         response = (
-            f"Commands available in the current context ({context_name}):\n"
+            f"Commands available in the current context:\n"
             f"{response}\n"
         )
 

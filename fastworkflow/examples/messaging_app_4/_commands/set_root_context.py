@@ -15,8 +15,6 @@ class ResponseGenerator:
         workflow.root_command_context = ChatRoom()
 
         response = (
-            f'Context: {workflow.current_command_context_displayname}\n'
-            f'Command: {command}\n'
             f"Now you can call commands exposed in this context."
         )
 

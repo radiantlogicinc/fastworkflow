@@ -54,7 +54,7 @@ class Signature:
     def generate_utterances(workflow: Workflow, command_name: str) -> list[str]:
         return ["valid command"]
     
-    def process_extracted_parameters(self, workflow: fastworkflow.Workflow, command: str, cmd_parameters: None) -> None:
+    def validate_extracted_parameters(self, workflow: fastworkflow.Workflow, command: str, cmd_parameters: None) -> None:
         pass
 
 class ResponseGenerator:

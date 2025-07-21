@@ -256,10 +256,10 @@ class Signature:
         return []
     
     @staticmethod
-    def process_extracted_parameters(workflow: fastworkflow.Workflow, parameters: Dict[str, Any]) -> Dict[str, Any]:
-        \"\"\"Process extracted parameters before command execution.\"\"\"
-        # TODO: Add parameter processing logic if needed
-        return parameters
+    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: "Signature.Input") -> tuple[bool, str]:
+        \"\"\"Any additional validation of extracted parameters after individual parameter validation.\"\"\"
+        # TODO: Add parameter validation logic if needed
+        return (True, '')
 
 
 class ResponseGenerator:

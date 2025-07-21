@@ -223,8 +223,6 @@ class ResponseGenerator:
         workflow.root_command_context = ChatRoom()
 
         response = (
-            f'Context: {workflow.current_command_context_displayname}\n'
-            f'Command: {command}\n'
             f"Now you can call commands exposed in this context."
         )
 
@@ -313,9 +311,6 @@ class ResponseGenerator:
         output = self._process_command(workflow, command_parameters)
         
         response = (
-            f'Context: {workflow.current_command_context_displayname}\n'
-            f'Command: {command}\n'
-            f'Command parameters: {command_parameters}\n'
             f'Response: {output.model_dump_json()}'
         )
 
@@ -405,9 +400,6 @@ class ResponseGenerator:
         output = self._process_command(workflow, command_parameters)
         
         response = (
-            f'Context: {workflow.current_command_context_displayname}\n'
-            f'Command: {command}\n'
-            f'Command parameters: {command_parameters}\n'
             f'Response: {output.model_dump_json()}'
         )
 

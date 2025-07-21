@@ -200,3 +200,4 @@ tasks/
 .taskmaster/config.json
 .taskmaster/state.json
 .taskmaster/reports/task-complexity-report.json
+docs/*.md

@@ -32,8 +32,8 @@ def todo_item_class():
     return class_info
 
 
-def test_process_extracted_parameters_is_instance_method(temp_dir, todo_item_class):
-    """Test that process_extracted_parameters is defined as an instance method, not a static method."""
+def test_validate_extracted_parameters_is_instance_method(temp_dir, todo_item_class):
+    """Test that validate_extracted_parameters is defined as an instance method, not a static method."""
     # Generate the command file
     output_dir = temp_dir / "TodoItem"
     output_dir.mkdir(exist_ok=True)
@@ -61,24 +61,24 @@ def test_process_extracted_parameters_is_instance_method(temp_dir, todo_item_cla
     
     assert signature_class is not None, "Could not find Signature class"
     
-    # Find the process_extracted_parameters method
+    # Find the validate_extracted_parameters method
     process_method = None
     for node in signature_class.body:
-        if isinstance(node, ast.FunctionDef) and node.name == 'process_extracted_parameters':
+        if isinstance(node, ast.FunctionDef) and node.name == 'validate_extracted_parameters':
             process_method = node
             break
     
-    assert process_method is not None, "Could not find process_extracted_parameters method"
+    assert process_method is not None, "Could not find validate_extracted_parameters method"
     
     # Check if it's an instance method (first parameter is 'self')
-    assert len(process_method.args.args) > 0, "process_extracted_parameters should have parameters"
-    assert process_method.args.args[0].arg == 'self', "First parameter of process_extracted_parameters should be 'self'"
+    assert len(process_method.args.args) > 0, "validate_extracted_parameters should have parameters"
+    assert process_method.args.args[0].arg == 'self', "First parameter of validate_extracted_parameters should be 'self'"
     
     # Check that it's not decorated with @staticmethod or @classmethod
     for decorator in process_method.decorator_list:
         if isinstance(decorator, ast.Name):
             assert decorator.id not in ('staticmethod', 'classmethod'), \
-                "process_extracted_parameters should not be decorated with @staticmethod or @classmethod"
+                "validate_extracted_parameters should not be decorated with @staticmethod or @classmethod"
 
 
 def test_generate_utterances_is_static_method(temp_dir, todo_item_class):

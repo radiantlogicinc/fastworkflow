@@ -44,17 +44,43 @@ def run_main(args):
 
     def print_command_output(command_output):
         """Pretty-print workflow output using rich panels and tables."""
-        for command_response in command_output.command_responses:
-            workflow_id = fastworkflow.ChatSession.get_active_workflow_id()
-
-            # Collect body elements for the panel content
-            body_renderables = []
-
+        # Use workflow_name in panel title
+        panel_title = f"[bold yellow]Workflow - {command_output.workflow_name}[/bold yellow]"
+        
+        # Collect all body renderables
+        all_renderables = []
+        
+        # Add command info section first (only once)
+        command_info_table = Table(show_header=False, box=None)
+        if command_output.context:
+            command_info_table.add_row("Context:", Text(command_output.context, style="yellow"))
+        if command_output.command_name:
+            command_info_table.add_row("Command:", Text(command_output.command_name, style="yellow"))
+        if command_output.command_parameters:
+            command_info_table.add_row("Parameters:", Text(command_output.command_parameters, style="yellow"))
+        
+        # Add command info section if we have any rows
+        if command_info_table.row_count > 0:
+            all_renderables.extend(
+                (Text("Command Information", style="bold yellow"), command_info_table)
+            )
+            
+            # Add a horizontal separator after command information
+            from rich.rule import Rule
+            all_renderables.append(Rule(style="dim"))
+        
+        # Process each command response
+        for i, command_response in enumerate(command_output.command_responses, start=1):
             if command_response.response:
-                body_renderables.append(Text(command_response.response, style="green"))
+                all_renderables.extend(
+                    (
+                        Text(f"Command Response {i}", style="bold green"),
+                        Text(command_response.response, style="green")
+                    )
+                )
 
             if command_response.artifacts:
-                body_renderables.extend(
+                all_renderables.extend(
                     (
                         Text("Artifacts", style="bold cyan"),
                         _build_artifact_table(command_response.artifacts),
@@ -64,23 +90,22 @@ def run_main(args):
                 actions_table = Table(show_header=False, box=None)
                 for act in command_response.next_actions:
                     actions_table.add_row(Text(str(act), style="blue"))
-                body_renderables.extend(
+                all_renderables.extend(
                     (Text("Next Actions", style="bold blue"), actions_table)
                 )
             if command_response.recommendations:
                 rec_table = Table(show_header=False, box=None)
                 for rec in command_response.recommendations:
                     rec_table.add_row(Text(str(rec), style="magenta"))
-                body_renderables.extend(
+                all_renderables.extend(
                     (Text("Recommendations", style="bold magenta"), rec_table)
                 )
 
-            panel_title = f"[bold yellow]Workflow {workflow_id}[/bold yellow]"
-            # Group all renderables together
-            group = Group(*body_renderables)
-            # Use the group in the panel
-            panel = Panel.fit(group, title=panel_title, border_style="green")
-            console.print(panel)
+        # Group all renderables together
+        group = Group(*all_renderables)
+        # Use the group in the panel
+        panel = Panel.fit(group, title=panel_title, border_style="green")
+        console.print(panel)
 
 
     """Main function to run the workflow."""
@@ -136,7 +161,11 @@ def run_main(args):
         with open(args.context_file_path, 'r') as file:
             context_dict = json.load(file)
 
-    chat_session = fastworkflow.ChatSession(
+    # Create the chat session
+    fastworkflow.chat_session = fastworkflow.ChatSession()
+    
+    # Start the workflow within the chat session
+    fastworkflow.chat_session.start_workflow(
         args.workflow_path, 
         workflow_context=context_dict,
         startup_command=args.startup_command, 
@@ -147,18 +176,17 @@ def run_main(args):
     StartupProgress.advance("ChatSession ready")
     StartupProgress.end()
 
-    chat_session.start()
     with contextlib.suppress(queue.Empty):
-        if command_output := chat_session.command_output_queue.get(
+        if command_output := fastworkflow.chat_session.command_output_queue.get(
             timeout=1.0
         ):
             print_command_output(command_output)
-    while not chat_session.workflow_is_complete or args.keep_alive:
+    while not fastworkflow.chat_session.workflow_is_complete or args.keep_alive:
         user_command = console.input("[bold yellow]User > [/bold yellow]")
         if user_command == "exit":
             break
 
-        chat_session.user_message_queue.put(user_command)
+        fastworkflow.chat_session.user_message_queue.put(user_command)
 
         # Create a spinner for "Processing command..."
         spinner = Spinner("dots", text="Processing command...")
@@ -168,7 +196,7 @@ def run_main(args):
         def wait_for_output():
             nonlocal command_output
             try:
-                command_output = chat_session.command_output_queue.get(block=True)
+                command_output = fastworkflow.chat_session.command_output_queue.get(block=True)
             except Exception as e:
                 logger.error(f"Error getting command output: {e}")
         

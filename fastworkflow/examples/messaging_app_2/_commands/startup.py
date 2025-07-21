@@ -42,9 +42,6 @@ class ResponseGenerator:
         workflow.root_command_context = User(command_parameters.name)
 
         response = (
-            f'Context: {workflow.current_command_context_displayname}\n'
-            f'Command: {command}\n'
-            f'Command parameters: {command_parameters}\n'
             f"Root context set to User('{command_parameters.name}')."
             f"Now you can call commands exposed in this context."
         )

@@ -5,6 +5,7 @@ from typing import ClassVar, Optional
 from collections import deque
 import json
 import contextlib
+import uuid
 
 import fastworkflow
 from fastworkflow.utils.logging import logger
@@ -29,7 +30,8 @@ class ChatWorker(Thread):
         """Process messages for the root workflow"""
         try:
             self.chat_session._status = SessionStatus.RUNNING
-            logger.debug(f"Started root workflow {self.chat_session.app_workflow.id}")
+            workflow = ChatSession.get_active_workflow()
+            logger.debug(f"Started root workflow {workflow.id}")
             
             # Run the workflow loop
             self.chat_session._run_workflow_loop()
@@ -37,49 +39,106 @@ class ChatWorker(Thread):
         finally:
             self.chat_session._status = SessionStatus.STOPPED
             # Ensure workflow is popped if thread terminates unexpectedly
-            if ChatSession.get_active_workflow_id() == self.chat_session.app_workflow.id:
-                ChatSession.pop_active_session()
+            if ChatSession.get_active_workflow() is not None:
+                ChatSession.pop_active_workflow()
 
 class ChatSession:
     _workflow_stack_lock = Lock()
-    _workflow_stack: ClassVar[deque[int]] = deque()  # Stack of workflow IDs
-    _map_workflow_id_2_chat_session: ClassVar[dict[int, "ChatSession"]] = {}
+    _workflow_stack: ClassVar[deque[fastworkflow.Workflow]] = deque()  # Stack of workflow objects
     
     @classmethod
-    def get_active_workflow_id(cls) -> Optional[int]:
-        """Get the currently active workflow ID (top of stack)"""
+    def get_active_workflow(cls) -> Optional[fastworkflow.Workflow]:
+        """Get the currently active workflow (top of stack)"""
         with cls._workflow_stack_lock:
             return cls._workflow_stack[-1] if cls._workflow_stack else None
     
     @classmethod
-    def push_active_workflow(cls, workflow_id: int) -> None:
+    def push_active_workflow(cls, workflow: fastworkflow.Workflow) -> None:
         with cls._workflow_stack_lock:
-            if workflow_id not in cls._map_workflow_id_2_chat_session:
-                raise ValueError(f"Workflow {workflow_id} does not exist")
-            cls._workflow_stack.append(workflow_id)
-            logger.debug(f"Workflow stack: {list(cls._workflow_stack)}")
+            cls._workflow_stack.append(workflow)
+            logger.debug(f"Workflow stack: {[w.id for w in cls._workflow_stack]}")
     
     @classmethod
-    def pop_active_session(cls) -> Optional[int]:
+    def pop_active_workflow(cls) -> Optional[fastworkflow.Workflow]:
         with cls._workflow_stack_lock:
             if not cls._workflow_stack:
                 return None
-            workflow_id = cls._workflow_stack.pop()
-            logger.debug(f"Workflow stack after pop: {list(cls._workflow_stack)}")
-            return workflow_id
+            workflow = cls._workflow_stack.pop()
+            logger.debug(f"Workflow stack after pop: {[w.id for w in cls._workflow_stack]}")
+            return workflow
 
-    def __init__(self,
+    @classmethod
+    def clear_workflow_stack(cls) -> None:
+        """Clear the entire workflow stack"""
+        with cls._workflow_stack_lock:
+            cls._workflow_stack.clear()
+            logger.debug("Workflow stack cleared")
+
+    def stop_workflow(self) -> None:
+        """
+        Stop the current workflow and clear the workflow stack.
+        This method is called when starting a new root workflow to ensure
+        the previous workflow is properly stopped and resources are cleaned up.
+        """
+        # Set status to stopping to signal the workflow loop to exit
+        self._status = SessionStatus.STOPPING
+        
+        # Wait for the chat worker thread to finish if it exists
+        if self._chat_worker and self._chat_worker.is_alive():
+            self._chat_worker.join(timeout=5.0)  # Wait up to 5 seconds
+            if self._chat_worker.is_alive():
+                logger.warning("Chat worker thread did not terminate within timeout")
+        
+        # Clear the workflow stack
+        ChatSession.clear_workflow_stack()
+        
+        # Reset status to stopped
+        self._status = SessionStatus.STOPPED
+        
+        # Clear current workflow reference
+        self._current_workflow = None
+        
+        logger.debug("Workflow stopped and workflow stack cleared")
+
+    def __init__(self):
+        """
+        Initialize a chat session.
+        
+        A chat session can run multiple workflows that share the same message queues.
+        Use start_workflow() to start a specific workflow within this session.
+        """
+        # Create queues for user messages and command outputs
+        self._user_message_queue = Queue()
+        self._command_output_queue = Queue()
+        self._status = SessionStatus.STOPPED
+        self._chat_worker = None
+        
+        # Import here to avoid circular imports
+        from fastworkflow.command_executor import CommandExecutor
+        self._CommandExecutor = CommandExecutor
+        
+        # Initialize workflow-related attributes that will be set in start_workflow
+        self._current_workflow = None
+        
+        # Create the command metadata extraction workflow with a unique ID
+        self._cme_workflow = fastworkflow.Workflow.create(
+            fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
+            workflow_id_str=f"cme_{uuid.uuid4().hex}",
+            workflow_context={
+                "NLU_Pipeline_Stage": fastworkflow.NLUPipelineStage.INTENT_DETECTION,
+            }
+        )
+
+    def start_workflow(self,
                  workflow_folderpath: str, 
                  workflow_id_str: Optional[str] = None, 
                  parent_workflow_id: Optional[int] = None, 
                  workflow_context: dict = None, 
                  startup_command: str = "", 
                  startup_action: Optional[fastworkflow.Action] = None, 
-                 keep_alive: bool = False, 
-                 user_message_queue: Optional[Queue] = None, 
-                 command_output_queue: Optional[Queue] = None):
+                 keep_alive: bool = False) -> Optional[fastworkflow.CommandOutput]:
         """
-        Initialize a workflow chat workflow.
+        Create and start a workflow within this chat session.
         
         Args:
             workflow_folderpath: The folder containing the fastworkflow Workflow
@@ -89,45 +148,38 @@ class ChatSession:
             startup_command: Optional command to execute on startup
             startup_action: Optional action to execute on startup
             keep_alive: Whether to keep the chat session alive after workflow completion
-            user_message_queue: If this is a keep_alive child workflow, pass this queue 
-            command_output_queue: If this is a keep_alive child workflow, pass this queue
+            
+        Returns:
+            CommandOutput for non-keep_alive workflows, None otherwise
         """
         if startup_command and startup_action:
             raise ValueError("Cannot provide both startup_command and startup_action")
 
-        if keep_alive:
-            if user_message_queue is not None or command_output_queue is not None:
-                raise ValueError("user_message_queue and command_output_queue are created automatically when keep_alive is True")
-            user_message_queue = Queue()
-            command_output_queue = Queue()
-        elif user_message_queue is None and command_output_queue is not None:
-            raise ValueError("when keep_alive is False - Provide both user_message_queue and command_output_queue OR provide neither")
-        elif user_message_queue is not None and command_output_queue is None:
-            raise ValueError("when keep_alive is False - Provide both user_message_queue and command_output_queue OR provide neither")
-
-        self._user_message_queue=user_message_queue
-        self._command_output_queue=command_output_queue
-
-        self._app_workflow = fastworkflow.Workflow.create(
+        # Create the workflow
+        workflow = fastworkflow.Workflow.create(
             workflow_folderpath,
             workflow_id_str=workflow_id_str,
             parent_workflow_id=parent_workflow_id,
-            # user_message_queue=user_message_queue,
-            # command_output_queue=command_output_queue,
             workflow_context=workflow_context
         )
-
+        
+        self._current_workflow = workflow
         self._status = SessionStatus.STOPPED
-        self._chat_worker: Optional[ChatWorker] = None
         self._startup_command = startup_command
 
         if startup_action and startup_action.workflow_id is None:
-            startup_action.workflow_id = self._app_workflow.id
+            startup_action.workflow_id = workflow.id
         self._startup_action = startup_action
-        self._keep_alive = keep_alive
+        self._keep_alive = False if parent_workflow_id else keep_alive
 
-        # Register chat session
-        ChatSession._map_workflow_id_2_chat_session[self._app_workflow.id] = self
+        # Check if we need to stop the current workflow
+        # Stop if this is a new root workflow (no parent, keep_alive=True)
+        current_workflow = ChatSession.get_active_workflow()
+        if (current_workflow and 
+            parent_workflow_id is None and 
+            self._keep_alive):
+            logger.info(f"Stopping current workflow {current_workflow.id} to start new root workflow {workflow.id}")
+            self.stop_workflow()
 
         # ------------------------------------------------------------
         # Eager warm-up of CommandRouter / ModelPipeline
@@ -136,7 +188,7 @@ class ChatSession:
         # expensive (~1 s).  We do it here *once* for every model artifact
         # directory so that the first user message does not pay the cost.
         try:
-            command_info_root = Path(self._app_workflow.folderpath) / "___command_info"
+            command_info_root = Path(workflow.folderpath) / "___command_info"
             if command_info_root.is_dir():
                 subdirs = [d for d in command_info_root.iterdir() if d.is_dir()]
 
@@ -159,28 +211,17 @@ class ChatSession:
         except Exception as warm_err:  # pragma: no cover – warm-up must never fail
             logger.debug(f"Model warm-up skipped due to error: {warm_err}")
 
-        # create the command metadata extraction workflow
-        self._cme_workflow = fastworkflow.Workflow.create(
-            fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
-            parent_workflow_id = self._app_workflow.id,
-            workflow_context = {
-                "NLU_Pipeline_Stage": fastworkflow.NLUPipelineStage.INTENT_DETECTION,
-                "app_workflow": self._app_workflow
-            }
-        )
+        # Update the command metadata extraction workflow's context with the app workflow
+        self._cme_workflow.context["app_workflow"] = workflow
 
-        from fastworkflow.command_executor import CommandExecutor
-        self._CommandExecutor = CommandExecutor
-    
-    def start(self) -> Optional[fastworkflow.CommandOutput]:
-        """Start the chat session"""
+        # Start the workflow
         if self._status != SessionStatus.STOPPED:
             raise RuntimeError("Workflow already started")
         
         self._status = SessionStatus.STARTING
         
         # Push this workflow as active
-        ChatSession.push_active_workflow(self._app_workflow.id)
+        ChatSession.push_active_workflow(workflow)
         
         command_output = None
         if self._keep_alive:
@@ -195,11 +236,8 @@ class ChatSession:
         return command_output
 
     @property
-    def app_workflow(self) -> fastworkflow.Workflow:
-        return self._app_workflow
-
-    @property
     def cme_workflow(self) -> fastworkflow.Workflow:
+        """Get the command metadata extraction workflow."""
         return self._cme_workflow
 
     @property
@@ -212,11 +250,13 @@ class ChatSession:
 
     @property
     def workflow_is_complete(self) -> bool:
-        return self._app_workflow.is_complete
+        workflow = ChatSession.get_active_workflow()
+        return workflow.is_complete if workflow else True
     
     @workflow_is_complete.setter
     def workflow_is_complete(self, value: bool) -> None:
-        self._app_workflow.is_complete = value
+        if workflow := ChatSession.get_active_workflow():
+            workflow.is_complete = value
        
 
     def _run_workflow_loop(self) -> Optional[fastworkflow.CommandOutput]:
@@ -227,6 +267,7 @@ class ChatSession:
         - All outputs (success or failure) are sent to queue during processing
         """
         last_output = None
+        workflow = ChatSession.get_active_workflow()
 
         try:
             # Handle startup command/action
@@ -256,8 +297,8 @@ class ChatSession:
 
         finally:
             self._status = SessionStatus.STOPPED
-            ChatSession.pop_active_session()
-            logger.debug(f"Workflow {self._app_workflow.id} completed")
+            ChatSession.pop_active_workflow()
+            logger.debug(f"Workflow {workflow.id if workflow else 'unknown'} completed")
 
         return None
     
@@ -270,7 +311,10 @@ class ChatSession:
             return False
     
     def _process_mcp_tool_call(self, message: str) -> fastworkflow.CommandOutput:
+        # sourcery skip: class-extract-method, extract-method
         """Process an MCP tool call message"""
+        workflow = ChatSession.get_active_workflow()
+        
         try:
             # Parse JSON message
             data = json.loads(message)
@@ -284,9 +328,9 @@ class ChatSession:
             
             # Execute via command executor
             mcp_result = self._CommandExecutor.perform_mcp_tool_call(
-                self._app_workflow, 
+                workflow, 
                 tool_call, 
-                context=self._app_workflow.current_command_context_name
+                command_context=workflow.current_command_context_name
             )
             
             # Convert MCPToolResult back to CommandOutput for consistency
@@ -297,7 +341,8 @@ class ChatSession:
                 self.command_output_queue.put(command_output)
 
             # Flush on successful or failed tool call – state may have changed.
-            self._app_workflow.flush()
+            if workflow := ChatSession.get_active_workflow():
+                workflow.flush()
             
             return command_output
             
@@ -418,18 +463,21 @@ class ChatSession:
             self.command_output_queue.put(command_output)
 
         # Persist workflow state changes lazily accumulated during message processing.
-        self._app_workflow.flush()
+        if workflow := ChatSession.get_active_workflow():
+            workflow.flush()
 
         return command_output
 
     def _process_action(self, action: fastworkflow.Action) -> fastworkflow.CommandOutput:
         """Process a startup action"""
-        command_output = self._CommandExecutor.perform_action(self._app_workflow, action)
+        workflow = ChatSession.get_active_workflow()
+        command_output = self._CommandExecutor.perform_action(workflow, action)
         if (not command_output.success or self._keep_alive) and \
             self.command_output_queue:
             self.command_output_queue.put(command_output)
 
         # Flush any pending workflow updates triggered by this startup action.
-        self._app_workflow.flush()
+        if workflow:
+            workflow.flush()
 
         return command_output

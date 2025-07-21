@@ -41,8 +41,6 @@ class ResponseGenerator:
         output = self._process_command(workflow)
         
         response = (
-            f'Context: {workflow.current_command_context_displayname}\n'
-            f'Command: {command}\n'
             f'Response: {output.model_dump_json()}'
         )
 

@@ -191,7 +191,7 @@ def validate_command_file_components_in_dir(directory: str) -> list:
                     has_model_config = False
                     has_plain_utterances = False
                     has_generate_utterances = False
-                    has_process_extracted_parameters = False
+                    has_validate_extracted_parameters = False
                     has_response_generator = False
                     has_response_call = False
 
@@ -221,9 +221,9 @@ def validate_command_file_components_in_dir(directory: str) -> list:
                                         if (isinstance(base, ast.Name) and base.id == 'BaseModel') or \
                                            (isinstance(base, ast.Attribute) and base.attr == 'BaseModel'):
                                             output_inherits_basemodel = True
-                                # process_extracted_parameters method
-                                if isinstance(subnode, ast.FunctionDef) and subnode.name == 'process_extracted_parameters':
-                                    has_process_extracted_parameters = True
+                                # validate_extracted_parameters method
+                                if isinstance(subnode, ast.FunctionDef) and subnode.name == 'validate_extracted_parameters':
+                                    has_validate_extracted_parameters = True
                             # plain_utterances and template_utterances
                             for subnode in node.body:
                                 if isinstance(subnode, ast.Assign):
@@ -256,8 +256,8 @@ def validate_command_file_components_in_dir(directory: str) -> list:
                         errors.append((file_path, 'Missing plain_utterances in Signature'))
                     if not has_generate_utterances:
                         errors.append((file_path, 'Missing generate_utterances static method in Signature'))
-                    if not has_process_extracted_parameters:
-                        errors.append((file_path, 'Missing process_extracted_parameters method in Signature'))
+                    if not has_validate_extracted_parameters:
+                        errors.append((file_path, 'Missing validate_extracted_parameters method in Signature'))
                     if not has_response_generator:
                         errors.append((file_path, 'Missing ResponseGenerator class'))
                     elif not has_response_call:

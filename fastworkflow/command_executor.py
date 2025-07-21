@@ -45,16 +45,19 @@ class CommandExecutor(CommandExecutorInterface):
                 command = command)
         )
 
-        if command_output.command_handled or not command_output.success:
+        if command_output.command_handled or not command_output.success:           
             return command_output
 
         command = command_output.command_responses[0].artifacts["command"]
         command_name = command_output.command_responses[0].artifacts["command_name"]
         input_obj = command_output.command_responses[0].artifacts["cmd_parameters"]
 
-        workflow_folderpath = chat_session.app_workflow.folderpath
+        workflow = ChatSession.get_active_workflow()
+        workflow_name = workflow.folderpath.split('/')[-1]
+        context = workflow.current_command_context_displayname
+        
         command_routing_definition = fastworkflow.RoutingRegistry.get_definition(
-            workflow_folderpath
+            workflow.folderpath
         )
 
         response_generation_class = command_routing_definition.get_command_class(
@@ -72,9 +75,17 @@ class CommandExecutor(CommandExecutorInterface):
                 command_name, ModuleType.COMMAND_PARAMETERS_CLASS
             )
         ):
-            return response_generation_object(chat_session.app_workflow, command, input_obj)
+            command_output = response_generation_object(workflow, command, input_obj)
         else:
-            return response_generation_object(chat_session.app_workflow, command)
+            command_output = response_generation_object(workflow, command)
+            
+        # Set the additional attributes
+        command_output.workflow_name = workflow_name
+        command_output.context = context
+        command_output.command_name = command_name
+        command_output.command_parameters = str(input_obj) if input_obj else ''
+            
+        return command_output
 
     @classmethod
     def perform_action(
@@ -85,8 +96,10 @@ class CommandExecutor(CommandExecutorInterface):
         workflow.command_context_for_response_generation = \
             workflow.current_command_context
 
-        workflow_folderpath = workflow.folderpath
-        command_routing_definition = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
+        workflow_name = workflow.folderpath.split('/')[-1]
+        context = workflow.current_command_context_displayname
+        
+        command_routing_definition = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
 
         response_generation_class = (
             command_routing_definition.get_command_class(
@@ -107,7 +120,11 @@ class CommandExecutor(CommandExecutorInterface):
             )
         )
         if not command_parameters_class:
-            return response_generation_object(workflow, action.command)
+            command_output = response_generation_object(workflow, action.command)           
+            # Set the additional attributes
+            command_output.workflow_name = workflow_name
+            command_output.context = context
+            return command_output
 
         if action.parameters:
             input_obj = command_parameters_class(**action.parameters)
@@ -121,7 +138,13 @@ class CommandExecutor(CommandExecutorInterface):
         else:
             input_obj = command_parameters_class()
 
-        return response_generation_object(workflow, action.command, input_obj)
+        command_output = response_generation_object(workflow, action.command, input_obj)
+        
+        # Set the additional attributes
+        command_output.workflow_name = workflow_name
+        command_output.context = context
+        
+        return command_output
 
     # MCP-compliant methods
     @classmethod
