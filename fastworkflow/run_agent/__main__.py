@@ -118,6 +118,9 @@ def main():
     parser.add_argument(
         "--keep_alive", help="Optional keep_alive", default=True
     )
+    parser.add_argument(
+        "--project_folderpath", help="Optional path to project folder containing application code", default=None
+    )
 
     args = parser.parse_args()
 
@@ -188,7 +191,8 @@ def main():
         workflow_context=context_dict,
         startup_command=args.startup_command, 
         startup_action=startup_action, 
-        keep_alive=args.keep_alive
+        keep_alive=args.keep_alive,
+        project_folderpath=args.project_folderpath
     )
 
     StartupProgress.advance("ChatSession ready")

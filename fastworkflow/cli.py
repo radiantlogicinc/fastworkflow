@@ -318,6 +318,7 @@ def add_run_parser(subparsers):
     parser_run.add_argument("--startup_command", help="Optional startup command", default="")
     parser_run.add_argument("--startup_action", help="Optional startup action", default="")
     parser_run.add_argument("--keep_alive", help="Optional keep_alive", default=True)
+    parser_run.add_argument("--project_folderpath", help="Optional path to project folder containing application code", default=None)
     parser_run.set_defaults(func=lambda args: run_with_defaults(args))
 
 def train_with_defaults(args):  # sourcery skip: extract-duplicate-method

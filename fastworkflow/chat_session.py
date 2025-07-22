@@ -130,13 +130,15 @@ class ChatSession:
         )
 
     def start_workflow(self,
-                 workflow_folderpath: str, 
-                 workflow_id_str: Optional[str] = None, 
-                 parent_workflow_id: Optional[int] = None, 
-                 workflow_context: dict = None, 
-                 startup_command: str = "", 
-                 startup_action: Optional[fastworkflow.Action] = None, 
-                 keep_alive: bool = False) -> Optional[fastworkflow.CommandOutput]:
+        workflow_folderpath: str, 
+        workflow_id_str: Optional[str] = None, 
+        parent_workflow_id: Optional[int] = None, 
+        workflow_context: dict = None, 
+        startup_command: str = "", 
+        startup_action: Optional[fastworkflow.Action] = None, 
+        keep_alive: bool = False,
+        project_folderpath: Optional[str] = None
+        ) -> Optional[fastworkflow.CommandOutput]:
         """
         Create and start a workflow within this chat session.
         
@@ -160,7 +162,8 @@ class ChatSession:
             workflow_folderpath,
             workflow_id_str=workflow_id_str,
             parent_workflow_id=parent_workflow_id,
-            workflow_context=workflow_context
+            workflow_context=workflow_context,
+            project_folderpath=project_folderpath
         )
         
         self._current_workflow = workflow

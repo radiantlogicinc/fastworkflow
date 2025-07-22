@@ -37,25 +37,37 @@ def enablecache(func):
 class Workflow:
     """Workflow class"""
     @classmethod
-    def create(cls, workflow_folderpath: str, workflow_id_str: Optional[str] = None, parent_workflow_id: Optional[int] = None, workflow_context: dict = None) -> "Workflow":
+    def create(
+        cls, 
+        workflow_folderpath: str, 
+        workflow_id_str: Optional[str] = None, 
+        parent_workflow_id: Optional[int] = None, 
+        workflow_context: dict = None,
+        project_folderpath: Optional[str] = None
+    ) -> "Workflow":
         if workflow_id_str is not None and parent_workflow_id is not None:
             raise ValueError("workflow_id_str and parent_workflow_id cannot both be provided")
-
-        if workflow_id_str:
-            workflow_id = fastworkflow.get_workflow_id(workflow_id_str)
-        else:
-            workflow_id = cls.generate_child_workflow_id(workflow_folderpath, parent_workflow_id)
-
-        if workflow := cls.get_workflow(workflow_id):
-            if workflow_context is not None:
-                workflow.context = workflow_context
-            return workflow
 
         if not os.path.exists(workflow_folderpath):
             raise ValueError(f"The folder path {workflow_folderpath} does not exist")
 
         if not os.path.isdir(workflow_folderpath):
             raise ValueError(f"{workflow_folderpath} must be a directory")
+
+        if workflow_id_str:
+            workflow_id = fastworkflow.get_workflow_id(workflow_id_str)
+        else:
+            workflow_id = cls.generate_child_workflow_id(workflow_folderpath, parent_workflow_id)
+
+        python_project_path = project_folderpath or workflow_folderpath
+        if python_project_path not in sys.path:
+            # THIS IS IMPORTANT: it allows relative import of modules in the code inside workflow_folderpath
+            sys.path.insert(0, python_project_path)
+
+        if workflow := cls.get_workflow(workflow_id):
+            if workflow_context is not None:
+                workflow.context = workflow_context
+            return workflow
 
         workflow_snapshot = {
             "workflow_id": workflow_id,
@@ -155,10 +167,6 @@ class Workflow:
         self._dirty: bool = False
         self._save()
         self._dirty = False
-
-        if self._folderpath not in sys.path:
-            # THIS IS IMPORTANT: it allows relative import of modules in the code inside workflow_folderpath
-            sys.path.insert(0, self._folderpath)
 
     @property
     def current_command_context(self) -> object:
