@@ -36,9 +36,11 @@ def chat_session(sample_workflow_path, initialized_fastworkflow):
     """Create a chat session for the sample workflow."""
     # Build command routing definition once so that command metadata is ready
     RoutingDefinition.build(sample_workflow_path)
-    return fastworkflow.ChatSession(
+    chat_session = fastworkflow.ChatSession()
+    chat_session.start_workflow(
         sample_workflow_path, workflow_id_str=str(uuid.uuid4())
     )
+    return chat_session
 
 
 @pytest.fixture

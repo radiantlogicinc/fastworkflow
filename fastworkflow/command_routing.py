@@ -299,6 +299,22 @@ class RoutingDefinition(BaseModel):
         self._build_simple_mappings()
         return self
 
+    def _build_simple_mappings(self):
+        """Build the simple mappings from the contexts data."""
+        self.command_directory_map = {}
+        self.routing_definition_map = {}
+        
+        # Build command_directory_map: context -> set of commands
+        for context, commands in self.contexts.items():
+            self.command_directory_map[context] = set(commands)
+        
+        # Build routing_definition_map: command -> set of contexts
+        for context, commands in self.contexts.items():
+            for command in commands:
+                if command not in self.routing_definition_map:
+                    self.routing_definition_map[command] = set()
+                self.routing_definition_map[command].add(context)
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 

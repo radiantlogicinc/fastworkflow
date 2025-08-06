@@ -28,10 +28,12 @@ def chat_session(retail_workflow_path: str):
     fastworkflow.RoutingRegistry.clear_registry()
     fastworkflow.RoutingRegistry.get_definition(retail_workflow_path)
 
-    return ChatSession(
+    chat_session = ChatSession()
+    chat_session.start_workflow(
         retail_workflow_path,
         workflow_id_str=str(uuid.uuid4())
     )
+    return chat_session
 
 
 class TestCommandExecutor:
