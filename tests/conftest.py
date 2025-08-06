@@ -42,7 +42,7 @@ def add_workflow_paths_to_syspath():
     # Add common workflow paths used in tests
     workflow_paths = [
         Path(project_root) / "fastworkflow" / "examples" / "retail_workflow",
-        Path(project_root) / "fastworkflow" / "examples" / "todo_list",
+        Path(project_root) / "fastworkflow" / "examples" / "simple_workflow_template",
         Path(project_root) / "fastworkflow" / "examples" / "hello_world",
         # Add any other workflow paths used in tests
     ]

@@ -35,14 +35,14 @@ def get_module(module_path: str, search_root: Optional[str] = None) -> Any:
         # Determine project root used for building the importable dotted path.
         #
         # * When `search_root` is provided it usually points to **the workflow
-        #   folder itself** (e.g. ``.../examples/todo_list``).  The modules we
+        #   folder itself** (e.g. ``.../examples/hello_world``).  The modules we
         #   load live *inside* that folder (e.g. ``_commands/startup.py``).
         #   We **include** the workflow folder name as the first package segment
         #   so that intra-workflow relative imports (like
         #   ``from ..application.todo_manager import ...``) resolve correctly.
         #   Therefore we treat the *parent* of ``search_root`` as the project
         #   root when computing the dotted path – this yields an import path
-        #   such as ``todo_list._commands.startup`` instead of
+        #   such as ``hello_world._commands.startup`` instead of
         #   ``_commands.startup``.
         #
         # * If `search_root` is not provided we fall back to the repository
@@ -51,7 +51,7 @@ def get_module(module_path: str, search_root: Optional[str] = None) -> Any:
         if search_root:
             project_root = os.path.abspath(os.path.join(search_root, os.pardir))
             # Ensure parent dir is on sys.path so that the workflow folder is
-            # importable as a top-level package (e.g. ``import todo_list``).
+            # importable as a top-level package (e.g. ``import hello_world``).
             if project_root not in sys.path:
                 sys.path.insert(0, project_root)
             # Also ensure the workflow folder itself is on sys.path to match
