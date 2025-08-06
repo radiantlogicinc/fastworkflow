@@ -22,7 +22,8 @@ include = [
 exclude = [
     "**/___command_info",
     "**/___workflow_contexts",
-    "./.env"
+    "./.env",
+    "**/simple_workflow_template/tests"
 ]
 
 [tool.poetry.scripts]

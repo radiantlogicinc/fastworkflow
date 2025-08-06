@@ -50,7 +50,7 @@
             ]
         },        
         {
-            "name": "run_todo_list",
+            "name": "run_simple_workflow_template",
             "type": "debugpy",
             "request": "launch",
             "module": "fastworkflow.run",
@@ -59,15 +59,15 @@
                 "PYTHONPATH": "${workspaceFolder}/"
             },
             "args": [
-                "./fastworkflow/examples/todo_list",
+                "./fastworkflow/examples/simple_workflow_template",
                 "./env/.env",
                 "./passwords/.env",
-                "--startup_action",
-                "./examples/todo_list/startup_action.json"
+                "--startup_command",
+                "startup"
             ]
         },
         {
-            "name": "train_todo_list",
+            "name": "train_simple_workflow_template",
             "type": "debugpy",
             "request": "launch",
             "module": "fastworkflow.train",
@@ -76,7 +76,7 @@
                 "PYTHONPATH": "${workspaceFolder}/"
             },
             "args": [
-                "./fastworkflow/examples/todo_list",
+                "./fastworkflow/examples/simple_workflow_template",
                 "./env/.env",
                 "./passwords/.env"
             ]
