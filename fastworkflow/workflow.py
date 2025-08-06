@@ -178,7 +178,16 @@ class Workflow:
 
     @property
     def current_command_context_displayname(self) -> str:
+        crd = fastworkflow.CommandContextModel.load(self._folderpath)
+        context_class = crd.get_context_class(
+                Workflow.get_command_context_name(self._current_command_context),
+                fastworkflow.ModuleType.CONTEXT_CLASS
+        )
+        if context_class and hasattr(context_class, 'get_displayname'):
+            return context_class.get_displayname(self._current_command_context)
+
         return Workflow.get_command_context_name(self._current_command_context, for_display=True)
+
 
     @property
     def is_current_command_context_root(self) -> bool:
