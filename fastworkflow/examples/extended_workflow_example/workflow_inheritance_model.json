@@ -1,0 +1,5 @@
+{
+    "base": [
+        "fastworkflow.examples.simple_workflow_template"
+    ]
+}

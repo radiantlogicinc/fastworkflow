@@ -7,6 +7,7 @@ from functools import lru_cache
 from pydantic import BaseModel, field_validator, model_validator, ConfigDict, Field, FieldValidationInfo
 
 from fastworkflow.utils import python_utils
+from fastworkflow.workflow_inheritance_model import WorkflowInheritanceModel
 
 
 class CommandMetadata(BaseModel):
@@ -170,28 +171,70 @@ class CommandDirectory(BaseModel):
     @classmethod
     def load(cls, workflow_folderpath: str) -> "CommandDirectory":
         """
-        Loads the command directory by recursively scanning the _commands folder 
-        in the workflow path. Commands in context subdirectories are registered with 
-        qualified names in the format 'ContextName/command_name'.
+        Loads the command directory by scanning _commands folders from base workflows 
+        and the current workflow, implementing workflow inheritance.
+        
+        Search order (last occurrence wins):
+        1. Each path in workflow_inheritance_model.json["base"] (in order) -> their _commands folders
+        2. <workflow_root>/_commands (current workflow - highest precedence)
+        3. Built-in core workflow fastworkflow/_workflows/command_metadata_extraction
+        
+        Commands in context subdirectories are registered with qualified names 
+        in the format 'ContextName/command_name'.
         """
         command_directory = cls(workflow_folderpath=workflow_folderpath)
-        commands_root_folder = Path(workflow_folderpath) / "_commands"
+        
+        # Step 1: Load workflow inheritance model
+        try:
+            inheritance_model = WorkflowInheritanceModel.load(workflow_folderpath)
+            base_paths = inheritance_model.resolve_base_paths(workflow_folderpath)
+        except Exception as e:
+            raise RuntimeError(f"Error processing workflow inheritance: {e}") from e
+        
+        # Step 2: Process base workflows first (in order of precedence)
+        for base_path in base_paths:
+            cls._load_commands_from_path(command_directory, base_path)
+        
+        # Step 3: Process current workflow commands (highest precedence for user commands)
+        cls._load_commands_from_path(command_directory, workflow_folderpath)
+        
+        # Step 4: Populate utterance metadata when available
+        for command_key in command_directory.map_command_2_metadata:
+            if utterance_metadata := command_directory.get_utterance_metadata(command_key):
+                command_directory.register_utterance_metadata(command_key, utterance_metadata)
 
+        # Step 5: Register core commands (processed last, lowest precedence)
+        cls._register_core_commands(command_directory)
+        
+        return command_directory
+    
+    @classmethod
+    def _load_commands_from_path(cls, command_directory: "CommandDirectory", path: str):
+        """
+        Load commands from a specific workflow path.
+        
+        This method handles loading commands from both base workflows and the current workflow.
+        Commands are registered with the command directory, with later calls overriding earlier ones
+        for the same command name (implementing precedence).
+        
+        Args:
+            command_directory: The CommandDirectory instance to register commands to
+            path: Path to the workflow folder containing _commands/
+        """
+        commands_root_folder = Path(path) / "_commands"
+        
         if not commands_root_folder.is_dir():
-            if not workflow_folderpath.endswith('fastworkflow'):
-                raise RuntimeError(f"Internal error: workflow_folderpath '{workflow_folderpath}' does not contain '_commands'")
-            return command_directory
-
+            # Skip silently if no _commands directory exists
+            # This allows for base workflows that may not have commands
+            return
+            
         # Process files directly under _commands/ (global commands)
         for item_path in commands_root_folder.glob("*.py"):
             if item_path.is_file() and not item_path.name.startswith("_") and item_path.name != "__init__.py":
                 command_name = item_path.stem
-                cls._register_command(command_directory, command_name, item_path, workflow_folderpath)
+                cls._register_command(command_directory, command_name, item_path, path)
         
         # Process subdirectories (contexts) and their commands
-        # Track which context directories contain command files
-        context_dirs_with_commands = set()
-        
         for context_dir in commands_root_folder.iterdir():
             if context_dir.is_dir() and not context_dir.name.startswith("_"):
                 context_name = context_dir.name
@@ -205,27 +248,19 @@ class CommandDirectory(BaseModel):
                         command_name = command_file.stem
                         # Use qualified name format: "ContextName/command_name"
                         qualified_command_name = f"{context_name}/{command_name}"
-                        cls._register_command(command_directory, qualified_command_name, command_file, workflow_folderpath)
+                        cls._register_command(command_directory, qualified_command_name, command_file, path)
                 
-                if not has_commands:
-                    # This is an empty context folder - flag as error
+                # For the current workflow (not base workflows), enforce the no-empty-contexts rule
+                if not has_commands and path == command_directory.workflow_folderpath:
+                    # This is an empty context folder in the main workflow - flag as error
                     raise ValueError(
                         f"Context folder '{context_name}' exists but contains no command files. "
-                        f"Empty context folders are not allowed."
+                        f"Empty context folders are not allowed in the main workflow."
                     )
                 
-                context_dirs_with_commands.add(context_name)
-                
                 # After processing commands, attempt to register context class implementation if present
-                cls._register_context_class(command_directory, context_name, context_dir, workflow_folderpath)
-
-        # Populate utterance metadata when available
-        for command_key in command_directory.map_command_2_metadata:
-            if utterance_metadata := command_directory.get_utterance_metadata(command_key):
-                command_directory.register_utterance_metadata(command_key, utterance_metadata)
-
-        cls._register_core_commands(command_directory)
-        return command_directory
+                if has_commands:  # Only register context classes if there are actual commands
+                    cls._register_context_class(command_directory, context_name, context_dir, path)
     
     @classmethod
     def _register_command(cls, command_directory: "CommandDirectory", command_name: str, 
