@@ -4,7 +4,7 @@ from fastworkflow.build.dir_scanner import find_python_files, EXCLUDE_DIRS
 from fastworkflow.utils.python_utils import get_module_import_path
 
 # Define the root directory for examples
-EXAMPLES_ROOT = './fastworkflow/examples/todo_list/application'
+EXAMPLES_ROOT = './tests/todo_list_workflow/application'
 
 
 def test_find_python_files_basic():

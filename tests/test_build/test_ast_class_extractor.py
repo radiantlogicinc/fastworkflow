@@ -3,7 +3,7 @@ import pytest
 from fastworkflow.build.ast_class_extractor import analyze_python_file
 from fastworkflow.build.class_analysis_structures import ClassInfo, MethodInfo
 
-EXAMPLES_ROOT = './fastworkflow/examples/todo_list/application'
+EXAMPLES_ROOT = './tests/todo_list_workflow/application'
 
 
 def test_analyze_python_file_todo_list():

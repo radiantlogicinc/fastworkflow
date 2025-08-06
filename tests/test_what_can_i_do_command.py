@@ -14,8 +14,8 @@ class Ctx:
 
 
 def get_example_workflow_path():
-    """Get the path to the examples/todo_list workflow."""
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "fastworkflow", "examples", "todo_list"))
+    """Get the path to the tests/todo_list workflow."""
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tests", "todo_list_workflow"))
 
 
 def test_what_can_i_do_global(monkeypatch):
@@ -23,7 +23,7 @@ def test_what_can_i_do_global(monkeypatch):
     
     # Use the real todo_list workflow directory
     workflow_dir = get_example_workflow_path()
-    assert os.path.isdir(workflow_dir), "examples/todo_list directory should exist"
+    assert os.path.isdir(workflow_dir), "tests/todo_list_workflow directory should exist"
     
     # Create a app workflow
     app_workflow = fastworkflow.Workflow.create(
@@ -60,7 +60,7 @@ def test_what_can_i_do_context(monkeypatch):
     
     # Use the real todo_list workflow directory
     workflow_dir = get_example_workflow_path()
-    assert os.path.isdir(workflow_dir), "examples/todo_list directory should exist"
+    assert os.path.isdir(workflow_dir), "tests/todo_list_workflow directory should exist"
     
     # Create a app workflow
     app_workflow = fastworkflow.Workflow.create(
@@ -69,7 +69,7 @@ def test_what_can_i_do_context(monkeypatch):
     )
     
     # Use TodoListManager as context
-    from fastworkflow.examples.todo_list.application.todo_manager import TodoListManager
+    from tests.todo_list_workflow.application.todo_manager import TodoListManager
     app_workflow.current_command_context = TodoListManager()
     
     # Create a command metadata extraction workflow

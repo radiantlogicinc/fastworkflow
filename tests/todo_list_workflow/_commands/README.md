@@ -1,6 +1,6 @@
 # FastWorkflow Commands
 
-This directory contains FastWorkflow command files generated from the Python application in `./examples/todo_list/application`.
+This directory contains FastWorkflow command files generated from the Python application in `./tests/todo_list_workflow/application`.
 
 ## Overview
 

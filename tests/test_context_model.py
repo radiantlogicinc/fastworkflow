@@ -49,9 +49,9 @@ def test_star_context_commands(sample_workflow_path):
 
 
 @pytest.fixture
-def todo_list_workflow_path(sample_workflow_path: Path) -> Path:
+def todo_list_workflow_path() -> Path:
     """Returns the path to the todo_list example workflow."""
-    return sample_workflow_path.parent / "todo_list"
+    return Path(__file__).parent.parent / "fastworkflow" / "tests" / "todo_list_workflow"
 
 
 def test_load_and_validate_ok(todo_list_workflow_path: Path):

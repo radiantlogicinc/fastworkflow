@@ -2,13 +2,13 @@ import os
 import pytest
 import fastworkflow
 from fastworkflow._workflows.command_metadata_extraction._commands.IntentDetection.what_is_current_context import ResponseGenerator
-from fastworkflow.examples.todo_list.application.todo_manager import TodoListManager
-from fastworkflow.examples.todo_list.application.todo_list import TodoList
+from tests.todo_list_workflow.application.todo_manager import TodoListManager
+from tests.todo_list_workflow.application.todo_list import TodoList
 
 
 def get_example_workflow_path():
-    """Get the path to the examples/todo_list workflow."""
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "fastworkflow", "examples", "todo_list"))
+    """Get the path to the tests/todo_list workflow."""
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tests", "todo_list_workflow"))
 
 
 def test_global_context():
@@ -17,7 +17,7 @@ def test_global_context():
     
     # Use the real todo_list workflow directory
     workflow_dir = get_example_workflow_path()
-    assert os.path.isdir(workflow_dir), "examples/todo_list directory should exist"
+    assert os.path.isdir(workflow_dir), "tests/todo_list_workflow directory should exist"
     
     # Create a app workflow
     app_workflow = fastworkflow.Workflow.create(
@@ -48,9 +48,9 @@ def test_context_no_properties():
     """Test the response when in a context without get_properties method."""
     fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
     
-    # Use the real todo_list workflow directory
+    # Use the real todo_list_workflow directory
     workflow_dir = get_example_workflow_path()
-    assert os.path.isdir(workflow_dir), "examples/todo_list directory should exist"
+    assert os.path.isdir(workflow_dir), "tests/todo_list_workflow directory should exist"
     
     # Create a app workflow
     app_workflow = fastworkflow.Workflow.create(
@@ -83,9 +83,9 @@ def test_context_with_properties():
     """Test the response when in a context with properties."""
     fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
     
-    # Use the real todo_list workflow directory
+    # Use the real todo_list_workflow directory
     workflow_dir = get_example_workflow_path()
-    assert os.path.isdir(workflow_dir), "examples/todo_list directory should exist"
+    assert os.path.isdir(workflow_dir), "tests/todo_list_workflow directory should exist"
     
     # Create a app workflow
     app_workflow = fastworkflow.Workflow.create(
