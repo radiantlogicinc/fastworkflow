@@ -127,22 +127,6 @@
             ]
         },
         {
-            "name": "build_todo_list",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "fastworkflow.build",
-            "justMyCode": false,
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}/",
-                "LOG_LEVEL": "DEBUG"
-            },
-            "args": [
-                "--app-dir", "./fastworkflow/examples/todo_list/application",
-                "--workflow-folderpath", "./fastworkflow/examples/todo_list/_commands",
-                "--overwrite"
-            ]
-        },
-        {
             "name": "Python Debugger: Current File with Arguments",
             "type": "debugpy",
             "request": "launch",

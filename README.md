@@ -192,12 +192,6 @@ You will be greeted with a `User >` prompt. Try it out by asking "what can you d
 
 To see other available examples, run `fastworkflow examples list`.
 
-> [!tip]
-> **Run the todo_list workflow with a startup action defined in a JSON file:**  
->```sh
->fastworkflow run ./examples/todo_list ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env --startup_action ./examples/todo_list/startup_action.json
->```
-
 ---
 
 ## CLI Command Reference
