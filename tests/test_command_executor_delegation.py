@@ -67,7 +67,11 @@ def test_invalid_action_parameters(monkeypatch, tmp_path):
     # Create a mock ResponseGenerator class
     class MockResponseGenerator:
         def __call__(self, *args, **kwargs):
-            return "mock response"
+            return fastworkflow.CommandOutput(
+                command_responses=[
+                    fastworkflow.CommandResponse(response="mock response", success=True)
+                ]
+            )
     
     # Create a mock RoutingDefinition
     mock_routing_def = MagicMock()

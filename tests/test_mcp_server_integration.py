@@ -6,6 +6,7 @@ without mocks, providing end-to-end testing of the MCP compliance features.
 """
 
 import pytest
+from contextlib import suppress
 import json
 import os
 from typing import Dict, Any
@@ -32,13 +33,24 @@ def initialized_fastworkflow():
 
 
 @pytest.fixture
-def chat_session(sample_workflow_path, initialized_fastworkflow):
+def chat_session(sample_workflow_path, initialized_fastworkflow, request):
     """Create a chat session for the sample workflow."""
     # Build command routing definition once so that command metadata is ready
     RoutingDefinition.build(sample_workflow_path)
-    return fastworkflow.ChatSession(
-        sample_workflow_path, workflow_id_str=str(uuid.uuid4())
+    chat_session = fastworkflow.ChatSession()
+    chat_session.start_workflow(
+        sample_workflow_path,
+        workflow_id_str=str(uuid.uuid4()),
+        keep_alive=True,
     )
+
+    def _teardown():
+        chat_session._keep_alive = False
+        with suppress(Exception):
+            chat_session.stop_workflow()
+
+    request.addfinalizer(_teardown)
+    return chat_session
 
 
 @pytest.fixture

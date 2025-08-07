@@ -86,15 +86,15 @@ def test_scan_and_lookup(add_temp_workflow_path, tmp_path):
 
         # Command directory checks - need to account for core commands
         assert "a" in router.command_directory_map["*"]
-        assert "x" in router.command_directory_map["ctx1"]
-        assert "y" in router.command_directory_map["ctx1"]
-        assert "dummy" in router.command_directory_map["ctx2"]
+        assert "ctx1/x" in router.command_directory_map["ctx1"]
+        assert "ctx1/y" in router.command_directory_map["ctx1"]
+        assert "ctx2/dummy" in router.command_directory_map["ctx2"]
 
         # Routing definition checks
         assert "*" in router.routing_definition_map["a"]
-        assert "ctx1" in router.routing_definition_map["x"]
-        assert "ctx1" in router.routing_definition_map["y"]
-        assert "ctx2" in router.routing_definition_map["dummy"]
+        assert "ctx1" in router.routing_definition_map["ctx1/x"]
+        assert "ctx1" in router.routing_definition_map["ctx1/y"]
+        assert "ctx2" in router.routing_definition_map["ctx2/dummy"]
         
         # Check nonexistent command - use get() to avoid KeyError
         assert router.routing_definition_map.get("unknown", set()) == set()

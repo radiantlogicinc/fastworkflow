@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from contextlib import suppress
 from dotenv import dotenv_values
 import pytest
 
@@ -17,7 +18,7 @@ def retail_workflow_path() -> str:
 
 
 @pytest.fixture(scope="function")
-def chat_session(retail_workflow_path: str):
+def chat_session(retail_workflow_path: str, request):
     """Spin up an in-memory chat session for each test so state cannot leak."""
     env_vars = {
         **dotenv_values("./env/.env"),
@@ -28,10 +29,21 @@ def chat_session(retail_workflow_path: str):
     fastworkflow.RoutingRegistry.clear_registry()
     fastworkflow.RoutingRegistry.get_definition(retail_workflow_path)
 
-    return ChatSession(
+    chat_session = ChatSession()
+    chat_session.start_workflow(
         retail_workflow_path,
-        workflow_id_str=str(uuid.uuid4())
+        workflow_id_str=str(uuid.uuid4()),
+        keep_alive=True,
     )
+
+    def _teardown():
+        # Nudge exit by marking not keep_alive and stopping
+        chat_session._keep_alive = False
+        with suppress(Exception):
+            chat_session.stop_workflow()
+
+    request.addfinalizer(_teardown)
+    return chat_session
 
 
 class TestCommandExecutor:
@@ -45,7 +57,8 @@ class TestCommandExecutor:
             parameters={},
         )
 
-        result = CommandExecutor.perform_action(chat_session.app_workflow, action)
+        active_workflow = chat_session.get_active_workflow()
+        result = CommandExecutor.perform_action(active_workflow, action)
 
         assert isinstance(result, fastworkflow.CommandOutput)
         assert result.success is True
@@ -59,7 +72,8 @@ class TestCommandExecutor:
             parameters={"email": "john.doe@example.com"},
         )
 
-        result = CommandExecutor.perform_action(chat_session.app_workflow, action)
+        active_workflow = chat_session.get_active_workflow()
+        result = CommandExecutor.perform_action(active_workflow, action)
 
         assert isinstance(result, fastworkflow.CommandOutput)
         # Response text should contain a user id (pattern xyz_xyz_\d+)
