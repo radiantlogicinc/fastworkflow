@@ -60,7 +60,6 @@ Build and train this workflow like any other:
 
 ```bash
 cd fastworkflow/examples/extended_workflow_example
-fastworkflow build
 fastworkflow train
 fastworkflow run
 ```
