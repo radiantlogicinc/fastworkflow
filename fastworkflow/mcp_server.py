@@ -9,7 +9,7 @@ from typing import Dict, Any, List
 import fastworkflow
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.command_directory import CommandDirectory
-from fastworkflow.command_routing import RoutingDefinition, ModuleType
+from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry, ModuleType
 from uuid import uuid4
 
 
@@ -42,7 +42,8 @@ class FastWorkflowMCPServer:
         # Get available commands from workflow
         workflow = fastworkflow.ChatSession.get_active_workflow()
         workflow_folderpath = workflow.folderpath
-        routing = RoutingDefinition.build(workflow_folderpath)
+        # Use cached routing definition instead of rebuilding every time
+        routing = RoutingRegistry.get_definition(workflow_folderpath)
 
         # Get active context name from chat session
         active_ctx_name = workflow.current_command_context_name
@@ -212,12 +213,19 @@ def create_mcp_server_for_workflow(workflow_path: str) -> FastWorkflowMCPServer:
     # Initialize FastWorkflow (would need actual env vars in practice)
     fastworkflow.init({})
     
-    # Recreate routing definition to guarantee it reflects the latest object model
-    RoutingDefinition.build(workflow_path)
+    # Ensure routing definition exists (build once if missing)
+    try:
+        RoutingRegistry.get_definition(workflow_path)
+    except Exception:
+        RoutingDefinition.build(workflow_path)
     
-    # Create workflow chat session
-    fastworkflow.chat_session = fastworkflow.ChatSession(
+    # Create workflow chat session and start the workflow so an active workflow exists
+    chat_session = fastworkflow.ChatSession()
+    # Start in keep-alive mode so creation does not block on the workflow loop
+    chat_session.start_workflow(
         workflow_path,
+        workflow_id_str=str(uuid4()),
+        keep_alive=True,
     )
     
-    return FastWorkflowMCPServer(fastworkflow.chat_session) 
+    return FastWorkflowMCPServer(chat_session)
