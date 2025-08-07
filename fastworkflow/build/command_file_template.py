@@ -25,11 +25,11 @@ def create_function_command_file(function_info: FunctionInfo, output_dir: str, f
     if file_name is None:
         file_name = f"{function_info.name}.py"
     file_path = os.path.join(output_dir, file_name)
-    
+
     # Check if file exists and overwrite is False
     if not overwrite and os.path.exists(file_path):
         return file_path
-    
+
     # Initialize generation variables
     input_fields = ""
     output_fields = ""
@@ -38,7 +38,7 @@ def create_function_command_file(function_info: FunctionInfo, output_dir: str, f
     process_logic_str = ""
     docstring = function_info.docstring or f"Execute {function_info.name} function"
     has_input = True  # Default to having input
-    
+
     # Process parameters for input model
     if function_info.parameters:
         input_field_lines = []
@@ -50,7 +50,7 @@ def create_function_command_file(function_info: FunctionInfo, output_dir: str, f
     else:
         input_fields = "        pass"
         has_input = False  # No input needed for functions without parameters
-    
+
     # Process return type for output model
     return_type = function_info.return_annotation or 'Any'
     if return_type.lower() == 'none' or not return_type:
@@ -61,28 +61,28 @@ def create_function_command_file(function_info: FunctionInfo, output_dir: str, f
         output_fields = f'        result: {return_type} = Field(description="Result of the function call")'
         output_return = "result=result_val"
         response_format = "result={output.result}"
-    
+
     # Generate process logic
     param_names = [p['name'] for p in function_info.parameters] if function_info.parameters else []
     call_params = ', '.join([f"{p_name}=input.{p_name}" for p_name in param_names])
-    
+
     if return_type.lower() == 'none' or not return_type:
-        if param_names:
-            process_logic_str = f"        # Call the function\n        from ..{os.path.basename(source_dir)}.{os.path.basename(function_info.module_path).replace('.py', '')} import {function_info.name}\n        {function_info.name}({call_params})"
-        else:
-            process_logic_str = f"        # Call the function\n        from ..{os.path.basename(source_dir)}.{os.path.basename(function_info.module_path).replace('.py', '')} import {function_info.name}\n        {function_info.name}()"
+        process_logic_str = (
+            f"        # Call the function\n        from ..{os.path.basename(source_dir)}.{os.path.basename(function_info.module_path).replace('.py', '')} import {function_info.name}\n        {function_info.name}({call_params})"
+            if param_names
+            else f"        # Call the function\n        from ..{os.path.basename(source_dir)}.{os.path.basename(function_info.module_path).replace('.py', '')} import {function_info.name}\n        {function_info.name}()"
+        )
+    elif param_names:
+        process_logic_str = f"        # Call the function\n        from ..{os.path.basename(source_dir)}.{os.path.basename(function_info.module_path).replace('.py', '')} import {function_info.name}\n        result_val = {function_info.name}({call_params})"
     else:
-        if param_names:
-            process_logic_str = f"        # Call the function\n        from ..{os.path.basename(source_dir)}.{os.path.basename(function_info.module_path).replace('.py', '')} import {function_info.name}\n        result_val = {function_info.name}({call_params})"
-        else:
-            process_logic_str = f"        # Call the function\n        from ..{os.path.basename(source_dir)}.{os.path.basename(function_info.module_path).replace('.py', '')} import {function_info.name}\n        result_val = {function_info.name}()"
-    
+        process_logic_str = f"        # Call the function\n        from ..{os.path.basename(source_dir)}.{os.path.basename(function_info.module_path).replace('.py', '')} import {function_info.name}\n        result_val = {function_info.name}()"
+
     # Generate utterances
     plain_utterances = ",\n".join([f'        "{u}"' for u in generate_utterances(None, function_info.name, function_info.parameters, is_function=True)])
-    
+
     # Build the command file content
     command_file_content = "\n" + get_import_block() + "\n\n" + "class Signature:\n"
-    
+
     # Add Input class if needed
     if has_input:
         command_file_content += f"    class Input(BaseModel):\n{input_fields}\n\n"
@@ -95,33 +95,33 @@ def create_function_command_file(function_info: FunctionInfo, output_dir: str, f
         input_param = ""
         call_param = ""
         call_arg = ""
-    
+
     # Add Output class
     command_file_content += f"    class Output(BaseModel):\n{output_fields}\n\n"
-    
+
     # Add utterances
     command_file_content += f"    plain_utterances = [\n{plain_utterances}\n    ]\n\n"
     command_file_content += f"    template_utterances = []\n\n"
-    
+
     # Add generate_utterances method
     command_file_content += """    @staticmethod
     def generate_utterances(workflow: Workflow, command_name: str) -> list[str]:
         return [
             command_name.split('/')[-1].lower().replace('_', ' ')
         ] + generate_diverse_utterances(Signature.plain_utterances, command_name)\n\n"""
-    
+
     # Add validate_extracted_parameters method
-    command_file_content +=  "    @staticmethod"
+    command_file_content +=  "    @staticmethod\n"
     command_file_content += f"    def validate_extracted_parameters(workflow: fastworkflow.Workflow, command: str, cmd_parameters: {input_param_type}) -> tuple[bool, str]:\n"
     command_file_content += "        return (True, '')\n\n"
-    
+
     # Add ResponseGenerator class
     command_file_content += "class ResponseGenerator:\n"
     command_file_content += f"    def _process_command(self, workflow: Workflow{input_param}) -> Signature.Output:\n"
     command_file_content += f"        \"\"\"{docstring}\"\"\"\n"
     command_file_content += f"{process_logic_str}\n"
     command_file_content += f"        return Signature.Output({output_return})\n\n"
-    
+
     # Add __call__ method
     command_file_content += f"    def __call__(self, workflow: Workflow, command: str{call_param}) -> CommandOutput:\n"
     command_file_content += f"        output = self._process_command(workflow{call_arg})\n"
@@ -132,11 +132,11 @@ def create_function_command_file(function_info: FunctionInfo, output_dir: str, f
             ]
         )
 """
-    
+
     # Write the command file
     with open(file_path, 'w') as f:
         f.write(command_file_content)
-    
+
     return file_path
 
 def create_command_file(class_info, method_info, output_dir, file_name=None, is_property_getter=False, is_property_setter=False, is_get_all_properties=False, all_properties_for_template: Optional[List[PropertyInfo]] = None, is_set_all_properties: bool = False, settable_properties_for_template: Optional[List[PropertyInfo]] = None, source_dir=None, overwrite=False, class_name_to_module_map: Optional[Dict[str, str]] = None, is_global_function: bool = False):
