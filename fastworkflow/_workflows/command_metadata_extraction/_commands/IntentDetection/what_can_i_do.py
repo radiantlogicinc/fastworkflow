@@ -89,10 +89,14 @@ class ResponseGenerator:
     ) -> fastworkflow.CommandOutput:
         output = self._process_command(workflow)
 
-        response = "\n".join(output.valid_command_names)
+        # Include the current context display name in the header so callers see
+        # which context is active (e.g., "TodoListManager" or "global/*").
+        app_workflow = workflow.context["app_workflow"]
+        context_name_for_display = app_workflow.current_command_context_displayname
+        response_body = "\n".join(output.valid_command_names)
         response = (
-            f"Commands available in the current context:\n"
-            f"{response}\n"
+            f"Commands available in the current context: {context_name_for_display}\n"
+            f"{response_body}\n"
         )
 
         return fastworkflow.CommandOutput(
