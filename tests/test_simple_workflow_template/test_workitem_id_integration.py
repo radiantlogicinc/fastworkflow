@@ -4,7 +4,7 @@ This module contains pytest tests for integrating the new ID functionality with 
 """
 
 import pytest
-from fastworkflow._workflows.simple_workflow_template.application.workitem import WorkItem
+from fastworkflow.examples.simple_workflow_template.application.workitem import WorkItem
 
 
 class TestWorkItemId:

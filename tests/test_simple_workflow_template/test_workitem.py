@@ -16,7 +16,7 @@ import json
 import tempfile
 import os
 from typing import Dict, Any
-from fastworkflow._workflows.simple_workflow_template.application.workitem import WorkItem
+from fastworkflow.examples.simple_workflow_template.application.workitem import WorkItem
 
 
 class TestChildSchema:
@@ -195,7 +195,7 @@ class TestWorkflowSchema:
                 "Project": {"Task": {"min_cardinality": 1, "max_cardinality": 5}},
                 "Task": None
             },
-            "context_hierarchy_model": {}
+            "parents_dict": {}
         }
         assert result == expected
 
@@ -339,7 +339,7 @@ class TestWorkflowSchema:
             "Epic": None,
             "InvalidType": {"parent": ["Epic"]}
         }
-        with pytest.raises(ValueError, match="Context hierarchy key 'InvalidType' not found in workflow_types"):
+        with pytest.raises(ValueError, match="Parents dict key 'InvalidType' not found in workflow_types"):
             WorkItem.WorkflowSchema(
                 workflow_types=types_dict, 
                 parents_dict=invalid_context_model
@@ -371,8 +371,8 @@ class TestWorkflowSchema:
         
         # Test to_dict
         schema_dict = schema.to_dict()
-        assert "context_hierarchy_model" in schema_dict
-        assert schema_dict["context_hierarchy_model"] == context_model
+        assert "parents_dict" in schema_dict
+        assert schema_dict["parents_dict"] == context_model
         
         # Test from_dict
         loaded_schema = WorkItem.WorkflowSchema.from_dict(schema_dict)

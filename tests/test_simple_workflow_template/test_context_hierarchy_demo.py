@@ -3,7 +3,7 @@
 import pytest
 import tempfile
 import os
-from fastworkflow._workflows.simple_workflow_template.application.workitem import WorkItem
+from fastworkflow.examples.simple_workflow_template.application.workitem import WorkItem
 
 
 def test_sample_workflow_schema_with_context_hierarchy():

@@ -9,7 +9,7 @@ This module contains pytest tests for the new ID functionality in the WorkItem c
 
 import pytest
 import json
-from fastworkflow._workflows.simple_workflow_template.application.workitem import WorkItem
+from fastworkflow.examples.simple_workflow_template.application.workitem import WorkItem
 
 
 class TestWorkItemIdBasics:
