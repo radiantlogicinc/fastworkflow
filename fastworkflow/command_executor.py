@@ -120,7 +120,12 @@ class CommandExecutor(CommandExecutorInterface):
             )
         )
         if not command_parameters_class:
-            command_output = response_generation_object(workflow, action.command)           
+            command_output = response_generation_object(workflow, action.command)
+            
+            # Validate that response_generation_object returns a CommandOutput, not a string
+            if not isinstance(command_output, CommandOutput):
+                raise TypeError(f"Response generation object for command '{action.command_name}' did not return a CommandOutput. This indicates an implementation error in the response generator.")
+                
             # Set the additional attributes
             command_output.workflow_name = workflow_name
             command_output.context = context
@@ -139,6 +144,10 @@ class CommandExecutor(CommandExecutorInterface):
             input_obj = command_parameters_class()
 
         command_output = response_generation_object(workflow, action.command, input_obj)
+        
+        # Validate that response_generation_object returns a CommandOutput, not a string
+        if not isinstance(command_output, CommandOutput):
+            raise TypeError(f"Response generation object for command '{action.command_name}' did not return a CommandOutput. This indicates an implementation error in the response generator.")
         
         # Set the additional attributes
         command_output.workflow_name = workflow_name
