@@ -218,6 +218,11 @@ class RoutingDefinition(BaseModel):
         in the format 'ContextName/command_name'. This method ensures these qualified names
         are properly handled when building the routing definition.
         """       
+        # Validate that the workflow directory exists and has a _commands folder
+        commands_dir = Path(workflow_folderpath) / "_commands"
+        if not commands_dir.is_dir():
+            raise RuntimeError(f"Workflow path '{workflow_folderpath}' does not contain '_commands' directory")
+            
         # Use cached command directory to avoid repeated filesystem scanning
         command_directory = get_cached_command_directory(workflow_folderpath)
         context_model = CommandContextModel.load(workflow_folderpath)
@@ -268,6 +273,9 @@ class RoutingDefinition(BaseModel):
                 # handles missing implementations.
                 with contextlib.suppress(Exception):
                     routing_definition.get_command_class(cmd_name, _mtype)
+
+        # Build the simple mappings for quick lookups
+        routing_definition._build_simple_mappings()
 
         # Only save if we were able to build successfully
         if resolved_contexts != {"*": []}:
