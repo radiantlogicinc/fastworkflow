@@ -120,19 +120,11 @@ class CommandExecutor(CommandExecutorInterface):
             )
         )
         if not command_parameters_class:
-            response = response_generation_object(workflow, action.command)
+            command_output = response_generation_object(workflow, action.command)
             
-            # If response is a string, wrap it in a CommandOutput
-            if isinstance(response, str):
-                from fastworkflow import CommandResponse
-                command_response = CommandResponse(
-                    response=response,
-                    success=True,
-                    artifacts={}
-                )
-                command_output = CommandOutput(command_responses=[command_response])
-            else:
-                command_output = response
+            # Validate that response_generation_object returns a CommandOutput, not a string
+            if isinstance(command_output, str):
+                raise TypeError(f"Response generation object for command '{action.command_name}' returned a string instead of CommandOutput. This indicates an implementation error in the response generator.")
                 
             # Set the additional attributes
             command_output.workflow_name = workflow_name
@@ -151,19 +143,11 @@ class CommandExecutor(CommandExecutorInterface):
         else:
             input_obj = command_parameters_class()
 
-        response = response_generation_object(workflow, action.command, input_obj)
+        command_output = response_generation_object(workflow, action.command, input_obj)
         
-        # If response is a string, wrap it in a CommandOutput
-        if isinstance(response, str):
-            from fastworkflow import CommandResponse
-            command_response = CommandResponse(
-                response=response,
-                success=True,
-                artifacts={}
-            )
-            command_output = CommandOutput(command_responses=[command_response])
-        else:
-            command_output = response
+        # Validate that response_generation_object returns a CommandOutput, not a string
+        if isinstance(command_output, str):
+            raise TypeError(f"Response generation object for command '{action.command_name}' returned a string instead of CommandOutput. This indicates an implementation error in the response generator.")
         
         # Set the additional attributes
         command_output.workflow_name = workflow_name
