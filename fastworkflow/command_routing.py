@@ -218,6 +218,11 @@ class RoutingDefinition(BaseModel):
         in the format 'ContextName/command_name'. This method ensures these qualified names
         are properly handled when building the routing definition.
         """       
+        # Validate that the workflow directory exists and has a _commands folder
+        commands_dir = Path(workflow_folderpath) / "_commands"
+        if not commands_dir.is_dir():
+            raise RuntimeError(f"Workflow path '{workflow_folderpath}' does not contain '_commands' directory")
+            
         # Use cached command directory to avoid repeated filesystem scanning
         command_directory = get_cached_command_directory(workflow_folderpath)
         context_model = CommandContextModel.load(workflow_folderpath)
@@ -269,6 +274,9 @@ class RoutingDefinition(BaseModel):
                 with contextlib.suppress(Exception):
                     routing_definition.get_command_class(cmd_name, _mtype)
 
+        # Build the simple mappings for quick lookups
+        routing_definition._build_simple_mappings()
+
         # Only save if we were able to build successfully
         if resolved_contexts != {"*": []}:
             routing_definition.save()
@@ -298,6 +306,22 @@ class RoutingDefinition(BaseModel):
             
         self._build_simple_mappings()
         return self
+
+    def _build_simple_mappings(self):
+        """Build the simple mappings from the contexts data."""
+        self.command_directory_map = {}
+        self.routing_definition_map = {}
+        
+        # Build command_directory_map: context -> set of commands
+        for context, commands in self.contexts.items():
+            self.command_directory_map[context] = set(commands)
+        
+        # Build routing_definition_map: command -> set of contexts
+        for context, commands in self.contexts.items():
+            for command in commands:
+                if command not in self.routing_definition_map:
+                    self.routing_definition_map[command] = set()
+                self.routing_definition_map[command].add(context)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
