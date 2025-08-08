@@ -19,6 +19,10 @@ class SessionStatus(Enum):
     STOPPING = "STOPPING"
     STOPPED = "STOPPED"
 
+class RunAsMode(str, Enum):
+    RUN_AS_ASSISTANT = "RUN_AS_ASSISTANT"
+    RUN_AS_AGENT = "RUN_AS_AGENT"
+
 class ChatWorker(Thread):
     def __init__(self, chat_session: "ChatSession"):
         super().__init__()
@@ -99,7 +103,7 @@ class ChatSession:
         
         logger.debug("Workflow stopped and workflow stack cleared")
 
-    def __init__(self):
+    def __init__(self, run_as: RunAsMode = RunAsMode.RUN_AS_ASSISTANT):
         """
         Initialize a chat session.
         
@@ -111,6 +115,8 @@ class ChatSession:
         self._command_output_queue = Queue()
         self._status = SessionStatus.STOPPED
         self._chat_worker = None
+        self._run_as = run_as
+        self._agent = None
         
         # Import here to avoid circular imports
         from fastworkflow.command_executor import CommandExecutor
@@ -184,7 +190,7 @@ class ChatSession:
             self.stop_workflow()
 
         # ------------------------------------------------------------
-        # Eager warm-up of CommandRouter / ModelPipeline (lazy import)
+        # Eager warm-up (kept unchanged)
         # ------------------------------------------------------------
         try:
             command_info_root = Path(workflow.folderpath) / "___command_info"
@@ -198,14 +204,10 @@ class ChatSession:
                 StartupProgress.add_total(len(subdirs) + 1)
 
                 for subdir in subdirs:
-                    # Instantiating CommandRouter triggers ModelPipeline
-                    # construction and caches it process-wide.
                     with contextlib.suppress(Exception):
                         CommandRouter(str(subdir))
                     StartupProgress.advance(f"Warm-up {subdir.name}")
 
-                # Also warm-up the global-context artefacts, which live in a
-                # pseudo-folder named '*' in some workflows.
                 with contextlib.suppress(Exception):
                     CommandRouter(str(command_info_root / '*'))
                 StartupProgress.advance("Warm-up global")
@@ -214,6 +216,14 @@ class ChatSession:
 
         # Update the command metadata extraction workflow's context with the app workflow
         self._cme_workflow.context["app_workflow"] = workflow
+
+        # Initialize agent in agent mode
+        if self._run_as == RunAsMode.RUN_AS_AGENT:
+            try:
+                from fastworkflow.agent_integration import initialize_main_agent
+                self._agent = initialize_main_agent(self)
+            except Exception as e:  # Agent init should not crash the session
+                logger.error(f"Agent initialization failed: {e}")
 
         # Start the workflow
         if self._status != SessionStatus.STOPPED:
