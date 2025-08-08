@@ -201,8 +201,3 @@ tasks/
 .taskmaster/state.json
 .taskmaster/reports/task-complexity-report.json
 
-docs/agentic_functionality_integration.md
-docs/build_postprocessing_using_dspy.md
-docs/probabilistic_response_generation.md
-docs/command_dependency_graph.md
-docs/implementing_tau_bench_retail.md
