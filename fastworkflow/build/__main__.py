@@ -344,6 +344,37 @@ def main():  # sourcery skip: extract-method
         traceback.print_exc()
         sys.exit(1)
 
+def _is_probabilistic_stub(file_path: str) -> bool:
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            src = f.read()
+        return "def _process_command(" in src and "pass" in src
+    except Exception:
+        return False
+
+
+def run_probabilistic_postprocessor(args):
+    """
+    Scan generated command files for stubbed _process_command methods and prepare
+    them for probabilistic response generation.
+
+    NOTE: This is a placeholder for integrating DSPy-based code generation per
+    docs/probabilistic_response_generation.md. The actual code generation is not
+    performed here to keep build deterministic without external LLMs.
+    """
+    commands_dir = os.path.join(args.workflow_folderpath, "_commands")
+    if not os.path.isdir(commands_dir):
+        return
+    for root, _, files in os.walk(commands_dir):
+        for fn in files:
+            if not fn.endswith(".py"):
+                continue
+            path = os.path.join(root, fn)
+            if _is_probabilistic_stub(path):
+                # A real implementation would: parse, generate DSPy program, insert code
+                # For now, only mark the file for later processing to avoid changing behavior
+                pass
+
 # Add this function to be imported by cli.py
 def build_main(args):
     """Entry point for the CLI build command."""
@@ -361,6 +392,8 @@ def build_main(args):
             commands_dir = os.path.join(args.workflow_folderpath, "_commands")
             print(f"Successfully generated FastWorkflow commands in {commands_dir}")
         run_documentation(args)
+        # Hook for future probabilistic post-processing (no-op by default)
+        run_probabilistic_postprocessor(args)
     except Exception as e:
         print(f"Error: {e}")
         import traceback
