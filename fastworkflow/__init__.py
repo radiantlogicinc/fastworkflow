@@ -115,12 +115,20 @@ ModelPipelineRegistry=None
 def init(env_vars: dict):
     global _env_vars, CommandContextModel, RoutingDefinition, RoutingRegistry, ModelPipelineRegistry
     _env_vars = env_vars
+    # Provide sensible default for SPEEDDICT_FOLDERNAME if not set
+    _env_vars.setdefault("SPEEDDICT_FOLDERNAME", "___workflow_contexts")
 
     # init before importing other modules so env vars are available
     from .command_context_model import CommandContextModel as CommandContextModelClass
     from .command_routing import RoutingDefinition as RoutingDefinitionClass
     from .command_routing import RoutingRegistry as RoutingRegistryClass
-    from .model_pipeline_training import ModelPipeline
+    # ModelPipeline relies on heavy optional deps (transformers, torch). Guard import.
+    try:
+        from .model_pipeline_training import ModelPipeline  # type: ignore
+    except Exception:
+        class ModelPipeline:  # type: ignore
+            def __init__(self, *args, **kwargs):
+                pass
 
     # Assign to global variables
     CommandContextModel = CommandContextModelClass
@@ -200,5 +208,11 @@ def get_internal_workflow_path(workflow_name: str) -> str:
 def get_workflow_id(workflow_id_str: str) -> int:
     return int(mmh3.hash(workflow_id_str))
 
-from .workflow import Workflow as Workflow
-from .chat_session import ChatSession as ChatSession
+def __getattr__(name: str):
+    if name == "Workflow":
+        from .workflow import Workflow as _Workflow
+        return _Workflow
+    if name == "ChatSession":
+        from .chat_session import ChatSession as _ChatSession
+        return _ChatSession
+    raise AttributeError(name)

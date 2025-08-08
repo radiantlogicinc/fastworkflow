@@ -345,7 +345,12 @@ class RoutingRegistry:
             if workflow_folderpath in cls._definitions:
                 return cls._definitions[workflow_folderpath]
 
-            definition = RoutingDefinition.load(workflow_folderpath)
+            # Attempt to load; if missing, build and save
+            try:
+                definition = RoutingDefinition.load(workflow_folderpath)
+            except Exception:
+                definition = RoutingDefinition.build(workflow_folderpath)
+                definition.save()
             cls._definitions[workflow_folderpath] = definition
             return definition
         

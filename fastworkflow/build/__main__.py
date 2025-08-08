@@ -338,6 +338,13 @@ def main():  # sourcery skip: extract-method
             commands_dir = os.path.join(args.workflow_folderpath, "_commands")
             print(f"Successfully generated FastWorkflow commands in {commands_dir}")
         run_documentation(args)
+        # Generate parameter dependency graph artifact
+        try:
+            from fastworkflow.utils.command_dependency_graph import generate_dependency_graph
+            graph_path = generate_dependency_graph(args.workflow_folderpath)
+            print(f"Generated parameter dependency graph at {graph_path}")
+        except Exception as ge:
+            print(f"Warning: failed to generate parameter dependency graph: {ge}")
     except Exception as e:
         print(f"Error: {e}")
         import traceback
@@ -361,6 +368,13 @@ def build_main(args):
             commands_dir = os.path.join(args.workflow_folderpath, "_commands")
             print(f"Successfully generated FastWorkflow commands in {commands_dir}")
         run_documentation(args)
+        # Generate parameter dependency graph artifact
+        try:
+            from fastworkflow.utils.command_dependency_graph import generate_dependency_graph
+            graph_path = generate_dependency_graph(args.workflow_folderpath)
+            print(f"Generated parameter dependency graph at {graph_path}")
+        except Exception as ge:
+            print(f"Warning: failed to generate parameter dependency graph: {ge}")
     except Exception as e:
         print(f"Error: {e}")
         import traceback
