@@ -13,8 +13,8 @@ from difflib import get_close_matches
 from fastworkflow import ModuleType
 import json
 from fastworkflow.utils.logging import logger
-from fastworkflow.model_pipeline_training import get_route_layer_filepath_model
 from fastworkflow.utils.fuzzy_match import find_best_matches
+# Avoid importing heavy training module at import time; import lazily inside functions
 
 MISSING_INFORMATION_ERRMSG = None
 INVALID_INFORMATION_ERRMSG = None
@@ -38,6 +38,8 @@ def get_trainset(subject_command_name,workflow_folderpath) -> List[Dict[str, Any
         
         try:
             trainset_file = f"{subject_command_name}_param_labeled.json"
+            # Lazy import to avoid heavy dependencies at module import time
+            from fastworkflow.model_pipeline_training import get_route_layer_filepath_model  # type: ignore
             trainset_path=get_route_layer_filepath_model(workflow_folderpath,trainset_file)
             
             if os.path.exists(trainset_path):

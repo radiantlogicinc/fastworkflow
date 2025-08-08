@@ -10,7 +10,6 @@ import uuid
 import fastworkflow
 from fastworkflow.utils.logging import logger
 from pathlib import Path
-from fastworkflow.model_pipeline_training import CommandRouter
 from fastworkflow.utils.startup_progress import StartupProgress
 
 
@@ -191,6 +190,9 @@ class ChatSession:
         # expensive (~1 s).  We do it here *once* for every model artifact
         # directory so that the first user message does not pay the cost.
         try:
+            # Lazy import to avoid heavy dependencies at module import time
+            with contextlib.suppress(Exception):
+                from fastworkflow.model_pipeline_training import CommandRouter  # type: ignore
             command_info_root = Path(workflow.folderpath) / "___command_info"
             if command_info_root.is_dir():
                 subdirs = [d for d in command_info_root.iterdir() if d.is_dir()]
@@ -203,13 +205,13 @@ class ChatSession:
                     # Instantiating CommandRouter triggers ModelPipeline
                     # construction and caches it process-wide.
                     with contextlib.suppress(Exception):
-                        CommandRouter(str(subdir))
+                        CommandRouter(str(subdir))  # type: ignore[name-defined]
                     StartupProgress.advance(f"Warm-up {subdir.name}")
 
                 # Also warm-up the global-context artefacts, which live in a
                 # pseudo-folder named '*' in some workflows.
                 with contextlib.suppress(Exception):
-                    CommandRouter(str(command_info_root / '*'))
+                    CommandRouter(str(command_info_root / '*'))  # type: ignore[name-defined]
                 StartupProgress.advance("Warm-up global")
         except Exception as warm_err:  # pragma: no cover – warm-up must never fail
             logger.debug(f"Model warm-up skipped due to error: {warm_err}")

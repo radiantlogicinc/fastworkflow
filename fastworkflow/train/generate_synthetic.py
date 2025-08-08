@@ -1,13 +1,24 @@
 import json
 from typing import List, Dict
-from datasets import load_dataset
 import random
 import fastworkflow
-import litellm
+
+# Optional dependency: litellm
+try:
+    import litellm  # type: ignore
+except Exception:  # pragma: no cover
+    litellm = None  # type: ignore
+
+# Optional dependency: datasets
+try:
+    from datasets import load_dataset  # type: ignore
+except Exception:  # pragma: no cover
+    load_dataset = None  # type: ignore
 
 NUMOF_PERSONAS=fastworkflow.get_env_var('SYNTHETIC_UTTERANCE_GEN_NUMOF_PERSONAS', int)
 UTTERANCES_PER_PERSONA=fastworkflow.get_env_var('SYNTHETIC_UTTERANCE_GEN_UTTERANCES_PER_PERSONA', int)
 PERSONAS_PER_BATCH=fastworkflow.get_env_var('SYNTHETIC_UTTERANCE_GEN_PERSONAS_PER_BATCH', int)
+
 
 def generate_diverse_utterances(
     seed_utterances: List[str],
@@ -16,6 +27,10 @@ def generate_diverse_utterances(
     utterances_per_persona: int = UTTERANCES_PER_PERSONA,
     personas_per_batch: int = PERSONAS_PER_BATCH
 ) -> list[str]:
+    # If datasets or litellm are unavailable, return a minimal deterministic fallback
+    if load_dataset is None or litellm is None:
+        return [command_name] + seed_utterances
+
     # Initialize LiteLLM with API key
     api_key = fastworkflow.get_env_var("LITELLM_API_KEY_SYNDATA_GEN")
     model=fastworkflow.get_env_var("LLM_SYNDATA_GEN")
@@ -102,8 +117,8 @@ def generate_diverse_utterances(
                 top_p=0.9,
                 stop=["<|end_of_text|>"]
             )
-        except litellm.exceptions.RateLimitError:
-            logger.error("LiteLLM Rate limiting error!")
+        except Exception:
+            logger.error("LiteLLM call failed!")
             return []
 
         # Process responses

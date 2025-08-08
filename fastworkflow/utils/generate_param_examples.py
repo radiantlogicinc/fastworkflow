@@ -4,17 +4,55 @@ import re
 import json
 from typing import List, Optional, Union, Annotated, Dict, Any
 from pydantic import Field
-import Levenshtein  # Make sure to install this package
-import litellm  # Import litellm instead of together
+
+# Optional dependencies
+try:
+    import Levenshtein  # type: ignore
+except Exception:  # pragma: no cover
+    Levenshtein = None  # type: ignore
+
+try:
+    import litellm  # type: ignore
+except Exception:  # pragma: no cover
+    litellm = None  # type: ignore
+
 import fastworkflow
+
+
+def _levenshtein_distance_py(a: str, b: str) -> int:
+    # Simple DP implementation as a fallback
+    n, m = len(a), len(b)
+    if n == 0:
+        return m
+    if m == 0:
+        return n
+    dp = list(range(m + 1))
+    for i in range(1, n + 1):
+        prev = dp[0]
+        dp[0] = i
+        for j in range(1, m + 1):
+            cur = dp[j]
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            dp[j] = min(
+                dp[j] + 1,      # deletion
+                dp[j - 1] + 1,  # insertion
+                prev + cost     # substitution
+            )
+            prev = cur
+    return dp[m]
+
 
 def normalize_text(text):
     """Normalize text by removing spaces, @ symbol, underscores, and converting to lowercase"""
     return "" if text is None else re.sub(r'[@\s_]', '', str(text).lower())
 
+
 def normalized_levenshtein_distance(s1, s2):
     """Calculate normalized Levenshtein distance"""
-    distance = Levenshtein.distance(s1, s2)
+    if Levenshtein is not None:
+        distance = Levenshtein.distance(s1, s2)
+    else:
+        distance = _levenshtein_distance_py(s1, s2)
     max_length = max(len(s1), len(s2))
     return 0.0 if max_length == 0 else distance / max_length
 
