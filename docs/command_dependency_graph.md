@@ -13,7 +13,7 @@ The primary use case is handling validation errors for missing input parameters 
 - Error: "Missing value for Y.input_param".
 - Query: Get list of X's whose outputs match Y.input_param.
 
-Graph generation occurs automatically during every build phase (via `fastworkflow build`), producing a JSON artifact (e.g., `___command_info/parameter_dependency_graph.json`).
+Graph generation occurs automatically during every train phase (via `fastworkflow train`), producing a JSON artifact (e.g., `___command_info/parameter_dependency_graph.json`).
 
 ### 1.2 Scope
 - **In Scope**: Matching based on parameter metadata within a single workflow's commands. Supports both exact and semantic matching with configurable thresholds. Includes a runtime function to query suggestions for missing parameters.
