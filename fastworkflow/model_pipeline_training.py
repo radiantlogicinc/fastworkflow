@@ -1,101 +1,27 @@
 import os
 from typing import Optional, ClassVar
-# Guard heavy ML dependencies for test environments
-try:
-    from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification  # type: ignore
-except Exception:  # pragma: no cover
-    AutoTokenizer = AutoModel = AutoModelForSequenceClassification = object  # type: ignore
-try:
-    from torch.optim import AdamW  # type: ignore
-except Exception:  # pragma: no cover
-    class AdamW:  # type: ignore
-        def __init__(self, *args, **kwargs):
-            pass
-try:
-    from sklearn.decomposition import PCA  # type: ignore
-    from sklearn.metrics import f1_score  # type: ignore
-except Exception:  # pragma: no cover
-    PCA = f1_score = object  # type: ignore
-try:
-    import torch  # type: ignore
-except Exception:  # pragma: no cover
-    class torch:  # type: ignore
-        @staticmethod
-        def device(x):
-            return 'cpu'
-        class cuda:  # type: ignore
-            @staticmethod
-            def is_available():
-                return False
-        class utils:
-            class data:
-                class DataLoader:
-                    def __init__(self, *args, **kwargs):
-                        pass
-                class Dataset:
-                    pass
-        class optim:
-            AdamW = AdamW
-        class no_grad:  # type: ignore
-            def __call__(self, *args, **kwargs):
-                return self
-            def __enter__(self):
-                return self
-            def __exit__(self, exc_type, exc, tb):
-                return False
-        @staticmethod
-        def tensor(x):
-            return x
-try:
-    # from torch.utils.data import DataLoader, Dataset
-    from torch.utils.data import DataLoader, Dataset  # type: ignore
-except Exception:  # pragma: no cover
-    DataLoader = torch.utils.data.DataLoader  # type: ignore
-    Dataset = torch.utils.data.Dataset  # type: ignore
-try:
-    from tqdm import tqdm  # type: ignore
-except Exception:  # pragma: no cover
-    def tqdm(x, *args, **kwargs):
-        return x
-try:
-    import numpy as np  # type: ignore
-except Exception:  # pragma: no cover
-    class np:  # type: ignore
-        @staticmethod
-        def array(x):
-            return x
-        @staticmethod
-        def zeros(shape):
-            return [[0]* (shape[1] if len(shape)>1 else 0) for _ in range(shape[0] if shape else 0)]
+from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification
+from torch.optim import AdamW
+from sklearn.decomposition import PCA
+from sklearn.metrics import f1_score
+import torch 
+# from torch.optim import AdamW
+from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
+import numpy as np
 import json
 import os
-try:
-    from torch.utils.data import random_split  # type: ignore
-except Exception:  # pragma: no cover
-    def random_split(*args, **kwargs):
-        return []
+from torch.utils.data import random_split
 import fastworkflow
-try:
-    from sklearn.model_selection import train_test_split  # type: ignore
-    from sklearn.preprocessing import LabelEncoder  # type: ignore
-except Exception:  # pragma: no cover
-    def train_test_split(*args, **kwargs):
-        return [], [], [], []
-    class LabelEncoder:  # type: ignore
-        def fit_transform(self, x):
-            return x
-        def transform(self, x):
-            return x
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
 from typing import List, Dict, Tuple,Union
 import pickle
 from pathlib import Path
 
 from fastworkflow.command_routing import RoutingDefinition
 
-try:
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')  # type: ignore
-except Exception:  # pragma: no cover
-    device = 'cpu'
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 dataset=None
 label_encoder=LabelEncoder()

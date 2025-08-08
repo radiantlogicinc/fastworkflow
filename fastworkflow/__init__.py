@@ -122,13 +122,7 @@ def init(env_vars: dict):
     from .command_context_model import CommandContextModel as CommandContextModelClass
     from .command_routing import RoutingDefinition as RoutingDefinitionClass
     from .command_routing import RoutingRegistry as RoutingRegistryClass
-    # ModelPipeline relies on heavy optional deps (transformers, torch). Guard import.
-    try:
-        from .model_pipeline_training import ModelPipeline  # type: ignore
-    except Exception:
-        class ModelPipeline:  # type: ignore
-            def __init__(self, *args, **kwargs):
-                pass
+    from .model_pipeline_training import ModelPipeline
 
     # Assign to global variables
     CommandContextModel = CommandContextModelClass

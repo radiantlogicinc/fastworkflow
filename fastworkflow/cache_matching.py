@@ -1,36 +1,7 @@
-try:
-    import numpy as np  # type: ignore
-except Exception:  # pragma: no cover
-    class np:  # type: ignore
-        @staticmethod
-        def array(x):
-            return x
-        @staticmethod
-        def reshape(a, *args, **kwargs):
-            return a
-try:
-    from sklearn.metrics.pairwise import cosine_similarity  # type: ignore
-except Exception:  # pragma: no cover
-    def cosine_similarity(a, b):
-        # Very rough fallback: return zero similarity matrix of correct shape
-        try:
-            n_rows = 1 if isinstance(a, list) else len(a)
-            n_cols = 1 if isinstance(b, list) else len(b)
-        except Exception:
-            n_rows, n_cols = 1, 1
-        return [[0.0 for _ in range(n_cols)] for _ in range(n_rows)]
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
 import fastworkflow
-try:
-    import torch  # type: ignore
-except Exception:  # pragma: no cover
-    class torch:  # type: ignore
-        class no_grad:
-            def __call__(self, *args, **kwargs):
-                return self
-            def __enter__(self):
-                return self
-            def __exit__(self, exc_type, exc, tb):
-                return False
+import torch
 from speedict import Rdict
 import mmh3  # mmh33 implementation
 from datetime import datetime

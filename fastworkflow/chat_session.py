@@ -10,8 +10,7 @@ import uuid
 import fastworkflow
 from fastworkflow.utils.logging import logger
 from pathlib import Path
-# Delay heavy imports to runtime to keep imports lightweight in tests
-# from fastworkflow.model_pipeline_training import CommandRouter
+from fastworkflow.model_pipeline_training import CommandRouter
 from fastworkflow.utils.startup_progress import StartupProgress
 
 
@@ -199,9 +198,6 @@ class ChatSession:
                 # Tell the progress bar how many extra steps we are going to
                 # perform (one per directory plus one for the wildcard "*").
                 StartupProgress.add_total(len(subdirs) + 1)
-
-                # Local import to avoid importing transformers during test collection
-                from fastworkflow.model_pipeline_training import CommandRouter
 
                 for subdir in subdirs:
                     # Instantiating CommandRouter triggers ModelPipeline

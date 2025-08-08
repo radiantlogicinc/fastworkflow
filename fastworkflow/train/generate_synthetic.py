@@ -1,13 +1,9 @@
 import json
 from typing import List, Dict
-# Guard optional dependency for tests
-try:
-    from datasets import load_dataset  # type: ignore
-except Exception:  # pragma: no cover - optional
-    def load_dataset(*args, **kwargs):
-        raise ImportError("datasets not available")
+from datasets import load_dataset
 import random
 import fastworkflow
+import litellm
 
 NUMOF_PERSONAS=fastworkflow.get_env_var('SYNTHETIC_UTTERANCE_GEN_NUMOF_PERSONAS', int)
 UTTERANCES_PER_PERSONA=fastworkflow.get_env_var('SYNTHETIC_UTTERANCE_GEN_UTTERANCES_PER_PERSONA', int)
@@ -20,22 +16,13 @@ def generate_diverse_utterances(
     utterances_per_persona: int = UTTERANCES_PER_PERSONA,
     personas_per_batch: int = PERSONAS_PER_BATCH
 ) -> list[str]:
-    # Import litellm lazily and guard for optional dependency
-    try:
-        import litellm  # type: ignore
-    except Exception:
-        return [command_name] + seed_utterances
-
     # Initialize LiteLLM with API key
     api_key = fastworkflow.get_env_var("LITELLM_API_KEY_SYNDATA_GEN")
     model=fastworkflow.get_env_var("LLM_SYNDATA_GEN")
     litellm.api_key = api_key
 
     # Load PersonaHub dataset
-    try:
-        persona_dataset = load_dataset("proj-persona/PersonaHub", data_files="persona.jsonl")['train']
-    except Exception:
-        return [command_name] + seed_utterances
+    persona_dataset = load_dataset("proj-persona/PersonaHub", data_files="persona.jsonl")['train']
 
     # Randomly sample personas
     selected_indices = random.sample(range(len(persona_dataset)), num_personas)
@@ -106,18 +93,14 @@ def generate_diverse_utterances(
 
         from fastworkflow.utils.logging import logger
 
-        try:
-            response = litellm.completion(
-                model=model,  # Corrected model name
-                messages=messages,
-                max_tokens=1000,
-                temperature=1.0,
-                top_p=0.9,
-                stop=["<|end_of_text|>"]
-            )
-        except Exception:
-            # Any failure from LLM, return seed-based output only
-            return [command_name] + seed_utterances
+        response = litellm.completion(
+            model=model,  # Corrected model name
+            messages=messages,
+            max_tokens=1000,
+            temperature=1.0,
+            top_p=0.9,
+            stop=["<|end_of_text|>"]
+        )
 
         # Process responses
         content = response.choices[0].message.content.strip()
