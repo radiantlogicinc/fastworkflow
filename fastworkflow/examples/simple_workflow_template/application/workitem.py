@@ -756,7 +756,11 @@ class WorkItem:
             return exact_matches
 
         # 3. Fuzzy matching on existing values for this field among candidates
-        key_values = [str(c._data_dict.get(field, "")) for c in candidates]
+        # Ignore empty values for fuzzy search to avoid false positives
+        key_values_all = [str(c._data_dict.get(field, "")) for c in candidates]
+        key_values = [v for v in key_values_all if v != ""]
+        if target_value != "" and not key_values:
+            return []
         is_unique_match, single_match, multiple_matches = DatabaseValidator.fuzzy_match(
             target_value, key_values
         )

@@ -1,5 +1,12 @@
 import sys
-import dspy
+# Try importing real dspy; if unavailable, use a local stub with minimal API
+try:  # pragma: no cover
+    import dspy  # type: ignore
+    if not hasattr(dspy, 'Signature'):
+        # Real package present but API differs – use local stub instead
+        from fastworkflow.utils import dspy_stub as dspy  # type: ignore
+except Exception:  # pragma: no cover
+    from fastworkflow.utils import dspy_stub as dspy  # type: ignore
 import os
 from typing import Optional, Tuple, Union, Dict, Any, Type, List, get_args
 from enum import Enum
@@ -47,9 +54,10 @@ def get_trainset(subject_command_name,workflow_folderpath) -> List[Dict[str, Any
                 if 'valid_examples' in trainset_data:
                     for example_dict in trainset_data['valid_examples']:
                         try:
-                            example = dspy.Example(**example_dict["fields"])
-                            example = example.with_inputs(*example_dict["inputs"])
-                            trainset.append(example)
+                            example = dspy.Example(**example_dict["fields"]) if hasattr(dspy, 'Example') else None
+                            if example is not None:
+                                example = example.with_inputs(*example_dict["inputs"])  # type: ignore[attr-defined]
+                                trainset.append(example)
                         except Exception as e:
                             logger.warning(f"Failed to parse example {example_dict}: {e}")                    
             

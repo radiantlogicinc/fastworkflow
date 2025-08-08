@@ -197,16 +197,20 @@ class RoutingDefinition(BaseModel):
     def load(cls, workflow_folderpath):
         """Load the routing definition from JSON"""
         load_path = f"{CommandDirectory.get_commandinfo_folderpath(workflow_folderpath)}/routing_definition.json"
-        with open(load_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        data["workflow_folderpath"] = workflow_folderpath
-
-        # Use cached command directory
-        command_directory = get_cached_command_directory(workflow_folderpath)
-        data["command_directory"] = command_directory
-
-        return cls.model_validate(data)
+        try:
+            with open(load_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            data["workflow_folderpath"] = workflow_folderpath
+            # Use cached command directory
+            command_directory = get_cached_command_directory(workflow_folderpath)
+            data["command_directory"] = command_directory
+            return cls.model_validate(data)
+        except FileNotFoundError:
+            # Build on the fly if the artifact is missing (common in tests)
+            definition = cls.build(workflow_folderpath)
+            with contextlib.suppress(Exception):
+                definition.save()
+            return definition
 
     @classmethod
     def build(cls, workflow_folderpath: str) -> "RoutingDefinition":

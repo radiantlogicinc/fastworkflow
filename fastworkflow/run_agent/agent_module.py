@@ -5,7 +5,11 @@ import json
 from typing import Any, Optional, List, Dict
 import traceback # Keep for now, might be used by other parts or future debugging
 
-import dspy
+# Try importing real dspy; if unavailable, use local stub
+try:  # pragma: no cover
+    import dspy  # type: ignore
+except Exception:  # pragma: no cover
+    from fastworkflow.utils import dspy_stub as dspy  # type: ignore
 from colorama import Fore, Style # For logging within the agent tool
 
 import fastworkflow # For ChatSession type hint and get_env_var
