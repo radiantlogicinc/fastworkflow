@@ -2,17 +2,20 @@ import re
 from typing import Optional
 import Levenshtein
 
+
 def normalize_text(text):
         """
         Normalize text by removing spaces, @ symbol, underscores, and converting to lowercase
         """
         return re.sub(r'[@\s_]', '', str(text).lower())
 
+
 def normalized_levenshtein_distance(s1, s2):
         """Calculate normalized Levenshtein distance"""
         distance = Levenshtein.distance(s1, s2)
         max_length = max(len(s1), len(s2))
         return 0.0 if max_length == 0 else distance / max_length
+
 
 def find_best_matches(input_text: str, 
                     text_list: list[str], 

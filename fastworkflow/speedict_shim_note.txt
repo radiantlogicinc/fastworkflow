@@ -1,0 +1,1 @@
+This file exists to document that a lightweight shim for speedict.Rdict is provided for test environments without the real speedict dependency.
