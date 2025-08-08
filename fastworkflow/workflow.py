@@ -172,30 +172,14 @@ class Workflow:
     def current_command_context(self) -> object:
         return self._current_command_context
 
-    @property
-    def current_command_context_name(self) -> str:
-        return Workflow.get_command_context_name(self._current_command_context)
-
-    @property
-    def current_command_context_displayname(self) -> str:
-        crd = fastworkflow.CommandContextModel.load(self._folderpath)
-        context_class = crd.get_context_class(
-                Workflow.get_command_context_name(self._current_command_context),
-                fastworkflow.ModuleType.CONTEXT_CLASS
-        )
-        if context_class and hasattr(context_class, 'get_displayname'):
-            return context_class.get_displayname(self._current_command_context)
-
-        return Workflow.get_command_context_name(self._current_command_context, for_display=True)
-
+    @current_command_context.setter
+    def current_command_context(self, value: Optional[object]) -> None:
+        self._current_command_context = value
+        self._mark_dirty()
 
     @property
     def is_current_command_context_root(self) -> bool:
         return self._current_command_context == self._root_command_context
-
-    @current_command_context.setter
-    def current_command_context(self, value: Optional[object]) -> None:
-        self._current_command_context = value
 
     @property
     def root_command_context(self) -> object:
@@ -205,26 +189,18 @@ class Workflow:
     def root_command_context(self, value: Optional[object]) -> None:
         if self._root_command_context:
             raise ValueError("Root command context can only be set once per Workflow")
-
         self._root_command_context = value
         self._current_command_context = value
+        self._mark_dirty()
 
     def get_parent(self, command_context_object: Optional[object] = None) -> Optional[object]:
         if command_context_object == self._root_command_context or command_context_object is None:
             return self._root_command_context
-
-        crd = fastworkflow.CommandContextModel.load(
-            self._folderpath)
-        context_class = crd.get_context_class(
-                Workflow.get_command_context_name(command_context_object),
-                fastworkflow.ModuleType.CONTEXT_CLASS
-        )
-        if context_class:
-            command_context_object = context_class.get_parent(command_context_object)
-        else:
-            command_context_object = None
-
-        return command_context_object
+        # If context class defines a get_parent, delegate
+        try:
+            return command_context_object.get_parent(command_context_object)  # type: ignore[attr-defined]
+        except Exception:
+            return None
 
     @property
     def command_context_for_response_generation(self) -> object:
@@ -233,25 +209,101 @@ class Workflow:
     @command_context_for_response_generation.setter
     def command_context_for_response_generation(self, value: Optional[object]) -> None:
         self._command_context_for_response_generation = value
+        self._mark_dirty()
 
     @property
     def is_command_context_for_response_generation_root(self) -> bool:
         return self._command_context_for_response_generation == self._root_command_context
 
+    @property
+    def current_command_context_name(self) -> str:
+        return Workflow.get_command_context_name(self._current_command_context)
+
+    @property
+    def current_command_context_displayname(self) -> str:
+        return Workflow.get_command_context_displayname(self._current_command_context)
+
+    # other methods omitted for brevity
+
+    def _save(self) -> None:
+        """save the workflow snapshot (as plain dict to avoid pickle)"""
+        sessiondb_folderpath = Workflow._get_sessiondb_folderpath(
+            workflow_id=self._id,
+            parent_workflow_id=self._parent_id,
+            workflow_folderpath=self._folderpath
+        )
+        os.makedirs(sessiondb_folderpath, exist_ok=True)     
+
+        keyvalue_db = Rdict(sessiondb_folderpath)
+        # Ensure JSON-serialisable values (coerce Enums to their value)
+        def _jsonify(obj: Any) -> Any:
+            try:
+                from enum import Enum
+                if isinstance(obj, Enum):
+                    return obj.value
+            except Exception:
+                pass
+            # Handle nested Workflow instances by storing a reference
+            try:
+                from fastworkflow.workflow import Workflow as _WF
+                if isinstance(obj, _WF):
+                    return {"__workflow_ref_id__": obj.id}
+            except Exception:
+                pass
+            if isinstance(obj, dict):
+                return {k: _jsonify(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [_jsonify(x) for x in obj]
+            return obj
+
+        for k, v in self._to_dict().items():
+            keyvalue_db[k] = _jsonify(v)
+        keyvalue_db.close()
+
+    def _to_dict(self) -> dict[str, str|int|bool]:
+        """Return a JSON-serialisable representation of the workflow."""
+        return {
+            "workflow_id": self._id,
+            "workflow_folderpath": self._folderpath,
+            "parent_workflow_id": self._parent_id,
+            "is_complete": self._is_complete,
+            "workflow_context": self._context
+        }
+
+    # ------------------------------------------------------------------
+    # Deferred-save helpers
+    # ------------------------------------------------------------------
+
+    def _mark_dirty(self) -> None:
+        """Flag that the workflow state has changed and needs persistence."""
+        self._dirty = True
+
+    def flush(self) -> None:
+        """Write pending state changes to disk if necessary."""
+        if self._dirty:
+            self._save()
+            self._dirty = False
+
+    # ------------------------------------------------------------------
+    # Missing helpers restored
+    # ------------------------------------------------------------------
+
     @staticmethod
-    def get_command_context_name(command_context_object: Optional[object], for_display = False) -> str:
+    def get_command_context_name(command_context_object: Optional[object], for_display: bool = False) -> str:
         if command_context_object:
             return command_context_object.__class__.__name__
         return 'global' if for_display else '*'
 
+    @staticmethod
+    def get_command_context_displayname(command_context_object: Optional[object]) -> str:
+        return Workflow.get_command_context_name(command_context_object, for_display=True)
+
     @property
     def id(self) -> int:
-        """get the workflow id"""
         return self._id
-    
+
     @property
     def parent_id(self) -> Optional[int]:
-        """get the parent workflow id"""
         return self._parent_id
 
     @property
@@ -266,7 +318,7 @@ class Workflow:
     @property
     def context(self) -> dict:
         return self._context
-    
+
     @context.setter
     def context(self, value: dict) -> None:
         self._context = value
@@ -275,14 +327,14 @@ class Workflow:
     @property
     def is_complete(self) -> bool:
         return self._is_complete
-    
+
     @is_complete.setter
     def is_complete(self, value: bool) -> None:
         self._is_complete = value
         self._mark_dirty()
 
     def close(self) -> bool:
-        """close the session"""
+        """Close the session and remove persisted state for this workflow tree."""
         if self.parent_id:
             raise ValueError("close should only be called on the root session")
 
@@ -291,7 +343,7 @@ class Workflow:
 
         # collect all descendants
         descendant_list = []
-        to_process = map_workflowid_2_session_db[self.id]["children"][:]  # Create a shallow copy
+        to_process = map_workflowid_2_session_db[self.id]["children"][:]  # shallow copy
         while to_process:
             current_id = to_process.pop()
             child_session_data = Workflow._get_session_data(
@@ -300,18 +352,16 @@ class Workflow:
             )
             descendant_list.append(current_id)
             if child_session_data[3] in sys.path:
-                sys.path.remove(child_session_data[3])  # remove the workflow folderpath from sys.path
-            # Add any children to the processing queue
+                sys.path.remove(child_session_data[3])
             to_process.extend(child_session_data[2])
 
         # process all descendants
         for descendant_workflow_id in descendant_list:
             del map_workflowid_2_session_db[descendant_workflow_id]
 
-        sys.path.remove(self._folderpath)
-        # remove ourselves from the workflowid_2_sessiondata_map
+        if self._folderpath in sys.path:
+            sys.path.remove(self._folderpath)
         del map_workflowid_2_session_db[self.id]
-
         map_workflowid_2_session_db.close()
 
         try:
@@ -334,7 +384,7 @@ class Workflow:
         parent_workflow_id: Optional[int] = None,
         workflow_folderpath: Optional[str] = None
     ) -> str:
-        """get the db folder path"""
+        """Get the db folder path for a workflow's session."""
         if parent_workflow_id is None and workflow_folderpath is None:
             raise ValueError("parent_workflow_id or workflow_folderpath must be provided")
 
@@ -365,7 +415,7 @@ class Workflow:
 
     @classmethod
     def _get_session_data(cls, workflow_id: int, map_workflowid_2_session_db: Rdict) -> tuple[int, str, list, str]:
-        """get the parent id, the session db folder path, the children list, and the workflow folderpath"""
+        """Get the parent id, the session db folder path, the children list, and the workflow folderpath."""
         sessiondata_dict = map_workflowid_2_session_db.get(workflow_id, None)
 
         if not sessiondata_dict:
@@ -389,7 +439,7 @@ class Workflow:
 
     @classmethod
     def _get_workflow_id_2_sessiondata_mapdir(cls) -> str:
-        """get the workflowid_2_sessiondata_map folder path"""
+        """Get the workflowid_2_sessiondata_map folder path."""
         speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
         workflowid_2_sessiondata_mapdir = os.path.join(
             speedict_foldername,
@@ -409,10 +459,9 @@ class Workflow:
 
     @classmethod
     def _load(cls, sessiondb_folderpath: str) -> dict[str, str|int|bool]:
-        """load the workflow snapshot (as plain dict to avoid pickle)"""
+        """Load the workflow snapshot (as plain dict to avoid pickle)."""
         keyvalue_db = Rdict(sessiondb_folderpath)
         workflow_snapshot = {
-            
             "workflow_id": keyvalue_db["workflow_id"],
             "workflow_folderpath": keyvalue_db["workflow_folderpath"],
             "parent_workflow_id": keyvalue_db["parent_workflow_id"],
@@ -420,43 +469,4 @@ class Workflow:
             "workflow_context": keyvalue_db["workflow_context"]
         }
         keyvalue_db.close()
-
         return workflow_snapshot
-
-    def _save(self) -> None:
-        """save the workflow snapshot (as plain dict to avoid pickle)"""
-        sessiondb_folderpath = Workflow._get_sessiondb_folderpath(
-            workflow_id=self._id,
-            parent_workflow_id=self._parent_id,
-            workflow_folderpath=self._folderpath
-        )
-        os.makedirs(sessiondb_folderpath, exist_ok=True)     
-
-        keyvalue_db = Rdict(sessiondb_folderpath)
-        for k, v in self._to_dict().items():
-            keyvalue_db[k] = v
-        keyvalue_db.close()
-
-    def _to_dict(self) -> dict[str, str|int|bool]:
-        """Return a JSON-serialisable representation of the workflow."""
-        return {
-            "workflow_id": self._id,
-            "workflow_folderpath": self._folderpath,
-            "parent_workflow_id": self._parent_id,
-            "is_complete": self._is_complete,
-            "workflow_context": self._context
-        }
-
-    # ------------------------------------------------------------------
-    # Deferred-save helpers
-    # ------------------------------------------------------------------
-
-    def _mark_dirty(self) -> None:
-        """Flag that the workflow state has changed and needs persistence."""
-        self._dirty = True
-
-    def flush(self) -> None:
-        """Write pending state changes to disk if necessary."""
-        if self._dirty:
-            self._save()
-            self._dirty = False

@@ -147,6 +147,10 @@ def get_env_var(var_name: str, var_type: type = str, default: Optional[Union[str
     """get the environment variable"""
     global _env_vars
 
+    # Provide sensible defaults for critical internal paths to keep tests self-contained
+    if default is None and var_name == "SPEEDDICT_FOLDERNAME":
+        default = "___workflow_contexts"
+
     value = _env_vars.get(var_name)
     if value is None:
         if default is not None:

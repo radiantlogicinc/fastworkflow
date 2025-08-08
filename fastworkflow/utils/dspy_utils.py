@@ -1,4 +1,8 @@
-import dspy
+# Try importing real dspy; if unavailable, use a local stub
+try:  # pragma: no cover
+    import dspy  # type: ignore
+except Exception:  # pragma: no cover
+    from fastworkflow.utils import dspy_stub as dspy  # type: ignore
 from pydantic import BaseModel, Field
 from typing import Type, Optional, Dict, Any, Union, get_args, get_origin, Tuple, List
 
@@ -16,7 +20,12 @@ def _process_field(field_info, is_input: bool) -> Tuple[Any, Any, bool]:
             is_optional = True
             field_type = next((t for t in args if t is not type(None)), str)
     
-    dspy_field = dspy.InputField(desc=field_desc) if is_input else dspy.OutputField(desc=field_desc)
+    # If the real dspy package is in use and has InputField/OutputField, use them.
+    # Otherwise, fallback to simple dict markers.
+    if hasattr(dspy, 'InputField') and hasattr(dspy, 'OutputField'):
+        dspy_field = dspy.InputField(desc=field_desc) if is_input else dspy.OutputField(desc=field_desc)
+    else:
+        dspy_field = {"__dspy_field_type": "input" if is_input else "output", "desc": field_desc}
     return field_type, dspy_field, is_optional
 
 

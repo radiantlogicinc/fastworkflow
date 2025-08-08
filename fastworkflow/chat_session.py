@@ -10,7 +10,6 @@ import uuid
 import fastworkflow
 from fastworkflow.utils.logging import logger
 from pathlib import Path
-from fastworkflow.model_pipeline_training import CommandRouter
 from fastworkflow.utils.startup_progress import StartupProgress
 
 
@@ -185,14 +184,13 @@ class ChatSession:
             self.stop_workflow()
 
         # ------------------------------------------------------------
-        # Eager warm-up of CommandRouter / ModelPipeline
+        # Eager warm-up of CommandRouter / ModelPipeline (lazy import)
         # ------------------------------------------------------------
-        # Loading transformer checkpoints and moving them to device is
-        # expensive (~1 s).  We do it here *once* for every model artifact
-        # directory so that the first user message does not pay the cost.
         try:
             command_info_root = Path(workflow.folderpath) / "___command_info"
             if command_info_root.is_dir():
+                # Import inside block to avoid importing heavy deps during test collection
+                from fastworkflow.model_pipeline_training import CommandRouter  # local import
                 subdirs = [d for d in command_info_root.iterdir() if d.is_dir()]
 
                 # Tell the progress bar how many extra steps we are going to

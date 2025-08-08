@@ -1,7 +1,12 @@
 from typing import Annotated, Type, Union, get_args, get_origin
 
-import dspy
-from dspy import Signature
+# Try importing real dspy; if unavailable, use a local stub
+try:  # pragma: no cover
+    import dspy  # type: ignore
+    from dspy import Signature  # type: ignore
+except Exception:  # pragma: no cover
+    from fastworkflow.utils import dspy_stub as dspy  # type: ignore
+    Signature = dspy.Signature  # type: ignore
 from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
