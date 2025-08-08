@@ -1,83 +1,26 @@
 import os
-from typing import Optional, ClassVar, Any
-try:
-    from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification
-except Exception:  # pragma: no cover - fallback for test environments without transformers
-    AutoTokenizer = None  # type: ignore
-    AutoModel = None  # type: ignore
-    AutoModelForSequenceClassification = None  # type: ignore
-try:
-    from torch.optim import AdamW  # type: ignore
-except Exception:  # pragma: no cover - fallback for test environments without torch
-    AdamW = None  # type: ignore
-
-try:
-    from sklearn.decomposition import PCA  # type: ignore
-except Exception:  # pragma: no cover - fallback for test environments without sklearn
-    PCA = None  # type: ignore
-
-try:
-    from sklearn.metrics import f1_score  # type: ignore
-except Exception:  # pragma: no cover - fallback for test environments without sklearn
-    f1_score = None  # type: ignore
-try:
-    import torch  # type: ignore
-    from torch.utils.data import DataLoader, Dataset
-    from torch.utils.data import random_split
-except Exception:
-    torch = None  # type: ignore
-    DataLoader = None  # type: ignore
-    Dataset = None  # type: ignore
-    random_split = None  # type: ignore
-try:
-    from tqdm import tqdm  # type: ignore
-except Exception:
-    def tqdm(iterable=None, **kwargs):  # type: ignore
-        return iterable if iterable is not None else []
-try:
-    import numpy as np  # type: ignore
-except Exception:
-    np = None  # type: ignore
-# Provide wrappers for torch-dependent decorators and ops
-if torch is None:
-    def _no_grad():
-        def deco(fn):
-            return fn
-        return deco
-    def torch_softmax(*args, **kwargs):
-        raise ImportError("PyTorch is required for softmax")
-    def torch_topk(*args, **kwargs):
-        raise ImportError("PyTorch is required for topk")
-else:
-    def _no_grad():
-        return torch.no_grad()
-    def torch_softmax(*args, **kwargs):
-        return torch.softmax(*args, **kwargs)
-    def torch_topk(*args, **kwargs):
-        return torch.topk(*args, **kwargs)
+from typing import Optional, ClassVar
+from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification
+from torch.optim import AdamW
+from sklearn.decomposition import PCA
+from sklearn.metrics import f1_score
+import torch 
+from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
+import numpy as np
 import json
 import os
+from torch.utils.data import random_split
 import fastworkflow
-try:
-    from sklearn.model_selection import train_test_split  # type: ignore
-except Exception:
-    def train_test_split(*args, **kwargs):  # type: ignore
-        return args
-try:
-    from sklearn.preprocessing import LabelEncoder  # type: ignore
-except Exception:
-    class LabelEncoder:  # type: ignore
-        def fit_transform(self, x): return x
-        def transform(self, x): return x
-        def inverse_transform(self, x): return x
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
 from typing import List, Dict, Tuple,Union
 import pickle
 from pathlib import Path
 
 from fastworkflow.command_routing import RoutingDefinition
 
-# If torch is available, set device; else default to cpu-like placeholder
-device = torch.device('cuda' if (hasattr(torch, 'cuda') and torch.cuda.is_available()) else 'cpu') if torch else 'cpu'
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 dataset=None
 label_encoder=LabelEncoder()

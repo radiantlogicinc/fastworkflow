@@ -10,7 +10,7 @@ import uuid
 import fastworkflow
 from fastworkflow.utils.logging import logger
 from pathlib import Path
-# from fastworkflow.model_pipeline_training import CommandRouter
+from fastworkflow.model_pipeline_training import CommandRouter
 from fastworkflow.utils.startup_progress import StartupProgress
 
 
@@ -184,25 +184,18 @@ class ChatSession:
             logger.info(f"Stopping current workflow {current_workflow.id} to start new root workflow {workflow.id}")
             self.stop_workflow()
 
-        # ------------------------------------------------------------
-        # Eager warm-up of CommandRouter / ModelPipeline (optional)
-        # ------------------------------------------------------------
-        # Wrapped in try/except to avoid pulling heavy ML dependencies in test envs
+        # Eager warm-up of CommandRouter / ModelPipeline
         try:
-            from fastworkflow.model_pipeline_training import CommandRouter  # type: ignore
             command_info_root = Path(workflow.folderpath) / "___command_info"
             if command_info_root.is_dir():
                 subdirs = [d for d in command_info_root.iterdir() if d.is_dir()]
                 for subdir in subdirs:
-                    # Instantiating CommandRouter triggers ModelPipeline
                     with contextlib.suppress(Exception):
                         CommandRouter(str(subdir))
-            else:
-                # Warm-up for root if only shared artifacts exist
                 with contextlib.suppress(Exception):
                     CommandRouter(str(command_info_root / '*'))
-        except Exception:
-            pass
+        except Exception as warm_err:  # pragma: no cover – warm-up must never fail
+            logger.debug(f"Model warm-up skipped due to error: {warm_err}")
 
         # Push the workflow to stack and optionally execute startup
         ChatSession.push_active_workflow(workflow)

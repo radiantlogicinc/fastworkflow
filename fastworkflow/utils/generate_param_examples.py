@@ -4,22 +4,8 @@ import re
 import json
 from typing import List, Optional, Union, Annotated, Dict, Any
 from pydantic import Field
-try:
-    import Levenshtein  # type: ignore
-except Exception:
-    class _Lev:
-        @staticmethod
-        def distance(a, b):
-            return abs(len(str(a)) - len(str(b)))
-    Levenshtein = _Lev()  # type: ignore
-try:
-    import litellm  # type: ignore
-except Exception:
-    class _LiteLLMStub:
-        class exceptions:
-            class RateLimitError(Exception):
-                pass
-    litellm = _LiteLLMStub()  # type: ignore
+import Levenshtein  # Make sure to install this package
+import litellm  # Import litellm instead of together
 import fastworkflow
 
 def normalize_text(text):
@@ -350,9 +336,6 @@ def generate_dspy_examples(
     # Extract detailed field information
     field_details = extract_field_details(field_annotations)
 
-    # If litellm is not available or keys are missing, return empty examples to avoid failures in tests
-    if not hasattr(litellm, "completion") or not model or not api_key:
-        return [], []
 
     # Create a section about each field with detailed information
     fields_section = ""
