@@ -1,0 +1,63 @@
+{
+  "workflow_types": {
+    "Epic": "A very long task with lots of stories and bugs",
+    "Story": "A use case scenario that is part of an epic",
+    "Task": "A high level work item required to complete a story implementation",
+    "Bug": "A problem or issue in the implementation of a story or epic",
+    "Subtask": "A low level work item required to complete a task"
+  },
+  "parents_dict": {
+    "Epic": null,
+    "Story": {
+      "parent": [
+        "Epic"
+      ]
+    },
+    "Bug": {
+      "parent": [
+        "Epic",
+        "Story"
+      ]
+    },
+    "Task": {
+      "parent": [
+        "Story"
+      ]
+    },
+    "Subtask": {
+      "parent": [
+        "Task"
+      ]
+    }
+  },
+  "child_schema_dict": {
+    "Epic": {
+      "Story": {
+        "min_cardinality": 1,
+        "max_cardinality": 10
+      },
+      "Bug": {
+        "min_cardinality": 0,
+        "max_cardinality": 5
+      }
+    },
+    "Story": {
+      "Task": {
+        "min_cardinality": 1,
+        "max_cardinality": 20
+      },
+      "Bug": {
+        "min_cardinality": 0,
+        "max_cardinality": 3
+      }
+    },
+    "Task": {
+      "Subtask": {
+        "min_cardinality": 0,
+        "max_cardinality": 5
+      }
+    },
+    "Bug": null,
+    "Subtask": null
+  }
+}

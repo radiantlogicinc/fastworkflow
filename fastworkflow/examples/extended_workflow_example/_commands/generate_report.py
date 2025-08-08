@@ -4,25 +4,20 @@ from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from pydantic import BaseModel
 
 class Signature:
-    plain_utterances = [
-        "generate a report",
-        "create a report", 
-        "show me a report",
-        "make a report for me"
-    ]
-
-    @staticmethod
-    def generate_utterances(command_name: str):
-        return [
-            "generate a report",
-            "create a report",
-            "show me a report",
-            "make a report for me"
-        ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
-
     class Input(BaseModel):
         report_type: str = "summary"
         include_details: bool = True
+
+    plain_utterances = [
+        "create a report"
+    ]
+
+    @staticmethod
+    def generate_utterances(workflow: fastworkflow.Workflow, command_name: str) -> list[str]:
+        return [
+            command_name.split('/')[-1].lower().replace('_', ' ')
+        ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
+
 
 class ResponseGenerator:
     def __call__(self, workflow: fastworkflow.Workflow, command: str, cmd_parameters: Signature.Input) -> CommandOutput:
