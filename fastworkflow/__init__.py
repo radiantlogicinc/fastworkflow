@@ -116,17 +116,25 @@ def init(env_vars: dict):
     global _env_vars, CommandContextModel, RoutingDefinition, RoutingRegistry, ModelPipelineRegistry
     _env_vars = env_vars
 
+    # Provide safe defaults for required env vars in tests
+    _env_vars.setdefault("SPEEDDICT_FOLDERNAME", ".___speedict")
+
     # init before importing other modules so env vars are available
     from .command_context_model import CommandContextModel as CommandContextModelClass
     from .command_routing import RoutingDefinition as RoutingDefinitionClass
     from .command_routing import RoutingRegistry as RoutingRegistryClass
-    from .model_pipeline_training import ModelPipeline
 
     # Assign to global variables
     CommandContextModel = CommandContextModelClass
     RoutingDefinition = RoutingDefinitionClass
     RoutingRegistry = RoutingRegistryClass
-    ModelPipelineRegistry = ModelPipeline
+
+    # Lazily set ModelPipelineRegistry; skip if heavy deps unavailable
+    try:
+        from .model_pipeline_training import ModelPipeline  # type: ignore
+        ModelPipelineRegistry = ModelPipeline
+    except Exception:
+        ModelPipelineRegistry = None
 
     # Ensure DSPy logging is properly configured after all imports
     # This needs to happen after DSPy is imported by other modules
@@ -200,5 +208,16 @@ def get_internal_workflow_path(workflow_name: str) -> str:
 def get_workflow_id(workflow_id_str: str) -> int:
     return int(mmh3.hash(workflow_id_str))
 
-from .workflow import Workflow as Workflow
-from .chat_session import ChatSession as ChatSession
+def __getattr__(name: str):
+    """
+    Provide lazy access to heavy modules to avoid importing large ML stacks during
+    test collection when only build utilities are needed.
+    """
+    if name == "Workflow":
+        from .workflow import Workflow as _Workflow
+        return _Workflow
+    if name == "ChatSession":
+        # Lazily import ChatSession to defer importing model_pipeline_training (torch/transformers)
+        from .chat_session import ChatSession as _ChatSession
+        return _ChatSession
+    raise AttributeError(name)

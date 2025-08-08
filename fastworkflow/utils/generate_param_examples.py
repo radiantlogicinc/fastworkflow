@@ -336,6 +336,7 @@ def generate_dspy_examples(
     # Extract detailed field information
     field_details = extract_field_details(field_annotations)
 
+
     # Create a section about each field with detailed information
     fields_section = ""
     if field_details:

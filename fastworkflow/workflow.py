@@ -354,7 +354,7 @@ class Workflow:
             
             map_workflowid_2_session_db.close()
         else:
-            speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
+            speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME", default=".___speedict")
             parent_session_folder = os.path.join(
                 workflow_folderpath, 
                 speedict_foldername
@@ -390,7 +390,7 @@ class Workflow:
     @classmethod
     def _get_workflow_id_2_sessiondata_mapdir(cls) -> str:
         """get the workflowid_2_sessiondata_map folder path"""
-        speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
+        speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME", default=".___speedict")
         workflowid_2_sessiondata_mapdir = os.path.join(
             speedict_foldername,
             "workflowid_2_sessiondata_map"
@@ -400,7 +400,7 @@ class Workflow:
 
     def get_cachedb_folderpath(self, function_name: str) -> str:
         """Get the cache database folder path for a specific function"""
-        speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
+        speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME", default=".___speedict")
         return os.path.join(
             self._folderpath,
             speedict_foldername,

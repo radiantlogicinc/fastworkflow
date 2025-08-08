@@ -1,7 +1,7 @@
 import fastworkflow
 from fastworkflow.command_interfaces import CommandExecutorInterface
 
-from fastworkflow import Action, CommandOutput, ChatSession
+from fastworkflow import Action, CommandOutput
 from fastworkflow import ModuleType
 from fastworkflow.utils.signatures import InputForParamExtraction
 from pathlib import Path
@@ -52,7 +52,7 @@ class CommandExecutor(CommandExecutorInterface):
         command_name = command_output.command_responses[0].artifacts["command_name"]
         input_obj = command_output.command_responses[0].artifacts["cmd_parameters"]
 
-        workflow = ChatSession.get_active_workflow()
+        workflow = fastworkflow.ChatSession.get_active_workflow()
         workflow_name = workflow.folderpath.split('/')[-1]
         context = workflow.current_command_context_displayname
         
