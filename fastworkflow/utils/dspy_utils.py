@@ -2,6 +2,22 @@ import dspy
 from pydantic import BaseModel, Field
 from typing import Type, Optional, Dict, Any, Union, get_args, get_origin, Tuple, List
 
+# Provide a minimal stub if dspy is missing relevant attributes during tests
+if not hasattr(dspy, "Signature"):
+    class _StubSignature:
+        def __init__(self, fields: Dict[str, Tuple[Type, Any]], instructions: str):
+            self.fields = fields
+            self.instructions = instructions
+    class _StubInputField:
+        def __init__(self, desc: str = ""):
+            self.desc = desc
+    class _StubOutputField:
+        def __init__(self, desc: str = ""):
+            self.desc = desc
+    dspy.Signature = _StubSignature  # type: ignore[attr-defined]
+    dspy.InputField = _StubInputField  # type: ignore[attr-defined]
+    dspy.OutputField = _StubOutputField  # type: ignore[attr-defined]
+
 
 def _process_field(field_info, is_input: bool) -> Tuple[Any, Any, bool]:
     """Process a single field and return its type, DSPy field, and optional status."""

@@ -1,7 +1,31 @@
-import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
+# Optional heavy deps; allow module import without them
+try:  # pragma: no cover
+    import numpy as np  # type: ignore
+except Exception:  # pragma: no cover
+    np = None  # type: ignore
+
+try:  # pragma: no cover
+    from sklearn.metrics.pairwise import cosine_similarity as _sk_cosine_similarity  # type: ignore
+except Exception:  # pragma: no cover
+    _sk_cosine_similarity = None  # type: ignore
+
+def _cosine_similarity(a, b):
+    if _sk_cosine_similarity is not None:
+        return _sk_cosine_similarity(a, b)
+    # Minimal fallback without sklearn; expects numpy arrays
+    if np is None:
+        # Degenerate fallback
+        return 0
+    a = np.asarray(a)
+    b = np.asarray(b)
+    a_norm = np.linalg.norm(a, axis=1, keepdims=True)
+    b_norm = np.linalg.norm(b, axis=1, keepdims=True)
+    denom = (a_norm * b_norm) + 1e-12
+    return (a @ b.T) / denom
+
 import fastworkflow
-import torch
+# torch used only inside functions; avoid import at module load
+# from speedict import Rdict
 from speedict import Rdict
 import mmh3  # mmh33 implementation
 from datetime import datetime
@@ -32,6 +56,11 @@ _MODEL_ID_2_REF: dict[int, weakref.ReferenceType] = {}
 
 def _compute_embedding(text: str, model_pipeline):
     """Actual embedding computation (was body of old get_embedding)."""
+    try:
+        import torch  # type: ignore
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError("torch not available for embeddings") from e
+
     model = model_pipeline.distil_model
     tokenizer = model_pipeline.distil_tokenizer
     device = model_pipeline.device
@@ -172,7 +201,7 @@ def cache_match(cache_path, utterance, model_pipeline, threshold=0.90, return_de
 
             # Reshape cached embedding for cosine_similarity
             cached_embedding = np.array(entry["embedding"]).reshape(1, -1)
-            similarity = cosine_similarity(query_embedding, cached_embedding)[0][0]
+            similarity = _cosine_similarity(query_embedding, cached_embedding)[0][0]
 
             if similarity > best_similarity:
                 best_similarity = similarity

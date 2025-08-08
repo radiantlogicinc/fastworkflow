@@ -1,9 +1,25 @@
 import json
 from typing import List, Dict
-from datasets import load_dataset
+# Optional dependency; tests may run without datasets installed
+try:
+    from datasets import load_dataset  # type: ignore
+except Exception:  # pragma: no cover
+    def load_dataset(*args, **kwargs):
+        raise RuntimeError("datasets not available in this environment")
 import random
 import fastworkflow
-import litellm
+# Optional dependency; provide a stub when unavailable
+try:
+    import litellm  # type: ignore
+except Exception:  # pragma: no cover
+    class _LiteLLMStub:
+        class exceptions:
+            class RateLimitError(Exception):
+                pass
+        api_key = None
+        def completion(self, *args, **kwargs):
+            raise RuntimeError("litellm not available in this environment")
+    litellm = _LiteLLMStub()  # type: ignore
 
 NUMOF_PERSONAS=fastworkflow.get_env_var('SYNTHETIC_UTTERANCE_GEN_NUMOF_PERSONAS', int)
 UTTERANCES_PER_PERSONA=fastworkflow.get_env_var('SYNTHETIC_UTTERANCE_GEN_UTTERANCES_PER_PERSONA', int)

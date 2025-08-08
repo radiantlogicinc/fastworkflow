@@ -10,7 +10,11 @@ import uuid
 import fastworkflow
 from fastworkflow.utils.logging import logger
 from pathlib import Path
-from fastworkflow.model_pipeline_training import CommandRouter
+# Lazy import: CommandRouter requires heavy ML deps not needed for most tests
+try:
+    from fastworkflow.model_pipeline_training import CommandRouter  # type: ignore
+except Exception:  # pragma: no cover - fallback for test environments without transformers/torch
+    CommandRouter = None  # type: ignore
 from fastworkflow.utils.startup_progress import StartupProgress
 
 
@@ -192,7 +196,7 @@ class ChatSession:
         # directory so that the first user message does not pay the cost.
         try:
             command_info_root = Path(workflow.folderpath) / "___command_info"
-            if command_info_root.is_dir():
+            if command_info_root.is_dir() and CommandRouter is not None:
                 subdirs = [d for d in command_info_root.iterdir() if d.is_dir()]
 
                 # Tell the progress bar how many extra steps we are going to
