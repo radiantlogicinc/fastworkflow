@@ -15,11 +15,17 @@ from fastworkflow.cache_matching import cache_match, store_utterance_cache
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.command_routing import RoutingDefinition
 import fastworkflow.command_routing
-from fastworkflow.model_pipeline_training import (
-    predict_single_sentence,
-    get_artifact_path,
-    CommandRouter
-)
+# Optional heavy ML dependencies
+try:
+    from fastworkflow.model_pipeline_training import (
+        predict_single_sentence,
+        get_artifact_path,
+        CommandRouter
+    )  # type: ignore
+except Exception:  # pragma: no cover
+    predict_single_sentence = None  # type: ignore
+    get_artifact_path = None  # type: ignore
+    CommandRouter = None  # type: ignore
 
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from fastworkflow.utils.fuzzy_match import find_best_matches
@@ -56,13 +62,13 @@ class CommandNamePrediction:
         # sourcery skip: extract-duplicate-method
 
         model_artifact_path = f"{self.app_workflow_folderpath}/___command_info/{command_context_name}"
-        command_router = CommandRouter(model_artifact_path)
+        command_router = CommandRouter(model_artifact_path) if CommandRouter is not None else None
 
         # Re-use the already-built ModelPipeline attached to the router
         # instead of instantiating a fresh one.  This avoids reloading HF
         # checkpoints and transferring tensors each time we see a new
         # message for the same context.
-        modelpipeline = command_router.modelpipeline
+        modelpipeline = command_router.modelpipeline if command_router is not None else None
 
         crd = fastworkflow.RoutingRegistry.get_definition(
             self.cme_workflow.folderpath)

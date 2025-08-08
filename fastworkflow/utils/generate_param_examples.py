@@ -4,8 +4,23 @@ import re
 import json
 from typing import List, Optional, Union, Annotated, Dict, Any
 from pydantic import Field
-import Levenshtein  # Make sure to install this package
-import litellm  # Import litellm instead of together
+# Optional dependency: python-Levenshtein
+try:
+    import Levenshtein  # type: ignore
+except Exception:  # pragma: no cover
+    Levenshtein = None  # type: ignore
+# Optional dependency: litellm
+try:
+    import litellm  # type: ignore
+except Exception:  # pragma: no cover
+    class _LiteLLMStub:
+        class exceptions:
+            class RateLimitError(Exception):
+                pass
+        api_key = None
+        def completion(self, *args, **kwargs):
+            raise RuntimeError("litellm not available in this environment")
+    litellm = _LiteLLMStub()  # type: ignore
 import fastworkflow
 
 def normalize_text(text):

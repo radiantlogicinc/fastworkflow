@@ -331,32 +331,30 @@ class RoutingRegistry:
     A registry that holds a single, active RoutingDefinition per workflow.
     It builds the definition on-demand the first time it's requested for a workflow.
     """
-    _definitions: dict[str, RoutingDefinition] = {}
+    _registry: dict[str, RoutingDefinition] = {}
 
     @classmethod
-    def get_definition(cls, workflow_folderpath: str, load_cached: bool = True) -> RoutingDefinition:
-        """
-        Gets the routing definition for a workflow.
-        If it doesn't exist, it will be built and cached.
-        """
-        workflow_folderpath = str(Path(workflow_folderpath).resolve())
+    def get_definition(cls, workflow_folderpath: str) -> RoutingDefinition:
+        """Get or build and cache the RoutingDefinition for a workflow."""
+        if workflow_folderpath in cls._registry:
+            return cls._registry[workflow_folderpath]
 
-        if load_cached:
-            if workflow_folderpath in cls._definitions:
-                return cls._definitions[workflow_folderpath]
-
+        # Try to load from disk; if missing, build and save
+        try:
             definition = RoutingDefinition.load(workflow_folderpath)
-            cls._definitions[workflow_folderpath] = definition
-            return definition
+        except FileNotFoundError:
+            definition = RoutingDefinition.build(workflow_folderpath)
+            # Persist for subsequent runs
+            with contextlib.suppress(Exception):
+                definition.save()
         
-        # build fresh definition and persist via .save()
-        cls._definitions[workflow_folderpath] = RoutingDefinition.build(workflow_folderpath)
-        return cls._definitions[workflow_folderpath]
+        cls._registry[workflow_folderpath] = definition
+        return definition
 
     @classmethod
     def clear_registry(cls):
         """Clears the registry. Useful for testing."""
-        cls._definitions.clear()
+        cls._registry.clear()
         
         # Also clear the CommandDirectory cache to ensure fresh data on reload
         import fastworkflow.command_directory

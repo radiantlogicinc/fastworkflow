@@ -1,6 +1,13 @@
 import re
 from typing import Optional
-import Levenshtein
+
+# Optional dependency: python-Levenshtein
+try:  # pragma: no cover
+    import Levenshtein  # type: ignore
+except Exception:  # pragma: no cover
+    Levenshtein = None  # type: ignore
+    from difflib import SequenceMatcher
+
 
 def normalize_text(text):
         """
@@ -8,11 +15,22 @@ def normalize_text(text):
         """
         return re.sub(r'[@\s_]', '', str(text).lower())
 
+
+def _levenshtein_distance(a: str, b: str) -> float:
+    if Levenshtein is not None:
+        return float(Levenshtein.distance(a, b))  # type: ignore[attr-defined]
+    # Fallback: convert similarity ratio to an approximate distance
+    ratio = SequenceMatcher(None, a, b).ratio()
+    # Distance ~ (1 - ratio) * max_len
+    return (1.0 - ratio) * max(len(a), len(b))
+
+
 def normalized_levenshtein_distance(s1, s2):
         """Calculate normalized Levenshtein distance"""
-        distance = Levenshtein.distance(s1, s2)
+        distance = _levenshtein_distance(s1, s2)
         max_length = max(len(s1), len(s2))
         return 0.0 if max_length == 0 else distance / max_length
+
 
 def find_best_matches(input_text: str, 
                     text_list: list[str], 

@@ -120,7 +120,15 @@ def init(env_vars: dict):
     from .command_context_model import CommandContextModel as CommandContextModelClass
     from .command_routing import RoutingDefinition as RoutingDefinitionClass
     from .command_routing import RoutingRegistry as RoutingRegistryClass
-    from .model_pipeline_training import ModelPipeline
+    # Delayed import inside init; avoid importing heavy ML deps at module import time
+    try:
+        from .model_pipeline_training import ModelPipeline  # type: ignore
+    except Exception:
+        ModelPipeline = None  # type: ignore
+
+    # Provide default foldername for speedict-based storage if not set
+    if not _env_vars.get("SPEEDDICT_FOLDERNAME"):
+        _env_vars["SPEEDDICT_FOLDERNAME"] = ".speedict"
 
     # Assign to global variables
     CommandContextModel = CommandContextModelClass

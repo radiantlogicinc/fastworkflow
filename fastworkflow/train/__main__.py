@@ -10,7 +10,14 @@ import fastworkflow
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import python_utils
 from fastworkflow import ModuleType
-from fastworkflow.model_pipeline_training import train, get_route_layer_filepath_model
+# Optional heavy ML training; provide stubs in environments without torch/transformers
+try:
+    from fastworkflow.model_pipeline_training import train, get_route_layer_filepath_model  # type: ignore
+except Exception:  # pragma: no cover
+    def train(*args, **kwargs):
+        raise RuntimeError("model training unavailable in this environment")
+    def get_route_layer_filepath_model(*args, **kwargs):
+        return os.path.join(args[0], "___command_info", args[1])
 from fastworkflow.utils.generate_param_examples import generate_dspy_examples
 from fastworkflow.command_directory import CommandDirectory, get_cached_command_directory
 from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
