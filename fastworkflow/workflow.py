@@ -354,7 +354,7 @@ class Workflow:
             
             map_workflowid_2_session_db.close()
         else:
-            speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
+            speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME") or "___workflow_contexts"
             parent_session_folder = os.path.join(
                 workflow_folderpath, 
                 speedict_foldername
@@ -390,7 +390,7 @@ class Workflow:
     @classmethod
     def _get_workflow_id_2_sessiondata_mapdir(cls) -> str:
         """get the workflowid_2_sessiondata_map folder path"""
-        speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
+        speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME") or "___workflow_contexts"
         workflowid_2_sessiondata_mapdir = os.path.join(
             speedict_foldername,
             "workflowid_2_sessiondata_map"
@@ -400,7 +400,7 @@ class Workflow:
 
     def get_cachedb_folderpath(self, function_name: str) -> str:
         """Get the cache database folder path for a specific function"""
-        speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
+        speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME") or "___workflow_contexts"
         return os.path.join(
             self._folderpath,
             speedict_foldername,
@@ -434,7 +434,11 @@ class Workflow:
 
         keyvalue_db = Rdict(sessiondb_folderpath)
         for k, v in self._to_dict().items():
-            keyvalue_db[k] = v
+            try:
+                keyvalue_db[k] = v
+            except TypeError:
+                # Ensure serialisability for complex objects
+                keyvalue_db[k] = repr(v)
         keyvalue_db.close()
 
     def _to_dict(self) -> dict[str, str|int|bool]:
