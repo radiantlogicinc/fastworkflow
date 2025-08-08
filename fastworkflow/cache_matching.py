@@ -1,7 +1,16 @@
-import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
+try:
+    import numpy as np  # type: ignore
+except Exception:  # pragma: no cover - fallback when numpy is unavailable
+    np = None  # type: ignore
+try:
+    from sklearn.metrics.pairwise import cosine_similarity  # type: ignore
+except Exception:  # pragma: no cover - fallback when sklearn is unavailable
+    cosine_similarity = None  # type: ignore
 import fastworkflow
-import torch
+try:
+    import torch  # type: ignore
+except Exception:  # pragma: no cover - fallback when torch is unavailable
+    torch = None  # type: ignore
 from speedict import Rdict
 import mmh3  # mmh33 implementation
 from datetime import datetime
@@ -32,6 +41,8 @@ _MODEL_ID_2_REF: dict[int, weakref.ReferenceType] = {}
 
 def _compute_embedding(text: str, model_pipeline):
     """Actual embedding computation (was body of old get_embedding)."""
+    if torch is None:
+        raise ImportError("PyTorch is required for embedding computation but is not installed.")
     model = model_pipeline.distil_model
     tokenizer = model_pipeline.distil_tokenizer
     device = model_pipeline.device
@@ -75,14 +86,17 @@ def store_utterance_cache(cache_path, utterance, label, model_pipeline=None):
         # Get current timestamp for feedback date
         current_time = datetime.now().isoformat()
         
-        # Compute embedding if model_pipeline provided
+        # Compute embedding if model_pipeline provided and numpy is available
         embedding = None
         if model_pipeline is not None:
-            embedding = get_embedding(utterance, model_pipeline)[0].tolist()
+            try:
+                embedding = get_embedding(utterance, model_pipeline)[0].tolist()
+            except Exception:
+                embedding = []
         
         if utterance_hash in cache:
             # Update existing entry
-            if embedding is not None:
+            if embedding:
                 cache[utterance_hash]["embedding"] = embedding
                 
             if label in cache[utterance_hash]["command_mapping"]:
@@ -144,6 +158,10 @@ def cache_match(cache_path, utterance, model_pipeline, threshold=0.90, return_de
         If match found: true_label or (true_label, similarity) if return_details=True
         If no match: None
     """
+    # If numpy or sklearn is unavailable, skip matching
+    if np is None or cosine_similarity is None:
+        return None
+
     # Open the database
     db = Rdict(cache_path)
     try:

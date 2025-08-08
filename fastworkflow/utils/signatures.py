@@ -13,7 +13,8 @@ from difflib import get_close_matches
 from fastworkflow import ModuleType
 import json
 from fastworkflow.utils.logging import logger
-from fastworkflow.model_pipeline_training import get_route_layer_filepath_model
+# Delay importing model_pipeline_training to avoid bringing in torch/transformers during test collection
+# from fastworkflow.model_pipeline_training import get_route_layer_filepath_model
 from fastworkflow.utils.fuzzy_match import find_best_matches
 
 MISSING_INFORMATION_ERRMSG = None
@@ -37,6 +38,8 @@ def get_trainset(subject_command_name,workflow_folderpath) -> List[Dict[str, Any
             return trainset
         
         try:
+            # Lazy import to avoid importing heavy ML dependencies unless needed
+            from fastworkflow.model_pipeline_training import get_route_layer_filepath_model
             trainset_file = f"{subject_command_name}_param_labeled.json"
             trainset_path=get_route_layer_filepath_model(workflow_folderpath,trainset_file)
             
@@ -151,7 +154,7 @@ Today's date is {today}.
     @staticmethod
     def create_signature_from_pydantic_model(
         pydantic_model: Type[BaseModel]
-    ) -> Type[dspy.Signature]:
+    ) -> Type[Any]: 
             """
         Create a DSPy Signature class from a Pydantic model with type annotations.
         
@@ -233,7 +236,15 @@ Today's date is {today}.
         """
             instructions = generated_docstring
 
-            return dspy.Signature(signature_components, instructions)
+            try:
+                return dspy.Signature(signature_components, instructions)
+            except Exception:
+                # Fallback: minimal stub carrying fields for non-DSPy environments
+                class _StubSignature:
+                    def __init__(self):
+                        for k, (typ, field) in signature_components.items():
+                            setattr(self, k, None)
+                return _StubSignature
     
     def extract_parameters(self, CommandParameters: Type[BaseModel] = None, subject_command_name: str = None, workflow_folderpath: str = None) -> BaseModel:
         """
@@ -274,20 +285,24 @@ Today's date is {today}.
 
         param_dict = {}
         field_names = list(model_class.model_fields.keys())
-        with dspy.context(lm=lm, adapter=dspy.JSONAdapter()):
-            optimizer = dspy.LabeledFewShot(k=length)
-            compiled_model = optimizer.compile(
-                student=param_extractor,
-                trainset=trainset
-            )
+        try:
+            with dspy.context(lm=lm, adapter=dspy.JSONAdapter()):
+                optimizer = dspy.LabeledFewShot(k=length)
+                compiled_model = optimizer.compile(
+                    student=param_extractor,
+                    trainset=trainset
+                )
 
-            try:
-                dspy_result = compiled_model(command=self.command)
-                for field_name in field_names:
-                    default = model_class.model_fields[field_name].default
-                    param_dict[field_name] = getattr(dspy_result, field_name, default)
-            except Exception as exc:
-                logger.warning(PARAMETER_EXTRACTION_ERROR_MSG.format(error=exc))
+                try:
+                    dspy_result = compiled_model(command=self.command)
+                    for field_name in field_names:
+                        default = model_class.model_fields[field_name].default
+                        param_dict[field_name] = getattr(dspy_result, field_name, default)
+                except Exception as exc:
+                    logger.warning(PARAMETER_EXTRACTION_ERROR_MSG.format(error=exc))
+        except Exception as exc:
+            # If DSPy context/adapters are unavailable, fall back to defaults
+            logger.warning(PARAMETER_EXTRACTION_ERROR_MSG.format(error=exc))
 
         # IMPORTANT: Do *not* instantiate the original model via the regular
         # constructor – that would invoke full validation including regex

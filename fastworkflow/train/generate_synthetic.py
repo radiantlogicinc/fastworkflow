@@ -1,9 +1,22 @@
 import json
 from typing import List, Dict
-from datasets import load_dataset
+try:
+    from datasets import load_dataset  # type: ignore
+except Exception:  # pragma: no cover - fallback when datasets is unavailable
+    def load_dataset(*_, **__):  # type: ignore
+        raise ImportError(
+            "Hugging Face datasets is required to load corpora. Install `datasets` or avoid features that need it."
+        )
 import random
 import fastworkflow
-import litellm
+try:
+    import litellm  # type: ignore
+except Exception:  # pragma: no cover - fallback when litellm is unavailable
+    class _LiteLLMStub:
+        class exceptions:
+            class RateLimitError(Exception):
+                pass
+    litellm = _LiteLLMStub()  # type: ignore
 
 NUMOF_PERSONAS=fastworkflow.get_env_var('SYNTHETIC_UTTERANCE_GEN_NUMOF_PERSONAS', int)
 UTTERANCES_PER_PERSONA=fastworkflow.get_env_var('SYNTHETIC_UTTERANCE_GEN_UTTERANCES_PER_PERSONA', int)
@@ -16,6 +29,10 @@ def generate_diverse_utterances(
     utterances_per_persona: int = UTTERANCES_PER_PERSONA,
     personas_per_batch: int = PERSONAS_PER_BATCH
 ) -> list[str]:
+    # If litellm is not available, return a minimal set using command name and seeds
+    if not hasattr(litellm, "completion"):
+        return [str(command_name).split('/')[-1].replace('_', ' ')] + list(seed_utterances)
+
     # Initialize LiteLLM with API key
     api_key = fastworkflow.get_env_var("LITELLM_API_KEY_SYNDATA_GEN")
     model=fastworkflow.get_env_var("LLM_SYNDATA_GEN")

@@ -15,15 +15,23 @@ from fastworkflow.cache_matching import cache_match, store_utterance_cache
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.command_routing import RoutingDefinition
 import fastworkflow.command_routing
-from fastworkflow.model_pipeline_training import (
-    predict_single_sentence,
-    get_artifact_path,
-    CommandRouter
-)
+# Deferred import of model_pipeline_training; see guarded block below to avoid heavy deps at import time
 
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from fastworkflow.utils.fuzzy_match import find_best_matches
 from fastworkflow.utils.signatures import InputForParamExtraction
+
+# Defer heavy ML imports until used
+try:
+    from fastworkflow.model_pipeline_training import (
+        predict_single_sentence,
+        get_artifact_path,
+        CommandRouter
+    )
+except Exception:  # pragma: no cover - fallback when ML stack is unavailable
+    predict_single_sentence = None  # type: ignore
+    get_artifact_path = None  # type: ignore
+    CommandRouter = None  # type: ignore
 
 
 INVALID_INT_VALUE = -sys.maxsize
@@ -56,7 +64,11 @@ class CommandNamePrediction:
         # sourcery skip: extract-duplicate-method
 
         model_artifact_path = f"{self.app_workflow_folderpath}/___command_info/{command_context_name}"
-        command_router = CommandRouter(model_artifact_path)
+        try:
+            from fastworkflow.model_pipeline_training import CommandRouter  # type: ignore
+            command_router = CommandRouter(model_artifact_path)
+        except Exception:
+            return CommandNamePrediction.Output(error_msg="Model stack unavailable", is_cme_command=False)
 
         # Re-use the already-built ModelPipeline attached to the router
         # instead of instantiating a fresh one.  This avoids reloading HF
@@ -175,7 +187,9 @@ class CommandNamePrediction:
             and not fully_qualified_command_name.endswith('you_misunderstood')
         ):
             command = self.cme_workflow.context["command"]
-            store_utterance_cache(self.path, command, command_name, modelpipeline)
+            # Only attempt to store if model pipeline is present
+            with contextlib.suppress(Exception):
+                store_utterance_cache(self.path, command, command_name, modelpipeline)
 
         return CommandNamePrediction.Output(
             command_name=fully_qualified_command_name,

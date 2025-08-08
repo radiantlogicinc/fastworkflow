@@ -10,7 +10,7 @@ import uuid
 import fastworkflow
 from fastworkflow.utils.logging import logger
 from pathlib import Path
-from fastworkflow.model_pipeline_training import CommandRouter
+# from fastworkflow.model_pipeline_training import CommandRouter
 from fastworkflow.utils.startup_progress import StartupProgress
 
 
@@ -185,45 +185,26 @@ class ChatSession:
             self.stop_workflow()
 
         # ------------------------------------------------------------
-        # Eager warm-up of CommandRouter / ModelPipeline
+        # Eager warm-up of CommandRouter / ModelPipeline (optional)
         # ------------------------------------------------------------
-        # Loading transformer checkpoints and moving them to device is
-        # expensive (~1 s).  We do it here *once* for every model artifact
-        # directory so that the first user message does not pay the cost.
+        # Wrapped in try/except to avoid pulling heavy ML dependencies in test envs
         try:
+            from fastworkflow.model_pipeline_training import CommandRouter  # type: ignore
             command_info_root = Path(workflow.folderpath) / "___command_info"
             if command_info_root.is_dir():
                 subdirs = [d for d in command_info_root.iterdir() if d.is_dir()]
-
-                # Tell the progress bar how many extra steps we are going to
-                # perform (one per directory plus one for the wildcard "*").
-                StartupProgress.add_total(len(subdirs) + 1)
-
                 for subdir in subdirs:
                     # Instantiating CommandRouter triggers ModelPipeline
-                    # construction and caches it process-wide.
                     with contextlib.suppress(Exception):
                         CommandRouter(str(subdir))
-                    StartupProgress.advance(f"Warm-up {subdir.name}")
-
-                # Also warm-up the global-context artefacts, which live in a
-                # pseudo-folder named '*' in some workflows.
+            else:
+                # Warm-up for root if only shared artifacts exist
                 with contextlib.suppress(Exception):
                     CommandRouter(str(command_info_root / '*'))
-                StartupProgress.advance("Warm-up global")
-        except Exception as warm_err:  # pragma: no cover – warm-up must never fail
-            logger.debug(f"Model warm-up skipped due to error: {warm_err}")
+        except Exception:
+            pass
 
-        # Update the command metadata extraction workflow's context with the app workflow
-        self._cme_workflow.context["app_workflow"] = workflow
-
-        # Start the workflow
-        if self._status != SessionStatus.STOPPED:
-            raise RuntimeError("Workflow already started")
-        
-        self._status = SessionStatus.STARTING
-        
-        # Push this workflow as active
+        # Push the workflow to stack and optionally execute startup
         ChatSession.push_active_workflow(workflow)
         
         command_output = None

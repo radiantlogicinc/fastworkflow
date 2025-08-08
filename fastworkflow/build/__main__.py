@@ -338,6 +338,12 @@ def main():  # sourcery skip: extract-method
             commands_dir = os.path.join(args.workflow_folderpath, "_commands")
             print(f"Successfully generated FastWorkflow commands in {commands_dir}")
         run_documentation(args)
+        # Optional DSPy-powered post-processing phase
+        try:
+            from fastworkflow.build.genai_postprocessor import run_genai_postprocessor
+            run_genai_postprocessor(args)
+        except Exception as _exc:  # defensive: never fail build due to post-processor
+            logger.warning(f"Skipping GenAI post-processing: {_exc}")
     except Exception as e:
         print(f"Error: {e}")
         import traceback
@@ -361,6 +367,12 @@ def build_main(args):
             commands_dir = os.path.join(args.workflow_folderpath, "_commands")
             print(f"Successfully generated FastWorkflow commands in {commands_dir}")
         run_documentation(args)
+        # Optional DSPy-powered post-processing phase
+        try:
+            from fastworkflow.build.genai_postprocessor import run_genai_postprocessor
+            run_genai_postprocessor(args)
+        except Exception as _exc:  # defensive: never fail build due to post-processor
+            logger.warning(f"Skipping GenAI post-processing: {_exc}")
     except Exception as e:
         print(f"Error: {e}")
         import traceback
