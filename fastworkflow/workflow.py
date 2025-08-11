@@ -2,8 +2,7 @@ import os
 import shutil
 import sys
 from functools import wraps
-from typing import Any, Optional
-from pydantic import BaseModel
+from typing import Optional
 
 from speedict import Rdict
 
