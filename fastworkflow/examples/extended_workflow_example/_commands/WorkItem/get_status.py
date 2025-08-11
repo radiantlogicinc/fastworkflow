@@ -7,6 +7,7 @@ from fastworkflow.examples.simple_workflow_template._commands.WorkItem.get_statu
     Signature as BaseSig,
     ResponseGenerator as BaseRG
 )
+from fastworkflow.examples.simple_workflow_template.application.workitem import WorkItem
 
 
 class Signature(BaseSig):
@@ -35,7 +36,7 @@ class ResponseGenerator:
         base_output = base_generator._process_command(workflow)
         
         # Add enhanced analytics
-        workitem = workflow.command_context_for_response_generation
+        workitem: WorkItem = workflow.command_context_for_response_generation
         analytics = self._generate_analytics(workitem)
         
         return Signature.Output(
@@ -44,11 +45,11 @@ class ResponseGenerator:
             timestamp=datetime.datetime.now().isoformat()
         )
     
-    def _generate_analytics(self, workitem) -> dict:
+    def _generate_analytics(self, workitem: WorkItem) -> dict:
         """Generate additional analytics about the workitem."""
         analytics = {
             "completion_percentage": self._calculate_completion_percentage(workitem),
-            "child_count": len(getattr(workitem, 'child_workitems', [])),
+            "child_count": workitem.get_child_count(),
             "depth_level": self._calculate_depth(workitem),
             "workitem_type": workitem.type,
         }
@@ -63,25 +64,22 @@ class ResponseGenerator:
         
         return analytics
     
-    def _calculate_completion_percentage(self, workitem) -> float:
+    def _calculate_completion_percentage(self, workitem: WorkItem) -> float:
         """Calculate completion percentage based on status and children."""
-        if workitem.status == "complete":
+        if workitem.is_complete:
             return 100.0
-        elif workitem.status == "in_progress":
-            # If has children, calculate based on children completion
-            if hasattr(workitem, 'child_workitems') and workitem.child_workitems:
-                completed_children = len([child for child in workitem.child_workitems if child.status == "complete"])
-                return (completed_children / len(workitem.child_workitems)) * 100.0
-            else:
-                return 50.0  # Assume 50% for in-progress items without children
+        
+        if child_count := workitem.get_child_count():
+            completed_children = workitem.get_child_count(is_complete = True)
+            return (completed_children / child_count) * 100.0
         else:
-            return 0.0
+            return 50.0  # Assume 50% for in-progress items without children
     
-    def _calculate_depth(self, workitem) -> int:
+    def _calculate_depth(self, workitem: WorkItem) -> int:
         """Calculate the depth of the workitem in the hierarchy."""
         depth = 0
         current = workitem
-        while hasattr(current, 'parent') and current.parent:
+        while current.parent:
             depth += 1
             current = current.parent
         return depth
