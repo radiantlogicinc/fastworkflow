@@ -1,20 +1,24 @@
 import sys
 import dspy
 import os
+from contextlib import suppress
 from typing import Optional, Tuple, Union, Dict, Any, Type, List, get_args
 from enum import Enum
-from pydantic import BaseModel, ConfigDict
-from pydantic_core import PydanticUndefined
-import fastworkflow
-
 from datetime import date
 import re
 from difflib import get_close_matches
-from fastworkflow import ModuleType
 import json
+
+from pydantic import BaseModel, ConfigDict
+from pydantic_core import PydanticUndefined
+
+import fastworkflow
+from fastworkflow import ModuleType
 from fastworkflow.utils.logging import logger
 from fastworkflow.model_pipeline_training import get_route_layer_filepath_model
 from fastworkflow.utils.fuzzy_match import find_best_matches
+from fastworkflow.command_directory import CommandDirectory
+from fastworkflow.utils.command_dependency_graph import get_dependency_suggestions
 
 MISSING_INFORMATION_ERRMSG = None
 INVALID_INFORMATION_ERRMSG = None
@@ -415,6 +419,22 @@ Today's date is {today}.
 
         if invalid_fields:
             message += f"{INVALID_INFORMATION_ERRMSG}" + ", ".join(invalid_fields) + "\n"
+
+        with suppress(Exception):
+            graph_path = os.path.join(CommandDirectory.get_commandinfo_folderpath(app_workflow.folderpath), "parameter_dependency_graph.json")
+            suggestions_texts: list[str] = []
+            for field in missing_fields:
+                plans = get_dependency_suggestions(graph_path, subject_command_name, field, min_weight=0.7, max_depth=3)
+                if plans:
+                    # Format a concise plan: main command and any immediate sub-steps
+                    top = plans[0]
+                    def format_plan(p):
+                        if not p.get('sub_plans'):
+                            return p['command']
+                        return p['command'] + " -> " + " -> ".join(sp['command'] for sp in p['sub_plans'])
+                    suggestions_texts.append(f"To get '{field}', try: {format_plan(top)}")
+            if suggestions_texts:
+                message += "\n" + "\n".join(suggestions_texts) + "\n"
 
         for field, suggestions in all_suggestions.items():
             if suggestions:

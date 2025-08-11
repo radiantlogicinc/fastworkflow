@@ -15,6 +15,7 @@ from fastworkflow.build.context_folder_generator import ContextFolderGenerator
 from fastworkflow.build.command_stub_generator import CommandStubGenerator
 from fastworkflow.build.navigator_stub_generator import NavigatorStubGenerator
 from fastworkflow.utils.logging import logger
+from fastworkflow.utils.command_dependency_graph import generate_dependency_graph
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -246,15 +247,15 @@ def generate_startup_command(workflow_folderpath: str, app_dir: str, overwrite: 
     """
     # Determine file path
     startup_path = os.path.join(workflow_folderpath, "_commands", "startup.py")
-    
+
     # Check if file already exists and overwrite is False
     if os.path.exists(startup_path) and not overwrite:
         logger.debug(f"Startup file already exists at {startup_path}")
         return True
-    
+
     # Get the name of the application module (last part of source_dir)
     app_module = os.path.basename(os.path.normpath(app_dir))
-    
+
     # Find potential manager classes that could serve as root context
     manager_classes = []
     py_files = glob.glob(os.path.join(app_dir, "**", "*.py"), recursive=True)
@@ -264,11 +265,11 @@ def generate_startup_command(workflow_folderpath: str, app_dir: str, overwrite: 
             rel_path = os.path.relpath(py_file, app_dir)
             module_path = os.path.splitext(rel_path)[0].replace(os.path.sep, ".")
             manager_classes.append((module_path, os.path.basename(os.path.splitext(py_file)[0])))
-    
+
     # Default manager class if none found
     manager_import = "# TODO: Replace with your application's root context class"
     manager_class = "YourRootContextClass"
-    
+
     # Use the first manager class found, if any
     if manager_classes:
         module_path, module_name = manager_classes[0]
@@ -280,12 +281,12 @@ def generate_startup_command(workflow_folderpath: str, app_dir: str, overwrite: 
                     if isinstance(node, ast.ClassDef) and "manager" in node.name.lower():
                         manager_class = node.name
                         break
-        except:
+        except Exception:
             # If parsing fails, use a default name based on the module
             manager_class = f"{module_name.capitalize()}Manager"
-        
+
         manager_import = f"from ..{app_module}.{module_path} import {manager_class}"
-    
+
     # Generate startup.py content
     startup_content = f'''import fastworkflow
 from fastworkflow import CommandOutput, CommandResponse
@@ -314,7 +315,7 @@ class ResponseGenerator:
             ]
         )
 '''
-    
+
     # Write the file
     try:
         with open(startup_path, 'w') as f:
@@ -338,6 +339,10 @@ def main():  # sourcery skip: extract-method
             commands_dir = os.path.join(args.workflow_folderpath, "_commands")
             print(f"Successfully generated FastWorkflow commands in {commands_dir}")
         run_documentation(args)
+
+        # Generate parameter dependency graph artifact
+        graph_path = generate_dependency_graph(args.workflow_folderpath)
+        print(f"Generated parameter dependency graph at {graph_path}")
     except Exception as e:
         print(f"Error: {e}")
         import traceback
@@ -345,7 +350,7 @@ def main():  # sourcery skip: extract-method
         sys.exit(1)
 
 # Add this function to be imported by cli.py
-def build_main(args):
+def build_main(args):  # sourcery skip: extract-method
     """Entry point for the CLI build command."""
     print("Building fastworkflow...\n")
 
@@ -361,6 +366,10 @@ def build_main(args):
             commands_dir = os.path.join(args.workflow_folderpath, "_commands")
             print(f"Successfully generated FastWorkflow commands in {commands_dir}")
         run_documentation(args)
+
+        # Generate parameter dependency graph artifact
+        graph_path = generate_dependency_graph(args.workflow_folderpath)
+        print(f"Generated parameter dependency graph at {graph_path}")
     except Exception as e:
         print(f"Error: {e}")
         import traceback
