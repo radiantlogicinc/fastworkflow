@@ -4,6 +4,8 @@ import sys
 import re
 import glob
 import ast
+from typing import Optional, List, Dict, Any
+from pathlib import Path
 
 import fastworkflow
 from fastworkflow.build.command_file_generator import validate_python_syntax_in_dir, validate_command_file_components_in_dir, verify_commands_against_context_model, validate_command_imports
@@ -16,6 +18,7 @@ from fastworkflow.build.command_stub_generator import CommandStubGenerator
 from fastworkflow.build.navigator_stub_generator import NavigatorStubGenerator
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils.command_dependency_graph import generate_dependency_graph
+from fastworkflow.build.genai_postprocessor import run_genai_postprocessor
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -137,6 +140,10 @@ def run_command_generation(args):
     # Generate command files
     real_generate_command_files(all_classes, commands_dir, args.app_dir, overwrite=args.overwrite, functions=all_functions)
 
+    # Run GenAI post-processing to enhance command files (always enabled)
+    logger.info("Running GenAI post-processing...")
+    run_genai_postprocessor(args, all_classes, all_functions)
+    
     return all_classes, context_model_data
 
 

@@ -52,10 +52,10 @@ DSPy programs will be defined as signatures (prompt templates) and modules (chai
 
       description: str = dspy.OutputField(desc=\"Clear, concise description of the field.\")
       examples: List[str] = dspy.OutputField(desc=\"2-3 example values.\")
-      constraints: str = dspy.OutputField(desc=\"Any patterns or constraints (e.g., 'must be positive integer').\")
+      pattern: str = dspy.OutputField(desc=\"Regular expression pattern for validation (e.g., '^\\d+$' for digits only).\")
   ```
 - **Module**: ChainOfThought(FieldMetadata) – Use reasoning to generate metadata.
-- **Usage**: For each field in Input/Output, call the module and update Field(description=..., examples=..., json_schema_extra={\"examples\": examples}).
+- **Usage**: For each field in Input/Output, call the module and update Field(description=..., examples=..., pattern=...).
 
 #### 2. Utterance Generator
 - **Purpose**: Generate a minimal set of natural utterances based on input parameters, covering every combination of parameters (including none), with varied parameter values across utterances.
