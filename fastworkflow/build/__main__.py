@@ -4,6 +4,8 @@ import sys
 import re
 import glob
 import ast
+from typing import Optional, List, Dict, Any
+from pathlib import Path
 
 import fastworkflow
 from fastworkflow.build.command_file_generator import validate_python_syntax_in_dir, validate_command_file_components_in_dir, verify_commands_against_context_model, validate_command_imports
@@ -16,6 +18,7 @@ from fastworkflow.build.command_stub_generator import CommandStubGenerator
 from fastworkflow.build.navigator_stub_generator import NavigatorStubGenerator
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils.command_dependency_graph import generate_dependency_graph
+from fastworkflow.build.genai_postprocessor import run_genai_postprocessor
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -26,6 +29,9 @@ def parse_args():
     parser.add_argument('--overwrite', action='store_true', help='Overwrite files in output directory if present')
     parser.add_argument('--stub-commands', help='Comma-separated list of command names to generate stubs for')
     parser.add_argument('--no-startup', action='store_true', help='Skip generating the startup.py file')
+    parser.add_argument('--no-genai', action='store_true', help='Disable GenAI post-processing of command files')
+    parser.add_argument('--genai-model', type=str, default=None, help='Model to use for GenAI post-processing (e.g., gpt-4, gpt-3.5-turbo). Defaults to gpt-4')
+    parser.add_argument('--genai-api-key', type=str, default=None, help='API key for GenAI model provider. Can also be set via OPENAI_API_KEY environment variable')
     return parser.parse_args()
 
 def validate_directories(args):
@@ -137,6 +143,11 @@ def run_command_generation(args):
     # Generate command files
     real_generate_command_files(all_classes, commands_dir, args.app_dir, overwrite=args.overwrite, functions=all_functions)
 
+    # Run GenAI post-processing to enhance command files
+    if not getattr(args, 'no_genai', False):
+        logger.info("Running GenAI post-processing...")
+        run_genai_postprocessor(args, all_classes, all_functions)
+    
     return all_classes, context_model_data
 
 
