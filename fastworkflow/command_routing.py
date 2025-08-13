@@ -363,6 +363,9 @@ class RoutingRegistry:
         """Clears the registry. Useful for testing."""
         cls._definitions.clear()
         
+        # Clear the global command class cache to ensure fresh command loading
+        RoutingDefinition._GLOBAL_COMMAND_CLASS_CACHE.clear()
+        
         # Also clear the CommandDirectory cache to ensure fresh data on reload
         import fastworkflow.command_directory
         if hasattr(fastworkflow.command_directory.get_cached_command_directory, 'cache_clear'):

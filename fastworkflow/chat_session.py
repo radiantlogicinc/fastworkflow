@@ -100,9 +100,13 @@ class ChatSession:
         
         logger.debug("Workflow stopped and workflow stack cleared")
 
-    def __init__(self):
+    def __init__(self, run_as_agent: bool = False):
         """
         Initialize a chat session.
+        
+        Args:
+            run_as_agent: If True, use agent mode (DSPy-based tool selection).
+                         If False (default), use traditional command execution.
         
         A chat session can run multiple workflows that share the same message queues.
         Use start_workflow() to start a specific workflow within this session.
@@ -119,6 +123,10 @@ class ChatSession:
         
         # Initialize workflow-related attributes that will be set in start_workflow
         self._current_workflow = None
+        
+        # Initialize agent-related attributes
+        self._run_as_agent = run_as_agent
+        self._workflow_tool_agent = None            
         
         # Create the command metadata extraction workflow with a unique ID
         self._cme_workflow = fastworkflow.Workflow.create(
@@ -238,10 +246,28 @@ class ChatSession:
 
         return command_output
 
+    def _initialize_workflow_tool_agent(self):
+        """
+        Initialize the workflow tool agent for agent mode.
+        This agent handles individual tool selection and execution.
+        """
+        if not self._workflow_tool_agent:
+            # Initialize the workflow tool agent
+            from fastworkflow.mcp_server import FastWorkflowMCPServer
+            from fastworkflow.agent_integration import initialize_workflow_tool_agent
+            
+            mcp_server = FastWorkflowMCPServer(self)
+            self._workflow_tool_agent = initialize_workflow_tool_agent(mcp_server)
+    
     @property
     def cme_workflow(self) -> fastworkflow.Workflow:
         """Get the command metadata extraction workflow."""
         return self._cme_workflow
+    
+    @property
+    def run_as_agent(self) -> bool:
+        """Check if running in agent mode."""
+        return self._run_as_agent
 
     @property
     def user_message_queue(self) -> Queue:
@@ -285,8 +311,11 @@ class ChatSession:
                 try:
                     message = self.user_message_queue.get()
                     
-                    # NEW: Route based on message type
-                    if self._is_mcp_tool_call(message):
+                    # Route based on mode and message type
+                    if self._run_as_agent:
+                        # In agent mode, use workflow tool agent for processing
+                        last_output = self._process_agent_message(message)
+                    elif self._is_mcp_tool_call(message):
                         last_output = self._process_mcp_tool_call(message)
                     else:
                         last_output = self._process_message(message)
@@ -362,6 +391,35 @@ class ChatSession:
         
         command_output = fastworkflow.CommandOutput(command_responses=[command_response])
         command_output._mcp_source = mcp_result  # Mark for special formatting
+        return command_output
+    
+    def _process_agent_message(self, message: str) -> fastworkflow.CommandOutput:
+        """Process a message in agent mode using workflow tool agent"""
+        # The agent processes the user's message and may make multiple tool calls
+        # to the workflow internally (directly via CommandExecutor)
+        agent_result = self._workflow_tool_agent(tool_request=message)
+        
+        # Extract the final result from the agent
+        result_text = (
+            agent_result.tool_result
+            if hasattr(agent_result, 'tool_result')
+            else str(agent_result)
+        )
+        
+        # Create CommandOutput with the agent's response
+        command_output = fastworkflow.CommandOutput(
+            command_responses=[fastworkflow.CommandResponse(response=result_text)]
+        )
+        
+        # Put output in queue (following same pattern as _process_message)
+        if (not command_output.success or self._keep_alive) and \
+            self.command_output_queue:
+            self.command_output_queue.put(command_output)
+        
+        # Persist workflow state changes
+        if workflow := ChatSession.get_active_workflow():
+            workflow.flush()
+        
         return command_output
     
     def profile_invoke_command(self, message: str):

@@ -15,13 +15,14 @@ import uuid
 import fastworkflow
 from fastworkflow.mcp_server import FastWorkflowMCPServer, create_mcp_server_for_workflow
 from fastworkflow.command_executor import CommandExecutor
-from fastworkflow.command_routing import RoutingDefinition
+from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
 
 
 @pytest.fixture(scope="module")
 def sample_workflow_path():
     """Get the path to the sample workflow example."""
-    return os.path.join(os.path.dirname(__file__), "..", "fastworkflow", "examples", "retail_workflow")
+    from pathlib import Path
+    return str(Path(__file__).parent.parent.joinpath("fastworkflow", "examples", "retail_workflow").resolve())
 
 
 @pytest.fixture(scope="module")
@@ -35,8 +36,12 @@ def initialized_fastworkflow():
 @pytest.fixture
 def chat_session(sample_workflow_path, initialized_fastworkflow, request):
     """Create a chat session for the sample workflow."""
-    # Build command routing definition once so that command metadata is ready
-    RoutingDefinition.build(sample_workflow_path)
+    # Clear all caches before initialization to ensure clean state
+    fastworkflow.RoutingRegistry.clear_registry()
+    
+    # Force rebuild of routing definition to avoid stale persisted JSON
+    # Use get_definition with load_cached=False to ensure fresh build
+    fastworkflow.RoutingRegistry.get_definition(sample_workflow_path, load_cached=False)
     chat_session = fastworkflow.ChatSession()
     chat_session.start_workflow(
         sample_workflow_path,
@@ -48,6 +53,8 @@ def chat_session(sample_workflow_path, initialized_fastworkflow, request):
         chat_session._keep_alive = False
         with suppress(Exception):
             chat_session.stop_workflow()
+        # Clear caches after test completes
+        fastworkflow.RoutingRegistry.clear_registry()
 
     request.addfinalizer(_teardown)
     return chat_session

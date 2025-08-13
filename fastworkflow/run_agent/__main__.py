@@ -182,8 +182,8 @@ def main():
         with open(args.context_file_path, 'r') as file:
             context_dict = json.load(file)
 
-    # Create the chat session
-    fastworkflow.chat_session = fastworkflow.ChatSession()
+    # Create the chat session in agent mode
+    fastworkflow.chat_session = fastworkflow.ChatSession(run_as_agent=True)
     
     # Start the workflow within the chat session
     fastworkflow.chat_session.start_workflow(

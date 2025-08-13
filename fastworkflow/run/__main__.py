@@ -161,8 +161,9 @@ def run_main(args):
         with open(args.context_file_path, 'r') as file:
             context_dict = json.load(file)
 
-    # Create the chat session
-    fastworkflow.chat_session = fastworkflow.ChatSession()
+    # Create the chat session with agent mode if specified
+    run_as_agent = args.run_as_agent if hasattr(args, 'run_as_agent') else False
+    fastworkflow.chat_session = fastworkflow.ChatSession(run_as_agent=run_as_agent)
     
     # Start the workflow within the chat session
     fastworkflow.chat_session.start_workflow(
@@ -240,6 +241,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--project_folderpath", help="Optional path to project folder containing application code", default=None
+    )
+    parser.add_argument(
+        "--run_as_agent", 
+        help="Run in agent mode (uses DSPy for tool selection)", 
+        action="store_true",
+        default=False
     )
     args = parser.parse_args()
     run_main(args)

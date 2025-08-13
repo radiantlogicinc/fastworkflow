@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import uuid
 from contextlib import suppress
+from pathlib import Path
 from dotenv import dotenv_values
 import pytest
 
@@ -14,20 +15,23 @@ from fastworkflow.chat_session import ChatSession
 @pytest.fixture(scope="module")
 def retail_workflow_path() -> str:
     """Absolute path to the retail workflow example used by the integration tests."""
-    return os.path.join("fastworkflow", "examples", "retail_workflow")
+    return str(Path(__file__).parent.parent.joinpath("fastworkflow", "examples", "retail_workflow").resolve())
 
 
 @pytest.fixture(scope="function")
 def chat_session(retail_workflow_path: str, request):
     """Spin up an in-memory chat session for each test so state cannot leak."""
+    # Clear ALL caches BEFORE any initialization to ensure clean state
+    fastworkflow.RoutingRegistry.clear_registry()
+    
     env_vars = {
         **dotenv_values("./env/.env"),
         **dotenv_values("./passwords/.env")
     }
     fastworkflow.init(env_vars)
     fastworkflow.CommandContextModel.load(retail_workflow_path)
-    fastworkflow.RoutingRegistry.clear_registry()
-    fastworkflow.RoutingRegistry.get_definition(retail_workflow_path)
+    # Force rebuild of routing definition to avoid stale persisted JSON
+    fastworkflow.RoutingRegistry.get_definition(retail_workflow_path, load_cached=False)
 
     chat_session = ChatSession()
     chat_session.start_workflow(
@@ -41,6 +45,8 @@ def chat_session(retail_workflow_path: str, request):
         chat_session._keep_alive = False
         with suppress(Exception):
             chat_session.stop_workflow()
+        # Clear caches after test completes
+        fastworkflow.RoutingRegistry.clear_registry()
 
     request.addfinalizer(_teardown)
     return chat_session

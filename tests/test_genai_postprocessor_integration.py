@@ -352,7 +352,7 @@ class TestPostProcessorCLIIntegration(unittest.TestCase):
             self.assertFalse(hasattr(args, 'genai_model'))
             self.assertFalse(hasattr(args, 'genai_api_key'))
     
-    @patch('fastworkflow.build.genai_postprocessor.run_genai_postprocessor')
+    @patch('fastworkflow.build.__main__.run_genai_postprocessor')
     def test_build_flow_integration(self, mock_run_postprocessor):
         """Test that post-processor is called in the build flow."""
         from fastworkflow.build.__main__ import run_command_generation

@@ -68,9 +68,13 @@ class Workflow:
                 workflow.context = workflow_context
             return workflow
 
+        # Resolve the workflow path to ensure consistent cache keys
+        from pathlib import Path
+        resolved_workflow_path = str(Path(workflow_folderpath).resolve())
+        
         workflow_snapshot = {
             "workflow_id": workflow_id,
-            "workflow_folderpath": workflow_folderpath,
+            "workflow_folderpath": resolved_workflow_path,
             "workflow_context": workflow_context or {},
             "parent_workflow_id": parent_workflow_id,
             "is_complete": False
@@ -147,8 +151,10 @@ class Workflow:
         if create_key is not Workflow.__create_key:
             raise ValueError("Workflow objects must be created using Workflow.create")
 
+        from pathlib import Path
         self._id = workflow_snapshot["workflow_id"]
-        self._folderpath = workflow_snapshot["workflow_folderpath"]
+        # Always resolve the workflow path to ensure consistent cache keys
+        self._folderpath = str(Path(workflow_snapshot["workflow_folderpath"]).resolve())
         self._parent_id = workflow_snapshot.get("parent_workflow_id")
         self._is_complete = workflow_snapshot.get("is_complete", False)
         self._context = workflow_snapshot.get("workflow_context", {}) 

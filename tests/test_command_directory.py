@@ -5,8 +5,9 @@ from fastworkflow.command_directory import CommandDirectory, CommandMetadata
 @pytest.fixture(scope="module")
 def sample_workflow_path():
     """Get the path to the sample workflow example."""
+    from pathlib import Path
     # Construct an absolute path to the sample_workflow directory
-    return os.path.join("fastworkflow", "examples", "retail_workflow")
+    return str(Path(__file__).parent.parent.joinpath("fastworkflow", "examples", "retail_workflow").resolve())
 
 class TestCommandDirectory:
     def test_load_command_directory(self, sample_workflow_path):
