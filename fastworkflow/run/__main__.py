@@ -21,6 +21,8 @@ def run_main(args):
     from rich.console import Group
     from rich.live import Live
     from rich.spinner import Spinner
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.patch_stdout import patch_stdout
 
     import fastworkflow
     from fastworkflow.utils.logging import logger
@@ -32,6 +34,7 @@ def run_main(args):
     # Instantiate a global console for consistent styling
     global console
     console = Console()
+    prompt_session = PromptSession("User > ")
 
     def _build_artifact_table(artifacts: dict[str, str]) -> Table:
         """Return a rich.Table representation for artifact key-value pairs."""
@@ -184,7 +187,8 @@ def run_main(args):
         ):
             print_command_output(command_output)
     while not fastworkflow.chat_session.workflow_is_complete or args.keep_alive:
-        user_command = console.input("[bold yellow]User > [/bold yellow]")
+        with patch_stdout():
+            user_command = prompt_session.prompt()
         if user_command == "exit":
             break
 

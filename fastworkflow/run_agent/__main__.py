@@ -38,6 +38,8 @@ def main():
     from rich.table import Table
     from rich.text import Text
     from rich.console import Group
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.patch_stdout import patch_stdout
 
     import fastworkflow
     from fastworkflow.command_executor import CommandExecutor
@@ -49,6 +51,7 @@ def main():
     # Instantiate a global console for consistent styling
     global console
     console = Console()
+    prompt_session = PromptSession("User > ")
 
     def _build_artifact_table(artifacts: dict[str, str]) -> Table:
         """Return a rich.Table representation for artifact key-value pairs."""
@@ -222,7 +225,8 @@ def main():
             console.print("[blue]Workflow complete and keep_alive is false. Exiting...[/blue]")
             break
 
-        user_input_str = console.input("[bold yellow]User > [/bold yellow]")
+        with patch_stdout():
+            user_input_str = prompt_session.prompt()
         if user_input_str.lower() == "exit":
             console.print("[blue]User requested exit. Exiting...[/blue]")
             break
