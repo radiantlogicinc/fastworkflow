@@ -26,7 +26,14 @@ class Signature:
         model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
 
     class Output(BaseModel):
-        status: str = Field(description="Detailed information about the order.")
+        order_details: str = Field(description=(
+            "Detailed information about the order such as "
+            "shipping address, "
+            "items ordered with details including name, product and item id, price and options, "
+            "fulfillments with details including tracking id and item ids, "
+            "order status, and"
+            "payment history with details including transaction type, amount and payment method id"
+        ))
 
     plain_utterances: List[str] = [
         "Can you tell me what's going on with my order #W1234567?",
@@ -65,5 +72,5 @@ class ResponseGenerator:
 
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         data = load_data()
-        result = GetOrderDetails.invoke(data=data, order_id=input.order_id)
-        return Signature.Output(status=result) 
+        order_details = GetOrderDetails.invoke(data=data, order_id=input.order_id)
+        return Signature.Output(order_details=order_details) 

@@ -22,7 +22,11 @@ class Signature:
         model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
 
     class Output(BaseModel):
-        status: str = Field(description="User details payload.")
+        user_details: str = Field(description=(
+            "Detailed user information such as "
+            "first and last name, address, email, payment methods and "
+            "the list of order id's"
+        ))
 
     plain_utterances: List[str] = [
         "Can you pull up my account info?",
@@ -54,5 +58,5 @@ class ResponseGenerator:
 
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         data = load_data()
-        result = GetUserDetails.invoke(data=data, user_id=input.user_id)
-        return Signature.Output(status=result) 
+        user_details = GetUserDetails.invoke(data=data, user_id=input.user_id)
+        return Signature.Output(user_details=user_details) 

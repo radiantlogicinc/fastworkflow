@@ -28,7 +28,7 @@ class Signature:
         model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
 
     class Output(BaseModel):
-        status: str = Field(description="User identifier returned by lookup.")
+        user_id: str = Field(description="User identifier returned by lookup.")
 
     plain_utterances: List[str] = [
         "Can you tell me the ID linked to john.doe@example.com?",
@@ -67,5 +67,5 @@ class ResponseGenerator:
 
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         data = load_data()
-        result = FindUserIdByEmail.invoke(data=data, email=input.email)
-        return Signature.Output(status=result) 
+        user_id = FindUserIdByEmail.invoke(data=data, email=input.email)
+        return Signature.Output(user_id=user_id) 

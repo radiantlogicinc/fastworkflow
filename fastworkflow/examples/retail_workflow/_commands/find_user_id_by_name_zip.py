@@ -35,7 +35,7 @@ class Signature:
         model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
 
     class Output(BaseModel):
-        status: str = Field(description="User identifier returned by lookup.")
+        user_id: str = Field(description="User identifier returned by lookup.")
 
     # ------------------------------------------------------------------
     # Utterances
@@ -78,10 +78,10 @@ class ResponseGenerator:
 
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         data = load_data()
-        result = FindUserIdByNameZip.invoke(
+        user_id = FindUserIdByNameZip.invoke(
             data=data,
             first_name=input.first_name,
             last_name=input.last_name,
             zip=input.zip,
         )
-        return Signature.Output(status=result) 
+        return Signature.Output(user_id=user_id) 

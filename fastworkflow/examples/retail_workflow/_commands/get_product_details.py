@@ -22,7 +22,10 @@ class Signature:
         model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
 
     class Output(BaseModel):
-        status: str = Field(description="Detailed product information.")
+        product_details: str = Field(description=(
+            "Detailed product information of all product variants "
+            "including item id, options, availability and price"
+        ))
 
     plain_utterances: List[str] = [
         "Can you give me more information about this product?",
@@ -56,5 +59,5 @@ class ResponseGenerator:
 
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
         data = load_data()
-        result = GetProductDetails.invoke(data=data, product_id=input.product_id)
-        return Signature.Output(status=result) 
+        product_details = GetProductDetails.invoke(data=data, product_id=input.product_id)
+        return Signature.Output(product_details=product_details) 
