@@ -421,7 +421,7 @@ Today's date is {today}.
             message += f"{INVALID_INFORMATION_ERRMSG}" + ", ".join(invalid_fields) + "\n"
 
         with suppress(Exception):
-            graph_path = os.path.join(CommandDirectory.get_commandinfo_folderpath(app_workflow.folderpath), "parameter_dependency_graph.json")
+            graph_path = os.path.join(app_workflow.folderpath, "command_dependency_graph.json")
             suggestions_texts: list[str] = []
             for field in missing_fields:
                 plans = get_dependency_suggestions(graph_path, subject_command_name, field, min_weight=0.7, max_depth=3)

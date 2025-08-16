@@ -44,8 +44,8 @@ def create_function_command_file(function_info: FunctionInfo, output_dir: str, f
         input_field_lines = []
         for p in function_info.parameters:
             param_type = p.get('annotation') or 'Any'
-            escaped_param_desc = (p.get('docstring') or f'Parameter {p["name"]}').replace('"', '\\"')
-            input_field_lines.append(f'        {p["name"]}: {param_type} = Field(description="{escaped_param_desc}")')
+            # No Field() - let GenAI postprocessor add it
+            input_field_lines.append(f'        {p["name"]}: {param_type}')
         input_fields = "\n".join(input_field_lines)
     else:
         input_fields = "        pass"
@@ -54,11 +54,13 @@ def create_function_command_file(function_info: FunctionInfo, output_dir: str, f
     # Process return type for output model
     return_type = function_info.return_annotation or 'Any'
     if return_type.lower() == 'none' or not return_type:
-        output_fields = '        success: bool = Field(default=True, description="Indicates successful execution.")'
+        # No Field() - let GenAI postprocessor add it
+        output_fields = '        success: bool'
         output_return = "success=True"
         response_format = "success={output.success}"
     else:
-        output_fields = f'        result: {return_type} = Field(description="Result of the function call")'
+        # No Field() - let GenAI postprocessor add it
+        output_fields = f'        result: {return_type}'
         output_return = "result=result_val"
         response_format = "result={output.result}"
 
@@ -158,7 +160,8 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
     if is_property_getter and not is_get_all_properties: # Kept for potential individual getters, though get_properties is preferred
         input_fields = "        pass"
         prop_type = method_info.return_annotation or 'Any'
-        output_fields = f'        value: {prop_type} = Field(description="Value of {method_info.name[4:]}")' # Assuming name is Get<PropName>
+        # No Field() - let GenAI postprocessor add it
+        output_fields = f'        value: {prop_type}'
         # For individual getter, process_logic retrieves the specific property
         # Ensure method_info.name for a getter is just the property name, or adjust access.
         # If method_info.name is like "Description", property name is method_info.name.lower()
@@ -174,12 +177,14 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
         prop_name = method_info.name
         if method_info.parameters and len(method_info.parameters) > 0:
             param_type = method_info.parameters[0].get('annotation') or 'Any'
-            escaped_param_desc = (method_info.parameters[0].get('docstring') or f'New value for {prop_name}').replace('"', '\\"')
-            input_fields = f'        {prop_name}: {param_type} = Field(description="{escaped_param_desc}")'
+            # No Field() - let GenAI postprocessor add it
+            input_fields = f'        {prop_name}: {param_type}'
         else:
-            input_fields = f"        {prop_name}: Any = Field(description=\"New value for {prop_name}\")"
+            # No Field() - let GenAI postprocessor add it
+            input_fields = f"        {prop_name}: Any"
 
-        output_fields = '        success: bool = Field(default=True, description="Indicates successful execution.")'
+        # No Field() - let GenAI postprocessor add it
+        output_fields = '        success: bool'
 
         # Use attribute assignment for property setter
         process_logic_str = f"        # Set property using attribute assignment\n        app_instance.{prop_name} = input.{prop_name}"
@@ -194,9 +199,8 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
         output_return_parts = []
         for prop in all_properties_for_template:
             prop_type = prop.type_annotation or 'Any'
-            # Ensure newlines in docstrings are also escaped for the description string
-            escaped_prop_doc = (prop.docstring or f'Value of property {prop.name}').replace('"', '\\"').replace('\n', '\\\\n')
-            output_field_lines.append(f'        {prop.name}: {prop_type} = Field(description="{escaped_prop_doc}")')
+            # No Field() - let GenAI postprocessor add it
+            output_field_lines.append(f'        {prop.name}: {prop_type}')
             output_return_parts.append(f"{prop.name}=app_instance.{prop.name}")
 
         if not output_field_lines:
@@ -220,15 +224,16 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
     elif is_set_all_properties and settable_properties_for_template:
         input_field_lines = []
         for prop_info in settable_properties_for_template:
-            escaped_docstring = (prop_info.docstring or f'Optional. New value for {prop_info.name}.').replace('"', '\\"')
-            input_field_lines.append(f"        {prop_info.name}: Optional[{prop_info.type_annotation}] = Field(default=None, description=\"{escaped_docstring}\")")
+            # No Field() - let GenAI postprocessor add it
+            input_field_lines.append(f"        {prop_info.name}: Optional[{prop_info.type_annotation}] = None")
         if input_field_lines:
             input_fields = "\n".join(input_field_lines)
             needs_model_config = True  # Need model_config for Optional fields
         else:
             input_fields = "        pass" 
 
-        output_fields = "        success: bool = Field(description=\"True if properties update was attempted.\")"
+        # No Field() - let GenAI postprocessor add it
+        output_fields = "        success: bool"
 
         set_logic_lines = []
         for prop_info in settable_properties_for_template:
@@ -257,8 +262,8 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
             input_field_lines = []
             for p in method_info.parameters:
                 param_type = p.get('annotation') or 'Any'
-                escaped_param_desc = (p.get('docstring') or f'Parameter {p["name"]}').replace('"', '\\"')
-                input_field_lines.append(f'        {p["name"]}: {param_type} = Field(description="{escaped_param_desc}")')
+                # No Field() - let GenAI postprocessor add it
+                input_field_lines.append(f'        {p["name"]}: {param_type}')
             input_fields = "\n".join(input_field_lines)
         else:
             input_fields = "        pass"
@@ -274,7 +279,8 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
                 regular_method_logic_lines.append(f"        app_instance.{method_info.name.lower()}({call_params})")
             else:
                 regular_method_logic_lines.append(f"        app_instance.{method_info.name.lower()}()")
-            output_fields = '        success: bool = Field(default=True, description="Indicates successful execution.")'
+            # No Field() - let GenAI postprocessor add it
+            output_fields = '        success: bool'
             output_return = "success=True" 
             response_format = "success={output.success}"
         else:
@@ -282,7 +288,8 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
                 regular_method_logic_lines.append(f"        result_val = app_instance.{method_info.name.lower()}({call_params})")
             else:
                 regular_method_logic_lines.append(f"        result_val = app_instance.{method_info.name.lower()}()")
-            output_fields = f'        result: {method_return_type} = Field(description="Result of the method call")'
+            # No Field() - let GenAI postprocessor add it
+            output_fields = f'        result: {method_return_type}'
             output_return = "result=result_val" 
             response_format = "result={output.result}"
         process_logic_str = "\n".join(regular_method_logic_lines)

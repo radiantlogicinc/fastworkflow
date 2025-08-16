@@ -174,9 +174,12 @@ def is_fast_workflow_trained(fastworkflow_folderpath: str):
 
 def train_main(args):
     """Main function to train the workflow."""
-    if not os.path.isdir(args.workflow_folderpath):
+    # Resolve the workflow path to absolute path to handle relative paths correctly
+    workflow_path = os.path.abspath(args.workflow_folderpath)
+    
+    if not os.path.isdir(workflow_path):
         print(
-            f"{Fore.RED}Error: The specified workflow path '{args.workflow_folderpath}' is not a valid directory.{Style.RESET_ALL}"
+            f"{Fore.RED}Error: The specified workflow path '{workflow_path}' is not a valid directory.{Style.RESET_ALL}"
         )
         exit(1)
 
@@ -196,12 +199,12 @@ def train_main(args):
     # Check if fastworkflow has been trained, and train it if not
     fastworkflow_folderpath = fastworkflow.get_fastworkflow_package_path()
     if (
-        "fastworkflow" not in args.workflow_folderpath and
+        "fastworkflow" not in workflow_path and
         not is_fast_workflow_trained(fastworkflow_folderpath)
     ):
         train_workflow(fastworkflow_folderpath)
 
-    train_workflow(args.workflow_folderpath)
+    train_workflow(workflow_path)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(

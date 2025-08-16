@@ -21,14 +21,14 @@ def retail_workflow_path() -> str:
 @pytest.fixture(scope="function")
 def chat_session(retail_workflow_path: str, request):
     """Spin up an in-memory chat session for each test so state cannot leak."""
-    # Clear ALL caches BEFORE any initialization to ensure clean state
-    fastworkflow.RoutingRegistry.clear_registry()
-    
     env_vars = {
         **dotenv_values("./env/.env"),
         **dotenv_values("./passwords/.env")
     }
     fastworkflow.init(env_vars)
+    
+    # Clear ALL caches AFTER initialization
+    fastworkflow.RoutingRegistry.clear_registry()
     fastworkflow.CommandContextModel.load(retail_workflow_path)
     # Force rebuild of routing definition to avoid stale persisted JSON
     fastworkflow.RoutingRegistry.get_definition(retail_workflow_path, load_cached=False)

@@ -40,8 +40,8 @@ def test_create_command_file_with_type_annotations():
     with tempfile.TemporaryDirectory() as tmpdir:
         file_path = create_command_file(class_info, method_info, tmpdir, source_dir='.')
         content = pathlib.Path(file_path).read_text()
-        assert 'user_id: int = Field' in content
-        assert 'verbose: bool = Field' in content
+        assert 'user_id: int' in content
+        assert 'verbose: bool' in content
         assert 'Fetch user.' in content
 
 def test_create_command_file_with_complex_types():
@@ -53,8 +53,8 @@ def test_create_command_file_with_complex_types():
     with tempfile.TemporaryDirectory() as tmpdir:
         file_path = create_command_file(class_info, method_info, tmpdir, source_dir='.')
         content = pathlib.Path(file_path).read_text()
-        assert 'ids: List[int] = Field' in content
-        assert 'options: Optional[dict] = Field' in content
+        assert 'ids: List[int]' in content
+        assert 'options: Optional[dict]' in content
         assert 'Batch update.' in content
 
 def test_create_command_file_get_properties():
@@ -92,9 +92,9 @@ def check_created_command_file(class_info, method_info_get_props, tmpdir):
     # No Input class should be present for get_properties
     assert "class Input(BaseModel):" not in content
     assert "class Output(BaseModel):" in content
-    assert "product_id: int = Field(description=\"The product ID.\")" in content
-    assert "name: str = Field(description=\"The product name.\")" in content
-    assert "price: float = Field(description=\"Value of property price\")" in content
+    assert "product_id: int" in content
+    assert "name: str" in content
+    assert "price: float" in content
 
     assert "# For get_properties, the primary logic is to gather attribute values" in content
     assert "return Signature.Output(product_id=app_instance.product_id, name=app_instance.name, price=app_instance.price)" in content
@@ -140,14 +140,14 @@ def test_create_command_file_set_properties():
         content = pathlib.Path(file_path).read_text()
 
         assert "class Input(BaseModel):" in content
-        assert "sku: Optional[str] = Field(default=None, description=\"Stock Keeping Unit.\")" in content
-        assert "quantity: Optional[int] = Field(default=None, description=\"Current stock quantity.\")" in content
-        assert "location: Optional[Optional[str]] = Field(default=None, description=\"Optional. New value for location.\")" in content
+        assert "sku: Optional[str] = None" in content
+        assert "quantity: Optional[int] = None" in content
+        assert "location: Optional[Optional[str]] = None" in content
         
         # Verify model_config is NOT included for Optional fields (we've removed it)
         assert "model_config = ConfigDict" not in content
 
-        assert "class Output(BaseModel):\n        success: bool = Field(description=\"True if properties update was attempted.\")" in content
+        assert "class Output(BaseModel):\n        success: bool" in content
         
         # Verify property setters use attribute assignment
         assert "if input.sku is not None:" in content
@@ -214,7 +214,7 @@ def test_property_setter_uses_attribute_assignment():
         
         # Verify that property setter uses property name as input parameter name
         content = pathlib.Path(file_path).read_text()
-        assert "assign_to: str = Field" in content
+        assert "assign_to: str" in content
         assert "app_instance.assign_to = input.assign_to" in content
 
 def test_response_uses_model_dump_json():

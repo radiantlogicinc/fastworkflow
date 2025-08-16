@@ -61,7 +61,7 @@ class ResponseGenerator:
         return CommandOutput(
             workflow_id=workflow.id,
             command_responses=[
-                CommandResponse(response=f"The user id is: {output.status}")
+                CommandResponse(response=f"The user id is: {output.user_id}")
             ],
         )
 

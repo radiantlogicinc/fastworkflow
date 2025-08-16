@@ -1,0 +1,80 @@
+{
+  "nodes": [
+    "cancel_pending_order",
+    "exchange_delivered_order_items",
+    "find_user_id_by_email",
+    "find_user_id_by_name_zip",
+    "get_order_details",
+    "get_product_details",
+    "get_user_details",
+    "list_all_product_types",
+    "modify_pending_order_address",
+    "modify_pending_order_items",
+    "modify_pending_order_payment",
+    "modify_user_address",
+    "return_delivered_order_items",
+    "transfer_to_human_agents"
+  ],
+  "edges": [
+    {
+      "from": "get_user_details",
+      "to": "find_user_id_by_email"
+    },
+    {
+      "from": "get_user_details",
+      "to": "find_user_id_by_name_zip"
+    },
+    {
+      "from": "get_order_details",
+      "to": "get_user_details"
+    },
+    {
+      "from": "cancel_pending_order",
+      "to": "get_user_details"
+    },
+    {
+      "from": "exchange_delivered_order_items",
+      "to": "get_order_details"
+    },
+    {
+      "from": "exchange_delivered_order_items",
+      "to": "get_product_details"
+    },
+    {
+      "from": "exchange_delivered_order_items",
+      "to": "get_user_details"
+    },
+    {
+      "from": "get_product_details",
+      "to": "get_order_details"
+    },
+    {
+      "from": "modify_pending_order_address",
+      "to": "get_user_details"
+    },
+    {
+      "from": "modify_pending_order_items",
+      "to": "get_user_details"
+    },
+    {
+      "from": "modify_pending_order_payment",
+      "to": "get_user_details"
+    },
+    {
+      "from": "modify_user_address",
+      "to": "find_user_id_by_email"
+    },
+    {
+      "from": "modify_user_address",
+      "to": "find_user_id_by_name_zip"
+    },
+    {
+      "from": "return_delivered_order_items",
+      "to": "get_order_details"
+    },
+    {
+      "from": "return_delivered_order_items",
+      "to": "get_user_details"
+    }
+  ]
+}

@@ -13,7 +13,7 @@ The primary use case is handling validation errors for missing input parameters 
 - Error: "Missing value for Y.input_param".
 - Query: Get list of X's whose outputs match Y.input_param.
 
-Graph generation occurs automatically during every train phase (via `fastworkflow train`), producing a JSON artifact (e.g., `___command_info/parameter_dependency_graph.json`).
+Graph generation occurs automatically during every train phase (via `fastworkflow train`), producing a JSON artifact (e.g., `command_dependency_graph.json`).
 
 ### 1.2 Scope
 - **In Scope**: Matching based on parameter metadata within a single workflow's commands. Supports both exact and semantic matching with configurable thresholds. Includes a runtime function to query suggestions for missing parameters.
@@ -112,7 +112,7 @@ Contexts in fastWorkflow are scopes tying commands to application objects (e.g.,
 
 6. **Output Artifact**:
    - JSON: `{"nodes": [list], "edges": [{"from": "Y", "to": "X", "weight": float, "details": dict}]}`.
-   - Save to `___command_info/parameter_dependency_graph.json`.
+   - Save to `command_dependency_graph.json`.
 
 ### 4.2 Example
 Assume:
@@ -131,7 +131,7 @@ All core graph functionality (generation, semantic search, querying) is consolid
 - **Runtime Query Function**: In `command_dependency_graph.py`:
   ```python
   def get_dependency_suggestions(
-      graph_path: str,  # Path to ___command_info/parameter_dependency_graph.json
+      graph_path: str,  # Path to command_dependency_graph.json
       y_qualified_name: str,
       missing_input_param: str,
       min_weight: float = 0.7,  # Configurable threshold

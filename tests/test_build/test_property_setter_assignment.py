@@ -172,16 +172,16 @@ def test_set_properties_uses_assignment(temp_dir, todo_item_class):
 
 
 def test_status_property_special_handling(temp_dir, todo_item_class):
-    """Test that the status property is correctly set using TodoItem.COMPLETE/INCOMPLETE constants."""
-    # Add the status property and is_complete parameter
-    status_prop = PropertyInfo('status', docstring='Status of this todo item', type_annotation='str')
+    """Test that the status property is directly set using the status parameter."""
+    # Add the status property
+    status_prop = PropertyInfo('status', docstring='Status of this todo item', type_annotation='bool')
     todo_item_class.properties.append(status_prop)
     todo_item_class.all_settable_properties.append(status_prop)
     
     # Create a method info for the status command
     method_info = MethodInfo(
         name="status",
-        parameters=[{'name': 'is_complete', 'annotation': 'bool'}],
+        parameters=[{'name': 'status', 'annotation': 'bool'}],
         docstring="Set the status of the todo item."
     )
     
@@ -225,5 +225,5 @@ def test_status_property_special_handling(temp_dir, todo_item_class):
     
     assert found_status_assignment, "Status setter should assign to the status attribute"
     
-    # Check that the file content contains references to is_complete
-    assert "is_complete" in file_content, "Status setter should use the is_complete parameter" 
+    # Check that the file content directly assigns status
+    assert "app_instance.status = input.status" in file_content, "Status setter should directly assign status parameter" 
