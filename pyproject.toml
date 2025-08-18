@@ -9,7 +9,7 @@ repository = "https://github.com/radiantlogicinc/fastworkflow"
 
 [tool.poetry]
 name = "fastworkflow"
-version = "2.13.1"
+version = "2.13.2"
 description = "A framework for rapidly building large-scale, deterministic, interactive workflows with a fault-tolerant, conversational UX"
 authors = ["Dhar Rawal <drawal@radiantlogic.com>"]
 license = "Apache-2.0"
@@ -45,6 +45,7 @@ sentence-transformers = "^3.4.1"
 prompt_toolkit = "^3.0.43"
 libcst = "^1.8.2"
 datasets = "^4.0.0"
+openai = "1.99.0"
 
 [tool.poetry.group.dev.dependencies]
 isort = "^5.13.2"
