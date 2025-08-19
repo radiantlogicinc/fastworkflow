@@ -575,7 +575,7 @@ class ResponseGenerator:
         if cnp_output.error_msg:
             workflow_context = workflow.context
             workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION
-            if command not in workflow_context:
+            if "command" not in workflow_context:
                 workflow_context["command"] = command
             workflow.context = workflow_context
             return CommandOutput(
@@ -594,7 +594,7 @@ class ResponseGenerator:
             workflow_context = workflow.context
             if cnp_output.command_name == 'ErrorCorrection/you_misunderstood':
                 workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
-                if command not in workflow_context:
+                if "command" not in workflow_context:
                     workflow_context["command"] = command
             else:
                 workflow.is_complete = True
@@ -636,7 +636,7 @@ class ResponseGenerator:
                         workflow_context = workflow.context
                         workflow_context["NLU_Pipeline_Stage"] = \
                             NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
-                        if command not in workflow_context:
+                        if "command" not in workflow_context:
                             workflow_context["command"] = command
                         workflow.context = workflow_context
 
@@ -661,7 +661,9 @@ class ResponseGenerator:
             workflow_context = workflow.context
             workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.PARAMETER_EXTRACTION
             workflow_context["command_name"] = cnp_output.command_name
-            workflow_context["command"] = command
+            # Only update command if it's not already set (preserve original command with parameters)
+            if "command" not in workflow_context:
+                workflow_context["command"] = command
             workflow.context = workflow_context
 
         command_name = workflow.context["command_name"]
