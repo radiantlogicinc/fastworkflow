@@ -342,11 +342,18 @@ class ParameterExtraction:
             _, _, _, stored_missing_fields = self._extract_missing_fields(input_for_param_extraction, self.app_workflow, self.command_name, stored_params)
         else:
             stored_missing_fields = []
-
-        new_params = input_for_param_extraction.extract_parameters(
-            command_parameters_class, 
-            self.command_name, 
-            app_workflow_folderpath)
+            
+        # If we have missing fields (in parameter extraction error state), try to apply the command directly
+        if stored_missing_fields:
+            # Apply the command directly as parameter values
+            direct_params = self._apply_missing_fields(self.command, stored_params, stored_missing_fields)
+            new_params = direct_params
+        else:
+            # Otherwise use the LLM-based extraction
+            new_params = input_for_param_extraction.extract_parameters(
+                command_parameters_class, 
+                self.command_name, 
+                app_workflow_folderpath)
 
         if stored_params:
             merged_params = self._merge_parameters(stored_params, new_params, stored_missing_fields)

@@ -112,6 +112,38 @@
             ]
         },
         {
+            "name": "run_messaging_app_4",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "fastworkflow.run",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/"
+            },
+            "args": [
+                "./fastworkflow/examples/messaging_app_4",
+                "./env/.env",
+                "./passwords/.env",
+                "--startup_action",
+                "./fastworkflow/examples/messaging_app_4/startup_action.json"
+            ]
+        },
+        {
+            "name": "train_messaging_app_4",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "fastworkflow.train",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/"
+            },
+            "args": [
+                "./fastworkflow/examples/messaging_app_4",
+                "./env/.env",
+                "./passwords/.env"
+            ]
+        },
+        {
             "name": "train_fastworkflow",
             "type": "debugpy",
             "request": "launch",
