@@ -22,6 +22,7 @@ class Signature:
         "what are my choices?",
         "what are my capabilities?",
         "what can i do?",
+        "what can i do here?",
         "what can i use?",
         "what are my tools?",
         "now what?",
