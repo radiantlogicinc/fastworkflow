@@ -49,7 +49,7 @@ class ResponseGenerator:
     def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> CommandOutput:
         output = self._process_command(workflow, command_parameters)
         response = (
-            f'Response: {output.status}'
+            f'Response: {output.user_details}'
         )
         return CommandOutput(
             workflow_id=workflow.id,

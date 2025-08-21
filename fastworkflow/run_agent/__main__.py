@@ -7,6 +7,7 @@ import time
 import threading
 from typing import Optional
 from dotenv import dotenv_values
+from queue import Empty
 
 # Instantiate a global console for consistent styling
 console = None
@@ -40,6 +41,7 @@ def main():
     from rich.console import Group
     from prompt_toolkit import PromptSession
     from prompt_toolkit.patch_stdout import patch_stdout
+
 
     import fastworkflow
     from fastworkflow.command_executor import CommandExecutor
@@ -187,7 +189,7 @@ def main():
 
     # Create the chat session in agent mode
     fastworkflow.chat_session = fastworkflow.ChatSession(run_as_agent=True)
-    
+
     # Start the workflow within the chat session
     fastworkflow.chat_session.start_workflow(
         args.workflow_path,
@@ -219,7 +221,7 @@ def main():
             console.print(Panel("Startup Command Output", border_style="dim"))
             print_command_output(command_output)
             console.print(Panel("End Startup Command Output", border_style="dim"))
-    
+
     while True: 
         if not args.keep_alive and fastworkflow.chat_session.workflow_is_complete:
             console.print("[blue]Workflow complete and keep_alive is false. Exiting...[/blue]")
@@ -234,37 +236,56 @@ def main():
         try:
             # Use a thread-safe way to store the agent response
             agent_response_container = {"response": None, "error": None}
-            
+
             # Function to run agent processing in a separate thread
             def process_agent_query():
                 try:
                     agent_response_container["response"] = react_agent(user_query=user_input_str)
                 except Exception as e:
                     agent_response_container["error"] = e
-            
+
             # Start processing thread
             agent_thread = threading.Thread(target=process_agent_query)
             agent_thread.daemon = True
             agent_thread.start()
-            
-            # Show spinner while waiting for agent to process
+
+            # Queues used by the agent to request user clarification
+            from fastworkflow.run_agent.agent_module import (
+                clarification_request_queue,
+                clarification_response_queue,
+            )
+
             with console.status("[bold cyan]Processing command...[/bold cyan]", spinner="dots") as status:
                 counter = 0
                 while agent_thread.is_alive():
-                    time.sleep(0.5)
+                    # Handle any number of clarification requests
+                    with contextlib.suppress(Empty):
+                        while True:
+                            prompt_text = clarification_request_queue.get_nowait()
+                            # Stop spinner so prompt renders cleanly
+                            status.stop()
+                            console.print(f"[bold yellow]Agent -> User> {prompt_text}[/bold yellow]")
+                            user_answer = prompt_session.prompt("User > ")
+                            clarification_response_queue.put(user_answer)
+                    time.sleep(0.3)
                     counter += 1
-                    if counter % 2 == 0:  # Update message every second
-                        status.update(f"[bold cyan]Processing command... ({counter//2}s)[/bold cyan]")
-            
+                    if counter % 3 == 0:
+                        status.update(
+                            f"[bold cyan]Processing command... ({counter // 3}s)[/bold cyan]"
+                        )
+
+                # Agent finished work
+                agent_thread.join()
+
             # Check for errors or display response
             if agent_response_container["error"]:
                 raise agent_response_container["error"]
-            
+
             if agent_response_container["response"]:
                 console.print(Panel(agent_response_container["response"].final_answer, 
                                    title="[bold green]Agent Response[/bold green]", 
                                    border_style="green"))
-            
+
         except Exception as e: # pylint: disable=broad-except
             console.print(f"[bold red]Agent Error:[/bold red] An error occurred during agent processing: {e}")
 

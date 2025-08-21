@@ -234,6 +234,12 @@ class ChatSession:
         # Push this workflow as active
         ChatSession.push_active_workflow(workflow)
         
+        # Initialize workflow tool agent if in agent mode
+        # This must happen after pushing the workflow to the stack
+        # so that get_active_workflow() returns the correct workflow
+        if self._run_as_agent:
+            self._initialize_workflow_tool_agent()
+        
         command_output = None
         if self._keep_alive:
             # Root workflow gets a worker thread

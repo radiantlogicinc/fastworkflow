@@ -5,6 +5,7 @@ Uses the integrated workflow tool agent from ChatSession.
 """
 import functools
 import os
+from queue import Queue
 from typing import Any, Optional, List, Dict
 
 import dspy
@@ -12,6 +13,11 @@ from colorama import Fore, Style
 
 import fastworkflow
 from fastworkflow.mcp_server import FastWorkflowMCPServer
+
+# Queues used to synchronise clarification requests between the agent thread
+# (where `_ask_user_tool` is executed) and the main thread that owns the TTY.
+clarification_request_queue: Queue[str] = Queue()
+clarification_response_queue: Queue[str] = Queue()
 
 
 # DSPy Signature for the High-Level Planning Agent
@@ -76,8 +82,9 @@ def _build_assistant_tool_documentation(available_tools: List[Dict]) -> str:
     Use the WorkflowAssistant to interact with a suite of underlying tools to assist the user.
     It takes a natural language query as input and delegates to an internal agent 
     that will try to understand the request, select the most appropriate tool, and execute it.
-    Example tool_args: {"tool_request": "<A single tool request with tool description and all required input parameter names and values>"}
-
+    In normal mode: Example tool_args: {"tool_request": "<A single tool request with tool description and all required input parameter names and values>"}
+    If workflow assistant reports back with parameter extraction errors: Example tool_args: {"tool_request": "<A strictly comma delimited list of just the requested parameter values>"}
+    
     Available tools that WorkflowAssistant can access:
     """
 
@@ -98,19 +105,24 @@ def _build_assistant_tool_documentation(available_tools: List[Dict]) -> str:
 
 def _execute_workflow_command_tool_with_delegation(tool_request: str,
                                                    *, 
-                                                   chat_session: fastworkflow.ChatSession) -> str:
+                                                   chat_session: fastworkflow.ChatSession,
+                                                   **kwargs) -> str:
     """
     Delegate tool requests to the workflow via queues.
     This is used by the high-level planning agent in run_agent.
     """
     print(f"{Fore.CYAN}{Style.BRIGHT}Agent -> Workflow>{Style.RESET_ALL}{Fore.CYAN} {tool_request}{Style.RESET_ALL}")
 
-    # Send the request through the user message queue
-    chat_session.user_message_queue.put(tool_request)
-    
+    if extras := " ".join(f"{k}={v}" for k, v in kwargs.items()):
+        # Send the request through the user message queue
+        chat_session.user_message_queue.put(f"{tool_request} {extras}")
+    else:
+        # Send the request through the user message queue
+        chat_session.user_message_queue.put(tool_request)
+
     # Get the response from the command output queue
     command_output = chat_session.command_output_queue.get()
-    
+
     # Format the output for the agent
     result = _format_workflow_output_for_agent(command_output)
 
@@ -119,22 +131,17 @@ def _execute_workflow_command_tool_with_delegation(tool_request: str,
 
 
 def _ask_user_tool(prompt: str) -> str:
+    """Request extra information from the human user.
+
+    Because the agent runs in a background thread, we cannot read from
+    `stdin` here.  Instead we send the prompt to the main thread via a
+    queue and block until the main thread puts the user's answer in the
+    response queue.
     """
-    Allows the agent to ask the user for clarification or additional information via CLI.
-    
-    Args:
-        prompt (str): The question or request for clarification to present to the user.
-        
-    Returns:
-        str: The user's response.
-    """
-    print(f"{Fore.YELLOW}{Style.BRIGHT}Agent -> User> Agent needs clarification!{Style.RESET_ALL}")
-    print(f"{Fore.YELLOW}{prompt}{Style.RESET_ALL}")
-    print(f"{Fore.YELLOW}User -> Agent> {Style.RESET_ALL}", end="")
-    
-    user_response = input().strip()
-    print(f"{Fore.GREEN}User response received: {user_response}{Style.RESET_ALL}")
-    return user_response
+    # Send the prompt to the main thread
+    clarification_request_queue.put(prompt)
+
+    return clarification_response_queue.get()
 
 
 def initialize_dspy_agent(chat_session: fastworkflow.ChatSession, LLM_AGENT: str, LITELLM_API_KEY_AGENT: Optional[str] = None, max_iters: int = 25, clear_cache: bool = False):

@@ -10,6 +10,7 @@ from pydantic_core import PydanticUndefined
 from speedict import Rdict
 
 import fastworkflow
+from fastworkflow.utils.logging import logger
 from fastworkflow import Action, CommandOutput, CommandResponse, ModuleType, NLUPipelineStage
 from fastworkflow.cache_matching import cache_match, store_utterance_cache
 from fastworkflow.command_executor import CommandExecutor
@@ -34,6 +35,7 @@ INVALID_INFORMATION_ERRMSG = fastworkflow.get_env_var("INVALID_INFORMATION_ERRMS
 
 NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
 INVALID = fastworkflow.get_env_var("INVALID")
+PARAMETER_EXTRACTION_ERROR_MSG = None
 
 
 class CommandNamePrediction:
@@ -422,52 +424,59 @@ class ParameterExtraction:
         """
         Merge new parameters with old parameters, prioritizing new values when appropriate.
         """
+        global PARAMETER_EXTRACTION_ERROR_MSG
+        if not PARAMETER_EXTRACTION_ERROR_MSG:
+            PARAMETER_EXTRACTION_ERROR_MSG = fastworkflow.get_env_var("PARAMETER_EXTRACTION_ERROR_MSG")
+
         merged = old_params.model_copy()
 
-        all_fields = list(old_params.model_fields.keys())
-        missing_fields = missing_fields or []
+        try:
+            all_fields = list(old_params.model_fields.keys())
+            missing_fields = missing_fields or []
 
-        for field_name in all_fields:
-            if hasattr(new_params, field_name):
-                new_value = getattr(new_params, field_name)
-                old_value = getattr(merged, field_name)
+            for field_name in all_fields:
+                if hasattr(new_params, field_name):
+                    new_value = getattr(new_params, field_name)
+                    old_value = getattr(merged, field_name)
 
-                if new_value is not None and new_value != NOT_FOUND:
-                    if isinstance(old_value, str) and INVALID in old_value and INVALID not in new_value:
-                        setattr(merged, field_name, new_value)
-
-                    elif old_value is None or old_value == NOT_FOUND:
-                        setattr(merged, field_name, new_value)
-
-                    elif isinstance(old_value, int) and old_value == INVALID_INT_VALUE:
-                        with contextlib.suppress(ValueError, TypeError):
-                            setattr(merged, field_name, int(new_value))
-
-                    elif isinstance(old_value, float) and old_value == INVALID_FLOAT_VALUE:
-                        with contextlib.suppress(ValueError, TypeError):
-                            setattr(merged, field_name, float(new_value))
-
-                    elif (field_name in missing_fields and
-                          hasattr(merged.model_fields.get(field_name), "json_schema_extra") and
-                          merged.model_fields.get(field_name).json_schema_extra and
-                          "db_lookup" in merged.model_fields.get(field_name).json_schema_extra):
-                        setattr(merged, field_name, new_value)
-
-                    elif field_name in missing_fields:
-                        field_info = merged.model_fields.get(field_name)
-                        has_pattern = hasattr(field_info, "pattern") and field_info.pattern is not None
-
-                        if not has_pattern:
-                            for meta in getattr(field_info, "metadata", []):
-                                if hasattr(meta, "pattern"):
-                                    has_pattern = True
-                                    break
-
-                        if not has_pattern and hasattr(field_info, "json_schema_extra") and field_info.json_schema_extra:
-                            has_pattern = "pattern" in field_info.json_schema_extra
-
-                        if has_pattern:
+                    if new_value is not None and new_value != NOT_FOUND:
+                        if isinstance(old_value, str) and INVALID in old_value and INVALID not in new_value:
                             setattr(merged, field_name, new_value)
+
+                        elif old_value is None or old_value == NOT_FOUND:
+                            setattr(merged, field_name, new_value)
+
+                        elif isinstance(old_value, int) and old_value == INVALID_INT_VALUE:
+                            with contextlib.suppress(ValueError, TypeError):
+                                setattr(merged, field_name, int(new_value))
+
+                        elif isinstance(old_value, float) and old_value == INVALID_FLOAT_VALUE:
+                            with contextlib.suppress(ValueError, TypeError):
+                                setattr(merged, field_name, float(new_value))
+
+                        elif (field_name in missing_fields and
+                            hasattr(merged.model_fields.get(field_name), "json_schema_extra") and
+                            merged.model_fields.get(field_name).json_schema_extra and
+                            "db_lookup" in merged.model_fields.get(field_name).json_schema_extra):
+                            setattr(merged, field_name, new_value)
+
+                        elif field_name in missing_fields:
+                            field_info = merged.model_fields.get(field_name)
+                            has_pattern = hasattr(field_info, "pattern") and field_info.pattern is not None
+
+                            if not has_pattern:
+                                for meta in getattr(field_info, "metadata", []):
+                                    if hasattr(meta, "pattern"):
+                                        has_pattern = True
+                                        break
+
+                            if not has_pattern and hasattr(field_info, "json_schema_extra") and field_info.json_schema_extra:
+                                has_pattern = "pattern" in field_info.json_schema_extra
+
+                            if has_pattern:
+                                setattr(merged, field_name, new_value)
+        except Exception as exc:
+            logger.warning(PARAMETER_EXTRACTION_ERROR_MSG.format(error=exc))
 
         return merged
 
@@ -512,34 +521,42 @@ class ParameterExtraction:
 
     @staticmethod
     def _apply_missing_fields(command: str, default_params: BaseModel, missing_fields: list):
+        global PARAMETER_EXTRACTION_ERROR_MSG
+        if not PARAMETER_EXTRACTION_ERROR_MSG:
+            PARAMETER_EXTRACTION_ERROR_MSG = fastworkflow.get_env_var("PARAMETER_EXTRACTION_ERROR_MSG")
+
         params = default_params.model_copy()
 
-        if "," in command:
-            parts = [part.strip() for part in command.split(",")]
+        try:
+            if "," in command:
+                parts = [part.strip() for part in command.split(",")]
 
-            if len(parts) == len(missing_fields):
-                if len(missing_fields) == 1:
-                    field = missing_fields[0]
-                    if hasattr(params, field):
-                        setattr(params, field, parts[0])
+                if len(parts) == len(missing_fields):
+                    if len(missing_fields) == 1:
+                        field = missing_fields[0]
+                        if hasattr(params, field):
+                            setattr(params, field, parts[0])
+                            return params
+                    elif len(missing_fields) > 1:
+                        for i, field in enumerate(missing_fields):
+                            if i < len(parts) and hasattr(params, field):
+                                setattr(params, field, parts[i])
                         return params
-                elif len(missing_fields) > 1:
-                    for i, field in enumerate(missing_fields):
-                        if i < len(parts) and hasattr(params, field):
-                            setattr(params, field, parts[i])
+                else:
+                    if parts and missing_fields:
+                        field = missing_fields[0]
+                        if hasattr(params, field):
+                            setattr(params, field, parts[0])
                     return params
-            else:
-                if parts and missing_fields:
-                    field = missing_fields[0]
-                    if hasattr(params, field):
-                        setattr(params, field, parts[0])
-                return params
 
-        elif missing_fields:
-            field = missing_fields[0]
-            if hasattr(params, field):
-                setattr(params, field, command.strip())
-                return params
+            elif missing_fields:
+                field = missing_fields[0]
+                if hasattr(params, field):
+                    setattr(params, field, command.strip())
+                    return params
+        
+        except Exception as exc:
+            logger.warning(PARAMETER_EXTRACTION_ERROR_MSG.format(error=exc))
 
         return params    
 
