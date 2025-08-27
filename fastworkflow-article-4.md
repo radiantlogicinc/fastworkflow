@@ -637,7 +637,7 @@ We hope this series has shown you the power and flexibility of `fastWorkflow` fo
 `fastWorkflow` is an open-source project released under the Apache 2.0 license, which means you can use it freely in your own projects, both commercial and non-commercial.
 
 We invite you to:
-- **Star the repository** at [github.com/fastworkflow/fastworkflow](https://github.com/fastworkflow/fastworkflow)
+- **Star the repository** at [github.com/fastworkflow/fastworkflow](https://github.com/radiantlogicinc/fastworkflow)
 - **Try the examples** included in the repository
 - **Build your own workflows** using the techniques we've covered
 - **Contribute** to the project with bug reports, feature requests, or pull requests

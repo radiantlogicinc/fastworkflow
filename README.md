@@ -301,7 +301,6 @@ mkdir -p messaging_app_1/application
 Create a simple function in `messaging_app_1/application/send_message.py`.
 
 ```python
-# my_project/greeter_application/greeter.py
 def send_message(to: str, message: str) -> str:
     print(f"Sending '{message}' to {to}")
 ```
@@ -396,15 +395,17 @@ fastworkflow run ./messaging_app_1 ./messaging_app_1/fastworkflow.env ./messagin
 ## Refining Your Workflow
 
 ### Calling class methods and initializing the class instance to set the context
+This will allow you to move beyond a flat set of tools (global functions) and organize your tools into logical contexts that maintain state
 
 - [Building stateful AI agents with fastworkflow - from functions to classes](fastworkflow-article-2.md)
 
 ### Adding class inheritance with command_context_model.json
+If you have a non-trivial application, your AI agent will have to understand the inheritance relationships between different types of objects in your application
 
 - [Leveraging class inheritance in fastWorkflow - building advanced AI agents](fastworkflow-article-3.md)
 
 ### Adding context hierarchies with context_inheritance_model.json
-
+Contexts are layered! Command handling should start with the current context, but move up the context hierarchy when the current context cannot handle the command. Learn how to build sophisticated agentic applications that support context hierarchies and expose aggregation relationships in object models. 
 - [Building complex context hierarchies in fastWorkflow - Advanced AI agents](fastworkflow-article-4.md)
 
 ---
