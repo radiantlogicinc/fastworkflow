@@ -17,21 +17,33 @@ class Signature:
             description="The order ID to exchange (must start with #)",
             pattern=r"^(#[\w\d]+|NOT_FOUND)$",
             examples=["#W0000000"],
+            json_schema_extra={
+                "available_from": ["get_user_details"]
+            }
         )
         item_ids: List[str] = Field(
             default_factory=list,
             description="The item IDs to be exchanged",
             examples=["1008292230"],
+            json_schema_extra={
+                "available_from": ["get_order_details"]
+            }
         )
         new_item_ids: List[str] = Field(
             default_factory=list,
             description="The new item IDs to exchange for",
             examples=["1008292230"],
+            json_schema_extra={
+                "available_from": ["get_product_details"]
+            }
         )
         payment_method_id: str = Field(
             default="NOT_FOUND",
-            description="Payment method ID for price difference. You can get this from order details->payment_history",
+            description="Payment method ID for price difference.",
             examples=["gift_card_0000000", "credit_card_0000000"],
+            json_schema_extra={
+                "available_from": ["get_order_details", "get_user_details"]
+            }
         )
 
         model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)

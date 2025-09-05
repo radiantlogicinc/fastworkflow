@@ -10,19 +10,25 @@ from ..tools.modify_pending_order_payment import ModifyPendingOrderPayment
 
 
 class Signature:
-    """Modify pending order payment"""
+    """Modify pending order payment method"""
     class Input(BaseModel):
         order_id: str = Field(
             default="NOT_FOUND",
             description="The order ID to modify (must start with #)",
             pattern=r"^(#W\d+|NOT_FOUND)$",
             examples=["#W0000000"],
+            json_schema_extra={
+                "available_from": ["get_user_details"]
+            }
         )
         payment_method_id: str = Field(
             default="NOT_FOUND",
             description="Payment method ID to switch to",
             pattern=r"^((gift_card|credit_card)_\d+|NOT_FOUND)$",
             examples=["gift_card_0000000", "credit_card_0000000"],
+            json_schema_extra={
+                "available_from": ["get_user_details"]
+            }
         )
 
         model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)

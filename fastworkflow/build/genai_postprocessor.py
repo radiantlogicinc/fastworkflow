@@ -18,8 +18,9 @@ import traceback
 import libcst as cst
 import dspy
 from pydantic import BaseModel, Field
-import fastworkflow
 
+import fastworkflow
+from fastworkflow.utils import dspy_utils
 from fastworkflow.build.class_analysis_structures import ClassInfo, MethodInfo, FunctionInfo
 from fastworkflow.build.libcst_transformers import (
     SignatureDocstringUpdater,
@@ -235,11 +236,7 @@ class GenAIPostProcessor:
     def __init__(self):
         """Initialize the post-processor with DSPy configuration."""
         # Get model and API key from FastWorkflow environment
-        self.model = fastworkflow.get_env_var("LLM_COMMAND_METADATA_GEN", default="mistral/mistral-small-latest")
-        self.api_key = fastworkflow.get_env_var("LITELLM_API_KEY_COMMANDMETADATA_GEN", default=None)
-        
-        # Initialize DSPy with the configured model
-        self._initialize_dspy()
+        self.lm = dspy_utils.get_lm("LLM_COMMAND_METADATA_GEN", "LITELLM_API_KEY_COMMANDMETADATA_GEN", max_tokens=2000)
         
         # Initialize DSPy modules (reuse from original)
         self.field_generator = FieldMetadataGenerator()
@@ -256,16 +253,6 @@ class GenAIPostProcessor:
             'utterances_added': 0
         }
     
-    def _initialize_dspy(self):
-        """Initialize DSPy with the configured model using LiteLLM."""
-        try:
-            lm = dspy.LM(model=self.model, api_key=self.api_key, max_tokens=2000)
-            dspy.settings.configure(lm=lm)
-            logger.info(f"DSPy initialized with model: {self.model}")
-        except Exception as e:
-            logger.error(f"Failed to initialize DSPy: {e}")
-            raise
-    
     def process_workflow(self, workflow_path: str, classes: Dict[str, ClassInfo], 
                         functions: Optional[Dict[str, FunctionInfo]] = None) -> bool:
         """Process all command files in the workflow with targeted updates.
@@ -280,17 +267,17 @@ class GenAIPostProcessor:
         """
         try:
             logger.info("Starting targeted GenAI post-processing with LibCST...")
-            
+
             # Process command files
             commands_dir = os.path.join(workflow_path, "_commands")
             if not os.path.exists(commands_dir):
                 logger.error(f"Commands directory not found: {commands_dir}")
                 return False
-            
+
             # Track all contexts and commands for workflow description
             all_contexts = {}
             global_commands = []
-            
+
             # Process context-specific commands
             for context_dir in os.listdir(commands_dir):
                 context_path = os.path.join(commands_dir, context_dir)
@@ -304,10 +291,10 @@ class GenAIPostProcessor:
                             'commands': context_commands,
                             'docstring': ""
                         }
-                    
+
                     # Generate context handler docstring (still uses original method)
                     self._generate_context_handler_docstring(context_path, context_dir, context_commands)
-            
+
             # Process global commands
             for file_name in os.listdir(commands_dir):
                 file_path = os.path.join(commands_dir, file_name)
@@ -319,20 +306,20 @@ class GenAIPostProcessor:
                             'name': command_name,
                             'docstring': func_info.docstring if func_info else ""
                         })
-            
+
             # Generate workflow description (reuse original method)
             self._generate_workflow_description(workflow_path, all_contexts, global_commands)
-            
+
             # Log statistics
-            logger.info(f"Targeted post-processing completed:")
+            logger.info("Targeted post-processing completed:")
             logger.info(f"  Files processed: {self.stats['files_processed']}")
             logger.info(f"  Files updated: {self.stats['files_updated']}")
             logger.info(f"  Docstrings added: {self.stats['docstrings_added']}")
             logger.info(f"  Fields updated: {self.stats['fields_updated']}")
             logger.info(f"  Utterances added: {self.stats['utterances_added']}")
-            
+
             return True
-            
+
         except Exception as e:
             logger.error(f"Error during targeted GenAI post-processing: {e}")
             logger.error(traceback.format_exc())
@@ -465,112 +452,116 @@ class GenAIPostProcessor:
         """Generate enhanced content using DSPy modules, only for missing elements."""
         
         enhanced_data = {}
-        
+
         # Only generate docstring if missing or empty
         if not current_state.get('has_signature_docstring'):
             try:
-                signature_docstring = self.docstring_generator.generate_signature_docstring(
-                    command_name=command_name,
-                    input_fields=[{
-                        'name': f['name'],
-                        'type': f['type'],
-                        'description': ''  # Will be generated if needed
-                    } for f in current_state['input_fields']],
-                    output_fields=[{
-                        'name': f['name'],
-                        'type': f['type'],
-                        'description': ''
-                    } for f in current_state['output_fields']],
-                    context_name=context_name or "global"
-                )
-                enhanced_data['signature_docstring'] = signature_docstring
-                logger.debug(f"Generated new docstring for {command_name}")
+                with dspy.context(lm=self.lm):
+                    signature_docstring = self.docstring_generator.generate_signature_docstring(
+                        command_name=command_name,
+                        input_fields=[{
+                            'name': f['name'],
+                            'type': f['type'],
+                            'description': ''  # Will be generated if needed
+                        } for f in current_state['input_fields']],
+                        output_fields=[{
+                            'name': f['name'],
+                            'type': f['type'],
+                            'description': ''
+                        } for f in current_state['output_fields']],
+                        context_name=context_name or "global"
+                    )
+                    enhanced_data['signature_docstring'] = signature_docstring
+                    logger.debug(f"Generated new docstring for {command_name}")
             except Exception as e:
                 logger.warning(f"Failed to generate docstring for {command_name}: {e}")
-        
+
         # Generate field metadata only for fields missing descriptions/examples
         field_metadata = {}
-        
+
         # Process input fields
         for field_info in current_state['input_fields']:
             if not field_info.get('has_description') or not field_info.get('has_examples'):
                 try:
-                    metadata = self.field_generator(
-                        field_name=field_info['name'],
-                        field_type=field_info['type'],
-                        method_docstring=method_or_func_info.docstring if method_or_func_info else "",
-                        method_name=command_name,
-                        context_name=context_name or "global",
-                        is_input=True
-                    )
-                    
-                    field_key = f"Input.{field_info['name']}"
-                    field_metadata[field_key] = {}
-                    
-                    if not field_info.get('has_description'):
-                        field_metadata[field_key]['description'] = metadata.description
-                    
-                    if not field_info.get('has_examples'):
-                        field_metadata[field_key]['examples'] = metadata.examples
-                    
-                    if metadata.pattern and metadata.pattern.strip():
-                        field_metadata[field_key]['pattern'] = metadata.pattern
-                    
-                    logger.debug(f"Generated metadata for {field_key}")
+                    with dspy.context(lm=self.lm):
+                        metadata = self.field_generator(
+                            field_name=field_info['name'],
+                            field_type=field_info['type'],
+                            method_docstring=method_or_func_info.docstring if method_or_func_info else "",
+                            method_name=command_name,
+                            context_name=context_name or "global",
+                            is_input=True
+                        )
+
+                        field_key = f"Input.{field_info['name']}"
+                        field_metadata[field_key] = {}
+
+                        if not field_info.get('has_description'):
+                            field_metadata[field_key]['description'] = metadata.description
+
+                        if not field_info.get('has_examples'):
+                            field_metadata[field_key]['examples'] = metadata.examples
+
+                        if metadata.pattern and metadata.pattern.strip():
+                            field_metadata[field_key]['pattern'] = metadata.pattern
+
+                        logger.debug(f"Generated metadata for {field_key}")
                 except Exception as e:
                     logger.warning(f"Failed to generate metadata for Input.{field_info['name']}: {e}")
-        
+
         # Process output fields
         for field_info in current_state['output_fields']:
             if not field_info.get('has_description') or not field_info.get('has_examples'):
                 try:
-                    metadata = self.field_generator(
-                        field_name=field_info['name'],
-                        field_type=field_info['type'],
-                        method_docstring=method_or_func_info.docstring if method_or_func_info else "",
-                        method_name=command_name,
-                        context_name=context_name or "global",
-                        is_input=False
-                    )
-                    
-                    field_key = f"Output.{field_info['name']}"
-                    field_metadata[field_key] = {}
-                    
-                    if not field_info.get('has_description'):
-                        field_metadata[field_key]['description'] = metadata.description
-                    
-                    if not field_info.get('has_examples'):
-                        field_metadata[field_key]['examples'] = metadata.examples
-                    
-                    logger.debug(f"Generated metadata for {field_key}")
+                    with dspy.context(lm=self.lm):
+                        metadata = self.field_generator(
+                            field_name=field_info['name'],
+                            field_type=field_info['type'],
+                            method_docstring=method_or_func_info.docstring if method_or_func_info else "",
+                            method_name=command_name,
+                            context_name=context_name or "global",
+                            is_input=False
+                        )
+
+                        field_key = f"Output.{field_info['name']}"
+                        field_metadata[field_key] = {}
+
+                        if not field_info.get('has_description'):
+                            field_metadata[field_key]['description'] = metadata.description
+
+                        if not field_info.get('has_examples'):
+                            field_metadata[field_key]['examples'] = metadata.examples
+
+                        logger.debug(f"Generated metadata for {field_key}")
                 except Exception as e:
                     logger.warning(f"Failed to generate metadata for Output.{field_info['name']}: {e}")
-        
+
         if field_metadata:
             enhanced_data['field_metadata'] = field_metadata
-        
+
         # Generate new utterances to append
         try:
-            new_utterances = self.utterance_generator(
-                command_name=command_name,
-                command_docstring=method_or_func_info.docstring if method_or_func_info else "",
-                input_fields=[{
-                    'name': f['name'],
-                    'type': f['type'],
-                    'description': ''
-                } for f in current_state['input_fields']]
-            )
-            
-            # Filter out existing utterances
-            existing_utterances = set(current_state.get('plain_utterances', []))
-            truly_new_utterances = [u for u in new_utterances if u not in existing_utterances]
-            
-            if truly_new_utterances:
-                enhanced_data['new_utterances'] = truly_new_utterances
-                logger.debug(f"Generated {len(truly_new_utterances)} new utterances for {command_name}")
+            with dspy.context(lm=self.lm):
+                new_utterances = self.utterance_generator(
+                    command_name=command_name,
+                    command_docstring=method_or_func_info.docstring if method_or_func_info else "",
+                    input_fields=[{
+                        'name': f['name'],
+                        'type': f['type'],
+                        'description': ''
+                    } for f in current_state['input_fields']]
+                )
+
+                # Filter out existing utterances
+                existing_utterances = set(current_state.get('plain_utterances', []))
+                if truly_new_utterances := [
+                    u for u in new_utterances if u not in existing_utterances
+                ]:
+                    enhanced_data['new_utterances'] = truly_new_utterances
+                    logger.debug(f"Generated {len(truly_new_utterances)} new utterances for {command_name}")
         except Exception as e:
             logger.warning(f"Failed to generate utterances for {command_name}: {e}")
-        
+
         return enhanced_data
     
     def _generate_context_handler_docstring(self, context_path: str, context_name: str, 
@@ -581,66 +572,67 @@ class GenAIPostProcessor:
             if not os.path.exists(handler_file):
                 logger.debug(f"Context handler file not found: {handler_file}")
                 return
-            
+
             # Read the file
             with open(handler_file, 'r') as f:
                 content = f.read()
-            
+
             # Parse with LibCST
             module = cst.parse_module(content)
-            
+
             # Generate context docstring
-            context_docstring = self.docstring_generator.generate_context_docstring(
-                context_name=context_name,
-                commands=commands
-            )
-            
-            # Find the main class and update its docstring
+            with dspy.context(lm=self.lm):
+                context_docstring = self.docstring_generator.generate_context_docstring(
+                    context_name=context_name,
+                    commands=commands
+                )
+
             class UpdateContextDocstring(cst.CSTTransformer):
                 def __init__(self, docstring: str):
                     self.docstring = docstring
                     self.updated = False
-                
+
                 def leave_ClassDef(self, original_node: cst.ClassDef, updated_node: cst.ClassDef) -> cst.ClassDef:
                     # Update the first class that matches the context name pattern
-                    if not self.updated and (updated_node.name.value == context_name or 
-                                            updated_node.name.value.endswith("Handler")):
-                        self.updated = True
-                        # Add or update docstring
-                        if updated_node.body and updated_node.body.body:
-                            first_stmt = updated_node.body.body[0]
-                            if isinstance(first_stmt, cst.SimpleStatementLine):
-                                if first_stmt.body and isinstance(first_stmt.body[0], cst.Expr):
-                                    if isinstance(first_stmt.body[0].value, (cst.SimpleString, cst.ConcatenatedString)):
-                                        # Replace existing docstring
-                                        new_docstring = cst.SimpleStatementLine(
-                                            body=[cst.Expr(cst.SimpleString(f'"""{self.docstring}"""'))]
-                                        )
-                                        new_body = [new_docstring] + list(updated_node.body.body[1:])
-                                        return updated_node.with_changes(
-                                            body=updated_node.body.with_changes(body=new_body)
-                                        )
-                        
-                        # Add new docstring
-                        docstring_node = cst.SimpleStatementLine(
-                            body=[cst.Expr(cst.SimpleString(f'"""{self.docstring}"""'))]
-                        )
-                        new_body = [docstring_node] + list(updated_node.body.body)
-                        return updated_node.with_changes(
-                            body=updated_node.body.with_changes(body=new_body)
-                        )
-                    
-                    return updated_node
-            
+                    if (
+                        self.updated
+                        or updated_node.name.value != context_name
+                        and not updated_node.name.value.endswith("Handler")
+                    ):
+                        return updated_node
+
+                    self.updated = True
+                    # Add or update docstring
+                    if updated_node.body and updated_node.body.body:
+                        first_stmt = updated_node.body.body[0]
+                        if isinstance(first_stmt, cst.SimpleStatementLine) and (first_stmt.body and isinstance(first_stmt.body[0], cst.Expr)) and isinstance(first_stmt.body[0].value, (cst.SimpleString, cst.ConcatenatedString)):
+                            new_docstring = cst.SimpleStatementLine(
+                                body=[cst.Expr(cst.SimpleString(f'"""{self.docstring}"""'))]
+                            )
+                            new_body = [new_docstring] + list(updated_node.body.body[1:])
+                            return updated_node.with_changes(
+                                body=updated_node.body.with_changes(body=new_body)
+                            )
+
+                    # Add new docstring
+                    docstring_node = cst.SimpleStatementLine(
+                        body=[cst.Expr(cst.SimpleString(f'"""{self.docstring}"""'))]
+                    )
+                    new_body = [docstring_node] + list(updated_node.body.body)
+                    return updated_node.with_changes(
+                        body=updated_node.body.with_changes(body=new_body)
+                    )
+
+
             transformer = UpdateContextDocstring(context_docstring)
             module = module.visit(transformer)
-            
+
             if transformer.updated:
                 # Write back
                 with open(handler_file, 'w') as f:
                     f.write(module.code)
                 logger.debug(f"Updated context handler docstring for {context_name}")
-            
+
         except Exception as e:
             logger.error(f"Error generating context handler docstring: {e}")
             logger.error(traceback.format_exc())
@@ -649,8 +641,10 @@ class GenAIPostProcessor:
                                       all_contexts: Dict[str, Dict],
                                       global_commands: List[Dict[str, str]]):
         """Generate workflow_description.txt file."""
+
         try:
-            description = self.workflow_generator(all_contexts, global_commands)
+            with dspy.context(lm=self.lm):
+                description = self.workflow_generator(all_contexts, global_commands)
             
             desc_file = os.path.join(workflow_path, "workflow_description.txt")
             with open(desc_file, 'w') as f:

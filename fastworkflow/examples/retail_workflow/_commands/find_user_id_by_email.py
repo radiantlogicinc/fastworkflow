@@ -28,7 +28,12 @@ class Signature:
         model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
 
     class Output(BaseModel):
-        user_id: str = Field(description="User identifier returned by lookup.")
+        user_id: str = Field(
+            description="User identifier returned by lookup.",
+            json_schema_extra={
+                "used_by": ["get_user_details"]
+            }
+        )
 
     plain_utterances: List[str] = [
         "Can you tell me the ID linked to john.doe@example.com?",

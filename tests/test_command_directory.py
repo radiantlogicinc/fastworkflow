@@ -25,6 +25,7 @@ class TestCommandDirectory:
         
         # Based on the file structure of sample_workflow/_commands
         expected_commands = {
+            "calculate",
             "cancel_pending_order",
             "exchange_delivered_order_items",
             "find_user_id_by_email",

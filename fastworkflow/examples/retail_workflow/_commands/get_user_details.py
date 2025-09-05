@@ -17,16 +17,32 @@ class Signature:
             description="The user ID to get details for",
             pattern=r"^([a-z]+_[a-z]+_\d+|NOT_FOUND)$",
             examples=["sara_doe_496"],
+            json_schema_extra={
+                "available_from": ["find_user_id_by_email", "find_user_id_by_name_zip"]
+            }
         )
 
         model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
 
     class Output(BaseModel):
-        user_details: str = Field(description=(
-            "Detailed user information such as "
-            "first and last name, address, email, payment methods and "
-            "the list of order id's"
-        ))
+        user_details: str = Field(
+            description=(
+                "Detailed user information such as "
+                "first and last name, address, email, payment methods and "
+                "the list of order id's"
+            ),
+            json_schema_extra={
+                "used_by": [
+                    "cancel_pending_order",
+                    "exchange_delivered_order_items",
+                    "get_order_details",
+                    "modify_pending_order_address",
+                    "modify_pending_order_items",
+                    "modify_pending_order_payment",
+                    "return_delivered_order_items",
+                ]
+            },
+        )
 
     plain_utterances: List[str] = [
         "Can you pull up my account info?",

@@ -16,24 +16,36 @@ class Signature:
         order_id: str = Field(
             default="NOT_FOUND",
             description=(
-                "The order ID to get details for (must start with #). You can get order id's "
-                "from get_user_details, given a user id."
+                "The order ID to get details for (must start with #)"
             ),
             pattern=r"^(#[\w\d]+|NOT_FOUND)$",
             examples=["#W0000000"],
+            json_schema_extra={
+                "available_from": ["get_user_details"]
+            }
         )
 
         model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
 
     class Output(BaseModel):
-        order_details: str = Field(description=(
-            "Detailed information about the order such as "
-            "shipping address, "
-            "items ordered with details including name, product and item id, price and options, "
-            "fulfillments with details including tracking id and item ids, "
-            "order status, and"
-            "payment history with details including transaction type, amount and payment method id"
-        ))
+        order_details: str = Field(
+            description=(
+                "Detailed information about the order such as "
+                "shipping address, "
+                "items ordered with details including name, product and item id, price and options, "
+                "fulfillments with details including tracking id and item ids, "
+                "order status, and"
+                "payment history with details including transaction type, amount and payment method id"
+            ),
+            json_schema_extra={
+                "used_by": [
+                    "exchange_delivered_order_items",
+                    "get_product_details",
+                    "modify_pending_order_items",
+                    "return_delivered_order_items",
+                ]
+            },
+        )
 
     plain_utterances: List[str] = [
         "Can you tell me what's going on with my order #W1234567?",

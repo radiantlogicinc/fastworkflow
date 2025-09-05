@@ -6,7 +6,7 @@ from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 
 
 class Signature:  # noqa: D101
-    """Change context to the parent of the current context."""
+    """Change context to the parent of the current context. This could change the commands that are available."""
 
     plain_utterances = [
         "go up",

@@ -76,7 +76,10 @@ class RoutingDefinition(BaseModel):
         """Returns the list of command names available in the given context."""
         if context not in self.contexts:
             raise ValueError(f"Context '{context}' not found in the workflow.")
-        return self.contexts[context]
+        commands = self.contexts[context]
+        if 'wildcard' in commands:
+            commands = [cmd for cmd in commands if cmd != 'wildcard']
+        return commands
 
     def get_command_class(self, command_name: str, module_type: ModuleType) -> Optional[Type[Any]]:
         """

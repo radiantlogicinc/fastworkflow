@@ -24,7 +24,10 @@ class Signature:
                 default="NOT_FOUND",
                 description="The order ID to cancel (must start with #)",
                 pattern=r"^(#[\w\d]+|NOT_FOUND)$",
-                examples=["#123", "#abc123", "#order456"]
+                examples=["#123", "#abc123", "#order456"],
+                json_schema_extra={
+                    "available_from": ["get_user_details"]
+                }
             )
         ]
 

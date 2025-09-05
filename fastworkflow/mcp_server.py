@@ -11,6 +11,7 @@ from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.command_directory import CommandDirectory
 from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry, ModuleType
 from uuid import uuid4
+from fastworkflow.command_metadata_api import CommandMetadataAPI
 
 
 class FastWorkflowMCPServer:
@@ -50,64 +51,68 @@ class FastWorkflowMCPServer:
         active_ctx = active_ctx_name if active_ctx_name in routing.contexts else '*'
         command_names = routing.get_command_names(active_ctx)
 
+        # Centralized command metadata (docstrings, inputs, plain_utterances)
+        cme_path = fastworkflow.get_internal_workflow_path("command_metadata_extraction")
+        enhanced_meta = CommandMetadataAPI.get_enhanced_command_info(
+            subject_workflow_path=workflow_folderpath,
+            cme_workflow_path=cme_path,
+            active_context_name=active_ctx_name,
+        )
+        meta_by_fq = {m.get("qualified_name"): m for m in enhanced_meta.get("commands", [])}
+
+        # Centralized parameters for building schemas
+        params_by_cmd = CommandMetadataAPI.get_params_for_all_commands(workflow_folderpath)
+
         tools = []
         for command_name in command_names:
-            # Get command parameters class to build schema
-            command_parameters_class = routing.get_command_class(
-                command_name,
-                ModuleType.COMMAND_PARAMETERS_CLASS
-            )
-
-            # Build JSON schema from Pydantic model
+            # Centralized metadata for this command (if any)
+            meta_for_cmd = meta_by_fq.get(command_name)
+            # Build JSON schema from centralized API params
             input_schema = {
                 "type": "object",
                 "properties": {},
                 "required": []
             }
 
-            description = f"Executes {command_name}"
-
-            if command_parameters_class:
-                field_descriptions = []
-                model_fields = command_parameters_class.model_fields
-                for field_name, field_info in model_fields.items():
-                    # Convert Pydantic field to JSON schema property
-                    prop = {"type": "string"}  # Default type
-                    if hasattr(field_info, 'description') and field_info.description:
-                        prop["description"] = field_info.description
-                        field_descriptions.append(field_info.description)
-                    else:
-                        field_descriptions.append(field_name)
-
-                    if hasattr(field_info, 'default') and field_info.default:
-                        prop["default"] = field_info.default
-                        # Add to required if default is NOT_FOUND
-                        if field_info.default == NOT_FOUND:
-                            input_schema["required"].append(field_name)
-                    elif field_info.is_required():
+            # Build input schema and required fields
+            field_descriptions = []
+            for param in params_by_cmd.get(command_name, {}).get("inputs", []):
+                field_name = param.get("name") or "param"
+                prop = {"type": "string"}
+                if desc := param.get("description"):
+                    prop["description"] = desc
+                    field_descriptions.append(desc)
+                else:
+                    field_descriptions.append(field_name)
+                if (default := param.get("default")) is not None:
+                    if default == NOT_FOUND:
                         input_schema["required"].append(field_name)
+                input_schema["properties"][field_name] = prop
 
-                    input_schema["properties"][field_name] = prop
-
-                if field_descriptions:
-                    description = f"Input: {', '.join(field_descriptions)}"
-                if command_parameters_class.__doc__:
-                    description = f"{description}. {command_parameters_class.__doc__.strip()}"
+            # Use centralized display generator for a single command for rich description
+            description = CommandMetadataAPI.get_command_display_text_for_command(
+                subject_workflow_path=workflow_folderpath,
+                cme_workflow_path=cme_path,
+                active_context_name=active_ctx_name,
+                qualified_command_name=command_name,
+                for_agents=True,
+                omit_command_name=True,
+            )
 
             # Add standard FastWorkflow parameters
-            input_schema["properties"]["command"] = {
-                "type": "string",
-                "description": "Natural language command or query"
-            }
+            # input_schema["properties"]["command"] = {
+            #     "type": "string",
+            #     "description": "Natural language command or query"
+            # }
 
-            input_schema["properties"]["workitem_path"] = {
-                "type": "string",
-                "description": "Command context (optional)",
-                "default": active_ctx
-            }
+            # input_schema["properties"]["workitem_path"] = {
+            #     "type": "string",
+            #     "description": "Command context (optional)",
+            #     "default": active_ctx
+            # }
 
             tool_def = {
-                "name": command_name,
+                "name": command_name.split("/")[-1],
                 "description": description,
                 "inputSchema": input_schema,
                 "annotations": {
@@ -118,6 +123,9 @@ class FastWorkflowMCPServer:
                     "openWorldHint": True  # FastWorkflow can interact with external systems
                 }
             }
+            # Attach plain_utterances from centralized metadata if present
+            if meta_for_cmd and meta_for_cmd.get("plain_utterances"):
+                tool_def["annotations"]["plain_utterances"] = meta_for_cmd["plain_utterances"]
             tools.append(tool_def)
 
         return tools

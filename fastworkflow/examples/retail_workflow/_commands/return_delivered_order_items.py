@@ -16,18 +16,27 @@ class Signature:
             default="NOT_FOUND",
             description="The order ID for return (must start with #)",
             pattern=r"^(#W\d+|NOT_FOUND)$",
-            examples=["#W0000000"],
+            examples=["#W3456890"],
+            json_schema_extra={
+                "available_from": ["get_user_details"]
+            }
         )
         item_ids: List[str] = Field(
             default_factory=list,
             description="List of item IDs to be returned",
             examples=["1008292230"],
+            json_schema_extra={
+                "available_from": ["get_order_details"]
+            }
         )
         payment_method_id: str = Field(
             default="NOT_FOUND",
             description="Payment method ID for refund",
             pattern=r"^((gift_card|credit_card)_\d+|NOT_FOUND)$",
             examples=["gift_card_0000000", "credit_card_0000000"],
+            json_schema_extra={
+                "available_from": ["get_order_details"]
+            }
         )
 
         model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)

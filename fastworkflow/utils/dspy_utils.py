@@ -2,6 +2,17 @@ import dspy
 from pydantic import BaseModel, Field
 from typing import Type, Optional, Dict, Any, Union, get_args, get_origin, Tuple, List
 
+import fastworkflow
+from fastworkflow.utils.logging import logger
+
+def get_lm(model_env_var: str, api_key_env_var: Optional[str] = None, **kwargs):
+    """get the dspy lm object"""
+    model = fastworkflow.get_env_var(model_env_var)
+    if not model:
+        logger.critical(f"Critical Error:DSPy Language Model not provided. Set {model_env_var} environment variable.")
+        raise ValueError(f"DSPy Language Model not provided. Set {model_env_var} environment variable.")
+    api_key = fastworkflow.get_env_var(api_key_env_var) if api_key_env_var else None
+    return dspy.LM(model=model, api_key=api_key, **kwargs) if api_key else dspy.LM(model=model, **kwargs)
 
 def _process_field(field_info, is_input: bool) -> Tuple[Any, Any, bool]:
     """Process a single field and return its type, DSPy field, and optional status."""

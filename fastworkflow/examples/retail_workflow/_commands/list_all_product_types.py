@@ -20,7 +20,10 @@ class Signature:
 
     class Output(BaseModel):
         status: str = Field(
-            description="List of product type names separated by comma, or a JSON string representation of that list.",
+            description="List of product type and product id tuples, or a JSON string representation of that list.",
+            json_schema_extra={
+                "used_by": ["get_product_details"]
+            }
         )
 
     # ---------------------------------------------------------------------

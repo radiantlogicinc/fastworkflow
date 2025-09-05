@@ -10,7 +10,7 @@ from ..tools.transfer_to_human_agents import TransferToHumanAgents
 
 
 class Signature:
-    """Transfer to a human agent"""
+    """Transfer to a human agent as the last resort"""
     class Input(BaseModel):
         summary: str = Field(
             default="NOT_FOUND",

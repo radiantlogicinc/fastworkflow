@@ -9,6 +9,9 @@ from typing import Optional
 from dotenv import dotenv_values
 from queue import Empty
 
+import dspy
+
+
 # Instantiate a global console for consistent styling
 console = None
 
@@ -44,6 +47,7 @@ def main():
 
 
     import fastworkflow
+    from fastworkflow.utils import dspy_utils
     from fastworkflow.command_executor import CommandExecutor
     from .agent_module import initialize_dspy_agent
 
@@ -174,7 +178,7 @@ def main():
         exit(1)
 
     # this could be None
-    LITELLM_API_KEY_AGENT = fastworkflow.get_env_var("LITELLM_API_KEY_AGENT")
+    lm = dspy_utils.get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")
 
     startup_action: Optional[fastworkflow.Action] = None
     if args.startup_action:
@@ -204,12 +208,7 @@ def main():
     StartupProgress.end()
 
     try:
-        react_agent = initialize_dspy_agent(
-            fastworkflow.chat_session, 
-            LLM_AGENT, 
-            LITELLM_API_KEY_AGENT,
-            clear_cache=True
-        )
+        react_agent = initialize_dspy_agent(fastworkflow.chat_session)
     except (EnvironmentError, RuntimeError) as e:
         console.print(f"[bold red]Failed to initialize DSPy agent:[/bold red] {e}")
         exit(1)
@@ -240,7 +239,8 @@ def main():
             # Function to run agent processing in a separate thread
             def process_agent_query():
                 try:
-                    agent_response_container["response"] = react_agent(user_query=user_input_str)
+                    with dspy.context(lm=lm):
+                        agent_response_container["response"] = react_agent(user_query=user_input_str)
                 except Exception as e:
                     agent_response_container["error"] = e
 

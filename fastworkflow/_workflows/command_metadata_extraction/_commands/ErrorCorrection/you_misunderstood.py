@@ -41,7 +41,7 @@ class ResponseGenerator:
         fully_qualified_command_names = (
             set(cme_command_names) | 
             set(subject_crd.get_command_names(app_workflow.current_command_context_name))
-        ) - {'wildcard'}
+        )
 
         valid_command_names = [
             fully_qualified_command_name.split('/')[-1] 

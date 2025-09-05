@@ -7,7 +7,7 @@ from .tool import Tool
 class Calculate(Tool):
     @staticmethod
     def invoke(data: Dict[str, Any], expression: str) -> str:
-        if not all(char in "0123456789+-*/(). " for char in expression):
+        if any(char not in "0123456789+-*/(). " for char in expression):
             return "Error: invalid characters in expression"
         try:
             # Evaluate the mathematical expression safely

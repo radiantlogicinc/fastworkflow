@@ -73,14 +73,18 @@ def run_main(args):
             all_renderables.append(Rule(style="dim"))
         
         # Process each command response
+        num_responses = len(command_output.command_responses)
         for i, command_response in enumerate(command_output.command_responses, start=1):
             if command_response.response:
-                all_renderables.extend(
-                    (
-                        Text(f"Command Response {i}", style="bold green"),
-                        Text(command_response.response, style="green")
+                if num_responses > 1:
+                    all_renderables.extend(
+                        (
+                            Text(f"Command Response {i}", style="bold green"),
+                            Text(command_response.response, style="green")
+                        )
                     )
-                )
+                else:
+                    all_renderables.append(Text(command_response.response, style="green"))
 
             if command_response.artifacts:
                 all_renderables.extend(

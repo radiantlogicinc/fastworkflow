@@ -23,7 +23,9 @@ clarification_response_queue: Queue[str] = Queue()
 # DSPy Signature for the High-Level Planning Agent
 class PlanningAgentSignature(dspy.Signature):
     """
-    Prepare and execute a plan for building the final answer using the WorkflowAssistant tool.
+    Create a minimal step based todo list based only on the commands in the user query
+    Then, execute the plan for building the final answer using the WorkflowAssistant tool.
+    Double-check that all the tasks in the todo list have been completed before returning the final answer.
     """
     user_query = dspy.InputField(desc="The user's full input or question.")
     final_answer = dspy.OutputField(desc="The agent's comprehensive response to the user after interacting with the workflow.")
@@ -76,7 +78,7 @@ def _format_mcp_result_for_agent(mcp_result) -> str:
 
 def _build_assistant_tool_documentation(available_tools: List[Dict]) -> str:
     """Build simplified tool documentation for the main agent's WorkflowAssistant tool."""
-    
+
     # Guidance for the MAIN AGENT on how to call WorkflowAssistant
     main_agent_guidance = """
     Use the WorkflowAssistant to interact with a suite of underlying tools to assist the user.
@@ -91,7 +93,7 @@ def _build_assistant_tool_documentation(available_tools: List[Dict]) -> str:
     tool_docs = []
     for tool_def in available_tools:
         tool_name = tool_def['name']
-        tool_desc = tool_def['description']
+        tool_desc = tool_def['description'].split("\n")[0]
 
         # Main agent does not need the detailed input schema, only name, description and parameters.
         tool_docs.append(
@@ -144,30 +146,18 @@ def _ask_user_tool(prompt: str) -> str:
     return clarification_response_queue.get()
 
 
-def initialize_dspy_agent(chat_session: fastworkflow.ChatSession, LLM_AGENT: str, LITELLM_API_KEY_AGENT: Optional[str] = None, max_iters: int = 25, clear_cache: bool = False):
+def initialize_dspy_agent(chat_session: fastworkflow.ChatSession, max_iters: int = 25):
     """
     Configures and returns a high-level DSPy ReAct planning agent.
     The workflow tool agent is already integrated in the ChatSession.
     
     Args:
         chat_session: ChatSession instance (should be in agent mode)
-        LLM_AGENT: Language model name
-        LITELLM_API_KEY_AGENT: API key for the language model
         max_iters: Maximum iterations for the ReAct agent
-        clear_cache: If True, clears DSPy cache before initialization
     
     Raises:
         EnvironmentError: If LLM_AGENT is not set.
-        RuntimeError: If there's an error configuring the DSPy LM.
     """
-    if not LLM_AGENT:
-        print(f"{Fore.RED}Error: DSPy Language Model name not provided.{Style.RESET_ALL}")
-        raise EnvironmentError("DSPy Language Model name not provided.")
-
-    # Configure DSPy LM for the high-level agent
-    lm = dspy.LM(model=LLM_AGENT, api_key=LITELLM_API_KEY_AGENT)
-    dspy.settings.configure(lm=lm)
-
     # Get available tools for documentation
     mcp_server = FastWorkflowMCPServer(chat_session)
     available_tools = mcp_server.list_tools()

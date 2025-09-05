@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 import shutil
 import json
+import contextlib
 
 from fastworkflow.build.genai_postprocessor import GenAIPostProcessor, run_genai_postprocessor
 from fastworkflow.build.class_analysis_structures import ClassInfo, MethodInfo
@@ -90,7 +91,8 @@ class ResponseGenerator:
             "TestClass": self._create_test_class_info()
         }
         
-        with patch.object(GenAIPostProcessor, '_initialize_dspy'):
+        with patch('fastworkflow.build.genai_postprocessor.dspy.LM'), \
+             patch('fastworkflow.build.genai_postprocessor.dspy.context', new=lambda *args, **kwargs: contextlib.nullcontext()):
             # Create processor
             processor = GenAIPostProcessor()
             
@@ -140,7 +142,8 @@ class ResponseGenerator:
         args.workflow_folderpath = self.workflow_path
         args.skip_genai = False
         
-        with patch.object(GenAIPostProcessor, '_initialize_dspy'), \
+        with patch('fastworkflow.build.genai_postprocessor.dspy.LM'), \
+             patch('fastworkflow.build.genai_postprocessor.dspy.context', new=lambda *args, **kwargs: contextlib.nullcontext()), \
              patch.object(GenAIPostProcessor, 'process_workflow') as mock_process:
             
             # Setup mock
@@ -170,7 +173,8 @@ class ResponseGenerator:
         
         # Note: The current implementation doesn't check skip_genai flag,
         # so we're just testing that the function returns successfully
-        with patch.object(GenAIPostProcessor, '_initialize_dspy'), \
+        with patch('fastworkflow.build.genai_postprocessor.dspy.LM'), \
+             patch('fastworkflow.build.genai_postprocessor.dspy.context', new=lambda *args, **kwargs: contextlib.nullcontext()), \
              patch.object(GenAIPostProcessor, 'process_workflow') as mock_process:
             
             # Run function
@@ -186,7 +190,8 @@ class ResponseGenerator:
         """Test error handling in the processor."""
         mock_get_env.return_value = 'test_value'
         
-        with patch.object(GenAIPostProcessor, '_initialize_dspy'), \
+        with patch('fastworkflow.build.genai_postprocessor.dspy.LM'), \
+             patch('fastworkflow.build.genai_postprocessor.dspy.context', new=lambda *args, **kwargs: contextlib.nullcontext()), \
              patch.object(GenAIPostProcessor, 'process_workflow') as mock_process:
             
             # Setup mock to raise exception

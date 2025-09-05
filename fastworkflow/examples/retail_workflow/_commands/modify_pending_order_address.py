@@ -17,6 +17,9 @@ class Signature:
             description="The order ID to modify (must start with #)",
             pattern=r"^(#W\d+|NOT_FOUND)$",
             examples=["#W0000000"],
+            json_schema_extra={
+                "available_from": ["get_user_details"]
+            }
         )
         address1: str = Field(default="NOT_FOUND", description="First line of address", examples=["123 Main St"])
         address2: str = Field(default="NOT_FOUND", description="Second line of address", examples=["Apt 1"])

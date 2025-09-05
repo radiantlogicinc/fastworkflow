@@ -80,7 +80,7 @@ class CommandNamePrediction:
             valid_command_names = (
                 set(cme_command_names) | 
                 set(app_crd.get_command_names(command_context_name))
-            ) - {'wildcard'}
+            )
 
         command_name_dict = {
             fully_qualified_command_name.split('/')[-1]: fully_qualified_command_name 
@@ -338,7 +338,11 @@ class ParameterExtraction:
 
         stored_params = self._get_stored_parameters(self.cme_workflow)
 
-        input_for_param_extraction = InputForParamExtraction.create(self.app_workflow, self.command_name, self.command)
+        self.command = self.command.replace(self.command_name, "").strip()
+
+        input_for_param_extraction = InputForParamExtraction.create(
+            self.app_workflow, self.command_name, 
+            self.command)
 
         if stored_params:
             _, _, _, stored_missing_fields = self._extract_missing_fields(input_for_param_extraction, self.app_workflow, self.command_name, stored_params)
@@ -372,7 +376,7 @@ class ParameterExtraction:
             if params_str := self._format_parameters_for_display(merged_params):
                 error_msg = f"Extracted parameters so far:\n{params_str}\n\n{error_msg}"
 
-            error_msg += "\nEnter 'abort' if you want to abort the command."
+            error_msg += "\nEnter 'abort' to get out of this error state and/or execute a different command."
             error_msg += "\nEnter 'you misunderstood' if the wrong command was executed."
             return self.Output(
                 parameters_are_valid=False,

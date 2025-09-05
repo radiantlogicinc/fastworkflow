@@ -417,6 +417,13 @@ Today's date is {today}.
         if missing_fields:
             message += f"{MISSING_INFORMATION_ERRMSG}" + ", ".join(missing_fields) + "\n"
 
+            for missing_field in missing_fields:
+                is_available_from = None
+                if hasattr(type(cmd_parameters).model_fields.get(missing_field), "json_schema_extra") and type(cmd_parameters).model_fields.get(missing_field).json_schema_extra:
+                    is_available_from = type(cmd_parameters).model_fields.get(missing_field).json_schema_extra.get("available_from")
+                if is_available_from:
+                    message += f"abort and use the {' or '.join(is_available_from)} command(s) to get {missing_field} information\n"
+
         if invalid_fields:
             message += f"{INVALID_INFORMATION_ERRMSG}" + ", ".join(invalid_fields) + "\n"
 

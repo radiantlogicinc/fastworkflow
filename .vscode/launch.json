@@ -5,21 +5,6 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "run_retail_hierarchical_agents",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "fastworkflow.run_agent",
-            "justMyCode": false,
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}/"
-            },
-            "args": [
-                "./fastworkflow/examples/retail_workflow",
-                "./env/.env",
-                "./passwords/.env"
-            ]
-        },
-        {
             "name": "run_retail_agent",
             "type": "debugpy",
             "request": "launch",

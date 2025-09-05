@@ -17,15 +17,23 @@ class Signature:
             description="The product ID (numeric string)",
             pattern=r"^(\d{10}|NOT_FOUND)$",
             examples=["6086499569"],
+            json_schema_extra={
+                "available_from": ["get_order_details", "list_all_product_types"]
+            }
         )
 
         model_config = ConfigDict(arbitrary_types_allowed=True, validate_assignment=True)
 
     class Output(BaseModel):
-        product_details: str = Field(description=(
-            "Detailed product information of all product variants "
-            "including item id, options, availability and price"
-        ))
+        product_details: str = Field(
+            description=(
+                "Detailed product information of all product variants of a given product type"
+                "including item id, options, availability and price"
+            ),
+            json_schema_extra={
+                "used_by": ["exchange_delivered_order_items", "modify_pending_order_items"]
+            }
+        )
 
     plain_utterances: List[str] = [
         "Can you give me more information about this product?",

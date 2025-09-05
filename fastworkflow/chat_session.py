@@ -6,10 +6,13 @@ from collections import deque
 import json
 import contextlib
 import uuid
+from pathlib import Path
+
+import dspy
 
 import fastworkflow
 from fastworkflow.utils.logging import logger
-from pathlib import Path
+from fastworkflow.utils import dspy_utils
 from fastworkflow.model_pipeline_training import CommandRouter
 from fastworkflow.utils.startup_progress import StartupProgress
 
@@ -260,7 +263,7 @@ class ChatSession:
         if not self._workflow_tool_agent:
             # Initialize the workflow tool agent
             from fastworkflow.mcp_server import FastWorkflowMCPServer
-            from fastworkflow.agent_integration import initialize_workflow_tool_agent
+            from fastworkflow.workflow_agent import initialize_workflow_tool_agent
             
             mcp_server = FastWorkflowMCPServer(self)
             self._workflow_tool_agent = initialize_workflow_tool_agent(mcp_server)
@@ -403,29 +406,57 @@ class ChatSession:
         """Process a message in agent mode using workflow tool agent"""
         # The agent processes the user's message and may make multiple tool calls
         # to the workflow internally (directly via CommandExecutor)
-        agent_result = self._workflow_tool_agent(tool_request=message)
-        
+
+        planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
+        lm = dspy_utils.get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")
+
+        class TaskPlannerSignature(dspy.Signature):
+            """
+            Breakdown the user query into a todo list, based only on the user query and available_commands and nothing else.
+            """
+            user_query: str = dspy.InputField()
+            available_commands: list[str] = dspy.InputField()
+            todo_list: list[str] = dspy.OutputField(desc="task descriptions as short sentences")
+
+        app_workflow = self.get_active_workflow()
+        crd = fastworkflow.RoutingRegistry.get_definition(app_workflow.folderpath)
+        available_commands = crd.get_command_names('*')
+
+        with dspy.context(lm=planner_lm):
+            task_planner_func = dspy.ChainOfThought(TaskPlannerSignature)
+            prediction = task_planner_func(user_query=message, available_commands=available_commands)
+            prediction.todo_list.insert(0, "Use the 'what_can_i_do' tool to get details on available commands")
+            refined_message = (
+                f"{message}\n"
+                "Todo list:\n"
+                f"{'\n'.join([f'{i+1}. {task}' for i, task in enumerate(prediction.todo_list)])}"
+            )
+
+        with dspy.context(lm=lm):
+            agent_result = self._workflow_tool_agent(user_query=refined_message)
+            # dspy.inspect_history(n=1)
+
         # Extract the final result from the agent
         result_text = (
-            agent_result.tool_result
-            if hasattr(agent_result, 'tool_result')
+            agent_result.final_answer
+            if hasattr(agent_result, 'final_answer')
             else str(agent_result)
         )
-        
+
         # Create CommandOutput with the agent's response
         command_output = fastworkflow.CommandOutput(
             command_responses=[fastworkflow.CommandResponse(response=result_text)]
         )
-        
+
         # Put output in queue (following same pattern as _process_message)
         if (not command_output.success or self._keep_alive) and \
-            self.command_output_queue:
+                self.command_output_queue:
             self.command_output_queue.put(command_output)
-        
+
         # Persist workflow state changes
         if workflow := ChatSession.get_active_workflow():
             workflow.flush()
-        
+
         return command_output
     
     def profile_invoke_command(self, message: str):

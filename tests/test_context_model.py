@@ -28,6 +28,7 @@ def test_star_context_commands(sample_workflow_path):
     commands = model.commands("*")
 
     expected = {
+        "calculate",
         "cancel_pending_order",
         "exchange_delivered_order_items",
         "find_user_id_by_email",

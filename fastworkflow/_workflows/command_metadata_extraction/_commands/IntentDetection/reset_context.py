@@ -5,7 +5,7 @@ from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 
 
 class Signature:  # noqa: D101
-    """Reset the current context to the global context (*)."""
+    """Reset the current context to the global context (*). This could change the commands that are available."""
     plain_utterances = [
         "reset context",
         "clear context",

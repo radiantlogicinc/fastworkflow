@@ -11,7 +11,6 @@ from ..application.add_two_numbers import add_two_numbers
 
 
 class Signature:
-    """Takes two floating point numbers and returns their sum"""
     class Input(BaseModel):
         first_num: float = Field(description="First number")
         second_num: float = Field(description="Second number")

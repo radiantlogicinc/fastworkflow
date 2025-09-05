@@ -5,6 +5,7 @@ from unittest.mock import patch, MagicMock
 import ast
 import json
 import shutil
+import contextlib
 
 from fastworkflow.build.genai_postprocessor import GenAIPostProcessor
 from fastworkflow.build.class_analysis_structures import ClassInfo, MethodInfo, PropertyInfo
@@ -87,7 +88,8 @@ class ResponseGenerator:
         """Test that the processor initializes correctly."""
         mock_get_env.return_value = 'test_value'
         
-        with patch.object(GenAIPostProcessor, '_initialize_dspy'):
+        with patch('fastworkflow.build.genai_postprocessor.dspy.LM'), \
+             patch('fastworkflow.build.genai_postprocessor.dspy.context', new=lambda *args, **kwargs: contextlib.nullcontext()):
             processor = GenAIPostProcessor()
             
             # Check that modules are initialized
@@ -105,7 +107,8 @@ class ResponseGenerator:
         """Test extraction of current state from a command file."""
         mock_get_env.return_value = 'test_value'
         
-        with patch.object(GenAIPostProcessor, '_initialize_dspy'):
+        with patch('fastworkflow.build.genai_postprocessor.dspy.LM'), \
+             patch('fastworkflow.build.genai_postprocessor.dspy.context', new=lambda *args, **kwargs: contextlib.nullcontext()):
             processor = GenAIPostProcessor()
             
             # Parse the test command file
@@ -135,7 +138,8 @@ class ResponseGenerator:
         """Test generation of enhanced content for a command file."""
         mock_get_env.return_value = 'test_value'
         
-        with patch.object(GenAIPostProcessor, '_initialize_dspy'):
+        with patch('fastworkflow.build.genai_postprocessor.dspy.LM'), \
+             patch('fastworkflow.build.genai_postprocessor.dspy.context', new=lambda *args, **kwargs: contextlib.nullcontext()):
             processor = GenAIPostProcessor()
             
             # Mock the DSPy modules
@@ -190,7 +194,8 @@ class ResponseGenerator:
         """Test processing a command file with targeted updates."""
         mock_get_env.return_value = 'test_value'
         
-        with patch.object(GenAIPostProcessor, '_initialize_dspy'), \
+        with patch('fastworkflow.build.genai_postprocessor.dspy.LM'), \
+             patch('fastworkflow.build.genai_postprocessor.dspy.context', new=lambda *args, **kwargs: contextlib.nullcontext()), \
              patch.object(GenAIPostProcessor, '_extract_current_state') as mock_extract, \
              patch.object(GenAIPostProcessor, '_generate_enhanced_content') as mock_generate:
             
@@ -252,7 +257,8 @@ class ResponseGenerator:
             "TestContext": self._create_test_class_info()
         }
         
-        with patch.object(GenAIPostProcessor, '_initialize_dspy'), \
+        with patch('fastworkflow.build.genai_postprocessor.dspy.LM'), \
+             patch('fastworkflow.build.genai_postprocessor.dspy.context', new=lambda *args, **kwargs: contextlib.nullcontext()), \
              patch.object(GenAIPostProcessor, '_process_command_file_targeted') as mock_process, \
              patch.object(GenAIPostProcessor, '_generate_context_handler_docstring') as mock_context_doc, \
              patch.object(GenAIPostProcessor, '_generate_workflow_description') as mock_workflow_doc:
@@ -290,7 +296,8 @@ class TestContextHandler:
         pass
 """)
         
-        with patch.object(GenAIPostProcessor, '_initialize_dspy'):
+        with patch('fastworkflow.build.genai_postprocessor.dspy.LM'), \
+             patch('fastworkflow.build.genai_postprocessor.dspy.context', new=lambda *args, **kwargs: contextlib.nullcontext()):
             processor = GenAIPostProcessor()
             
             # Mock docstring generator
@@ -315,7 +322,8 @@ class TestContextHandler:
         """Test generating workflow description file."""
         mock_get_env.return_value = 'test_value'
         
-        with patch.object(GenAIPostProcessor, '_initialize_dspy'):
+        with patch('fastworkflow.build.genai_postprocessor.dspy.LM'), \
+             patch('fastworkflow.build.genai_postprocessor.dspy.context', new=lambda *args, **kwargs: contextlib.nullcontext()):
             processor = GenAIPostProcessor()
             
             # Mock workflow generator

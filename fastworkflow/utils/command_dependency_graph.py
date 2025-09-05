@@ -1,16 +1,17 @@
 import json
 import os
 from dataclasses import dataclass
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 
 from sentence_transformers import SentenceTransformer, util as st_util
 
-import dspy  # type: ignore
+# import dspy  # type: ignore
 
-import fastworkflow  # For env configuration when using DSPy
+# import fastworkflow  # For env configuration when using DSPy
 from fastworkflow.command_directory import CommandDirectory
 from fastworkflow.command_routing import RoutingDefinition
 from fastworkflow.utils import python_utils
+from fastworkflow.command_metadata_api import CommandMetadataAPI
 
 
 @dataclass
@@ -27,53 +28,39 @@ class CommandParams:
     outputs: List[ParamMeta]
 
 
-def _serialize_type_str(t: Any) -> str:
-    try:
-        # Basic serialization for common typing and classes
-        return t.__name__ if hasattr(t, "__name__") else str(t)
-    except Exception:
-        return str(t)
+# def _serialize_type_str(t: Any) -> str:
+#     try:
+#         # Basic serialization for common typing and classes
+#         return t.__name__ if hasattr(t, "__name__") else str(t)
+#     except Exception:
+#         return str(t)
 
 
 def _collect_command_params(workflow_path: str) -> Dict[str, CommandParams]:
-    directory = CommandDirectory.load(workflow_path)
-    routing = RoutingDefinition.build(workflow_path)
+    params_map = CommandMetadataAPI.get_params_for_all_commands(workflow_path)
 
     results: Dict[str, CommandParams] = {}
-
-    for qualified_name in directory.get_commands():
-        # Hydrate metadata and import module
-        directory.ensure_command_hydrated(qualified_name)
-        metadata = directory.get_command_metadata(qualified_name)
-        module_path = metadata.parameter_extraction_signature_module_path or metadata.response_generation_module_path
-        if not module_path:
-            continue
-        module = python_utils.get_module(str(module_path), workflow_path)
-        signature_cls = getattr(module, "Signature", None)
-        if not signature_cls:
-            continue
-
-        inputs: List[ParamMeta] = []
-        outputs: List[ParamMeta] = []
-
-        InputModel = getattr(signature_cls, "Input", None)
-        if InputModel is not None and hasattr(InputModel, "model_fields"):
-            for name, field in InputModel.model_fields.items():
-                desc = getattr(field, "description", "") or ""
-                examples = getattr(field, "examples", []) or []
-                type_str = _serialize_type_str(field.annotation)
-                inputs.append(ParamMeta(name=name, type_str=type_str, description=str(desc), examples=list(examples)))
-
-        OutputModel = getattr(signature_cls, "Output", None)
-        if OutputModel is not None and hasattr(OutputModel, "model_fields"):
-            for name, field in OutputModel.model_fields.items():
-                desc = getattr(field, "description", "") or ""
-                examples = getattr(field, "examples", []) or []
-                type_str = _serialize_type_str(field.annotation)
-                outputs.append(ParamMeta(name=name, type_str=type_str, description=str(desc), examples=list(examples)))
-
-        if contexts := routing.get_contexts_for_command(qualified_name):
-            results[qualified_name] = CommandParams(inputs=inputs, outputs=outputs)
+    for qualified_name, io in params_map.items():
+        inputs = [
+            ParamMeta(
+                name=p.get("name", ""),
+                type_str=str(p.get("type_str", "")),
+                description=str(p.get("description", "")),
+                examples=list(p.get("examples", []) or []),
+            )
+            for p in io.get("inputs", [])
+        ]
+        outputs = [
+            ParamMeta(
+                name=p.get("name", ""),
+                type_str=str(p.get("type_str", "")),
+                description=str(p.get("description", "")),
+                examples=list(p.get("examples", []) or []),
+            )
+            for p in io.get("outputs", [])
+        ]
+        # Include all discovered commands; context overlap is handled later
+        results[qualified_name] = CommandParams(inputs=inputs, outputs=outputs)
 
     return results
 
@@ -129,112 +116,112 @@ def _semantic_match(out_param: ParamMeta, in_param: ParamMeta, threshold: float 
 # ----------------------------------------------------------------------------
 
 # Lazy singletons
-_llm_initialized: bool = False  # type: ignore
-_llm_module: Optional["CommandDependencyModule"] = None  # type: ignore
+# _llm_initialized: bool = False  # type: ignore
+# _llm_module: Optional["CommandDependencyModule"] = None  # type: ignore
 
 
-def _initialize_dspy_llm_if_needed() -> None:
-    """Initialize DSPy LM once using FastWorkflow environment.
+# def _initialize_dspy_llm_if_needed() -> None:
+#     """Initialize DSPy LM once using FastWorkflow environment.
 
-    Controlled by env vars:
-      - LLM_COMMAND_METADATA_GEN (model id for LiteLLM via DSPy)
-      - LITELLM_API_KEY_COMMANDMETADATA_GEN (API key)
-    """
-    global _llm_initialized, _llm_module
-    if _llm_initialized:
-        return
+#     Controlled by env vars:
+#       - LLM_COMMAND_METADATA_GEN (model id for LiteLLM via DSPy)
+#       - LITELLM_API_KEY_COMMANDMETADATA_GEN (API key)
+#     """
+#     global _llm_initialized, _llm_module
+#     if _llm_initialized:
+#         return
 
-    model = fastworkflow.get_env_var("LLM_COMMAND_METADATA_GEN")
-    api_key = fastworkflow.get_env_var("LITELLM_API_KEY_COMMANDMETADATA_GEN")
-    lm = dspy.LM(model=model, api_key=api_key, max_tokens=1000)
-    dspy.settings.configure(lm=lm)
+#     model = fastworkflow.get_env_var("LLM_COMMAND_METADATA_GEN")
+#     api_key = fastworkflow.get_env_var("LITELLM_API_KEY_COMMANDMETADATA_GEN")
+#     lm = dspy.LM(model=model, api_key=api_key, max_tokens=1000)
 
-    # Define signature and module only if dspy is available
-    class CommandDependencySignature(dspy.Signature):  # type: ignore
-        """Analyze if two commands have a dependency relationship.
+#     # Define signature and module only if dspy is available
+#     class CommandDependencySignature(dspy.Signature):  # type: ignore
+#         """Analyze if two commands have a dependency relationship.
 
-        There is a dependency relationship if and only if the outputs from one command can be used directly as inputs of the other.
-        Tip for figuring out dependency direction: Commands with hard-to-remember inputs (such as id) typically depend on commands with easy to remember inputs (such as name, email).
-        """
+#         There is a dependency relationship if and only if the outputs from one command can be used directly as inputs of the other.
+#         Tip for figuring out dependency direction: Commands with hard-to-remember inputs (such as id) typically depend on commands with easy to remember inputs (such as name, email).
+#         """
 
-        cmd_x_name: str = dspy.InputField(desc="Name of command X")
-        cmd_x_inputs: str = dspy.InputField(desc="Input parameters of command X (name:type)")
-        cmd_x_outputs: str = dspy.InputField(desc="Output parameters of command X (name:type)")
+#         cmd_x_name: str = dspy.InputField(desc="Name of command X")
+#         cmd_x_inputs: str = dspy.InputField(desc="Input parameters of command X (name:type)")
+#         cmd_x_outputs: str = dspy.InputField(desc="Output parameters of command X (name:type)")
         
-        cmd_y_name: str = dspy.InputField(desc="Name of command Y")
-        cmd_y_inputs: str = dspy.InputField(desc="Input parameters of command Y (name:type)")
-        cmd_y_outputs: str = dspy.InputField(desc="Output parameters of command Y (name:type)")
+#         cmd_y_name: str = dspy.InputField(desc="Name of command Y")
+#         cmd_y_inputs: str = dspy.InputField(desc="Input parameters of command Y (name:type)")
+#         cmd_y_outputs: str = dspy.InputField(desc="Output parameters of command Y (name:type)")
 
-        has_dependency: bool = dspy.OutputField(
-            desc="True if there's a dependency between the commands"
-        )
-        direction: str = dspy.OutputField(
-            desc="Direction: 'x_depends_on_y', 'y_depends_on_x', or 'none'"
-        )
+#         has_dependency: bool = dspy.OutputField(
+#             desc="True if there's a dependency between the commands"
+#         )
+#         direction: str = dspy.OutputField(
+#             desc="Direction: 'x_depends_on_y', 'y_depends_on_x', or 'none'"
+#         )
 
-    class CommandDependencyModule(dspy.Module):  # type: ignore
-        def __init__(self):
-            super().__init__()
-            self.generate = dspy.ChainOfThought(CommandDependencySignature)
+#     class CommandDependencyModule(dspy.Module):  # type: ignore
+#         def __init__(self):
+#             super().__init__()
+#             self.generate = dspy.ChainOfThought(CommandDependencySignature)
 
-        def forward(
-            self,
-            cmd_x_name: str,
-            cmd_x_inputs: str,
-            cmd_x_outputs: str,
-            cmd_y_name: str,
-            cmd_y_inputs: str,
-            cmd_y_outputs: str,
-        ) -> tuple[bool, str]:
-            prediction = self.generate(
-                cmd_x_name=cmd_x_name,
-                cmd_x_inputs=cmd_x_inputs,
-                cmd_x_outputs=cmd_x_outputs,
-                cmd_y_name=cmd_y_name,
-                cmd_y_inputs=cmd_y_inputs,
-                cmd_y_outputs=cmd_y_outputs,
-            )
-            return prediction.has_dependency, prediction.direction
+#         def forward(
+#             self,
+#             cmd_x_name: str,
+#             cmd_x_inputs: str,
+#             cmd_x_outputs: str,
+#             cmd_y_name: str,
+#             cmd_y_inputs: str,
+#             cmd_y_outputs: str,
+#         ) -> tuple[bool, str]:
+#             with dspy.context(lm=lm):
+#                 prediction = self.generate(
+#                     cmd_x_name=cmd_x_name,
+#                     cmd_x_inputs=cmd_x_inputs,
+#                     cmd_x_outputs=cmd_x_outputs,
+#                     cmd_y_name=cmd_y_name,
+#                     cmd_y_inputs=cmd_y_inputs,
+#                     cmd_y_outputs=cmd_y_outputs,
+#                 )
+#                 return prediction.has_dependency, prediction.direction
 
-    _llm_module = CommandDependencyModule()
-    _llm_initialized = True
+#     _llm_module = CommandDependencyModule()
+#     _llm_initialized = True
 
 
-def _llm_command_dependency(
-    cmd_x_name: str, 
-    cmd_x_params: CommandParams,
-    cmd_y_name: str,
-    cmd_y_params: CommandParams
-) -> Optional[str]:
-    """Check if two commands have a dependency using LLM.
+# def _llm_command_dependency(
+#     cmd_x_name: str, 
+#     cmd_x_params: CommandParams,
+#     cmd_y_name: str,
+#     cmd_y_params: CommandParams
+# ) -> Optional[str]:
+#     """Check if two commands have a dependency using LLM.
     
-    Returns:
-        - "x_to_y" if Y depends on X (X's outputs feed Y's inputs)
-        - "y_to_x" if X depends on Y (Y's outputs feed X's inputs)  
-        - None if no dependency
-    """
-    _initialize_dspy_llm_if_needed()
+#     Returns:
+#         - "x_to_y" if Y depends on X (X's outputs feed Y's inputs)
+#         - "y_to_x" if X depends on Y (Y's outputs feed X's inputs)  
+#         - None if no dependency
+#     """
+#     _initialize_dspy_llm_if_needed()
 
-    # Format parameters for LLM
-    x_inputs = ", ".join([f"{p.name}:{p.type_str}" for p in cmd_x_params.inputs])
-    x_outputs = ", ".join([f"{p.name}:{p.type_str}" for p in cmd_x_params.outputs])
-    y_inputs = ", ".join([f"{p.name}:{p.type_str}" for p in cmd_y_params.inputs])
-    y_outputs = ", ".join([f"{p.name}:{p.type_str}" for p in cmd_y_params.outputs])
+#     # Format parameters for LLM
+#     x_inputs = ", ".join([f"{p.name}:{p.type_str}" for p in cmd_x_params.inputs])
+#     x_outputs = ", ".join([f"{p.name}:{p.type_str}" for p in cmd_x_params.outputs])
+#     y_inputs = ", ".join([f"{p.name}:{p.type_str}" for p in cmd_y_params.inputs])
+#     y_outputs = ", ".join([f"{p.name}:{p.type_str}" for p in cmd_y_params.outputs])
 
-    has_dep, direction = _llm_module(
-        cmd_x_name=cmd_x_name,
-        cmd_x_inputs=x_inputs or "none",
-        cmd_x_outputs=x_outputs or "none",
-        cmd_y_name=cmd_y_name,
-        cmd_y_inputs=y_inputs or "none",
-        cmd_y_outputs=y_outputs or "none",
-    )
+#     has_dep, direction = _llm_module(
+#         cmd_x_name=cmd_x_name,
+#         cmd_x_inputs=x_inputs or "none",
+#         cmd_x_outputs=x_outputs or "none",
+#         cmd_y_name=cmd_y_name,
+#         cmd_y_inputs=y_inputs or "none",
+#         cmd_y_outputs=y_outputs or "none",
+#     )
 
-    if not has_dep or direction == "none":
-        return None
-    if direction == "x_depends_on_y":
-        return "y_to_x"  # Y's outputs -> X's inputs
-    return "x_to_y" if direction == "y_depends_on_x" else None
+#     if not has_dep or direction == "none":
+#         return None
+#     if direction == "x_depends_on_y":
+#         return "y_to_x"  # Y's outputs -> X's inputs
+#     return "x_to_y" if direction == "y_depends_on_x" else None
 
 
 def _contexts_overlap(routing: RoutingDefinition, cmd_x: str, cmd_y: str) -> bool:
