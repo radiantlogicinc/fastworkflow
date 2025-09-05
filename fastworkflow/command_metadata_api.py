@@ -316,12 +316,18 @@ class CommandMetadataAPI:
                                                 desc_val = str(param.get("description", "") or "").strip()
                                                 name_val = str(param.get("name", "") or "").strip()
                                                 title_val = desc_val or name_val
+                                                type_val = str(param.get("type", "") or "").strip()
                                                 if not title_val:
                                                     # Skip to avoid a bare '-'
                                                     continue
-                                                lines.append(f"{indent_str}  - {title_val}")
+                                                # Render name/description and type on the same line
+                                                if type_val:
+                                                    lines.append(f"{indent_str}  - {title_val}, type: {type_val}")
+                                                else:
+                                                    lines.append(f"{indent_str}  - {title_val}")
                                                 for rk2, rv2 in param.items():
-                                                    if rk2 in {"name", "description"}:
+                                                    # We've already rendered name/description (and type) inline
+                                                    if rk2 in {"name", "description", "type"}:
                                                         continue
                                                     # Render examples inline for readability
                                                     if rk2 == "examples" and isinstance(rv2, list):

@@ -3,7 +3,7 @@
 ## 1. Overview
 
 ### 1.1 Purpose
-This specification outlines the requirements and design for a Python-based evaluation tool that assesses the performance of the FastWorkflow agent (located at `/run_agent`) on the Tau Bench retail workflow benchmark (from https://github.com/sierra-research/tau-bench, specifically the retail domain). The tool will simulate multi-turn interactions between the agent and a Tau Bench-compatible environment, compute success metrics (e.g., Pass^1 to Pass^4 rates), accumulate costs (e.g., API token usage), and generate an overall score. This will enable benchmarking FastWorkflow against Tau Bench leaderboards, identifying strengths/weaknesses in tool-calling, reasoning, and task completion for real-world retail scenarios.
+This specification outlines the requirements and design for evaluating the FastWorkflow agent via a programmatic agent session API (non-interactive; not the CLI) against the Tau Bench retail workflow benchmark (from https://github.com/sierra-research/tau-bench, specifically the retail domain). The integration is implemented in the Tau Bench fork as a thin adapter plus a runtime bridge that monkey-patches FastWorkflow's agent tool execution to perform agent-internal stepping with the Tau Bench environment (no fastworkflow code changes). The adapter is registered with Tau Bench's existing harness (`run.py`), minimizing changes to both repositories and requiring no modifications to Tau Bench tests. The bridge simulates multi-turn interactions, computes success metrics (e.g., Pass^1 to Pass^4 rates), accumulates costs (e.g., API token usage), and generates an overall score.
 
 The evaluation will focus on:
 - **Task Completion**: How effectively the agent resolves user instructions by invoking the correct sequence of tools (e.g., `get_user_details`, `exchange_delivered_order_items`).
@@ -13,12 +13,12 @@ The evaluation will focus on:
 This is not an implementation; it is a blueprint for developers to build the evaluation code.
 
 ### 1.2 Scope
-- **In Scope**: Loading Tau Bench retail tasks, integrating with FastWorkflow agent, simulating Tau Bench environment, running evaluations, computing metrics (Pass^1 to Pass^4, average reward, total cost), and generating reports.
-- **Out of Scope**: Modifying the FastWorkflow agent or Tau Bench codebase; supporting non-retail domains (e.g., airline); real-time API integrations beyond simulation; UI/dashboard for results (console/JSON output only).
+- **In Scope**: Using Tau Bench's native task loading and environment; integrating FastWorkflow as an agent through a thin adapter within the Tau Bench fork; registering the adapter with the existing `run.py` harness (e.g., `--agent-strategy fastworkflow`); running evaluations; computing metrics (Pass^1 to Pass^4, average reward, total cost); and generating reports in Tau Bench's expected formats.
+- **Out of Scope**: Changing Tau Bench tests; large-scale refactors in either repo; supporting non-retail domains (e.g., airline); real-time API integrations beyond simulation; UI/dashboard for results (console/JSON output only).
 
 ### 1.3 Assumptions
-- Tau Bench repo is cloned locally or accessible via pip (e.g., `pip install tau-bench` if available; otherwise, use the GitHub source).
-- FastWorkflow agent supports tool-calling and multi-turn conversations as per `/run_agent/agent_module.py`.
+- Tau Bench repo is forked/cloned locally and will install the latest `fastworkflow` (e.g., `pip install -U fastworkflow`) into its environment.
+- FastWorkflow exposes a programmatic API to start and step a workflow chat session as an agent (e.g., `create_agent_session` / `start_agent_session`) without using the interactive CLI. If such an API is not yet public, only minimal, additive changes are made to expose it.
 - Environment variables for API keys (e.g., OpenAI, Anthropic) are set for the agent.
 - Tasks are static JSON-like structures as shown in the user query (e.g., with `user_id`, `instruction`, `actions`).
 
@@ -43,24 +43,30 @@ This is not an implementation; it is a blueprint for developers to build the eva
    - Handle resets: For each task, call `env.reset(task_index)` to start with the task's `instruction` as the initial user query.
    - Support multi-turn: Loop until `response.done` or max steps reached, passing agent actions to `env.step(action)`.
 
-3. **Agent Integration**:
-   - Initialize FastWorkflow agent from `/run_agent` (e.g., using `initialize_dspy_agent` or equivalent entrypoint).
-   - Map Tau Bench tools to FastWorkflow commands (e.g., Tau's `get_user_details` -> FastWorkflow's `_commands/get_user_details.py`).
-   - Adapt agent's input: Feed environment observations (e.g., user instructions, tool outputs) as agent queries.
-   - Extract actions: Parse agent's output into Tau Bench's `Action` format (e.g., `{"name": "get_order_details", "arguments": {"order_id": "#W123"}}`).
-   - Handle reasoning: If agent uses ReAct-style (Thought/Action), extract only the Action for env.step.
+3. **Agent Integration (Option A: agent-internal stepping via runtime bridge)**:
+   - Implement a thin adapter inside the Tau Bench fork (e.g., `tau_bench/agents/fastworkflow_adapter.py`) that conforms to Tau Bench's agent interface and is selectable via the existing harness (no test edits).
+   - At adapter initialization, install a runtime bridge (monkey patch) that overrides FastWorkflow's internal tool execution entrypoint used by the agent (e.g., patch `fastworkflow.workflow_agent._execute_workflow_query`). The bridge must:
+     - Plan-only: Resolve the exact command name and validated parameters without executing tools by invoking the CME “wildcard” route (extract `command_name`, `cmd_parameters`) and serializing parameters.
+     - Translate the plan into Tau Bench `Action` ({`name`, `arguments`}).
+     - Call `env.step(action)` directly (agent-internal stepping), obtain observation/reward/done.
+     - Format the observation (deterministic `render_obs_for_agent`) and return it as the tool result to the agent so the agent can use it in subsequent turns.
+   - Provide a minimal tool-name mapping layer to translate Tau Bench tool names to FastWorkflow tool identifiers if they differ (prefer 1:1 naming to avoid churn).
+   - Avoid modifying tests: All formatting and structures must exactly match what the Tau Bench environment expects.
+   - No changes to `fastworkflow` source are required; the bridge is installed only when `--agent-strategy fastworkflow` is selected.
 
-4. **Evaluation Loop** (Adapted from Tau Bench's solve()):
+4. **Evaluation Loop** (Reuse Tau Bench's `solve()`/runner with agent-internal stepping):
+   - Use Tau Bench's existing loop/infrastructure; register/select the FastWorkflow adapter as the agent under test (e.g., via CLI flag or agent registry) without altering test cases.
+   - Expose the agent via Tau Bench's CLI as: `python run.py --agent-strategy fastworkflow --env retail --model <m> --model-provider <p> --user-model <m> --user-model-provider <p> --user-strategy llm --max-concurrency <n>`.
    - For each task:
      - Reset environment with task.
      - Initialize message history with system prompt (e.g., wiki/policy from Tau Bench) + initial observation.
      - Loop (up to max_num_steps=30):
-       - Generate agent's next step (message, action, cost).
-       - Step environment with action -> get observation, reward, done, info.
-       - Append to history.
-       - Accumulate cost.
+       - The agent, via the installed bridge, plans the next action, internally executes `env.step(action)`, and receives the observation text as the tool result.
+       - The adapter simply advances the conversation (no external `env.step` call by the harness); append the observation to history.
+       - Accumulate cost and step metrics via a callback from the bridge.
+       - Break if `done` or max steps.
      - Record final reward, steps taken, success (reward==1.0), and pass level (e.g., if succeeded on turn 2, counts for Pass^2+).
-   - Ground-Truth Validation: Optionally compare agent's action sequence to task's expected `actions` for accuracy.
+   - Ground-Truth Validation: Optionally record the planned action sequence for comparison to task `actions`.
 
 5. **Metrics Computation**:
    - Per-task: Reward, steps to success, cost, success turn (if any).
@@ -80,37 +86,204 @@ This is not an implementation; it is a blueprint for developers to build the eva
 
 ### 2.2 Non-Functional Requirements
 - **Performance**: Support parallel evaluation (e.g., `--max-concurrency 10`) to handle API rate limits.
-- **Configurability**: CLI flags for model (e.g., `--model gpt-4o`), provider (e.g., `--provider openai`), max steps, temperature, use_reasoning (ReAct vs. Act).
+- **Configurability**: CLI flags for model (e.g., `--model gpt-4o`), provider (e.g., `--provider openai`), max steps, temperature, use_reasoning (ReAct vs. Act). Map these to FastWorkflow session configuration.
+- **Compatibility**: Zero changes to Tau Bench tests; adapter strictly conforms to expected action/result formats.
+- **Programmatic API Only**: Use FastWorkflow's non-interactive, programmatic agent session API (no CLI, no streaming I/O). Disable streaming; return structured steps.
 - **Error Handling**: Retry on API failures (up to 3x); log invalid actions; handle task validation errors.
-- **Dependencies**: Python 3.10+, litellm (for completions), tau-bench (pip or local), rich (for console tables), pydantic (for parsing).
+- **Dependencies**: Python 3.10+, litellm (for completions), tau-bench (pip or local), fastworkflow (latest), rich (for console tables), pydantic (for parsing).
 - **Reproducibility**: Seed random elements; cache results if `--clear-cache false`.
 - **Security**: Do not hardcode API keys; use env vars.
 
 ## 3. Design
 
 ### 3.1 Architecture
-- **Main Script**: `evaluate_tau_bench.py` (in `/run_agent` or new dir `/evaluation`).
-- **Modules**:
-  - `task_loader.py`: Load/parse Tau Bench retail tasks.
-  - `env_adapter.py`: Wrapper for Tau Bench Env, mapping to FastWorkflow data/tools.
-  - `agent_runner.py`: Interface to run FastWorkflow agent, parse outputs to Actions.
-  - `evaluator.py`: Core loop (like solve()), metrics computation.
-  - `reporter.py`: Generate console/JSON outputs.
+- **Integration Location (Tau Bench fork)**:
+  - `tau_bench/agents/fastworkflow_adapter.py`: Thin adapter implementing Tau Bench's agent interface; constructs the FastWorkflow session, installs the runtime bridge, and orchestrates the conversation.
+  - `tau_bench/agents/fastworkflow_bridge.py`: Runtime monkey-patch that overrides FastWorkflow's tool execution entrypoint used by the agent to:
+    1) plan-only (extract `name`, `arguments`), 2) call `env.step(action)`, 3) format and return observation text to the agent, and 4) stream step metrics to the adapter.
+  - `tau_bench/agents/fastworkflow_tool_map.py` (optional): Centralized mapping from Tau Bench tool names to FastWorkflow tool identifiers, if names differ.
+  - Registration: Add the adapter to the existing agent factory/registry so it is selectable via `--agent-strategy fastworkflow` in `run.py`.
+- **FastWorkflow**:
+  - No code changes required. The bridge is installed at runtime only for the FastWorkflow strategy.
+- **Reuse Existing Tau Bench Components**:
+  - Use Tau Bench's native task loaders, environment, evaluator/solver, and reporting. Do not duplicate these in FastWorkflow.
 
 ### 3.2 Data Flow
-1. Load tasks -> For each: Reset Env -> Init messages with instruction.
-2. Agent generates action -> Env steps -> Update messages with obs.
-3. Repeat until done or max steps -> Compute per-task metrics.
-4. Aggregate and report.
+1. Tau Bench loads tasks and environment as usual.
+2. For each task: Reset Env -> Initialize messages with instruction.
+3. Agent, via the bridge, plans an action, executes `env.step(action)` internally, and returns observation text to itself.
+4. Adapter advances the agent turn, accumulating cost/metrics via bridge callbacks.
+5. Repeat until done or max steps -> Compute per-task metrics via Tau Bench's existing logic.
+6. Aggregate and report using Tau Bench's reporting.
 
 ### 3.3 Edge Cases
-- Agent fails to parse (invalid JSON): Treat as error, assign reward 0.
+- Agent fails to produce a valid `Action`: Treat as error, assign reward 0.
 - Max steps exceeded: Failure (reward 0).
 - Partial success: If Tau Bench supports fractional rewards, use them.
-- Tool Mismatch: If FastWorkflow lacks a tool, log and skip task.
+- Tool mismatch or missing tool: Log clearly and skip task or return a no-op action per Tau Bench conventions; prefer aligning tool names to avoid mapping where possible.
+- Optional toggle (debug): The bridge can be switched to “decision-only” to return planned actions as JSON with external stepping (for debugging) without changing tests.
 
 ### 3.4 Extensibility
-- Add flags for other domains (e.g., `--env airline`).
-- Support custom agents (e.g., via abstract Agent class).
+- Add flags for other domains (e.g., `--env airline`) by setting appropriate `run_as` domain values.
+- Support custom agents by swapping adapters via Tau Bench's agent registry without test changes.
+
+### 3.5 Runtime Bridge Implementation Plan (Option A)
+
+This section specifies the concrete design and implementation plan for the runtime bridge that enables agent-internal stepping without modifying the `fastworkflow` package.
+
+#### 3.5.1 Files to add (Tau Bench fork)
+- `tau_bench/agents/fastworkflow_adapter.py`: Adapter wiring to Tau Bench harness (agent factory) and lifecycle.
+- `tau_bench/agents/fastworkflow_bridge.py`: Runtime monkey-patch that intercepts FastWorkflow agent tool execution and performs env stepping.
+- `tau_bench/agents/fastworkflow_tool_map.py` (optional): Stable mapping of Tau Bench tool names to FastWorkflow tool identifiers.
+
+#### 3.5.2 Runtime bridge (monkey-patch)
+- Intercept the agent’s synchronous tool execution entrypoint (preferred target: `fastworkflow.workflow_agent._execute_workflow_query`).
+- For each call:
+  1) Plan-only using the CME wildcard to resolve the final command name and validated parameters (no tool side effects).
+  2) Build a Tau Bench `Action` dict: `{ "name": <command_name>, "arguments": <validated params dict> }`.
+  3) Call `env.step(action)` (agent-internal stepping) and obtain `(obs, reward, done, info)`.
+  4) Format a deterministic observation string and return it as the tool result to the agent.
+  5) Emit a per-step callback for metrics (action, reward, done), accumulated by the adapter.
+
+Example (pseudocode):
+
+```python
+# tau_bench/agents/fastworkflow_bridge.py
+import json
+import fastworkflow
+from fastworkflow import Action
+from fastworkflow.command_executor import CommandExecutor
+
+_SESSION_ENV: dict[int, any] = {}
+_STEP_CB = None  # optional callback(dict)
+
+def set_step_callback(fn):
+    global _STEP_CB
+    _STEP_CB = fn
+
+def render_obs_for_agent(obs, info) -> str:
+    # Implement deterministic, concise formatting (e.g., JSON)
+    return json.dumps({"observation": obs, "info": info}, ensure_ascii=False)
+
+def install_bridge(env) -> None:
+    import fastworkflow.workflow_agent as wa
+
+    def _execute_workflow_query_bridge(command: str,
+                                       chat_session_obj: fastworkflow.ChatSession) -> str:
+        _SESSION_ENV[id(chat_session_obj)] = env
+
+        # Plan-only via CME wildcard
+        cme_out = CommandExecutor.perform_action(
+            chat_session_obj.cme_workflow,
+            Action(command_name="wildcard", command=command)
+        )
+        resp = cme_out.command_responses[0]
+        artifacts = resp.artifacts
+        name = artifacts["command_name"]
+        params = artifacts.get("cmd_parameters")
+
+        # Best-effort parameter serialization
+        if hasattr(params, "model_dump"):
+            args = params.model_dump()
+        elif hasattr(params, "dict"):
+            args = params.dict()
+        elif params is None:
+            args = {}
+        else:
+            args = dict(params)
+
+        tau_action = {"name": name, "arguments": args}
+        obs, reward, done, info = _SESSION_ENV[id(chat_session_obj)].step(tau_action)
+
+        if _STEP_CB:
+            _STEP_CB({"action": tau_action, "reward": reward, "done": done, "info": info})
+
+        return render_obs_for_agent(obs, info)
+
+    # Install monkey patch
+    wa._execute_workflow_query = _execute_workflow_query_bridge
+```
+
+Notes:
+- Maintain a per-session Env registry (`_SESSION_ENV`) to ensure isolation in concurrent runs.
+- Provide a stable observation formatter (`render_obs_for_agent`) for agent consumption.
+- Optionally expose `set_step_callback(fn)` for the adapter to collect metrics.
+- Fallback: if a future FastWorkflow version changes `_execute_workflow_query`, patch `CommandExecutor.invoke_command` with the same plan→env.step→return-text logic.
+
+#### 3.5.3 Adapter wiring (`fastworkflow_adapter.py`)
+- Responsibilities:
+  - Construct `env` from Tau Bench context.
+  - Install the runtime bridge: `install_bridge(env)`.
+  - Initialize the FastWorkflow session/agent as usual.
+  - Provide an agent wrapper for the harness that starts the conversation and reads step-level metrics from the bridge’s callback.
+
+Adapter sketch:
+
+```python
+# tau_bench/agents/fastworkflow_adapter.py
+from .fastworkflow_bridge import install_bridge, set_step_callback
+
+class FastWorkflowAgentAdapter:
+    def __init__(self, env, model_cfg):
+        install_bridge(env)
+        set_step_callback(self._on_step)
+        # create/start fastworkflow session/agent here (programmatic API)
+        self.metrics = []
+
+    def _on_step(self, step_info: dict):
+        self.metrics.append(step_info)
+
+    def run_episode(self, task):
+        # Initialize conversation with task instruction
+        # Drive the agent until it finishes internally (bridge performs env.step)
+        # Return per-episode results (reward, pass-level, etc.)
+        ...
+```
+
+#### 3.5.4 Metrics & cost
+- The bridge’s step callback reports `{action, reward, done, info}` per turn.
+- The adapter accumulates these to compute: steps-to-success, Pass^k, average reward, costs (if available from model provider logs), and total tokens.
+- If provider cost/tokens are tracked elsewhere, the adapter can merge them with step metrics on a per-turn basis.
+
+#### 3.5.5 Concurrency & safety
+- Use a per-session map (`_SESSION_ENV[id(chat_session)]`) to avoid cross-talk in concurrent evaluations.
+- Ensure the bridge is installed only for `--agent-strategy fastworkflow` and removed/ignored otherwise.
+
+#### 3.5.6 Debugging: decision-only mode
+- Add a non-default debug toggle in the bridge to return planned action JSON without calling `env.step`. The harness can then step externally.
+- Keep default as agent-internal stepping.
+
+#### 3.5.7 Error handling
+- Parameter resolution failures: return a crisp agent-readable error string so the agent can recover or re-plan.
+- Env rejects action: format the error in the observation string; still record the step in metrics.
+- Max steps exceeded: adapter marks failure and stops.
+
+#### 3.5.8 Testing plan
+- Unit: Parameter serialization (Pydantic/dataclass/dict) → dict.
+- Unit: CME wildcard result contains `command_name` and `cmd_parameters`.
+- Unit: Bridge returns deterministic observation text.
+- Integration: End-to-end task with known ground truth; verify action sequence, rewards, and Pass^k.
+
+#### 3.5.9 Integration steps
+- Register adapter in Tau Bench agent factory so it is selectable via `--agent-strategy fastworkflow`.
+- On adapter init: install the bridge, configure the model/provider, and create the FastWorkflow session.
+- The harness remains unchanged for this strategy path; the agent executes internally and reports metrics via the adapter.
+
+#### 3.5.10 Fallback strategy
+- If `_execute_workflow_query` becomes unavailable, patch `CommandExecutor.invoke_command` with an equivalent bridge:
+
+```python
+from fastworkflow.command_executor import CommandExecutor as CE
+_orig_invoke = CE.invoke_command
+
+def invoke_command_bridge(chat_session, command):
+    # Same plan-only extraction using chat_session.cme_workflow
+    # Then env.step and wrap the observation as a CommandOutput text response
+    ...
+
+CE.invoke_command = invoke_command_bridge
+```
+
+This fallback keeps the design resilient across FastWorkflow versions without changing either repository’s tests.
 
 This spec provides a complete blueprint; implementation should follow Tau Bench's MIT license and cite the repo/paper. If clarifications needed (e.g., exact Pass^k definition), refer to Tau Bench paper or run their examples.

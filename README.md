@@ -165,6 +165,7 @@ You'll need to add at least:
 LITELLM_API_KEY_SYNDATA_GEN=your-mistral-api-key
 LITELLM_API_KEY_PARAM_EXTRACTION=your-mistral-api-key
 LITELLM_API_KEY_RESPONSE_GEN=your-mistral-api-key
+LITELLM_API_KEY_PLANNER=your-mistral-api-key
 LITELLM_API_KEY_AGENT=your-mistral-api-key
 ```
 
@@ -225,6 +226,12 @@ fastworkflow train <workflow_dir> <env_file> <passwords_file>
 
 # Run a workflow
 fastworkflow run <workflow_dir> <env_file> <passwords_file>
+```
+
+To run a workflow in agentic mode, add the `--run_as_agent` flag:
+
+```sh
+fastworkflow run <workflow_dir> <env_file> <passwords_file> --run_as_agent
 ```
 
 Each command has additional options that can be viewed with the `--help` flag:
@@ -548,7 +555,8 @@ This single command will generate the `greet.py` command, `get_properties` and `
 | `LLM_SYNDATA_GEN` | LiteLLM model string for synthetic utterance generation | `train` | `mistral/mistral-small-latest` |
 | `LLM_PARAM_EXTRACTION` | LiteLLM model string for parameter extraction | `train`, `run` | `mistral/mistral-small-latest` |
 | `LLM_RESPONSE_GEN` | LiteLLM model string for response generation | `run` | `mistral/mistral-small-latest` |
-| `LLM_AGENT` | LiteLLM model string for the DSPy agent | `run_agent` | `mistral/mistral-small-latest` |
+| `LLM_PLANNER` | LiteLLM model string for the agent's task planner | `run` (agent mode) | `mistral/mistral-small-latest` |
+| `LLM_AGENT` | LiteLLM model string for the DSPy agent | `run` (agent mode) | `mistral/mistral-small-latest` |
 | `NOT_FOUND` | Placeholder value for missing parameters during extraction | Always | `"NOT_FOUND"` |
 | `MISSING_INFORMATION_ERRMSG` | Error message prefix for missing parameters | Always | `"Missing required..."` |
 | `INVALID_INFORMATION_ERRMSG` | Error message prefix for invalid parameters | Always | `"Invalid information..."` |
@@ -560,7 +568,8 @@ This single command will generate the `greet.py` command, `get_properties` and `
 | `LITELLM_API_KEY_SYNDATA_GEN`| API key for the `LLM_SYNDATA_GEN` model | `train` | *required* |
 | `LITELLM_API_KEY_PARAM_EXTRACTION`| API key for the `LLM_PARAM_EXTRACTION` model | `train`, `run` | *required* |
 | `LITELLM_API_KEY_RESPONSE_GEN`| API key for the `LLM_RESPONSE_GEN` model | `run` | *required* |
-| `LITELLM_API_KEY_AGENT`| API key for the `LLM_AGENT` model | `run_agent` | *required* |
+| `LITELLM_API_KEY_PLANNER`| API key for the `LLM_PLANNER` model | `run` (agent mode) | *required* |
+| `LITELLM_API_KEY_AGENT`| API key for the `LLM_AGENT` model | `run` (agent mode) | *required* |
 
 > [!tip]
 > The example workflows are configured to use Mistral's models by default. You can get a free API key from [Mistral AI](https://mistral.ai) that works with the `mistral-small-latest` model.
