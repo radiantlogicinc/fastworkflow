@@ -338,6 +338,12 @@ def add_run_parser(subparsers):
     parser_run.add_argument("--startup_action", help="Optional startup action", default="")
     parser_run.add_argument("--keep_alive", help="Optional keep_alive", default=True)
     parser_run.add_argument("--project_folderpath", help="Optional path to project folder containing application code", default=None)
+    parser_run.add_argument(
+        "--run_as_agent",
+        help="Run in agent mode (uses DSPy for tool selection)",
+        action="store_true",
+        default=False,
+    )
     parser_run.set_defaults(func=lambda args: run_with_defaults(args))
 
 def train_with_defaults(args):  # sourcery skip: extract-duplicate-method
@@ -485,6 +491,10 @@ def run_example(args):
         str(passwords_file)
     ]
 
+    # Forward agent mode flag if requested
+    if getattr(args, "run_as_agent", False):
+        cmd.append("--run_as_agent")
+
     try:
         rprint(f"[bold green]Starting interactive session...[/bold green]")
         # Replace the current process with the run command
@@ -526,6 +536,12 @@ def main():
     # 'examples run' command
     parser_run_example = examples_subparsers.add_parser("run", help="Run a specific example")
     parser_run_example.add_argument("name", help="The name of the example to run")
+    parser_run_example.add_argument(
+        "--run_as_agent",
+        help="Run the example in agent mode (uses DSPy for tool selection)",
+        action="store_true",
+        default=False,
+    )
     parser_run_example.set_defaults(func=run_example)
     
     # Add top-level commands
