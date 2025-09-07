@@ -699,6 +699,7 @@ class ResponseGenerator:
         pe_output = extractor.extract()
         if not pe_output.parameters_are_valid:
             return CommandOutput(
+                command_name = command_name,
                 command_responses=[
                     CommandResponse(
                         response=(
