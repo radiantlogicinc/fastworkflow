@@ -310,7 +310,11 @@ class ChatSession:
         try:
             # Handle startup command/action
             if self._startup_command:
-                last_output = self._process_message(self._startup_command)
+                if self._run_as_agent:
+                    # In agent mode, use workflow tool agent for processing
+                    last_output = self._process_agent_message(self._startup_command)
+                else:
+                    last_output = self._process_message(self._startup_command)
             elif self._startup_action:
                 last_output = self._process_action(self._startup_action)
 
