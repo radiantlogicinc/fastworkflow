@@ -52,7 +52,7 @@ class CommandExecutor(CommandExecutorInterface):
             record = {
                 "command" if command_output.success else "failing command": command,
                 "command_name": command_output.command_name, 
-                "parameters": command_output.command_parametersr.model_dump(),
+                "parameters": command_output.command_parameters.model_dump() if command_output.command_parameters else None,
                 "response": command_output.command_responses[0].response if command_output.success else ''}
             with open("action.json", "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -99,7 +99,7 @@ class CommandExecutor(CommandExecutorInterface):
         record = {
             "command": command, 
             "command_name": command_name, 
-            "parameters": input_obj.model_dump(),
+            "parameters": input_obj.model_dump() if input_obj else None,
             "response": command_output.command_responses[0].response}
         with open("action.json", "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
