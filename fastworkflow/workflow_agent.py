@@ -119,7 +119,8 @@ def _ask_user_tool(clarification_request: str, chat_session_obj: fastworkflow.Ch
         command_responses=[fastworkflow.CommandResponse(response=clarification_request)]
     )
     chat_session_obj.command_output_queue.put(command_output)
-    return chat_session_obj.user_message_queue.get()
+    user_query = chat_session_obj.user_message_queue.get()
+    return _think_and_plan(user_query, chat_session_obj)
 
 def initialize_workflow_tool_agent(mcp_server: FastWorkflowMCPServer, max_iters: int = 25):
     """
@@ -133,11 +134,6 @@ def initialize_workflow_tool_agent(mcp_server: FastWorkflowMCPServer, max_iters:
     Returns:
         DSPy ReAct agent configured with workflow tools
     """
-    # available_tools = mcp_server.list_tools()
-
-    # if not available_tools:
-    #     return None
-
     chat_session_obj = mcp_server.chat_session
     if not chat_session_obj:
         return None
@@ -225,3 +221,33 @@ def initialize_workflow_tool_agent(mcp_server: FastWorkflowMCPServer, max_iters:
         tools=tools,
         max_iters=max_iters,
     )
+
+def _think_and_plan(user_query: str, chat_session_obj: fastworkflow.ChatSession) -> str:
+    """
+    Returns a refined plan by breaking down a user_query into simpler tasks based only on available commands and returns a todo list.
+    """
+    class TaskPlannerSignature(dspy.Signature):
+        """
+        Break down a user_query into simpler tasks based only on available commands and return a todo list.
+        If user_query is simple, return a single todo that is the user_query as-is
+        """
+        user_query: str = dspy.InputField()
+        available_commands: list[str] = dspy.InputField()
+        todo_list: list[str] = dspy.OutputField(desc="task descriptions as short sentences")
+
+    current_workflow = chat_session_obj.get_active_workflow()
+    available_commands = CommandMetadataAPI.get_command_display_text(
+        subject_workflow_path=current_workflow.folderpath,
+        cme_workflow_path=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
+        active_context_name=current_workflow.current_command_context_name,
+    )
+
+    planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
+    with dspy.context(lm=planner_lm):
+        task_planner_func = dspy.ChainOfThought(TaskPlannerSignature)
+        prediction = task_planner_func(user_query=user_query, available_commands=available_commands)
+
+        if not prediction.todo_list or (len(prediction.todo_list) == 1 and prediction.todo_list[0] == user_query):
+            return user_query
+
+        return f"{user_query}\nNext steps:\n{'\n'.join([f'{i + 1}. {task}' for i, task in enumerate(prediction.todo_list)])}"
