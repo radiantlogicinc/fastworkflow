@@ -119,6 +119,7 @@ class ChatSession:
         # Create queues for user messages and command outputs
         self._user_message_queue = Queue()
         self._command_output_queue = Queue()
+        self._command_trace_queue = Queue()
         self._status = SessionStatus.STOPPED
         self._chat_worker = None
 
@@ -289,6 +290,10 @@ class ChatSession:
     @property
     def command_output_queue(self) -> Queue:
         return self._command_output_queue
+
+    @property
+    def command_trace_queue(self) -> Queue:
+        return self._command_trace_queue
 
     @property
     def workflow_is_complete(self) -> bool:

@@ -1,6 +1,8 @@
 import contextlib
+from dataclasses import dataclass
 from enum import Enum
 import os
+import time
 from typing import Any, Optional, Union
 
 from pydantic import BaseModel
@@ -46,6 +48,20 @@ class MCPToolResult(BaseModel):
     """MCP-compliant tool result format"""
     content: list[MCPContent]
     isError: bool = False
+
+class CommandTraceEventDirection(str, Enum):
+    AGENT_TO_WORKFLOW = "agent_to_workflow"
+    WORKFLOW_TO_AGENT = "workflow_to_agent"
+
+@dataclass
+class CommandTraceEvent:
+    direction: CommandTraceEventDirection
+    raw_command: str | None               # for AGENT_TO_WORKFLOW
+    command_name: str | None              # for WORKFLOW_TO_AGENT
+    parameters: dict | str | None
+    response_text: str | None
+    success: bool | None
+    timestamp_ms: int
 
 class CommandOutput(BaseModel):
     command_responses: list[CommandResponse]

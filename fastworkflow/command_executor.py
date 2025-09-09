@@ -45,18 +45,7 @@ class CommandExecutor(CommandExecutorInterface):
                 command = command)
         )
 
-        import json
-
         if command_output.command_handled or not command_output.success:           
-            # Append executed action to action.json for external consumers
-            record = {
-                "command" if command_output.success else "failing command": command,
-                "command_name": command_output.command_name, 
-                "parameters": command_output.command_parameters.model_dump() if command_output.command_parameters else None,
-                "response": command_output.command_responses[0].response if command_output.success else ''}
-            with open("action.json", "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
             return command_output
 
         command_name = command_output.command_responses[0].artifacts["command_name"]
@@ -93,16 +82,7 @@ class CommandExecutor(CommandExecutorInterface):
         command_output.workflow_name = workflow_name
         command_output.context = context
         command_output.command_name = command_name
-        command_output.command_parameters = str(input_obj) if input_obj else ''
-
-        # Append executed action to action.json for external consumers
-        record = {
-            "command": command, 
-            "command_name": command_name, 
-            "parameters": input_obj.model_dump() if input_obj else None,
-            "response": command_output.command_responses[0].response}
-        with open("action.json", "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        command_output.command_parameters = input_obj or None
 
         return command_output
 

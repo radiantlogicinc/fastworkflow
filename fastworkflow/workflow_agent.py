@@ -3,6 +3,8 @@ Agent integration module for fastWorkflow.
 Provides workflow tool agent functionality for intelligent tool selection.
 """
 
+import json
+import time
 import dspy
 
 import fastworkflow
@@ -78,18 +80,67 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     Commands must be formatted using plain text for command name followed by XML tags enclosing parameter values (if any) as follows: command_name <param1_name>param1_value</param1_name> <param2_name>param2_value</param2_name> ...
     Don't use this tool to respond to a clarification requests in PARAMETER EXTRACTION ERROR state
     """
+    # Emit trace event before execution
+    chat_session_obj.command_trace_queue.put(fastworkflow.CommandTraceEvent(
+        direction=fastworkflow.CommandTraceEventDirection.AGENT_TO_WORKFLOW,
+        raw_command=command,
+        command_name=None,
+        parameters=None,
+        response_text=None,
+        success=None,
+        timestamp_ms=int(time.time() * 1000),
+    ))
+
     # Directly invoke the command without going through queues
     # This allows the agent to synchronously call workflow tools
     from fastworkflow.command_executor import CommandExecutor
     command_output = CommandExecutor.invoke_command(chat_session_obj, command)
 
+    # Emit trace event after execution
+    # Extract command name and parameters from command_output
+    name = command_output.command_name
+    params = command_output.command_parameters
+    
+    # Handle parameter serialization
+    params_dict = params.model_dump() if params else None
+    
+    # Extract response text
+    resp_text = ""
+    if command_output.command_responses:
+        response_parts = [
+            cmd_response.response
+            for cmd_response in command_output.command_responses
+            if cmd_response.response
+        ]
+        resp_text = "\n".join(response_parts)
+    
+    chat_session_obj.command_trace_queue.put(fastworkflow.CommandTraceEvent(
+        direction=fastworkflow.CommandTraceEventDirection.WORKFLOW_TO_AGENT,
+        raw_command=None,
+        command_name=name,
+        parameters=params_dict,
+        response_text=resp_text or "",
+        success=bool(command_output.success),
+        timestamp_ms=int(time.time() * 1000),
+    ))
+
+    # Append executed action to action.json for external consumers (agent mode only)
+    record = {
+        "command" if command_output.success else "failing command": command,
+        "command_name": name,
+        "parameters": params_dict,
+        "response": resp_text if command_output.success else ""
+    }
+    with open("action.json", "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
     # Format output - extract text from command response
-    if hasattr(command_output, 'command_responses') and command_output.command_responses:
+    if command_output.command_responses:
         response_parts = []
         response_parts.extend(
             cmd_response.response
             for cmd_response in command_output.command_responses
-            if hasattr(cmd_response, 'response') and cmd_response.response
+            if cmd_response.response
         )
         return "\n".join(response_parts) if response_parts else "Command executed successfully."
 

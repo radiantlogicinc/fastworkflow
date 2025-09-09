@@ -219,6 +219,29 @@ def run_main(args):
         with console.status("[bold cyan]Processing command...[/bold cyan]", spinner="dots") as status:
             counter = 0
             while wait_thread.is_alive():
+                # Check for agent traces if in agent mode
+                if args.run_as_agent:
+                    while True:
+                        try:
+                            evt = fastworkflow.chat_session.command_trace_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        
+                        # Choose styles based on success
+                        info_style = "dim orange3" if (evt.success is False) else "dim yellow"
+                        resp_style = "dim orange3" if (evt.success is False) else "dim green"
+
+                        if evt.direction == fastworkflow.CommandTraceEventDirection.AGENT_TO_WORKFLOW:
+                            console.print(Text("Agent -> Workflow: ", style=info_style), end="")
+                            console.print(Text(str(evt.raw_command or ""), style=info_style))
+                        else:
+                            # command info (dim yellow or dim orange3)
+                            info = f"{evt.command_name or ''}, {evt.parameters}: "
+                            console.print(Text("Workflow -> Agent: ", style=info_style), end="")
+                            console.print(Text(info, style=info_style), end="")
+                            # response (dim green or dim orange3)
+                            console.print(Text(str(evt.response_text or ""), style=resp_style))
+
                 time.sleep(0.5)
                 counter += 1
                 if counter % 2 == 0:  # Update message every second
