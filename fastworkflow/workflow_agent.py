@@ -18,6 +18,7 @@ class WorkflowAgentSignature(dspy.Signature):
     All the tasks in the todo list must be completed before returning the final answer.
     """
     user_query = dspy.InputField(desc="The natural language user query.")
+    conversation_history: dspy.History = dspy.InputField()
     final_answer = dspy.OutputField(desc="Comprehensive final answer with supporting evidence to demonstrate that all the tasks in the todo list have been completed.")
 
 def _what_can_i_do(chat_session_obj: fastworkflow.ChatSession) -> str:

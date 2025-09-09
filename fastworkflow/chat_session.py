@@ -121,6 +121,8 @@ class ChatSession:
         self._command_output_queue = Queue()
         self._status = SessionStatus.STOPPED
         self._chat_worker = None
+
+        self._conversation_history = dspy.History(messages=[])
         
         # Import here to avoid circular imports
         from fastworkflow.command_executor import CommandExecutor
@@ -297,6 +299,11 @@ class ChatSession:
     def workflow_is_complete(self, value: bool) -> None:
         if workflow := ChatSession.get_active_workflow():
             workflow.is_complete = value
+    
+    @property
+    def conversation_history(self) -> dspy.History:
+        """Return the conversation history."""
+        return self._conversation_history
        
 
     def _run_workflow_loop(self) -> Optional[fastworkflow.CommandOutput]:
@@ -421,7 +428,10 @@ class ChatSession:
 
         lm = dspy_utils.get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")
         with dspy.context(lm=lm):
-            agent_result = self._workflow_tool_agent(user_query=refined_message)
+            agent_result = self._workflow_tool_agent(
+                user_query=refined_message,
+                conversation_history=self.conversation_history
+            )
             # dspy.inspect_history(n=1)
 
         # Extract the final result from the agent
@@ -429,6 +439,11 @@ class ChatSession:
             agent_result.final_answer
             if hasattr(agent_result, 'final_answer')
             else str(agent_result)
+        )
+
+        self.conversation_history.messages.append(
+            {"user_query": message, 
+             "agent_response": result_text}
         )
 
         # Create CommandOutput with the agent's response
