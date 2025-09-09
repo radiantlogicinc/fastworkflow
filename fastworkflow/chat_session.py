@@ -616,4 +616,5 @@ class ChatSession:
             if not prediction.todo_list or (len(prediction.todo_list) == 1 and prediction.todo_list[0] == user_query):
                 return user_query
 
-            return f"{user_query}\nNext steps:\n{'\n'.join([f'{i + 1}. {task}' for i, task in enumerate(prediction.todo_list)])}"
+            steps_list = '\n'.join([f'{i + 1}. {task}' for i, task in enumerate(prediction.todo_list)])
+            return f"{user_query}\nNext steps:\n{steps_list}"
