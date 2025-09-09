@@ -285,6 +285,24 @@ class Workflow:
     def is_complete(self, value: bool) -> None:
         self._is_complete = value
         self._mark_dirty()
+    
+    def end_command_processing(self) -> None:
+        """Process the end of a command"""
+        mark_dirty = False
+        # important to clear the current command from the workflow context
+        if "command" in self._context:
+            del self._context["command"]
+            mark_dirty = True
+
+        # important to clear parameter extraction error state (if any)
+        if "stored_parameters" in self._context:
+            del self._context["stored_parameters"]
+            mark_dirty = True
+
+        self._context["NLU_Pipeline_Stage"] = fastworkflow.NLUPipelineStage.INTENT_DETECTION
+
+        if mark_dirty:
+            self._mark_dirty()
 
     def close(self) -> bool:
         """close the session"""

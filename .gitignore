@@ -201,3 +201,4 @@ tasks/
 .taskmaster/state.json
 .taskmaster/reports/task-complexity-report.json
 
+action.json

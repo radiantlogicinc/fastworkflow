@@ -560,7 +560,8 @@ class ParameterExtraction:
                     return params
         
         except Exception as exc:
-            logger.warning(PARAMETER_EXTRACTION_ERROR_MSG.format(error=exc))
+            # logger.warning(PARAMETER_EXTRACTION_ERROR_MSG.format(error=exc))
+            pass
 
         return params    
 
@@ -589,8 +590,6 @@ class ResponseGenerator:
         workflow: fastworkflow.Workflow, 
         command: str,
     ) -> CommandOutput:  # sourcery skip: hoist-if-from-if
-        workflow.is_complete = False
-
         app_workflow = workflow.context["app_workflow"]   # type: fastworkflow.Workflow
         cmd_ctxt_obj_name = app_workflow.current_command_context_name
         nlu_pipeline_stage = workflow.context.get(
@@ -603,8 +602,6 @@ class ResponseGenerator:
         if cnp_output.error_msg:
             workflow_context = workflow.context
             workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION
-            if "command" not in workflow_context:
-                workflow_context["command"] = command
             workflow.context = workflow_context
             return CommandOutput(
                 command_responses=[
@@ -617,17 +614,19 @@ class ResponseGenerator:
                     )
                 ]
             )
+        else:
+            if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION and \
+                cnp_output.command_name != 'ErrorCorrection/you_misunderstood':
+                workflow_context = workflow.context
+                workflow_context["command"] = command
+                workflow.context = workflow_context
         
         if cnp_output.is_cme_command:
             workflow_context = workflow.context
             if cnp_output.command_name == 'ErrorCorrection/you_misunderstood':
                 workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
-                if "command" not in workflow_context:
-                    workflow_context["command"] = command
             else:
-                workflow.is_complete = True
-                workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.INTENT_DETECTION
-                workflow_context.pop("command", None)
+                workflow.end_command_processing()
             workflow.context = workflow_context
 
             startup_action = Action(
@@ -664,8 +663,6 @@ class ResponseGenerator:
                         workflow_context = workflow.context
                         workflow_context["NLU_Pipeline_Stage"] = \
                             NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
-                        if "command" not in workflow_context:
-                            workflow_context["command"] = command
                         workflow.context = workflow_context
 
                         startup_action = Action(
@@ -689,9 +686,6 @@ class ResponseGenerator:
             workflow_context = workflow.context
             workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.PARAMETER_EXTRACTION
             workflow_context["command_name"] = cnp_output.command_name
-            # Only update command if it's not already set (preserve original command with parameters)
-            if "command" not in workflow_context:
-                workflow_context["command"] = command
             workflow.context = workflow_context
 
         command_name = workflow.context["command_name"]
@@ -711,16 +705,14 @@ class ResponseGenerator:
                 ]
             )
 
-        workflow.is_complete = True
-        workflow.context["NLU_Pipeline_Stage"] = \
-            NLUPipelineStage.INTENT_DETECTION
+        workflow.end_command_processing()
 
         return CommandOutput(
             command_responses=[
                 CommandResponse(
                     response="",
                     artifacts={
-                        "command": workflow.context["command"],
+                        "command": command,
                         "command_name": command_name,
                         "cmd_parameters": pe_output.cmd_parameters,
                     },

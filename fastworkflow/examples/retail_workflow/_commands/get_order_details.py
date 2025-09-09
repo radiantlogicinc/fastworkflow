@@ -16,9 +16,9 @@ class Signature:
         order_id: str = Field(
             default="NOT_FOUND",
             description=(
-                "The order ID to get details for (must start with #)"
+                "The order ID to get details for"
             ),
-            pattern=r"^(#[\w\d]+|NOT_FOUND)$",
+            pattern=r"^(#?[\w\d]+|NOT_FOUND)$",
             examples=["#W0000000"],
             json_schema_extra={
                 "available_from": ["get_user_details"]
@@ -65,6 +65,15 @@ class Signature:
         from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 
         return generate_diverse_utterances(utterances_obj.plain_utterances, command_name)
+
+    @staticmethod
+    def validate_extracted_parameters(
+        workflow: fastworkflow.Workflow, 
+        command: str, cmd_parameters: "Signature.Input"
+    ) -> tuple[bool, str]:
+        if not cmd_parameters.order_id.startswith('#'):
+            cmd_parameters.order_id = f'#{cmd_parameters.order_id}'
+        return (True, '')
 
 
 class ResponseGenerator:

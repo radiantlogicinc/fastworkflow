@@ -22,9 +22,9 @@ class Signature:
             str,
             Field(
                 default="NOT_FOUND",
-                description="The order ID to cancel (must start with #)",
-                pattern=r"^(#[\w\d]+|NOT_FOUND)$",
-                examples=["#123", "#abc123", "#order456"],
+                description="The order ID to cancel",
+                pattern=r"^(#?[\w\d]+|NOT_FOUND)$",
+                examples=["123", "#abc123", "order456"],
                 json_schema_extra={
                     "available_from": ["get_user_details"]
                 }
@@ -34,10 +34,10 @@ class Signature:
         reason: Annotated[
             str,
             Field(
-                default="NOT_FOUND",
-                description="Reason for cancellation",
+                default="ordered by mistake",
+                description="Reason for cancellation. If reason is invalid, use the default reason value",
                 json_schema_extra={
-                    "enum": ["no longer needed", "ordered by mistake", "NOT_FOUND"]
+                    "enum": ["no longer needed", "ordered by mistake"]
                 },
                 examples=["no longer needed", "ordered by mistake"]
             )
@@ -77,6 +77,15 @@ class Signature:
         return generate_diverse_utterances(
             utterances_obj.plain_utterances, command_name
         )
+
+    @staticmethod
+    def validate_extracted_parameters(
+        workflow: fastworkflow.Workflow, 
+        command: str, cmd_parameters: "Signature.Input"
+    ) -> tuple[bool, str]:
+        if not cmd_parameters.order_id.startswith('#'):
+            cmd_parameters.order_id = f'#{cmd_parameters.order_id}'
+        return (True, '')
 
 
 class ResponseGenerator:

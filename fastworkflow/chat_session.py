@@ -7,6 +7,7 @@ import json
 import contextlib
 import uuid
 from pathlib import Path
+import os
 
 import dspy
 
@@ -15,6 +16,7 @@ from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_utils
 from fastworkflow.model_pipeline_training import CommandRouter
 from fastworkflow.utils.startup_progress import StartupProgress
+from fastworkflow.command_metadata_api import CommandMetadataAPI
 
 
 class SessionStatus(Enum):
@@ -411,31 +413,13 @@ class ChatSession:
         # The agent processes the user's message and may make multiple tool calls
         # to the workflow internally (directly via CommandExecutor)
 
-        planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
+        # Ensure any prior action log is removed before a fresh agent run
+        if os.path.exists("action.json"):
+            os.remove("action.json")
+
+        refined_message = f'messsage\n{self._think_and_plan(message)}'
+
         lm = dspy_utils.get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")
-
-        class TaskPlannerSignature(dspy.Signature):
-            """
-            Breakdown the user query into a todo list, based only on the user query and available_commands and nothing else.
-            """
-            user_query: str = dspy.InputField()
-            available_commands: list[str] = dspy.InputField()
-            todo_list: list[str] = dspy.OutputField(desc="task descriptions as short sentences")
-
-        app_workflow = self.get_active_workflow()
-        crd = fastworkflow.RoutingRegistry.get_definition(app_workflow.folderpath)
-        available_commands = crd.get_command_names('*')
-
-        with dspy.context(lm=planner_lm):
-            task_planner_func = dspy.ChainOfThought(TaskPlannerSignature)
-            prediction = task_planner_func(user_query=message, available_commands=available_commands)
-            prediction.todo_list.insert(0, "Use the 'what_can_i_do' tool to get details on available commands")
-            refined_message = (
-                f"{message}\n"
-                "Todo list:\n"
-                f"{'\n'.join([f'{i+1}. {task}' for i, task in enumerate(prediction.todo_list)])}"
-            )
-
         with dspy.context(lm=lm):
             agent_result = self._workflow_tool_agent(user_query=refined_message)
             # dspy.inspect_history(n=1)
@@ -448,8 +432,15 @@ class ChatSession:
         )
 
         # Create CommandOutput with the agent's response
+        command_response = fastworkflow.CommandResponse(response=result_text)
+        # Attach actions captured during agent execution as artifacts if available
+        if os.path.exists("action.json"):
+            with open("action.json", "r", encoding="utf-8") as f:
+                actions = [json.loads(line) for line in f if line.strip()]
+            command_response.artifacts["extracted_actions"] = actions
+
         command_output = fastworkflow.CommandOutput(
-            command_responses=[fastworkflow.CommandResponse(response=result_text)]
+            command_responses=[command_response]
         )
 
         # Put output in queue (following same pattern as _process_message)
@@ -474,7 +465,6 @@ class ChatSession:
         Returns:
             The result of the invoke_command call
         """
-        import os
         from datetime import datetime
         
         # Generate a unique filename with timestamp
@@ -484,7 +474,6 @@ class ChatSession:
         import cProfile
         import pstats
         import io
-        import os
         import time
         
         # Create a Profile object
@@ -583,3 +572,33 @@ class ChatSession:
             workflow.flush()
 
         return command_output
+
+    def _think_and_plan(self, user_query: str) -> str:
+        """
+        Returns a refined plan by breaking down a user_query into simpler tasks based only on available commands and returns a todo list.
+        """
+        class TaskPlannerSignature(dspy.Signature):
+            """
+            Break down a user_query into simpler tasks based only on available commands and return a todo list.
+            If user_query is simple, return a single todo that is the user_query as-is
+            """
+            user_query: str = dspy.InputField()
+            available_commands: list[str] = dspy.InputField()
+            todo_list: list[str] = dspy.OutputField(desc="task descriptions as short sentences")
+
+        current_workflow = ChatSession.get_active_workflow()
+        available_commands = CommandMetadataAPI.get_command_display_text(
+            subject_workflow_path=current_workflow.folderpath,
+            cme_workflow_path=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
+            active_context_name=current_workflow.current_command_context_name,
+        )
+
+        planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
+        with dspy.context(lm=planner_lm):
+            task_planner_func = dspy.ChainOfThought(TaskPlannerSignature)
+            prediction = task_planner_func(user_query=user_query, available_commands=available_commands)
+
+            if not prediction.todo_list or (len(prediction.todo_list) == 1 and prediction.todo_list[0] == user_query):
+                return user_query
+
+            return f"{user_query}\nNext steps:\n{'\n'.join([f'{i + 1}. {task}' for i, task in enumerate(prediction.todo_list)])}"

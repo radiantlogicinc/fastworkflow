@@ -29,7 +29,7 @@ class Signature:
 
 class ResponseGenerator:
     def _process_command(self, workflow: Workflow, command: str) -> Signature.Output:
-        workflow.is_complete = True
+        workflow.end_command_processing()
         return Signature.Output(command=command, command_name="abort")
 
     def __call__(self, workflow: Workflow, command: str) -> CommandOutput:

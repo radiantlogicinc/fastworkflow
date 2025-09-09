@@ -408,7 +408,13 @@ Today's date is {today}.
             ):
                 return (True, "All required parameters are valid.", {})
             
-            is_valid, message = self.input_for_param_extraction_class.validate_extracted_parameters(app_workflow, subject_command_name, cmd_parameters)
+            try:
+                is_valid, message = self.input_for_param_extraction_class.validate_extracted_parameters(app_workflow, subject_command_name, cmd_parameters)
+            except Exception as e:
+                message = f"Exception in {subject_command_name}'s validate_extracted_parameters function: {str(e)}"
+                logger.critical(message)                    
+                return (False, message, {})
+            
             if is_valid:
                 return (True, "All required parameters are valid.", {})
             return (False, message, {})
@@ -422,7 +428,7 @@ Today's date is {today}.
                 if hasattr(type(cmd_parameters).model_fields.get(missing_field), "json_schema_extra") and type(cmd_parameters).model_fields.get(missing_field).json_schema_extra:
                     is_available_from = type(cmd_parameters).model_fields.get(missing_field).json_schema_extra.get("available_from")
                 if is_available_from:
-                    message += f"abort and use the {' or '.join(is_available_from)} command(s) to get {missing_field} information\n"
+                    message += f"abort and use the {' or '.join(is_available_from)} command(s) to get {missing_field} information. OR...\n"
 
         if invalid_fields:
             message += f"{INVALID_INFORMATION_ERRMSG}" + ", ".join(invalid_fields) + "\n"

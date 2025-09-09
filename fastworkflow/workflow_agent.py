@@ -6,6 +6,7 @@ Provides workflow tool agent functionality for intelligent tool selection.
 import dspy
 
 import fastworkflow
+from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_utils
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.mcp_server import FastWorkflowMCPServer
@@ -30,13 +31,22 @@ def _what_can_i_do(chat_session_obj: fastworkflow.ChatSession) -> str:
         active_context_name=current_workflow.current_command_context_name,
     )
 
+def _clarify_ambiguous_intent(
+        correct_command_name: str,
+        chat_session_obj: fastworkflow.ChatSession) -> str:
+    """
+    Call this tool ONLY in the intent detection error state (ambiguous or misunderstood intent) to provide the exact command name.
+    The intent detection error message will list the command names to pick from.
+    """
+    return _execute_workflow_query(correct_command_name, chat_session_obj = chat_session_obj)
+
 def _provide_missing_or_corrected_parameters(
         missing_or_corrected_parameter_values: list[str|int|float|bool],
         chat_session_obj: fastworkflow.ChatSession) -> str:
     """
     Call this tool ONLY in the parameter extraction error state to provide missing or corrected parameter values.
-    Missing parameter values may be found in the user query, or information already available, or by executing a different command (refer to the optional 'available_from' hint for guidance on appropriate commands to use to get the information).
-    If the error message indicates parameter values are improperly formatted, correct using your internal knowledge.
+    Missing parameter values may be found in the user query, or information already available, or by aborting and executing a different command (refer to the optional 'available_from' hint for guidance on appropriate commands to use to get the information).
+    If the error message indicates parameter values are improperly formatted, correct using your internal knowledge and command metadata information.
     """
     if missing_or_corrected_parameter_values:
         command = ', '.join(missing_or_corrected_parameter_values)
@@ -51,6 +61,14 @@ def _abort_current_command_to_exit_parameter_extraction_error_state(
     Call this tool ONLY in the parameter extraction error state when you want to get out of the parameter extraction error state and execute a different command.
     """
     return _execute_workflow_query('abort', chat_session_obj = chat_session_obj)
+
+def _intent_misunderstood(
+        chat_session_obj: fastworkflow.ChatSession) -> str:
+    """
+    Shows the full list of available command names so you can specify the command name you really meant
+    Call this tool when your intent is misunderstood (i.e. the wrong command name is executed).
+    """
+    return _execute_workflow_query('you misunderstood', chat_session_obj = chat_session_obj)
 
 def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSession) -> str:
     """
@@ -130,6 +148,14 @@ def initialize_workflow_tool_agent(mcp_server: FastWorkflowMCPServer, max_iters:
         """
         return _what_can_i_do(chat_session_obj=chat_session_obj)
 
+    def clarify_ambiguous_intent(
+            correct_command_name: str) -> str:
+        """
+        Call this tool ONLY in the intent detection error state to provide the exact command name.
+        The intent detection error message will list the command names to pick from.
+        """
+        return _clarify_ambiguous_intent(correct_command_name, chat_session_obj = chat_session_obj)
+
     def provide_missing_or_corrected_parameters(
             missing_or_corrected_parameter_values: list[str|int|float|bool]) -> str:
         """
@@ -139,13 +165,21 @@ def initialize_workflow_tool_agent(mcp_server: FastWorkflowMCPServer, max_iters:
         """
         return _provide_missing_or_corrected_parameters(missing_or_corrected_parameter_values, chat_session_obj=chat_session_obj)
 
-
     def abort_current_command_to_exit_parameter_extraction_error_state() -> str:
         """
-        Call this tool ONLY in the parameter extraction error state when you want to get out of the parameter extraction error state and execute a different command.
+        Call this tool ONLY when you need to execute a different command to get missing parameters.
+        DO NOT execute the same failing command over and over. Either provide_missing_or_corrected_parameters or abort 
         """
         return _abort_current_command_to_exit_parameter_extraction_error_state(
             chat_session_obj=chat_session_obj)
+
+    def intent_misunderstood() -> str:
+        """
+        Shows the full list of available command names so you can specify the command name you really meant
+        Call this tool when your intent is misunderstood (i.e. the wrong command name is executed).
+        Do not use this tool if its a missing or invalid parameter issue. Use the provide_missing_or_corrected_parameters tool instead
+        """
+        return _intent_misunderstood(chat_session_obj = chat_session_obj)
 
     def execute_workflow_query(command: str) -> str:
         """
@@ -154,7 +188,12 @@ def initialize_workflow_tool_agent(mcp_server: FastWorkflowMCPServer, max_iters:
         Commands must be formatted as follows: command_name <param1_name>param1_value</param1_name> <param2_name>param2_value</param2_name> ...
         Don't use this tool to respond to a clarification requests in PARAMETER EXTRACTION ERROR state
         """
-        return _execute_workflow_query(command, chat_session_obj=chat_session_obj)
+        try:
+            return _execute_workflow_query(command, chat_session_obj=chat_session_obj)
+        except Exception as e:
+            message = f"Terminate immediately! Exception processing {command}: {str(e)}"
+            logger.critical(message)                    
+            return message
 
     def missing_information_guidance(how_to_find_request: str) -> str:
         """
@@ -174,6 +213,8 @@ def initialize_workflow_tool_agent(mcp_server: FastWorkflowMCPServer, max_iters:
         what_can_i_do,
         execute_workflow_query,
         missing_information_guidance,
+        clarify_ambiguous_intent,
+        intent_misunderstood,
         ask_user,
         provide_missing_or_corrected_parameters,
         abort_current_command_to_exit_parameter_extraction_error_state,

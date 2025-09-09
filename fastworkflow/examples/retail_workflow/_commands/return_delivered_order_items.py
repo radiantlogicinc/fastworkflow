@@ -14,9 +14,9 @@ class Signature:
     class Input(BaseModel):
         order_id: str = Field(
             default="NOT_FOUND",
-            description="The order ID for return (must start with #)",
-            pattern=r"^(#W\d+|NOT_FOUND)$",
-            examples=["#W3456890"],
+            description="The order ID of return items",
+            pattern=r"^(#?[\w\d]+|NOT_FOUND)$",
+            examples=["#W00000000"],
             json_schema_extra={
                 "available_from": ["get_user_details"]
             }
@@ -32,8 +32,8 @@ class Signature:
         payment_method_id: str = Field(
             default="NOT_FOUND",
             description="Payment method ID for refund",
-            pattern=r"^((gift_card|credit_card)_\d+|NOT_FOUND)$",
-            examples=["gift_card_0000000", "credit_card_0000000"],
+            pattern=r"^((gift_card|credit_card|paypal)_\d+|NOT_FOUND)$",
+            examples=["gift_card_0000000", "credit_card_0000000", "paypal_0000000"],
             json_schema_extra={
                 "available_from": ["get_order_details"]
             }
@@ -61,6 +61,15 @@ class Signature:
         utterances_obj = utterance_definition.get_command_utterances(command_name)
         from fastworkflow.train.generate_synthetic import generate_diverse_utterances
         return generate_diverse_utterances(utterances_obj.plain_utterances, command_name)
+
+    @staticmethod
+    def validate_extracted_parameters(
+        workflow: fastworkflow.Workflow, 
+        command: str, cmd_parameters: "Signature.Input"
+    ) -> tuple[bool, str]:
+        if not cmd_parameters.order_id.startswith('#'):
+            cmd_parameters.order_id = f'#{cmd_parameters.order_id}'
+        return (True, '')
 
 
 class ResponseGenerator:
