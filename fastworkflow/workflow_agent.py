@@ -14,7 +14,7 @@ from fastworkflow.mcp_server import FastWorkflowMCPServer
 
 class WorkflowAgentSignature(dspy.Signature):
     """
-    Carefully review the user request and execute the todo list using available tools for building the final answer.
+    Carefully review the user request and conversation_history, then execute the todo list using available tools for building the final answer.
     All the tasks in the todo list must be completed before returning the final answer.
     """
     user_query = dspy.InputField(desc="The natural language user query.")
@@ -185,12 +185,18 @@ def initialize_workflow_tool_agent(mcp_server: FastWorkflowMCPServer, max_iters:
         Commands must be formatted using plain text for command name followed by XML tags enclosing parameter values (if any) as follows: command_name <param1_name>param1_value</param1_name> <param2_name>param2_value</param2_name> ...
         Don't use this tool to respond to a clarification requests in PARAMETER EXTRACTION ERROR state
         """
-        try:
-            return _execute_workflow_query(command, chat_session_obj=chat_session_obj)
-        except Exception as e:
-            message = f"Terminate immediately! Exception processing {command}: {str(e)}"
-            logger.critical(message)                    
-            return message
+        # Retry logic for workflow execution
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                return _execute_workflow_query(command, chat_session_obj=chat_session_obj)
+            except Exception as e:
+                if attempt == max_retries - 1:  # Last attempt
+                    message = f"Terminate immediately! Exception processing {command}: {str(e)}"
+                    logger.critical(message)                    
+                    return message
+                # Continue to next attempt
+                logger.warning(f"Attempt {attempt + 1} failed for command '{command}': {str(e)}")
 
     def missing_information_guidance(how_to_find_request: str) -> str:
         """

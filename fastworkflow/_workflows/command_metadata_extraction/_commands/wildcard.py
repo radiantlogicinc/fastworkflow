@@ -602,6 +602,7 @@ class ResponseGenerator:
         if cnp_output.error_msg:
             workflow_context = workflow.context
             workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION
+            workflow_context["command"] = command
             workflow.context = workflow_context
             return CommandOutput(
                 command_responses=[

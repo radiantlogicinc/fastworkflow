@@ -50,6 +50,7 @@ class Signature:
         "What details do you have on my user account?",
         "Can you show me everything tied to my profile?",
         "I'd like to review my account and recent activity.",
+        "retrieve user details"
     ]
     template_utterances: List[str] = []
 

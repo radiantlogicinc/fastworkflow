@@ -424,14 +424,25 @@ class ChatSession:
         if os.path.exists("action.json"):
             os.remove("action.json")
 
-        refined_message = f'messsage\n{self._think_and_plan(message)}'
+        refined_message = f'messsage\n{self._think_and_plan(message, self.conversation_history)}'
 
         lm = dspy_utils.get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")
-        with dspy.context(lm=lm):
-            agent_result = self._workflow_tool_agent(
-                user_query=refined_message,
-                conversation_history=self.conversation_history
-            )
+        from dspy.utils.exceptions import AdapterParseError
+        # Retry logic for AdapterParseError
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                with dspy.context(lm=lm, adapter=dspy.ChatAdapter()):
+                    agent_result = self._workflow_tool_agent(
+                        user_query=refined_message,
+                        conversation_history=self.conversation_history
+                    )
+                break  # Success, exit retry loop
+            except AdapterParseError as _:
+                if attempt == max_retries - 1:  # Last attempt
+                    raise  # Re-raise the exception if all retries failed
+                # Continue to next attempt
+
             # dspy.inspect_history(n=1)
 
         # Extract the final result from the agent
@@ -441,18 +452,21 @@ class ChatSession:
             else str(agent_result)
         )
 
-        self.conversation_history.messages.append(
-            {"user_query": message, 
-             "agent_response": result_text}
-        )
-
         # Create CommandOutput with the agent's response
         command_response = fastworkflow.CommandResponse(response=result_text)
+
+        user_instructions_summary = message
         # Attach actions captured during agent execution as artifacts if available
         if os.path.exists("action.json"):
             with open("action.json", "r", encoding="utf-8") as f:
                 actions = [json.loads(line) for line in f if line.strip()]
-            command_response.artifacts["extracted_actions"] = actions
+            user_instructions_summary = self._extract_user_instructions(message, actions)
+            command_response.artifacts["user_instructions_summary"] = user_instructions_summary
+
+        self.conversation_history.messages.append(
+            {"user_instructions": user_instructions_summary, 
+             "agent_response": result_text}
+        )
 
         command_output = fastworkflow.CommandOutput(
             command_responses=[command_response]
@@ -588,16 +602,17 @@ class ChatSession:
 
         return command_output
 
-    def _think_and_plan(self, user_query: str) -> str:
+    def _think_and_plan(self, user_query: str, conversation_history: dspy.History) -> str:
         """
-        Returns a refined plan by breaking down a user_query into simpler tasks based only on available commands and returns a todo list.
+        Returns a refined plan by breaking down a user_query into simpler tasks.
         """
         class TaskPlannerSignature(dspy.Signature):
             """
-            Break down a user_query into simpler tasks based only on available commands and return a todo list.
+            Break down a user_query into simpler tasks based only on available commands and conversation_history.
             If user_query is simple, return a single todo that is the user_query as-is
             """
             user_query: str = dspy.InputField()
+            conversation_history: dspy.History = dspy.InputField()
             available_commands: list[str] = dspy.InputField()
             todo_list: list[str] = dspy.OutputField(desc="task descriptions as short sentences")
 
@@ -611,10 +626,36 @@ class ChatSession:
         planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
         with dspy.context(lm=planner_lm):
             task_planner_func = dspy.ChainOfThought(TaskPlannerSignature)
-            prediction = task_planner_func(user_query=user_query, available_commands=available_commands)
+            prediction = task_planner_func(
+                user_query=user_query,
+                conversation_history=conversation_history, 
+                available_commands=available_commands)
 
             if not prediction.todo_list or (len(prediction.todo_list) == 1 and prediction.todo_list[0] == user_query):
                 return user_query
 
             steps_list = '\n'.join([f'{i + 1}. {task}' for i, task in enumerate(prediction.todo_list)])
             return f"{user_query}\nNext steps:\n{steps_list}"
+
+
+    def _extract_user_instructions(self, 
+        user_query: str, workflow_actions: list[dict[str, str]]) -> str:
+        """
+        Summarizes user instructions based on original user query and subsequent user feedback in workflow actions.
+        """
+        class UserInstructionCompilerSignature(dspy.Signature):
+            """
+            Concise summary of user instructions based on their commands to the workflow. 
+            Include parameter values passed in commands in the summary.
+            """
+            commands_list: list[str] = dspy.InputField()
+            user_instructions_summary: str = dspy.OutputField(desc="A single paragraph summary")
+
+        commands_list: list[str] = [user_query]
+        commands_list.extend([wf_action['command'] for wf_action in workflow_actions if 'command' in wf_action])
+
+        planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
+        with dspy.context(lm=planner_lm):
+            uic_func = dspy.ChainOfThought(UserInstructionCompilerSignature)
+            prediction = uic_func(commands_list=commands_list)
+            return prediction.user_instructions_summary
