@@ -60,7 +60,7 @@ def run_main(args):
         if command_output.command_name:
             command_info_table.add_row("Command:", Text(command_output.command_name, style="yellow"))
         if command_output.command_parameters:
-            command_info_table.add_row("Parameters:", Text(command_output.command_parameters, style="yellow"))
+            command_info_table.add_row("Parameters:", Text(str(command_output.command_parameters.model_dump()), style="yellow"))
         
         # Add command info section if we have any rows
         if command_info_table.row_count > 0:
