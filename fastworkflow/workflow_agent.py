@@ -11,17 +11,16 @@ import fastworkflow
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_utils
 from fastworkflow.command_metadata_api import CommandMetadataAPI
-from fastworkflow.mcp_server import FastWorkflowMCPServer
+from fastworkflow.utils.react import fastWorkflowReAct
 
 
 class WorkflowAgentSignature(dspy.Signature):
     """
-    Carefully review the user request and conversation_history, then execute the todo list using available tools for building the final answer.
-    All the tasks in the todo list must be completed before returning the final answer.
+    Carefully review the user request, then execute the next steps using available tools for building the final answer.
+    Every user intent must be fully addressed before returning the final answer.
     """
     user_query = dspy.InputField(desc="The natural language user query.")
-    conversation_history: dspy.History = dspy.InputField()
-    final_answer = dspy.OutputField(desc="Comprehensive final answer with supporting evidence to demonstrate that all the tasks in the todo list have been completed.")
+    final_answer = dspy.OutputField(desc="Comprehensive final answer with supporting evidence to demonstrate that every user intent has been fully addressed.")
 
 def _what_can_i_do(chat_session_obj: fastworkflow.ChatSession) -> str:
     """
@@ -34,36 +33,36 @@ def _what_can_i_do(chat_session_obj: fastworkflow.ChatSession) -> str:
         active_context_name=current_workflow.current_command_context_name,
     )
 
-def _clarify_ambiguous_intent(
-        correct_command_name: str,
-        chat_session_obj: fastworkflow.ChatSession) -> str:
-    """
-    Call this tool ONLY in the intent detection error state (ambiguous or misunderstood intent) to provide the exact command name.
-    The intent detection error message will list the command names to pick from.
-    """
-    return _execute_workflow_query(correct_command_name, chat_session_obj = chat_session_obj)
+# def _clarify_ambiguous_intent(
+#         correct_command_name: str,
+#         chat_session_obj: fastworkflow.ChatSession) -> str:
+#     """
+#     Call this tool ONLY in the intent detection error state (ambiguous or misunderstood intent) to provide the exact command name.
+#     The intent detection error message will list the command names to pick from.
+#     """
+#     return _execute_workflow_query(correct_command_name, chat_session_obj = chat_session_obj)
 
-def _provide_missing_or_corrected_parameters(
-        missing_or_corrected_parameter_values: list[str|int|float|bool],
-        chat_session_obj: fastworkflow.ChatSession) -> str:
-    """
-    Call this tool ONLY in the parameter extraction error state to provide missing or corrected parameter values.
-    Missing parameter values may be found in the user query, or information already available, or by aborting and executing a different command (refer to the optional 'available_from' hint for guidance on appropriate commands to use to get the information).
-    If the error message indicates parameter values are improperly formatted, correct using your internal knowledge and command metadata information.
-    """
-    if missing_or_corrected_parameter_values:
-        command = ', '.join(missing_or_corrected_parameter_values)
-    else:
-        return "Provide missing or corrected parameter values or abort"
+# def _provide_missing_or_corrected_parameters(
+#         missing_or_corrected_parameter_values: list[str|int|float|bool],
+#         chat_session_obj: fastworkflow.ChatSession) -> str:
+#     """
+#     Call this tool ONLY in the parameter extraction error state to provide missing or corrected parameter values.
+#     Missing parameter values may be found in the user query, or information already available, or by aborting and executing a different command (refer to the optional 'available_from' hint for guidance on appropriate commands to use to get the information).
+#     If the error message indicates parameter values are improperly formatted, correct using your internal knowledge and command metadata information.
+#     """
+#     if missing_or_corrected_parameter_values:
+#         command = ', '.join(missing_or_corrected_parameter_values)
+#     else:
+#         return "Provide missing or corrected parameter values or abort"
     
-    return _execute_workflow_query(command, chat_session_obj = chat_session_obj)
+#   return _execute_workflow_query(command, chat_session_obj = chat_session_obj)
 
-def _abort_current_command_to_exit_parameter_extraction_error_state(
-        chat_session_obj: fastworkflow.ChatSession) -> str:
-    """
-    Call this tool ONLY in the parameter extraction error state when you want to get out of the parameter extraction error state and execute a different command.
-    """
-    return _execute_workflow_query('abort', chat_session_obj = chat_session_obj)
+# def _abort_current_command_to_exit_parameter_extraction_error_state(
+#         chat_session_obj: fastworkflow.ChatSession) -> str:
+#     """
+#     Call this tool ONLY in the parameter extraction error state when you want to get out of the parameter extraction error state and execute a different command.
+#     """
+#     return 
 
 def _intent_misunderstood(
         chat_session_obj: fastworkflow.ChatSession) -> str:
@@ -71,7 +70,7 @@ def _intent_misunderstood(
     Shows the full list of available command names so you can specify the command name you really meant
     Call this tool when your intent is misunderstood (i.e. the wrong command name is executed).
     """
-    return _execute_workflow_query('you misunderstood', chat_session_obj = chat_session_obj)
+    return _what_can_i_do(chat_session_obj = chat_session_obj)
 
 def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSession) -> str:
     """
@@ -105,21 +104,23 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     params_dict = params.model_dump() if params else None
     
     # Extract response text
-    resp_text = ""
+    response_text = ""
     if command_output.command_responses:
-        response_parts = [
+        response_parts = []
+        response_parts.extend(
             cmd_response.response
             for cmd_response in command_output.command_responses
             if cmd_response.response
-        ]
-        resp_text = "\n".join(response_parts)
-    
+        )
+        response_text = "\n".join(response_parts) \
+            if response_parts else "Command executed successfully but produced no output."
+
     chat_session_obj.command_trace_queue.put(fastworkflow.CommandTraceEvent(
         direction=fastworkflow.CommandTraceEventDirection.WORKFLOW_TO_AGENT,
         raw_command=None,
         command_name=name,
         parameters=params_dict,
-        response_text=resp_text or "",
+        response_text=response_text,
         success=bool(command_output.success),
         timestamp_ms=int(time.time() * 1000),
     ))
@@ -129,66 +130,73 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
         "command" if command_output.success else "failing command": command,
         "command_name": name,
         "parameters": params_dict,
-        "response": resp_text if command_output.success else ""
+        "response": response_text if command_output.success else ""
     }
     with open("action.json", "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    # Format output - extract text from command response
-    if command_output.command_responses:
-        response_parts = []
-        response_parts.extend(
-            cmd_response.response
-            for cmd_response in command_output.command_responses
-            if cmd_response.response
-        )
-        return "\n".join(response_parts) if response_parts else "Command executed successfully."
+    if 'PARAMETER EXTRACTION ERROR' in response_text or 'The command is ambiguous' in response_text:
+        abort_confirmation = _execute_workflow_query('abort', chat_session_obj = chat_session_obj)
+        return f'{response_text}\n{abort_confirmation}'
 
-    return "Command executed but produced no output."
+    return response_text
 
-def _missing_information_guidance_tool(
-        how_to_find_request: str, 
-        chat_session_obj: fastworkflow.ChatSession) -> str:
-    """
-    Request guidance on finding missing information. 
-    The how_to_find_request must be plain text without any formatting.
-    """
-    lm = dspy_utils.get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")
-    with dspy.context(lm=lm):
-        guidance_func = dspy.ChainOfThought(
-            "command_info, missing_information_guidance_request -> guidance: str")
-        prediction = guidance_func(
-            command_info=_what_can_i_do(chat_session_obj), 
-            missing_information_guidance_request=how_to_find_request)
-        return prediction.guidance
+# def _missing_information_guidance_tool(
+#         how_to_find_request: str, 
+#         chat_session_obj: fastworkflow.ChatSession) -> str:
+#     """
+#     Request guidance on finding missing information. 
+#     The how_to_find_request must be plain text without any formatting.
+#     """
+#     class MissingInfoGuidanceSignature(dspy.Signature):
+#         """
+#         Carefully review the command info 'available_from' hints to see if the missing information can be found by executing a different command.
+#         You may have to walk the graph of commands based on the 'available_from' hints to find the most appropriate command
+#         Note that using the wrong command name can produce missing information errors. The requestor should double-check that the command name is correct. 
+#         """
+#         command_info: str = dspy.InputField()
+#         missing_information_guidance_request: str = dspy.InputField()
+#         guidance: str = dspy.OutputField()
+
+
+#     lm = dspy_utils.get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")
+#     with dspy.context(lm=lm):
+#         guidance_func = dspy.ChainOfThought(MissingInfoGuidanceSignature)
+#         prediction = guidance_func(
+#             command_info=_what_can_i_do(chat_session_obj), 
+#             missing_information_guidance_request=how_to_find_request)
+#         return prediction.guidance
 
 def _ask_user_tool(clarification_request: str, chat_session_obj: fastworkflow.ChatSession) -> str:
     """
-    As a last resort, request clarification for missing information (only after using the missing_information_guidance_tool) or error correction from the human user. 
+    If the missing_information_guidance_tool does not help and only as the last resort, request clarification for missing information from the human user. 
     The clarification_request must be plain text without any formatting.
+    Note that using the wrong command name can produce missing information errors. Double-check with the missing_information_guidance_tool to verify that the correct command name is being used 
     """
     command_output = fastworkflow.CommandOutput(
         command_responses=[fastworkflow.CommandResponse(response=clarification_request)]
     )
-    chat_session_obj.command_output_queue.put(command_output)
-    user_query = chat_session_obj.user_message_queue.get()
-    return _think_and_plan(user_query, chat_session_obj)
 
-def initialize_workflow_tool_agent(mcp_server: FastWorkflowMCPServer, max_iters: int = 25):
+    chat_session_obj.command_output_queue.put(command_output)
+
+    user_query = chat_session_obj.user_message_queue.get()
+    return build_query_with_next_steps(user_query, chat_session_obj, with_agent_inputs_and_trajectory = True)
+
+def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_iters: int = 25):
     """
     Initialize and return a DSPy ReAct agent that exposes individual MCP tools.
     Each tool expects a single query string for its specific tool.
     
     Args:
-        mcp_server: FastWorkflowMCPServer instance
+        chat_session: fastworkflow.ChatSession instance
         max_iters: Maximum iterations for the ReAct agent
         
     Returns:
         DSPy ReAct agent configured with workflow tools
     """
-    chat_session_obj = mcp_server.chat_session
+    chat_session_obj = chat_session
     if not chat_session_obj:
-        return None
+        raise ValueError("chat session cannot be null")
 
     def what_can_i_do() -> str:
         """
@@ -196,36 +204,10 @@ def initialize_workflow_tool_agent(mcp_server: FastWorkflowMCPServer, max_iters:
         """
         return _what_can_i_do(chat_session_obj=chat_session_obj)
 
-    def clarify_ambiguous_intent(
-            correct_command_name: str) -> str:
-        """
-        Call this tool ONLY in the intent detection error state to provide the exact command name.
-        The intent detection error message will list the command names to pick from.
-        """
-        return _clarify_ambiguous_intent(correct_command_name, chat_session_obj = chat_session_obj)
-
-    def provide_missing_or_corrected_parameters(
-            missing_or_corrected_parameter_values: list[str|int|float|bool]) -> str:
-        """
-        Call this tool ONLY in the parameter extraction error state to provide missing or corrected parameter values.
-        Missing parameter values may be found in the user query, or information already available, or by executing a different command (refer to the optional 'available_from' hint for guidance on appropriate commands to use to get the information).
-        If the error message indicates parameter values are improperly formatted, correct using your internal knowledge.
-        """
-        return _provide_missing_or_corrected_parameters(missing_or_corrected_parameter_values, chat_session_obj=chat_session_obj)
-
-    def abort_current_command_to_exit_parameter_extraction_error_state() -> str:
-        """
-        Call this tool ONLY when you need to execute a different command to get missing parameters.
-        DO NOT execute the same failing command over and over. Either provide_missing_or_corrected_parameters or abort 
-        """
-        return _abort_current_command_to_exit_parameter_extraction_error_state(
-            chat_session_obj=chat_session_obj)
-
     def intent_misunderstood() -> str:
         """
         Shows the full list of available command names so you can specify the command name you really meant
         Call this tool when your intent is misunderstood (i.e. the wrong command name is executed).
-        Do not use this tool if its a missing or invalid parameter issue. Use the provide_missing_or_corrected_parameters tool instead
         """
         return _intent_misunderstood(chat_session_obj = chat_session_obj)
 
@@ -249,49 +231,63 @@ def initialize_workflow_tool_agent(mcp_server: FastWorkflowMCPServer, max_iters:
                 # Continue to next attempt
                 logger.warning(f"Attempt {attempt + 1} failed for command '{command}': {str(e)}")
 
-    def missing_information_guidance(how_to_find_request: str) -> str:
-        """
-        Request guidance on finding missing information. 
-        The how_to_find_request must be plain text without any formatting.
-        """
-        return _missing_information_guidance_tool(how_to_find_request, chat_session_obj=chat_session_obj)
+    # def missing_information_guidance(how_to_find_request: str) -> str:
+    #     """
+    #     Request guidance on finding missing information. 
+    #     The how_to_find_request must be plain text without any formatting.
+    #     """
+    #     return _missing_information_guidance_tool(how_to_find_request, chat_session_obj=chat_session_obj)
 
     def ask_user(clarification_request: str) -> str:
         """
-        As a last resort, request clarification for missing information (only after using the missing_information_guidance_tool) or error correction from the human user. 
+        Only as the last resort, request clarification for missing information from the human user. 
         The clarification_request must be plain text without any formatting.
+        Note that using the wrong command name can produce missing information errors. Double-check with the what_can_i_do tool to verify that the correct command name is being used 
         """
         return _ask_user_tool(clarification_request, chat_session_obj=chat_session_obj)
 
     tools = [
         what_can_i_do,
         execute_workflow_query,
-        missing_information_guidance,
-        clarify_ambiguous_intent,
+        # missing_information_guidance,
         intent_misunderstood,
         ask_user,
-        provide_missing_or_corrected_parameters,
-        abort_current_command_to_exit_parameter_extraction_error_state,
     ]
 
-    return dspy.ReAct(
+    return fastWorkflowReAct(
         WorkflowAgentSignature,
         tools=tools,
         max_iters=max_iters,
     )
 
-def _think_and_plan(user_query: str, chat_session_obj: fastworkflow.ChatSession) -> str:
+
+def build_query_with_next_steps(user_query: str, 
+    chat_session_obj: fastworkflow.ChatSession, with_agent_inputs_and_trajectory: bool = False) -> str:
     """
-    Returns a refined plan by breaking down a user_query into simpler tasks based only on available commands and returns a todo list.
+    Generate a todo list.
+    Return a string that combine the user query and todo list
     """
     class TaskPlannerSignature(dspy.Signature):
         """
-        Break down a user_query into simpler tasks based only on available commands and return a todo list.
-        If user_query is simple, return a single todo that is the user_query as-is
+        Carefully review the user_query and generate a next steps sequence based only on available commands.
+        Walk the graph of commands based on the 'available_from' hints to build the most appropriate command sequence
+        Avoid specifying 'ask user' because 9 times out of 10, you can find the information via available commands. 
         """
         user_query: str = dspy.InputField()
         available_commands: list[str] = dspy.InputField()
-        todo_list: list[str] = dspy.OutputField(desc="task descriptions as short sentences")
+        next_steps: list[str] = dspy.OutputField(desc="task descriptions as short sentences")
+
+    class TaskPlannerWithTrajectoryAndAgentInputsSignature(dspy.Signature):
+        """
+        Carefully review agent inputs, agent trajectory and user response and generate a next steps sequence based only on available commands.
+        Walk the graph of commands based on the 'available_from' hints to build the most appropriate command sequence
+        Avoid specifying 'ask user' because 9 times out of 10, you can find the information via available commands. 
+        """
+        agent_inputs: dict = dspy.InputField()
+        agent_trajectory: dict = dspy.InputField()
+        user_response: str = dspy.InputField()
+        available_commands: list[str] = dspy.InputField()
+        next_steps: list[str] = dspy.OutputField(desc="task descriptions as short sentences")
 
     current_workflow = chat_session_obj.get_active_workflow()
     available_commands = CommandMetadataAPI.get_command_display_text(
@@ -302,10 +298,27 @@ def _think_and_plan(user_query: str, chat_session_obj: fastworkflow.ChatSession)
 
     planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
     with dspy.context(lm=planner_lm):
-        task_planner_func = dspy.ChainOfThought(TaskPlannerSignature)
-        prediction = task_planner_func(user_query=user_query, available_commands=available_commands)
+        if with_agent_inputs_and_trajectory:
+            workflow_tool_agent = chat_session_obj.workflow_tool_agent
+            task_planner_func = dspy.ChainOfThought(TaskPlannerWithTrajectoryAndAgentInputsSignature)
+            prediction = task_planner_func(
+                agent_inputs = workflow_tool_agent.inputs,
+                agent_trajectory = workflow_tool_agent.current_trajectory,
+                user_response = user_query,
+                available_commands=available_commands)
+        else:
+            task_planner_func = dspy.ChainOfThought(TaskPlannerSignature)
+            prediction = task_planner_func(
+                user_query=user_query,
+                available_commands=available_commands)
 
-        if not prediction.todo_list or (len(prediction.todo_list) == 1 and prediction.todo_list[0] == user_query):
+        if not prediction.next_steps:
             return user_query
 
-        return f"{user_query}\nNext steps:\n{'\n'.join([f'{i + 1}. {task}' for i, task in enumerate(prediction.todo_list)])}"
+        steps_list = '\n'.join([f'{i + 1}. {task}' for i, task in enumerate(prediction.next_steps)])
+        user_query_and_next_steps = f"{user_query}\n\nNext steps:\n{steps_list}"
+        return (
+            f'{available_commands}\n\nUser Query:\n{user_query_and_next_steps}'
+            if with_agent_inputs_and_trajectory else
+            user_query_and_next_steps
+        )

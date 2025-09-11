@@ -24,7 +24,7 @@ class Signature:
         item_ids: List[str] = Field(
             default_factory=list,
             description="List of item IDs to be returned",
-            examples=["1008292230"],
+            examples=["'57347828', '8646987326'"],
             json_schema_extra={
                 "available_from": ["get_order_details"]
             }
@@ -69,7 +69,18 @@ class Signature:
     ) -> tuple[bool, str]:
         if not cmd_parameters.order_id.startswith('#'):
             cmd_parameters.order_id = f'#{cmd_parameters.order_id}'
-        return (True, '')
+
+        error_message = ''
+        if len(cmd_parameters.item_ids) == 0:
+            error_message = 'item ids must be specified\n'
+        for item_id in cmd_parameters.item_ids:
+            try:
+                int(item_id)
+            except ValueError:
+                error_message += 'item ids must be integers\n'
+                break
+
+        return (False, error_message) if error_message else (True, '')
 
 
 class ResponseGenerator:

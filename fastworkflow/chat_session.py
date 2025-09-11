@@ -16,7 +16,6 @@ from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_utils
 from fastworkflow.model_pipeline_training import CommandRouter
 from fastworkflow.utils.startup_progress import StartupProgress
-from fastworkflow.command_metadata_api import CommandMetadataAPI
 
 
 class SessionStatus(Enum):
@@ -123,7 +122,7 @@ class ChatSession:
         self._status = SessionStatus.STOPPED
         self._chat_worker = None
 
-        self._conversation_history = dspy.History(messages=[])
+        self._conversation_history: dspy.History = dspy.History(messages=[])
         
         # Import here to avoid circular imports
         from fastworkflow.command_executor import CommandExecutor
@@ -246,7 +245,7 @@ class ChatSession:
         # This must happen after pushing the workflow to the stack
         # so that get_active_workflow() returns the correct workflow
         if self._run_as_agent:
-            self._initialize_workflow_tool_agent()
+            self._initialize_agent_functionality()
         
         command_output = None
         if self._keep_alive:
@@ -260,19 +259,22 @@ class ChatSession:
 
         return command_output
 
-    def _initialize_workflow_tool_agent(self):
+    def _initialize_agent_functionality(self):
         """
         Initialize the workflow tool agent for agent mode.
         This agent handles individual tool selection and execution.
         """
-        if not self._workflow_tool_agent:
-            # Initialize the workflow tool agent
-            from fastworkflow.mcp_server import FastWorkflowMCPServer
-            from fastworkflow.workflow_agent import initialize_workflow_tool_agent
-            
-            mcp_server = FastWorkflowMCPServer(self)
-            self._workflow_tool_agent = initialize_workflow_tool_agent(mcp_server)
-    
+        self._cme_workflow.context["run_as_agent"] = True
+        self._current_workflow.context["run_as_agent"] = True
+
+        # Initialize the workflow tool agent
+        from fastworkflow.workflow_agent import initialize_workflow_tool_agent       
+        self._workflow_tool_agent = initialize_workflow_tool_agent(self)
+
+    @property
+    def workflow_tool_agent(self):
+        """Get the workflow tool agent for agent mode."""
+        return self._workflow_tool_agent
     @property
     def cme_workflow(self) -> fastworkflow.Workflow:
         """Get the command metadata extraction workflow."""
@@ -309,7 +311,13 @@ class ChatSession:
     def conversation_history(self) -> dspy.History:
         """Return the conversation history."""
         return self._conversation_history
-       
+
+    def clear_conversation_history(self) -> None:
+        """
+        Clear the conversation history.
+        This resets the conversation history to an empty state.
+        """
+        self._conversation_history = dspy.History(messages=[])
 
     def _run_workflow_loop(self) -> Optional[fastworkflow.CommandOutput]:
         """
@@ -324,7 +332,7 @@ class ChatSession:
         try:
             # Handle startup command/action
             if self._startup_command:
-                if self._run_as_agent:
+                if self._run_as_agent and not self._startup_command.startswith('/'):
                     # In agent mode, use workflow tool agent for processing
                     last_output = self._process_agent_message(self._startup_command)
                 else:
@@ -339,11 +347,11 @@ class ChatSession:
                     message = self.user_message_queue.get()
                     
                     # Route based on mode and message type
-                    if self._run_as_agent:
+                    if self._run_as_agent and not message.startswith('/'):
                         # In agent mode, use workflow tool agent for processing
                         last_output = self._process_agent_message(message)
-                    elif self._is_mcp_tool_call(message):
-                        last_output = self._process_mcp_tool_call(message)
+                    # elif self._is_mcp_tool_call(message):
+                    #     last_output = self._process_mcp_tool_call(message)
                     else:
                         last_output = self._process_message(message)
                         
@@ -361,66 +369,67 @@ class ChatSession:
 
         return None
     
-    def _is_mcp_tool_call(self, message: str) -> bool:
-        """Detect if message is an MCP tool call JSON"""
-        try:
-            data = json.loads(message)
-            return data.get("type") == "mcp_tool_call"
-        except (json.JSONDecodeError, AttributeError):
-            return False
+    # def _is_mcp_tool_call(self, message: str) -> bool:
+    #     """Detect if message is an MCP tool call JSON"""
+    #     try:
+    #         data = json.loads(message)
+    #         return data.get("type") == "mcp_tool_call"
+    #     except (json.JSONDecodeError, AttributeError):
+    #         return False
     
-    def _process_mcp_tool_call(self, message: str) -> fastworkflow.CommandOutput:
-        # sourcery skip: class-extract-method, extract-method
-        """Process an MCP tool call message"""
-        workflow = ChatSession.get_active_workflow()
+    # def _process_mcp_tool_call(self, message: str) -> fastworkflow.CommandOutput:
+    #     # sourcery skip: class-extract-method, extract-method
+    #     """Process an MCP tool call message"""
+    #     workflow = ChatSession.get_active_workflow()
         
-        try:
-            # Parse JSON message
-            data = json.loads(message)
-            tool_call_data = data["tool_call"]
+    #     try:
+    #         # Parse JSON message
+    #         data = json.loads(message)
+    #         tool_call_data = data["tool_call"]
             
-            # Create MCPToolCall object
-            tool_call = fastworkflow.MCPToolCall(
-                name=tool_call_data["name"],
-                arguments=tool_call_data["arguments"]
-            )
+    #         # Create MCPToolCall object
+    #         tool_call = fastworkflow.MCPToolCall(
+    #             name=tool_call_data["name"],
+    #             arguments=tool_call_data["arguments"]
+    #         )
             
-            # Execute via command executor
-            mcp_result = self._CommandExecutor.perform_mcp_tool_call(
-                workflow, 
-                tool_call, 
-                command_context=workflow.current_command_context_name
-            )
+    #         # Execute via command executor
+    #         mcp_result = self._CommandExecutor.perform_mcp_tool_call(
+    #             workflow, 
+    #             tool_call, 
+    #             command_context=workflow.current_command_context_name
+    #         )
             
-            # Convert MCPToolResult back to CommandOutput for consistency
-            command_output = self._convert_mcp_result_to_command_output(mcp_result)
+    #         # Convert MCPToolResult back to CommandOutput for consistency
+    #         command_output = self._convert_mcp_result_to_command_output(mcp_result)
             
-            # Put in output queue if needed
-            if (not command_output.success or self._keep_alive) and self.command_output_queue:
-                self.command_output_queue.put(command_output)
+    #         # Put in output queue if needed
+    #         if (not command_output.success or self._keep_alive) and self.command_output_queue:
+    #             self.command_output_queue.put(command_output)
 
-            # Flush on successful or failed tool call – state may have changed.
-            if workflow := ChatSession.get_active_workflow():
-                workflow.flush()
+    #         # Flush on successful or failed tool call – state may have changed.
+    #         if workflow := ChatSession.get_active_workflow():
+    #             workflow.flush()
             
-            return command_output
+    #         return command_output
             
-        except Exception as e:
-            logger.error(f"Error processing MCP tool call: {e}. Tool call content: {message}")
-            return self._process_message(message)  # process as a message
+    #     except Exception as e:
+    #         logger.error(f"Error processing MCP tool call: {e}. Tool call content: {message}")
+    #         return self._process_message(message)  # process as a message
     
-    def _convert_mcp_result_to_command_output(self, mcp_result: fastworkflow.MCPToolResult) -> fastworkflow.CommandOutput:
-        """Convert MCPToolResult to CommandOutput for compatibility"""
-        command_response = fastworkflow.CommandResponse(
-            response=mcp_result.content[0].text if mcp_result.content else "No response",
-            success=not mcp_result.isError
-        )
+    # def _convert_mcp_result_to_command_output(self, mcp_result: fastworkflow.MCPToolResult) -> fastworkflow.CommandOutput:
+    #     """Convert MCPToolResult to CommandOutput for compatibility"""
+    #     command_response = fastworkflow.CommandResponse(
+    #         response=mcp_result.content[0].text if mcp_result.content else "No response",
+    #         success=not mcp_result.isError
+    #     )
         
-        command_output = fastworkflow.CommandOutput(command_responses=[command_response])
-        command_output._mcp_source = mcp_result  # Mark for special formatting
-        return command_output
+    #     command_output = fastworkflow.CommandOutput(command_responses=[command_response])
+    #     command_output._mcp_source = mcp_result  # Mark for special formatting
+    #     return command_output
     
     def _process_agent_message(self, message: str) -> fastworkflow.CommandOutput:
+        # sourcery skip: class-extract-method
         """Process a message in agent mode using workflow tool agent"""
         # The agent processes the user's message and may make multiple tool calls
         # to the workflow internally (directly via CommandExecutor)
@@ -429,7 +438,13 @@ class ChatSession:
         if os.path.exists("action.json"):
             os.remove("action.json")
 
-        refined_message = f'messsage\n{self._think_and_plan(message, self.conversation_history)}'
+        refined_user_query = self._refine_user_query(message, self.conversation_history)
+
+        from fastworkflow.workflow_agent import build_query_with_next_steps
+        command_info_and_refined_message_with_todolist = build_query_with_next_steps(
+            refined_user_query, 
+            self
+        )
 
         lm = dspy_utils.get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")
         from dspy.utils.exceptions import AdapterParseError
@@ -439,8 +454,7 @@ class ChatSession:
             try:
                 with dspy.context(lm=lm, adapter=dspy.ChatAdapter()):
                     agent_result = self._workflow_tool_agent(
-                        user_query=refined_message,
-                        conversation_history=self.conversation_history
+                        user_query=command_info_and_refined_message_with_todolist
                     )
                 break  # Success, exit retry loop
             except AdapterParseError as _:
@@ -460,22 +474,22 @@ class ChatSession:
         # Create CommandOutput with the agent's response
         command_response = fastworkflow.CommandResponse(response=result_text)
 
-        user_instructions_summary = message
+        conversation_summary = message
         # Attach actions captured during agent execution as artifacts if available
         if os.path.exists("action.json"):
             with open("action.json", "r", encoding="utf-8") as f:
                 actions = [json.loads(line) for line in f if line.strip()]
-            user_instructions_summary = self._extract_user_instructions(message, actions)
-            command_response.artifacts["user_instructions_summary"] = user_instructions_summary
+            conversation_summary = self._extract_conversation_summary(message, actions, result_text)
+            command_response.artifacts["conversation_summary"] = conversation_summary
 
         self.conversation_history.messages.append(
-            {"user_instructions": user_instructions_summary, 
-             "agent_response": result_text}
+            {f"conversation {len(self.conversation_history.messages) + 1}": conversation_summary}
         )
 
         command_output = fastworkflow.CommandOutput(
             command_responses=[command_response]
         )
+        command_output.workflow_name = self._current_workflow.folderpath.split('/')[-1]
 
         # Put output in queue (following same pattern as _process_message)
         if (not command_output.success or self._keep_alive) and \
@@ -487,6 +501,78 @@ class ChatSession:
             workflow.flush()
 
         return command_output
+
+    def _process_message(self, message: str) -> fastworkflow.CommandOutput:
+        """Process a single message"""
+        # Use our specialized profiling method
+        # command_output = self.profile_invoke_command(message)
+        
+        command_output = self._CommandExecutor.invoke_command(self, message)
+        if (not command_output.success or self._keep_alive) and \
+            self.command_output_queue:
+            self.command_output_queue.put(command_output)
+
+        # Persist workflow state changes lazily accumulated during message processing.
+        if workflow := ChatSession.get_active_workflow():
+            workflow.flush()
+
+        return command_output
+
+    def _process_action(self, action: fastworkflow.Action) -> fastworkflow.CommandOutput:
+        """Process a startup action"""
+        workflow = ChatSession.get_active_workflow()
+        command_output = self._CommandExecutor.perform_action(workflow, action)
+        if (not command_output.success or self._keep_alive) and \
+            self.command_output_queue:
+            self.command_output_queue.put(command_output)
+
+        # Flush any pending workflow updates triggered by this startup action.
+        if workflow:
+            workflow.flush()
+
+        return command_output
+
+    def _refine_user_query(self, user_query: str, conversation_history: dspy.History) -> str:
+        """
+        Refine user query using conversation history. 
+        Return the refined user query
+        """
+        if conversation_history.messages:
+            messages = []
+            for conv_dict in conversation_history.messages[-5:]:
+                messages.extend([
+                    f'{k}: {v}' for k, v in conv_dict.items()
+                ])
+            messages.append(f'new_user_query: {user_query}')
+            return '\n'.join(messages)
+
+        return user_query    
+
+    def _extract_conversation_summary(self, 
+        user_query: str, workflow_actions: list[dict[str, str]], final_agent_response: str) -> str:
+        """
+        Summarizes conversation based on original user query, workflow actions and agentt response.
+        """
+        class ConversationSummarySignature(dspy.Signature):
+            """
+            A summary of conversation
+            Omit descriptions of action sequences 
+            Capture relevant facts and parameter values from user query, workflow actions and agent response
+            """
+            user_query: str = dspy.InputField()
+            workflow_actions: list[dict[str, str]] = dspy.InputField()
+            final_agent_response: str = dspy.InputField()
+            conversation_summary: str = dspy.OutputField(desc="A multiline paragraph summary")
+
+        planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
+        with dspy.context(lm=planner_lm):
+            cs_func = dspy.ChainOfThought(ConversationSummarySignature)
+            prediction = cs_func(
+                user_query=user_query, 
+                workflow_actions=workflow_actions, 
+                final_agent_response=final_agent_response)
+            return prediction.conversation_summary
+
     
     def profile_invoke_command(self, message: str):
         """
@@ -576,91 +662,3 @@ class ChatSession:
         print(f"Detailed report saved to {os.path.abspath(report_file)}")
         
         return result
-
-    def _process_message(self, message: str) -> fastworkflow.CommandOutput:
-        """Process a single message"""
-        # Use our specialized profiling method
-        # command_output = self.profile_invoke_command(message)
-        
-        command_output = self._CommandExecutor.invoke_command(self, message)
-        if (not command_output.success or self._keep_alive) and \
-            self.command_output_queue:
-            self.command_output_queue.put(command_output)
-
-        # Persist workflow state changes lazily accumulated during message processing.
-        if workflow := ChatSession.get_active_workflow():
-            workflow.flush()
-
-        return command_output
-
-    def _process_action(self, action: fastworkflow.Action) -> fastworkflow.CommandOutput:
-        """Process a startup action"""
-        workflow = ChatSession.get_active_workflow()
-        command_output = self._CommandExecutor.perform_action(workflow, action)
-        if (not command_output.success or self._keep_alive) and \
-            self.command_output_queue:
-            self.command_output_queue.put(command_output)
-
-        # Flush any pending workflow updates triggered by this startup action.
-        if workflow:
-            workflow.flush()
-
-        return command_output
-
-    def _think_and_plan(self, user_query: str, conversation_history: dspy.History) -> str:
-        """
-        Returns a refined plan by breaking down a user_query into simpler tasks.
-        """
-        class TaskPlannerSignature(dspy.Signature):
-            """
-            Break down a user_query into simpler tasks based only on available commands and conversation_history.
-            If user_query is simple, return a single todo that is the user_query as-is
-            """
-            user_query: str = dspy.InputField()
-            conversation_history: dspy.History = dspy.InputField()
-            available_commands: list[str] = dspy.InputField()
-            todo_list: list[str] = dspy.OutputField(desc="task descriptions as short sentences")
-
-        current_workflow = ChatSession.get_active_workflow()
-        available_commands = CommandMetadataAPI.get_command_display_text(
-            subject_workflow_path=current_workflow.folderpath,
-            cme_workflow_path=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
-            active_context_name=current_workflow.current_command_context_name,
-        )
-
-        planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
-        with dspy.context(lm=planner_lm):
-            task_planner_func = dspy.ChainOfThought(TaskPlannerSignature)
-            prediction = task_planner_func(
-                user_query=user_query,
-                conversation_history=conversation_history, 
-                available_commands=available_commands)
-
-            if not prediction.todo_list or (len(prediction.todo_list) == 1 and prediction.todo_list[0] == user_query):
-                return user_query
-
-            steps_list = '\n'.join([f'{i + 1}. {task}' for i, task in enumerate(prediction.todo_list)])
-            return f"{user_query}\nNext steps:\n{steps_list}"
-
-
-    def _extract_user_instructions(self, 
-        user_query: str, workflow_actions: list[dict[str, str]]) -> str:
-        """
-        Summarizes user instructions based on original user query and subsequent user feedback in workflow actions.
-        """
-        class UserInstructionCompilerSignature(dspy.Signature):
-            """
-            Concise summary of user instructions based on their commands to the workflow. 
-            Include parameter values passed in commands in the summary.
-            """
-            commands_list: list[str] = dspy.InputField()
-            user_instructions_summary: str = dspy.OutputField(desc="A single paragraph summary")
-
-        commands_list: list[str] = [user_query]
-        commands_list.extend([wf_action['command'] for wf_action in workflow_actions if 'command' in wf_action])
-
-        planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
-        with dspy.context(lm=planner_lm):
-            uic_func = dspy.ChainOfThought(UserInstructionCompilerSignature)
-            prediction = uic_func(commands_list=commands_list)
-            return prediction.user_instructions_summary

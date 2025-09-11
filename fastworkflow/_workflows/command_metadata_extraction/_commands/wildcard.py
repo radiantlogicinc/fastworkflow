@@ -4,6 +4,8 @@ import sys
 from typing import Dict, List, Optional, Type, Union
 import json
 import os
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from pydantic import BaseModel
 from pydantic_core import PydanticUndefined
@@ -36,6 +38,67 @@ INVALID_INFORMATION_ERRMSG = fastworkflow.get_env_var("INVALID_INFORMATION_ERRMS
 NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
 INVALID = fastworkflow.get_env_var("INVALID")
 PARAMETER_EXTRACTION_ERROR_MSG = None
+
+
+# TODO - generation is deterministic. They all return the same answer
+# TODO - Need 'temperature' for intent detection pipeline
+def majority_vote_predictions(command_router, command: str, n_predictions: int = 5) -> list[str]:
+    """
+    Generate N prediction sets in parallel and return the set that wins the majority vote.
+    
+    This function improves prediction reliability by running multiple parallel predictions
+    and selecting the most common result through majority voting. This helps reduce
+    the impact of random variations in model predictions.
+    
+    Args:
+        command_router: The CommandRouter instance to use for predictions
+        command: The input command string
+        n_predictions: Number of parallel predictions to generate (default: 5)
+                      Can be configured via N_PARALLEL_PREDICTIONS environment variable
+        
+    Returns:
+        The prediction set that received the majority vote. Falls back to a single
+        prediction if all parallel predictions fail.
+        
+    Note:
+        Uses ThreadPoolExecutor with max_workers limited to min(n_predictions, 10)
+        to avoid overwhelming the system with too many concurrent threads.
+    """
+    def get_single_prediction():
+        """Helper function to get a single prediction"""
+        return command_router.predict(command)
+    
+    # Generate N predictions in parallel
+    prediction_sets = []
+    with ThreadPoolExecutor(max_workers=min(n_predictions, 10)) as executor:
+        # Submit all prediction tasks
+        futures = [executor.submit(get_single_prediction) for _ in range(n_predictions)]
+        
+        # Collect results as they complete
+        for future in as_completed(futures):
+            try:
+                prediction_set = future.result()
+                prediction_sets.append(prediction_set)
+            except Exception as e:
+                logger.warning(f"Prediction failed: {e}")
+                # Continue with other predictions even if one fails
+    
+    if not prediction_sets:
+        # Fallback to single prediction if all parallel predictions failed
+        logger.warning("All parallel predictions failed, falling back to single prediction")
+        return command_router.predict(command)
+    
+    # Convert lists to tuples so they can be hashed and counted
+    prediction_tuples = [tuple(sorted(pred_set)) for pred_set in prediction_sets]
+    
+    # Count occurrences of each unique prediction set
+    vote_counts = Counter(prediction_tuples)
+    
+    # Get the prediction set with the most votes
+    winning_tuple = vote_counts.most_common(1)[0][0]
+    
+    # Convert back to list and return
+    return list(winning_tuple)
 
 
 class CommandNamePrediction:
@@ -140,12 +203,15 @@ class CommandNamePrediction:
                     command_name = cache_result
                 else:
                     predictions=command_router.predict(command)
+                    # predictions = majority_vote_predictions(command_router, command)
 
                     if len(predictions)==1:
                         command_name = predictions[0].split('/')[-1]
                     else:
                         # If confidence is low, treat as ambiguous command (type 1)
-                        error_msg = self._formulate_ambiguous_command_error_message(predictions)
+                        error_msg = self._formulate_ambiguous_command_error_message(
+                            predictions, "run_as_agent" in self.app_workflow.context)
+
                         # Store suggested commands
                         self._store_suggested_commands(self.path, predictions, 1)
                         return CommandNamePrediction.Output(error_msg=error_msg)
@@ -296,7 +362,8 @@ class CommandNamePrediction:
             db.close()
 
     @staticmethod
-    def _formulate_ambiguous_command_error_message(route_choice_list: list[str]) -> str:
+    def _formulate_ambiguous_command_error_message(
+        route_choice_list: list[str], run_as_agent: bool) -> str:
         command_list = (
             "\n".join([
                 f"{route_choice.split('/')[-1].lower()}"
@@ -305,10 +372,14 @@ class CommandNamePrediction:
         )
 
         return (
-            "The command is ambiguous. Please select from these possible options:\n"
-            f"{command_list}\n\n"
-            "or type 'what can i do' to see all commands\n"
-            "or type 'abort' to cancel"
+            "The command is ambiguous. "
+            + (
+                "Choose the correct command name from these possible options and update your command:\n"
+                if run_as_agent
+                else "Please choose a command name from these possible options:\n"
+            )
+            + f"{command_list}\n\nor type 'what can i do' to see all commands\n"
+            + ("or type 'abort' to cancel" if run_as_agent else '')
         )
 
 class ParameterExtraction:
@@ -376,8 +447,11 @@ class ParameterExtraction:
             if params_str := self._format_parameters_for_display(merged_params):
                 error_msg = f"Extracted parameters so far:\n{params_str}\n\n{error_msg}"
 
-            error_msg += "\nEnter 'abort' to get out of this error state and/or execute a different command."
-            error_msg += "\nEnter 'you misunderstood' if the wrong command was executed."
+            if "run_as_agent" not in self.app_workflow.context:
+                error_msg += "\nEnter 'abort' to get out of this error state and/or execute a different command."
+                error_msg += "\nEnter 'you misunderstood' if the wrong command was executed."
+            else:
+                error_msg += "\nCheck your command name if the wrong command was executed."
             return self.Output(
                 parameters_are_valid=False,
                 error_msg=error_msg,
@@ -626,6 +700,7 @@ class ResponseGenerator:
             workflow_context = workflow.context
             if cnp_output.command_name == 'ErrorCorrection/you_misunderstood':
                 workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
+                workflow_context["command"] = command
             else:
                 workflow.end_command_processing()
             workflow.context = workflow_context
@@ -664,6 +739,7 @@ class ResponseGenerator:
                         workflow_context = workflow.context
                         workflow_context["NLU_Pipeline_Stage"] = \
                             NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
+                        workflow_context["command"] = command
                         workflow.context = workflow_context
 
                         startup_action = Action(
@@ -686,10 +762,9 @@ class ResponseGenerator:
             # move to the parameter extraction stage
             workflow_context = workflow.context
             workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.PARAMETER_EXTRACTION
-            workflow_context["command_name"] = cnp_output.command_name
             workflow.context = workflow_context
 
-        command_name = workflow.context["command_name"]
+        command_name = cnp_output.command_name
         extractor = ParameterExtraction(workflow, app_workflow, command_name, command)
         pe_output = extractor.extract()
         if not pe_output.parameters_are_valid:

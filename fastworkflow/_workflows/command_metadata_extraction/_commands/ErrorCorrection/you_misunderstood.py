@@ -60,7 +60,7 @@ class ResponseGenerator:
             ])
         )
         response = (
-            "Please enter the correct command from the list below:\n"
+            "Please select the correct command name from the list below:\n"
             f"{response}\n\nor type 'abort' to cancel"
         )
 

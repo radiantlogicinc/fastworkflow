@@ -24,7 +24,7 @@ class Signature:
         item_ids: List[str] = Field(
             default_factory=list,
             description="The item IDs to be exchanged",
-            examples=["1008292230"],
+            examples=["'34742388', '59475928'"],
             json_schema_extra={
                 "available_from": ["get_order_details"]
             }
@@ -32,7 +32,7 @@ class Signature:
         new_item_ids: List[str] = Field(
             default_factory=list,
             description="The new item IDs to exchange for",
-            examples=["1008292230"],
+            examples=["'45854949', '68789960'"],
             json_schema_extra={
                 "available_from": ["get_product_details"]
             }
@@ -75,7 +75,36 @@ class Signature:
     ) -> tuple[bool, str]:
         if not cmd_parameters.order_id.startswith('#'):
             cmd_parameters.order_id = f'#{cmd_parameters.order_id}'
-        return (True, '')
+
+        error_message = ''
+        if len(cmd_parameters.item_ids) == 0:
+            error_message = 'item ids must be specified\n'
+        for item_id in cmd_parameters.item_ids:
+            try:
+                int(item_id)
+            except ValueError:
+                error_message += 'item ids must be integers\n'
+                break
+
+        if len(cmd_parameters.new_item_ids) == 0:
+            error_message += 'new item ids must be specified\n'
+        for item_id in cmd_parameters.new_item_ids:
+            try:
+                int(item_id)
+            except ValueError:
+                error_message += 'new item ids must be integers\n'
+                break
+
+        if len(cmd_parameters.new_item_ids) != len(cmd_parameters.item_ids):
+            error_message += 'the number of item ids and new item ids must match for a valid exchange\n'
+
+        if common_items := set(cmd_parameters.item_ids).intersection(
+            set(cmd_parameters.new_item_ids)
+        ):
+            common_items_str = ', '.join(common_items)
+            error_message += f'cannot exchange items for themselves: {common_items_str}. new item ids must differ from item ids\n'
+
+        return (False, error_message) if error_message else (True, '')
 
 
 class ResponseGenerator:

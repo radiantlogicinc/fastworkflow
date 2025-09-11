@@ -23,6 +23,7 @@ def run_main(args):
     from rich.spinner import Spinner
     from prompt_toolkit import PromptSession
     from prompt_toolkit.patch_stdout import patch_stdout
+    from prompt_toolkit.formatted_text import HTML
 
     import fastworkflow
     from fastworkflow.utils.logging import logger
@@ -34,7 +35,7 @@ def run_main(args):
     # Instantiate a global console for consistent styling
     global console
     console = Console()
-    prompt_session = PromptSession("User > ")
+    prompt_session = PromptSession(HTML('<b>User ></b> '))
 
     def _build_artifact_table(artifacts: dict[str, str]) -> Table:
         """Return a rich.Table representation for artifact key-value pairs."""
@@ -138,7 +139,7 @@ def run_main(args):
         raise ValueError("Cannot provide both startup_command and startup_action")
 
     console.print(Panel(f"Running fastWorkflow: [bold]{args.workflow_path}[/bold]", title="[bold green]fastworkflow[/bold green]", border_style="green"))
-    console.print("[bold green]Tip:[/bold green] Type 'exit' to quit the application.")
+    console.print("[bold green]Tips:[/bold green] Type '/exit' to quit the application. Type '/new' to start a new conversation.")
 
     # ------------------------------------------------------------------
     # Startup progress bar ------------------------------------------------
@@ -193,8 +194,12 @@ def run_main(args):
     while not fastworkflow.chat_session.workflow_is_complete or args.keep_alive:
         with patch_stdout():
             user_command = prompt_session.prompt()
-        if user_command == "exit":
+        if user_command == "/exit":
             break
+        if user_command.startswith("/new"):
+            fastworkflow.chat_session.clear_conversation_history()
+            console.print("[bold]Agent >[/bold] New conversation started!\n", end="")
+            user_command = prompt_session.prompt()
 
         fastworkflow.chat_session.user_message_queue.put(user_command)
 
@@ -232,15 +237,13 @@ def run_main(args):
                         resp_style = "dim orange3" if (evt.success is False) else "dim green"
 
                         if evt.direction == fastworkflow.CommandTraceEventDirection.AGENT_TO_WORKFLOW:
-                            console.print(Text("Agent -> Workflow: ", style=info_style), end="")
-                            console.print(Text(str(evt.raw_command or ""), style=info_style))
+                            console.print(f'[bold]Agent >[/bold] {evt.raw_command}', style=info_style)
                         else:
                             # command info (dim yellow or dim orange3)
-                            info = f"{evt.command_name or ''}, {evt.parameters}: "
-                            console.print(Text("Workflow -> Agent: ", style=info_style), end="")
-                            console.print(Text(info, style=info_style), end="")
+                            info = f"[bold]Workflow >[/bold] {evt.command_name or ''}, {evt.parameters}: "
+                            console.print(info, style=info_style, end="")
                             # response (dim green or dim orange3)
-                            console.print(Text(str(evt.response_text or ""), style=resp_style))
+                            console.print(f'[bold]Workflow >[/bold] {evt.response_text}', style=resp_style)
 
                 time.sleep(0.5)
                 counter += 1

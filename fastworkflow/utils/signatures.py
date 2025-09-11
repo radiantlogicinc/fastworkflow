@@ -285,8 +285,24 @@ Today's date is {today}.
                 trainset=trainset
             )
 
+            def basic_checks(args, pred):
+                for field_name in field_names:
+                    # return 0 if it extracts an example value instead of correct value | None
+                    extracted_param_value = getattr(pred, field_name)
+                    examples = model_class.model_fields[field_name].examples
+                    if extracted_param_value in examples:
+                        return 0.0
+                return 1.0
+
+            # Create a refined module that tries up to 3 times
+            best_of_3 = dspy.BestOfN(
+                module=compiled_model, 
+                N=3, 
+                reward_fn=basic_checks, 
+                threshold=1.0)
+
             try:
-                dspy_result = compiled_model(command=self.command)
+                dspy_result = best_of_3(command=self.command)
                 for field_name in field_names:
                     default = model_class.model_fields[field_name].default
                     param_dict[field_name] = getattr(dspy_result, field_name, default)
@@ -428,26 +444,13 @@ Today's date is {today}.
                 if hasattr(type(cmd_parameters).model_fields.get(missing_field), "json_schema_extra") and type(cmd_parameters).model_fields.get(missing_field).json_schema_extra:
                     is_available_from = type(cmd_parameters).model_fields.get(missing_field).json_schema_extra.get("available_from")
                 if is_available_from:
-                    message += f"abort and use the {' or '.join(is_available_from)} command(s) to get {missing_field} information. OR...\n"
+                    msg_prefix = "abort and "
+                    if "run_as_agent" in app_workflow.context:
+                        msg_prefix = ""
+                    message += f"{msg_prefix}use the {' or '.join(is_available_from)} command(s) to get {missing_field} information. OR...\n"
 
         if invalid_fields:
             message += f"{INVALID_INFORMATION_ERRMSG}" + ", ".join(invalid_fields) + "\n"
-
-        with suppress(Exception):
-            graph_path = os.path.join(app_workflow.folderpath, "command_dependency_graph.json")
-            suggestions_texts: list[str] = []
-            for field in missing_fields:
-                plans = get_dependency_suggestions(graph_path, subject_command_name, field, min_weight=0.7, max_depth=3)
-                if plans:
-                    # Format a concise plan: main command and any immediate sub-steps
-                    top = plans[0]
-                    def format_plan(p):
-                        if not p.get('sub_plans'):
-                            return p['command']
-                        return p['command'] + " -> " + " -> ".join(sp['command'] for sp in p['sub_plans'])
-                    suggestions_texts.append(f"To get '{field}', try: {format_plan(top)}")
-            if suggestions_texts:
-                message += "\n" + "\n".join(suggestions_texts) + "\n"
 
         for field, suggestions in all_suggestions.items():
             if suggestions:
@@ -468,6 +471,7 @@ Today's date is {today}.
         if combined_fields:
             combined_fields_str = ", ".join(combined_fields)
             message += f"\nProvide corrected parameter values in the exact order specified below, separated by commas:\n{combined_fields_str}"
-            message += "\nFor parameter values that include a comma, provide separately from other values, and one at a time."
+            if "run_as_agent" not in app_workflow.context:
+                message += "\nFor parameter values that include a comma, provide separately from other values, and one at a time."
 
         return (False, message, all_suggestions)
