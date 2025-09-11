@@ -5,6 +5,7 @@ from fastworkflow.build.class_analysis_structures import ClassInfo, MethodInfo, 
 from fastworkflow.build.ast_class_extractor import resolve_inherited_properties
 import pytest
 
+
 def make_class_with_methods_and_properties():
     class_info = ClassInfo('User', 'application/user.py')
     class_info.methods.append(MethodInfo('GetDetails', [{'name': 'user_id', 'annotation': 'int'}], docstring='Get details.'))
@@ -21,6 +22,7 @@ def make_class_with_methods_and_properties():
     # For this test, one is enough to trigger set_properties.py.
 
     return {'User': class_info}
+
 
 def test_generate_command_files():
     classes_fixture = make_class_with_methods_and_properties()
@@ -61,99 +63,4 @@ def test_generate_command_files():
         assert len(files) == len(expected_files_map), \
             f"Expected {len(expected_files_map)} files, but got {len(files)}"
 
-# Test for resolve_command_dependencies needs to be re-evaluated separately
-# as it relies on how properties and setters are now represented for command generation.
-# For now, let's update test_resolve_command_dependencies_none based on get_properties
-from fastworkflow.build.command_dependency_resolver import resolve_command_dependencies
-
-def test_resolve_command_dependencies_none():
-    c = ClassInfo('A', 'a.py')
-    c.methods.append(MethodInfo('foo', []))
-    # If a class has properties, 'get_properties' command is expected
-    c.properties.append(PropertyInfo('bar', type_annotation='str')) 
-    classes = {'A': c}
-    
-    # Simulate pre-population of all_settable_properties if 'bar' was settable
-    # c.all_settable_properties.append(PropertyInfo('bar', type_annotation='str'))
-    # If 'bar' is also settable, 'set_properties' would also appear.
-    # For this specific test, let's assume 'bar' is only gettable.
-
-    graph = resolve_command_dependencies(classes)
-    # Expected: 'A.foo' (method), 'A.get_properties' (due to c.properties)
-    # If 'set_properties' were also expected, it would be 'A.set_properties'
-    expected_commands_in_graph = {'A.foo', 'A.get_properties'}
-    assert set(graph.keys()) == expected_commands_in_graph
-    assert graph['A.foo'] == set()
-    assert graph['A.get_properties'] == set()
-
-
-def test_resolve_command_dependencies_simple():
-    a = ClassInfo('A', 'a.py')
-    a.methods.append(MethodInfo('foo', [], return_annotation='B'))
-    b = ClassInfo('B', 'b.py')
-    b.methods.append(MethodInfo('bar', []))
-    classes = {'A': a, 'B': b}
-    graph = resolve_command_dependencies(classes)
-    assert graph['A.foo'] == {'B.bar'} # This should remain similar if B has no properties
-    assert graph['B.bar'] == set()
-
-def test_resolve_command_dependencies_circular():
-    a = ClassInfo('A', 'a.py', bases=['B'])
-    a.methods.append(MethodInfo('foo', [], return_annotation='B'))
-    b = ClassInfo('B', 'b.py', bases=['A'])
-    b.methods.append(MethodInfo('bar', [], return_annotation='A'))
-    classes = {'A': a, 'B': b}
-    graph = resolve_command_dependencies(classes)
-    assert graph['A.foo'] == {'B.bar'}
-    assert graph['B.bar'] == {'A.foo'}
-
-@pytest.mark.skip(reason="Skipping import statement validation due to known discrepancy in generation logic.")
-def test_dependency_manager_basic(tmp_path):
-    # This test might need review based on new command names (get_properties, set_properties)
-    src = tmp_path / "src"
-    src.mkdir()
-    f = src / "foo.py"
-    f.write_text("# test file")
-    c = ClassInfo('Foo', str(f))
-    c.methods.append(MethodInfo('bar', []))
-    c.properties.append(PropertyInfo('myprop', type_annotation='str')) # Added a property
-    classes = {'Foo': c}
-    
-    from fastworkflow.build.dependency_manager import DependencyManager # Import here to keep it local to test
-    mgr = DependencyManager(classes, src)
-    
-    # Expected commands: Foo.bar, Foo.get_properties
-    assert 'Foo.bar' in mgr.get_dependency_graph()
-    assert 'Foo.get_properties' in mgr.get_dependency_graph()
-
-    imports = mgr.get_imports_for_command('Foo.bar')
-    assert f"from foo import Foo" in imports or f"from .foo import Foo" in imports
-    imports_props = mgr.get_imports_for_command('Foo.get_properties')
-    assert f"from foo import Foo" in imports_props or f"from .foo import Foo" in imports_props
-
-    assert mgr.get_command_dependencies('Foo.bar') == set()
-    assert mgr.get_command_dependencies('Foo.get_properties') == set()
-    
-    graph = mgr.get_dependency_graph()
-    assert 'Foo.bar' in graph
-    assert 'Foo.get_properties' in graph # Check for get_properties
-    
-    assert mgr.check_circular_dependencies() == []
-    diag = mgr.diagnostics()
-    assert "No circular dependencies" in diag
-    # Orphan check might change if get_properties/set_properties are considered differently
-    # assert "Orphan commands" in diag 
-
-def test_dependency_manager_circular():
-    # This test focuses on method dependencies, less likely to be affected by get/set_properties directly unless they form part of a cycle
-    a = ClassInfo('A', 'a.py', bases=['B'])
-    a.methods.append(MethodInfo('foo', [], return_annotation='B'))
-    b = ClassInfo('B', 'b.py', bases=['A'])
-    b.methods.append(MethodInfo('bar', [], return_annotation='A'))
-    classes = {'A': a, 'B': b}
-    from fastworkflow.build.dependency_manager import DependencyManager # Import here
-    mgr = DependencyManager(classes, '.')
-    cycles = mgr.check_circular_dependencies()
-    assert any({'A.foo', 'B.bar'}.issubset(set(c)) for c in cycles)
-    diag = mgr.diagnostics()
-    assert "Circular dependencies detected" in diag 
+# Removed dependency-graph-related tests and imports below to reflect feature deprecation. 

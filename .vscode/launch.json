@@ -16,22 +16,6 @@
             "args": [
                 "./fastworkflow/examples/retail_workflow",
                 "./env/.env",
-                "./passwords/.env",
-                "--run_as_agent"
-            ]
-        },
-        {
-            "name": "run_retail_assistant",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "fastworkflow.run",
-            "justMyCode": false,
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}/"
-            },
-            "args": [
-                "./fastworkflow/examples/retail_workflow",
-                "./env/.env",
                 "./passwords/.env"
             ]
         },

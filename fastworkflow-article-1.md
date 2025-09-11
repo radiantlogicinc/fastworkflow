@@ -143,7 +143,7 @@ LITELLM_API_KEY_AGENT=your-mistral-api-key
 Next, train the intent-detection models for the workflow. This step builds the NLP models that help the workflow understand user commands.
 
 ```sh
-fastworkflow examples train hello_world
+fastworkflow train ./examples/hello_world ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env
 ```
 
 ### Step 5: Run the Example
@@ -151,7 +151,7 @@ fastworkflow examples train hello_world
 Once training is complete, run the interactive assistant!
 
 ```sh
-fastworkflow examples run hello_world
+fastworkflow run ./examples/hello_world ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env
 ```
 
 You’ll be greeted with a `User >` prompt. Try asking it "what can you do?" or "add 49 + 51"!

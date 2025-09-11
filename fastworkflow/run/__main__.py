@@ -139,7 +139,9 @@ def run_main(args):
         raise ValueError("Cannot provide both startup_command and startup_action")
 
     console.print(Panel(f"Running fastWorkflow: [bold]{args.workflow_path}[/bold]", title="[bold green]fastworkflow[/bold green]", border_style="green"))
-    console.print("[bold green]Tips:[/bold green] Type '/exit' to quit the application. Type '/new' to start a new conversation.")
+    console.print(
+        "[bold green]Tips:[/bold green] Type '//exit' to quit the application. Type '//new' to start a new conversation. " 
+        "[bold green]Tips:[/bold green] Prefix natural language commands with a single '/' to execute them in deterministic (non-agentic) mode")
 
     # ------------------------------------------------------------------
     # Startup progress bar ------------------------------------------------
@@ -169,9 +171,9 @@ def run_main(args):
         with open(args.context_file_path, 'r') as file:
             context_dict = json.load(file)
 
-    # Create the chat session with agent mode if specified
-    run_as_agent = args.run_as_agent if hasattr(args, 'run_as_agent') else False
-    fastworkflow.chat_session = fastworkflow.ChatSession(run_as_agent=run_as_agent)
+    # Create the chat session in agent mode always
+    # run_as_agent = args.run_as_agent if hasattr(args, 'run_as_agent') else False
+    fastworkflow.chat_session = fastworkflow.ChatSession(run_as_agent=True)
     
     # Start the workflow within the chat session
     fastworkflow.chat_session.start_workflow(
@@ -194,9 +196,9 @@ def run_main(args):
     while not fastworkflow.chat_session.workflow_is_complete or args.keep_alive:
         with patch_stdout():
             user_command = prompt_session.prompt()
-        if user_command == "/exit":
+        if user_command.startswith("//exit"):
             break
-        if user_command.startswith("/new"):
+        if user_command.startswith("//new"):
             fastworkflow.chat_session.clear_conversation_history()
             console.print("[bold]Agent >[/bold] New conversation started!\n", end="")
             user_command = prompt_session.prompt()
@@ -224,26 +226,25 @@ def run_main(args):
         with console.status("[bold cyan]Processing command...[/bold cyan]", spinner="dots") as status:
             counter = 0
             while wait_thread.is_alive():
-                # Check for agent traces if in agent mode
-                if args.run_as_agent:
-                    while True:
-                        try:
-                            evt = fastworkflow.chat_session.command_trace_queue.get_nowait()
-                        except queue.Empty:
-                            break
-                        
-                        # Choose styles based on success
-                        info_style = "dim orange3" if (evt.success is False) else "dim yellow"
-                        resp_style = "dim orange3" if (evt.success is False) else "dim green"
+                # Always show agent traces (run mode is always agentic)
+                while True:
+                    try:
+                        evt = fastworkflow.chat_session.command_trace_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    
+                    # Choose styles based on success
+                    info_style = "dim orange3" if (evt.success is False) else "dim yellow"
+                    resp_style = "dim orange3" if (evt.success is False) else "dim green"
 
-                        if evt.direction == fastworkflow.CommandTraceEventDirection.AGENT_TO_WORKFLOW:
-                            console.print(f'[bold]Agent >[/bold] {evt.raw_command}', style=info_style)
-                        else:
-                            # command info (dim yellow or dim orange3)
-                            info = f"[bold]Workflow >[/bold] {evt.command_name or ''}, {evt.parameters}: "
-                            console.print(info, style=info_style, end="")
-                            # response (dim green or dim orange3)
-                            console.print(f'[bold]Workflow >[/bold] {evt.response_text}', style=resp_style)
+                    if evt.direction == fastworkflow.CommandTraceEventDirection.AGENT_TO_WORKFLOW:
+                        console.print(f'[bold]Agent >[/bold] {evt.raw_command}', style=info_style)
+                    else:
+                        # command info (dim yellow or dim orange3)
+                        info = f"[bold]Workflow >[/bold] {evt.command_name or ''}, {evt.parameters}: "
+                        console.print(info, style=info_style, end="")
+                        # response (dim green or dim orange3)
+                        console.print(f'[bold]Workflow >[/bold] {evt.response_text}', style=resp_style)
 
                 time.sleep(0.5)
                 counter += 1
@@ -276,11 +277,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--project_folderpath", help="Optional path to project folder containing application code", default=None
     )
-    parser.add_argument(
-        "--run_as_agent", 
-        help="Run in agent mode (uses DSPy for tool selection)", 
-        action="store_true",
-        default=False
-    )
+    # run mode is always agentic; deterministic NL execution can be forced by prefixing '/' to a command
     args = parser.parse_args()
     run_main(args)

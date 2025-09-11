@@ -176,7 +176,7 @@ You can get a free API key from [Mistral AI](https://mistral.ai) - the example i
 Train the intent-detection models for the workflow:
 
 ```sh
-fastworkflow examples train hello_world
+fastworkflow train ./examples/hello_world ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env
 ```
 
 This step builds the NLP models that help the workflow understand user commands.
@@ -186,7 +186,7 @@ This step builds the NLP models that help the workflow understand user commands.
 Once training is complete, run the interactive assistant:
 
 ```sh
-fastworkflow examples run hello_world
+fastworkflow run ./examples/hello_world ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env
 ```
 
 You will be greeted with a `User >` prompt. Try it out by asking "what can you do?" or "add 49 + 51"!
@@ -207,12 +207,6 @@ fastworkflow examples list
 
 # Fetch an example to your local directory
 fastworkflow examples fetch <example_name>
-
-# Train an example workflow
-fastworkflow examples train <example_name>
-
-# Run an example workflow
-fastworkflow examples run <example_name>
 ```
 
 ### Workflow Operations
@@ -228,11 +222,8 @@ fastworkflow train <workflow_dir> <env_file> <passwords_file>
 fastworkflow run <workflow_dir> <env_file> <passwords_file>
 ```
 
-To run a workflow in agentic mode, add the `--run_as_agent` flag:
-
-```sh
-fastworkflow run <workflow_dir> <env_file> <passwords_file> --run_as_agent
-```
+> [!tip]
+> **Deterministic execution:** Prefix a natural language command with `/` to execute it deterministically (non‑agentic) during an interactive run.
 
 Each command has additional options that can be viewed with the `--help` flag:
 
