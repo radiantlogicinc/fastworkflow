@@ -17,7 +17,7 @@ While [DSPy](https://dspy.ai) ([Why DSPy](https://x.com/lateinteraction/status/1
 
 ### Why fastWorkflow?
 
-- ✅ **Unlimited Tool Scaling**: fastworkflow can scale to an unlimited number of tools
+- ✅ **Unlimited Tool Scaling**: fastworkflow organizes tools into context hierarchies so use any number of tools without sacrificing performance or efficiency
 - ✅ **Cost-Effective Performance**: fastWorkFlow with small, free models can match the quality of large expensive models
 - ✅ **Reliable Tool Execution**: fastworkflow validation pipeline virtually eliminates incorrect tool calling or parameter extraction, ensuring a reliable tool response
 - ✅ **Adaptive Learning**: 1-shot learning from intent detection mistakes. It learns your conversational vocabulary as you interact with it
@@ -169,7 +169,7 @@ LITELLM_API_KEY_PLANNER=your-mistral-api-key
 LITELLM_API_KEY_AGENT=your-mistral-api-key
 ```
 
-You can get a free API key from [Mistral AI](https://mistral.ai) - the example is configured to use the `mistral-small-latest` model which is available on their free tier.
+You can get a free API key from [Mistral AI](https://mistral.ai) for the mistral small model. Or a free API key from [OpenRouter](https://openrouter.ai/openai/gpt-oss-20b:free) for the GPT-OSS-20B:free model. You can use different models for different LLM roles in the same workflow if you wish.
 
 ### Step 3: Train the Example
 

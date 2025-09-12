@@ -22,7 +22,7 @@ That's where **fastWorkflow** comes in.
 
 **fastWorkflow** is an application framework designed to build reliable agents and assistants for complex workflows and large-scale Python applications, using either deterministic or AI-powered business logic.
 
--   ✅ **Unlimited Tool Scaling**: Scale to an unlimited number of tools without sacrificing performance or accuracy.
+-   ✅ **Unlimited Tool Scaling**: fastworkflow organizes tools into context hierarchies so use any number of tools without sacrificing performance or efficiency.
 -   ✅ **Cost-Effective Performance**: With `fastWorkflow`, small, free models can match the quality of large, expensive ones.
 -   ✅ **Reliable Tool Execution**: A robust validation pipeline virtually eliminates incorrect tool calling and faulty parameter extraction.
 -   ✅ **Adaptive Learning**: It learns your conversational vocabulary as you interact with it, adapting from intent detection mistakes in a single shot.
@@ -134,7 +134,7 @@ You can get a free API key from [Mistral AI](https://mistral.ai) for the mistral
 LITELLM_API_KEY_SYNDATA_GEN=your-mistral-api-key
 LITELLM_API_KEY_PARAM_EXTRACTION=your-mistral-api-key
 LITELLM_API_KEY_RESPONSE_GEN=your-mistral-api-key
-LITELLM_API_KEY_PLANNER=your-openrouter-gpt-oss-20b:free-api-key
+LITELLM_API_KEY_PLANNER=your-mistral-api-key
 LITELLM_API_KEY_AGENT=your-mistral-api-key
 ```
 
