@@ -129,7 +129,7 @@ The example workflow uses Mistral's free tier model. Edit the passwords file to 
 nano ./examples/fastworkflow.passwords.env
 ```
 
-You can get a free API key from [Mistral AI](https://mistral.ai) for the mistral small model and a free API key from [OpenRouter](https://openrouter.ai/openai/gpt-oss-20b:free) for the GPT-OSS-20B:free model. You'll need to add it for the different LLM roles:
+You can get a free API key from [Mistral AI](https://mistral.ai) for the mistral small model. Or a free API key from [OpenRouter](https://openrouter.ai/openai/gpt-oss-20b:free) for the GPT-OSS-20B:free model. You can use different models for different LLM roles in the same workflow if you wish:
 ```
 LITELLM_API_KEY_SYNDATA_GEN=your-mistral-api-key
 LITELLM_API_KEY_PARAM_EXTRACTION=your-mistral-api-key
