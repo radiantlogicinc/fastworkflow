@@ -290,7 +290,7 @@ Today's date is {today}.
                     # return 0 if it extracts an example value instead of correct value | None
                     extracted_param_value = getattr(pred, field_name)
                     examples = model_class.model_fields[field_name].examples
-                    if extracted_param_value in examples:
+                    if examples and extracted_param_value in examples:
                         return 0.0
                 return 1.0
 
