@@ -45,7 +45,12 @@ class CommandExecutor(CommandExecutorInterface):
                 command = command)
         )
 
-        if command_output.command_handled or not command_output.success:           
+        if command_output.command_handled:       
+            # important to clear the current command mode from the workflow context
+            if "is_assistant_mode_command" in chat_session.cme_workflow._context:
+                del chat_session.cme_workflow._context["is_assistant_mode_command"]
+            return command_output
+        elif not command_output.success:       
             return command_output
 
         command_name = command_output.command_responses[0].artifacts["command_name"]
@@ -54,7 +59,7 @@ class CommandExecutor(CommandExecutorInterface):
         workflow = ChatSession.get_active_workflow()
         workflow_name = workflow.folderpath.split('/')[-1]
         context = workflow.current_command_context_displayname
-        
+
         command_routing_definition = fastworkflow.RoutingRegistry.get_definition(
             workflow.folderpath
         )
@@ -77,12 +82,16 @@ class CommandExecutor(CommandExecutorInterface):
             command_output = response_generation_object(workflow, command, input_obj)
         else:
             command_output = response_generation_object(workflow, command)
-            
+
         # Set the additional attributes
         command_output.workflow_name = workflow_name
         command_output.context = context
         command_output.command_name = command_name
         command_output.command_parameters = input_obj or None
+
+        # important to clear the current command mode from the workflow context
+        if "is_assistant_mode_command" in chat_session.cme_workflow._context:
+            del chat_session.cme_workflow._context["is_assistant_mode_command"]
 
         return command_output
 
@@ -134,7 +143,7 @@ class CommandExecutor(CommandExecutorInterface):
             input_obj = command_parameters_class(**action.parameters)
 
             input_for_param_extraction = InputForParamExtraction(command=action.command)
-            is_valid, error_msg, _ = input_for_param_extraction.validate_parameters(
+            is_valid, error_msg, _, _ = input_for_param_extraction.validate_parameters(
                 workflow, action.command_name, input_obj
             )
             if not is_valid:

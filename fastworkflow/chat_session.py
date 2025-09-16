@@ -345,9 +345,16 @@ class ChatSession:
             ) and self._status != SessionStatus.STOPPING:
                 try:
                     message = self.user_message_queue.get()
+
+                    if ((
+                            "NLU_Pipeline_Stage" not in self._cme_workflow.context or
+                            self._cme_workflow.context["NLU_Pipeline_Stage"] == fastworkflow.NLUPipelineStage.INTENT_DETECTION) and
+                        message.startswith('/')
+                    ):
+                        self._cme_workflow.context["is_assistant_mode_command"] = True
                     
                     # Route based on mode and message type
-                    if self._run_as_agent and not message.startswith('/'):
+                    if self._run_as_agent and "is_assistant_mode_command" not in self._cme_workflow.context:
                         # In agent mode, use workflow tool agent for processing
                         last_output = self._process_agent_message(message)
                     # elif self._is_mcp_tool_call(message):

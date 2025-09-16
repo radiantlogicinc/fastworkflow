@@ -1,4 +1,5 @@
 import sys
+import ast
 import dspy
 import os
 from contextlib import suppress
@@ -318,7 +319,7 @@ Today's date is {today}.
     def validate_parameters(self,
                             app_workflow: fastworkflow.Workflow, 
                             subject_command_name: str,
-                            cmd_parameters: BaseModel) -> Tuple[bool, str, Dict[str, List[str]]]:
+                            cmd_parameters: BaseModel) -> Tuple[bool, str, Dict[str, List[str]], List[str]]:
         """
         Check if the parameters are valid in the current context, including database lookups.
         """
@@ -335,54 +336,234 @@ Today's date is {today}.
         invalid_fields = []
         all_suggestions = {}
 
-        # Check required fields
         for field_name, field_info in type(cmd_parameters).model_fields.items():
-            field_value = getattr(cmd_parameters, field_name, None)
+                field_value = getattr(cmd_parameters, field_name, None)
 
-            is_optional = False
-            attribute_type = field_info.annotation
-            if hasattr(attribute_type, "__origin__") and attribute_type.__origin__ is Union:
-                union_elements = get_args(attribute_type)
-                if type(None) in union_elements:
-                    is_optional = True
+                if field_value not in [NOT_FOUND, None, INVALID_INT_VALUE, INVALID_FLOAT_VALUE]:
+                        annotation = field_info.annotation
 
-            is_required=True
-            if is_optional:
-                    is_required=False
+                        # Build list of candidate concrete types (exclude NoneType from Union)
+                        candidate_types: List[Type[Any]] = []
+                        if hasattr(annotation, "__origin__") and annotation.__origin__ is Union:
+                            for t in get_args(annotation):
+                                if t is not type(None):  # noqa: E721
+                                    candidate_types.append(t)  # type: ignore[arg-type]
+                        else:
+                            candidate_types = [annotation]  # type: ignore[list-item]
 
-            # Only add to missing fields if it's required AND has no value
-            if is_required and \
-                field_value in [
-                    NOT_FOUND, 
-                    None,
-                    INVALID_INT_VALUE,
-                    INVALID_FLOAT_VALUE
-                ]:
-                missing_fields.append(field_name)
-                is_valid = False
+                        def try_coerce_enum(enum_cls: Type[Enum], val: Any) -> Tuple[bool, Optional[Enum]]:
+                            if isinstance(val, enum_cls):
+                                return True, val
+                            if isinstance(val, str):
+                                for member in enum_cls:
+                                    if val == member.value or val.lower() == str(member.name).lower():
+                                        return True, member
+                            return False, None
 
-            pattern = next(
-                (meta.pattern
-                    for meta in getattr(field_info, "metadata", [])
-                    if hasattr(meta, "pattern")),
-                None,
-            )
-            if pattern and field_value is not None and field_value != NOT_FOUND:
-                invalid_value = None
-                if hasattr(field_info, "json_schema_extra") and field_info.json_schema_extra:
-                    invalid_value = field_info.json_schema_extra.get("invalid_value")
+                        def build_type_suggestion() -> List[str]:
+                            examples = getattr(field_info, "examples", []) or []
+                            example = examples[0] if examples else None
+                            # Enum suggestions list valid values
+                            enum_types = [t for t in candidate_types if isinstance(t, type) and issubclass(t, Enum)]
+                            if enum_types:
+                                opts = [f"'{opt.value}'" for t in enum_types for opt in t]
+                                return [f"Please provide a value matching the expected type/format. Valid values: {', '.join(opts)}"]
+                            # List suggestions
+                            def _is_list_type(tt):
+                                try:
+                                    return hasattr(tt, "__origin__") and tt.__origin__ in (list, List)
+                                except Exception:
+                                    return False
+                            list_types = [t for t in candidate_types if _is_list_type(t)]
+                            if list_types:
+                                inner_args = get_args(list_types[0])
+                                inner = inner_args[0] if inner_args else str
+                                inner_name = inner.__name__ if isinstance(inner, type) else str(inner)
+                                hint = (
+                                    f"Please provide a list of {inner_name} values. Accepted formats: "
+                                    f"JSON list (e.g., [\"a\", \"b\"]), Python list (e.g., ['a', 'b']), "
+                                    f"or comma-separated (e.g., a,b)."
+                                )
+                                return [hint]
+                            # Fallback: show expected type names (handles unions)
+                            name_list: List[str] = []
+                            for t in candidate_types:
+                                if isinstance(t, type):
+                                    name_list.append(t.__name__)
+                                else:
+                                    name_list.append(str(t))
+                            base = f"Please provide a value matching the expected type/format: {' or '.join(name_list)}"
+                            if example is not None:
+                                base = f"{base} (e.g., {example})"
+                            return [base]
 
-                if invalid_value and field_value == invalid_value:
-                    invalid_fields.append(f"{field_name} '{field_value}'")
-                    pattern_str = str(pattern)
-                    examples = getattr(field_info, "examples", [])
-                    example = examples[0] if examples else ""
-                    all_suggestions[field_name] = [f"Please use the format matching pattern {pattern_str} (e.g., {example})"]
+                        valid_by_type = False
+                        corrected_value: Optional[Any] = None
+                        def _is_list_type(tt):
+                            try:
+                                return hasattr(tt, "__origin__") and tt.__origin__ in (list, List)
+                            except Exception:
+                                return False
+
+                        def _parse_list_like_string(s: str) -> Optional[list]:
+                                if not isinstance(s, str):
+                                    return None
+                                text = s.strip()
+                                if text.startswith("[") and text.endswith("]"):
+                                        with suppress(Exception):
+                                                parsed = json.loads(text)
+                                                if isinstance(parsed, list):
+                                                    return parsed
+                                # Try Python literal list
+                                with suppress(Exception):
+                                        parsed = ast.literal_eval(text)
+                                        if isinstance(parsed, list):
+                                            return parsed
+                                # Fallback: comma-separated
+                                if "," in text:
+                                    parts = [p.strip() for p in text.split(",")]
+                                    cleaned = [
+                                        (p[1:-1] if len(p) >= 2 and ((p[0] == p[-1] == '"') or (p[0] == p[-1] == "'")) else p)
+                                        for p in parts
+                                    ]
+                                    return cleaned
+                                return None
+
+                        def _coerce_scalar(expected_type: Type[Any], val: Any) -> Tuple[bool, Optional[Any]]:
+                                # str
+                                if expected_type is str:
+                                    return True, str(val)
+                                # int
+                                if expected_type is int:
+                                    if isinstance(val, bool):
+                                        return False, None
+                                    if isinstance(val, int):
+                                        return True, val
+                                    if isinstance(val, str):
+                                        with suppress(Exception):
+                                            return True, int(val.strip())
+                                    return False, None
+                                # float
+                                if expected_type is float:
+                                    if isinstance(val, (int, float)) and not isinstance(val, bool):
+                                        return True, float(val)
+                                    if isinstance(val, str):
+                                        with suppress(Exception):
+                                            return True, float(val.strip())
+                                    return False, None
+                                # Enum
+                                if isinstance(expected_type, type) and issubclass(expected_type, Enum):
+                                    ok, enum_val = try_coerce_enum(expected_type, val)
+                                    return (ok, enum_val if ok else None)
+                                                            # Unknown: accept if already instance
+                                return (True, val) if isinstance(val, expected_type) else (False, None)
+
+                        def _try_coerce_list(list_type: Any, value: Any) -> Tuple[bool, Optional[list]]:
+                            inner_args = get_args(list_type)
+                            inner_type = inner_args[0] if inner_args else str
+                            raw_list: Optional[list] = None
+                            if isinstance(value, list):
+                                raw_list = value
+                            elif isinstance(value, str):
+                                raw_list = _parse_list_like_string(value)
+                            if raw_list is None:
+                                return False, None
+                            coerced_list = []
+                            for item in raw_list:
+                                ok, coerced = _coerce_scalar(inner_type, item)
+                                if not ok:
+                                    return False, None
+                                coerced_list.append(coerced)
+                            return True, coerced_list
+
+                        for t in candidate_types:
+                            # list[...] and typing.List[...] support
+                            if _is_list_type(t):
+                                ok, coerced_list = _try_coerce_list(t, field_value)
+                                if ok:
+                                    corrected_value = coerced_list
+                                    valid_by_type = True
+                                    break
+                            # str
+                            if t is str and isinstance(field_value, str):
+                                valid_by_type = True
+                                break
+                            # int
+                            if t is int:
+                                if isinstance(field_value, bool):
+                                    pass  # bool is subclass of int; treat as invalid here
+                                elif isinstance(field_value, int):
+                                    valid_by_type = True
+                                    break
+                                elif isinstance(field_value, str):
+                                    with suppress(Exception):
+                                        coerced = int(field_value.strip())
+                                        corrected_value = coerced
+                                        valid_by_type = True
+                                        break
+                            # float
+                            if t is float:
+                                if isinstance(field_value, (int, float)) and not isinstance(field_value, bool):
+                                    if isinstance(field_value, int):
+                                        corrected_value = float(field_value)
+                                    valid_by_type = True
+                                    break
+                                elif isinstance(field_value, str):
+                                    with suppress(Exception):
+                                        coerced = float(field_value.strip())
+                                        corrected_value = coerced
+                                        valid_by_type = True
+                                        break
+                            # Enum
+                            if isinstance(t, type) and issubclass(t, Enum):
+                                ok, enum_val = try_coerce_enum(t, field_value)
+                                if ok:
+                                    corrected_value = enum_val
+                                    valid_by_type = True
+                                    break
+
+                        if valid_by_type:
+                            if corrected_value is not None:
+                                setattr(cmd_parameters, field_name, corrected_value)
+                        else:
+                            invalid_fields.append(f"{field_name} '{field_value}'")
+                            all_suggestions[field_name] = build_type_suggestion()
+                            is_valid = False
+
+                is_optional = False
+                attribute_type = field_info.annotation
+                if hasattr(attribute_type, "__origin__") and attribute_type.__origin__ is Union:
+                    union_elements = get_args(attribute_type)
+                    if type(None) in union_elements:
+                        is_optional = True
+
+                is_required=True
+                if is_optional:
+                        is_required=False
+
+                # Only add to missing fields if it's required AND has no value
+                if is_required and \
+                                field_value in [
+                        NOT_FOUND, 
+                        None,
+                        INVALID_INT_VALUE,
+                        INVALID_FLOAT_VALUE
+                    ]:
+                    missing_fields.append(field_name)
                     is_valid = False
 
-                else:
-                    pattern_regex = re.compile(pattern)
-                    if not pattern_regex.fullmatch(str(field_value)):
+                pattern = next(
+                    (meta.pattern
+                        for meta in getattr(field_info, "metadata", [])
+                        if hasattr(meta, "pattern")),
+                    None,
+                )
+                if pattern and field_value is not None and field_value != NOT_FOUND:
+                    invalid_value = None
+                    if hasattr(field_info, "json_schema_extra") and field_info.json_schema_extra:
+                        invalid_value = field_info.json_schema_extra.get("invalid_value")
+
+                    if invalid_value and field_value == invalid_value:
                         invalid_fields.append(f"{field_name} '{field_value}'")
                         pattern_str = str(pattern)
                         examples = getattr(field_info, "examples", [])
@@ -390,6 +571,15 @@ Today's date is {today}.
                         all_suggestions[field_name] = [f"Please use the format matching pattern {pattern_str} (e.g., {example})"]
                         is_valid = False
 
+                    else:
+                        pattern_regex = re.compile(pattern)
+                        if not pattern_regex.fullmatch(str(field_value)):
+                            invalid_fields.append(f"{field_name} '{field_value}'")
+                            pattern_str = str(pattern)
+                            examples = getattr(field_info, "examples", [])
+                            example = examples[0] if examples else ""
+                            all_suggestions[field_name] = [f"Please use the format matching pattern {pattern_str} (e.g., {example})"]
+                            is_valid = False
 
         for field_name, field_info in type(cmd_parameters).model_fields.items():
             field_value = getattr(cmd_parameters, field_name, None)
@@ -420,20 +610,20 @@ Today's date is {today}.
         if is_valid:
             if not (
                 self.input_for_param_extraction_class and \
-                hasattr(self.input_for_param_extraction_class, 'validate_extracted_parameters')
+                            hasattr(self.input_for_param_extraction_class, 'validate_extracted_parameters')
             ):
-                return (True, "All required parameters are valid.", {})
-            
+                return (True, "All required parameters are valid.", {}, [])
+
             try:
                 is_valid, message = self.input_for_param_extraction_class.validate_extracted_parameters(app_workflow, subject_command_name, cmd_parameters)
             except Exception as e:
                 message = f"Exception in {subject_command_name}'s validate_extracted_parameters function: {str(e)}"
                 logger.critical(message)                    
-                return (False, message, {})
-            
+                return (False, message, {}, [])
+
             if is_valid:
-                return (True, "All required parameters are valid.", {})
-            return (False, message, {})
+                return (True, "All required parameters are valid.", {}, [])
+            return (False, message, {}, [])
 
         message = ''
         if missing_fields:
@@ -474,4 +664,4 @@ Today's date is {today}.
             if "run_as_agent" not in app_workflow.context:
                 message += "\nFor parameter values that include a comma, provide separately from other values, and one at a time."
 
-        return (False, message, all_suggestions)
+        return (False, message, all_suggestions, combined_fields)
