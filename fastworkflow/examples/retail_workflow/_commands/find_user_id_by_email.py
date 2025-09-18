@@ -11,16 +11,17 @@ from ..tools.find_user_id_by_email import FindUserIdByEmail
 
 
 class Signature:
-    """Find user id by email"""
+    """
+    Find user id by email. 
+    If email is not available, use `find_user_id_by_name_zip` instead.
+    As a last resort transfer to a human agent
+    """
     class Input(BaseModel):
         """Parameters taken from user utterance."""
 
         email: str = Field(
             default="NOT_FOUND",
-            description=(
-                "The email address to search for. If email is not available, "
-                "use `find_user_id_by_name_zip` instead. As a last resort transfer to a human agent"
-            ),
+            description="The email address to search for",
             pattern=r"^(NOT_FOUND|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})$",
             examples=["user@example.com"],
         )

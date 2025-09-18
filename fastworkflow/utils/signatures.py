@@ -157,7 +157,7 @@ Today's date is {today}.
     def create_signature_from_pydantic_model(
         pydantic_model: Type[BaseModel]
     ) -> Type[dspy.Signature]:
-            """
+        """
         Create a DSPy Signature class from a Pydantic model with type annotations.
         
         Args:
@@ -166,79 +166,76 @@ Today's date is {today}.
         Returns:
             A DSPy Signature class
         """
-            signature_components = {
-                "command": (str, dspy.InputField(desc="User's request"))
-            }
+        signature_components = {
+            "statement": (str, dspy.InputField(desc="Statement according to Dhar"))
+        }
 
-            steps = ["query: The original user query (Always include this)."]
-            field_num = 1
+        steps = []
+        field_num = 1
 
-            for attribute_name, attribute_metadata in pydantic_model.model_fields.items():
-                is_optional = False
-                attribute_type = attribute_metadata.annotation
+        for attribute_name, attribute_metadata in pydantic_model.model_fields.items():
+            is_optional = False
+            attribute_type = attribute_metadata.annotation
 
-                if hasattr(attribute_type, "__origin__") and attribute_type.__origin__ is Union:
-                    union_elements = get_args(attribute_type)
-                    if type(None) in union_elements:
-                        is_optional = True
-                        attribute_type = next((elem for elem in union_elements if elem is not type(None)), str)
+            if hasattr(attribute_type, "__origin__") and attribute_type.__origin__ is Union:
+                union_elements = get_args(attribute_type)
+                if type(None) in union_elements:
+                    is_optional = True
+                    attribute_type = next((elem for elem in union_elements if elem is not type(None)), str)
 
-                NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
-                if attribute_type is str:            
-                    default_value = NOT_FOUND
-                elif attribute_type is int:
-                    default_value = INVALID_INT_VALUE
-                elif attribute_type is float:
-                    default_value = -sys.float_info.max
-                else:
-                    default_value = None
+            NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
+            if attribute_type is str:            
+                default_value = NOT_FOUND
+            elif attribute_type is int:
+                default_value = INVALID_INT_VALUE
+            elif attribute_type is float:
+                default_value = -sys.float_info.max
+            else:
+                default_value = None
 
-                if (
-                    attribute_metadata.default is not PydanticUndefined and 
-                    attribute_metadata.default is not None and 
-                    attribute_metadata.default != Ellipsis
-                ):
-                    default_value = attribute_metadata.default
+            if (
+                attribute_metadata.default is not PydanticUndefined and 
+                attribute_metadata.default is not None and 
+                attribute_metadata.default != Ellipsis
+            ):
+                default_value = attribute_metadata.default
 
-                info_text = attribute_metadata.description or f"The {attribute_name}"
+            info_text = attribute_metadata.description or f"The {attribute_name}"
 
-                if attribute_name != "query": 
-                    steps.append(f"Step {field_num}: Identify the {attribute_name} ({info_text}).")
-                    field_num += 1
+            if attribute_name != "query": 
+                steps.append(f"Step {field_num}: Identify the {attribute_name} ({info_text}).")
+                field_num += 1
 
-                if isinstance(attribute_type, type) and issubclass(attribute_type, Enum):
-                    possible_values = [f"'{option.value}'" for option in attribute_type]
-                    info_text += f". Valid values: {', '.join(possible_values)}"
+            if isinstance(attribute_type, type) and issubclass(attribute_type, Enum):
+                possible_values = [f"'{option.value}'" for option in attribute_type]
+                info_text += f". Valid values: {', '.join(possible_values)}"
 
-                if attribute_metadata.examples:
-                    sample_values = ", ".join([f"'{sample}'" for sample in attribute_metadata.examples])
-                    info_text += f". Examples: {sample_values}"
+            if attribute_metadata.examples:
+                sample_values = ", ".join([f"'{sample}'" for sample in attribute_metadata.examples])
+                info_text += f". Examples: {sample_values}"
 
-                requirement_status = "Optional" if is_optional else "Required"
-                info_text += f". This field is {requirement_status}."
+            requirement_status = "Optional" if is_optional else "Required"
+            info_text += f". This field is {requirement_status}."
 
-                if is_optional:
-                    info_text += f" If not mentioned in the query, use: '{default_value or 'None'}'."
-                elif default_value is not None:
-                    info_text += f" Default value: '{default_value}'."
+            if is_optional:
+                info_text += f" If not mentioned in the query, use: '{default_value or 'None'}'."
+            elif default_value is not None:
+                info_text += f" Default value: '{default_value}'."
 
-                field_definition = dspy.OutputField(desc=info_text, default=default_value)
-                signature_components[attribute_name] = (attribute_metadata.annotation, field_definition)
+            field_definition = dspy.OutputField(desc=info_text, default=default_value)
+            signature_components[attribute_name] = (attribute_metadata.annotation, field_definition)
 
             steps.extend((
-                f"Step {field_num}: Check for any missing details.",
-                "Return the default value for the parameters for which default value is specified.",
-                "For parameters specified as enums, return the default value if the parameter value is not explicitly specified in the query",
-                "Return None for the parameter value which is missing in the query",
-                "Always return the query in the output.",
+                f"Step {field_num}: ",
+                "For missing parameter values - return the default if it is specified otherwise return None",
             ))
-            generated_docstring = f"""Extract structured parameters from a user query using step-by-step reasoning. Today's date is {date.today()}.
+            
+        generated_docstring = (
+            f"Extract parameter values from the statement according to Dhar. Today's date is {date.today()}.\n"
+            f"{chr(10).join(steps)}"
+        )
 
-        {chr(10).join(steps)}
-        """
-            instructions = generated_docstring
-
-            return dspy.Signature(signature_components, instructions)
+        return dspy.Signature(signature_components, generated_docstring)
     
     def extract_parameters(self, CommandParameters: Type[BaseModel] = None, subject_command_name: str = None, workflow_folderpath: str = None) -> BaseModel:
         """
@@ -270,7 +267,7 @@ Today's date is {today}.
                 self.predictor = dspy.ChainOfThought(signature)
                 
             def forward(self, command=None):
-                return self.predictor(command=command)
+                return self.predictor(statement=command)
         
         param_extractor = ParamExtractor(params_signature)
         
@@ -351,15 +348,6 @@ Today's date is {today}.
                         else:
                             candidate_types = [annotation]  # type: ignore[list-item]
 
-                        def try_coerce_enum(enum_cls: Type[Enum], val: Any) -> Tuple[bool, Optional[Enum]]:
-                            if isinstance(val, enum_cls):
-                                return True, val
-                            if isinstance(val, str):
-                                for member in enum_cls:
-                                    if val == member.value or val.lower() == str(member.name).lower():
-                                        return True, member
-                            return False, None
-
                         def build_type_suggestion() -> List[str]:
                             examples = getattr(field_info, "examples", []) or []
                             example = examples[0] if examples else None
@@ -433,6 +421,20 @@ Today's date is {today}.
                                 # str
                                 if expected_type is str:
                                     return True, str(val)
+                                # bool
+                                if expected_type is bool:
+                                    if isinstance(val, bool):
+                                        return True, val
+                                    elif isinstance(val, str):
+                                        lower_val = val.lower().strip()
+                                        if lower_val in ('true', 'false'):
+                                            return True, lower_val == 'true'
+                                        # Also handle string representations of integers
+                                        elif lower_val in ('0', '1'):
+                                            return True, lower_val == '1'
+                                    elif isinstance(val, int):
+                                        return True, bool(val)
+                                    return False, None
                                 # int
                                 if expected_type is int:
                                     if isinstance(val, bool):
@@ -453,7 +455,7 @@ Today's date is {today}.
                                     return False, None
                                 # Enum
                                 if isinstance(expected_type, type) and issubclass(expected_type, Enum):
-                                    ok, enum_val = try_coerce_enum(expected_type, val)
+                                    ok, enum_val = _try_coerce_enum(expected_type, val)
                                     return (ok, enum_val if ok else None)
                                                             # Unknown: accept if already instance
                                 return (True, val) if isinstance(val, expected_type) else (False, None)
@@ -476,6 +478,15 @@ Today's date is {today}.
                                 coerced_list.append(coerced)
                             return True, coerced_list
 
+                        def _try_coerce_enum(enum_cls: Type[Enum], val: Any) -> Tuple[bool, Optional[Enum]]:
+                            if isinstance(val, enum_cls):
+                                return True, val
+                            if isinstance(val, str):
+                                for member in enum_cls:
+                                    if val == member.value or val.lower() == str(member.name).lower():
+                                        return True, member
+                            return False, None
+
                         for t in candidate_types:
                             # list[...] and typing.List[...] support
                             if _is_list_type(t):
@@ -484,39 +495,15 @@ Today's date is {today}.
                                     corrected_value = coerced_list
                                     valid_by_type = True
                                     break
-                            # str
-                            if t is str and isinstance(field_value, str):
-                                valid_by_type = True
-                                break
-                            # int
-                            if t is int:
-                                if isinstance(field_value, bool):
-                                    pass  # bool is subclass of int; treat as invalid here
-                                elif isinstance(field_value, int):
+                            # str, bool, int, float - use _coerce_scalar for consistency
+                            if t in (str, bool, int, float):
+                                ok, coerced = _coerce_scalar(t, field_value)
+                                if ok:
+                                    corrected_value = coerced
                                     valid_by_type = True
-                                    break
-                                elif isinstance(field_value, str):
-                                    with suppress(Exception):
-                                        coerced = int(field_value.strip())
-                                        corrected_value = coerced
-                                        valid_by_type = True
-                                        break
-                            # float
-                            if t is float:
-                                if isinstance(field_value, (int, float)) and not isinstance(field_value, bool):
-                                    if isinstance(field_value, int):
-                                        corrected_value = float(field_value)
-                                    valid_by_type = True
-                                    break
-                                elif isinstance(field_value, str):
-                                    with suppress(Exception):
-                                        coerced = float(field_value.strip())
-                                        corrected_value = coerced
-                                        valid_by_type = True
-                                        break
-                            # Enum
+                                    break                            # Enum
                             if isinstance(t, type) and issubclass(t, Enum):
-                                ok, enum_val = try_coerce_enum(t, field_value)
+                                ok, enum_val = _try_coerce_enum(t, field_value)
                                 if ok:
                                     corrected_value = enum_val
                                     valid_by_type = True

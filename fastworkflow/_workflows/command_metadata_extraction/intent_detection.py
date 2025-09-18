@@ -96,8 +96,8 @@ class CommandNamePrediction:
                 ].plain_utterances
             }
 
-        # See if the command starts with a command name followed by a space
-        tentative_command_name = command.split(" ", 1)[0]
+        # See if the command starts with a command name followed by a space or a '('
+        tentative_command_name = command.split(" ", 1)[0].split("(", 1)[0]
         normalized_command_name = tentative_command_name.lower()
         command_name = None
         if normalized_command_name in command_name_dict:
