@@ -8,6 +8,7 @@ import contextlib
 import uuid
 from pathlib import Path
 import os
+from datetime import datetime
 
 import dspy
 
@@ -143,6 +144,10 @@ class ChatSession:
                 "NLU_Pipeline_Stage": fastworkflow.NLUPipelineStage.INTENT_DETECTION,
             }
         )
+
+        # this intializes the conversation traces file name also
+        # which is necessary when starting a brand new chat session
+        self.clear_conversation_history()
 
     def start_workflow(self,
         workflow_folderpath: str, 
@@ -312,12 +317,21 @@ class ChatSession:
         """Return the conversation history."""
         return self._conversation_history
 
-    def clear_conversation_history(self) -> None:
+    def clear_conversation_history(self, trace_filename_suffix: Optional[str] = None) -> None:
         """
         Clear the conversation history.
         This resets the conversation history to an empty state.
         """
         self._conversation_history = dspy.History(messages=[])
+        # Filename for conversation traces
+        if trace_filename_suffix:
+            self._conversation_traces_file_name: str = (
+                f"conversation_traces_{trace_filename_suffix}"
+            )
+        else:
+            self._conversation_traces_file_name: str = (
+                f"conversation_traces_{datetime.now().strftime('%m_%d_%Y:%H_%M_%S')}.jsonl"
+            )
 
     def _run_workflow_loop(self) -> Optional[fastworkflow.CommandOutput]:
         """
@@ -442,8 +456,8 @@ class ChatSession:
         # to the workflow internally (directly via CommandExecutor)
 
         # Ensure any prior action log is removed before a fresh agent run
-        if os.path.exists("action.json"):
-            os.remove("action.json")
+        if os.path.exists("action.jsonl"):
+            os.remove("action.jsonl")
 
         refined_user_query = self._refine_user_query(message, self.conversation_history)
 
@@ -483,8 +497,8 @@ class ChatSession:
 
         conversation_summary = message
         # Attach actions captured during agent execution as artifacts if available
-        if os.path.exists("action.json"):
-            with open("action.json", "r", encoding="utf-8") as f:
+        if os.path.exists("action.jsonl"):
+            with open("action.jsonl", "r", encoding="utf-8") as f:
                 actions = [json.loads(line) for line in f if line.strip()]
             conversation_summary = self._extract_conversation_summary(message, actions, result_text)
             command_response.artifacts["conversation_summary"] = conversation_summary
@@ -561,14 +575,13 @@ class ChatSession:
         Summarizes conversation based on original user query, workflow actions and agentt response.
         """
         # Lets log everything to a file called action_log.jsonl, if it exists
-        if os.path.exists("action_log.jsonl"):
-            log_entry = {
-                "user_query": user_query,
-                "agent_workflow_interactions": workflow_actions,
-                "final_agent_response": final_agent_response
-            }
-            with open("action_log.jsonl", "a", encoding="utf-8") as f:
-                f.write(json.dumps(log_entry) + "\n")
+        log_entry = {
+            "user_query": user_query,
+            "agent_workflow_interactions": workflow_actions,
+            "final_agent_response": final_agent_response
+        }
+        with open(self._conversation_traces_file_name, "a", encoding="utf-8") as f:
+            f.write(json.dumps(log_entry) + "\n")
 
         class ConversationSummarySignature(dspy.Signature):
             """

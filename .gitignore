@@ -201,5 +201,5 @@ tasks/
 .taskmaster/state.json
 .taskmaster/reports/task-complexity-report.json
 
-action.json
-action_log.jsonl
+action.jsonl
+conversation_traces_*.jsonl

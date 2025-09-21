@@ -5,7 +5,7 @@
 We will surface real-time command execution traces in agentic mode so users can see what the agent is doing as it plans and calls workflow commands. Traces will stream to the CLI while the agent runs, without changing the existing behavior of writing traces to disk. This keeps developer observability high and preserves current offline logs.
 
 Key properties:
-- Keep writing per-step records to the existing `action.json` file (unchanged behavior).
+- Keep writing per-step records to the existing `action.jsonl` file (unchanged behavior).
 - Add an in-memory streaming channel so the CLI (`run` tool) can render live traces as they occur.
 - Render using the existing color scheme: command information in yellow and responses in green.
 - Only enabled for agentic mode (`--run_as_agent`). Assistant mode remains unchanged.
@@ -17,11 +17,11 @@ Key properties:
   - Format each step exactly as:
     - Agent -> Workflow: <command or failing command text>
     - Workflow -> Agent: <command_name>, <parameters>: <response text>
-  - Preserve the on-disk trace file `action.json` as-is.
+  - Preserve the on-disk trace file `action.jsonl` as-is.
   - Avoid impacting the agent’s planning or execution performance.
 
 - Non‑Goals
-  - No new persistence format beyond the existing `action.json`.
+  - No new persistence format beyond the existing `action.jsonl`.
   - No UI overhaul; only incremental updates to the current `run` output.
   - Do not display internal “meta” tools (e.g., guidance or discovery) unless they translate to a workflow command execution via `execute_workflow_query`.
   - No automated tests in this change (manual verification only).
@@ -61,7 +61,7 @@ We will introduce a lightweight event stream for trace messages, emitted synchro
   - Do not change existing file logging behavior; this function should only add streaming events to the queue.
 
 - `fastworkflow/command_executor.py` ([command_executor.py](mdc:fastworkflow/command_executor.py))
-  - No required functional change for streaming. Continue writing `action.json` records (already implemented in two code paths: early/handled and resolved execution).
+  - No required functional change for streaming. Continue writing `action.jsonl` records (already implemented in two code paths: early/handled and resolved execution).
   - Optional: expose utility helpers to normalize/serialize parameters for consistent rendering, but this can also live inside `workflow_agent.py` to keep scope tight.
 
 - `fastworkflow/run/__main__.py` ([__main__.py](mdc:fastworkflow/run/__main__.py))
@@ -189,7 +189,7 @@ CLI wiring suggestion in [__main__.py](mdc:fastworkflow/run/__main__.py):
 ### 10. Backward Compatibility and Safety
 
 - Assistant mode (non‑agent) is unchanged.
-- Disk logging to `action.json` remains unchanged in both early/handled and resolved paths.
+- Disk logging to `action.jsonl` remains unchanged in both early/handled and resolved paths.
 - The new queue is per session and resides in memory only; it should be drained continuously to avoid build‑up. The spinner loop already ticks every 0.5s.
 - If an exception occurs when producing trace events, agent execution still proceeds; the feature should be best‑effort and never block the agent.
 
@@ -222,7 +222,7 @@ CLI wiring suggestion in [__main__.py](mdc:fastworkflow/run/__main__.py):
    - Optional flag: add `--no_agent_traces` and compute `show_agent_traces` to guard rendering.
 
 4) Optional utilities
-   - If helpful, add a small serialization helper for parameters inside `workflow_agent.py` to keep the event construction clean and consistent with `action.json`.
+   - If helpful, add a small serialization helper for parameters inside `workflow_agent.py` to keep the event construction clean and consistent with `action.jsonl`.
 
 ### 13. Example Output (Colors implied, not shown here)
 
@@ -241,6 +241,6 @@ These lines stream during the spinner. After the agent finishes, the existing su
 - Toggle to include/exclude internal meta tools (e.g., discovery/guidance) for deep debugging.
 - Rich “Live” container to group trace lines under a titled panel during processing.
 - Compact parameter formatting with truncation and tooltips.
-- Persist streaming traces into a rolling session log (separate from `action.json`).
+- Persist streaming traces into a rolling session log (separate from `action.jsonl`).
 
 

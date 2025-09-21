@@ -125,14 +125,14 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
         timestamp_ms=int(time.time() * 1000),
     ))
 
-    # Append executed action to action.json for external consumers (agent mode only)
+    # Append executed action to action.jsonl for external consumers (agent mode only)
     record = {
         "command": command,
         "command_name": name,
         "parameters": params_dict,
         "response": response_text
     }
-    with open("action.json", "a", encoding="utf-8") as f:
+    with open("action.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     if 'PARAMETER EXTRACTION ERROR' in response_text or 'The command is ambiguous' in response_text:
@@ -176,10 +176,18 @@ def _ask_user_tool(clarification_request: str, chat_session_obj: fastworkflow.Ch
     command_output = fastworkflow.CommandOutput(
         command_responses=[fastworkflow.CommandResponse(response=clarification_request)]
     )
-
     chat_session_obj.command_output_queue.put(command_output)
 
     user_query = chat_session_obj.user_message_queue.get()
+
+    # add the agent user dialog to the log
+    with open("action.jsonl", "a", encoding="utf-8") as f:
+        agent_user_dialog = {
+            "agent_query": clarification_request,
+            "user_response": user_query
+        }
+        f.write(json.dumps(agent_user_dialog, ensure_ascii=False) + "\n")
+
     return build_query_with_next_steps(user_query, chat_session_obj, with_agent_inputs_and_trajectory = True)
 
 def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_iters: int = 25):
