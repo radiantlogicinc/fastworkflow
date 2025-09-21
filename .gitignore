@@ -202,3 +202,4 @@ tasks/
 .taskmaster/reports/task-complexity-report.json
 
 action.json
+action_log.jsonl

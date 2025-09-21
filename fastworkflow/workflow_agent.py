@@ -127,10 +127,10 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
 
     # Append executed action to action.json for external consumers (agent mode only)
     record = {
-        "command" if command_output.success else "failing command": command,
+        "command": command,
         "command_name": name,
         "parameters": params_dict,
-        "response": response_text if command_output.success else ""
+        "response": response_text
     }
     with open("action.json", "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")

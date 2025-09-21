@@ -560,6 +560,16 @@ class ChatSession:
         """
         Summarizes conversation based on original user query, workflow actions and agentt response.
         """
+        # Lets log everything to a file called action_log.jsonl, if it exists
+        if os.path.exists("action_log.jsonl"):
+            log_entry = {
+                "user_query": user_query,
+                "agent_workflow_interactions": workflow_actions,
+                "final_agent_response": final_agent_response
+            }
+            with open("action_log.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps(log_entry) + "\n")
+
         class ConversationSummarySignature(dspy.Signature):
             """
             A summary of conversation
