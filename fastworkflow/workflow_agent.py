@@ -174,8 +174,9 @@ def _ask_user_tool(clarification_request: str, chat_session_obj: fastworkflow.Ch
     Note that using the wrong command name can produce missing information errors. Double-check with the missing_information_guidance_tool to verify that the correct command name is being used 
     """
     command_output = fastworkflow.CommandOutput(
-        command_responses=[fastworkflow.CommandResponse(response=clarification_request)]
-    )
+        command_responses=[fastworkflow.CommandResponse(response=clarification_request)],
+        workflow_name = chat_session_obj.get_active_workflow().folderpath.split('/')[-1]
+    )    
     chat_session_obj.command_output_queue.put(command_output)
 
     user_query = chat_session_obj.user_message_queue.get()
