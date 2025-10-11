@@ -1,5 +1,6 @@
 passwords/*
 ___workflow_contexts*
+___user_conversations*
 ___command_info*
 ___convo_info*
 .roo*
@@ -203,3 +204,4 @@ tasks/
 
 action.jsonl
 conversation_traces_*.jsonl
+redoc.html

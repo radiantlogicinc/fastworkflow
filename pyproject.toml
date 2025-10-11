@@ -9,7 +9,7 @@ repository = "https://github.com/radiantlogicinc/fastworkflow"
 
 [tool.poetry]
 name = "fastworkflow"
-version = "2.15.13"
+version = "2.16.0"
 description = "A framework for rapidly building large-scale, deterministic, interactive workflows with a fault-tolerant, conversational UX"
 authors = ["Dhar Rawal <drawal@radiantlogic.com>"]
 license = "Apache-2.0"
@@ -31,7 +31,7 @@ exclude = [
 fastworkflow = "fastworkflow.cli:main"
 
 [tool.poetry.dependencies]
-python = ">=3.11"
+python = ">=3.11,<3.14"
 pydantic = "^2.9.2"
 speedict = "^0.3.12"
 python-dotenv = "^1.0.1"
@@ -60,9 +60,13 @@ bandit = "^1.7.10"
 [tool.poetry.group.test.dependencies]
 pytest = "^8.3.3"
 requests-mock = "^1.12.1"
+pytest-cov = "^6.2.1"
 
 # poetry install --with aws if you are using AWS Bedrock for LLM or LLM_AGENT
-pytest-cov = "^6.2.1"
 [tool.poetry.group.aws.dependencies]
 boto3 = {version = "1.36.0", optional = true}
+
+
+[tool.poetry.group.fastapi.dependencies]
+fastapi = ">=0.115.5,<0.116.0"
 

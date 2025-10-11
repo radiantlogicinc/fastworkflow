@@ -41,7 +41,7 @@ class FastWorkflowMCPServer:
         NOT_FOUND = fastworkflow.get_env_var('NOT_FOUND')
 
         # Get available commands from workflow
-        workflow = fastworkflow.ChatSession.get_active_workflow()
+        workflow = fastworkflow.chat_session.get_active_workflow()
         workflow_folderpath = workflow.folderpath
         # Use cached routing definition instead of rebuilding every time
         routing = RoutingRegistry.get_definition(workflow_folderpath)
@@ -147,7 +147,7 @@ class FastWorkflowMCPServer:
             arguments=arguments
         )
         
-        workflow = fastworkflow.ChatSession.get_active_workflow()
+        workflow = fastworkflow.chat_session.get_active_workflow()
         # Execute using MCP-compliant method
         return CommandExecutor.perform_mcp_tool_call(
             workflow,
@@ -203,7 +203,7 @@ class FastWorkflowMCPServer:
 
         Falls back to the first available path if the active context is none.
         """
-        workflow = fastworkflow.ChatSession.get_active_workflow()
+        workflow = fastworkflow.chat_session.get_active_workflow()
         return workflow.current_command_context_name
 
 

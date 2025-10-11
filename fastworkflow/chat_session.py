@@ -35,7 +35,7 @@ class ChatWorker(Thread):
         """Process messages for the root workflow"""
         try:
             self.chat_session._status = SessionStatus.RUNNING
-            workflow = ChatSession.get_active_workflow()
+            workflow = self.chat_session.get_active_workflow()
             logger.debug(f"Started root workflow {workflow.id}")
             
             # Run the workflow loop
@@ -44,39 +44,34 @@ class ChatWorker(Thread):
         finally:
             self.chat_session._status = SessionStatus.STOPPED
             # Ensure workflow is popped if thread terminates unexpectedly
-            if ChatSession.get_active_workflow() is not None:
-                ChatSession.pop_active_workflow()
+            if self.chat_session.get_active_workflow() is not None:
+                self.chat_session.pop_active_workflow()
 
 class ChatSession:
-    _workflow_stack_lock = Lock()
-    _workflow_stack: ClassVar[deque[fastworkflow.Workflow]] = deque()  # Stack of workflow objects
-    
-    @classmethod
-    def get_active_workflow(cls) -> Optional[fastworkflow.Workflow]:
+    def get_active_workflow(self) -> Optional[fastworkflow.Workflow]:
         """Get the currently active workflow (top of stack)"""
-        with cls._workflow_stack_lock:
-            return cls._workflow_stack[-1] if cls._workflow_stack else None
+        with self._workflow_stack_lock:
+            return self._workflow_stack[-1] if self._workflow_stack else None
     
-    @classmethod
-    def push_active_workflow(cls, workflow: fastworkflow.Workflow) -> None:
-        with cls._workflow_stack_lock:
-            cls._workflow_stack.append(workflow)
-            logger.debug(f"Workflow stack: {[w.id for w in cls._workflow_stack]}")
+    def push_active_workflow(self, workflow: fastworkflow.Workflow) -> None:
+        """Push a workflow onto this session's stack"""
+        with self._workflow_stack_lock:
+            self._workflow_stack.append(workflow)
+            logger.debug(f"Workflow stack: {[w.id for w in self._workflow_stack]}")
     
-    @classmethod
-    def pop_active_workflow(cls) -> Optional[fastworkflow.Workflow]:
-        with cls._workflow_stack_lock:
-            if not cls._workflow_stack:
+    def pop_active_workflow(self) -> Optional[fastworkflow.Workflow]:
+        """Pop a workflow from this session's stack"""
+        with self._workflow_stack_lock:
+            if not self._workflow_stack:
                 return None
-            workflow = cls._workflow_stack.pop()
-            logger.debug(f"Workflow stack after pop: {[w.id for w in cls._workflow_stack]}")
+            workflow = self._workflow_stack.pop()
+            logger.debug(f"Workflow stack after pop: {[w.id for w in self._workflow_stack]}")
             return workflow
 
-    @classmethod
-    def clear_workflow_stack(cls) -> None:
-        """Clear the entire workflow stack"""
-        with cls._workflow_stack_lock:
-            cls._workflow_stack.clear()
+    def clear_workflow_stack(self) -> None:
+        """Clear the entire workflow stack for this session"""
+        with self._workflow_stack_lock:
+            self._workflow_stack.clear()
             logger.debug("Workflow stack cleared")
 
     def stop_workflow(self) -> None:
@@ -95,7 +90,7 @@ class ChatSession:
                 logger.warning("Chat worker thread did not terminate within timeout")
         
         # Clear the workflow stack
-        ChatSession.clear_workflow_stack()
+        self.clear_workflow_stack()
         
         # Reset status to stopped
         self._status = SessionStatus.STOPPED
@@ -116,6 +111,10 @@ class ChatSession:
         A chat session can run multiple workflows that share the same message queues.
         Use start_workflow() to start a specific workflow within this session.
         """
+        # Create instance-level workflow stack (supports nested workflows within this session)
+        self._workflow_stack: deque[fastworkflow.Workflow] = deque()
+        self._workflow_stack_lock = Lock()
+        
         # Create queues for user messages and command outputs
         self._user_message_queue = Queue()
         self._command_output_queue = Queue()
@@ -197,7 +196,7 @@ class ChatSession:
 
         # Check if we need to stop the current workflow
         # Stop if this is a new root workflow (no parent, keep_alive=True)
-        current_workflow = ChatSession.get_active_workflow()
+        current_workflow = self.get_active_workflow()
         if (current_workflow and 
             parent_workflow_id is None and 
             self._keep_alive):
@@ -244,7 +243,7 @@ class ChatSession:
         self._status = SessionStatus.STARTING
         
         # Push this workflow as active
-        ChatSession.push_active_workflow(workflow)
+        self.push_active_workflow(workflow)
         
         # Initialize workflow tool agent if in agent mode
         # This must happen after pushing the workflow to the stack
@@ -304,12 +303,12 @@ class ChatSession:
 
     @property
     def workflow_is_complete(self) -> bool:
-        workflow = ChatSession.get_active_workflow()
+        workflow = self.get_active_workflow()
         return workflow.is_complete if workflow else True
     
     @workflow_is_complete.setter
     def workflow_is_complete(self, value: bool) -> None:
-        if workflow := ChatSession.get_active_workflow():
+        if workflow := self.get_active_workflow():
             workflow.is_complete = value
     
     @property
@@ -317,21 +316,22 @@ class ChatSession:
         """Return the conversation history."""
         return self._conversation_history
 
-    def clear_conversation_history(self, trace_filename_suffix: Optional[str] = None) -> None:
+    # def clear_conversation_history(self, trace_filename_suffix: Optional[str] = None) -> None:
+    def clear_conversation_history(self) -> None:
         """
         Clear the conversation history.
         This resets the conversation history to an empty state.
         """
         self._conversation_history = dspy.History(messages=[])
         # Filename for conversation traces
-        if trace_filename_suffix:
-            self._conversation_traces_file_name: str = (
-                f"conversation_traces_{trace_filename_suffix}"
-            )
-        else:
-            self._conversation_traces_file_name: str = (
-                f"conversation_traces_{datetime.now().strftime('%m_%d_%Y:%H_%M_%S')}.jsonl"
-            )
+        # if trace_filename_suffix:
+        #     self._conversation_traces_file_name: str = (
+        #         f"conversation_traces_{trace_filename_suffix}"
+        #     )
+        # else:
+        #     self._conversation_traces_file_name: str = (
+        #         f"conversation_traces_{datetime.now().strftime('%m_%d_%Y:%H_%M_%S')}.jsonl"
+        #     )
 
     def _run_workflow_loop(self) -> Optional[fastworkflow.CommandOutput]:
         """
@@ -341,7 +341,7 @@ class ChatSession:
         - All outputs (success or failure) are sent to queue during processing
         """
         last_output = None
-        workflow = ChatSession.get_active_workflow()
+        workflow = self.get_active_workflow()
 
         try:
             # Handle startup command/action
@@ -385,7 +385,7 @@ class ChatSession:
 
         finally:
             self._status = SessionStatus.STOPPED
-            ChatSession.pop_active_workflow()
+            self.pop_active_workflow()
             logger.debug(f"Workflow {workflow.id if workflow else 'unknown'} completed")
 
         return None
@@ -401,7 +401,7 @@ class ChatSession:
     # def _process_mcp_tool_call(self, message: str) -> fastworkflow.CommandOutput:
     #     # sourcery skip: class-extract-method, extract-method
     #     """Process an MCP tool call message"""
-    #     workflow = ChatSession.get_active_workflow()
+    #     workflow = self.get_active_workflow()
         
     #     try:
     #         # Parse JSON message
@@ -429,7 +429,7 @@ class ChatSession:
     #             self.command_output_queue.put(command_output)
 
     #         # Flush on successful or failed tool call – state may have changed.
-    #         if workflow := ChatSession.get_active_workflow():
+    #         if workflow := self.get_active_workflow():
     #             workflow.flush()
             
     #         return command_output
@@ -500,11 +500,15 @@ class ChatSession:
         if os.path.exists("action.jsonl"):
             with open("action.jsonl", "r", encoding="utf-8") as f:
                 actions = [json.loads(line) for line in f if line.strip()]
-            conversation_summary = self._extract_conversation_summary(message, actions, result_text)
+            conversation_summary, conversation_traces = self._extract_conversation_summary(message, actions, result_text)
             command_response.artifacts["conversation_summary"] = conversation_summary
 
         self.conversation_history.messages.append(
-            {f"conversation {len(self.conversation_history.messages) + 1}": conversation_summary}
+            {
+                "conversation summary": conversation_summary,
+                "conversation_traces": conversation_traces,
+                "feedback": None  # Initialize feedback slot for this turn
+            }
         )
 
         command_output = fastworkflow.CommandOutput(
@@ -514,11 +518,11 @@ class ChatSession:
 
         # Put output in queue (following same pattern as _process_message)
         if (not command_output.success or self._keep_alive) and \
-                self.command_output_queue:
+                    self.command_output_queue:
             self.command_output_queue.put(command_output)
 
         # Persist workflow state changes
-        if workflow := ChatSession.get_active_workflow():
+        if workflow := self.get_active_workflow():
             workflow.flush()
 
         return command_output
@@ -529,20 +533,77 @@ class ChatSession:
         # command_output = self.profile_invoke_command(message)
         
         command_output = self._CommandExecutor.invoke_command(self, message)
+
+        # Record assistant mode trace to action.jsonl (similar to agent mode in workflow_agent.py)
+        # This ensures assistant commands are captured even when interspersed with agent commands
+        response_text = ""
+        if command_output.command_responses:
+            response_text = command_output.command_responses[0].response or ""
+        
+        # Convert parameters to dict if it's a Pydantic model or other complex object
+        params = command_output.command_parameters or {}
+        if hasattr(params, 'model_dump'):
+            params = params.model_dump()
+        elif hasattr(params, 'dict'):
+            params = params.dict()
+        
+        record = {
+            "command": message,
+            "command_name": command_output.command_name or "",
+            "parameters": params,
+            "response": response_text
+        }
+
+        self.conversation_history.messages.append(
+            {
+                "conversation summary": "assistant_mode_command",
+                "conversation_traces": json.dumps(record),
+                "feedback": None  # Initialize feedback slot for this turn
+            }
+        )
+
         if (not command_output.success or self._keep_alive) and \
             self.command_output_queue:
             self.command_output_queue.put(command_output)
 
         # Persist workflow state changes lazily accumulated during message processing.
-        if workflow := ChatSession.get_active_workflow():
+        if workflow := self.get_active_workflow():
             workflow.flush()
 
         return command_output
 
     def _process_action(self, action: fastworkflow.Action) -> fastworkflow.CommandOutput:
         """Process a startup action"""
-        workflow = ChatSession.get_active_workflow()
+        workflow = self.get_active_workflow()
         command_output = self._CommandExecutor.perform_action(workflow, action)
+
+        # Record action trace to action.jsonl
+        response_text = ""
+        if command_output.command_responses:
+            response_text = command_output.command_responses[0].response or ""
+        
+        # Convert parameters to dict if it's a Pydantic model or other complex object
+        params = action.parameters or {}
+        if hasattr(params, 'model_dump'):
+            params = params.model_dump()
+        elif hasattr(params, 'dict'):
+            params = params.dict()
+        
+        record = {
+            "command": "process_action",
+            "command_name": action.command_name,
+            "parameters": params,
+            "response": response_text
+        }
+
+        self.conversation_history.messages.append(
+            {
+                "conversation summary": "process_action command",
+                "conversation_traces": json.dumps(record),
+                "feedback": None  # Initialize feedback slot for this turn
+            }
+        )
+
         if (not command_output.success or self._keep_alive) and \
             self.command_output_queue:
             self.command_output_queue.put(command_output)
@@ -573,15 +634,16 @@ class ChatSession:
         user_query: str, workflow_actions: list[dict[str, str]], final_agent_response: str) -> str:
         """
         Summarizes conversation based on original user query, workflow actions and agentt response.
+        Returns the conversation summary and the log entry
         """
         # Lets log everything to a file called action_log.jsonl, if it exists
-        log_entry = {
+        conversation_traces = {
             "user_query": user_query,
             "agent_workflow_interactions": workflow_actions,
             "final_agent_response": final_agent_response
         }
-        with open(self._conversation_traces_file_name, "a", encoding="utf-8") as f:
-            f.write(json.dumps(log_entry) + "\n")
+        # with open(self._conversation_traces_file_name, "a", encoding="utf-8") as f:
+        #     f.write(json.dumps(log_entry) + "\n")
 
         class ConversationSummarySignature(dspy.Signature):
             """
@@ -601,7 +663,7 @@ class ChatSession:
                 user_query=user_query, 
                 workflow_actions=workflow_actions, 
                 final_agent_response=final_agent_response)
-            return prediction.conversation_summary
+            return prediction.conversation_summary, json.dumps(conversation_traces)
 
     
     def profile_invoke_command(self, message: str):

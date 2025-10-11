@@ -48,7 +48,7 @@ def test_what_can_i_do_tool_executes(initialized_fastworkflow):
     from pathlib import Path
     retail_path = str(Path(__file__).parent.parent.joinpath("fastworkflow", "examples", "retail_workflow").resolve())
     workflow = fastworkflow.Workflow.create(retail_path, workflow_id_str="agent-test")
-    ChatSession.push_active_workflow(workflow)
+    chat_session.push_active_workflow(workflow)
 
     from fastworkflow.mcp_server import FastWorkflowMCPServer
     mcp_server = FastWorkflowMCPServer(chat_session)
@@ -65,6 +65,6 @@ def test_what_can_i_do_tool_executes(initialized_fastworkflow):
     except Exception:
         assert "Commands available" in result
 
-    ChatSession.clear_workflow_stack()
+    chat_session.clear_workflow_stack()
 
 

@@ -105,4 +105,14 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers", "slow: mark test as slow running"
-    ) 
+    )
+
+
+@pytest.fixture(autouse=True, scope="function")
+def cleanup_background_threads():
+    """Ensure all background ChatWorker threads complete before next test"""
+    yield
+    # Give ChatWorker daemon threads time to complete their current operations
+    # This prevents thread pollution between tests in the full suite
+    import time
+    time.sleep(0.5) 

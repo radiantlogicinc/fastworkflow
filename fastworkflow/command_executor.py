@@ -56,7 +56,7 @@ class CommandExecutor(CommandExecutorInterface):
         command_name = command_output.command_responses[0].artifacts["command_name"]
         input_obj = command_output.command_responses[0].artifacts["cmd_parameters"]
 
-        workflow = ChatSession.get_active_workflow()
+        workflow = chat_session.get_active_workflow()
         workflow_name = workflow.folderpath.split('/')[-1]
         context = workflow.current_command_context_displayname
 

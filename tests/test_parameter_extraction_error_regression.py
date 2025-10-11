@@ -15,7 +15,7 @@ class MockCommandParameters(BaseModel):
 class TestParameterExtractionErrorRegression:
     """Test that parameter extraction correctly handles error state and direct parameter input."""
     
-    @patch('fastworkflow._workflows.command_metadata_extraction._commands.wildcard.InputForParamExtraction')
+    @patch('fastworkflow._workflows.command_metadata_extraction.parameter_extraction.InputForParamExtraction')
     @patch('fastworkflow.RoutingRegistry')
     def test_parameter_extraction_in_error_state(self, mock_routing_registry, mock_input_for_param_extraction):
         """Test that direct parameter values are correctly extracted in error state."""
@@ -54,9 +54,9 @@ class TestParameterExtractionErrorRegression:
             
         extractor._apply_missing_fields = mock_apply_missing_fields
         
-        # Mock validate_parameters to return valid
+        # Mock validate_parameters to return valid (returns 4 values: is_valid, error_msg, suggestions, missing_fields)
         mock_input_instance = MagicMock()
-        mock_input_instance.validate_parameters.return_value = (True, "All required parameters are valid.", {})
+        mock_input_instance.validate_parameters.return_value = (True, "All required parameters are valid.", {}, [])
         mock_input_for_param_extraction.create.return_value = mock_input_instance
         
         # Execute the extraction

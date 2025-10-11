@@ -548,6 +548,7 @@ This single command will generate the `greet.py` command, `get_properties` and `
 | `LLM_RESPONSE_GEN` | LiteLLM model string for response generation | `run` | `mistral/mistral-small-latest` |
 | `LLM_PLANNER` | LiteLLM model string for the agent's task planner | `run` (agent mode) | `mistral/mistral-small-latest` |
 | `LLM_AGENT` | LiteLLM model string for the DSPy agent | `run` (agent mode) | `mistral/mistral-small-latest` |
+| `LLM_CONVERSATION_STORE` | LiteLLM model string for conversation topic/summary generation | FastAPI service | `mistral/mistral-small-latest` |
 | `NOT_FOUND` | Placeholder value for missing parameters during extraction | Always | `"NOT_FOUND"` |
 | `MISSING_INFORMATION_ERRMSG` | Error message prefix for missing parameters | Always | `"Missing required..."` |
 | `INVALID_INFORMATION_ERRMSG` | Error message prefix for invalid parameters | Always | `"Invalid information..."` |
@@ -561,6 +562,7 @@ This single command will generate the `greet.py` command, `get_properties` and `
 | `LITELLM_API_KEY_RESPONSE_GEN`| API key for the `LLM_RESPONSE_GEN` model | `run` | *required* |
 | `LITELLM_API_KEY_PLANNER`| API key for the `LLM_PLANNER` model | `run` (agent mode) | *required* |
 | `LITELLM_API_KEY_AGENT`| API key for the `LLM_AGENT` model | `run` (agent mode) | *required* |
+| `LITELLM_API_KEY_CONVERSATION_STORE`| API key for the `LLM_CONVERSATION_STORE` model | FastAPI service | *required* |
 
 > [!tip]
 > The example workflows are configured to use Mistral's models by default. You can get a free API key from [Mistral AI](https://mistral.ai) that works with the `mistral-small-latest` model.
