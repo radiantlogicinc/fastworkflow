@@ -148,11 +148,20 @@ class ResponseGenerator:
             for_agents=is_agent_mode,
         )
 
+        # Check if the NLU pipeline stage is intent detection
+        success = False
+        nlu_pipeline_stage = workflow.context.get(
+            "NLU_Pipeline_Stage", 
+            fastworkflow.NLUPipelineStage.INTENT_DETECTION)
+        if nlu_pipeline_stage == fastworkflow.NLUPipelineStage.INTENT_DETECTION:
+            success = True
+
         return fastworkflow.CommandOutput(
             workflow_id=workflow.id,
             command_responses=[
                 fastworkflow.CommandResponse(
                     response=response,
+                    success=success
                 )
             ]
         ) 

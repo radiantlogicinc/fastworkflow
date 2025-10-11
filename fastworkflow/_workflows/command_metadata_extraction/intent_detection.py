@@ -136,7 +136,7 @@ class CommandNamePrediction:
             NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
             NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
         ) and not command_name:
-            command_name = "what_can_i_do"
+            command_name = "what can i do?"
 
         if not command_name or command_name == "wildcard":
             fully_qualified_command_name=None

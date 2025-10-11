@@ -67,7 +67,10 @@ class ResponseGenerator:
             if cnp_output.command_name == 'ErrorCorrection/you_misunderstood':
                 workflow_context["NLU_Pipeline_Stage"] = NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
                 workflow_context["command"] = command
-            else:
+            elif (
+                nlu_pipeline_stage == fastworkflow.NLUPipelineStage.INTENT_DETECTION or
+                cnp_output.command_name == 'ErrorCorrection/abort'
+            ):
                 workflow.end_command_processing()
             workflow.context = workflow_context
 
@@ -76,9 +79,13 @@ class ResponseGenerator:
                 command=command,
             )
             command_output = CommandExecutor.perform_action(workflow, startup_action)
-            command_output.command_responses[0].artifacts["command_handled"] = True     
-            # Set the additional attributes
-            command_output.command_name = cnp_output.command_name
+            if (
+                nlu_pipeline_stage == fastworkflow.NLUPipelineStage.INTENT_DETECTION or
+                cnp_output.command_name == 'ErrorCorrection/abort'
+            ):
+                command_output.command_responses[0].artifacts["command_handled"] = True     
+                # Set the additional attributes
+                command_output.command_name = cnp_output.command_name
             return command_output
         
         if nlu_pipeline_stage in {
@@ -138,7 +145,9 @@ class ResponseGenerator:
             workflow.context = workflow_context
 
         command_name = cnp_output.command_name
-        extractor = ParameterExtraction(workflow, app_workflow, command_name, command)
+        # Use the preserved original command (with parameters) if available
+        preserved_command = f'{command_name}: {workflow.context.get("command", command)}'
+        extractor = ParameterExtraction(workflow, app_workflow, command_name, preserved_command)
         pe_output = extractor.extract()
         if not pe_output.parameters_are_valid:
             return CommandOutput(
@@ -161,7 +170,7 @@ class ResponseGenerator:
                 CommandResponse(
                     response="",
                     artifacts={
-                        "command": command,
+                        "command": preserved_command,
                         "command_name": command_name,
                         "cmd_parameters": pe_output.cmd_parameters,
                     },
