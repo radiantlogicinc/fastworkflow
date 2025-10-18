@@ -481,6 +481,58 @@ class CommandMetadataAPI:
         return f"{indent_str}{value}"
 
     @staticmethod
+    def get_workflow_definition_display_text(workflow_info: Dict[str, Any]) -> str:
+        """
+        Convert workflow definition dict to human-readable text display.
+        
+        Args:
+            workflow_info: Workflow info dict from get_workflow_info()
+                {
+                    "workflow_name": str,
+                    "available_contexts": list[str],
+                    "context_inheritance_model": dict,
+                    "context_hierarchy_model": dict
+                }
+        
+        Returns:
+            Human-readable text representation of workflow definition
+        """
+        lines: List[str] = ["Workflow Definition:"]
+        
+        # Workflow name
+        if workflow_name := workflow_info.get("workflow_name"):
+            lines.append(f"  name: {workflow_name}")
+        
+        # Available contexts
+        if contexts := workflow_info.get("available_contexts"):
+            lines.append("  available_contexts:")
+            for ctx in contexts:
+                display_name = "global" if ctx == "*" else ctx
+                lines.append(f"    - {display_name}")
+        
+        # Context inheritance (if present and non-empty)
+        if inheritance := workflow_info.get("context_inheritance_model"):
+            if inheritance:  # Only show if not empty dict
+                lines.append("  context_inheritance:")
+                for ctx, parents in sorted(inheritance.items()):
+                    if parents:  # Only show if has parents
+                        display_ctx = "global" if ctx == "*" else ctx
+                        parent_list = ", ".join(["global" if p == "*" else p for p in parents])
+                        lines.append(f"    {display_ctx}: [{parent_list}]")
+        
+        # Context hierarchy (if present and non-empty)
+        if hierarchy := workflow_info.get("context_hierarchy_model"):
+            if hierarchy:  # Only show if not empty dict
+                lines.append("  context_hierarchy:")
+                for parent, children in sorted(hierarchy.items()):
+                    if children:  # Only show if has children
+                        display_parent = "global" if parent == "*" else parent
+                        children_list = ", ".join(["global" if c == "*" else c for c in children])
+                        lines.append(f"    {display_parent}: [{children_list}]")
+        
+        return "\n".join(lines)
+
+    @staticmethod
     def get_command_display_text(
         subject_workflow_path: str,
         cme_workflow_path: str,
@@ -499,7 +551,7 @@ class CommandMetadataAPI:
             cme_workflow_path=cme_workflow_path,
             active_context_name=active_context_name,
         )
-        
+
         # Build minimal context info (inheritance/containment if available)
         context_info: Dict[str, Any] = {
             "name": active_context_name,
@@ -529,10 +581,8 @@ class CommandMetadataAPI:
             empty_display = CommandMetadataAPI._prune_empty(empty_display, remove_keys={"default"})
             rendered = CommandMetadataAPI._to_yaml_like(empty_display, omit_command_name=False)
             # Ensure a visible header is present
-            header = "Commands available:"
-            if not rendered.strip():
-                return header
-            return f"{header}\n{rendered}"
+            header = "Commands available in the current context:"
+            return f"{header}\n{rendered}" if rendered.strip() else header
 
         # Build the combined display by stitching per-command strings while keeping
         # a single "Commands available:" header and blank lines between commands
@@ -553,7 +603,7 @@ class CommandMetadataAPI:
             empty_display = CommandMetadataAPI._prune_empty(empty_display, remove_keys={"default"})
             return CommandMetadataAPI._to_yaml_like(empty_display, omit_command_name=False)
 
-        combined_lines: List[str] = ["Commands available:"]
+        combined_lines: List[str] = [f"Commands available in the current context ({context_info['display_name']}):"]
         for idx, text in enumerate(parts):
             lines = text.splitlines()
             if idx > 0:

@@ -19,7 +19,6 @@ def run_main(args):
     from rich.table import Table
     from rich.text import Text
     from rich.console import Group
-    from rich.live import Live
     from rich.spinner import Spinner
     from prompt_toolkit import PromptSession
     from prompt_toolkit.patch_stdout import patch_stdout
@@ -27,7 +26,6 @@ def run_main(args):
 
     import fastworkflow
     from fastworkflow.utils.logging import logger
-    from fastworkflow.command_executor import CommandExecutor
 
     # Progress bar helper
     from fastworkflow.utils.startup_progress import StartupProgress
@@ -146,10 +144,6 @@ def run_main(args):
     # ------------------------------------------------------------------
     # Startup progress bar ------------------------------------------------
     # ------------------------------------------------------------------
-    command_info_root = os.path.join(args.workflow_path, "___command_info")
-    subdir_count = 0
-    if os.path.isdir(command_info_root):
-        subdir_count = len([d for d in os.listdir(command_info_root) if os.path.isdir(os.path.join(command_info_root, d))])
 
     # 3 coarse CLI steps + per-directory warm-up (handled inside ChatSession) + 1 global warm-up
     StartupProgress.begin(total=3)

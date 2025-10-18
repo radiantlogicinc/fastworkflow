@@ -144,6 +144,24 @@
             ]
         },
         {
+            "name": "run_hello_world_with_fastapi_mcp",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "services.run_fastapi_mcp.main",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/"
+            },
+            "args": [
+                "--workflow_path",
+                "./fastworkflow/examples/hello_world",
+                "--env_file_path",
+                "./env/.env",
+                "--passwords_file_path",
+                "./passwords/.env"
+            ]
+        },
+        {
             "name": "Python Debugger: Current File with Arguments",
             "type": "debugpy",
             "request": "launch",

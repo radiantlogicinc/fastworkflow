@@ -8,6 +8,7 @@ import json
 
 import fastworkflow
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
+from fastworkflow.command_context_model import get_workflow_info
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 
 class Signature:
@@ -139,23 +140,27 @@ class ResponseGenerator:
         with contextlib.suppress(Exception):
             if fastworkflow.chat_session:
                 is_agent_mode = fastworkflow.chat_session.run_as_agent
-        
+
         app_workflow = workflow.context["app_workflow"]
-        response = CommandMetadataAPI.get_command_display_text(
+        
+        # Get workflow definition
+        workflow_info = get_workflow_info(app_workflow.folderpath)
+        workflow_def_text = CommandMetadataAPI.get_workflow_definition_display_text(workflow_info)
+        
+        # Get available commands in current context
+        commands_text = CommandMetadataAPI.get_command_display_text(
             subject_workflow_path=app_workflow.folderpath,
             cme_workflow_path=workflow.folderpath,
             active_context_name=app_workflow.current_command_context_name,
             for_agents=is_agent_mode,
         )
+        
+        response = f"{workflow_def_text}\n\n{commands_text}"
 
-        # Check if the NLU pipeline stage is intent detection
-        success = False
         nlu_pipeline_stage = workflow.context.get(
             "NLU_Pipeline_Stage", 
             fastworkflow.NLUPipelineStage.INTENT_DETECTION)
-        if nlu_pipeline_stage == fastworkflow.NLUPipelineStage.INTENT_DETECTION:
-            success = True
-
+        success = nlu_pipeline_stage == fastworkflow.NLUPipelineStage.INTENT_DETECTION
         return fastworkflow.CommandOutput(
             workflow_id=workflow.id,
             command_responses=[

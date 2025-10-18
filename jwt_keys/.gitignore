@@ -1,0 +1,6 @@
+# JWT Private Key - NEVER COMMIT
+private_key.pem
+
+# Public key is safe to commit if needed, but ignore by default for security
+public_key.pem
+

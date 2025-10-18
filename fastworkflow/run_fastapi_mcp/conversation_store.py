@@ -47,13 +47,14 @@ def extract_turns_from_history(conversation_history: 'dspy.History') -> list[dic
     """
     turns = []
 
-    for msg_dict in conversation_history.messages:
-        # Extract all fields including feedback (which may have been added via post_feedback)
-        turns.append({
+    turns.extend(
+        {
             "conversation summary": msg_dict.get("conversation summary"),
             "conversation_traces": msg_dict.get("conversation_traces"),
-            "feedback": msg_dict.get("feedback")  # Preserve existing feedback
-        })
+            "feedback": msg_dict.get("feedback"),  # Preserve existing feedback
+        }
+        for msg_dict in conversation_history.messages
+    )
     return turns
 
 
@@ -66,12 +67,14 @@ def restore_history_from_turns(turns: list[dict[str, Any]]) -> 'dspy.History':
     """
     messages = []
 
-    for turn in turns:
-        messages.append({
+    messages.extend(
+        {
             "conversation summary": turn.get("conversation summary"),
             "conversation_traces": turn.get("conversation_traces"),
-            "feedback": turn.get("feedback")  # Restore feedback if present
-        })
+            "feedback": turn.get("feedback"),  # Restore feedback if present
+        }
+        for turn in turns
+    )
     return dspy.History(messages=messages)
 
 

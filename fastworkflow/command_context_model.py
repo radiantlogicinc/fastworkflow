@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from typing import Any
+import os
 from pathlib import Path
-from typing import Any, Optional, Type
 
 import fastworkflow
-from fastworkflow.command_directory import CommandDirectory, get_cached_command_directory
+from fastworkflow.command_directory import get_cached_command_directory
 from fastworkflow.utils import python_utils
 
 """Utility for loading and traversing the single-file workflow command context model.
@@ -152,10 +153,10 @@ class CommandContextModel:
         hierarchy_model_path = Path(self._workflow_path) / "context_hierarchy_model.json"
         if not hierarchy_model_path.is_file():
             return {}
-        
+
         with hierarchy_model_path.open("r") as f:
             hierarchy_data = json.load(f)
-            
+
         return hierarchy_data
 
     def _resolve_ancestry(self, hierarchy: dict[str, dict[str, list[str]]]) -> None:
@@ -205,10 +206,10 @@ class CommandContextModel:
             all_ancestors.add(parent)
             grandparents = self.get_ancestor_contexts(parent, visiting.copy(), _hierarchy)
             all_ancestors.update(grandparents)
-        
+
         final_ancestors = sorted(list(all_ancestors))
         self._resolved_ancestors[context_name] = final_ancestors
-        
+
         visiting.remove(context_name)
 
         return final_ancestors
@@ -228,7 +229,7 @@ class CommandContextModel:
             # or by being part of a command inheritance structure. If it's not
             # in _command_contexts, it's an unknown/invalid context.
             raise CommandContextModelValidationError(f"Context '{context_name}' not found in model.")
-            
+
         if visiting is None:
             visiting = set()
 
@@ -294,3 +295,68 @@ class CommandContextModel:
             return getattr(module, context_metadata.context_class, None)
         else:
             return None
+
+
+# ---------------------------------------------------------------------
+# Workflow info helper (module-level)
+# ---------------------------------------------------------------------
+
+def get_workflow_info(chat_session_or_path: fastworkflow.ChatSession | str) -> dict[str, Any]:
+    """
+    Return workflow-level metadata for the active workflow in the given chat session or workflow path.
+
+    Shape:
+    {
+      "workflow_name": str,
+      "available_contexts": list[str],
+      "context_inheritance_model": dict,
+      "context_hierarchy_model": dict
+    }
+
+    Notes:
+    - available_contexts are derived from CommandContextModel.load(workflow_path)
+      so they reflect filesystem + inheritance.
+    - current context and purpose/description are intentionally omitted.
+    - Raw JSON for inheritance (from _commands/context_inheritance_model.json)
+      and hierarchy (from context_hierarchy_model.json) is returned verbatim when present.
+    """
+    if isinstance(chat_session_or_path, str):
+        workflow_path_str = chat_session_or_path
+    else:
+        workflow_path_str = chat_session_or_path.get_active_workflow().folderpath
+    workflow_name = os.path.basename(os.path.abspath(workflow_path_str))
+
+    available_contexts: list[str]
+    inheritance_json: dict[str, Any] = {}
+    hierarchy_json: dict[str, Any] = {}
+
+    try:
+        # Derive contexts via consolidated model
+        context_model = CommandContextModel.load(workflow_path_str)
+        # Do not normalize names beyond keeping what the model exposes
+        available_contexts = sorted([key for key in context_model._command_contexts.keys() if key != 'IntentDetection'])
+    except Exception:
+        available_contexts = ["/"]
+
+    # Load raw context inheritance model (if present)
+    try:
+        inheritance_path = Path(workflow_path_str) / "_commands" / "context_inheritance_model.json"
+        if inheritance_path.is_file():
+            inheritance_json = json.loads(inheritance_path.read_text())
+    except Exception:
+        inheritance_json = {}
+
+    # Load raw context hierarchy model (if present)
+    try:
+        hierarchy_path = Path(workflow_path_str) / "context_hierarchy_model.json"
+        if hierarchy_path.is_file():
+            hierarchy_json = json.loads(hierarchy_path.read_text())
+    except Exception:
+        hierarchy_json = {}
+
+    return {
+        "workflow_name": workflow_name,
+        "available_contexts": available_contexts,
+        "context_inheritance_model": inheritance_json,
+        "context_hierarchy_model": hierarchy_json,
+    }

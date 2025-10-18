@@ -495,6 +495,7 @@ class ChatSession:
         # Create CommandOutput with the agent's response
         command_response = fastworkflow.CommandResponse(response=result_text)
 
+        conversation_traces = None
         conversation_summary = message
         # Attach actions captured during agent execution as artifacts if available
         if os.path.exists("action.jsonl"):

@@ -8,7 +8,7 @@ Based on: [fastworkflow_fastapi_spec.md](mdc:docs/fastworkflow_fastapi_spec.md)
 
 #### 2. Non‑Goals
 - **UI**: No user interface. Only REST endpoints with OpenAPI/Swagger at `/docs`.
-- **WebSockets**: No WebSocket support; SSE (Server‑Sent Events) is used for streaming.
+- **Streaming**: Streamable HTTP at `/invoke_agent_stream` (NDJSON by default; SSE also supported per session preference). MCP Streamable HTTP is also available when MCP is mounted and maps to the same streaming implementation.
 
 #### 3. High‑Level Architecture
 - **Process‑wide app**: A single FastAPI app hosts an in‑memory `UserSessionManager` keyed by `user_id`.
@@ -16,7 +16,7 @@ Based on: [fastworkflow_fastapi_spec.md](mdc:docs/fastworkflow_fastapi_spec.md)
   - Active `ChatSession` (always agent mode) bound to a current conversation (internal id only).
   - Persistent `ConversationStore` per user backed by Rdict (one DB file per user).
 - **Synchronous turn execution**: For each request, enqueue user input and synchronously await a `CommandOutput` from the `command_output_queue` with timeout and single‑turn serialization.
-- **Optional traces**: If `show_agent_traces=true` (set during initialization), trace events are collected and included in the final response payload.
+- **Traces**: Trace events are collected by default and included in the synchronous response, or emitted incrementally for the streaming endpoint.
 
 #### 4. Minimal Module Decomposition
 - **API Layer (FastAPI routes)**
@@ -25,45 +25,36 @@ Based on: [fastworkflow_fastapi_spec.md](mdc:docs/fastworkflow_fastapi_spec.md)
 
 - **Session Layer (`UserSessionManager`)**
   - In‑memory registry: `{ user_id: UserRuntime }`.
-  - `UserRuntime` fields: `active_conversation_id`, `chat_session`, `lock`, `show_agent_traces`.
-  - Serializes turns per user using an asyncio lock.
+  - `UserRuntime` fields: `active_conversation_id`, `chat_session`, `lock`, `stream_format`.
 
 - **Workflow Adapter**
   - Bridges HTTP inputs to `ChatSession` by placing user messages on the `user_message_queue` (or executing an `Action`) and reading `CommandOutput` from `command_output_queue`.
-  - When enabled, drains trace events from `command_trace_queue` into the response `traces` field.
+  - When enabled, drains trace events from `command_trace_queue` into the response `traces` field (REST). Streaming is handled by NDJSON or SSE for REST; MCP tools mirror the same server-side streaming.
 
 - **Persistence Adapter (`ConversationStore`)**
-  - Rdict database per user under `USER_CONVERSATIONS_SPEEDDICT_FOLDERNAME`.
+  - Rdict database per user under `SPEEDDICT_FOLDERNAME/user_conversations`.
   - Schema and functional rules described in Section 8.
 
-- **Environment Loader**
-  - Loads environment variables strictly from `env_file_path` and `passwords_file_path` files passed to `/initialize`.
-  - Calls `fastworkflow.init(env_vars=<file_based_env_dict>)`.
+- **Startup Configuration Loader**
+  - Parse CLI args at process startup (e.g., `--workflow_path`, `--env_file_path`, `--passwords_file_path`, `--context`, `--startup_command`, `--startup_action`).
+  - Load env strictly from provided files and call `fastworkflow.init(env_vars=...)`.
+  - Store configuration in process-wide variables for use by `/initialize`.
 
 #### 5. Request Lifecycle (Per Endpoint)
 
 - **POST `/initialize`**
-  - Validate `workflow_path` exists (optionally warn if `_commands/` missing).
-  - Load env from the two files only; call `fastworkflow.init(...)`.
   - Create `ChatSession` with forced agent mode. Restore prior conversation when available; otherwise start a new one.
-  - Start the workflow via `chat_session.start_workflow(...)` using provided `context`, `startup_command`, or `startup_action` (mutually exclusive).
-  - Store `UserRuntime` in `UserSessionManager` and return `{ user_id }`.
+  - Start the workflow via `chat_session.start_workflow(...)` using configuration loaded at process startup (CLI args/env).
+  - Store `UserRuntime` in `UserSessionManager` and return a JWT `TokenResponse` containing `access_token`, `refresh_token`, `token_type`, `expires_in`, `user_id`, and `workflow_info`.
 
 - **POST `/invoke_agent`**
   - Require existing session; enforce single in‑flight turn per user (acquire user lock).
   - If the query begins with `/`, strip all leading slashes before processing.
   - Enqueue the user message and wait for `CommandOutput` up to `timeout_seconds`.
-  - If `show_agent_traces=true`, include collected traces in `CommandOutput.traces`.
+  - Include collected traces in `CommandOutput.traces`.
 
 - **POST `/invoke_agent_stream`**
-  - Require existing session; enforce single in‑flight turn per user (acquire user lock).
-  - If the query begins with `/`, strip all leading slashes before processing.
-  - Set response content-type to `text/event-stream` for SSE.
-  - Enqueue the user message.
-  - If `show_agent_traces=true`, continuously drain `command_trace_queue` and emit each trace as an SSE event (`event: trace`).
-  - Wait for `CommandOutput` up to `timeout_seconds`.
-  - Emit the final `CommandOutput` as an SSE event (`event: command_output`).
-  - Handle errors by emitting `event: error` before closing the stream.
+  - Streamable HTTP (NDJSON) and SSE: emits `{ "type": "trace" }` records and a final `{ "type": "output" }` record.
 
 - **POST `/invoke_assistant`**
   - Same path as agent but deterministic/assistant execution (no planning).
@@ -78,7 +69,7 @@ Based on: [fastworkflow_fastapi_spec.md](mdc:docs/fastworkflow_fastapi_spec.md)
   - On success, rotate to a new internal conversation id and clear runtime history; on failure, log critical, return 500, do not rotate.
 
 - **GET `/conversations`**
-  - Return up to `FASTWORKFLOW_CONVERSATIONS_LIST_LIMIT` latest conversations for the user by `updated_at` desc, each including `{ conversation_id, topic, summary }`.
+  - Return up to `limit` (default `20`) latest conversations for the user by `updated_at` desc, each including `{ conversation_id, topic, summary }`.
 
 - **POST `/post_feedback`**
   - Attach optional feedback to the latest turn of the active conversation.
@@ -90,6 +81,9 @@ Based on: [fastworkflow_fastapi_spec.md](mdc:docs/fastworkflow_fastapi_spec.md)
 - **POST `/activate_conversation`**
   - Body: `{ user_id, conversation_id }`. Locate the conversation by ID for the user and set it as active. 404 if not found.
 
+- **POST `/admin/generate_mcp_token`**
+  - Generate long-lived access tokens for MCP client configuration. Default expiration: 365 days. Returns TokenResponse with access_token (no refresh_token).
+
 - **GET `/`**
   - Simple HTML page linking to `/docs`; also serves as a health check.
 
@@ -97,10 +91,10 @@ Based on: [fastworkflow_fastapi_spec.md](mdc:docs/fastworkflow_fastapi_spec.md)
 - **Import first**: When FastWorkflow provides canonical Pydantic/dataclass models for these types, import and use them to avoid divergence.
 - **Otherwise mirror the spec** (sketches only):
   - `InitializationRequest`, `InitializationResponse`
-  - `InvokeRequest`, `PerformActionRequest`, `NewConversationRequest`, `PostFeedbackRequest`
+  - `InvokeRequest`, `PerformActionRequest`, `PostFeedbackRequest`
   - `Action`, `CommandResponse`, `CommandOutput`
 - **Fields and semantics**:
-  - `CommandOutput.traces` is included only when `show_agent_traces=true`.
+  - `CommandOutput.traces` is included by default (if any traces were produced during the turn).
   - `Action` equals the runtime execution object consumed by `CommandExecutor`.
 
 #### 7. Error Handling
@@ -135,12 +129,9 @@ Based on: [fastworkflow_fastapi_spec.md](mdc:docs/fastworkflow_fastapi_spec.md)
 - **Logging**: Log each call with `user_id`, action/command, outcome, and timing. Keep FastWorkflow file logging to `action.jsonl` unchanged.
 
 #### 11. Configuration & Environment Loading
-- **Env sources**: Load environment variables strictly from `env_file_path` and `passwords_file_path` supplied to `/initialize`.
-- **Initialization**: Call `fastworkflow.init(env_vars=<file_based_env_dict>)`.
+- **Startup**: Configuration is provided via CLI args and environment on process start; do not accept these in `/initialize`.
 - **Operational environment variables**:
-  - `USER_CONVERSATIONS_SPEEDDICT_FOLDERNAME`: base folder for per‑user Rdict files
-  - `FASTWORKFLOW_CONVERSATIONS_LIST_LIMIT`: max conversations returned by `/conversations`
-  - `FASTWORKFLOW_SHUTDOWN_MAX_WAIT_SECONDS`: max wait to finish active turns before shutdown persistence
+  - `SPEEDDICT_FOLDERNAME`: base folder for per‑user Rdict files
   - `LLM_CONVERSATION_STORE`: LiteLLM model string for conversation topic/summary generation
   - `LITELLM_API_KEY_CONVERSATION_STORE`: API key for the `LLM_CONVERSATION_STORE` model
 
@@ -152,42 +143,19 @@ Based on: [fastworkflow_fastapi_spec.md](mdc:docs/fastworkflow_fastapi_spec.md)
 - **Code**: `services/run_fastapi/main.py` contains:
   - FastAPI app and route handlers
   - `UserSessionManager` and `UserRuntime` (in‑memory)
-  - Wiring to `ChatSession` queues and optional trace collection
-  - SSE streaming logic for `/invoke_agent_stream`
+  - Wiring to `ChatSession` queues and optional trace collection (REST)
+  - OpenAPI security for JWT Bearer (all endpoints except `/initialize`, `/refresh_token`)
+- **Code**: `services/run_fastapi_mcp/mcp_specific.py` contains:
+  - MCP mounting using `fastapi_mcp` that exposes FastAPI endpoints as MCP tools
+  - Excludes admin-only and non-applicable endpoints
+  - Maps the REST streaming endpoint `/invoke_agent_stream` (operation_id `invoke_agent`) for MCP streaming
 - **Code**: `services/conversation_store.py` contains:
   - Rdict adapters for `ConversationStore`
-- **Docs**: This file and the source spec live under `docs/`.
-- **Core FastWorkflow**: No changes required. The service uses existing APIs:
-  - `ChatSession.user_message_queue`, `command_output_queue`, `command_trace_queue`
-  - `ChatSession.start_workflow(...)`, `clear_conversation_history()`
-  - Canonical models: `Action`, `CommandResponse`, `CommandOutput` from `fastworkflow.__init__`
 
-#### 14. Testing Guidance (from spec)
-- **Unit**
-  - SessionManager: concurrency and lifecycle
-  - Env loading from files only
-  - Validation rules: XOR handling and feedback presence
-  - Timeout behavior: return 504 when no output arrives
-  - SSE formatting: verify correct event structure for trace and command_output events
-- **Integration**
-  - Spin up the FastAPI app via `TestClient`
-  - Initialize with a sample workflow and perform a single agent turn; assert `CommandOutput` shape
-  - Exercise `/perform_action` using a known command; verify response
-  - Validate `/new_conversation` persistence and `/conversations` listing behavior
-  - Test `/invoke_agent_stream` by parsing SSE events: verify trace events arrive before final command_output event; validate JSON structure of each event
-  - Test streaming with `show_agent_traces=false`: verify only command_output event is emitted
-  - Test streaming error handling: verify `event: error` emission when turn fails
-
-#### 15. Future Enhancements (as enumerated in the spec)
-- WebSocket support as an alternative to SSE for bidirectional communication
-- Session TTL and eviction policy; persistence layer for sessions if required
-- Richer observability: correlate CLI trace colors to structured HTTP traces
-- Security hardening: workflow/path allow‑list, authn/z
-
-#### 16. Design Principles Recap
-- **Minimal**: Only implement explicitly specified features and behaviors.
-- **Modular**: Keep API, session management, workflow bridging, persistence, and env loading as separate concerns with clear interfaces.
-- **Parity**: Mirror the CLI runner’s semantics for initialization and single‑turn orchestration.
-- **Observability**: Include traces in responses only when enabled; always log with sufficient context.
+#### 14. Testing Guidance
+- Parse NDJSON on `/invoke_agent_stream`: verify trace records arrive before the final `command_output` record; validate structure.
+- Verify `/invoke_agent` returns `traces` array populated when produced.
+- Concurrency: ensure 409 when a turn is in progress.
+- Timeouts: ensure 504 when no `CommandOutput` arrives within `timeout_seconds`.
 
 
