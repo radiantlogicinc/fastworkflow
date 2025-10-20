@@ -147,7 +147,8 @@
             "name": "run_hello_world_with_fastapi_mcp",
             "type": "debugpy",
             "request": "launch",
-            "module": "services.run_fastapi_mcp.main",
+            "module": "fastworkflow.run_fastapi_mcp",
+            "python": "${workspaceFolder}/.venv/bin/python",
             "justMyCode": false,
             "env": {
                 "PYTHONPATH": "${workspaceFolder}/"

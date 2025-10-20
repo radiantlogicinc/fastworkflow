@@ -217,6 +217,8 @@ def load_args():
     parser.add_argument("--startup_command", required=False)
     parser.add_argument("--startup_action", required=False)  # JSON string
     parser.add_argument("--project_folderpath", required=False)
+    parser.add_argument("--port", type=int, default=8000, help="Port to run the server on (default: 8000)")
+    parser.add_argument("--host", default="0.0.0.0", help="Host to bind the server to (default: 0.0.0.0)")
     return parser.parse_args()
 
 ARGS = load_args()
@@ -1202,5 +1204,11 @@ setup_mcp(
 # Main
 # ============================================================================
 
+def main():
+    """Entry point for the FastAPI MCP server."""
+    host = ARGS.host if hasattr(ARGS, 'host') else "0.0.0.0"
+    port = ARGS.port if hasattr(ARGS, 'port') else 8000
+    uvicorn.run(app, host=host, port=port)
+
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    main()

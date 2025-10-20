@@ -273,6 +273,32 @@ def add_run_parser(subparsers):
     parser_run.add_argument("--project_folderpath", help="Optional path to project folder containing application code", default=None)
     parser_run.set_defaults(func=lambda args: run_with_defaults(args))
 
+def add_run_fastapi_mcp_parser(subparsers):
+    """Add subparser for the 'run_fastapi_mcp' command."""
+    parser_run_fastapi_mcp = subparsers.add_parser("run_fastapi_mcp", help="Run a workflow as a FastAPI server with MCP support.")
+    parser_run_fastapi_mcp.add_argument("workflow_path", help="Path to the workflow folder")
+    
+    # Default env files will be determined at runtime based on the workflow path
+    parser_run_fastapi_mcp.add_argument(
+        "env_file_path",
+        nargs='?',
+        default=None,
+        help="Path to the environment file (default: .env in current directory, or bundled env file for examples)",
+    )
+    parser_run_fastapi_mcp.add_argument(
+        "passwords_file_path",
+        nargs='?',
+        default=None,
+        help="Path to the passwords file (default: passwords.env in current directory, or bundled env file for examples)",
+    )
+    parser_run_fastapi_mcp.add_argument("--context", help="Optional context (JSON string)", default=None)
+    parser_run_fastapi_mcp.add_argument("--startup_command", help="Optional startup command", default=None)
+    parser_run_fastapi_mcp.add_argument("--startup_action", help="Optional startup action (JSON string)", default=None)
+    parser_run_fastapi_mcp.add_argument("--project_folderpath", help="Optional path to project folder containing application code", default=None)
+    parser_run_fastapi_mcp.add_argument("--port", type=int, default=8000, help="Port to run the FastAPI server on (default: 8000)")
+    parser_run_fastapi_mcp.add_argument("--host", default="0.0.0.0", help="Host to bind the FastAPI server to (default: 0.0.0.0)")
+    parser_run_fastapi_mcp.set_defaults(func=lambda args: run_fastapi_mcp_with_defaults(args))
+
 def train_with_defaults(args):  # sourcery skip: extract-duplicate-method
     """Wrapper for train_main that sets default env file paths based on context."""
     if args.env_file_path is None or args.passwords_file_path is None:
@@ -353,6 +379,63 @@ def run_with_defaults(args):  # sourcery skip: extract-duplicate-method
     from .run.__main__ import run_main as _run_main
     return _run_main(args)
 
+def run_fastapi_mcp_with_defaults(args):  # sourcery skip: extract-duplicate-method
+    """Wrapper for fastapi mcp server that sets default env file paths based on context."""
+    if args.env_file_path is None or args.passwords_file_path is None:
+        default_env, default_passwords = find_default_env_files(args.workflow_path)
+    if args.env_file_path is None:
+        args.env_file_path = default_env
+    if args.passwords_file_path is None:
+        args.passwords_file_path = default_passwords
+
+    # Check if the files exist and provide helpful error messages
+    if not os.path.exists(args.env_file_path):
+        print(f"Error: Environment file not found at: {args.env_file_path}", file=sys.stderr)
+        # Check if this is an example workflow
+        if "/examples/" in str(args.workflow_path) or "\\examples\\" in str(args.workflow_path):
+            example_name = os.path.basename(args.workflow_path)
+            print("\nThis appears to be an example workflow. Please run:")
+            print(f"  fastworkflow examples fetch {example_name}")
+            print(f"  fastworkflow run_fastapi_mcp ./examples/{example_name} ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env")
+        else:
+            print("\nPlease ensure this file exists with required environment variables.")
+            print("You can create a basic .env file in your current directory.")
+        sys.exit(1)
+
+    if not os.path.exists(args.passwords_file_path):
+        print(f"Error: Passwords file not found at: {args.passwords_file_path}", file=sys.stderr)
+        # Check if this is an example workflow
+        if "/examples/" in str(args.workflow_path) or "\\examples\\" in str(args.workflow_path):
+            example_name = os.path.basename(args.workflow_path)
+            print("\nThis appears to be an example workflow. Please run:")
+            print(f"  fastworkflow examples fetch {example_name}")
+            print(f"  fastworkflow run_fastapi_mcp ./examples/{example_name} ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env")
+        else:
+            print("\nPlease ensure this file exists with required API keys.")
+            print("You can create a basic passwords.env file in your current directory.")
+        sys.exit(1)
+
+    # Use subprocess to run python -m fastworkflow.run_fastapi_mcp with the correct arguments
+    cmd = [
+        sys.executable, '-m', 'fastworkflow.run_fastapi_mcp',
+        '--workflow_path', args.workflow_path,
+        '--env_file_path', args.env_file_path,
+        '--passwords_file_path', args.passwords_file_path,
+        '--port', str(args.port),
+        '--host', args.host,
+    ]
+    if args.context:
+        cmd.extend(['--context', args.context])
+    if args.startup_command:
+        cmd.extend(['--startup_command', args.startup_command])
+    if args.startup_action:
+        cmd.extend(['--startup_action', args.startup_action])
+    if args.project_folderpath:
+        cmd.extend(['--project_folderpath', args.project_folderpath])
+    
+    # Run the subprocess
+    return subprocess.run(cmd).returncode
+
 def main():
     """Main function for the fastworkflow CLI."""
     
@@ -380,6 +463,7 @@ def main():
     add_refine_parser(subparsers)
     add_train_parser(subparsers)
     add_run_parser(subparsers)
+    add_run_fastapi_mcp_parser(subparsers)
 
     try:
         args = parser.parse_args()
