@@ -99,10 +99,10 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     # Extract command name and parameters from command_output
     name = command_output.command_name
     params = command_output.command_parameters
-    
+
     # Handle parameter serialization
     params_dict = params.model_dump() if params else None
-    
+
     # Extract response text
     response_text = ""
     if command_output.command_responses:
@@ -135,8 +135,81 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     with open("action.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    if 'PARAMETER EXTRACTION ERROR' in response_text or 'The command is ambiguous' in response_text:
-        abort_confirmation = _execute_workflow_query('abort', chat_session_obj = chat_session_obj)
+    # Check workflow context to determine if we're in an error state that needs specialized handling
+    cme_workflow = chat_session_obj.cme_workflow
+    nlu_stage = cme_workflow.context.get("NLU_Pipeline_Stage")
+
+    # Handle intent ambiguity clarification state with specialized agent
+    if nlu_stage == fastworkflow.NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION:
+        if intent_agent := chat_session_obj.intent_clarification_agent:
+            # Get suggested commands from intent detection system
+            from fastworkflow._workflows.command_metadata_extraction.intent_detection import CommandNamePrediction
+            predictor = CommandNamePrediction(cme_workflow)
+            suggested_commands = predictor._get_suggested_commands(predictor.path)
+
+            suggested_commands = list(suggested_commands) if suggested_commands is not None else []
+
+            # Get metadata for only the suggested commands
+            current_workflow = chat_session_obj.get_active_workflow()
+            suggested_commands_metadata = CommandMetadataAPI.get_suggested_commands_metadata(
+                subject_workflow_path=current_workflow.folderpath,
+                cme_workflow_path=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
+                active_context_name=current_workflow.current_command_context_name,
+                suggested_command_names=suggested_commands
+            )
+
+            # Get the workflow agent's trajectory and inputs for context
+            workflow_tool_agent = chat_session_obj.workflow_tool_agent
+            agent_inputs = workflow_tool_agent.inputs if workflow_tool_agent else {}
+            agent_trajectory = workflow_tool_agent.current_trajectory if workflow_tool_agent else {}
+
+            lm = dspy_utils.get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")
+            with dspy.context(lm=lm):
+                result = intent_agent(
+                    original_command=command,
+                    error_message=response_text,
+                    agent_inputs=agent_inputs,
+                    agent_trajectory=agent_trajectory,
+                    suggested_commands_metadata=suggested_commands_metadata
+                )
+            # The clarified command should have the correct name with all original parameters
+            clarified_cmd = result.clarified_command if hasattr(result, 'clarified_command') else str(result)
+            # Execute the clarified command
+            return _execute_workflow_query(clarified_cmd, chat_session_obj=chat_session_obj)
+        else:
+            # No intent clarification agent available, fall back to abort
+            abort_confirmation = _execute_workflow_query('abort', chat_session_obj=chat_session_obj)
+            return f'{response_text}\n{abort_confirmation}'
+
+    # Handle intent misunderstanding clarification state with specialized agent
+    if nlu_stage == fastworkflow.NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION:
+        if intent_agent := chat_session_obj.intent_clarification_agent:
+            # Get the workflow agent's trajectory and inputs for context
+            workflow_tool_agent = chat_session_obj.workflow_tool_agent
+            agent_inputs = workflow_tool_agent.inputs if workflow_tool_agent else {}
+            agent_trajectory = workflow_tool_agent.current_trajectory if workflow_tool_agent else {}
+
+            lm = dspy_utils.get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")
+            with dspy.context(lm=lm):
+                result = intent_agent(
+                    original_command=command,
+                    error_message=response_text,
+                    agent_inputs=agent_inputs,
+                    agent_trajectory=agent_trajectory,
+                    suggested_commands_metadata=""
+                )
+
+            clarified_cmd = result.clarified_command if hasattr(result, 'clarified_command') else str(result)
+
+            return _execute_workflow_query(clarified_cmd, chat_session_obj=chat_session_obj)
+        else:
+            # No intent clarification agent available, fall back to abort
+            abort_confirmation = _execute_workflow_query('abort', chat_session_obj=chat_session_obj)
+            return f'{response_text}\n{abort_confirmation}'
+
+    # Handle parameter extraction errors with abort
+    if nlu_stage == fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION and not command_output.success:
+        abort_confirmation = _execute_workflow_query('abort', chat_session_obj=chat_session_obj)
         return f'{response_text}\n{abort_confirmation}'
 
     return response_text

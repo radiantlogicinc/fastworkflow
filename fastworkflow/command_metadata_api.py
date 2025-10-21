@@ -614,6 +614,56 @@ class CommandMetadataAPI:
         return "\n".join(combined_lines)
 
     @staticmethod
+    def get_suggested_commands_metadata(
+        subject_workflow_path: str,
+        cme_workflow_path: str,
+        active_context_name: str,
+        suggested_command_names: list[str],
+        for_agents: bool = False,
+    ) -> str:
+        """
+        Get metadata display text for ONLY the suggested commands.
+
+        Args:
+            subject_workflow_path: Path to the subject workflow
+            cme_workflow_path: Path to the CME workflow
+            active_context_name: Active context name
+            suggested_command_names: List of suggested command names (can be short names or qualified)
+            for_agents: Include agent-specific fields
+
+        Returns:
+            YAML-like formatted string with metadata for suggested commands only
+        """
+        if not suggested_command_names:
+            return "No suggested commands provided."
+
+        parts: list[str] = []
+        for suggested_cmd in suggested_command_names:
+            # Try to get metadata for this command
+            # The command name could be qualified (Context/command) or short (command)
+            if part := CommandMetadataAPI.get_command_display_text_for_command(
+                subject_workflow_path=subject_workflow_path,
+                cme_workflow_path=cme_workflow_path,
+                active_context_name=active_context_name,
+                qualified_command_name=suggested_cmd,
+                for_agents=for_agents,
+            ):
+                parts.append(part)
+
+        if not parts:
+            return "No metadata available for suggested commands."
+
+        # Combine all parts with header
+        combined_lines: list[str] = ["Suggested commands with metadata:"]
+        for idx, text in enumerate(parts):
+            lines = text.splitlines()
+            if idx > 0:
+                combined_lines.append("")  # Blank line separator
+            combined_lines.extend(lines)
+
+        return "\n".join(combined_lines)
+
+    @staticmethod
     def get_command_display_text_for_command(
         subject_workflow_path: str,
         cme_workflow_path: str,
