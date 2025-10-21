@@ -7,6 +7,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
+from fastworkflow.utils.logging import logger
+
 # Normalize arguments so logically identical calls share the same cache key
 @lru_cache(maxsize=128)
 def get_module(module_path: str, search_root: Optional[str] = None) -> Any:
@@ -90,12 +92,10 @@ def get_module(module_path: str, search_root: Optional[str] = None) -> Any:
         spec.loader.exec_module(module)
         return module
 
-    except ImportError as e:
-        # re-raise with clearer context
+    except Exception as e:
+        logger.critical(f"Could not import module from path: {module_path}. Error: {e}")
         raise ImportError(
             f"Could not import module from path: {module_path}. Error: {e}") from e
-    except Exception:
-        return None
 
 def get_module_import_path(file_path: str, source_dir: str) -> str:
     """
