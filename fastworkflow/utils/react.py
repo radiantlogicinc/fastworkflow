@@ -67,13 +67,17 @@ class fastWorkflowReAct(Module):
             args={},
         )
 
-        for idx, tool in enumerate(tools.values()):
-            instr.append(f"({idx + 1}) {tool}")
+        instr.extend(f"({idx + 1}) {tool}" for idx, tool in enumerate(tools.values()))
         instr.append("When providing `next_tool_args`, the value inside the field must be in JSON format")
 
+        # Build the ReAct signature with trajectory and available_commands inputs.
+        # available_commands is injected into system message by CommandsSystemPreludeAdapter
+        # (see fastworkflow/utils/chat_adapter.py) and is NOT included in the trajectory
+        # formatting to avoid token bloat across iterations.
         react_signature = (
             dspy.Signature({**signature.input_fields}, "\n".join(instr))
             .append("trajectory", dspy.InputField(), type_=str)
+            .append("available_commands", dspy.InputField(), type_=str)
             .append("next_thought", dspy.OutputField(), type_=str)
             .append("next_tool_name", dspy.OutputField(), type_=Literal[tuple(tools.keys())])
             .append("next_tool_args", dspy.OutputField(), type_=dict[str, Any])
@@ -82,7 +86,7 @@ class fastWorkflowReAct(Module):
         fallback_signature = dspy.Signature(
             {**signature.input_fields, **signature.output_fields},
             signature.instructions,
-        ).append("trajectory", dspy.InputField(), type_=str)
+        ).append("trajectory", dspy.InputField(), type_=str).append("available_commands", dspy.InputField(), type_=str)
 
         self.tools = tools
         self.react = dspy.Predict(react_signature)

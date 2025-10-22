@@ -467,15 +467,28 @@ class ChatSession:
             self
         )
 
+        # Get available commands for current context and pass to agent.
+        # The CommandsSystemPreludeAdapter will inject these commands into the system 
+        # message, keeping them out of the trajectory to avoid token bloat while still 
+        # providing context-specific command info.
+        from fastworkflow.workflow_agent import _what_can_i_do
+        available_commands = _what_can_i_do(self)
+
         lm = dspy_utils.get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")
         from dspy.utils.exceptions import AdapterParseError
+        from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
+        
+        # Use CommandsSystemPreludeAdapter specifically for workflow agent calls
+        agent_adapter = CommandsSystemPreludeAdapter()
+        
         # Retry logic for AdapterParseError
         max_retries = 2
         for attempt in range(max_retries):
             try:
-                with dspy.context(lm=lm, adapter=dspy.ChatAdapter()):
+                with dspy.context(lm=lm, adapter=agent_adapter):
                     agent_result = self._workflow_tool_agent(
-                        user_query=command_info_and_refined_message_with_todolist
+                        user_query=command_info_and_refined_message_with_todolist,
+                        available_commands=available_commands
                     )
                 break  # Success, exit retry loop
             except AdapterParseError as _:
