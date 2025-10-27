@@ -2,6 +2,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from litellm import ContextWindowExceededError
+from litellm import exceptions as litellm_exceptions
 
 import dspy
 from dspy.adapters.types.tool import Tool
@@ -41,6 +42,7 @@ class fastWorkflowReAct(Module):
         super().__init__()
         self.signature = signature = ensure_signature(signature)
         self.max_iters = max_iters
+        self.iteration_counter = 0
 
         tools = [t if isinstance(t, Tool) else Tool(t) for t in tools]
         tools = {tool.name: tool for tool in tools}
@@ -105,7 +107,8 @@ class fastWorkflowReAct(Module):
 
         trajectory = {}
         max_iters = input_args.pop("max_iters", self.max_iters)
-        for idx in range(max_iters):
+        idx = 0
+        while True:
             try:
                 pred = self._call_with_potential_trajectory_truncation(self.react, trajectory, **input_args)
             except ValueError as err:
@@ -124,6 +127,12 @@ class fastWorkflowReAct(Module):
                 trajectory[f"observation_{idx}"] = f"Execution error in {pred.next_tool_name}: {_fmt_exc(err)}"
 
             if pred.next_tool_name == "finish":
+                break
+
+            idx += 1 # this is the counter for the index of the entire trajectory
+            self.iteration_counter += 1 # this counter just determines the number of times we run the react agent and it's reset everytime we call the user for clarification
+            if self.iteration_counter >= max_iters:
+                logger.warning("Max iterations reached")
                 break
 
         extract = self._call_with_potential_trajectory_truncation(self.extract, trajectory, **input_args)
@@ -161,6 +170,9 @@ class fastWorkflowReAct(Module):
                     **input_args,
                     trajectory=self._format_trajectory(trajectory),
                 )
+            except litellm_exceptions.BadRequestError: 
+                logger.warning("Trajectory exceeded the context window, truncating the oldest tool call information.")
+                trajectory = self.truncate_trajectory(trajectory)
             except ContextWindowExceededError:
                 logger.warning("Trajectory exceeded the context window, truncating the oldest tool call information.")
                 trajectory = self.truncate_trajectory(trajectory)

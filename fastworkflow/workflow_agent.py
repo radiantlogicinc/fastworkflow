@@ -208,7 +208,7 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
             return f'{response_text}\n{abort_confirmation}'
 
     # Handle parameter extraction errors with abort
-    if nlu_stage == fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION and not command_output.success:
+    if nlu_stage == fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION:
         abort_confirmation = _execute_workflow_query('abort', chat_session_obj=chat_session_obj)
         return f'{response_text}\n{abort_confirmation}'
 
@@ -326,6 +326,7 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
         The clarification_request must be plain text without any formatting.
         Note that using the wrong command name can produce missing information errors. Double-check with the what_can_i_do tool to verify that the correct command name is being used 
         """
+        chat_session_obj.workflow_tool_agent.iteration_counter = 0  # reset iteration counter, everytime we ask the user
         return _ask_user_tool(clarification_request, chat_session_obj=chat_session_obj)
 
     tools = [
