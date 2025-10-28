@@ -126,7 +126,8 @@ async def get_session_and_ensure_runtime(
         workflow_path=ARGS.workflow_path,
         context=json.loads(ARGS.context) if ARGS.context else None,
         startup_command=ARGS.startup_command,
-        startup_action=fastworkflow.Action(**json.loads(ARGS.startup_action)) if ARGS.startup_action else None
+        startup_action=fastworkflow.Action(**json.loads(ARGS.startup_action)) if ARGS.startup_action else None,
+        http_bearer_token=session.http_bearer_token
     )
     
     return session

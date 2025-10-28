@@ -43,7 +43,7 @@ def app_module(hello_world_workflow_path, env_files):
         "--env_file_path", env_file,
         "--passwords_file_path", passwords_file,
     ]
-    import fastworkflow.run_fastapi_mcp.main as main
+    import fastworkflow.run_fastapi_mcp.__main__ as main
     importlib.reload(main)
     
     import fastworkflow

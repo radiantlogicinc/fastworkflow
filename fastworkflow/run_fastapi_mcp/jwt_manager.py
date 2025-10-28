@@ -269,6 +269,14 @@ def verify_token(token: str, expected_type: str = "access") -> dict:
             logger.warning(f"Token decoding failed: {e}")
             raise JWTError(f"Failed to decode token: {e}") from e
         
+        # Manually check expiration even in unverified mode
+        if exp_timestamp := payload.get("exp"):
+            import time
+            current_time = int(time.time())
+            if exp_timestamp < current_time:
+                logger.warning(f"Token expired: exp={exp_timestamp}, now={current_time}")
+                raise JWTError("Token has expired")
+        
         # Validate token type for consistency (outside try-except to allow JWTError to propagate)
         if payload.get("type") != expected_type:
             raise JWTError(f"Invalid token type: expected {expected_type}, got {payload.get('type')}")

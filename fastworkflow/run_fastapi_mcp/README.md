@@ -82,6 +82,32 @@ uvicorn services.run_fastapi.main:app --workflow_path /path/to/workflow --expect
 - Tokens without valid signatures are rejected
 - Recommended for production deployments in untrusted environments
 
+### Token Access in Workflow Context
+
+JWT tokens are automatically passed to workflows via the `workflow_context` parameter as `http_bearer_token`. This allows workflows to access the bearer token for making authenticated API calls or forwarding authentication.
+
+**Important notes:**
+- The token is **only available to authenticated endpoints** (those using `get_session_and_ensure_runtime` dependency)
+- The token is stored in the workflow context dictionary under the key `http_bearer_token`
+- Token is **automatically updated** on every authenticated request, ensuring workflows always have the current valid token
+- Token expiration is **automatically verified** by `verify_token()` in both secure mode (`--expect_encrypted_jwt` flag) and trusted network mode
+- In secure mode: Full cryptographic signature verification + expiration checking
+- In trusted network mode: Expiration checking is performed (signature verification disabled)
+- Tokens should be treated as sensitive data and handled securely in workflows
+- The `/initialize` endpoint is unauthenticated and does NOT provide a token to the workflow context; tokens are only available after calling `/initialize` and using the returned token in subsequent requests
+
+**Example usage in workflow:**
+
+```python
+# In workflow code
+workflow_context = self._context  # Gets the workflow_context
+bearer_token = workflow_context.get('http_bearer_token')
+
+# Use token for API calls
+headers = {"Authorization": f"Bearer {bearer_token}"}
+response = requests.get("https://api.example.com/data", headers=headers)
+```
+
 ## API Endpoints (REST)
 
 ### `POST /initialize`

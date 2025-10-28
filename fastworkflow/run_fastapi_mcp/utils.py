@@ -42,6 +42,7 @@ class SessionData(BaseModel):
     issued_at: int  # Unix timestamp
     expires_at: int  # Unix timestamp
     jti: str  # JWT ID (unique token identifier)
+    http_bearer_token: Optional[str] = None  # The actual JWT token string for workflow context access
 
 
 class InvokeRequest(BaseModel):
@@ -174,13 +175,14 @@ def get_session_from_jwt(
     try:
         payload = verify_token(token, expected_type="access")
 
-        # Extract session data from payload
+        # Extract session data from payload, including the token for workflow context
         return SessionData(
             user_id=payload["sub"],
             token_type=payload["type"],
             issued_at=payload["iat"],
             expires_at=payload["exp"],
-            jti=payload["jti"]
+            jti=payload["jti"],
+            http_bearer_token=token  # Store the actual token for workflow access
         )
 
     except JWTError as e:
@@ -204,7 +206,8 @@ async def ensure_user_runtime_exists(
     context: Optional[dict] = None,
     startup_command: Optional[str] = None,
     startup_action: Optional['fastworkflow.Action'] = None,
-    stream_format: str = "ndjson"
+    stream_format: str = "ndjson",
+    http_bearer_token: Optional[str] = None
 ) -> None:
     """
     Ensure a user runtime exists in the session manager. If not, create it.
@@ -220,6 +223,7 @@ async def ensure_user_runtime_exists(
         startup_command: Optional startup command
         startup_action: Optional startup action
         stream_format: Stream format preference ("ndjson" or "sse", default "ndjson")
+        http_bearer_token: Optional JWT token to update in workflow context
         
     Raises:
         HTTPException: If session creation fails
@@ -228,7 +232,29 @@ async def ensure_user_runtime_exists(
     existing_runtime = await session_manager.get_session(user_id)
     if existing_runtime:
         logger.debug(f"Session for user_id {user_id} already exists, skipping creation")
+        
+        # Update the workflow's context with the current token if provided
+        if http_bearer_token and existing_runtime.chat_session:
+            active_workflow = existing_runtime.chat_session.get_active_workflow()
+            if active_workflow and active_workflow.context:
+                # Update the workflow's context with the current token
+                # Note: We mutate the dictionary in-place (no setter call), which means:
+                # 1. The change is immediate and visible to workflow code
+                # 2. The workflow is NOT marked dirty (won't persist to disk)
+                # 3. This is intentional for JWT tokens - we don't want to persist sensitive tokens
+                active_workflow.context['http_bearer_token'] = http_bearer_token
+                logger.debug(f"Updated http_bearer_token in workflow context for user_id {user_id}")
+        
         return
+    
+    # Prepare workflow context, ensuring http_bearer_token is available
+    if http_bearer_token:
+        if context:
+            # Add or replace http_bearer_token in the context
+            context['http_bearer_token'] = http_bearer_token
+        else:
+            # Initialize context with http_bearer_token
+            context = {'http_bearer_token': http_bearer_token}
     
     logger.info(f"Creating new session for user_id: {user_id}")
     
