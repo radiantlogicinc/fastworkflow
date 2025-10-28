@@ -407,7 +407,7 @@ Today's date is {today}.
                                         parsed = ast.literal_eval(text)
                                         if isinstance(parsed, list):
                                             return parsed
-                                # Fallback: comma-separated
+                                # Comma-separated values
                                 if "," in text:
                                     parts = [p.strip() for p in text.split(",")]
                                     cleaned = [
@@ -415,6 +415,12 @@ Today's date is {today}.
                                         for p in parts
                                     ]
                                     return cleaned
+                                # Single value - treat as a list with one element
+                                if text:
+                                    # Remove quotes if present
+                                    if len(text) >= 2 and ((text[0] == text[-1] == '"') or (text[0] == text[-1] == "'")):
+                                        return [text[1:-1]]
+                                    return [text]
                                 return None
 
                         def _coerce_scalar(expected_type: Type[Any], val: Any) -> Tuple[bool, Optional[Any]]:

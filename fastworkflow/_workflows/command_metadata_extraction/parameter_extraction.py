@@ -1,10 +1,7 @@
 import contextlib
 import sys
 import re
-import ast
-import json
-from typing import Dict, List, Optional, Any, Type, get_args, Union
-from enum import Enum
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel
 from pydantic_core import PydanticUndefined
@@ -296,158 +293,9 @@ class ParameterExtraction:
         return default_params.__class__.model_construct(**params_data)
 
     @staticmethod
-    def _parse_list_like_string(s: str) -> Optional[list]:
-        """Parse string into list - supports JSON, Python literal, comma-separated, or single value format."""
-        if not isinstance(s, str):
-            return None
-        text = s.strip()
-
-        # Try JSON list
-        if text.startswith("[") and text.endswith("]"):
-            with contextlib.suppress(Exception):
-                parsed = json.loads(text)
-                if isinstance(parsed, list):
-                    return parsed
-
-        # Try Python literal list
-        with contextlib.suppress(Exception):
-            parsed = ast.literal_eval(text)
-            if isinstance(parsed, list):
-                return parsed
-
-        # Comma-separated values (including single values)
-        if "," in text:
-            parts = [p.strip() for p in text.split(",")]
-            # Remove quotes if present and filter out empty strings
-            cleaned = [
-                (p[1:-1] if len(p) >= 2 and ((p[0] == p[-1] == '"') or (p[0] == p[-1] == "'")) else p)
-                for p in parts
-                if p.strip()  # Filter out empty strings
-            ]
-            return cleaned
-
-        # Single value - treat as a list with one element
-        if text:
-            # Remove quotes if present
-            if len(text) >= 2 and ((text[0] == text[-1] == '"') or (text[0] == text[-1] == "'")):
-                return [text[1:-1]]
-            return [text]
-
-        return None
-
-    @staticmethod
-    def _coerce_scalar(expected_type: Type[Any], val: Any) -> tuple[bool, Optional[Any]]:
-        """Coerce a value to the expected scalar type."""
-        # str
-        if expected_type is str:
-            return True, str(val)
-
-        # bool
-        if expected_type is bool:
-            if isinstance(val, bool):
-                return True, val
-            elif isinstance(val, str):
-                lower_val = val.lower().strip()
-                if lower_val in ('true', 'false'):
-                    return True, lower_val == 'true'
-                elif lower_val in ('0', '1'):
-                    return True, lower_val == '1'
-            elif isinstance(val, int):
-                return True, bool(val)
-            return False, None
-
-        # int
-        if expected_type is int:
-            if isinstance(val, bool):
-                return False, None
-            if isinstance(val, int):
-                return True, val
-            if isinstance(val, str):
-                with contextlib.suppress(Exception):
-                    return True, int(val.strip())
-            return False, None
-
-        # float
-        if expected_type is float:
-            if isinstance(val, (int, float)) and not isinstance(val, bool):
-                return True, float(val)
-            if isinstance(val, str):
-                with contextlib.suppress(Exception):
-                    return True, float(val.strip())
-            return False, None
-
-        # Enum
-        if isinstance(expected_type, type) and issubclass(expected_type, Enum):
-            if isinstance(val, expected_type):
-                return True, val
-            if isinstance(val, str):
-                for member in expected_type:
-                    if val == member.value or val.lower() == str(member.name).lower():
-                        return True, member
-            return False, None
-
-        # Unknown: accept if already instance
-        return (True, val) if isinstance(val, expected_type) else (False, None)
-
-    @staticmethod
-    def _coerce_to_type(field_type: Type[Any], value: str) -> Any:
-        """
-        Coerce a string value to the expected field type.
-        Handles list types, scalar types (int, float, bool, str), and Enums.
-        """
-        # Get candidate types (handle Union/Optional)
-        candidate_types: List[Type[Any]] = []
-        if hasattr(field_type, "__origin__") and field_type.__origin__ is Union:
-            for t in get_args(field_type):
-                if t is not type(None):  # noqa: E721
-                    candidate_types.append(t)
-        else:
-            candidate_types = [field_type]
-
-        # Try each candidate type
-        for t in candidate_types:
-            # Check if it's a list type
-            if hasattr(t, "__origin__") and t.__origin__ in (list, List):
-                inner_args = get_args(t)
-                inner_type = inner_args[0] if inner_args else str
-
-                # Parse list-like string
-                raw_list = ParameterExtraction._parse_list_like_string(value)
-                if raw_list is None:
-                    continue
-
-                # Coerce each element to inner type
-                coerced_list = []
-                all_ok = True
-                for item in raw_list:
-                    ok, coerced = ParameterExtraction._coerce_scalar(inner_type, item)
-                    if not ok:
-                        all_ok = False
-                        break
-                    coerced_list.append(coerced)
-
-                if all_ok:
-                    return coerced_list
-
-            # Try scalar types
-            elif t in (str, bool, int, float):
-                ok, coerced = ParameterExtraction._coerce_scalar(t, value)
-                if ok:
-                    return coerced
-
-            # Try Enum
-            elif isinstance(t, type) and issubclass(t, Enum):
-                ok, enum_val = ParameterExtraction._coerce_scalar(t, value)
-                if ok:
-                    return enum_val
-
-        # If no type conversion worked, return original value
-        return value
-
-    @staticmethod
     def _extract_parameters_from_xml(command: str, command_parameters_class: type[BaseModel]) -> Optional[BaseModel]:
         """
-        Extract parameters from XML-formatted command using regex with type coercion.
+        Extract parameters from XML-formatted command using regex.
 
         Returns:
             BaseModel instance with extracted parameters, or None if parsing fails
@@ -465,18 +313,22 @@ class ParameterExtraction:
             # Look for <field_name>value</field_name> pattern
             pattern = rf'<{re.escape(field_name)}>(.+?)</{re.escape(field_name)}>'
             if match := re.search(pattern, command, re.DOTALL):
-                raw_value = match[1].strip()
+                parameter_value = match[1].strip()
+                extracted_data[field_name] = parameter_value
 
-                # Get field type and coerce the value
+        # Check if we extracted values for ALL fields (safest criteria for LLM fallback)
+        all_fields_extracted = len(extracted_data) == len(field_names)
+
+        # Check if agent used example values
+        if all_fields_extracted:
+            for field_name, extracted_value in extracted_data.items():
                 field_info = command_parameters_class.model_fields[field_name]
-                field_type = field_info.annotation
+                examples = getattr(field_info, "examples", None)
+                if examples and extracted_value in examples:
+                    all_fields_extracted = False
+                    break
 
-                # Apply type coercion
-                coerced_value = ParameterExtraction._coerce_to_type(field_type, raw_value)
-                extracted_data[field_name] = coerced_value
-
-        # If we extracted at least one parameter, create the model
-        if extracted_data:
+        if all_fields_extracted:
             # Initialize all fields with their default values (if they exist) or None
             params_data = {}
             for field_name in field_names:
