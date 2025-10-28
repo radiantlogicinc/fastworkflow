@@ -34,6 +34,9 @@ PUBLIC_KEY_PATH = os.path.join(KEYS_DIR, "public_key.pem")
 _private_key: Optional[str] = None
 _public_key: Optional[str] = None
 
+# Flag to control JWT verification behavior (set from CLI)
+EXPECT_ENCRYPTED_JWT = True  # Default to secure mode
+
 
 def ensure_keys_directory() -> None:
     """Create jwt_keys directory if it doesn't exist."""
@@ -129,19 +132,42 @@ def load_or_generate_keys() -> tuple[str, str]:
     return _private_key, _public_key
 
 
+def set_jwt_verification_mode(expect_encrypted: bool) -> None:
+    """
+    Configure JWT verification mode for trusted network scenarios.
+    
+    When expect_encrypted=False, JWT tokens are decoded without signature verification.
+    This mode is ONLY suitable for trusted internal networks where JWT is used for
+    data transport rather than security.
+    
+    WARNING: Disabling signature verification allows any client to forge tokens.
+    Only use in controlled environments.
+    """
+    global EXPECT_ENCRYPTED_JWT
+    EXPECT_ENCRYPTED_JWT = expect_encrypted
+    if not expect_encrypted:
+        logger.warning(
+            "JWT signature verification DISABLED. "
+            "Tokens will be accepted without cryptographic validation. "
+            "Only use in trusted internal networks."
+        )
+
+
 def create_access_token(user_id: str, expires_days: int | None = None) -> str:
     """
     Create a JWT access token for a user.
+    
+    Behavior depends on EXPECT_ENCRYPTED_JWT flag:
+    - If True: Creates a signed token using RSA algorithm
+    - If False: Creates an unsigned token for trusted network use
     
     Args:
         user_id: User identifier
         expires_days: Optional custom expiration in days. If None, uses JWT_ACCESS_TOKEN_EXPIRE_MINUTES (default 60 minutes).
         
     Returns:
-        str: Encoded JWT access token
+        str: Encoded JWT access token (signed or unsigned based on EXPECT_ENCRYPTED_JWT)
     """
-    private_key, _ = load_or_generate_keys()
-    
     now = datetime.now(timezone.utc)
     if expires_days is not None:
         expire = now + timedelta(days=expires_days)
@@ -159,8 +185,17 @@ def create_access_token(user_id: str, expires_days: int | None = None) -> str:
         "aud": JWT_AUDIENCE  # Audience
     }
     
-    token = jwt.encode(payload, private_key, algorithm=JWT_ALGORITHM)
-    logger.debug(f"Created access token for user_id: {user_id}, expires: {expire.isoformat()}")
+    if EXPECT_ENCRYPTED_JWT:
+        # Secure mode: create signed token
+        private_key, _ = load_or_generate_keys()
+        token = jwt.encode(payload, private_key, algorithm=JWT_ALGORITHM)
+        logger.debug(f"Created signed access token for user_id: {user_id}, expires: {expire.isoformat()}")
+    else:
+        # Trusted network mode: create unsigned token using HS256 with empty key
+        # This creates a JWT that can be decoded without verification
+        token = jwt.encode(payload, "", algorithm="HS256")
+        logger.debug(f"Created unsigned access token for user_id: {user_id}, expires: {expire.isoformat()}")
+    
     return token
 
 
@@ -168,14 +203,16 @@ def create_refresh_token(user_id: str) -> str:
     """
     Create a JWT refresh token for a user.
     
+    Behavior depends on EXPECT_ENCRYPTED_JWT flag:
+    - If True: Creates a signed token using RSA algorithm
+    - If False: Creates an unsigned token for trusted network use
+    
     Args:
         user_id: User identifier
         
     Returns:
-        str: Encoded JWT refresh token
+        str: Encoded JWT refresh token (signed or unsigned based on EXPECT_ENCRYPTED_JWT)
     """
-    private_key, _ = load_or_generate_keys()
-    
     now = datetime.now(timezone.utc)
     expire = now + timedelta(days=JWT_REFRESH_TOKEN_EXPIRE_DAYS)
     
@@ -190,14 +227,28 @@ def create_refresh_token(user_id: str) -> str:
         "aud": JWT_AUDIENCE  # Audience
     }
     
-    token = jwt.encode(payload, private_key, algorithm=JWT_ALGORITHM)
-    logger.debug(f"Created refresh token for user_id: {user_id}, expires: {expire.isoformat()}")
+    if EXPECT_ENCRYPTED_JWT:
+        # Secure mode: create signed token
+        private_key, _ = load_or_generate_keys()
+        token = jwt.encode(payload, private_key, algorithm=JWT_ALGORITHM)
+        logger.debug(f"Created signed refresh token for user_id: {user_id}, expires: {expire.isoformat()}")
+    else:
+        # Trusted network mode: create unsigned token using HS256 with empty key
+        # This creates a JWT that can be decoded without verification
+        token = jwt.encode(payload, "", algorithm="HS256")
+        logger.debug(f"Created unsigned refresh token for user_id: {user_id}, expires: {expire.isoformat()}")
+    
     return token
 
 
 def verify_token(token: str, expected_type: str = "access") -> dict:
+    # sourcery skip: extract-duplicate-method
     """
     Verify and decode a JWT token.
+    
+    Behavior depends on EXPECT_ENCRYPTED_JWT flag:
+    - If True (default): Full cryptographic verification with signature check
+    - If False: Extract payload without verification (trusted network mode)
     
     Args:
         token: JWT token string
@@ -209,8 +260,25 @@ def verify_token(token: str, expected_type: str = "access") -> dict:
     Raises:
         JWTError: If token is invalid, expired, or type mismatch
     """
+    if not EXPECT_ENCRYPTED_JWT:
+        # Trusted network mode: decode without verification (accepts both unsigned and signed tokens)
+        try:
+            # Use unverified decoding - works for any JWT regardless of algorithm or signing
+            payload = jwt.get_unverified_claims(token)
+        except Exception as e:
+            logger.warning(f"Token decoding failed: {e}")
+            raise JWTError(f"Failed to decode token: {e}") from e
+        
+        # Validate token type for consistency (outside try-except to allow JWTError to propagate)
+        if payload.get("type") != expected_type:
+            raise JWTError(f"Invalid token type: expected {expected_type}, got {payload.get('type')}")
+        
+        logger.debug(f"Token decoded (unverified mode): user_id={payload.get('sub')}, type={expected_type}")
+        return payload
+
+    # Standard mode: full verification (existing code)
     _, public_key = load_or_generate_keys()
-    
+
     try:
         # Decode and verify token
         payload = jwt.decode(
@@ -220,14 +288,14 @@ def verify_token(token: str, expected_type: str = "access") -> dict:
             issuer=JWT_ISSUER,
             audience=JWT_AUDIENCE
         )
-        
+
         # Verify token type
         if payload.get("type") != expected_type:
             raise JWTError(f"Invalid token type: expected {expected_type}, got {payload.get('type')}")
-        
+
         logger.debug(f"Token verified successfully: user_id={payload.get('sub')}, type={expected_type}")
         return payload
-        
+
     except JWTError as e:
         logger.warning(f"Token verification failed: {e}")
         raise
@@ -247,8 +315,7 @@ def get_token_expiry(token: str) -> Optional[datetime]:
     try:
         # Decode without verification (just to inspect claims)
         payload = jwt.get_unverified_claims(token)
-        exp_timestamp = payload.get("exp")
-        if exp_timestamp:
+        if exp_timestamp := payload.get("exp"):
             return datetime.fromtimestamp(exp_timestamp, tz=timezone.utc)
     except Exception as e:
         logger.debug(f"Failed to get token expiry: {e}")

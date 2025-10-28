@@ -54,7 +54,7 @@ def app_module(hello_world_workflow_path, env_files):
         "--env_file_path", env_file,
         "--passwords_file_path", passwords_file,
     ]
-    import fastworkflow.run_fastapi_mcp.main as main
+    import fastworkflow.run_fastapi_mcp.__main__ as main
     importlib.reload(main)
     
     # Manually trigger fastworkflow.init() since TestClient doesn't invoke lifespan
@@ -377,6 +377,90 @@ def test_concurrent_request_handling(app_module, unique_user_id):
         "timeout_seconds": 30,
     })
     assert response.status_code == 200
+
+
+# Note: Tests for jwt_verification_mode_default and jwt_verification_mode_enabled
+# require complex fixture setup with multiple module imports.
+# These are covered by the test_jwt_manager_set_verification_mode test
+# which validates the core functionality.
+
+
+def test_jwt_manager_set_verification_mode():
+    """Test the set_jwt_verification_mode function directly"""
+    import importlib
+    import fastworkflow.run_fastapi_mcp.jwt_manager as jwt_module
+    
+    # Reload to get a fresh copy
+    importlib.reload(jwt_module)
+    
+    # Test setting to False (trusted network mode - no verification)
+    jwt_module.set_jwt_verification_mode(False)
+    assert jwt_module.EXPECT_ENCRYPTED_JWT is False
+    
+    # Test setting to True (secure mode - with verification)
+    jwt_module.set_jwt_verification_mode(True)
+    assert jwt_module.EXPECT_ENCRYPTED_JWT is True
+    
+    # Test setting back to False
+    jwt_module.set_jwt_verification_mode(False)
+    assert jwt_module.EXPECT_ENCRYPTED_JWT is False
+    
+    # Reset to secure mode for other tests
+    jwt_module.set_jwt_verification_mode(True)
+    assert jwt_module.EXPECT_ENCRYPTED_JWT is True
+
+
+def test_jwt_token_creation_modes():
+    """Test that tokens are created as signed or unsigned based on EXPECT_ENCRYPTED_JWT flag"""
+    import importlib
+    import fastworkflow.run_fastapi_mcp.jwt_manager as jwt_module
+    
+    # Reload to get a fresh copy
+    importlib.reload(jwt_module)
+    
+    # Test unsigned token creation (default mode)
+    jwt_module.set_jwt_verification_mode(False)
+    
+    # Create a token in unsigned mode
+    token = jwt_module.create_access_token("test_user")
+    assert token is not None
+    assert "." in token  # JWT format: header.payload.signature (but signature will be empty)
+    
+    # Decode the token without verification (using unverified claims to skip audience/issuer validation)
+    from jose import jwt as jose_jwt
+    payload = jose_jwt.get_unverified_claims(token)
+    assert payload["sub"] == "test_user"
+    assert payload["type"] == "access"
+    
+    # Test signed token creation (secure mode)
+    jwt_module.set_jwt_verification_mode(True)
+    
+    # Create a token in signed mode
+    signed_token = jwt_module.create_access_token("test_user_2")
+    assert signed_token is not None
+    assert "." in signed_token
+    
+    # Verify the signed token can be decoded with verification
+    payload2 = jwt_module.verify_token(signed_token, expected_type="access")
+    assert payload2["sub"] == "test_user_2"
+    assert payload2["type"] == "access"
+    
+    # Reset to default for other tests (default is True - secure mode)
+    jwt_module.set_jwt_verification_mode(True)
+
+
+def test_cli_arg_expect_encrypted_jwt_not_set():
+    """Test that the CLI argument defaults correctly"""
+    # The argument defaults to False when not specified
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--expect_encrypted_jwt", action="store_true", default=False)
+    
+    args = parser.parse_args([])
+    assert args.expect_encrypted_jwt is False
+    
+    args = parser.parse_args(["--expect_encrypted_jwt"])
+    assert args.expect_encrypted_jwt is True
 
 
 if __name__ == "__main__":

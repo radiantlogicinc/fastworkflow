@@ -169,11 +169,11 @@ def get_session_from_jwt(
     """
     # Extract token from credentials (already validated by HTTPBearer)
     token = credentials.credentials
-    
+
     # Verify and decode token
     try:
         payload = verify_token(token, expected_type="access")
-        
+
         # Extract session data from payload
         return SessionData(
             user_id=payload["sub"],
@@ -182,19 +182,19 @@ def get_session_from_jwt(
             expires_at=payload["exp"],
             jti=payload["jti"]
         )
-        
+
     except JWTError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Invalid or expired token: {str(e)}",
-            headers={"WWW-Authenticate": "Bearer"}
-        )
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from e
     except KeyError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Token missing required claim: {str(e)}",
-            headers={"WWW-Authenticate": "Bearer"}
-        )
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from e
 
 
 async def ensure_user_runtime_exists(

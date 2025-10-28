@@ -47,11 +47,40 @@ Configure in your environment (loaded at process startup via CLI args or env loa
 | Variable | Description | Required | Default |
 |----------|-------------|----------|---------|
 | `SPEEDDICT_FOLDERNAME` | Base folder for workflow contexts and conversation storage | Yes | - |
+| `--expect_encrypted_jwt` | Enable full JWT signature verification (pass flag to require signed tokens) | No | False (no verification by default) |
 
 Notes:
 - Conversation DBs are stored under `SPEEDDICT_FOLDERNAME/user_conversations` (directory is auto-created).
 - `/conversations` now accepts a `limit` query parameter (default `20`).
 - Shutdown waits up to 30 seconds for active turns (hard-coded).
+
+## JWT Verification Modes
+
+### Default Behavior: No Signature Verification
+By default, the service does NOT verify JWT signatures, accepting unsigned tokens for trusted internal networks where JWT is used purely for data transport:
+
+```bash
+uvicorn services.run_fastapi.main:app --workflow_path /path/to/workflow
+```
+
+**Use cases** (no verification):
+- Controlled internal networks with network-level security
+- Systems where JWT carries non-sensitive routing information
+- Trusted environments where data transport is the primary concern
+
+The service logs a warning on startup when running in this mode.
+
+### Secure Mode: Enable Signature Verification
+For production deployments requiring full RSA signature verification:
+
+```bash
+uvicorn services.run_fastapi.main:app --workflow_path /path/to/workflow --expect_encrypted_jwt
+```
+
+**Secure mode** (with `--expect_encrypted_jwt` flag):
+- JWT tokens are cryptographically verified using RSA signatures
+- Tokens without valid signatures are rejected
+- Recommended for production deployments in untrusted environments
 
 ## API Endpoints (REST)
 

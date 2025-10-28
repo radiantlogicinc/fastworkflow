@@ -61,6 +61,7 @@ from .jwt_manager import (
     create_access_token,
     create_refresh_token,
     verify_token,
+    set_jwt_verification_mode,
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES
 )
 
@@ -148,6 +149,9 @@ async def lifespan(_app: FastAPI):
         if ARGS.passwords_file_path:
             env_vars.update(dotenv_values(ARGS.passwords_file_path))
         fastworkflow.init(env_vars=env_vars)
+        
+        # Configure JWT verification mode based on CLI parameter
+        set_jwt_verification_mode(ARGS.expect_encrypted_jwt)
 
     async def _active_turn_user_ids() -> list[str]:
         active: list[str] = []
@@ -219,6 +223,8 @@ def load_args():
     parser.add_argument("--project_folderpath", required=False)
     parser.add_argument("--port", type=int, default=8000, help="Port to run the server on (default: 8000)")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind the server to (default: 0.0.0.0)")
+    parser.add_argument("--expect_encrypted_jwt", action="store_true", default=False,
+                       help="Enable JWT signature verification (default: unsigned tokens accepted for trusted networks)")
     return parser.parse_args()
 
 ARGS = load_args()
@@ -251,13 +257,11 @@ def custom_openapi():
     
     # Enhance the auto-generated Bearer token security scheme with better documentation
     # The HTTPBearer dependency in utils.py creates the base scheme, we just improve it
-    if "components" in openapi_schema and "securitySchemes" in openapi_schema["components"]:
-        if "BearerAuth" in openapi_schema["components"]["securitySchemes"]:
-            # Update the description to be more helpful
-            openapi_schema["components"]["securitySchemes"]["BearerAuth"]["description"] = (
-                "JWT access token from /initialize or /refresh_token endpoint. "
-                "Enter ONLY the token (Swagger UI automatically adds 'Bearer ' prefix)"
-            )
+    if "components" in openapi_schema and "securitySchemes" in openapi_schema["components"] and "BearerAuth" in openapi_schema["components"]["securitySchemes"]:
+        openapi_schema["components"]["securitySchemes"]["BearerAuth"]["description"] = (
+            "JWT access token from /initialize or /refresh_token endpoint. "
+            "Enter ONLY the token (Swagger UI automatically adds 'Bearer ' prefix)"
+        )
     
     # Apply security globally to all endpoints except public ones
     for path, path_item in openapi_schema["paths"].items():
@@ -265,10 +269,8 @@ def custom_openapi():
         if path in ["/initialize", "/refresh_token", "/", "/admin/dump_all_conversations", "/admin/generate_mcp_token"]:
             continue
         for method in path_item:
-            if method in ["get", "post", "put", "delete", "patch"]:
-                # Ensure security is applied (should already be set by HTTPBearer dependency)
-                if "security" not in path_item[method]:
-                    path_item[method]["security"] = [{"BearerAuth": []}]
+            if method in ["get", "post", "put", "delete", "patch"] and "security" not in path_item[method]:
+                path_item[method]["security"] = [{"BearerAuth": []}]
     
     app.openapi_schema = openapi_schema
     return app.openapi_schema
