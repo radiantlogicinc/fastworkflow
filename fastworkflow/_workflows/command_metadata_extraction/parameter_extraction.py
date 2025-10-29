@@ -1,8 +1,10 @@
 import contextlib
 import sys
+import re
 from typing import Dict, List, Optional
 
 from pydantic import BaseModel
+from pydantic_core import PydanticUndefined
 
 import fastworkflow
 from fastworkflow.utils.logging import logger
@@ -59,11 +61,29 @@ class ParameterExtraction:
         if stored_params:
             new_params = self._extract_and_merge_missing_parameters(stored_params, self.command)
         else:
-            # Otherwise use the LLM-based extraction
-            new_params = input_for_param_extraction.extract_parameters(
-                command_parameters_class, 
-                self.command_name, 
-                app_workflow_folderpath)
+            # Check if we're in agentic mode (not assistant mode command)
+            is_agentic_mode = (
+                "is_assistant_mode_command" not in self.cme_workflow.context
+                and "run_as_agent" in self.app_workflow.context
+                and self.app_workflow.context["run_as_agent"]
+            )
+
+            if is_agentic_mode:
+                # Try regex-based extraction first in agentic mode
+                new_params = self._extract_parameters_from_xml(self.command, command_parameters_class)
+
+                # If regex extraction fails, fall back to LLM-based extraction
+                if new_params is None:
+                    new_params = input_for_param_extraction.extract_parameters(
+                        command_parameters_class,
+                        self.command_name,
+                        app_workflow_folderpath)
+            else:
+                # Use LLM-based extraction for assistant mode
+                new_params = input_for_param_extraction.extract_parameters(
+                    command_parameters_class,
+                    self.command_name,
+                    app_workflow_folderpath)
 
         is_valid, error_msg, suggestions, missing_invalid_fields = \
             input_for_param_extraction.validate_parameters(
@@ -271,6 +291,62 @@ class ParameterExtraction:
 
         # Construct model without validation
         return default_params.__class__.model_construct(**params_data)
+
+    @staticmethod
+    def _extract_parameters_from_xml(command: str, command_parameters_class: type[BaseModel]) -> Optional[BaseModel]:
+        """
+        Extract parameters from XML-formatted command using regex.
+
+        Returns:
+            BaseModel instance with extracted parameters, or None if parsing fails
+        """
+        field_names = list(command_parameters_class.model_fields.keys())
+
+        # If no parameters are defined, return empty model immediately
+        if not field_names:
+            return command_parameters_class.model_construct()
+
+        extracted_data = {}
+
+        # Try to extract each parameter using XML tags
+        for field_name in field_names:
+            # Look for <field_name>value</field_name> pattern
+            pattern = rf'<{re.escape(field_name)}>(.+?)</{re.escape(field_name)}>'
+            if match := re.search(pattern, command, re.DOTALL):
+                parameter_value = match[1].strip()
+                extracted_data[field_name] = parameter_value
+
+        # Check if we extracted values for ALL fields (safest criteria for LLM fallback)
+        all_fields_extracted = len(extracted_data) == len(field_names)
+
+        # Check if agent used example values
+        if all_fields_extracted:
+            for field_name, extracted_value in extracted_data.items():
+                field_info = command_parameters_class.model_fields[field_name]
+                examples = getattr(field_info, "examples", None)
+                if examples and extracted_value in examples:
+                    all_fields_extracted = False
+                    break
+
+        if all_fields_extracted:
+            # Initialize all fields with their default values (if they exist) or None
+            params_data = {}
+            for field_name in field_names:
+                field_info = command_parameters_class.model_fields[field_name]
+                if field_info.default is not PydanticUndefined:
+                    params_data[field_name] = field_info.default
+                elif field_info.default_factory is not None:
+                    params_data[field_name] = field_info.default_factory()
+                else:
+                    params_data[field_name] = None
+
+            # Update with extracted values
+            params_data |= extracted_data
+
+            # Construct model without validation
+            return command_parameters_class.model_construct(**params_data)
+
+        return None
 
     @staticmethod
     def _extract_and_merge_missing_parameters(stored_params: BaseModel, command: str):

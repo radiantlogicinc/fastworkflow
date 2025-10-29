@@ -114,7 +114,7 @@ def _get_commands_with_parameters(json_path):
         command_directory = json.load(f)
     
     # Extract the command metadata
-    commands_metadata = command_directory.get("map_commandkey_2_metadata", {})
+    commands_metadata = command_directory.get("map_command_2_metadata", {})
     
     # Initialize result dictionary
     commands_with_parameters = {}

@@ -407,7 +407,7 @@ Today's date is {today}.
                                         parsed = ast.literal_eval(text)
                                         if isinstance(parsed, list):
                                             return parsed
-                                # Fallback: comma-separated
+                                # Comma-separated values
                                 if "," in text:
                                     parts = [p.strip() for p in text.split(",")]
                                     cleaned = [
@@ -415,6 +415,12 @@ Today's date is {today}.
                                         for p in parts
                                     ]
                                     return cleaned
+                                # Single value - treat as a list with one element
+                                if text:
+                                    # Remove quotes if present
+                                    if len(text) >= 2 and ((text[0] == text[-1] == '"') or (text[0] == text[-1] == "'")):
+                                        return [text[1:-1]]
+                                    return [text]
                                 return None
 
                         def _coerce_scalar(expected_type: Type[Any], val: Any) -> Tuple[bool, Optional[Any]]:
@@ -511,7 +517,48 @@ Today's date is {today}.
 
                         if valid_by_type:
                             if corrected_value is not None:
-                                setattr(cmd_parameters, field_name, corrected_value)
+                                pattern = next(
+                                    (meta.pattern
+                                        for meta in getattr(field_info, "metadata", [])
+                                        if hasattr(meta, "pattern")),
+                                    None,
+                                )
+                                if pattern and field_value is not None and field_value != NOT_FOUND:
+                                    invalid_value = None
+                                    if hasattr(field_info, "json_schema_extra") and field_info.json_schema_extra:
+                                        invalid_value = field_info.json_schema_extra.get("invalid_value")
+
+                                    # if invalid_value and field_value == invalid_value:
+                                    #     invalid_fields.append(f"{field_name} '{field_value}'")
+                                    #     pattern_str = str(pattern)
+                                    #     examples = getattr(field_info, "examples", [])
+                                    #     example = examples[0] if examples else ""
+                                    #     all_suggestions[field_name] = [f"Please use the format matching pattern {pattern_str} (e.g., {example})"]
+                                    #     is_valid = False
+
+                                    # else:
+                                    pattern_regex = re.compile(pattern)
+                                    if not pattern_regex.fullmatch(str(field_value)):
+                                        invalid_fields.append(f"{field_name} '{field_value}'")
+                                        pattern_str = str(pattern)
+                                        examples = getattr(field_info, "examples", [])
+                                        example = examples[0] if examples else ""
+
+                                        invalid_fields.append(f"{field_name} '{field_value}'")
+                                        all_suggestions[field_name] = [f"Please use the format matching pattern {pattern_str} (e.g., {example})"]
+                                        is_valid = False
+                                    else:
+                                        try:
+                                            setattr(cmd_parameters, field_name, corrected_value)
+                                        except Exception as e:
+                                            logger.critical(f"Failed to set attribute {field_name} with value {corrected_value}")
+                                            raise e
+                                else:
+                                    try:
+                                        setattr(cmd_parameters, field_name, corrected_value)
+                                    except Exception as e:
+                                        logger.critical(f"Failed to set attribute {field_name} with value {corrected_value}")
+                                        raise e
                         else:
                             invalid_fields.append(f"{field_name} '{field_value}'")
                             all_suggestions[field_name] = build_type_suggestion()
@@ -538,35 +585,6 @@ Today's date is {today}.
                     ]:
                     missing_fields.append(field_name)
                     is_valid = False
-
-                pattern = next(
-                    (meta.pattern
-                        for meta in getattr(field_info, "metadata", [])
-                        if hasattr(meta, "pattern")),
-                    None,
-                )
-                if pattern and field_value is not None and field_value != NOT_FOUND:
-                    invalid_value = None
-                    if hasattr(field_info, "json_schema_extra") and field_info.json_schema_extra:
-                        invalid_value = field_info.json_schema_extra.get("invalid_value")
-
-                    if invalid_value and field_value == invalid_value:
-                        invalid_fields.append(f"{field_name} '{field_value}'")
-                        pattern_str = str(pattern)
-                        examples = getattr(field_info, "examples", [])
-                        example = examples[0] if examples else ""
-                        all_suggestions[field_name] = [f"Please use the format matching pattern {pattern_str} (e.g., {example})"]
-                        is_valid = False
-
-                    else:
-                        pattern_regex = re.compile(pattern)
-                        if not pattern_regex.fullmatch(str(field_value)):
-                            invalid_fields.append(f"{field_name} '{field_value}'")
-                            pattern_str = str(pattern)
-                            examples = getattr(field_info, "examples", [])
-                            example = examples[0] if examples else ""
-                            all_suggestions[field_name] = [f"Please use the format matching pattern {pattern_str} (e.g., {example})"]
-                            is_valid = False
 
         for field_name, field_info in type(cmd_parameters).model_fields.items():
             field_value = getattr(cmd_parameters, field_name, None)

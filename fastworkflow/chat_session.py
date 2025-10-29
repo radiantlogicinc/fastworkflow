@@ -133,7 +133,8 @@ class ChatSession:
         
         # Initialize agent-related attributes
         self._run_as_agent = run_as_agent
-        self._workflow_tool_agent = None            
+        self._workflow_tool_agent = None
+        self._intent_clarification_agent = None            
         
         # Create the command metadata extraction workflow with a unique ID
         self._cme_workflow = fastworkflow.Workflow.create(
@@ -272,13 +273,23 @@ class ChatSession:
         self._current_workflow.context["run_as_agent"] = True
 
         # Initialize the workflow tool agent
-        from fastworkflow.workflow_agent import initialize_workflow_tool_agent       
+        from fastworkflow.workflow_agent import initialize_workflow_tool_agent
         self._workflow_tool_agent = initialize_workflow_tool_agent(self)
+
+        # Initialize the intent clarification agent
+        from fastworkflow.intent_clarification_agent import initialize_intent_clarification_agent
+        self._intent_clarification_agent = initialize_intent_clarification_agent(self)
 
     @property
     def workflow_tool_agent(self):
         """Get the workflow tool agent for agent mode."""
         return self._workflow_tool_agent
+
+    @property
+    def intent_clarification_agent(self):
+        """Get the intent clarification agent for agent mode."""
+        return self._intent_clarification_agent
+
     @property
     def cme_workflow(self) -> fastworkflow.Workflow:
         """Get the command metadata extraction workflow."""
@@ -647,7 +658,7 @@ class ChatSession:
     def _extract_conversation_summary(self, 
         user_query: str, workflow_actions: list[dict[str, str]], final_agent_response: str) -> str:
         """
-        Summarizes conversation based on original user query, workflow actions and agentt response.
+        Summarizes conversation based on original user query, workflow actions and agent response.
         Returns the conversation summary and the log entry
         """
         # Lets log everything to a file called action_log.jsonl, if it exists
