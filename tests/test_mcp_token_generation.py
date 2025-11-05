@@ -65,7 +65,7 @@ def test_generate_mcp_token_default_expiration(app_module):
     client = TestClient(app_module.app)
     
     response = client.post("/admin/generate_mcp_token", json={
-        "user_id": "mcp_client_test",
+        "channel_id": "mcp_client_test",
         "expires_days": 365
     })
     
@@ -94,7 +94,7 @@ def test_generate_mcp_token_custom_expiration(app_module):
     client = TestClient(app_module.app)
     
     response = client.post("/admin/generate_mcp_token", json={
-        "user_id": "mcp_client_custom",
+        "channel_id": "mcp_client_custom",
         "expires_days": 30  # 30 days
     })
     
@@ -111,6 +111,7 @@ def test_mcp_token_works_for_protected_endpoints(app_module):
     
     # Generate MCP token
     token_response = client.post("/admin/generate_mcp_token", json={
+        "channel_id": "mcp_test_channel",
         "user_id": "mcp_test_user",
         "expires_days": 1  # Short-lived for test
     })
@@ -118,9 +119,9 @@ def test_mcp_token_works_for_protected_endpoints(app_module):
     assert token_response.status_code == 200
     mcp_token = token_response.json()["access_token"]
     
-    # Initialize a session for this user
+    # Initialize a session for this channel
     init_response = client.post("/initialize", json={
-        "user_id": "mcp_test_user",
+        "channel_id": "mcp_test_channel",
         "stream_format": "ndjson"
     })
     assert init_response.status_code == 200

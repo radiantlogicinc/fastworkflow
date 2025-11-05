@@ -99,15 +99,21 @@ def test_root_endpoint(app_module):
 
 
 def test_validation_startup_mutual_exclusion(app_module):
-    """Updated: Validate InitializationRequest requires user_id and supports stream_format"""
+    """Validate InitializationRequest requires channel_id and supports user_id and stream_format"""
     from pydantic import ValidationError
     InitReq = app_module.InitializationRequest
-    # Missing user_id should fail
+    # Missing channel_id should fail
     with pytest.raises(ValidationError):
         InitReq()
-    # Valid with user_id and optional stream_format
-    req = InitReq(user_id="test", stream_format="ndjson")
-    assert req.user_id == "test"
+    # Valid with channel_id and optional user_id/stream_format
+    req = InitReq(channel_id="test_channel", user_id="test_user", stream_format="ndjson")
+    assert req.channel_id == "test_channel"
+    assert req.user_id == "test_user"
+    assert req.stream_format == "ndjson"
+    # Valid with only channel_id
+    req2 = InitReq(channel_id="channel2")
+    assert req2.channel_id == "channel2"
+    assert req2.user_id is None
 
 
 def test_validation_feedback_presence(app_module):
@@ -116,25 +122,24 @@ def test_validation_feedback_presence(app_module):
     PostFeedbackRequest = app_module.PostFeedbackRequest
     with pytest.raises(ValidationError):
         PostFeedbackRequest(
-            user_id="test",
             binary_or_numeric_score=None,
             nl_feedback=None,
         )
-    req = PostFeedbackRequest(user_id="test", binary_or_numeric_score=True)
+    req = PostFeedbackRequest(binary_or_numeric_score=True)
     assert req.binary_or_numeric_score == 1.0
-    req = PostFeedbackRequest(user_id="test", nl_feedback="Great response")
+    req = PostFeedbackRequest(nl_feedback="Great response")
     assert req.nl_feedback == "Great response"
-    req = PostFeedbackRequest(user_id="test", binary_or_numeric_score=0.8, nl_feedback="Good")
+    req = PostFeedbackRequest(binary_or_numeric_score=0.8, nl_feedback="Good")
     assert req.binary_or_numeric_score == 0.8
     assert req.nl_feedback == "Good"
 
 
 def test_session_manager_basic(app_module):
-    """Test basic UserSessionManager get_session behavior (no sessions initially)"""
+    """Test basic ChannelSessionManager get_session behavior (no sessions initially)"""
     import asyncio
     async def test_async():
-        manager = app_module.UserSessionManager()
-        session = await manager.get_session("test_user")
+        manager = app_module.ChannelSessionManager()
+        session = await manager.get_session("test_channel")
         assert session is None
     asyncio.run(test_async())
 
@@ -143,8 +148,11 @@ def _authorize(client: TestClient, access_token: str) -> dict:
     return {"Authorization": f"Bearer {access_token}"}
 
 
-def _initialize(client: TestClient, user_id: str) -> dict:
-    resp = client.post("/initialize", json={"user_id": user_id, "stream_format": "ndjson"})
+def _initialize(client: TestClient, channel_id: str, user_id: str = None) -> dict:
+    payload = {"channel_id": channel_id, "stream_format": "ndjson"}
+    if user_id:
+        payload["user_id"] = user_id
+    resp = client.post("/initialize", json=payload)
     assert resp.status_code == 200
     data = resp.json()
     assert "access_token" in data and "refresh_token" in data
@@ -158,36 +166,76 @@ def test_initialize_endpoint(app_module, unique_user_id):
     assert data["token_type"].lower() == "bearer"
 
 
-def test_initialize_with_startup_command(app_module, unique_user_id):
-    """Initialization still succeeds with startup_command configured via ARGS"""
-    app_module.ARGS.startup_command = "/add_two_numbers first_num=5 second_num=3"
+def test_initialize_with_startup_command_in_request(app_module, unique_user_id):
+    """Test initialize with startup_command provided in request body"""
     client = TestClient(app_module.app)
-    data = _initialize(client, unique_user_id)
-    assert "access_token" in data
-    # reset
-    app_module.ARGS.startup_command = None
-
-
-def test_initialize_with_startup_action(app_module, unique_user_id):
-    """Initialization with startup_action configured via ARGS"""
-    import json as _json
-    app_module.ARGS.startup_action = _json.dumps({
-        "command_name": "add_two_numbers",
-        "parameters": {"first_num": 10, "second_num": 20}
+    resp = client.post("/initialize", json={
+        "channel_id": unique_user_id,
+        "user_id": "user_123",
+        "stream_format": "ndjson",
+        "startup_command": "add_two_numbers first_num=5 second_num=3"
     })
-    client = TestClient(app_module.app)
-    data = _initialize(client, unique_user_id)
+    assert resp.status_code == 200
+    data = resp.json()
     assert "access_token" in data
-    # reset
-    app_module.ARGS.startup_action = None
+    assert "refresh_token" in data
+    assert "startup_output" in data
+    # Verify startup_output has expected structure
+    if data["startup_output"]:
+        assert "command_responses" in data["startup_output"]
+
+
+def test_initialize_with_startup_action_in_request(app_module, unique_user_id):
+    """Test initialize with startup_action provided in request body"""
+    client = TestClient(app_module.app)
+    resp = client.post("/initialize", json={
+        "channel_id": unique_user_id,
+        "user_id": "user_456",
+        "stream_format": "ndjson",
+        "startup_action": {
+            "command_name": "add_two_numbers",
+            "parameters": {"first_num": 10, "second_num": 20}
+        }
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "access_token" in data
+    assert "startup_output" in data
+    if data["startup_output"]:
+        assert "command_responses" in data["startup_output"]
+
+
+def test_initialize_requires_user_id_with_startup(app_module, unique_user_id):
+    """Test that user_id is required when startup is provided"""
+    client = TestClient(app_module.app)
+    # Without user_id
+    resp = client.post("/initialize", json={
+        "channel_id": unique_user_id,
+        "startup_command": "add_two_numbers first_num=1 second_num=2"
+    })
+    assert resp.status_code == 400
+    assert "user_id is required" in resp.json()["detail"]
+
+
+def test_initialize_xor_validation(app_module, unique_user_id):
+    """Test that startup_command and startup_action are mutually exclusive"""
+    client = TestClient(app_module.app)
+    resp = client.post("/initialize", json={
+        "channel_id": unique_user_id,
+        "user_id": "user_789",
+        "startup_command": "some command",
+        "startup_action": {"command_name": "test", "parameters": {}}
+    })
+    assert resp.status_code == 400
+    assert "both startup_command and startup_action" in resp.json()["detail"].lower()
 
 
 def test_initialize_validation_errors(app_module):
-    """Invalid workflow path via ARGS should 422"""
+    """Invalid workflow path via ARGS should 500"""
     client = TestClient(app_module.app)
     # Set invalid workflow path
     app_module.ARGS.workflow_path = "/nonexistent/workflow"
-    resp = client.post("/initialize", json={"user_id": "test_user"})
+    resp = client.post("/initialize", json={"channel_id": "test_channel"})
     assert resp.status_code == 500
     assert "Internal error" in resp.json()["detail"]
     # Note: do not restore ARGS here; other tests import a new module instance if needed
@@ -461,6 +509,76 @@ def test_cli_arg_expect_encrypted_jwt_not_set():
     
     args = parser.parse_args(["--expect_encrypted_jwt"])
     assert args.expect_encrypted_jwt is True
+
+
+def test_jwt_token_includes_user_id_claim(app_module):
+    """Test that JWT tokens include uid claim when user_id is provided"""
+    import fastworkflow.run_fastapi_mcp.jwt_manager as jwt_module
+    from jose import jwt as jose_jwt
+    
+    # Create token with user_id
+    token = jwt_module.create_access_token("test_channel", user_id="test_user_789")
+    
+    # Decode and verify uid claim
+    payload = jose_jwt.get_unverified_claims(token)
+    assert payload["sub"] == "test_channel"
+    assert payload["uid"] == "test_user_789"
+    assert payload["type"] == "access"
+    
+    # Create token without user_id
+    token_no_uid = jwt_module.create_access_token("test_channel_2")
+    payload_no_uid = jose_jwt.get_unverified_claims(token_no_uid)
+    assert payload_no_uid["sub"] == "test_channel_2"
+    assert "uid" not in payload_no_uid  # uid should be absent when not provided
+
+
+def test_session_data_extracts_user_id_from_token(app_module, unique_user_id):
+    """Test that SessionData properly extracts user_id from JWT uid claim"""
+    client = TestClient(app_module.app)
+    
+    # Initialize with user_id
+    resp = client.post("/initialize", json={
+        "channel_id": unique_user_id,
+        "user_id": "alice_123"
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    
+    # Use the token to call an endpoint and verify user_id is extracted
+    headers = {"Authorization": f"Bearer {data['access_token']}"}
+    resp2 = client.post("/invoke_agent", headers=headers, json={
+        "user_query": "add 2 and 3",
+        "timeout_seconds": 30
+    })
+    assert resp2.status_code == 200
+    result = resp2.json()
+    
+    # Verify traces include user_id
+    if "traces" in result and result["traces"]:
+        first_trace = result["traces"][0]
+        assert "user_id" in first_trace
+        assert first_trace["user_id"] == "alice_123"
+
+
+def test_traces_include_raw_command(app_module, unique_user_id):
+    """Test that traces include the raw_command field"""
+    client = TestClient(app_module.app)
+    init = _initialize(client, unique_user_id)
+    headers = _authorize(client, init["access_token"])
+    
+    response = client.post("/invoke_agent", headers=headers, json={
+        "user_query": "add 7 and 9",
+        "timeout_seconds": 30,
+    })
+    assert response.status_code == 200
+    data = response.json()
+    
+    # Verify traces include raw_command
+    if "traces" in data and data["traces"]:
+        for trace in data["traces"]:
+            assert "raw_command" in trace
+            # raw_command should be the user query
+            assert trace["raw_command"] == "add 7 and 9"
 
 
 if __name__ == "__main__":

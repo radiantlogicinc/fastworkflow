@@ -1,7 +1,7 @@
 ### FastWorkflow FastAPI Service — Specification
 
 #### 1. Overview
-- **Goal**: Expose FastWorkflow workflows as a FastAPI web service, enabling clients to initialize for a given workflow (per user), then interact in agent mode (forced). If a query starts with `/`, all leading slashes are stripped before processing. The service supports explicit actions, resetting conversations, listing conversations, dumping all conversations to JSONL, and posting feedback. `invoke_agent` returns a synchronous `CommandOutput` and, when enabled, includes collected trace events in the final response. Streaming is supported via NDJSON or SSE at `/invoke_agent_stream`, and MCP tools map to the same NDJSON-based streaming implementation.
+- **Goal**: Expose FastWorkflow workflows as a FastAPI web service, enabling clients to initialize for a given workflow (per channel), then interact in agent mode (forced). If a query starts with `/`, all leading slashes are stripped before processing. The service supports explicit actions, resetting conversations, listing conversations, dumping all conversations to JSONL, and posting feedback. `invoke_agent` returns a synchronous `CommandOutput` and, when enabled, includes collected trace events in the final response. Streaming is supported via NDJSON or SSE at `/invoke_agent_stream`, and MCP tools map to the same NDJSON-based streaming implementation.
 - **Source parity**: Behavior mirrors the CLI runner in `fastworkflow/run/__main__.py` while replacing its interactive loop with synchronous and streaming HTTP endpoints.
 
 #### 2. Non‑Goals
@@ -14,56 +14,54 @@
   - Parity we need to preserve: environment loading, startup command/action handling, deterministic vs agentic execution, command output shape.
 
 #### 4. Architecture Summary
-- FastAPI app with a process‑wide in‑memory `UserSessionManager` that manages per‑user runtime state keyed by `user_id`.
-- For each `user_id`, maintain:
+- FastAPI app with a process‑wide in‑memory `ChannelSessionManager` that manages per‑channel runtime state keyed by `channel_id`.
+- For each `channel_id`, maintain:
   - An active `ChatSession` (always agent mode) bound to the current conversation (internal id only).
-  - A persistent `ConversationStore` backed by `Rdict` (one DB file per user) storing: `conversation_id` (internal), `topic` (unique per user), `summary`, timestamps, per‑turn history, and optional feedback per turn.
-- For requests, enqueue a user message and synchronously wait for a `CommandOutput` on the `command_output_queue` (with timeout and single‑turn serialization per user).
+  - A persistent `ConversationStore` backed by `Rdict` (one DB file per channel) storing: `conversation_id` (internal), `topic` (unique per channel), `summary`, timestamps, per‑turn history, and optional feedback per turn.
+- For requests, enqueue a channel message and synchronously wait for a `CommandOutput` on the `command_output_queue` (with timeout and single‑turn serialization per channel).
 - Trace events are collected and included in responses by default for REST streaming and collected into the synchronous response for `/invoke_agent`.
 
-#### 5. User and Conversation Lifecycle
-1) Client calls `POST /initialize` with workflow location and setup options plus a `user_id`.
+#### 5. Channel and Conversation Lifecycle
+1) Client calls `POST /initialize` with `channel_id` (required) and optional `user_id`, plus optional startup command/action.
 2) Server:
    - Loads environment from `env_file_path` and `passwords_file_path` only.
    - Calls `fastworkflow.init(env_vars=<file_based_env_dict>)`.
-   - Creates a new `ChatSession` with `run_as=RUN_AS_AGENT` (forced agent mode), bound to `user_id` and a current conversation (internal id only).
-   - If the user has a prior conversation, resume it by default (restore last conversation history); otherwise create a new conversation.
+   - Creates a new `ChatSession` with `run_as=RUN_AS_AGENT` (forced agent mode), bound to `channel_id` and a current conversation (internal id only).
+   - If the channel has a prior conversation, resume it by default (restore last conversation history); otherwise create a new conversation.
    - Starts the workflow via `chat_session.start_workflow(...)` with provided context/startup parameters.
-   - Stores runtime in `UserSessionManager` and returns a JWT TokenResponse containing `access_token`, `refresh_token`, `token_type`, `expires_in`, `user_id`, and `workflow_info`.
-3) Client uses the JWT access token with `/invoke_agent`, `/invoke_assistant`, `/perform_action`, or `/new_conversation`. Additional endpoints: `/conversations`. Admin-only endpoint: `/admin/dump_all_conversations`.
+   - Stores runtime in `ChannelSessionManager` and returns:
+     - A TokenResponse containing `access_token`, `refresh_token`, `token_type`, `expires_in`.
+     - If a startup command/action was provided, also return `startup_output` (a `CommandOutput`) and persist it as the first turn in `ConversationStore`.
+3) Client uses the JWT access token with `/invoke_agent`, `/invoke_assistant`, `/perform_action`, or `/new_conversation`. In trusted mode, the tokens are unencrypted. Additional endpoints: `/conversations`. Admin-only endpoint: `/admin/dump_all_conversations`.
 4) On `new_conversation` or process shutdown:
-   - Generate `topic` (guaranteed unique per user via case-insensitive and whitespace-insensitive comparison; append an incrementing integer if needed) and `summary` synchronously via `dspy.ChainOfThought()`.
+   - Generate `topic` (guaranteed unique per channel via case-insensitive and whitespace-insensitive comparison; append an incrementing integer if needed) and `summary` synchronously via `dspy.ChainOfThought()`.
    - If generation succeeds, persist the conversation to Rdict and rotate to a new internal conversation; if it fails, log a critical error, do NOT persist, and do NOT rotate.
 5) Conversation histories persist across restarts; users resume from their last conversation by default.
 
 #### 6. Endpoints
 
 1) POST `/initialize`
-- Purpose: Create or resume a FastWorkflow `ChatSession` for a `user_id` and start the workflow.
+- Purpose: Create or resume a FastWorkflow `ChatSession` for a `channel_id` and start the workflow. Optionally execute a startup command/action and return its `CommandOutput`.
 - Request (InitializationRequest):
 ```json
 {
-  "user_id": "user-123",
+  "channel_id": "channel-123",
+  "user_id": "user-9",               
   "conversation_id": null,
-  "stream_format": "ndjson"
+  "stream_format": "ndjson",
+  "startup_command": "load_workflow ...",
+  "startup_action": { "command_name": "User/get_details", "arguments": {"channel_id": "u-42"} }
 }
 ```
+- Rules:
+  - `channel_id` is required.
+  - Exactly one of `startup_command` or `startup_action` may be provided (or neither).
+  - If startup is provided, `user_id` is required.
+  - `stream_format`: `ndjson` (default) or `sse` for `/invoke_agent_stream`.
+- Response:
+  - TokenResponse + optional `startup_output` (`CommandOutput`).
 - Notes:
-  - Workflow path, env, passwords, startup command/action, and initial context are loaded at server startup from CLI args/environment (ops-managed), not from the initialize call.
-  - Service always runs in agent mode; assistant behavior is exposed via `/invoke_assistant`.
-  - `conversation_id`: Optional. If `null` or omitted, restores last conversation (or starts new if none exist). Provide specific ID to restore that conversation.
-  - `stream_format`: Optional preference for `/invoke_agent_stream` response format. Supported: `ndjson` (default) or `sse`. This setting is REST-only and does not apply to MCP.
-- Response (TokenResponse):
-```json
-{
-  "access_token": "<JWT>",
-  "refresh_token": "<JWT>",
-  "token_type": "bearer",
-  "expires_in": 3600
-}
-```
-- Notes:
-  - `user_id` is embedded in the JWT token itself (as the "sub" claim) and can be extracted by decoding the token
+  - `channel_id` is embedded in JWT `sub`; `user_id` (when provided) is embedded in `uid`.
   - Workflow definition can be obtained by calling the `what_can_i_do` command (IntentDetection context)
 - Errors:
   - 500 initialization failure (details logged)
@@ -77,30 +75,33 @@
   - 404 session not found
 
 3) POST `/invoke_agent`
-- Purpose: Submit a natural language query to an agentic session for a user (synchronous response). Leading `/` characters are permitted and stripped for compatibility; assistant semantics remain exclusive to `/invoke_assistant`.
+- Purpose: Submit a natural language query to an agentic session for a channel (synchronous response). Leading `/` characters are permitted and stripped for compatibility; assistant semantics remain exclusive to `/invoke_assistant`.
+- Headers:
+  - `Authorization: Bearer <access_token>` (contains `sub` and optional `uid`)
 - Request:
 ```json
-{ "user_query": "find orders for user 42", "timeout_seconds": 60 }
+{ "user_query": "find orders for channel 42", "timeout_seconds": 60 }
 ```
 - Behavior:
-  - Validate the user session exists. Agent mode is always enabled.
+  - Validate the channel session exists. Agent mode is always enabled.
   - If `user_query` begins with `/`, strip all leading slashes before processing (compatibility path).
   - When the turn completes, return a `CommandOutput` JSON including collected `traces`.
 - Response: `CommandOutput` (JSON).
 - Errors:
-  - 404 user not found
-  - 409 concurrent turn already in progress for this user
+  - 404 channel not found
+  - 409 concurrent turn already in progress for this channel
   - 504 turn timed out (no output on queue within `timeout_seconds`)
   - 500 unexpected error
 
 4) POST `/invoke_agent_stream`
 - Purpose: Submit a natural language query to an agentic session and stream trace events in real-time, followed by the final `CommandOutput`. Leading `/` characters are permitted and stripped.
+- Headers: Same as `/invoke_agent`.
 - Request:
 ```json
-{ "user_query": "find orders for user 42", "timeout_seconds": 60 }
+{ "user_query": "find orders for channel 42", "timeout_seconds": 60 }
 ```
 - Behavior:
-  - Validate the user session exists. Agent mode is always enabled.
+  - Validate the channel session exists. Agent mode is always enabled.
   - If `user_query` begins with `/`, strip all leading slashes before processing.
   - Emit streaming records as they are available:
     - NDJSON: `{ "type": "trace", "data": <trace_json> }` (multiple), then `{ "type": "output", "data": <CommandOutput_json> }` (final)
@@ -108,13 +109,14 @@
   - Only the final output record is streamed if no traces were produced.
 - Response: HTTP 200 with `Content-Type: application/x-ndjson` (NDJSON) or `text/event-stream` (SSE).
 - Errors:
-  - 404 user not found
-  - 409 concurrent turn already in progress for this user
+  - 404 channel not found
+  - 409 concurrent turn already in progress for this channel
   - 504 turn timed out (no output within `timeout_seconds`)
   - On error, send a terminal record `{ "type": "error", "data": { "detail": "..." } }` then close the connection
 
 5) POST `/invoke_assistant`
-- Purpose: Deterministic/assistant invocation for a user. The server accepts plain queries; clients need not prefix `/`.
+- Purpose: Deterministic/assistant invocation for a channel. The server accepts plain queries; clients need not prefix `/`.
+- Headers: Same as `/invoke_agent`.
 - Request:
 ```json
 { "user_query": "load_workflow file='...'" }
@@ -125,9 +127,10 @@
 
 6) POST `/perform_action`
 - Purpose: Execute a specific workflow action chosen by the client (e.g., from `next_actions`).
+- Headers: Same as `/invoke_agent`.
 - Request:
 ```json
-{ "action": { "command_name": "User/get_details", "arguments": { "user_id": "u-42" } }, "timeout_seconds": 60 }
+{ "action": { "command_name": "User/get_details", "arguments": { "channel_id": "u-42" } }, "timeout_seconds": 60 }
 ```
 - Behavior:
   - Validate session exists.
@@ -140,20 +143,20 @@
 - Purpose: Persist and close the current conversation (topic + summary via GenAI), then reset history and start a new internal conversation.
 - Request:
 ```json
-{ "user_id": "user-123" }
+{ "channel_id": "channel-123" }
 ```
 - Behavior:
-  - Generate `topic` (unique per user; append integer suffix if needed) and `summary` synchronously using `dspy.ChainOfThought()`.
+  - Generate `topic` (unique per channel; append integer suffix if needed) and `summary` synchronously using `dspy.ChainOfThought()`.
   - If generation succeeds, persist conversation `{topic, summary, history}` in Rdict and rotate; if it fails, log critical, return 500, and do not rotate.
 - Response: `{ "status": "ok" }`.
-- Errors: 404 if user missing.
+- Errors: 404 if channel missing.
 
 8) POST `/post_feedback`
-- Purpose: Attach optional feedback to the latest turn in the current conversation for a user.
+- Purpose: Attach optional feedback to the latest turn in the current conversation for a channel.
 - Request:
 ```json
 {
-  "user_id": "user-123",
+  "channel_id": "channel-123",
   "binary_or_numeric_score": true,
   "nl_feedback": null
 }
@@ -166,7 +169,7 @@
   - Validate presence (reject only when both are null); store feedback on the latest turn in `ConversationStore` with a timestamp.
   - Feedback is optional per turn; multiple feedback updates overwrite the previous entry for that turn.
 - Response: `{ "status": "ok" }`.
-- Errors: 404 user missing; 422 invalid input (both fields null).
+- Errors: 404 channel missing; 422 invalid input (both fields null).
 
 9) GET `/` (root)
 - Simple HTML page with a link to `/docs`. Serves also as a health check (no dedicated `/healthz`).
@@ -177,8 +180,12 @@ Pydantic model sketches (for reference; actual code will import FastWorkflow typ
 
 ```python
 class InitializationRequest(BaseModel):
-    user_id: str | None = None
+    channel_id: str
+    user_id: str | None = None  # required if startup provided
     conversation_id: int | None = None
+    stream_format: Literal["ndjson", "sse"] | None = None
+    startup_command: str | None = None
+    startup_action: Action | None = None
 
 class TokenResponse(BaseModel):
     access_token: str
@@ -195,7 +202,7 @@ class PerformActionRequest(BaseModel):
     timeout_seconds: int = 60
 
 class PostFeedbackRequest(BaseModel):
-    user_id: str
+    channel_id: str
     binary_or_numeric_score: bool | float | None = None
     nl_feedback: str | None = None
 
@@ -222,23 +229,24 @@ class CommandOutput(BaseModel):
 Notes:
 - Align `CommandOutput` and `CommandResponse` fields with FastWorkflow’s canonical definitions to avoid divergence. If Pydantic models exist in FastWorkflow, import them instead of redefining.
 - `Action` mirrors the runtime execution object consumed by `CommandExecutor`.
+- `user_id` is extracted on authenticated endpoints from JWT `uid` and included in traces alongside `raw_command`.
 
 #### 8. Error Handling
-- 404 Not Found: Missing `user_id`.
-- 409 Conflict: A turn is already in progress for the same `user_id` (serialize turns per user).
-- 422 Unprocessable Entity: Validation failures (invalid paths/action schema/user input) and XOR violation in `/post_feedback`.
+- 404 Not Found: Missing `channel_id`.
+- 409 Conflict: A turn is already in progress for the same `channel_id` (serialize turns per channel).
+- 422 Unprocessable Entity: Validation failures (invalid paths/action schema/channel input) and XOR violation in `/post_feedback`.
 - 500 Internal Server Error: Unexpected errors (log with stack trace; avoid broad except without logging).
 - 504 Gateway Timeout: No `CommandOutput` received before `timeout_seconds`.
 
 Error body format (example):
 ```json
 {
-  "detail": "Internal error in invoke_agent() for user_id: user-123"
+  "detail": "Internal error in invoke_agent() for channel_id: channel-123"
 }
 ```
 
 #### 9. Concurrency & Timeouts
-- Only one in‑flight turn per user. Use a per‑user asyncio Lock or queue state flag.
+- Only one in‑flight turn per channel. Use a per‑channel asyncio Lock or queue state flag.
 - Default `timeout_seconds=60` per request; configurable per call.
 - Consider a global `MAX_CONCURRENT_SESSIONS` guard if needed.
 
@@ -246,13 +254,13 @@ Error body format (example):
 - CORS: Allow configured origins; default to `*` for development only.
 - Restrict `workflow_path` to an allow‑list of directories via config.
 
-- Log each call with `user_id`, action/command, and timing.
+- Log each call with `channel_id`, action/command, and timing.
 - Keep file logging to `action.jsonl` unchanged inside FastWorkflow.
 
 #### 10. Storage (Rdict) and Limits
 
-- Conversations are stored under `SPEEDDICT_FOLDERNAME/user_conversations`; one Rdict DB file per user (`<user_id>.rdb`).
-- Per-user DB schema (keys/values):
+- Conversations are stored under `SPEEDDICT_FOLDERNAME/user_conversations`; one Rdict DB file per channel (`<channel_id>.rdb`).
+- Per-channel DB schema (keys/values):
   - Key: `meta` → { "last_conversation_id": int }
   - Key: `conv:<id>` → {
       "topic": str,
@@ -261,7 +269,7 @@ Error body format (example):
       "updated_at": int,
       "turns": [ { "conversation summary": str, "conversation_traces": str (JSON), "feedback": { "binary_or_numeric_score": bool|float|null, "nl_feedback": str|null, "timestamp": int } | null } ]
     }
-- Functional constraint: one active conversation per user to avoid write concurrency.
+- Functional constraint: one active conversation per channel to avoid write concurrency.
 - `/conversations` accepts `limit` (default `20`) controlling the max conversations returned (latest N by `updated_at`).
 - Shutdown waits up to 30 seconds for active turns before persistence.
 - `LLM_CONVERSATION_STORE`: LiteLLM model string for conversation topic/summary generation (e.g., `mistral/mistral-small-latest`).
@@ -271,20 +279,20 @@ Error body format (example):
 
 Minimal edits in `fastworkflow/run_fastapi/main.py`:
 1) Replace legacy imports and undefined helpers with FastWorkflow runtime imports.
-2) Implement a `UserSessionManager` holding `{ user_id: { active_conversation_id, chat_session, lock } }`.
+2) Implement a `ChannelSessionManager` holding `{ channel_id: { active_conversation_id, chat_session, lock } }`.
 3) `POST /initialize`:
    - Validate `workflow_path` exists and contains `_commands/` (optional warning).
    - Load env from files only; call `fastworkflow.init(env_vars=env)`.
    - Create `chat_session = fastworkflow.ChatSession(run_as_agent=True)` (keep_alive=True internally).
    - `chat_session.start_workflow(workflow_path, workflow_context=context, startup_command=..., startup_action=...)`.
    - If `conversation_id` provided and exists, restore its history; else restore last; else start new.
-   - Store and return `{user_id}`.
+   - Store and return `{channel_id}`.
 4) `POST /invoke_agent`:
-   - Serialize turns per user: acquire user lock.
+   - Serialize turns per channel: acquire channel lock.
    - Put `user_query` on `user_message_queue`; wait for `command_output_queue.get(timeout=timeout_seconds)`.
    - If `show_agent_traces=True`, drain `command_trace_queue` and include events in `traces` array of the final response.
 5) `POST /invoke_agent_stream`:
-   - Serialize turns per user: acquire user lock.
+   - Serialize turns per channel: acquire channel lock.
    - Put `user_query` on `user_message_queue`.
    - Set response content-type to `text/event-stream`.
    - If `show_agent_traces=True`, continuously drain `command_trace_queue` and emit each trace as an SSE event (`event: trace`).
@@ -303,7 +311,7 @@ Minimal edits in `fastworkflow/run_fastapi/main.py`:
 10) `POST /post_feedback`:
    - Validate presence (at least one field); attach to latest turn of active conversation in `Rdict`.
 11) `POST /activate_conversation`:
-   - Body: { user_id, conversation_id }. Find conversation by ID for user and set as active; if not found 404.
+   - Body: { channel_id, conversation_id }. Find conversation by ID for channel and set as active; if not found 404.
 12) Root endpoint doubles as health check; remove `/healthz`.
 
 Type hints & structure should follow existing FastWorkflow dataclasses/Pydantic models for compatibility.
@@ -361,7 +369,7 @@ python-jose = {extras = ["cryptography"], version = "^3.3.0"}
 **Claims:**
 ```json
 {
-  "sub": "john_doe",           # subject (user_id)
+  "sub": "john_doe",           # subject (channel_id)
   "iat": 1234567890,           # issued at (Unix timestamp)
   "exp": 1234571490,           # expires at (iat + TTL)
   "jti": "uuid-v4-string",     # unique token ID (prevents replay attacks)
@@ -439,10 +447,10 @@ Create `services/run_fastapi/jwt_manager.py`:
 def load_or_generate_keys() -> tuple[RSAPrivateKey, RSAPublicKey]:
     """Load existing keys or generate new pair on first run"""
 
-def create_access_token(user_id: str, expires_delta: timedelta) -> str:
+def create_access_token(channel_id: str, expires_delta: timedelta) -> str:
     """Create and sign JWT access token with RS256"""
 
-def create_refresh_token(user_id: str, expires_delta: timedelta) -> str:
+def create_refresh_token(channel_id: str, expires_delta: timedelta) -> str:
     """Create and sign JWT refresh token with RS256"""
 
 def verify_and_decode_token(token: str, token_type: str = "access") -> dict:
@@ -455,7 +463,7 @@ def verify_and_decode_token(token: str, token_type: str = "access") -> dict:
 ```python
 class SessionData(BaseModel):
     """Decoded JWT session data"""
-    user_id: str
+    channel_id: str
     issued_at: int
     expires_at: int
     token_id: str
@@ -485,7 +493,7 @@ Add docstrings noting: "Requires JWT access token in Authorization header"
 ```bash
 # Initialize
 POST /initialize
-Request: {"user_id": "john_doe"}
+Request: {"channel_id": "john_doe"}
 Response: {"session_id": 1234567890, "workflow_info": {...}}
 
 # Use endpoint
@@ -498,7 +506,7 @@ Body: {"user_query": "..."}
 ```bash
 # Initialize
 POST /initialize
-Request: {"user_id": "john_doe"}
+Request: {"channel_id": "john_doe"}
 Response: {
   "access_token": "eyJhbGci...",
   "refresh_token": "eyJhbGci...",
@@ -506,7 +514,7 @@ Response: {
   "expires_in": 3600
 }
 # Notes:
-# - user_id is in the JWT's "sub" claim
+# - channel_id is in the JWT's "sub" claim
 # - Workflow definition available via what_can_i_do command
 
 # Use endpoint
@@ -520,12 +528,12 @@ Body: {"user_query": "..."}
 **1. `POST /initialize` (Modified)**
 - Generate JWT tokens instead of returning integer session_id
 - Return `TokenResponse` with both access and refresh tokens
-- The `user_id` is embedded in the JWT (sub claim), not returned separately
+- The `channel_id` is embedded in the JWT (sub claim), not returned separately
 
 **2. All authenticated endpoints (Modified)**
 - Change dependency from: `session_id: int = Depends(get_session_id_from_header)`
 - To: `session: SessionData = Depends(get_session_from_jwt)`
-- Use `session.user_id` for session lookups and logging
+- Use `session.channel_id` for session lookups and logging
 
 **3. `POST /refresh_token` (New)**
 ```python
@@ -604,7 +612,7 @@ def get_session_from_jwt(
     try:
         claims = verify_and_decode_token(token, token_type="access")
         return SessionData(
-            user_id=claims["sub"],
+            channel_id=claims["sub"],
             session_id=claims["session_id"],
             issued_at=claims["iat"],
             expires_at=claims["exp"],
@@ -684,7 +692,7 @@ services/run_fastapi/
 ├── jwt_manager.py          # NEW: JWT creation, verification, key management
 ├── utils.py                # MODIFIED: JWT models, get_session_from_jwt dependency
 ├── main.py                 # MODIFIED: Endpoints use JWT
-└── mcp_specific.py         # NO CHANGE (still uses user_id directly)
+└── mcp_specific.py         # NO CHANGE (still uses channel_id directly)
 
 .jwt_keys/                  # NEW: Key storage (project root)
 ├── private_key.pem         # Server only, mode 600
@@ -831,7 +839,7 @@ MCP clients (e.g., Claude Desktop) use pre-configured access tokens instead of d
 ```bash
 POST /admin/generate_mcp_token
 {
-  "user_id": "claude_desktop_user",
+  "channel_id": "claude_desktop_user",
   "expires_days": 365
 }
 
@@ -868,15 +876,15 @@ Add to Claude Desktop's `mcp.json`:
 
 **Security Notes:**
 - Store the generated token securely in MCP client config
-- Tokens are tied to a specific `user_id`
-- All MCP tool calls are authenticated and tracked per user
+- Tokens are tied to a specific `channel_id`
+- All MCP tool calls are authenticated and tracked per channel
 - Token expiration can be customized (e.g., 30 days, 180 days, etc.)
 
 ##### 15.21 Future Enhancements (Not in Initial Implementation)
 
 **Token Revocation:**
 - Maintain Redis-based revocation list
-- Store token JTI when user logs out
+- Store token JTI when channel logs out
 - Check revocation list in `verify_and_decode_token()`
 - Implement `/logout` endpoint that adds token to revocation list
 

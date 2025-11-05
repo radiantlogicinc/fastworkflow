@@ -8,6 +8,7 @@ import contextlib
 import uuid
 from pathlib import Path
 import os
+import time
 from datetime import datetime
 
 import dspy
@@ -371,21 +372,23 @@ class ChatSession:
                 try:
                     message = self.user_message_queue.get()
 
-                    if ((
-                            "NLU_Pipeline_Stage" not in self._cme_workflow.context or
-                            self._cme_workflow.context["NLU_Pipeline_Stage"] == fastworkflow.NLUPipelineStage.INTENT_DETECTION) and
-                        message.startswith('/')
-                    ):
-                        self._cme_workflow.context["is_assistant_mode_command"] = True
-                    
-                    # Route based on mode and message type
-                    if self._run_as_agent and "is_assistant_mode_command" not in self._cme_workflow.context:
-                        # In agent mode, use workflow tool agent for processing
-                        last_output = self._process_agent_message(message)
-                    # elif self._is_mcp_tool_call(message):
-                    #     last_output = self._process_mcp_tool_call(message)
+                    # Handle Action objects directly
+                    if isinstance(message, fastworkflow.Action):
+                        last_output = self._process_action(message)
                     else:
-                        last_output = self._process_message(message)
+                        if ((
+                                "NLU_Pipeline_Stage" not in self._cme_workflow.context or
+                                self._cme_workflow.context["NLU_Pipeline_Stage"] == fastworkflow.NLUPipelineStage.INTENT_DETECTION) and
+                            message.startswith('/')
+                        ):
+                            self._cme_workflow.context["is_assistant_mode_command"] = True
+
+                        # Route based on mode and message type
+                        if self._run_as_agent and "is_assistant_mode_command" not in self._cme_workflow.context:
+                            # In agent mode, use workflow tool agent for processing
+                            last_output = self._process_agent_message(message)
+                        else:
+                            last_output = self._process_message(message)
                         
                 except Empty:
                     continue
@@ -554,13 +557,22 @@ class ChatSession:
 
     def _process_message(self, message: str) -> fastworkflow.CommandOutput:
         """Process a single message"""
-        # Use our specialized profiling method
-        # command_output = self.profile_invoke_command(message)
+        # Pre-execution trace
+        if self.command_trace_queue:
+            self.command_trace_queue.put(fastworkflow.CommandTraceEvent(
+                direction=fastworkflow.CommandTraceEventDirection.AGENT_TO_WORKFLOW,
+                raw_command=message,
+                command_name=None,
+                parameters=None,
+                response_text=None,
+                success=None,
+                timestamp_ms=int(time.time() * 1000),
+            ))
         
+        # Execute command
         command_output = self._CommandExecutor.invoke_command(self, message)
 
-        # Record assistant mode trace to action.jsonl (similar to agent mode in workflow_agent.py)
-        # This ensures assistant commands are captured even when interspersed with agent commands
+        # Extract response text and parameters for traces
         response_text = ""
         if command_output.command_responses:
             response_text = command_output.command_responses[0].response or ""
@@ -568,14 +580,30 @@ class ChatSession:
         # Convert parameters to dict if it's a Pydantic model or other complex object
         params = command_output.command_parameters or {}
         if hasattr(params, 'model_dump'):
-            params = params.model_dump()
+            params_dict = params.model_dump()
         elif hasattr(params, 'dict'):
-            params = params.dict()
+            params_dict = params.dict()
+        else:
+            params_dict = params
         
+        # Post-execution trace
+        if self.command_trace_queue:
+            self.command_trace_queue.put(fastworkflow.CommandTraceEvent(
+                direction=fastworkflow.CommandTraceEventDirection.WORKFLOW_TO_AGENT,
+                raw_command=None,
+                command_name=command_output.command_name or "",
+                parameters=params_dict,
+                response_text=response_text,
+                success=bool(command_output.success),
+                timestamp_ms=int(time.time() * 1000),
+            ))
+        
+        # Record assistant mode trace to action.jsonl (similar to agent mode in workflow_agent.py)
+        # This ensures assistant commands are captured even when interspersed with agent commands
         record = {
             "command": message,
             "command_name": command_output.command_name or "",
-            "parameters": params,
+            "parameters": params_dict,
             "response": response_text
         }
 
@@ -600,24 +628,54 @@ class ChatSession:
     def _process_action(self, action: fastworkflow.Action) -> fastworkflow.CommandOutput:
         """Process a startup action"""
         workflow = self.get_active_workflow()
+        
+        # Serialize action parameters for trace
+        params = action.parameters or {}
+        if hasattr(params, 'model_dump'):
+            params_dict = params.model_dump()
+        elif hasattr(params, 'dict'):
+            params_dict = params.dict()
+        else:
+            params_dict = params
+        
+        # Pre-execution trace: serialize action as raw_command
+        raw_command = f"{action.command_name} {json.dumps(params_dict)}"
+        if self.command_trace_queue:
+            self.command_trace_queue.put(fastworkflow.CommandTraceEvent(
+                direction=fastworkflow.CommandTraceEventDirection.AGENT_TO_WORKFLOW,
+                raw_command=raw_command,
+                command_name=None,
+                parameters=None,
+                response_text=None,
+                success=None,
+                timestamp_ms=int(time.time() * 1000),
+            ))
+        
+        # Execute the action
         command_output = self._CommandExecutor.perform_action(workflow, action)
 
-        # Record action trace to action.jsonl
+        # Extract response text for post-execution trace
         response_text = ""
         if command_output.command_responses:
             response_text = command_output.command_responses[0].response or ""
         
-        # Convert parameters to dict if it's a Pydantic model or other complex object
-        params = action.parameters or {}
-        if hasattr(params, 'model_dump'):
-            params = params.model_dump()
-        elif hasattr(params, 'dict'):
-            params = params.dict()
+        # Post-execution trace
+        if self.command_trace_queue:
+            self.command_trace_queue.put(fastworkflow.CommandTraceEvent(
+                direction=fastworkflow.CommandTraceEventDirection.WORKFLOW_TO_AGENT,
+                raw_command=None,
+                command_name=command_output.command_name,
+                parameters=params_dict,
+                response_text=response_text,
+                success=bool(command_output.success),
+                timestamp_ms=int(time.time() * 1000),
+            ))
         
+        # Record action trace to action.jsonl
         record = {
             "command": "process_action",
             "command_name": action.command_name,
-            "parameters": params,
+            "parameters": params_dict,
             "response": response_text
         }
 

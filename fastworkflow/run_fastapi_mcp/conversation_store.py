@@ -90,9 +90,9 @@ class ConversationSummary(BaseModel):
 class ConversationStore:
     """Rdict-backed conversation persistence per user"""
     
-    def __init__(self, user_id: str, base_folder: str):
-        self.user_id = user_id
-        self.db_path = os.path.join(base_folder, f"{user_id}.rdb")
+    def __init__(self, channel_id: str, base_folder: str):
+        self.channel_id = channel_id
+        self.db_path = os.path.join(base_folder, f"{channel_id}.rdb")
         os.makedirs(base_folder, exist_ok=True)
     
     def _get_db(self) -> Rdict:
@@ -352,7 +352,7 @@ class ConversationStore:
                 if conv_key in db:
                     conv = db[conv_key]
                     conversations.append({
-                        "user_id": self.user_id,
+                        "channel_id": self.channel_id,
                         "conversation_id": i,
                         **conv
                     })

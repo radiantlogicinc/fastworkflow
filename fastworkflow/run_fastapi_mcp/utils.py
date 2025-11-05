@@ -22,9 +22,12 @@ from .jwt_manager import verify_token
 # ============================================================================
 
 class InitializationRequest(BaseModel):
-    """Request to initialize a FastWorkflow session for a user"""
-    user_id: str
+    """Request to initialize a FastWorkflow session for a channel"""
+    channel_id: str
+    user_id: Optional[str] = None  # Required if startup_command or startup_action provided
     stream_format: Optional[str] = None  # "ndjson" | "sse" (default ndjson)
+    startup_command: Optional[str] = None  # Mutually exclusive with startup_action
+    startup_action: Optional[dict[str, Any]] = None  # Mutually exclusive with startup_command
 
 
 class TokenResponse(BaseModel):
@@ -35,9 +38,19 @@ class TokenResponse(BaseModel):
     expires_in: int  # Access token expiration in seconds
 
 
+class InitializeResponse(BaseModel):
+    """Response from initialization including tokens and optional startup output"""
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int  # Access token expiration in seconds
+    startup_output: Optional[fastworkflow.CommandOutput] = None  # Present if startup was executed
+
+
 class SessionData(BaseModel):
     """Validated session data extracted from JWT token"""
-    user_id: str
+    channel_id: str
+    user_id: Optional[str] = None  # From JWT uid claim
     token_type: str  # "access" or "refresh"
     issued_at: int  # Unix timestamp
     expires_at: int  # Unix timestamp
@@ -48,7 +61,7 @@ class SessionData(BaseModel):
 class InvokeRequest(BaseModel):
     """
     Request to invoke agent or assistant.
-    Requires user_id to be passed in the Authorization header (via JWT token).
+    Requires channel_id to be passed in the Authorization header (via JWT token).
     """
     user_query: str
     timeout_seconds: int = 60
@@ -57,7 +70,7 @@ class InvokeRequest(BaseModel):
 class PerformActionRequest(BaseModel):
     """
     Request to perform a specific action.
-    Requires user_id to be passed in the Authorization header (via JWT token).
+    Requires channel_id to be passed in the Authorization header (via JWT token).
     """
     action: dict[str, Any]  # Will be converted to fastworkflow.Action
     timeout_seconds: int = 60
@@ -66,7 +79,7 @@ class PerformActionRequest(BaseModel):
 class PostFeedbackRequest(BaseModel):
     """
     Request to post feedback on the latest turn.
-    Requires user_id to be passed in the Authorization header (via JWT token).
+    Requires channel_id to be passed in the Authorization header (via JWT token).
     
     Note: binary_or_numeric_score accepts numeric values (float).
     Boolean values (True/False) are automatically converted to 1.0/0.0.
@@ -86,7 +99,7 @@ class PostFeedbackRequest(BaseModel):
 class ActivateConversationRequest(BaseModel):
     """
     Request to activate a conversation by ID.
-    Requires user_id to be passed in the Authorization header (via JWT token).
+    Requires channel_id to be passed in the Authorization header (via JWT token).
     """
     conversation_id: int
 
@@ -98,7 +111,8 @@ class DumpConversationsRequest(BaseModel):
 
 class GenerateMCPTokenRequest(BaseModel):
     """Request to generate a long-lived MCP token"""
-    user_id: str
+    channel_id: str
+    user_id: Optional[str] = None
     expires_days: int = 365
 
 
@@ -151,7 +165,7 @@ def get_session_from_jwt(
         ```python
         @app.post("/endpoint")
         async def endpoint(session: SessionData = Depends(get_session_from_jwt)):
-            # Use session.user_id, session.token_type, etc.
+            # Use session.channel_id, session.token_type, etc.
             pass
         ```
         
@@ -177,7 +191,8 @@ def get_session_from_jwt(
 
         # Extract session data from payload, including the token for workflow context
         return SessionData(
-            user_id=payload["sub"],
+            channel_id=payload["sub"],
+            user_id=payload.get("uid"),  # Optional user_id from uid claim
             token_type=payload["type"],
             issued_at=payload["iat"],
             expires_at=payload["exp"],
@@ -200,8 +215,8 @@ def get_session_from_jwt(
 
 
 async def ensure_user_runtime_exists(
-    user_id: str,
-    session_manager: 'UserSessionManager',
+    channel_id: str,
+    session_manager: 'ChannelSessionManager',
     workflow_path: str,
     context: Optional[dict] = None,
     startup_command: Optional[str] = None,
@@ -216,8 +231,8 @@ async def ensure_user_runtime_exists(
     allowing it to be reused across different parts of the application without duplicating code.
     
     Args:
-        user_id: The user identifier
-        session_manager: The UserSessionManager instance
+        channel_id: The user identifier
+        session_manager: The ChannelSessionManager instance
         workflow_path: Path to the workflow directory (validated at server startup)
         context: Optional workflow context dictionary
         startup_command: Optional startup command
@@ -229,9 +244,9 @@ async def ensure_user_runtime_exists(
         HTTPException: If session creation fails
     """
     # Check if user already has an active session
-    existing_runtime = await session_manager.get_session(user_id)
+    existing_runtime = await session_manager.get_session(channel_id)
     if existing_runtime:
-        logger.debug(f"Session for user_id {user_id} already exists, skipping creation")
+        logger.debug(f"Session for channel_id {channel_id} already exists, skipping creation")
         
         # Update the workflow's context with the current token if provided
         if http_bearer_token and existing_runtime.chat_session:
@@ -243,7 +258,7 @@ async def ensure_user_runtime_exists(
                 # 2. The workflow is NOT marked dirty (won't persist to disk)
                 # 3. This is intentional for JWT tokens - we don't want to persist sensitive tokens
                 active_workflow.context['http_bearer_token'] = http_bearer_token
-                logger.debug(f"Updated http_bearer_token in workflow context for user_id {user_id}")
+                logger.debug(f"Updated http_bearer_token in workflow context for channel_id {channel_id}")
         
         return
     
@@ -256,13 +271,13 @@ async def ensure_user_runtime_exists(
             # Initialize context with http_bearer_token
             context = {'http_bearer_token': http_bearer_token}
     
-    logger.info(f"Creating new session for user_id: {user_id}")
+    logger.info(f"Creating new session for channel_id: {channel_id}")
     
-    # Resolve conversation store base folder from SPEEDDICT_FOLDERNAME/user_conversations
-    conv_base_folder = get_userconversations_dir()
+    # Resolve conversation store base folder from SPEEDDICT_FOLDERNAME/channel_conversations
+    conv_base_folder = get_channelconversations_dir()
 
     # Create conversation store for this user
-    conversation_store = ConversationStore(user_id, conv_base_folder)
+    conversation_store = ConversationStore(channel_id, conv_base_folder)
 
     # Create ChatSession in agent mode (forced)
     chat_session = fastworkflow.ChatSession(run_as_agent=True)
@@ -280,9 +295,9 @@ async def ensure_user_runtime_exists(
             # Restore the conversation history from saved turns
             restored_history = restore_history_from_turns(conversation["turns"])
             chat_session._conversation_history = restored_history
-            logger.info(f"Restored conversation {conv_id_to_restore} for user {user_id}")
+            logger.info(f"Restored conversation {conv_id_to_restore} for user {channel_id}")
         else:
-            logger.info(f"No conversations available for user {user_id}, starting new")
+            logger.info(f"No conversations available for user {channel_id}, starting new")
             conv_id_to_restore = None
 
     # Start the workflow
@@ -296,14 +311,14 @@ async def ensure_user_runtime_exists(
 
     # Create and store user runtime
     await session_manager.create_session(
-        user_id=user_id,
+        channel_id=channel_id,
         chat_session=chat_session,
         conversation_store=conversation_store,
         active_conversation_id=conv_id_to_restore,
         stream_format=stream_format
     )
 
-    logger.info(f"Successfully created session for user_id: {user_id}")
+    logger.info(f"Successfully created session for channel_id: {channel_id}")
     
     # Wait for workflow to be ready (background thread sets status to RUNNING)
     import asyncio
@@ -318,19 +333,19 @@ async def ensure_user_runtime_exists(
         logger.warning(f"Workflow not fully started after {max_wait}s, status={chat_session._status}")
 
 
-def get_userconversations_dir() -> str:
+def get_channelconversations_dir() -> str:
     """
-    Return SPEEDDICT_FOLDERNAME/user_conversations, creating the directory if missing.
+    Return SPEEDDICT_FOLDERNAME/channel_conversations, creating the directory if missing.
     fastworkflow is injected to avoid circular imports and to access get_env_var.
     """
     speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
-    user_conversations_dir = os.path.join(speedict_foldername, "user_conversations")
+    user_conversations_dir = os.path.join(speedict_foldername, "channel_conversations")
     os.makedirs(user_conversations_dir, exist_ok=True)
     return user_conversations_dir
 
 
 async def wait_for_command_output(
-    runtime: 'UserRuntime',
+    runtime: 'ChannelRuntime',
     timeout_seconds: int
 ) -> 'fastworkflow.CommandOutput':
     """Wait for command output from the queue with timeout"""
@@ -349,14 +364,23 @@ async def wait_for_command_output(
     )
 
 
-def collect_trace_events(runtime: 'UserRuntime') -> list[dict[str, Any]]:
-    """Drain and collect all trace events from the queue"""
+def collect_trace_events(runtime: 'ChannelRuntime', user_id: Optional[str] = None) -> list[dict[str, Any]]:
+    """
+    Drain and collect all trace events from the queue.
+    
+    Args:
+        runtime: ChannelRuntime containing the trace queue
+        user_id: Optional user_id to include in traces
+        
+    Returns:
+        List of trace event dictionaries with optional user_id
+    """
     traces = []
     
     while True:
         try:
             evt = runtime.chat_session.command_trace_queue.get_nowait()
-            traces.append({
+            trace = {
                 "direction": evt.direction.value if hasattr(evt.direction, 'value') else str(evt.direction),
                 "raw_command": evt.raw_command,
                 "command_name": evt.command_name,
@@ -364,7 +388,47 @@ def collect_trace_events(runtime: 'UserRuntime') -> list[dict[str, Any]]:
                 "response_text": evt.response_text,
                 "success": evt.success,
                 "timestamp_ms": evt.timestamp_ms
-            })
+            }
+            if user_id is not None:
+                trace["user_id"] = user_id
+            traces.append(trace)
+        except queue.Empty:
+            break
+    
+    return traces
+
+
+async def collect_trace_events_async(
+    trace_queue: queue.Queue,
+    user_id: Optional[str] = None
+) -> list[dict[str, Any]]:
+    """
+    Async version: Drain and collect all trace events from a trace queue.
+    
+    Args:
+        trace_queue: The trace queue to drain
+        user_id: Optional user_id to include in traces
+        
+    Returns:
+        List of trace event dictionaries with optional user_id
+    """
+    traces = []
+    
+    while True:
+        try:
+            evt = trace_queue.get_nowait()
+            trace = {
+                "direction": evt.direction.value if hasattr(evt.direction, 'value') else str(evt.direction),
+                "raw_command": evt.raw_command,
+                "command_name": evt.command_name,
+                "parameters": evt.parameters,
+                "response_text": evt.response_text,
+                "success": evt.success,
+                "timestamp_ms": evt.timestamp_ms
+            }
+            if user_id is not None:
+                trace["user_id"] = user_id
+            traces.append(trace)
         except queue.Empty:
             break
     
@@ -376,9 +440,9 @@ def collect_trace_events(runtime: 'UserRuntime') -> list[dict[str, Any]]:
 # ============================================================================
 
 @dataclass
-class UserRuntime:
-    """Per-user runtime state"""
-    user_id: str
+class ChannelRuntime:
+    """Per-channel runtime state"""
+    channel_id: str
     active_conversation_id: int
     chat_session: 'fastworkflow.ChatSession'
     lock: asyncio.Lock
@@ -386,51 +450,51 @@ class UserRuntime:
     stream_format: str = "ndjson"  # "ndjson" | "sse"
 
 
-class UserSessionManager:
-    """Process-wide manager for user sessions"""
+class ChannelSessionManager:
+    """Process-wide manager for channel sessions"""
     
     def __init__(self):
-        self._sessions: dict[str, UserRuntime] = {}
+        self._sessions: dict[str, ChannelRuntime] = {}
         self._lock = asyncio.Lock()
     
-    async def get_session(self, user_id: str) -> Optional[UserRuntime]:
-        """Get a session by user_id"""
+    async def get_session(self, channel_id: str) -> Optional[ChannelRuntime]:
+        """Get a session by channel_id"""
         async with self._lock:
-            return self._sessions.get(user_id)
+            return self._sessions.get(channel_id)
     
     async def create_session(
         self,
-        user_id: str,
+        channel_id: str,
         chat_session: 'fastworkflow.ChatSession',
         conversation_store: 'ConversationStore',
         active_conversation_id: Optional[int] = None,
         stream_format: str = "ndjson"
-    ) -> UserRuntime:
+    ) -> ChannelRuntime:
         """Create or update a session"""
         async with self._lock:            
-            runtime = UserRuntime(
-                user_id=user_id,
+            runtime = ChannelRuntime(
+                channel_id=channel_id,
                 active_conversation_id=active_conversation_id or 0,
                 chat_session=chat_session,
                 lock=asyncio.Lock(),
                 conversation_store=conversation_store,
                 stream_format=stream_format
             )
-            self._sessions[user_id] = runtime
+            self._sessions[channel_id] = runtime
             return runtime
     
-    async def remove_session(self, user_id: str) -> None:
+    async def remove_session(self, channel_id: str) -> None:
         """Remove a session"""
         async with self._lock:
-            if user_id in self._sessions:
-                del self._sessions[user_id]
+            if channel_id in self._sessions:
+                del self._sessions[channel_id]
 
 
 # ============================================================================
 # Helper Functions
 # ============================================================================
 
-def save_conversation_incremental(runtime: UserRuntime, extract_turns_func, logger) -> None:
+def save_conversation_incremental(runtime: ChannelRuntime, extract_turns_func, logger) -> None:
     """
     Save conversation turns incrementally after each turn (without generating topic/summary).
     This provides crash protection - all turns except the last will be preserved.
@@ -442,7 +506,7 @@ def save_conversation_incremental(runtime: UserRuntime, extract_turns_func, logg
             # This is the first conversation for this session
             # Reserve ID 1 and use it
             runtime.active_conversation_id = runtime.conversation_store.reserve_next_conversation_id()
-            logger.debug(f"Initialized first conversation with ID {runtime.active_conversation_id} for user {runtime.user_id}")
+            logger.debug(f"Initialized first conversation with ID {runtime.active_conversation_id} for user {runtime.channel_id}")
         
         # Save turns using the active conversation ID
         runtime.conversation_store.save_conversation_turns(

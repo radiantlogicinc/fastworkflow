@@ -5,7 +5,7 @@ HTTP + MCP interface for FastWorkflow workflows with synchronous and streaming e
 ## Overview
 
 This service exposes FastWorkflow workflows as REST endpoints and as MCP tools, enabling clients to:
-- Initialize workflow sessions per user
+- Initialize workflow sessions per channel
 - Submit natural language queries (agent mode)
 - Execute deterministic commands (assistant mode)
 - Perform explicit actions
@@ -14,8 +14,8 @@ This service exposes FastWorkflow workflows as REST endpoints and as MCP tools, 
 
 ## Architecture
 
-- **Session Management**: In-memory `UserSessionManager` with per-user `ChatSession` instances
-- **Persistence**: Rdict-backed conversation storage (one DB file per user)
+- **Session Management**: In-memory `ChannelSessionManager` with per-channel `ChatSession` instances
+- **Persistence**: Rdict-backed conversation storage (one DB file per channel)
 - **Execution**: Synchronous turn-based processing with queue-based communication
 - **Tracing**: Traces are collected by default and included in synchronous responses or emitted incrementally during streaming
 - **Streaming (REST)**: `/invoke_agent_stream` supports Streamable HTTP via NDJSON by default and SSE when requested in REST initialize
@@ -50,27 +50,25 @@ Configure in your environment (loaded at process startup via CLI args or env loa
 | `--expect_encrypted_jwt` | Enable full JWT signature verification (pass flag to require signed tokens) | No | False (no verification by default) |
 
 Notes:
-- Conversation DBs are stored under `SPEEDDICT_FOLDERNAME/user_conversations` (directory is auto-created).
+- Conversation DBs are stored under `SPEEDDICT_FOLDERNAME/channel_conversations` (directory is auto-created).
 - `/conversations` now accepts a `limit` query parameter (default `20`).
 - Shutdown waits up to 30 seconds for active turns (hard-coded).
 
-## JWT Verification Modes
+## Auth Modes
 
-### Default Behavior: No Signature Verification
-By default, the service does NOT verify JWT signatures, accepting unsigned tokens for trusted internal networks where JWT is used purely for data transport:
+### Trusted Mode (default): No Signature Verification
+When `--expect_encrypted_jwt` is NOT set (trusted environments), the service still creates and returns JWT tokens from `/initialize`, but signature verification is disabled. Clients must include `Authorization: Bearer <access_token>` on subsequent requests.
 
 ```bash
 uvicorn services.run_fastapi.main:app --workflow_path /path/to/workflow
 ```
 
-**Use cases** (no verification):
-- Controlled internal networks with network-level security
-- Systems where JWT carries non-sensitive routing information
-- Trusted environments where data transport is the primary concern
+Notes (trusted mode):
+- `/initialize` returns access/refresh tokens and, if a startup command/action is provided, also returns the startup `CommandOutput`.
+- Subsequent endpoints require `Authorization: Bearer <access_token>`.
+- Traces include `user_id` when available (from JWT `uid` claim).
 
-The service logs a warning on startup when running in this mode.
-
-### Secure Mode: Enable Signature Verification
+### Secure Mode: Signed JWTs with Verification
 For production deployments requiring full RSA signature verification:
 
 ```bash
@@ -78,13 +76,14 @@ uvicorn services.run_fastapi.main:app --workflow_path /path/to/workflow --expect
 ```
 
 **Secure mode** (with `--expect_encrypted_jwt` flag):
-- JWT tokens are cryptographically verified using RSA signatures
-- Tokens without valid signatures are rejected
+- `/initialize` issues access/refresh tokens. Subsequent endpoints require `Authorization: Bearer <token>`.
+- JWT claims include `sub` (channel_id) and `uid` (user_id when provided).
+- Tokens are verified (signature, expiry, audience/issuer). Invalid or expired tokens are rejected.
 - Recommended for production deployments in untrusted environments
 
 ### Token Access in Workflow Context
 
-JWT tokens are automatically passed to workflows via the `workflow_context` parameter as `http_bearer_token`. This allows workflows to access the bearer token for making authenticated API calls or forwarding authentication.
+In secure mode, JWT tokens are passed to workflows via `workflow_context['http_bearer_token']` to support authenticated upstream calls. In trusted mode, tokens are not created/returned and `http_bearer_token` is absent.
 
 **Important notes:**
 - The token is **only available to authenticated endpoints** (those using `get_session_and_ensure_runtime` dependency)
@@ -100,7 +99,7 @@ JWT tokens are automatically passed to workflows via the `workflow_context` para
 
 ```python
 # In workflow code
-workflow_context = self._context  # Gets the workflow_context
+workflow_context = self._context
 bearer_token = workflow_context.get('http_bearer_token')
 
 # Use token for API calls
@@ -111,39 +110,49 @@ response = requests.get("https://api.example.com/data", headers=headers)
 ## API Endpoints (REST)
 
 ### `POST /initialize`
-Initialize a session for a user. Workflow configuration is loaded at server startup from CLI args/env.
+Initialize a session for a channel. Workflow configuration is loaded at server startup from CLI args/env.
 
 **Request:**
 ```json
 {
-  "user_id": "user-123",
-  "stream_format": "ndjson"  // optional: "ndjson" | "sse" (default "ndjson")
+  "channel_id": "channel-123",
+  "user_id": "user-9",
+  "stream_format": "ndjson",
+  "startup_command": "load_workflow ...",
+  "startup_action": {
+    "command_name": "find_orders",
+    "parameters": {"channel_id": 42}
+  }
 }
 ```
 
-**Important Notes:**
+**Rules:**
+- `channel_id` is required.
+- Exactly one of `startup_command` or `startup_action` may be provided (or neither).
+- If startup is provided, `user_id` is required and recorded in the initial trace.
 - `stream_format` controls REST streaming format for `/invoke_agent_stream` (NDJSON default, SSE optional).
-- Workflow configuration is loaded at server startup from CLI args/env, not from the request.
 
 **Response:**
 ```json
 {
-  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "access_token": "eyJhbGci...",
+  "refresh_token": "eyJhbGci...",
   "token_type": "bearer",
-  "expires_in": 3600
+  "expires_in": 3600,
+  "startup_output": { /* CommandOutput, present only if startup was executed */ }
 }
-
 ```
 
 ### `POST /invoke_agent`
 Submit a natural language query for agentic processing.
 
+**Headers:**
+- `Authorization: Bearer <access_token>` (JWT contains `sub` for channel_id and optional `uid` for user_id)
+
 **Request:**
 ```json
 {
-  "user_id": "user-123",
-  "user_query": "find orders for user 42",
+  "user_query": "find orders for channel 42",
   "timeout_seconds": 60
 }
 ```
@@ -153,7 +162,7 @@ Submit a natural language query for agentic processing.
 {
   "command_responses": [
     {
-      "response": "Found 3 orders for user 42",
+      "response": "Found 3 orders for channel 42",
       "success": true,
       "artifacts": {},
       "next_actions": [],
@@ -163,7 +172,7 @@ Submit a natural language query for agentic processing.
   "workflow_name": "default_workflow",
   "context": "Order management context",
   "command_name": "find_orders",
-  "command_parameters": "user_id=42",
+  "command_parameters": "channel_id=42",
   "traces": [...]
 }
 ```
@@ -176,12 +185,15 @@ Same request/response format as `/invoke_agent`.
 ### `POST /perform_action`
 Execute a specific workflow action directly (bypasses parameter extraction).
 
+**Headers:**
+- `Authorization: Bearer <access_token>` (JWT contains `sub` for channel_id and optional `uid` for user_id)
+
 **Request:**
 ```json
 {
   "action": {
     "command_name": "find_orders",
-    "parameters": {"user_id": 42}
+    "parameters": {"channel_id": 42}
   },
   "timeout_seconds": 60
 }
@@ -194,6 +206,8 @@ Same format as `/invoke_agent` (CommandOutput with traces).
 Stream trace events and final `CommandOutput` via Streamable HTTP:
 - NDJSON (default; `Content-Type: application/x-ndjson`)
 - SSE (when REST `stream_format` is set to `sse`; `Content-Type: text/event-stream`)
+
+**Headers:** Same as `/invoke_agent`.
 
 ## Conversation Management (REST)
 
@@ -212,8 +226,8 @@ Persist current conversation and start a new one.
 }
 ```
 
-### `GET /conversations?user_id={user_id}&limit=20`
-List conversations for a user (most recent first). `limit` is optional; defaults to `20`.
+### `GET /conversations?channel_id={channel_id}&limit=20`
+List conversations for a channel (most recent first). `limit` is optional; defaults to `20`.
 
 **Response:**
 ```json
@@ -277,7 +291,7 @@ Export all conversations to JSONL.
 import requests
 
 resp = requests.post("http://localhost:8000/initialize", json={
-    "user_id": "alice",
+    "channel_id": "alice",
     "stream_format": "ndjson"
 })
 print(resp.json())  # {"access_token": "...", "refresh_token": "...", "token_type": "bearer", "expires_in": 3600}
@@ -287,7 +301,7 @@ print(resp.json())  # {"access_token": "...", "refresh_token": "...", "token_typ
 ```python
 # First get a token from /initialize
 init_resp = requests.post("http://localhost:8000/initialize", json={
-    "user_id": "alice",
+    "channel_id": "alice",
     "stream_format": "ndjson"
 })
 token_data = init_resp.json()
@@ -297,7 +311,7 @@ access_token = token_data["access_token"]
 resp = requests.post("http://localhost:8000/invoke_agent", 
     headers={"Authorization": f"Bearer {access_token}"},
     json={
-        "user_query": "list all users",
+        "channel_query": "list all channels",
         "timeout_seconds": 30
     }
 )
@@ -308,7 +322,8 @@ print(result.get("traces"))
 
 ### MCP Quickstart
 - Mount is available at `/mcp` (auto-exposed by fastapi_mcp).
-- MCP clients use pre-configured long-lived access tokens (generated via `/admin/generate_mcp_token`).
+- In secure mode, MCP clients use pre-configured long-lived access tokens (generated via `/admin/generate_mcp_token`).
+- In trusted mode, clients must send `Authorization: Bearer <token>`; the JWT `sub` claim carries the `channel_id`.
 - No need for initialize or refresh_token tools in MCP context.
 
 MCP invoke agent (streaming):
@@ -319,14 +334,14 @@ curl -N -X POST http://localhost:8000/mcp/invoke_agent \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/x-ndjson' \
   -H 'Authorization: Bearer <your-mcp-token>' \
-  -d '{"user_query":"find orders for user 42","timeout_seconds":60}'
+  -d '{"channel_query":"find orders for channel 42","timeout_seconds":60}'
 
 # SSE (if stream_format was set to "sse" during MCP setup)
 curl -N -X POST http://localhost:8000/mcp/invoke_agent \
   -H 'Content-Type: application/json' \
   -H 'Accept: text/event-stream' \
   -H 'Authorization: Bearer <your-mcp-token>' \
-  -d '{"user_query":"find orders for user 42","timeout_seconds":60}'
+  -d '{"channel_query":"find orders for channel 42","timeout_seconds":60}'
 ```
 
 ### MCP Prompts
@@ -345,6 +360,9 @@ See [`tests/`](../../tests/) for unit and integration tests.
 - Timeout behavior (504 on no output)
 - Conversation persistence and listing
 - Feedback attachment
+ - Initialize with startup command/action returns `startup_output` and records conversation
+ - Both trusted mode return tokens; secure mode tokens are encrypted
+ - Traces include `user_id` and `raw_command`
 
 ## Future Enhancements
 

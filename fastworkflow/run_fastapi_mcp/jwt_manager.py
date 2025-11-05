@@ -153,7 +153,7 @@ def set_jwt_verification_mode(expect_encrypted: bool) -> None:
         )
 
 
-def create_access_token(user_id: str, expires_days: int | None = None) -> str:
+def create_access_token(channel_id: str, user_id: Optional[str] = None, expires_days: int | None = None) -> str:
     """
     Create a JWT access token for a user.
     
@@ -162,7 +162,8 @@ def create_access_token(user_id: str, expires_days: int | None = None) -> str:
     - If False: Creates an unsigned token for trusted network use
     
     Args:
-        user_id: User identifier
+        channel_id: Channel identifier (required)
+        user_id: User identifier (optional, will be included as uid claim if provided)
         expires_days: Optional custom expiration in days. If None, uses JWT_ACCESS_TOKEN_EXPIRE_MINUTES (default 60 minutes).
         
     Returns:
@@ -176,30 +177,34 @@ def create_access_token(user_id: str, expires_days: int | None = None) -> str:
     
     # JWT claims
     payload = {
-        "sub": user_id,  # Subject: the user identifier
+        "sub": channel_id,  # Subject: the channel identifier
         "iat": int(now.timestamp()),  # Issued at
         "exp": int(expire.timestamp()),  # Expiration time
-        "jti": f"{user_id}_{int(now.timestamp())}",  # JWT ID (unique identifier)
+        "jti": f"{channel_id}_{int(now.timestamp())}",  # JWT ID (unique identifier)
         "type": "access",  # Token type
         "iss": JWT_ISSUER,  # Issuer
         "aud": JWT_AUDIENCE  # Audience
     }
     
+    # Add optional user_id claim
+    if user_id is not None:
+        payload["uid"] = user_id
+    
     if EXPECT_ENCRYPTED_JWT:
         # Secure mode: create signed token
         private_key, _ = load_or_generate_keys()
         token = jwt.encode(payload, private_key, algorithm=JWT_ALGORITHM)
-        logger.debug(f"Created signed access token for user_id: {user_id}, expires: {expire.isoformat()}")
+        logger.debug(f"Created signed access token for channel_id: {channel_id}, user_id: {user_id}, expires: {expire.isoformat()}")
     else:
         # Trusted network mode: create unsigned token using HS256 with empty key
         # This creates a JWT that can be decoded without verification
         token = jwt.encode(payload, "", algorithm="HS256")
-        logger.debug(f"Created unsigned access token for user_id: {user_id}, expires: {expire.isoformat()}")
+        logger.debug(f"Created unsigned access token for channel_id: {channel_id}, user_id: {user_id}, expires: {expire.isoformat()}")
     
     return token
 
 
-def create_refresh_token(user_id: str) -> str:
+def create_refresh_token(channel_id: str, user_id: Optional[str] = None) -> str:
     """
     Create a JWT refresh token for a user.
     
@@ -208,7 +213,8 @@ def create_refresh_token(user_id: str) -> str:
     - If False: Creates an unsigned token for trusted network use
     
     Args:
-        user_id: User identifier
+        channel_id: Channel identifier (required)
+        user_id: User identifier (optional, will be included as uid claim if provided)
         
     Returns:
         str: Encoded JWT refresh token (signed or unsigned based on EXPECT_ENCRYPTED_JWT)
@@ -218,25 +224,29 @@ def create_refresh_token(user_id: str) -> str:
     
     # JWT claims
     payload = {
-        "sub": user_id,  # Subject: the user identifier
+        "sub": channel_id,  # Subject: the channel identifier
         "iat": int(now.timestamp()),  # Issued at
         "exp": int(expire.timestamp()),  # Expiration time
-        "jti": f"{user_id}_{int(now.timestamp())}_refresh",  # JWT ID (unique identifier)
+        "jti": f"{channel_id}_{int(now.timestamp())}_refresh",  # JWT ID (unique identifier)
         "type": "refresh",  # Token type
         "iss": JWT_ISSUER,  # Issuer
         "aud": JWT_AUDIENCE  # Audience
     }
     
+    # Add optional user_id claim
+    if user_id is not None:
+        payload["uid"] = user_id
+    
     if EXPECT_ENCRYPTED_JWT:
         # Secure mode: create signed token
         private_key, _ = load_or_generate_keys()
         token = jwt.encode(payload, private_key, algorithm=JWT_ALGORITHM)
-        logger.debug(f"Created signed refresh token for user_id: {user_id}, expires: {expire.isoformat()}")
+        logger.debug(f"Created signed refresh token for channel_id: {channel_id}, user_id: {user_id}, expires: {expire.isoformat()}")
     else:
         # Trusted network mode: create unsigned token using HS256 with empty key
         # This creates a JWT that can be decoded without verification
         token = jwt.encode(payload, "", algorithm="HS256")
-        logger.debug(f"Created unsigned refresh token for user_id: {user_id}, expires: {expire.isoformat()}")
+        logger.debug(f"Created unsigned refresh token for channel_id: {channel_id}, user_id: {user_id}, expires: {expire.isoformat()}")
     
     return token
 
@@ -281,7 +291,7 @@ def verify_token(token: str, expected_type: str = "access") -> dict:
         if payload.get("type") != expected_type:
             raise JWTError(f"Invalid token type: expected {expected_type}, got {payload.get('type')}")
         
-        logger.debug(f"Token decoded (unverified mode): user_id={payload.get('sub')}, type={expected_type}")
+        logger.debug(f"Token decoded (unverified mode): channel_id={payload.get('sub')}, type={expected_type}")
         return payload
 
     # Standard mode: full verification (existing code)
@@ -301,7 +311,7 @@ def verify_token(token: str, expected_type: str = "access") -> dict:
         if payload.get("type") != expected_type:
             raise JWTError(f"Invalid token type: expected {expected_type}, got {payload.get('type')}")
 
-        logger.debug(f"Token verified successfully: user_id={payload.get('sub')}, type={expected_type}")
+        logger.debug(f"Token verified successfully: channel_id={payload.get('sub')}, type={expected_type}")
         return payload
 
     except JWTError as e:

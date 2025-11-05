@@ -40,11 +40,12 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from .mcp_specific import setup_mcp
 from .utils import (
-    get_userconversations_dir,
-    UserSessionManager,
+    get_channelconversations_dir,
+    ChannelSessionManager,
     save_conversation_incremental,
     InitializationRequest,
     TokenResponse,
+    InitializeResponse,
     SessionData,
     InvokeRequest,
     PerformActionRequest,
@@ -54,6 +55,7 @@ from .utils import (
     GenerateMCPTokenRequest,
     wait_for_command_output,
     collect_trace_events,
+    collect_trace_events_async,
     get_session_from_jwt,
     ensure_user_runtime_exists
 )
@@ -79,7 +81,7 @@ from .conversation_store import (
 # ============================================================================
 
 # Global session manager
-session_manager = UserSessionManager()
+session_manager = ChannelSessionManager()
 
 
 # ============================================================================
@@ -114,14 +116,14 @@ async def get_session_and_ensure_runtime(
         ```python
         @app.post("/endpoint")
         async def endpoint(session: SessionData = Depends(get_session_and_ensure_runtime)):
-            # session.user_id can now safely be used with session_manager
-            runtime = await session_manager.get_session(session.user_id)
+            # session.channel_id can now safely be used with session_manager
+            runtime = await session_manager.get_session(session.channel_id)
             # runtime is guaranteed to exist
         ```
     """
     # Ensure the user runtime exists (creates if missing)
     await ensure_user_runtime_exists(
-        user_id=session.user_id,
+        channel_id=session.channel_id,
         session_manager=session_manager,
         workflow_path=ARGS.workflow_path,
         context=json.loads(ARGS.context) if ARGS.context else None,
@@ -154,31 +156,31 @@ async def lifespan(_app: FastAPI):
         # Configure JWT verification mode based on CLI parameter
         set_jwt_verification_mode(ARGS.expect_encrypted_jwt)
 
-    async def _active_turn_user_ids() -> list[str]:
+    async def _active_turn_channel_ids() -> list[str]:
         active: list[str] = []
-        for user_id in list(session_manager._sessions.keys()):
-            rt = await session_manager.get_session(user_id)
+        for channel_id in list(session_manager._sessions.keys()):
+            rt = await session_manager.get_session(channel_id)
             if rt and rt.lock.locked():
-                active.append(user_id)
+                active.append(channel_id)
         return active
 
     async def wait_for_active_turns_to_complete(max_wait_seconds: int) -> None:
         logger.info(f"Waiting up to {max_wait_seconds}s for active turns to complete...")
         start_time = time.time()
         while time.time() - start_time < max_wait_seconds:
-            active_turns = await _active_turn_user_ids()
+            active_turns = await _active_turn_channel_ids()
             if not active_turns:
                 logger.info("All turns completed, shutting down gracefully")
                 return
             logger.debug(f"Waiting for {len(active_turns)} active turns: {active_turns}")
             await asyncio.sleep(0.5)
-        remaining = await _active_turn_user_ids()
+        remaining = await _active_turn_channel_ids()
         logger.warning(f"Shutdown timeout reached with {len(remaining)} turns still active")
 
     async def finalize_conversations_on_shutdown() -> None:
         logger.info("Finalizing conversations with topic and summary...")
-        for user_id in list(session_manager._sessions.keys()):
-            runtime = await session_manager.get_session(user_id)
+        for channel_id in list(session_manager._sessions.keys()):
+            runtime = await session_manager.get_session(channel_id)
             if not runtime:
                 continue
             if turns := extract_turns_from_history(runtime.chat_session.conversation_history):
@@ -188,17 +190,17 @@ async def lifespan(_app: FastAPI):
                         runtime.conversation_store.update_conversation_topic_summary(
                             runtime.active_conversation_id, topic, summary
                         )
-                        logger.info(f"Finalized conversation {runtime.active_conversation_id} for user {user_id} during shutdown")
+                        logger.info(f"Finalized conversation {runtime.active_conversation_id} for user {channel_id} during shutdown")
                     else:
-                        logger.warning(f"Conversation history exists but no active_conversation_id for user {user_id} during shutdown")
+                        logger.warning(f"Conversation history exists but no active_conversation_id for user {channel_id} during shutdown")
                         conv_id = runtime.conversation_store.save_conversation(topic, summary, turns)
-                        logger.info(f"Created conversation {conv_id} for user {user_id} during shutdown")
+                        logger.info(f"Created conversation {conv_id} for user {channel_id} during shutdown")
                 except Exception as e:
-                    logger.error(f"Failed to finalize conversation for user {user_id} during shutdown: {e}")
+                    logger.error(f"Failed to finalize conversation for user {channel_id} during shutdown: {e}")
 
     async def stop_all_chat_sessions() -> None:
-        for user_id in list(session_manager._sessions.keys()):
-            runtime = await session_manager.get_session(user_id)
+        for channel_id in list(session_manager._sessions.keys()):
+            runtime = await session_manager.get_session(channel_id)
             if runtime:
                 runtime.chat_session.stop_workflow()
 
@@ -311,76 +313,146 @@ async def root():
 @app.post(
     "/initialize",
     operation_id="rest_initialize",
-    response_model=TokenResponse,
+    response_model=InitializeResponse,
     status_code=status.HTTP_200_OK,
     responses={
-        200: {"description": "Session successfully initialized, JWT tokens returned"},
-        400: {"description": "Both startup_command and startup_action provided"},
+        200: {"description": "Session successfully initialized, JWT tokens returned with optional startup output"},
+        400: {"description": "Both startup_command and startup_action provided, or user_id missing when startup provided"},
         422: {"description": "Invalid paths or missing env vars"},
         500: {"description": "Internal error during initialization"}
     }
 )
-async def initialize(request: InitializationRequest) -> TokenResponse:
+async def initialize(request: InitializationRequest) -> InitializeResponse:
     """
-    Initialize a FastWorkflow session for a user.
+    Initialize a FastWorkflow session for a channel.
     Creates or resumes a ChatSession and starts the workflow.
+    Optionally executes a startup command/action and returns its output.
     """
     try:
+        channel_id = request.channel_id
         user_id = request.user_id
-        logger.info(f"Initializing session for user_id: {user_id}")
+        logger.info(f"Initializing session for channel_id: {channel_id}, user_id: {user_id}")
+
+        # Validate XOR: can't have both startup_command and startup_action
+        if request.startup_command and request.startup_action:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot provide both startup_command and startup_action. Choose one or neither."
+            )
+        
+        # Validate: if startup provided, user_id is required
+        if (request.startup_command or request.startup_action) and not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="user_id is required when startup_command or startup_action is provided"
+            )
 
         # Check if user already has an active session
-        existing_runtime = await session_manager.get_session(user_id)
+        existing_runtime = await session_manager.get_session(channel_id)
         if existing_runtime:
-            logger.info(f"Session for user_id {user_id} already exists, generating new tokens")
+            logger.info(f"Session for channel_id {channel_id} already exists, generating new tokens")
             
             # Generate new JWT tokens for existing session
-            access_token = create_access_token(user_id)
-            refresh_token = create_refresh_token(user_id)
+            access_token = create_access_token(channel_id, user_id)
+            refresh_token = create_refresh_token(channel_id, user_id)
             
-            return TokenResponse(
+            return InitializeResponse(
                 access_token=access_token,
                 refresh_token=refresh_token,
                 token_type="bearer",
                 expires_in=JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60  # Convert to seconds
             )
 
-        # Prepare startup action if provided via CLI args
+        # Prepare startup action if provided in request (takes precedence over CLI args)
         startup_action = None
-        if ARGS.startup_action:
+        startup_command_str = request.startup_command or ARGS.startup_command
+        
+        if request.startup_action:
+            startup_action = fastworkflow.Action(**request.startup_action)
+        elif ARGS.startup_action:
             startup_action = fastworkflow.Action(**json.loads(ARGS.startup_action))
 
         # Use the modular helper function to create the session
-        # This ensures consistent session creation logic across the application
         await ensure_user_runtime_exists(
-            user_id=user_id,
+            channel_id=channel_id,
             session_manager=session_manager,
             workflow_path=ARGS.workflow_path,
             context=json.loads(ARGS.context) if ARGS.context else None,
-            startup_command=ARGS.startup_command,
-            startup_action=startup_action,
+            startup_command=None,  # Don't execute during session creation
+            startup_action=None,  # Don't execute during session creation
             stream_format=(request.stream_format if request.stream_format in ("ndjson", "sse") else "ndjson")
         )
         
-        # Generate JWT tokens
-        access_token = create_access_token(user_id)
-        refresh_token = create_refresh_token(user_id)
+        # Execute startup if provided
+        startup_output = None
+        if startup_command_str or startup_action:
+            runtime = await session_manager.get_session(channel_id)
+            if not runtime:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Runtime not found after creation for channel_id: {channel_id}"
+                )
+            
+            chat_session = runtime.chat_session
+            
+            # Execute startup action or command
+            if startup_action:
+                # Execute action directly (like perform_action)
+                logger.info(f"Executing startup action for channel_id {channel_id}: {startup_action.command_name}")
+                chat_session.user_message_queue.put(startup_action)
+            else:
+                # Execute command via assistant path (deterministic) - needs / prefix
+                assistant_command = f"/{startup_command_str.lstrip('/')}"
+                logger.info(f"Executing startup command for channel_id {channel_id}: {assistant_command}")
+                chat_session.user_message_queue.put(assistant_command)
+            
+            # Wait for output
+            try:
+                startup_output = await wait_for_command_output(
+                    runtime=runtime,
+                    timeout_seconds=60
+                )
+                
+                # Collect traces
+                traces = await collect_trace_events_async(
+                    trace_queue=chat_session.command_trace_queue,
+                    user_id=user_id
+                )
+                
+                # Persist the startup turn to conversation store
+                if startup_output:
+                    # Save turn incrementally using existing conversation store in runtime
+                    save_conversation_incremental(runtime, extract_turns_from_history, logger)
+                    
+                logger.info(f"Startup execution completed and persisted for channel_id: {channel_id}")
+                
+            except asyncio.TimeoutError:
+                logger.error(f"Startup execution timed out for channel_id: {channel_id}")
+                raise HTTPException(
+                    status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                    detail=f"Startup execution timed out for channel_id: {channel_id}"
+                )
         
-        return TokenResponse(
+        # Generate JWT tokens
+        access_token = create_access_token(channel_id, user_id)
+        refresh_token = create_refresh_token(channel_id, user_id)
+        
+        return InitializeResponse(
             access_token=access_token,
             refresh_token=refresh_token,
             token_type="bearer",
-            expires_in=JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60  # Convert to seconds
+            expires_in=JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60,  # Convert to seconds
+            startup_output=startup_output
         )
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error initializing session for user_id: {request.user_id}: {e}")
+        logger.error(f"Error initializing session for channel_id: {request.channel_id}: {e}")
         traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal error in initialize() for user_id: {request.user_id}",
+            detail=f"Internal error in initialize() for channel_id: {request.channel_id}",
         ) from e
 
 
@@ -426,22 +498,23 @@ async def refresh_token(
                 headers={"WWW-Authenticate": "Bearer"},
             ) from e
 
-        # Extract user_id from payload
-        user_id = payload["sub"]
+        # Extract channel_id and optional user_id from payload
+        channel_id = payload["sub"]
+        user_id = payload.get("uid")
 
         # Verify session still exists
-        runtime = await session_manager.get_session(user_id)
+        runtime = await session_manager.get_session(channel_id)
         if not runtime:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User session not found: {user_id} (may have been cleaned up)"
+                detail=f"User session not found: {channel_id} (may have been cleaned up)"
             )
 
-        # Generate new tokens
-        new_access_token = create_access_token(user_id)
-        new_refresh_token = create_refresh_token(user_id)
+        # Generate new tokens with same user_id
+        new_access_token = create_access_token(channel_id, user_id)
+        new_refresh_token = create_refresh_token(channel_id, user_id)
 
-        logger.info(f"Refreshed tokens for user_id: {user_id}")
+        logger.info(f"Refreshed tokens for channel_id: {channel_id}, user_id: {user_id}")
 
         return TokenResponse(
             access_token=new_access_token,
@@ -484,20 +557,21 @@ async def invoke_agent(
     
     Requires a valid JWT access token in the Authorization header (Bearer token format).
     """
+    channel_id = session.channel_id
     user_id = session.user_id
     try:
-        runtime = await session_manager.get_session(user_id)
+        runtime = await session_manager.get_session(channel_id)
         if not runtime:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User session not found: {user_id}"
+                detail=f"User session not found: {channel_id}"
             )
 
         # Serialize turns per user
         if runtime.lock.locked():
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=f"A turn is already in progress for user: {user_id}"
+                detail=f"A turn is already in progress for user: {channel_id}"
             )
 
         async with runtime.lock:
@@ -513,7 +587,7 @@ async def invoke_agent(
             # Incrementally save conversation turns (without generating topic/summary)
             save_conversation_incremental(runtime, extract_turns_from_history, logger)
 
-            traces = collect_trace_events(runtime)
+            traces = collect_trace_events(runtime, user_id=user_id)
             # Build response with traces
             response_data = command_output.model_dump()
             if traces:
@@ -524,11 +598,11 @@ async def invoke_agent(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error in invoke_agent for user {user_id}: {e}")
+        logger.error(f"Error in invoke_agent for user {channel_id}: {e}")
         traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal error in invoke_agent() for user_id: {user_id}",
+            detail=f"Internal error in invoke_agent() for channel_id: {channel_id}",
         ) from e
 
 
@@ -563,20 +637,21 @@ async def invoke_agent_stream(
     Requires a valid JWT access token in the Authorization header (Bearer token format).
     Exposed as 'invoke_agent' tool for MCP clients (who don't need JWT auth).
     """
+    channel_id = session.channel_id
     user_id = session.user_id
     
     # Get runtime and validate session exists
-    runtime = await session_manager.get_session(user_id)
+    runtime = await session_manager.get_session(channel_id)
     if not runtime:
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
-            content={"detail": f"User session not found: {user_id}"}
+            content={"detail": f"User session not found: {channel_id}"}
         )
 
     async def ndjson_stream():
         try:
             if runtime.lock.locked():
-                yield {"type": "error", "data": {"detail": f"A turn is already in progress for user: {user_id}"}}
+                yield {"type": "error", "data": {"detail": f"A turn is already in progress for user: {channel_id}"}}
                 return
             
             async with runtime.lock:
@@ -597,6 +672,8 @@ async def invoke_agent_stream(
                                 "success": evt.success,
                                 "timestamp_ms": evt.timestamp_ms,
                             }
+                            if user_id is not None:
+                                trace_json["user_id"] = user_id
                             yield {"type": "trace", "data": trace_json}
                         except queue.Empty:
                             break
@@ -621,6 +698,8 @@ async def invoke_agent_stream(
                             "success": evt.success,
                             "timestamp_ms": evt.timestamp_ms,
                         }
+                        if user_id is not None:
+                            trace_json["user_id"] = user_id
                         yield {"type": "trace", "data": trace_json}
                     except queue.Empty:
                         break
@@ -633,14 +712,14 @@ async def invoke_agent_stream(
                 yield {"type": "output", "data": command_output.model_dump()}
         
         except Exception as e:
-            logger.error(f"Error in invoke_agent_stream for user {user_id}: {e}")
+            logger.error(f"Error in invoke_agent_stream for user {channel_id}: {e}")
             traceback.print_exc()
-            yield {"type": "error", "data": {"detail": f"Internal error in invoke_agent_stream() for user_id: {user_id}"}}
+            yield {"type": "error", "data": {"detail": f"Internal error in invoke_agent_stream() for channel_id: {channel_id}"}}
 
     async def sse_stream():
         try:
             if runtime.lock.locked():
-                yield "event: error\n" + f"data: {json.dumps({'detail': f'A turn is already in progress for user: {user_id}'})}\n\n"
+                yield "event: error\n" + f"data: {json.dumps({'detail': f'A turn is already in progress for user: {channel_id}'})}\n\n"
                 return
             
             async with runtime.lock:
@@ -656,6 +735,8 @@ async def invoke_agent_stream(
                         "success": evt.success,
                         "timestamp_ms": evt.timestamp_ms,
                     }
+                    if user_id is not None:
+                        trace_data["user_id"] = user_id
                     return f"event: trace\ndata: {json.dumps(trace_data)}\n\n"
                 
                 start_time = time.time()
@@ -692,9 +773,9 @@ async def invoke_agent_stream(
                 yield "event: output\n" + f"data: {json.dumps(command_output.model_dump())}\n\n"
         
         except Exception as e:
-            logger.error(f"Error in invoke_agent_stream SSE for user {user_id}: {e}")
+            logger.error(f"Error in invoke_agent_stream SSE for user {channel_id}: {e}")
             traceback.print_exc()
-            yield "event: error\n" + f"data: {json.dumps({'detail': f'Internal error in invoke_agent_stream() for user_id: {user_id}'})}\n\n"
+            yield "event: error\n" + f"data: {json.dumps({'detail': f'Internal error in invoke_agent_stream() for channel_id: {channel_id}'})}\n\n"
 
     # Route to appropriate stream format
     if runtime.stream_format == "sse":
@@ -735,19 +816,20 @@ async def invoke_assistant(
     
     Requires a valid JWT access token in the Authorization header (Bearer token format).
     """
+    channel_id = session.channel_id
     user_id = session.user_id
     try:
-        runtime = await session_manager.get_session(user_id)
+        runtime = await session_manager.get_session(channel_id)
         if not runtime:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User session not found: {user_id}"
+                detail=f"User session not found: {channel_id}"
             )
 
         if runtime.lock.locked():
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=f"A turn is already in progress for user: {user_id}"
+                detail=f"A turn is already in progress for user: {channel_id}"
             )
 
         async with runtime.lock:
@@ -769,7 +851,7 @@ async def invoke_assistant(
             # Incrementally save conversation turns (without generating topic/summary)
             save_conversation_incremental(runtime, extract_turns_from_history, logger)
 
-            traces = collect_trace_events(runtime)
+            traces = collect_trace_events(runtime, user_id=user_id)
             response_data = command_output.model_dump()
             if traces:
                 response_data["traces"] = traces
@@ -779,11 +861,11 @@ async def invoke_assistant(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error in invoke_assistant for session {user_id}: {e}")
+        logger.error(f"Error in invoke_assistant for session {channel_id}: {e}")
         traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal error in invoke_assistant() for user_id: {user_id}",
+            detail=f"Internal error in invoke_assistant() for channel_id: {channel_id}",
         ) from e
 
 
@@ -810,19 +892,20 @@ async def perform_action(
     
     Requires a valid JWT access token in the Authorization header (Bearer token format).
     """
+    channel_id = session.channel_id
     user_id = session.user_id
     try:
-        runtime = await session_manager.get_session(user_id)
+        runtime = await session_manager.get_session(channel_id)
         if not runtime:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User session not found: {user_id}"
+                detail=f"User session not found: {channel_id}"
             )
 
         if runtime.lock.locked():
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=f"A turn is already in progress for user: {user_id}"
+                detail=f"A turn is already in progress for user: {channel_id}"
             )
 
         async with runtime.lock:
@@ -839,7 +922,7 @@ async def perform_action(
             # This executes synchronously in the current thread (not via queue)
             command_output = runtime.chat_session._process_action(action)
 
-            traces = collect_trace_events(runtime)
+            traces = collect_trace_events(runtime, user_id=user_id)
             response_data = command_output.model_dump()
             if traces:
                 response_data["traces"] = traces
@@ -849,11 +932,11 @@ async def perform_action(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error in perform_action for session {user_id}: {e}")
+        logger.error(f"Error in perform_action for session {channel_id}: {e}")
         traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal error in perform_action() for user_id: {user_id}",
+            detail=f"Internal error in perform_action() for channel_id: {channel_id}",
         ) from e
 
 
@@ -877,13 +960,13 @@ async def new_conversation(
     
     Requires a valid JWT access token in the Authorization header (Bearer token format).
     """
-    user_id = session.user_id
+    channel_id = session.channel_id
     try:
-        runtime = await session_manager.get_session(user_id)
+        runtime = await session_manager.get_session(channel_id)
         if not runtime:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User session not found: {user_id}"
+                detail=f"User session not found: {channel_id}"
             )
 
         # Extract turns from chat_session conversation history
@@ -897,34 +980,34 @@ async def new_conversation(
                 runtime.conversation_store.update_conversation_topic_summary(
                     conv_id, topic, summary
                 )
-                logger.info(f"Finalized conversation {conv_id} with topic and summary for session {user_id}")
+                logger.info(f"Finalized conversation {conv_id} with topic and summary for session {channel_id}")
             else:
                 # Edge case: conversation history exists but no active ID (shouldn't happen with incremental saves)
-                logger.warning(f"Conversation history exists but no active_conversation_id for session {user_id}")
+                logger.warning(f"Conversation history exists but no active_conversation_id for session {channel_id}")
                 conv_id = runtime.conversation_store.save_conversation(topic, summary, turns)
-                logger.info(f"Created conversation {conv_id} for session {user_id}")
+                logger.info(f"Created conversation {conv_id} for session {channel_id}")
 
             # Reserve next conversation ID for the next conversation
             next_id = runtime.conversation_store.reserve_next_conversation_id()
             runtime.active_conversation_id = next_id
             runtime.chat_session.clear_conversation_history()
 
-            logger.info(f"Ready for new conversation {runtime.active_conversation_id} for session {user_id}")
+            logger.info(f"Ready for new conversation {runtime.active_conversation_id} for session {channel_id}")
             return {"status": "ok"}
         else:
             # No turns to save, just clear history and start fresh
             runtime.chat_session.clear_conversation_history()
-            logger.info(f"No turns to save for session {user_id}, cleared history")
+            logger.info(f"No turns to save for session {channel_id}, cleared history")
             return {"status": "ok", "message": "No turns to save"}
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error in new_conversation for session {user_id}: {e}")
+        logger.error(f"Error in new_conversation for session {channel_id}: {e}")
         traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal error in new_conversation() for user_id: {user_id}",
+            detail=f"Internal error in new_conversation() for channel_id: {channel_id}",
         ) from e
 
 
@@ -949,23 +1032,23 @@ async def list_conversations(
     
     Requires a valid JWT access token in the Authorization header (Bearer token format).
     """
-    user_id = session.user_id
+    channel_id = session.channel_id
     try:
-        runtime = await session_manager.get_session(user_id)
+        runtime = await session_manager.get_session(channel_id)
         if not runtime:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User session not found: {user_id}"
+                detail=f"User session not found: {channel_id}"
             )
         return runtime.conversation_store.list_conversations(limit)
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error in list_conversations for session {user_id}: {e}")
+        logger.error(f"Error in list_conversations for session {channel_id}: {e}")
         traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal error in list_conversations() for user_id: {user_id}",
+            detail=f"Internal error in list_conversations() for channel_id: {channel_id}",
         ) from e
 
 
@@ -992,20 +1075,20 @@ async def post_feedback(
     
     Requires a valid JWT access token in the Authorization header (Bearer token format).
     """
-    user_id = session.user_id
+    channel_id = session.channel_id
     try:
-        runtime = await session_manager.get_session(user_id)
+        runtime = await session_manager.get_session(channel_id)
         if not runtime:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User session not found: {user_id}"
+                detail=f"User session not found: {channel_id}"
             )
 
         # Check if there are any in-memory turns to give feedback on
         if not runtime.chat_session.conversation_history.messages:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"No turns available to give feedback on for user: {user_id}"
+                detail=f"No turns available to give feedback on for user: {channel_id}"
             )
 
         # Update feedback on the last turn in the in-memory conversation history
@@ -1019,17 +1102,17 @@ async def post_feedback(
         # Incrementally save the updated turns with feedback
         save_conversation_incremental(runtime, extract_turns_from_history, logger)
 
-        logger.info(f"Added feedback to latest turn for session {user_id}")
+        logger.info(f"Added feedback to latest turn for session {channel_id}")
         return {"status": "ok"}
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error in post_feedback for session {user_id}: {e}")
+        logger.error(f"Error in post_feedback for session {channel_id}: {e}")
         traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal error in post_feedback() for user_id: {user_id}",
+            detail=f"Internal error in post_feedback() for channel_id: {channel_id}",
         ) from e
 
 
@@ -1052,13 +1135,13 @@ async def activate_conversation(
     
     Requires a valid JWT access token in the Authorization header (Bearer token format).
     """
-    user_id = session.user_id
+    channel_id = session.channel_id
     try:
-        runtime = await session_manager.get_session(user_id)
+        runtime = await session_manager.get_session(channel_id)
         if not runtime:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User session not found: {user_id}"
+                detail=f"User session not found: {channel_id}"
             )
 
         # Get conversation by ID
@@ -1074,18 +1157,18 @@ async def activate_conversation(
         # Restore conversation history to chat_session
         restored_history = restore_history_from_turns(conv["turns"])
         runtime.chat_session._conversation_history = restored_history
-        logger.info(f"Activated conversation {request.conversation_id} for session {user_id}")
+        logger.info(f"Activated conversation {request.conversation_id} for session {channel_id}")
         
         return {"status": "ok"}
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error in activate_conversation for session {user_id}: {e}")
+        logger.error(f"Error in activate_conversation for session {channel_id}: {e}")
         traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal error in activate_conversation() for user_id: {user_id}",
+            detail=f"Internal error in activate_conversation() for channel_id: {channel_id}",
         ) from e
 
 
@@ -1108,8 +1191,8 @@ async def dump_all_conversations(request: DumpConversationsRequest) -> dict[str,
         timestamp = int(time.time())
         output_file = os.path.join(request.output_folder, f"all_conversations_{timestamp}.jsonl")
         
-        # Resolve base folder using SPEEDDICT_FOLDERNAME/user_conversations
-        base_folder = get_userconversations_dir()
+        # Resolve base folder using SPEEDDICT_FOLDERNAME/channel_conversations
+        base_folder = get_channelconversations_dir()
         
         all_conversations = []
         session_count = 0
@@ -1118,11 +1201,11 @@ async def dump_all_conversations(request: DumpConversationsRequest) -> dict[str,
         if os.path.isdir(base_folder):
             for filename in os.listdir(base_folder):
                 if filename.endswith('.rdb'):
-                    # Extract user_id from filename (format: <user_id>.rdb)
-                    user_id = filename[:-4]  # Remove .rdb extension
+                    # Extract channel_id from filename (format: <channel_id>.rdb)
+                    channel_id = filename[:-4]  # Remove .rdb extension
                     
                     # Create temporary ConversationStore for this user
-                    store = ConversationStore(user_id, base_folder)
+                    store = ConversationStore(channel_id, base_folder)
                     user_convs = store.get_all_conversations_for_dump()
                     all_conversations.extend(user_convs)
                     session_count += 1
@@ -1162,7 +1245,7 @@ async def generate_mcp_token(request: GenerateMCPTokenRequest) -> TokenResponse:
     and have extended expiration times (default 365 days) since they can't be easily refreshed.
     
     Args:
-        user_id: Identifier for the MCP user/client
+        channel_id: Identifier for the MCP user/client
         expires_days: Token expiration in days (default: 365 days / 1 year)
         
     Returns:
@@ -1171,10 +1254,10 @@ async def generate_mcp_token(request: GenerateMCPTokenRequest) -> TokenResponse:
     Note: This endpoint should be restricted to administrators only in production.
     """
     try:
-        # Generate long-lived access token
-        access_token = create_access_token(request.user_id, expires_days=request.expires_days)
+        # Generate long-lived access token with optional user_id
+        access_token = create_access_token(request.channel_id, user_id=request.user_id, expires_days=request.expires_days)
         
-        logger.info(f"Generated MCP token for user_id: {request.user_id}, expires in {request.expires_days} days")
+        logger.info(f"Generated MCP token for channel_id: {request.channel_id}, user_id: {request.user_id}, expires in {request.expires_days} days")
         
         return TokenResponse(
             access_token=access_token,
