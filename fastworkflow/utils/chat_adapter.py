@@ -54,7 +54,7 @@ class CommandsSystemPreludeAdapter(dspy.ChatAdapter):
         >>> dspy.settings.adapter = CommandsSystemPreludeAdapter()
     """
     
-    def __init__(self, base: dspy.ChatAdapter | None = None, title: str = "Available commands"):
+    def __init__(self, base: dspy.ChatAdapter | None = None, title: str = "Available execute_workflow_query tool commands"):
         super().__init__()
         self.base = base or dspy.ChatAdapter()
         self.title = title

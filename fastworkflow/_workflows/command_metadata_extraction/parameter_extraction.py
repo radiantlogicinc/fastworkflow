@@ -309,12 +309,20 @@ class ParameterExtraction:
         extracted_data = {}
 
         # Try to extract each parameter using XML tags
-        for field_name in field_names:
-            # Look for <field_name>value</field_name> pattern
-            pattern = rf'<{re.escape(field_name)}>(.+?)</{re.escape(field_name)}>'
+        if len(field_names) == 1:
+            # If there's only one field, extract content from first XML tag
+            pattern = r'<[^>]+>(.+?)</[^>]+>'
             if match := re.search(pattern, command, re.DOTALL):
                 parameter_value = match[1].strip()
-                extracted_data[field_name] = parameter_value
+                extracted_data[field_names[0]] = parameter_value
+        else:
+            # Try to extract each parameter using XML tags
+            for field_name in field_names:
+                # Look for <field_name>value</field_name> pattern
+                pattern = rf'<{re.escape(field_name)}>(.+?)</{re.escape(field_name)}>'
+                if match := re.search(pattern, command, re.DOTALL):
+                    parameter_value = match[1].strip()
+                    extracted_data[field_name] = parameter_value
 
         # Check if we extracted values for ALL fields (safest criteria for LLM fallback)
         all_fields_extracted = len(extracted_data) == len(field_names)
