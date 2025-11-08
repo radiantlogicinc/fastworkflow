@@ -295,6 +295,7 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
 
     def execute_workflow_query(command: str) -> str:
         """
+        Takes just a single argument called 'command'.
         Executes the command and returns either a response, or a clarification request.
         Use the "what_can_i_do" tool to get details on available commands, including their names and parameters. Fyi, values in the 'examples' field are fake and for illustration purposes only.
         Commands must be formatted using plain text for command name followed by XML tags enclosing parameter values (if any) as follows: command_name <param1_name>param1_value</param1_name> <param2_name>param2_value</param2_name> ...
