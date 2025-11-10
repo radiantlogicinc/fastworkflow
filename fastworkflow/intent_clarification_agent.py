@@ -28,27 +28,26 @@ class IntentClarificationAgentSignature(dspy.Signature):
     error_message = dspy.InputField(desc="The intent detection error message from the workflow.")
     agent_inputs = dspy.InputField(desc="The original inputs to the workflow agent.")
     agent_trajectory = dspy.InputField(desc="The workflow agent's trajectory showing all actions taken so far leading to this error.")
-    suggested_commands_metadata = dspy.InputField(desc="Metadata for suggested commands (for ambiguity clarification), or empty string (for misunderstanding - use show_available_commands tool instead).")
     clarified_command = dspy.OutputField(desc="The complete command with correct command name AND all original parameters preserved.")
 
 
-def _show_available_commands(chat_session: fastworkflow.ChatSession) -> str:
-    """
-    Show available commands to help resolve intent detection errors.
+# def _show_available_commands(chat_session: fastworkflow.ChatSession) -> str:
+#     """
+#     Show available commands to help resolve intent detection errors.
 
-    Args:
-        chat_session: The chat session instance
+#     Args:
+#         chat_session: The chat session instance
 
-    Returns:
-        List of available commands
-    """
+#     Returns:
+#         List of available commands
+#     """
 
-    current_workflow = chat_session.get_active_workflow()
-    return CommandMetadataAPI.get_command_display_text(
-        subject_workflow_path=current_workflow.folderpath,
-        cme_workflow_path=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
-        active_context_name=current_workflow.current_command_context_name,
-    )
+#     current_workflow = chat_session.get_active_workflow()
+#     return CommandMetadataAPI.get_command_display_text(
+#         subject_workflow_path=current_workflow.folderpath,
+#         cme_workflow_path=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
+#         active_context_name=current_workflow.current_command_context_name,
+#     )
 
 
 def _ask_user_for_clarification(
@@ -103,11 +102,11 @@ def initialize_intent_clarification_agent(
     if not chat_session:
         raise ValueError("chat_session cannot be null")
 
-    def show_available_commands() -> str:
-        """
-        Show all available commands to help resolve intent ambiguity.
-        """
-        return _show_available_commands(chat_session)
+    # def show_available_commands() -> str:
+    #     """
+    #     Show all available commands to help resolve intent ambiguity.
+    #     """
+    #     return _show_available_commands(chat_session)
 
     def ask_user(clarification_request: str) -> str:
         """
@@ -121,7 +120,7 @@ def initialize_intent_clarification_agent(
 
     # Limited tool set for intent detection errors
     tools = [
-        show_available_commands,
+        # show_available_commands,
         ask_user,
     ]
 

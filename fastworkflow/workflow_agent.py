@@ -33,37 +33,6 @@ def _what_can_i_do(chat_session_obj: fastworkflow.ChatSession) -> str:
         active_context_name=current_workflow.current_command_context_name,
     )
 
-# def _clarify_ambiguous_intent(
-#         correct_command_name: str,
-#         chat_session_obj: fastworkflow.ChatSession) -> str:
-#     """
-#     Call this tool ONLY in the intent detection error state (ambiguous or misunderstood intent) to provide the exact command name.
-#     The intent detection error message will list the command names to pick from.
-#     """
-#     return _execute_workflow_query(correct_command_name, chat_session_obj = chat_session_obj)
-
-# def _provide_missing_or_corrected_parameters(
-#         missing_or_corrected_parameter_values: list[str|int|float|bool],
-#         chat_session_obj: fastworkflow.ChatSession) -> str:
-#     """
-#     Call this tool ONLY in the parameter extraction error state to provide missing or corrected parameter values.
-#     Missing parameter values may be found in the user query, or information already available, or by aborting and executing a different command (refer to the optional 'available_from' hint for guidance on appropriate commands to use to get the information).
-#     If the error message indicates parameter values are improperly formatted, correct using your internal knowledge and command metadata information.
-#     """
-#     if missing_or_corrected_parameter_values:
-#         command = ', '.join(missing_or_corrected_parameter_values)
-#     else:
-#         return "Provide missing or corrected parameter values or abort"
-    
-#   return _execute_workflow_query(command, chat_session_obj = chat_session_obj)
-
-# def _abort_current_command_to_exit_parameter_extraction_error_state(
-#         chat_session_obj: fastworkflow.ChatSession) -> str:
-#     """
-#     Call this tool ONLY in the parameter extraction error state when you want to get out of the parameter extraction error state and execute a different command.
-#     """
-#     return 
-
 def _intent_misunderstood(
         chat_session_obj: fastworkflow.ChatSession) -> str:
     """
@@ -142,6 +111,10 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     # Handle intent ambiguity clarification state with specialized agent
     if nlu_stage == fastworkflow.NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION:
         if intent_agent := chat_session_obj.intent_clarification_agent:
+            from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter    
+            # Use CommandsSystemPreludeAdapter specifically for workflow agent calls
+            agent_adapter = CommandsSystemPreludeAdapter()
+
             # Get suggested commands from intent detection system
             from fastworkflow._workflows.command_metadata_extraction.intent_detection import CommandNamePrediction
             predictor = CommandNamePrediction(cme_workflow)
@@ -164,13 +137,13 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
             agent_trajectory = workflow_tool_agent.current_trajectory if workflow_tool_agent else {}
 
             lm = dspy_utils.get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")
-            with dspy.context(lm=lm):
+            with dspy.context(lm=lm, adapter=agent_adapter):
                 result = intent_agent(
                     original_command=command,
                     error_message=response_text,
                     agent_inputs=agent_inputs,
                     agent_trajectory=agent_trajectory,
-                    suggested_commands_metadata=suggested_commands_metadata
+                    available_commands=suggested_commands_metadata  # Note that this is not part of the signature. It is extra metadata that will be picked up by the CommandsSystemPreludeAdapter
                 )
             # The clarified command should have the correct name with all original parameters
             clarified_cmd = result.clarified_command if hasattr(result, 'clarified_command') else str(result)
@@ -196,7 +169,6 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
                     error_message=response_text,
                     agent_inputs=agent_inputs,
                     agent_trajectory=agent_trajectory,
-                    suggested_commands_metadata=""
                 )
 
             clarified_cmd = result.clarified_command if hasattr(result, 'clarified_command') else str(result)
@@ -212,33 +184,12 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
         abort_confirmation = _execute_workflow_query('abort', chat_session_obj=chat_session_obj)
         return f'{response_text}\n{abort_confirmation}'
 
+    # Clean up the context flag after command execution
+    workflow = chat_session_obj.get_active_workflow()
+    if workflow and "is_user_command" in workflow.context:
+        del workflow.context["is_user_command"]
+    
     return response_text
-
-# def _missing_information_guidance_tool(
-#         how_to_find_request: str, 
-#         chat_session_obj: fastworkflow.ChatSession) -> str:
-#     """
-#     Request guidance on finding missing information. 
-#     The how_to_find_request must be plain text without any formatting.
-#     """
-#     class MissingInfoGuidanceSignature(dspy.Signature):
-#         """
-#         Carefully review the command info 'available_from' hints to see if the missing information can be found by executing a different command.
-#         You may have to walk the graph of commands based on the 'available_from' hints to find the most appropriate command
-#         Note that using the wrong command name can produce missing information errors. The requestor should double-check that the command name is correct. 
-#         """
-#         command_info: str = dspy.InputField()
-#         missing_information_guidance_request: str = dspy.InputField()
-#         guidance: str = dspy.OutputField()
-
-
-#     lm = dspy_utils.get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")
-#     with dspy.context(lm=lm):
-#         guidance_func = dspy.ChainOfThought(MissingInfoGuidanceSignature)
-#         prediction = guidance_func(
-#             command_info=_what_can_i_do(chat_session_obj), 
-#             missing_information_guidance_request=how_to_find_request)
-#         return prediction.guidance
 
 def _ask_user_tool(clarification_request: str, chat_session_obj: fastworkflow.ChatSession) -> str:
     """
@@ -301,6 +252,13 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
         Commands must be formatted using plain text for command name followed by XML tags enclosing parameter values (if any) as follows: command_name <param1_name>param1_value</param1_name> <param2_name>param2_value</param2_name> ...
         Don't use this tool to respond to a clarification requests in PARAMETER EXTRACTION ERROR state
         """
+        # Check if this command originated from user input (iteration_counter == 0)
+        # Set flag in workflow context so validate_extracted_parameters can access it
+        is_user_command = chat_session_obj.workflow_tool_agent.iteration_counter <= 0 
+        workflow = chat_session_obj.get_active_workflow()
+        if workflow:
+            workflow.context["is_user_command"] = is_user_command
+        
         # Retry logic for workflow execution
         max_retries = 2
         for attempt in range(max_retries):
@@ -314,20 +272,17 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
                 # Continue to next attempt
                 logger.warning(f"Attempt {attempt + 1} failed for command '{command}': {str(e)}")
 
-    # def missing_information_guidance(how_to_find_request: str) -> str:
-    #     """
-    #     Request guidance on finding missing information. 
-    #     The how_to_find_request must be plain text without any formatting.
-    #     """
-    #     return _missing_information_guidance_tool(how_to_find_request, chat_session_obj=chat_session_obj)
-
     def ask_user(clarification_request: str) -> str:
         """
         Only as the last resort, request clarification for missing information from the human user. 
         The clarification_request must be plain text without any formatting.
         Note that using the wrong command name can produce missing information errors. Double-check with the what_can_i_do tool to verify that the correct command name is being used 
         """
-        chat_session_obj.workflow_tool_agent.iteration_counter = 0  # reset iteration counter, everytime we ask the user
+        # reset iteration counter, everytime we ask the user
+        # reset to -1, because we are dual purposing (iteration_counter <= 0) to check
+        # if command passed to execute_workflow_query() originated either:
+        # externally or inside agent loop immediately after an ask_user()_call 
+        chat_session_obj.workflow_tool_agent.iteration_counter = -1
         return _ask_user_tool(clarification_request, chat_session_obj=chat_session_obj)
 
     tools = [
@@ -400,9 +355,9 @@ def build_query_with_next_steps(user_query: str,
             return user_query
 
         steps_list = '\n'.join([f'{i + 1}. {task}' for i, task in enumerate(prediction.next_steps)])
-        user_query_and_next_steps = f"{user_query}\n\nNext steps:\n{steps_list}"
+        user_query_and_next_steps = f"{user_query}\n\nExecute these next steps:\n{steps_list}"
         return (
-            f'{available_commands}\n\nUser Query:\n{user_query_and_next_steps}'
+            f'User Query:\n{user_query_and_next_steps}'
             if with_agent_inputs_and_trajectory else
             user_query_and_next_steps
         )
