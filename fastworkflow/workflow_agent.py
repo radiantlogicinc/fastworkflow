@@ -186,7 +186,7 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
 
     # Clean up the context flag after command execution
     workflow = chat_session_obj.get_active_workflow()
-    if workflow and "is_user_command" in workflow.context:
+    if "is_user_command" in workflow.context:
         del workflow.context["is_user_command"]
     
     return response_text
@@ -212,6 +212,11 @@ def _ask_user_tool(clarification_request: str, chat_session_obj: fastworkflow.Ch
             "user_response": user_query
         }
         f.write(json.dumps(agent_user_dialog, ensure_ascii=False) + "\n")
+
+    # store the message as 'raw_user_input' in workflow_context. This is useful in agentic mode
+    # when command implementations want to get the exact message that user entered (no refinement)
+    workflow = chat_session_obj.get_active_workflow()
+    workflow.context['raw_user_message'] = user_query
 
     return build_query_with_next_steps(user_query, chat_session_obj, with_agent_inputs_and_trajectory = True)
 
