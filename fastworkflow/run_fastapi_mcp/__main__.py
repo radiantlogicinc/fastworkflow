@@ -120,7 +120,14 @@ async def get_session_and_ensure_runtime(
             runtime = await session_manager.get_session(session.channel_id)
             # runtime is guaranteed to exist
         ```
-    """
+    """        
+    # Prepare startup action if provided in request (takes precedence over CLI args)
+    startup_action = None
+    if ARGS.startup_action:
+        with open(ARGS.startup_action, 'r') as file:
+            startup_action_dict = json.load(file)
+        startup_action = fastworkflow.Action(**startup_action_dict)
+
     # Ensure the user runtime exists (creates if missing)
     await ensure_user_runtime_exists(
         channel_id=session.channel_id,
@@ -128,7 +135,7 @@ async def get_session_and_ensure_runtime(
         workflow_path=ARGS.workflow_path,
         context=json.loads(ARGS.context) if ARGS.context else None,
         startup_command=ARGS.startup_command,
-        startup_action=fastworkflow.Action(**json.loads(ARGS.startup_action)) if ARGS.startup_action else None,
+        startup_action=startup_action,
         http_bearer_token=session.http_bearer_token
     )
     
@@ -363,10 +370,10 @@ async def initialize(request: InitializationRequest) -> InitializeResponse:
                 expires_in=JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60  # Convert to seconds
             )
 
-        # Prepare startup action if provided in request (takes precedence over CLI args)
-        startup_action = None
         startup_command_str = request.startup_command or ARGS.startup_command
         
+        # Prepare startup action if provided in request (takes precedence over CLI args)
+        startup_action = None
         if request.startup_action:
             startup_action = fastworkflow.Action(**request.startup_action)
         elif ARGS.startup_action:
