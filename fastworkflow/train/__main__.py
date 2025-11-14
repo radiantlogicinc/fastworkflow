@@ -3,6 +3,7 @@ import os
 import json
 import shutil
 from dotenv import dotenv_values
+import importlib.util
 
 from colorama import Fore, Style
 
@@ -15,6 +16,21 @@ from fastworkflow.utils.generate_param_examples import generate_dspy_examples
 from fastworkflow.command_directory import CommandDirectory, get_cached_command_directory
 from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
 from fastworkflow.command_context_model import CommandContextModel
+
+# Cache the datasets availability check result
+_DATASETS_AVAILABLE = None
+
+
+def _datasets_available() -> bool:
+    """Check if the datasets package is available in the environment.
+    
+    Returns:
+        bool: True if datasets can be imported, False otherwise.
+    """
+    global _DATASETS_AVAILABLE
+    if _DATASETS_AVAILABLE is None:
+        _DATASETS_AVAILABLE = importlib.util.find_spec("datasets") is not None
+    return _DATASETS_AVAILABLE
 
 
 def train_workflow(workflow_path: str):
@@ -42,6 +58,16 @@ def train_workflow(workflow_path: str):
     commands_dir = os.path.join(workflow_path, "_commands")
     if not os.path.isdir(commands_dir):
         logger.info(f"No _commands directory found at {workflow_path}, skipping training")
+        return
+    
+    # Check if datasets package is available for training
+    # Command directory and routing artifacts are generated above regardless
+    if not _datasets_available():
+        logger.warning(
+            f"datasets package not found in environment. Skipping intent detection training "
+            f"and DSPy few-shot parameter extraction for workflow: {workflow_path}. "
+            f"Other artifacts such as command_directory.json and routing_definition.json have been generated successfully."
+        )
         return
     
     # create a workflow and train the main workflow

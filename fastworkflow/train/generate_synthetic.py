@@ -1,8 +1,15 @@
 from typing import List
-from datasets import load_dataset
 import random
 import fastworkflow
 import litellm
+
+# Conditional import of datasets - only required at runtime during training
+try:
+    from datasets import load_dataset
+    _DATASETS_AVAILABLE = True
+except ImportError:
+    _DATASETS_AVAILABLE = False
+    load_dataset = None
 
 NUMOF_PERSONAS=fastworkflow.get_env_var('SYNTHETIC_UTTERANCE_GEN_NUMOF_PERSONAS', int)
 UTTERANCES_PER_PERSONA=fastworkflow.get_env_var('SYNTHETIC_UTTERANCE_GEN_UTTERANCES_PER_PERSONA', int)
@@ -15,6 +22,15 @@ def generate_diverse_utterances(
     utterances_per_persona: int = UTTERANCES_PER_PERSONA,
     personas_per_batch: int = PERSONAS_PER_BATCH
 ) -> list[str]:
+    # If datasets is not available, return only the seed utterances
+    if not _DATASETS_AVAILABLE:
+        from fastworkflow.utils.logging import logger
+        logger.warning(
+            f"datasets package not available. Skipping synthetic utterance generation "
+            f"for command '{command_name}'. Using only seed utterances."
+        )
+        return [command_name] + seed_utterances
+    
     # Initialize LiteLLM with API key
     api_key = fastworkflow.get_env_var("LITELLM_API_KEY_SYNDATA_GEN")
     model=fastworkflow.get_env_var("LLM_SYNDATA_GEN")
