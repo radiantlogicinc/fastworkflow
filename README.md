@@ -130,6 +130,7 @@ uv pip install fastworkflow
 - `fastWorkflow` currently works on Linux and MacOS only. On windows, use WSL.
 - `fastWorkflow` installs PyTorch as a dependency. If you don't already have PyTorch installed, this could take a few minutes depending on your internet speed.
 - `fastWorkflow` requires Python 3.11+ or higher.
+- Training (`fastworkflow train`) also expects the optional Hugging Face `datasets` package. Install it by including the dev group when using Poetry.
 
 ---
 
@@ -172,6 +173,10 @@ LITELLM_API_KEY_AGENT=your-mistral-api-key
 You can get a free API key from [Mistral AI](https://mistral.ai) for the mistral small model. Or a free API key from [OpenRouter](https://openrouter.ai/openai/gpt-oss-20b:free) for the GPT-OSS-20B:free model. You can use different models for different LLM roles in the same workflow if you wish.
 
 ### Step 3: Train the Example
+
+> [!note]
+> The training CLI depends on the optional Hugging Face `datasets` package.  
+> Install it explicitly (`pip install datasets`) or, if you're working from this repo, run `poetry install --with dev` before training.
 
 Train the intent-detection models for the workflow:
 

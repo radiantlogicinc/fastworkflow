@@ -73,13 +73,20 @@ def get_module(module_path: str, search_root: Optional[str] = None) -> Any:
 
         fw_pkg_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 
-        if not (abs_module_path.startswith(project_root) or abs_module_path.startswith(fw_pkg_root)):
+        if abs_module_path.startswith(project_root):
+            relative_base = project_root
+        elif abs_module_path.startswith(fw_pkg_root):
+            relative_base = fw_pkg_root
+        else:
             raise ImportError(
                 f"Module {abs_module_path} is outside of permitted roots: {project_root} or {fw_pkg_root}")
 
         # Build import path relative to project root
-        relative_path = os.path.relpath(abs_module_path, project_root)
+        relative_path = os.path.relpath(abs_module_path, relative_base)
         module_pythonic_path = relative_path.replace(os.sep, ".").rsplit(".py", 1)[0]
+        if relative_base == fw_pkg_root:
+            pkg_name = Path(fw_pkg_root).name
+            module_pythonic_path = f"{pkg_name}.{module_pythonic_path}"
 
         # Use spec_from_file_location for dynamic loading from file paths
         spec = importlib.util.spec_from_file_location(module_pythonic_path, abs_module_path)

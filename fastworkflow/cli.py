@@ -214,12 +214,10 @@ def add_refine_parser(subparsers):
     """Add subparser for the 'refine' command."""
     parser_refine = subparsers.add_parser(
         "refine",
-        help="Refine generated commands: enhance metadata and build dependency graph.",
+        help="Refine generated commands by enhancing metadata.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser_refine.add_argument('--workflow-folderpath', '-w', required=True, help='Path to the workflow folder to refine')
-    parser_refine.add_argument('--semantic-threshold', type=float, default=0.85, help='Semantic match threshold for dependency graph')
-    parser_refine.add_argument('--exact-only', action='store_true', help='Use exact name/type matching only for dependency graph')
 
     # Lazy-import refine_main only if the user actually invokes the command
     def _refine_main_wrapper(args):

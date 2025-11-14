@@ -19,7 +19,6 @@ from fastworkflow.utils.logging import logger
 from fastworkflow.model_pipeline_training import get_route_layer_filepath_model
 from fastworkflow.utils.fuzzy_match import find_best_matches
 from fastworkflow.command_directory import CommandDirectory
-from fastworkflow.utils.command_dependency_graph import get_dependency_suggestions
 
 MISSING_INFORMATION_ERRMSG = None
 INVALID_INFORMATION_ERRMSG = None

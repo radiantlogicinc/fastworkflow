@@ -65,6 +65,22 @@ def test_get_module_internal_workflow():
     assert hasattr(module.ResponseGenerator, "__call__")
 
 
+def test_get_module_internal_workflow_with_external_search_root():
+    """Ensure internal workflows load even when a different search_root is provided."""
+    internal_wf_path = fastworkflow.get_internal_workflow_path("command_metadata_extraction")
+    module_path = os.path.join(internal_wf_path, "_commands", "wildcard.py")
+    assert os.path.exists(module_path), f"Test file not found: {module_path}"
+
+    example_workflow = os.path.join(fastworkflow.get_fastworkflow_package_path(), "examples", "hello_world")
+    assert os.path.isdir(example_workflow), f"Example workflow not found: {example_workflow}"
+
+    module = python_utils.get_module(module_path, example_workflow)
+
+    assert module is not None
+    assert hasattr(module, "Signature")
+    assert hasattr(module, "ResponseGenerator")
+
+
 def test_get_module_import_path():
     """Test the get_module_import_path function."""
     # Test with a simple case

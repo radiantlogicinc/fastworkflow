@@ -16,9 +16,8 @@ This enhances usability by enabling natural language interactions that autonomou
   - Embedding a DSPy-based "main agent" within fastWorkflow for agent mode.
   - Dynamic tool description generation using GenAI artifacts (e.g., workflow_description.json from post-build step).
   - Context-aware agent logic for detecting changes and refreshing command info.
-  - Integration with upcoming features like command dependency graphs for parameter resolution suggestions.
 - **Out of Scope**:
-  - Full runtime execution of dependency chains (covered in command_dependency_graph.md spec; agent will suggest but not auto-execute).
+  - Full runtime execution of dependency chains (agent will suggest but not auto-execute).
   - Cross-workflow agentic behavior.
   - Advanced agent training/optimization beyond basic DSPy ReAct setup.
   - UI changes beyond CLI prompts.
@@ -28,13 +27,12 @@ This enhances usability by enabling natural language interactions that autonomou
 - **Dynamic Adaptability**: Agent treats workflow as a evolving tool, querying runtime state (e.g., current context) to update its "tool description."
 - **Improved Error Handling**: Autonomous recovery from missing parameters using dependency clues; graceful fallback to user queries.
 - **Enhanced Discoverability**: Richer "what_can_i_do" responses provide comprehensive command details for both modes.
-- **Leverage Existing Specs**: Builds on GenAI post-processing (build_postprocessing_using_dspy.md) for metadata and command_dependency_graph.md for suggestions.
+- **Leverage Existing Specs**: Builds on GenAI post-processing (build_postprocessing_using_dspy.md) for metadata-driven suggestions.
 
 ### 1.4 Assumptions and Dependencies
 - **Dependencies**:
   - DSPy library for agent implementation (already in run_agent).
   - GenAI post-processing phase (from build_postprocessing_using_dspy.md) generates artifacts like `workflow_description.json`, command docstrings, and field metadata.
-  - Command dependency graph (from command_dependency_graph.md) for parameter resolution suggestions.
   - Existing fastWorkflow components: `ChatSession`, `CommandExecutor`, core commands (e.g., "what_can_i_do", "go_up", "reset_context", "current_context").
 - **Assumptions**:
   - Workflows are built with `_commands` directory structure, Pydantic-based Signatures, and context hierarchies defined in `context_inheritance_model.json` and `context_containment_model.json` (if available).
@@ -60,7 +58,7 @@ This enhances usability by enabling natural language interactions that autonomou
    - Aggregates static (GenAI artifacts) and runtime (context queries) info.
 
 5. **Error Handling and Fallback**:
-   - Integrates dependency graph for suggestions; uses "AskUser" tool for unresolved cases.
+   - Surfaces metadata-driven suggestions; uses "AskUser" tool for unresolved cases.
 
 ### 2.2 Execution Flow
 - **Initialization** (`ChatSession.__init__`):
@@ -82,7 +80,6 @@ This enhances usability by enabling natural language interactions that autonomou
 
 - **Build Integration**:
   - During `fastworkflow build`, generate/update GenAI artifacts (descriptions, docstrings).
-  - Ensure dependency graph is built for parameter suggestions.
 
 ### 2.3 DSPy Components
 - **Main Agent Signature** (PlanningAgentSignature):
@@ -128,8 +125,8 @@ This enhances usability by enabling natural language interactions that autonomou
 
 ### 3.3 Error Handling and Fallback
 - **Missing Parameters**:
-  - Parse validation message (from command_dependency_graph.md).
-  - If clues (e.g., suggested commands via graph query), attempt resolution autonomously.
+  - Parse validation message returned by the validation pipeline.
+  - If clues are present (e.g., suggested commands surfaced by metadata), attempt resolution autonomously.
   - Else: Invoke "AskUser" with validation message + request for values.
 - **Context Change Detection**:
   - Post-response: Semantic check (e.g., embeddings) for phrases like "switched to context X".
