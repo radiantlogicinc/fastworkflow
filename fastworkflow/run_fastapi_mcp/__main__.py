@@ -370,7 +370,9 @@ async def initialize(request: InitializationRequest) -> InitializeResponse:
         if request.startup_action:
             startup_action = fastworkflow.Action(**request.startup_action)
         elif ARGS.startup_action:
-            startup_action = fastworkflow.Action(**json.loads(ARGS.startup_action))
+            with open(ARGS.startup_action, 'r') as file:
+                startup_action_dict = json.load(file)
+            startup_action = fastworkflow.Action(**startup_action_dict)
 
         # Use the modular helper function to create the session
         await ensure_user_runtime_exists(
