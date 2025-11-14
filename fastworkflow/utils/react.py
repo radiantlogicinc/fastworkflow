@@ -108,12 +108,23 @@ class fastWorkflowReAct(Module):
         trajectory = {}
         max_iters = input_args.pop("max_iters", self.max_iters)
         idx = 0
+        exception_count = 0
         while True:
             try:
                 pred = self._call_with_potential_trajectory_truncation(self.react, trajectory, **input_args)
             except ValueError as err:
-                logger.warning(f"Ending the trajectory: Agent failed to select a valid tool: {_fmt_exc(err)}")
-                break
+                trajectory[f"observation_{idx}"] = f"Agent failed to select a valid tool: {_fmt_exc(err)}"
+                idx += 1 # this is the counter for the index of the entire trajectory
+                trajectory[f"thought_{idx}"] = (
+                    "To execute a command, I should use the execute_workflow_query tool"
+                )
+                trajectory[f"observation_{idx}"] = "Use the execute_workflow_query tool with a single argument called 'command' formatted as plain text using the command name and parameter values"
+                idx += 1 # this is the counter for the index of the entire trajectory
+                exception_count += 1
+                if exception_count > 2:
+                    break
+                else:
+                    continue
 
             trajectory[f"thought_{idx}"] = pred.next_thought
             trajectory[f"tool_name_{idx}"] = pred.next_tool_name

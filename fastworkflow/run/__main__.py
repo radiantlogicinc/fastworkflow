@@ -184,7 +184,7 @@ def run_main(args):
 
     with contextlib.suppress(queue.Empty):
         if command_output := fastworkflow.chat_session.command_output_queue.get(
-            timeout=1.0
+            timeout=180.0
         ):
             print_command_output(command_output)
     while not fastworkflow.chat_session.workflow_is_complete or args.keep_alive:
