@@ -181,12 +181,16 @@ def run_main(args):
 
     StartupProgress.advance("ChatSession ready")
     StartupProgress.end()
-
+   
     with contextlib.suppress(queue.Empty):
-        if command_output := fastworkflow.chat_session.command_output_queue.get(
+        timeout: float | None = None
+        if args.startup_command or args.startup_action:
             timeout=180.0
+        if command_output := fastworkflow.chat_session.command_output_queue.get(
+            timeout=timeout
         ):
             print_command_output(command_output)
+
     while not fastworkflow.chat_session.workflow_is_complete or args.keep_alive:
         with patch_stdout():
             user_command = prompt_session.prompt()

@@ -182,7 +182,10 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     # Handle parameter extraction errors with abort
     if nlu_stage == fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION:
         abort_confirmation = _execute_workflow_query('abort', chat_session_obj=chat_session_obj)
-        return f'{response_text}\n{abort_confirmation}'
+        return build_query_with_next_steps(
+            f'{response_text}\n{abort_confirmation}', 
+            chat_session_obj, with_agent_inputs_and_trajectory = True
+        )
 
     # Clean up the context flag after command execution
     workflow = chat_session_obj.get_active_workflow()
