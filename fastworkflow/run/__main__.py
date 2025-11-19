@@ -183,7 +183,7 @@ def run_main(args):
     StartupProgress.end()
    
     with contextlib.suppress(queue.Empty):
-        timeout: float | None = None
+        timeout: float = 0.000001
         if args.startup_command or args.startup_action:
             timeout=180.0
         if command_output := fastworkflow.chat_session.command_output_queue.get(
