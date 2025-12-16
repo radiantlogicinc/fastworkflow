@@ -1,7 +1,7 @@
 from enum import Enum
 from queue import Empty, Queue
 from threading import Thread, Lock
-from typing import ClassVar, Optional
+from typing import Optional
 from collections import deque
 import json
 import contextlib
@@ -9,9 +9,9 @@ import uuid
 from pathlib import Path
 import os
 import time
-from datetime import datetime
 
 import dspy
+from dspy.clients import litellm
 
 import fastworkflow
 from fastworkflow.utils.logging import logger
@@ -177,6 +177,8 @@ class ChatSession:
         """
         if startup_command and startup_action:
             raise ValueError("Cannot provide both startup_command and startup_action")
+
+        litellm.drop_params = True  # See https://docs.litellm.ai/docs/completion/drop_params
 
         # Create the workflow
         workflow = fastworkflow.Workflow.create(
