@@ -17,8 +17,22 @@ While [DSPy](https://dspy.ai) ([Why DSPy](https://x.com/lateinteraction/status/1
 
 ### Why fastWorkflow?
 
-- ✅ **Unlimited Tool Scaling**: fastworkflow organizes tools into context hierarchies so use any number of tools without sacrificing performance or efficiency
 - ✅ **Cost-Effective Performance**: fastWorkFlow with small, free models can match the quality of large expensive models
+
+<p align="center">
+  <table>
+    <tr>
+      <td align="center" width="50%">
+        <img src="fastWorkflow - Tau Bench Retail.jpg" alt="fastWorkflow - Tau Bench Retail" style="max-width: 100%; height: auto;"/>
+      </td>
+      <td align="center" width="50%">
+        <img src="fastWorkflow - TauBench Airline.jpg" alt="fastWorkflow - TauBench Airline" style="max-width: 100%; height: auto;"/>
+      </td>
+    </tr>
+  </table>
+</p>
+
+- ✅ **Unlimited Tool Scaling**: fastworkflow organizes tools into context hierarchies so use any number of tools without sacrificing performance or efficiency
 - ✅ **Reliable Tool Execution**: fastworkflow validation pipeline virtually eliminates incorrect tool calling or parameter extraction, ensuring a reliable tool response
 - ✅ **Adaptive Learning**: 1-shot learning from intent detection mistakes. It learns your conversational vocabulary as you interact with it
 - ✅ **Interface Flexibility**: Support programmatic, assistant-driven and agent-driven interfaces with the same codebase
