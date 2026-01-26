@@ -74,11 +74,15 @@ class CommandsSystemPreludeAdapter(dspy.ChatAdapter):
         Returns:
             Formatted messages with commands injected into system message
         """
-        # Call the base adapter's format method
-        formatted = self.base.format(signature, demos, inputs)
-        
-        # Check if available_commands is in inputs
+        # Extract available_commands before passing to base adapter
         cmds = inputs.get("available_commands")
+
+        # Create a copy of inputs without available_commands to avoid including it in user message
+        inputs_for_base = {k: v for k, v in inputs.items() if k != "available_commands"}
+
+        # Call the base adapter's format method with filtered inputs
+        formatted = self.base.format(signature, demos, inputs_for_base)
+
         if not cmds:
             return formatted
         
