@@ -47,7 +47,7 @@ class FormatterNs(logging.Formatter):
 
 logging.setLogRecordFactory(LogRecordNs)
 
-LOG_FORMAT = "%(asctime)s - %(levelname)s - %(filename)s-%(funcName)s - %(message)s"
+LOG_FORMAT = "%(levelname)s:     %(message)s - %(asctime)s - %(filename)s-%(funcName)s"
 log_formatter = FormatterNs(LOG_FORMAT)
 
 if log_level := get_env_variable("LOG_LEVEL", "INFO"):
@@ -98,7 +98,7 @@ pytest_assertion_logger.propagate = (
 pytest_assertion_logger.handlers.clear()
 ch = logging.StreamHandler()
 ch.setLevel(logging.DEBUG)
-ch.setFormatter(FormatterNs("%(asctime)s - %(levelname)s - %(message)s"))
+ch.setFormatter(FormatterNs("%(levelname)s:     %(message)s - %(asctime)s"))
 pytest_assertion_logger.addHandler(ch)
 
 logging.getLogger("dspy").setLevel(logging.ERROR)

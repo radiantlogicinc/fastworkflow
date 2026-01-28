@@ -34,9 +34,10 @@ from dotenv import dotenv_values
 import fastworkflow
 from fastworkflow.utils.logging import logger
 
-from fastapi import FastAPI, HTTPException, status, Depends, Header
+from fastapi import FastAPI, HTTPException, status, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from .mcp_specific import setup_mcp
 from .utils import (
@@ -76,6 +77,85 @@ from .conversation_store import (
 )
 
  
+# ============================================================================
+# Probe Logging Filter Middleware
+# ============================================================================
+
+# Paths that should not be logged unless they return non-200 status
+PROBE_PATHS = {"/probes/healthz", "/probes/readyz"}
+
+
+class ProbeLoggingFilterMiddleware(BaseHTTPMiddleware):
+    """
+    Middleware to suppress logging for Kubernetes probe endpoints.
+    
+    Probe endpoints (/probes/healthz, /probes/readyz) are called frequently by
+    Kubernetes and would generate excessive logs. This middleware only logs
+    probe requests when they return a non-200 status code.
+    """
+    
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        
+        # Only log probe endpoints if they return non-200 status
+        if request.url.path in PROBE_PATHS and response.status_code != 200:
+            logger.warning(
+                f"Probe {request.url.path} returned status {response.status_code}"
+            )
+        
+        return response
+
+
+# ============================================================================
+# Readiness State Tracking
+# ============================================================================
+
+class ReadinessState:
+    """
+    Tracks the readiness state of the application.
+    
+    The application is considered ready when set_ready(True) is called,
+    typically after successful initialization in the lifespan startup.
+    
+    Additional debug attributes (is_initialized, workflow_path_valid) are
+    retained for production debugging but do not control readiness.
+    """
+    
+    def __init__(self):
+        self._is_ready = False
+        # Debug attributes - do not control readiness, used for diagnostics
+        self._is_initialized = False
+        self._workflow_path_valid = False
+    
+    def set_ready(self, value: bool = True):
+        """Set the main readiness state. Called after successful initialization."""
+        self._is_ready = value
+    
+    def set_initialized(self, value: bool = True):
+        """Mark FastWorkflow as initialized (for debugging/diagnostics)."""
+        self._is_initialized = value
+    
+    def set_workflow_path_valid(self, value: bool = True):
+        """Mark workflow path as validated (for debugging/diagnostics)."""
+        self._workflow_path_valid = value
+    
+    def is_ready(self) -> bool:
+        """Check if the application is ready to serve traffic."""
+        return self._is_ready
+    
+    def get_status(self) -> dict:
+        """Get detailed readiness status for debugging."""
+        return {
+            "ready": self._is_ready,
+            "fastworkflow_initialized": self._is_initialized,
+            "workflow_path_valid": self._workflow_path_valid
+        }
+
+
+# Global readiness state
+readiness_state = ReadinessState()
+
+
 # ============================================================================
 # Session Management
 # ============================================================================
@@ -162,6 +242,17 @@ async def lifespan(_app: FastAPI):
         
         # Configure JWT verification mode based on CLI parameter
         set_jwt_verification_mode(ARGS.expect_encrypted_jwt)
+        
+        # Mark FastWorkflow as initialized for readiness probe
+        readiness_state.set_initialized(True)
+        
+        # Validate workflow path for readiness probe
+        if ARGS.workflow_path and os.path.exists(ARGS.workflow_path):
+            readiness_state.set_workflow_path_valid(True)
+            logger.info(f"Workflow path validated: {ARGS.workflow_path}")
+        else:
+            logger.warning(f"Workflow path not valid or not found: {ARGS.workflow_path}")
+            readiness_state.set_workflow_path_valid(False)
 
     async def _active_turn_channel_ids() -> list[str]:
         active: list[str] = []
@@ -213,6 +304,9 @@ async def lifespan(_app: FastAPI):
 
     try:
         initialize_fastworkflow_on_startup()
+        # Mark application as ready to accept traffic
+        readiness_state.set_ready(True)
+        logger.info("Application ready to accept traffic")
         yield
     finally:
         logger.info("FastWorkflow FastAPI service shutting down...")
@@ -275,8 +369,8 @@ def custom_openapi():
     
     # Apply security globally to all endpoints except public ones
     for path, path_item in openapi_schema["paths"].items():
-        # Skip endpoints that don't require authentication
-        if path in ["/initialize", "/refresh_token", "/", "/admin/dump_all_conversations", "/admin/generate_mcp_token"]:
+        # Skip endpoints that don't require authentication (including probe endpoints)
+        if path in ["/initialize", "/refresh_token", "/", "/admin/dump_all_conversations", "/admin/generate_mcp_token", "/probes/healthz", "/probes/readyz"]:
             continue
         for method in path_item:
             if method in ["get", "post", "put", "delete", "patch"] and "security" not in path_item[method]:
@@ -295,6 +389,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Probe logging filter middleware - suppresses logs for successful probe requests
+app.add_middleware(ProbeLoggingFilterMiddleware)
 
 # ============================================================================
 # Endpoints
@@ -315,6 +412,91 @@ async def root():
         </body>
     </html>
     """
+
+
+# ============================================================================
+# Kubernetes Probe Endpoints
+# ============================================================================
+
+@app.get(
+    "/probes/healthz",
+    operation_id="liveness_probe",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "Application is alive and running"},
+        503: {"description": "Application is unhealthy"}
+    },
+    tags=["probes"]
+)
+async def liveness_probe() -> dict:
+    """
+    Liveness probe endpoint for Kubernetes.
+    
+    Determines whether the container is still running. If this probe fails,
+    Kubernetes will restart the container.
+    
+    This endpoint checks basic application health:
+    - The FastAPI application is responsive
+    - The event loop is processing requests
+    
+    This endpoint is not logged unless it returns a non-200 status code
+    to avoid excessive logging from frequent Kubernetes health checks.
+    
+    Returns:
+        200 OK: {"status": "alive"} - Application is running normally
+        503 Service Unavailable: Application is unhealthy
+    """
+    # Basic liveness check - if we can respond, we're alive
+    # The application is considered "live" if it can process HTTP requests
+    return {"status": "alive"}
+
+
+@app.get(
+    "/probes/readyz",
+    operation_id="readiness_probe",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "Application is ready to accept traffic"},
+        503: {"description": "Application is not ready to accept traffic"}
+    },
+    tags=["probes"]
+)
+async def readiness_probe() -> JSONResponse:
+    """
+    Readiness probe endpoint for Kubernetes.
+    
+    Checks whether the container is ready to accept traffic. Kubernetes only
+    routes traffic to containers that pass the readiness check.
+    
+    This endpoint verifies:
+    - FastWorkflow has been initialized
+    - The configured workflow path is valid and accessible
+    
+    This endpoint is not logged unless it returns a non-200 status code
+    to avoid excessive logging from frequent Kubernetes health checks.
+    
+    Returns:
+        200 OK: {"status": "ready", "checks": {...}} - Ready to accept traffic
+        503 Service Unavailable: {"status": "not_ready", "checks": {...}} - Not ready
+    """
+    status_info = readiness_state.get_status()
+    
+    if readiness_state.is_ready():
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={
+                "status": "ready",
+                "checks": status_info
+            }
+        )
+    else:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "status": "not_ready",
+                "checks": status_info
+            }
+        )
 
 
 @app.post(

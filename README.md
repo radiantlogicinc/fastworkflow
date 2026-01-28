@@ -568,6 +568,7 @@ This single command will generate the `greet.py` command, `get_properties` and `
 | `LLM_PLANNER` | LiteLLM model string for the agent's task planner | `run` (agent mode) | `mistral/mistral-small-latest` |
 | `LLM_AGENT` | LiteLLM model string for the DSPy agent | `run` (agent mode) | `mistral/mistral-small-latest` |
 | `LLM_CONVERSATION_STORE` | LiteLLM model string for conversation topic/summary generation | FastAPI service | `mistral/mistral-small-latest` |
+| `LITELLM_PROXY_API_BASE` | URL of your LiteLLM Proxy server | When using `litellm_proxy/` models | *not set* |
 | `NOT_FOUND` | Placeholder value for missing parameters during extraction | Always | `"NOT_FOUND"` |
 | `MISSING_INFORMATION_ERRMSG` | Error message prefix for missing parameters | Always | `"Missing required..."` |
 | `INVALID_INFORMATION_ERRMSG` | Error message prefix for invalid parameters | Always | `"Invalid information..."` |
@@ -582,9 +583,34 @@ This single command will generate the `greet.py` command, `get_properties` and `
 | `LITELLM_API_KEY_PLANNER`| API key for the `LLM_PLANNER` model | `run` (agent mode) | *required* |
 | `LITELLM_API_KEY_AGENT`| API key for the `LLM_AGENT` model | `run` (agent mode) | *required* |
 | `LITELLM_API_KEY_CONVERSATION_STORE`| API key for the `LLM_CONVERSATION_STORE` model | FastAPI service | *required* |
+| `LITELLM_PROXY_API_KEY`| Shared API key for authenticating with LiteLLM Proxy | When using `litellm_proxy/` models | *optional* |
 
 > [!tip]
 > The example workflows are configured to use Mistral's models by default. You can get a free API key from [Mistral AI](https://mistral.ai) that works with the `mistral-small-latest` model.
+
+### Using LiteLLM Proxy
+
+FastWorkflow supports routing LLM calls through a [LiteLLM Proxy](https://docs.litellm.ai/docs/simple_proxy) server. This is useful when you want to:
+- Centralize API key management
+- Use a unified endpoint for multiple LLM providers
+- Route requests through a corporate proxy with custom configurations
+
+To use LiteLLM Proxy, set your model strings to use the `litellm_proxy/` prefix and configure the proxy URL:
+
+```
+# In fastworkflow.env - use the litellm_proxy/ prefix for model names
+LLM_AGENT=litellm_proxy/bedrock_mistral_large_2407
+LLM_PARAM_EXTRACTION=litellm_proxy/bedrock_mistral_large_2407
+LITELLM_PROXY_API_BASE=http://127.0.0.1:4000
+
+# In fastworkflow.passwords.env - shared key for proxy authentication
+LITELLM_PROXY_API_KEY=your-proxy-api-key
+```
+
+The model name after `litellm_proxy/` (e.g., `bedrock_mistral_large_2407`) is passed to your proxy server, which routes it to the actual provider based on its configuration.
+
+> [!note]
+> When using `litellm_proxy/` models, the per-role API keys (`LITELLM_API_KEY_*`) are ignored. All proxied calls use the shared `LITELLM_PROXY_API_KEY` instead. You can mix proxied and direct models - only models with the `litellm_proxy/` prefix are routed through the proxy.
 
 ---
 
