@@ -49,11 +49,12 @@ litellm = {extras = ["proxy"], version = "^1.80.5"}
 uvicorn = {version = ">=0.31.1,<0.32.0", optional = true}
 fastapi = {version = ">=0.120.1", optional = true}
 fastapi-mcp = {version = "^0.4.0", optional = true}
-python-jose = {extras = ["cryptography"], version = "^3.3.0", optional = true}
+pyjwt = {extras = ["crypto"], version = ">=2.4.0", optional = true}  # Replaces python-jose (CVE-2024-23342 in ecdsa dep)
 datasets = {version = "^4.0.0", optional = true}
 
 # Security floor constraints for transitive dependencies
 # These ensure users get patched versions even though these are not direct deps
+orjson = ">=3.9.15"      # CVE-2024-27454 (unbounded recursion)
 urllib3 = ">=2.6.0"      # CVE-2025-66418, CVE-2025-66471 (decompression chain)
 aiohttp = ">=3.13.3"     # CVE-2025-69223 + 7 others (zip bomb, DoS)
 starlette = ">=0.49.1"   # CVE-2025-62727, CVE-2025-54121 (Range header DoS)
@@ -80,4 +81,4 @@ boto3 = {version = "1.36.0", optional = true}
 
 [tool.poetry.extras]
 training = ["datasets"]
-fastapi = ["uvicorn", "fastapi", "fastapi-mcp", "python-jose"]
+fastapi = ["uvicorn", "fastapi", "fastapi-mcp", "pyjwt"]

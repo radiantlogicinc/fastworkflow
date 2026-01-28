@@ -475,8 +475,8 @@ def test_jwt_token_creation_modes():
     assert "." in token  # JWT format: header.payload.signature (but signature will be empty)
     
     # Decode the token without verification (using unverified claims to skip audience/issuer validation)
-    from jose import jwt as jose_jwt
-    payload = jose_jwt.get_unverified_claims(token)
+    import jwt as pyjwt
+    payload = pyjwt.decode(token, options={"verify_signature": False})
     assert payload["sub"] == "test_user"
     assert payload["type"] == "access"
     
@@ -514,20 +514,20 @@ def test_cli_arg_expect_encrypted_jwt_not_set():
 def test_jwt_token_includes_user_id_claim(app_module):
     """Test that JWT tokens include uid claim when user_id is provided"""
     import fastworkflow.run_fastapi_mcp.jwt_manager as jwt_module
-    from jose import jwt as jose_jwt
+    import jwt as pyjwt
     
     # Create token with user_id
     token = jwt_module.create_access_token("test_channel", user_id="test_user_789")
     
     # Decode and verify uid claim
-    payload = jose_jwt.get_unverified_claims(token)
+    payload = pyjwt.decode(token, options={"verify_signature": False})
     assert payload["sub"] == "test_channel"
     assert payload["uid"] == "test_user_789"
     assert payload["type"] == "access"
     
     # Create token without user_id
     token_no_uid = jwt_module.create_access_token("test_channel_2")
-    payload_no_uid = jose_jwt.get_unverified_claims(token_no_uid)
+    payload_no_uid = pyjwt.decode(token_no_uid, options={"verify_signature": False})
     assert payload_no_uid["sub"] == "test_channel_2"
     assert "uid" not in payload_no_uid  # uid should be absent when not provided
 

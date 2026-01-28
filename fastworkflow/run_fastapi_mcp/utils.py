@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 from fastapi import HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jose import JWTError
+from jwt.exceptions import PyJWTError as JWTError
 from pydantic import BaseModel, field_validator
 
 import fastworkflow

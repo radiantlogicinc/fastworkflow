@@ -9,8 +9,8 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from jose import JWTError, jwt
-from jose.constants import ALGORITHMS
+import jwt
+from jwt.exceptions import PyJWTError as JWTError
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.backends import default_backend
@@ -19,7 +19,7 @@ from fastworkflow.utils.logging import logger
 
 
 # JWT Configuration (can be made configurable via env vars)
-JWT_ALGORITHM = ALGORITHMS.RS256
+JWT_ALGORITHM = "RS256"
 JWT_ACCESS_TOKEN_EXPIRE_MINUTES = 60  # 1 hour
 JWT_REFRESH_TOKEN_EXPIRE_DAYS = 30  # 30 days
 JWT_ISSUER = "fastworkflow-api"
@@ -274,7 +274,7 @@ def verify_token(token: str, expected_type: str = "access") -> dict:
         # Trusted network mode: decode without verification (accepts both unsigned and signed tokens)
         try:
             # Use unverified decoding - works for any JWT regardless of algorithm or signing
-            payload = jwt.get_unverified_claims(token)
+            payload = jwt.decode(token, options={"verify_signature": False})
         except Exception as e:
             logger.warning(f"Token decoding failed: {e}")
             raise JWTError(f"Failed to decode token: {e}") from e
@@ -332,7 +332,7 @@ def get_token_expiry(token: str) -> Optional[datetime]:
     """
     try:
         # Decode without verification (just to inspect claims)
-        payload = jwt.get_unverified_claims(token)
+        payload = jwt.decode(token, options={"verify_signature": False})
         if exp_timestamp := payload.get("exp"):
             return datetime.fromtimestamp(exp_timestamp, tz=timezone.utc)
     except Exception as e:

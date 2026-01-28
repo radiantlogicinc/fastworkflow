@@ -28,7 +28,7 @@ from contextlib import asynccontextmanager
 import argparse
 
 import uvicorn
-from jose import JWTError
+from jwt.exceptions import PyJWTError as JWTError
 from dotenv import dotenv_values
 
 import fastworkflow
