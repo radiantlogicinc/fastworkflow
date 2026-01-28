@@ -367,7 +367,8 @@ def build_query_with_next_steps(user_query: str,
             if step.strip()
         ]
 
-        user_query_and_next_steps = f"{user_query}\n\nExecute these next steps:\n{steps_as_list}"
+        steps_formatted = '\n'.join(steps_as_list)
+        user_query_and_next_steps = f"{user_query}\n\nExecute these next steps:\n{steps_formatted}"
         return (
             f'User Query:\n{user_query_and_next_steps}'
             if with_agent_inputs_and_trajectory else
