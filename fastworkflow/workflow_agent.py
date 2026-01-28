@@ -12,7 +12,7 @@ from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_utils
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.utils.react import fastWorkflowReAct
-
+from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
 
 class WorkflowAgentSignature(dspy.Signature):
     """
@@ -110,8 +110,7 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
 
     # Handle intent ambiguity clarification state with specialized agent
     if nlu_stage == fastworkflow.NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION:
-        if intent_agent := chat_session_obj.intent_clarification_agent:
-            from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter    
+        if intent_agent := chat_session_obj.intent_clarification_agent: 
             # Use CommandsSystemPreludeAdapter specifically for workflow agent calls
             agent_adapter = CommandsSystemPreludeAdapter()
 
@@ -321,8 +320,7 @@ def build_query_with_next_steps(user_query: str,
         Avoid specifying 'ask user' because 9 times out of 10, you can find the information via available commands. 
         """
         user_query: str = dspy.InputField()
-        available_commands: list[str] = dspy.InputField()
-        next_steps: list[str] = dspy.OutputField(desc="task descriptions as short sentences")
+        next_steps: str = dspy.OutputField(desc="task descriptions as a numbered list of short sentences separated by line breaks")
 
     class TaskPlannerWithTrajectoryAndAgentInputsSignature(dspy.Signature):
         """
@@ -333,8 +331,7 @@ def build_query_with_next_steps(user_query: str,
         agent_inputs: dict = dspy.InputField()
         agent_trajectory: dict = dspy.InputField()
         user_response: str = dspy.InputField()
-        available_commands: list[str] = dspy.InputField()
-        next_steps: list[str] = dspy.OutputField(desc="task descriptions as short sentences")
+        next_steps: str = dspy.OutputField(desc="task descriptions as a numbered list of short sentences separated by line breaks")
 
     current_workflow = chat_session_obj.get_active_workflow()
     available_commands = CommandMetadataAPI.get_command_display_text(
@@ -344,12 +341,14 @@ def build_query_with_next_steps(user_query: str,
     )
 
     planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
-    with dspy.context(lm=planner_lm):
+    agent_adapter = CommandsSystemPreludeAdapter()
+    with dspy.context(lm=planner_lm, adapter=agent_adapter):
         if with_agent_inputs_and_trajectory:
             workflow_tool_agent = chat_session_obj.workflow_tool_agent
             task_planner_func = dspy.ChainOfThought(TaskPlannerWithTrajectoryAndAgentInputsSignature)
+            cleaned_agent_inputs = {k: v for k, v in workflow_tool_agent.inputs.items() if k != "available_commands"}
             prediction = task_planner_func(
-                agent_inputs = workflow_tool_agent.inputs,
+                agent_inputs = cleaned_agent_inputs,
                 agent_trajectory = workflow_tool_agent.current_trajectory,
                 user_response = user_query,
                 available_commands=available_commands)
@@ -362,8 +361,13 @@ def build_query_with_next_steps(user_query: str,
         if not prediction.next_steps:
             return user_query
 
-        steps_list = '\n'.join([f'{i + 1}. {task}' for i, task in enumerate(prediction.next_steps)])
-        user_query_and_next_steps = f"{user_query}\n\nExecute these next steps:\n{steps_list}"
+        steps_as_list = [
+            step.strip()
+            for step in prediction.next_steps.split('\n')
+            if step.strip()
+        ]
+
+        user_query_and_next_steps = f"{user_query}\n\nExecute these next steps:\n{steps_as_list}"
         return (
             f'User Query:\n{user_query_and_next_steps}'
             if with_agent_inputs_and_trajectory else
