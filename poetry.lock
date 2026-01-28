@@ -3979,7 +3979,7 @@ files = [
 name = "pyasn1"
 version = "0.6.2"
 description = "Pure-Python implementation of ASN.1 types and DER/BER/CER codecs (X.208)"
-optional = true
+optional = false
 python-versions = ">=3.8"
 files = [
     {file = "pyasn1-0.6.2-py3-none-any.whl", hash = "sha256:1eb26d860996a18e9b6ed05e7aae0e9fc21619fcee6af91cca9bad4fbea224bf"},
@@ -6445,4 +6445,4 @@ training = ["datasets"]
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.11,<3.14"
-content-hash = "7c2f03ed1f30f0bcba4df837e84ec11ac348fb578e887ee0a6b1f39ce95c39c1"
+content-hash = "e10bedd7bfbd7c3e132f617f5eefcf093442606348b978762a894c7ca5770970"
