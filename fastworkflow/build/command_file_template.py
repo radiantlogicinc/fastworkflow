@@ -16,7 +16,7 @@ def get_import_block():
         f"from fastworkflow.train.generate_synthetic import generate_diverse_utterances\n"
         f"from fastworkflow.utils.context_utils import list_context_names\n"
         f"from typing import Any, Dict, Optional\n"
-        f"from pydantic import BaseModel, Field\n"
+        f"from pydantic import BaseModel, Field, ConfigDict\n"
     )
 
 def create_function_command_file(function_info: FunctionInfo, output_dir: str, file_name: str = None, source_dir: str = None, overwrite: bool = False) -> str:
@@ -98,8 +98,10 @@ def create_function_command_file(function_info: FunctionInfo, output_dir: str, f
         call_param = ""
         call_arg = ""
 
-    # Add Output class
-    command_file_content += f"    class Output(BaseModel):\n{output_fields}\n\n"
+    # Add Output class with arbitrary_types_allowed for non-Pydantic return types
+    command_file_content += f"    class Output(BaseModel):\n"
+    command_file_content += f"        model_config = ConfigDict(arbitrary_types_allowed=True)\n"
+    command_file_content += f"{output_fields}\n\n"
 
     # Add utterances
     command_file_content += f"    plain_utterances = [\n{plain_utterances}\n    ]\n\n"
@@ -326,8 +328,10 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
     # Add Input class if needed
     command_file_content += input_class
 
-    # Add Output class
-    command_file_content += f"    class Output(BaseModel):\n{output_fields}\n\n"
+    # Add Output class with arbitrary_types_allowed for non-Pydantic return types
+    command_file_content += f"    class Output(BaseModel):\n"
+    command_file_content += f"        model_config = ConfigDict(arbitrary_types_allowed=True)\n"
+    command_file_content += f"{output_fields}\n\n"
 
     # Add utterances
     command_file_content += f"    plain_utterances = [\n{plain_utterances}\n    ]\n\n"

@@ -144,10 +144,11 @@ def test_create_command_file_set_properties():
         assert "quantity: Optional[int] = None" in content
         assert "location: Optional[Optional[str]] = None" in content
         
-        # Verify model_config is NOT included for Optional fields (we've removed it)
-        assert "model_config = ConfigDict" not in content
+        # Verify model_config is included in Output class for Pydantic compatibility
+        assert "model_config = ConfigDict(arbitrary_types_allowed=True)" in content
 
-        assert "class Output(BaseModel):\n        success: bool" in content
+        assert "class Output(BaseModel):" in content
+        assert "success: bool" in content
         
         # Verify property setters use attribute assignment
         assert "if input.sku is not None:" in content
@@ -246,15 +247,15 @@ def test_response_uses_model_dump_json():
         )
         assert found_model_dump_json, "Response should use output.model_dump_json()"
 
-def test_no_model_config_when_not_needed():
-    """Test that model_config is not included when not needed."""
+def test_output_has_model_config_for_arbitrary_types():
+    """Test that Output class has model_config for Pydantic compatibility with arbitrary types."""
     class_info, method_info = make_class_and_method('User', 'get_details', docstring='Get user details.')
     with tempfile.TemporaryDirectory() as tmpdir:
         file_path = create_command_file(class_info, method_info, tmpdir, source_dir='.')
         content = pathlib.Path(file_path).read_text()
         
-        # model_config should not be included for simple Input classes
-        assert "model_config = ConfigDict" not in content
+        # Output class should have model_config for Pydantic compatibility
+        assert "model_config = ConfigDict(arbitrary_types_allowed=True)" in content
 
 def test_no_input_class_for_parameterless_methods():
     """Test that Input class is not included for methods without parameters."""

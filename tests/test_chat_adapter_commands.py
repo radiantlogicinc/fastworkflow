@@ -32,7 +32,7 @@ def test_chat_adapter_injects_commands_into_system():
     system_message = next((msg for msg in formatted if msg.get("role") == "system"), None)
     
     assert system_message is not None, "System message should exist"
-    assert "Available commands:" in system_message.get("content", "")
+    assert "Available execute_workflow_query tool commands:" in system_message.get("content", "")
     assert "Command 1: get_weather" in system_message.get("content", "")
     assert "Command 2: search_info" in system_message.get("content", "")
 
@@ -110,7 +110,7 @@ def test_chat_adapter_preserves_existing_system_content():
     content = system_message.get("content", "")
     
     # Should have both commands and original instructions
-    assert "Available commands:" in content
+    assert "Available execute_workflow_query tool commands:" in content
     assert "Command 1: get_weather" in content
     # The original instructions should be preserved somewhere in system content
     # (exact format depends on DSPy adapter implementation)

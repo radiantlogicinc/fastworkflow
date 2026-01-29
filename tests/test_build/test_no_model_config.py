@@ -32,8 +32,8 @@ def todo_item_class():
     return class_info
 
 
-def test_input_output_no_model_config(temp_dir, todo_item_class):
-    """Test that generated command files do not include model_config in Input or Output classes."""
+def test_input_no_model_config_output_has_model_config(temp_dir, todo_item_class):
+    """Test that generated command files have model_config in Output class for Pydantic compatibility."""
     # Generate the command file
     output_dir = temp_dir / "TodoItem"
     output_dir.mkdir(exist_ok=True)
@@ -61,7 +61,7 @@ def test_input_output_no_model_config(temp_dir, todo_item_class):
     
     assert signature_class is not None, "Could not find Signature class"
     
-    # Check for model_config in Input class (if present)
+    # Check for model_config in Input class (if present) - should NOT have it
     input_class = None
     for node in signature_class.body:
         if isinstance(node, ast.ClassDef) and node.name == 'Input':
@@ -75,7 +75,7 @@ def test_input_output_no_model_config(temp_dir, todo_item_class):
                     if isinstance(target, ast.Name):
                         assert target.id != 'model_config', "Input class should not have model_config"
     
-    # Check for model_config in Output class
+    # Check for model_config in Output class - SHOULD have it for Pydantic compatibility
     output_class = None
     for node in signature_class.body:
         if isinstance(node, ast.ClassDef) and node.name == 'Output':
@@ -84,11 +84,15 @@ def test_input_output_no_model_config(temp_dir, todo_item_class):
     
     assert output_class is not None, "Could not find Output class"
     
+    has_model_config = False
     for node in output_class.body:
         if isinstance(node, ast.Assign):
             for target in node.targets:
-                if isinstance(target, ast.Name):
-                    assert target.id != 'model_config', "Output class should not have model_config"
+                if isinstance(target, ast.Name) and target.id == 'model_config':
+                    has_model_config = True
+                    break
     
-    # Check that ConfigDict is not imported
-    assert "from pydantic import ConfigDict" not in file_content, "ConfigDict should not be imported" 
+    assert has_model_config, "Output class should have model_config for Pydantic compatibility"
+    
+    # Check that ConfigDict IS imported (needed for model_config)
+    assert "ConfigDict" in file_content, "ConfigDict should be imported for model_config" 
