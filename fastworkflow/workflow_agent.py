@@ -351,23 +351,17 @@ def build_query_with_next_steps(user_query: str,
                 agent_inputs = cleaned_agent_inputs,
                 agent_trajectory = workflow_tool_agent.current_trajectory,
                 user_response = user_query,
-                available_commands=available_commands)
+                available_commands=available_commands) # Note that this is not part of the signature. It is extra metadata that will be picked up by the CommandsSystemPreludeAdapter
         else:
             task_planner_func = dspy.ChainOfThought(TaskPlannerSignature)
             prediction = task_planner_func(
                 user_query=user_query,
-                available_commands=available_commands)
+                available_commands=available_commands) # Note that this is not part of the signature. It is extra metadata that will be picked up by the CommandsSystemPreludeAdapter
 
         if not prediction.next_steps:
             return user_query
 
-        steps_as_list = [
-            step.strip()
-            for step in prediction.next_steps.split('\n')
-            if step.strip()
-        ]
-
-        steps_formatted = '\n'.join(steps_as_list)
+        steps_formatted = " ".join(prediction.next_steps.split())
         user_query_and_next_steps = f"{user_query}\n\nExecute these next steps:\n{steps_formatted}"
         return (
             f'User Query:\n{user_query_and_next_steps}'
