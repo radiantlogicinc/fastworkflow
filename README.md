@@ -88,6 +88,9 @@ While [DSPy](https://dspy.ai) ([Why DSPy](https://x.com/lateinteraction/status/1
     - [Adding context hierarchies with context_inheritance_model.json](#adding-context-hierarchies-with-context_inheritance_modeljson)
     - [Using DSPy for Response Generation](#using-dspy-for-response-generation)
     - [Using Startup Commands and Actions](#using-startup-commands-and-actions)
+    - [Running FastWorkflow as a FastAPI Service](#running-fastworkflow-as-a-fastapi-service)
+        - [Kubernetes Liveness and Readiness Probes](#kubernetes-liveness-and-readiness-probes)
+        - [Using LiteLLM Proxy](#using-litellm-proxy)
 - [Rapidly Building Workflows with the Build Tool](#rapidly-building-workflows-with-the-build-tool)
 - [Environment Variables Reference](#environment-variables-reference)
     - [Environment Variables](#environment-variables)
@@ -537,6 +540,110 @@ For workflows with complex initialization requirements, creating a dedicated sta
 
 ---
 
+### Running FastWorkflow as a FastAPI Service
+
+For production deployments and integrations, fastWorkflow provides a FastAPI-based HTTP service via the `run_fastapi_mcp` module. This exposes your workflow as REST endpoints with JWT authentication, SSE streaming, and MCP (Model Context Protocol) support.
+
+```sh
+# Run the FastAPI service
+python -m fastworkflow.run_fastapi_mcp \
+  --workflow_path ./my_workflow \
+  --env_file_path ./fastworkflow.env \
+  --passwords_file_path ./fastworkflow.passwords.env \
+  --port 8000
+```
+
+The service provides endpoints for:
+- `/initialize` - Create a new session and obtain JWT tokens
+- `/invoke_agent` - Submit natural language queries to the agent
+- `/invoke_agent_stream` - Stream responses via SSE or NDJSON
+- `/perform_action` - Execute workflow actions directly
+- `/conversations` - Manage conversation history
+
+#### Kubernetes Liveness and Readiness Probes
+
+When deploying fastWorkflow in Kubernetes, the service provides dedicated probe endpoints for health monitoring:
+
+**Liveness Probe (`/probes/healthz`)**
+
+Determines whether the container is still running. If this probe fails, Kubernetes will restart the container.
+
+```sh
+curl http://localhost:8000/probes/healthz
+# Response: {"status": "alive"}
+```
+
+**Readiness Probe (`/probes/readyz`)**
+
+Checks whether the container is ready to accept traffic. Kubernetes only routes traffic to containers that pass this check.
+
+```sh
+curl http://localhost:8000/probes/readyz
+# Response (ready): {"status": "ready", "checks": {"ready": true, "fastworkflow_initialized": true, "workflow_path_valid": true}}
+# Response (not ready): {"status": "not_ready", "checks": {"ready": false, ...}}
+```
+
+The readiness probe returns:
+- `200 OK` when the application is ready to serve traffic
+- `503 Service Unavailable` when not ready (e.g., during startup)
+
+**Example Kubernetes Configuration**
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  template:
+    spec:
+      containers:
+        - name: fastworkflow
+          livenessProbe:
+            httpGet:
+              path: /probes/healthz
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 5
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /probes/readyz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+            timeoutSeconds: 3
+```
+
+> [!note]
+> Probe endpoints do not require authentication and are excluded from request logging when returning 200 status to avoid excessive log noise from frequent Kubernetes health checks.
+
+#### Using LiteLLM Proxy
+
+FastWorkflow supports routing LLM calls through a [LiteLLM Proxy](https://docs.litellm.ai/docs/simple_proxy) server. This is useful when you want to:
+- Centralize API key management
+- Use a unified endpoint for multiple LLM providers
+- Route requests through a corporate proxy with custom configurations
+
+To use LiteLLM Proxy, set your model strings to use the `litellm_proxy/` prefix and configure the proxy URL:
+
+```
+# In fastworkflow.env - use the litellm_proxy/ prefix for model names
+LLM_AGENT=litellm_proxy/bedrock_mistral_large_2407
+LLM_PARAM_EXTRACTION=litellm_proxy/bedrock_mistral_large_2407
+LITELLM_PROXY_API_BASE=http://127.0.0.1:4000
+
+# In fastworkflow.passwords.env - shared key for proxy authentication
+LITELLM_PROXY_API_KEY=your-proxy-api-key
+```
+
+The model name after `litellm_proxy/` (e.g., `bedrock_mistral_large_2407`) is passed to your proxy server, which routes it to the actual provider based on its configuration.
+
+> [!note]
+> When using `litellm_proxy/` models, the per-role API keys (`LITELLM_API_KEY_*`) are ignored. All proxied calls use the shared `LITELLM_PROXY_API_KEY` instead. You can mix proxied and direct models - only models with the `litellm_proxy/` prefix are routed through the proxy.
+
+---
+
 ## Rapidly Building Workflows with the Build Tool
 
 After understanding the manual process, you can use the `fastworkflow build` command to automate everything. It introspects your code and generates all the necessary files.
@@ -587,30 +694,6 @@ This single command will generate the `greet.py` command, `get_properties` and `
 
 > [!tip]
 > The example workflows are configured to use Mistral's models by default. You can get a free API key from [Mistral AI](https://mistral.ai) that works with the `mistral-small-latest` model.
-
-### Using LiteLLM Proxy
-
-FastWorkflow supports routing LLM calls through a [LiteLLM Proxy](https://docs.litellm.ai/docs/simple_proxy) server. This is useful when you want to:
-- Centralize API key management
-- Use a unified endpoint for multiple LLM providers
-- Route requests through a corporate proxy with custom configurations
-
-To use LiteLLM Proxy, set your model strings to use the `litellm_proxy/` prefix and configure the proxy URL:
-
-```
-# In fastworkflow.env - use the litellm_proxy/ prefix for model names
-LLM_AGENT=litellm_proxy/bedrock_mistral_large_2407
-LLM_PARAM_EXTRACTION=litellm_proxy/bedrock_mistral_large_2407
-LITELLM_PROXY_API_BASE=http://127.0.0.1:4000
-
-# In fastworkflow.passwords.env - shared key for proxy authentication
-LITELLM_PROXY_API_KEY=your-proxy-api-key
-```
-
-The model name after `litellm_proxy/` (e.g., `bedrock_mistral_large_2407`) is passed to your proxy server, which routes it to the actual provider based on its configuration.
-
-> [!note]
-> When using `litellm_proxy/` models, the per-role API keys (`LITELLM_API_KEY_*`) are ignored. All proxied calls use the shared `LITELLM_PROXY_API_KEY` instead. You can mix proxied and direct models - only models with the `litellm_proxy/` prefix are routed through the proxy.
 
 ---
 
