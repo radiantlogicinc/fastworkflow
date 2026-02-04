@@ -20,6 +20,7 @@ See docs/fastworkflow_fastapi_spec.md for complete specification.
 
 import asyncio
 import json
+import logging
 import os
 import queue
 import time
@@ -104,6 +105,24 @@ class ProbeLoggingFilterMiddleware(BaseHTTPMiddleware):
             )
         
         return response
+
+
+class ProbeAccessLogFilter(logging.Filter):
+    """
+    Filter to suppress successful probe requests from uvicorn's access logger.
+    
+    This prevents Kubernetes health check spam in access logs while preserving
+    access logs for all other endpoints. Failed probes (non-200) are still logged
+    via ProbeLoggingFilterMiddleware at WARNING level.
+    """
+    
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        # Suppress logs for successful probe requests (contain path and 200 status)
+        for path in PROBE_PATHS:
+            if f'"{path}' in message and '" 200' in message:
+                return False  # Suppress this log
+        return True
 
 
 # ============================================================================
@@ -229,8 +248,6 @@ async def get_session_and_ensure_runtime(
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Startup and shutdown hooks"""
-    logger.info("FastWorkflow FastAPI service starting...")
-    logger.info(f"Startup with CLI params: workflow_path={ARGS.workflow_path}, env_file_path={ARGS.env_file_path}, passwords_file_path={ARGS.passwords_file_path}")
 
     def initialize_fastworkflow_on_startup() -> None:
         env_vars: dict[str, str] = {}
@@ -304,6 +321,9 @@ async def lifespan(_app: FastAPI):
 
     try:
         initialize_fastworkflow_on_startup()
+        # Log startup info AFTER init() so log level from env file is respected
+        logger.info("FastWorkflow FastAPI service starting...")
+        logger.info(f"Startup with CLI params: workflow_path={ARGS.workflow_path}, env_file_path={ARGS.env_file_path}, passwords_file_path={ARGS.passwords_file_path}")
         # Mark application as ready to accept traffic
         readiness_state.set_ready(True)
         logger.info("Application ready to accept traffic")
@@ -1485,6 +1505,12 @@ def main():
     """Entry point for the FastAPI MCP server."""
     host = ARGS.host if hasattr(ARGS, 'host') else "0.0.0.0"
     port = ARGS.port if hasattr(ARGS, 'port') else 8000
+    
+    # Add filter to suppress successful probe requests from uvicorn's access logger
+    # This preserves access logs for other endpoints while eliminating probe spam
+    # Probe failures (non-200) are still logged via ProbeLoggingFilterMiddleware at WARNING level
+    logging.getLogger("uvicorn.access").addFilter(ProbeAccessLogFilter())
+    
     uvicorn.run(app, host=host, port=port)
 
 if __name__ == "__main__":

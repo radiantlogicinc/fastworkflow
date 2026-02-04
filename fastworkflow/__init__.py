@@ -132,6 +132,12 @@ def init(env_vars: dict):
     global _env_vars, CommandContextModel, RoutingDefinition, RoutingRegistry, ModelPipelineRegistry
     _env_vars = env_vars
 
+    # Reconfigure log level from env_vars (dotenv files) if LOG_LEVEL is specified
+    # This allows LOG_LEVEL to be set in fastworkflow.env files, not just OS environment
+    if log_level := env_vars.get("LOG_LEVEL"):
+        from .utils.logging import reconfigure_log_level
+        reconfigure_log_level(log_level)
+
     # init before importing other modules so env vars are available
     from .command_context_model import CommandContextModel as CommandContextModelClass
     from .command_routing import RoutingDefinition as RoutingDefinitionClass

@@ -113,6 +113,48 @@ logging.getLogger("speedict").setLevel(logging.WARNING)
 logging.getLogger("filelock").setLevel(logging.WARNING)
 logging.getLogger("datasets").setLevel(logging.WARNING)
 
+
+def reconfigure_log_level(log_level_str: str) -> None:
+    """Reconfigure the fastWorkflow logger's level after initialization.
+    
+    This allows LOG_LEVEL to be set via dotenv files loaded after module import.
+    
+    Args:
+        log_level_str: One of DEBUG, INFO, WARNING, ERROR, CRITICAL
+    """
+    global LOG_LEVEL
+    
+    level_map = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+        "CRITICAL": logging.CRITICAL,
+    }
+    
+    log_level_str_upper = log_level_str.upper()
+    if log_level_str_upper not in level_map:
+        logger.warning(
+            f"Invalid LOG_LEVEL '{log_level_str}', must be one of {list(level_map.keys())}. Keeping current level."
+        )
+        return
+    
+    new_level = level_map[log_level_str_upper]
+    
+    # Only reconfigure if the level is actually different
+    if LOG_LEVEL == new_level:
+        return
+    
+    LOG_LEVEL = new_level
+    logger.setLevel(LOG_LEVEL)
+    
+    # Update all handlers
+    for handler in logger.handlers:
+        handler.setLevel(LOG_LEVEL)
+    
+    logger.info(f"Log level reconfigured to {log_level_str_upper}")
+
+
 # some testing code
 if __name__ == "__main__":
     logger.debug("debug message")
