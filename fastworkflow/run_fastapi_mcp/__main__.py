@@ -118,11 +118,9 @@ class ProbeAccessLogFilter(logging.Filter):
     
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
-        # Suppress logs for successful probe requests (contain path and 200 status)
-        for path in PROBE_PATHS:
-            if f'"{path}' in message and '" 200' in message:
-                return False  # Suppress this log
-        return True
+        return not any(
+            f'"{path}' in message and '" 200' in message for path in PROBE_PATHS
+        )
 
 
 # ============================================================================
@@ -1506,12 +1504,20 @@ def main():
     host = ARGS.host if hasattr(ARGS, 'host') else "0.0.0.0"
     port = ARGS.port if hasattr(ARGS, 'port') else 8000
     
+    # Read LOG_LEVEL from env file to configure uvicorn's logger
+    # (env file isn't loaded until lifespan, but uvicorn needs log_level at startup)
+    log_level = "info"  # uvicorn default
+    if hasattr(ARGS, 'env_file_path') and ARGS.env_file_path:
+        env_vars = dotenv_values(ARGS.env_file_path)
+        if "LOG_LEVEL" in env_vars:
+            log_level = env_vars["LOG_LEVEL"].lower()
+    
     # Add filter to suppress successful probe requests from uvicorn's access logger
     # This preserves access logs for other endpoints while eliminating probe spam
     # Probe failures (non-200) are still logged via ProbeLoggingFilterMiddleware at WARNING level
     logging.getLogger("uvicorn.access").addFilter(ProbeAccessLogFilter())
     
-    uvicorn.run(app, host=host, port=port)
+    uvicorn.run(app, host=host, port=port, log_level=log_level)
 
 if __name__ == "__main__":
     main()
