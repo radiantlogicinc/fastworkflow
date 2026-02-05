@@ -914,6 +914,7 @@ async def invoke_agent_stream(
                         break
                 
                 if command_output is None:
+                    logger.error(f"Command execution timed out after {request.timeout_seconds} seconds for channel_id: {channel_id}")
                     yield {"type": "error", "data": {"detail": f"Command execution timed out after {request.timeout_seconds} seconds"}}
                     return
                 
@@ -975,6 +976,7 @@ async def invoke_agent_stream(
                         break
                 
                 if command_output is None:
+                    logger.error(f"Command execution timed out after {request.timeout_seconds} seconds for channel_id: {channel_id}")
                     yield "event: error\n" + f"data: {json.dumps({'detail': f'Command execution timed out after {request.timeout_seconds} seconds'})}\n\n"
                     return
                 

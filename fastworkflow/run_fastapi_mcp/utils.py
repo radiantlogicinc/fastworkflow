@@ -358,6 +358,7 @@ async def wait_for_command_output(
             await asyncio.sleep(0.1)
             continue
 
+    logger.error(f"Command execution timed out after {timeout_seconds} seconds for channel_id: {runtime.channel_id}")
     raise HTTPException(
         status_code=status.HTTP_504_GATEWAY_TIMEOUT,
         detail=f"Command execution timed out after {timeout_seconds} seconds"
