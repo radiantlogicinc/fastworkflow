@@ -119,7 +119,7 @@ class ProbeAccessLogFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage()
         return not any(
-            f'"{path}' in message and '" 200' in message for path in PROBE_PATHS
+            path in message and '" 200' in message for path in PROBE_PATHS
         )
 
 
