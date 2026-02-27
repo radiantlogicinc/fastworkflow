@@ -1,0 +1,175 @@
+{
+  "metadata": {
+    "version": "1.0",
+    "last_updated": "2026-02-27",
+    "total_workflows": 13,
+    "total_commands": 75,
+    "collections": {
+      "core": [],
+      "business": [],
+      "development": [],
+      "advanced": []
+    }
+  },
+  "workflows": [
+    {
+      "id": "hello_world",
+      "name": "Hello World",
+      "path": "fastworkflow/examples/hello_world",
+      "type": "example",
+      "commands": 1,
+      "collection": "core",
+      "description": "Basic hello world example workflow",
+      "complexity": "low",
+      "status": "stable"
+    },
+    {
+      "id": "simple_workflow_template",
+      "name": "Simple Workflow Template",
+      "path": "fastworkflow/examples/simple_workflow_template",
+      "type": "example",
+      "commands": 13,
+      "collection": "core",
+      "description": "Template for creating simple workflows",
+      "complexity": "low",
+      "status": "stable"
+    },
+    {
+      "id": "messaging_app_1",
+      "name": "Messaging App 1",
+      "path": "fastworkflow/examples/messaging_app_1",
+      "type": "example",
+      "commands": 1,
+      "collection": "core",
+      "description": "Basic messaging application workflow",
+      "complexity": "low",
+      "status": "stable"
+    },
+    {
+      "id": "messaging_app_2",
+      "name": "Messaging App 2",
+      "path": "fastworkflow/examples/messaging_app_2",
+      "type": "example",
+      "commands": 2,
+      "collection": "business",
+      "description": "Intermediate messaging application",
+      "complexity": "medium",
+      "status": "stable"
+    },
+    {
+      "id": "messaging_app_3",
+      "name": "Messaging App 3",
+      "path": "fastworkflow/examples/messaging_app_3",
+      "type": "example",
+      "commands": 3,
+      "collection": "business",
+      "description": "Advanced messaging application",
+      "complexity": "medium",
+      "status": "stable"
+    },
+    {
+      "id": "messaging_app_4",
+      "name": "Messaging App 4",
+      "path": "fastworkflow/examples/messaging_app_4",
+      "type": "example",
+      "commands": 11,
+      "collection": "business",
+      "description": "Full-featured messaging application",
+      "complexity": "high",
+      "status": "stable"
+    },
+    {
+      "id": "extended_workflow_example",
+      "name": "Extended Workflow Example",
+      "path": "fastworkflow/examples/extended_workflow_example",
+      "type": "example",
+      "commands": 3,
+      "collection": "core",
+      "description": "Extended example demonstrating workflow features",
+      "complexity": "medium",
+      "status": "stable"
+    },
+    {
+      "id": "retail_workflow",
+      "name": "Retail Workflow (Tau Bench)",
+      "path": "fastworkflow/examples/retail_workflow",
+      "type": "example",
+      "commands": 15,
+      "collection": "business",
+      "description": "Production retail workflow from Tau Bench benchmark",
+      "complexity": "high",
+      "status": "stable"
+    },
+    {
+      "id": "todo_list_workflow",
+      "name": "Todo List Workflow",
+      "path": "tests/todo_list_workflow",
+      "type": "test",
+      "commands": 25,
+      "collection": "development",
+      "description": "Comprehensive todo list management for testing",
+      "complexity": "high",
+      "status": "stable"
+    },
+    {
+      "id": "hello_world_test",
+      "name": "Hello World Test",
+      "path": "tests/hello_world_workflow",
+      "type": "test",
+      "commands": 1,
+      "collection": "development",
+      "description": "Hello world workflow for testing",
+      "complexity": "low",
+      "status": "stable"
+    },
+    {
+      "id": "example_workflow_test",
+      "name": "Example Workflow Test",
+      "path": "tests/example_workflow",
+      "type": "test",
+      "commands": 0,
+      "collection": "development",
+      "description": "Example workflow for testing framework",
+      "complexity": "low",
+      "status": "stable"
+    },
+    {
+      "id": "simple_workflow_template_test",
+      "name": "Simple Workflow Template Test",
+      "path": "tests/test_simple_workflow_template",
+      "type": "test",
+      "commands": 0,
+      "collection": "development",
+      "description": "Test for simple workflow template",
+      "complexity": "low",
+      "status": "stable"
+    },
+    {
+      "id": "hello_world_build_test",
+      "name": "Hello World Build Test",
+      "path": "tests/test_build/test_hello_world_workflow",
+      "type": "test",
+      "commands": 0,
+      "collection": "development",
+      "description": "Build test for hello world workflow",
+      "complexity": "low",
+      "status": "stable"
+    }
+  ],
+  "commands": {
+    "description": "Individual command agents within workflows",
+    "note": "75 total command implementations across all workflows",
+    "breakdown": {
+      "core_commands": 18,
+      "business_commands": 31,
+      "development_commands": 26,
+      "advanced_commands": 0
+    }
+  },
+  "categorization_rules": {
+    "core": "Basic workflows, templates, and simple examples for learning",
+    "business": "Production-ready, domain-specific workflows for real-world applications",
+    "development": "Test workflows, development utilities, and testing frameworks",
+    "advanced": "Experimental, multi-agent, or research-focused workflows"
+  }
+}

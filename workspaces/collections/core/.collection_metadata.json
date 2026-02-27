@@ -1,0 +1,10 @@
+{
+  "collection": "core",
+  "name": "Core & Foundation",
+  "description": "Essential workflows and fundamental system agents",
+  "purpose": "Learning, templates, and foundational building blocks",
+  "target_audience": ["beginners", "learners", "template-seekers"],
+  "complexity_range": ["low", "medium"],
+  "typical_command_count": "1-5",
+  "workflows": []
+}

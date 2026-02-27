@@ -1,0 +1,10 @@
+{
+  "collection": "development",
+  "name": "Development & Tools",
+  "description": "Testing, development utilities, and tooling workflows",
+  "purpose": "Framework development and testing",
+  "target_audience": ["contributors", "testers", "framework-developers"],
+  "complexity_range": ["low", "medium", "high"],
+  "typical_command_count": "varies",
+  "workflows": []
+}

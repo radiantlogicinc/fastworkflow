@@ -1,0 +1,10 @@
+{
+  "collection": "business",
+  "name": "Business & Domain",
+  "description": "Domain-specific workflows for real-world applications",
+  "purpose": "Production-ready business solutions",
+  "target_audience": ["production-developers", "domain-experts", "business-users"],
+  "complexity_range": ["medium", "high"],
+  "typical_command_count": "5-20",
+  "workflows": []
+}

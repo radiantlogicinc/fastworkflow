@@ -96,6 +96,7 @@ While [DSPy](https://dspy.ai) ([Why DSPy](https://x.com/lateinteraction/status/1
     - [Environment Variables](#environment-variables)
     - [Password/API Key Variables](#passwordapi-key-variables)
 - [Troubleshooting / FAQ](#troubleshooting--faq)
+- [Agent Workspace Collections](#agent-workspace-collections)
 - [For Contributors](#for-contributors)
 - [License](#license)
 
@@ -716,6 +717,19 @@ This single command will generate the `greet.py` command, `get_properties` and `
 
 > [!tip]
 > To debug command files and fastWorkflow code, set up vscode launch.json, set `justmycode` to False, add breakpoints, and run in debug mode
+
+---
+
+## Agent Workspace Collections
+
+fastWorkflow workflows and agents are organized into four logical collections for better discoverability and usability:
+
+- **[Core & Foundation](workspaces/collections/core/)** - Templates, examples, and learning resources (4 workflows, 18 commands)
+- **[Business & Domain](workspaces/collections/business/)** - Production-ready, domain-specific workflows (4 workflows, 31 commands)
+- **[Development & Tools](workspaces/collections/development/)** - Testing and development utilities (5 workflows, 26 commands)
+- **[Advanced & Specialized](workspaces/collections/advanced/)** - Experimental and research-focused workflows
+
+**Learn more:** [Workspace Collections Documentation](workspaces/README.md)
 
 ---
 

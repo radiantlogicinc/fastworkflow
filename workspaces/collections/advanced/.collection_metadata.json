@@ -1,0 +1,10 @@
+{
+  "collection": "advanced",
+  "name": "Advanced & Specialized",
+  "description": "Complex, experimental, and research-focused workflows",
+  "purpose": "Innovation and advanced capabilities",
+  "target_audience": ["researchers", "advanced-users", "innovators"],
+  "complexity_range": ["high", "very-high"],
+  "typical_command_count": "20+",
+  "workflows": []
+}
