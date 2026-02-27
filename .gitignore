@@ -205,3 +205,4 @@ tasks/
 action.jsonl
 conversation_traces_*.jsonl
 redoc.html
+.beads/beads_fastworkflow/.dolt/stats/
