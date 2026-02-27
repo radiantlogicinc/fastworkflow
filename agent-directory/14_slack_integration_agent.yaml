@@ -1,0 +1,37 @@
+name: slack_integration_agent
+type: integration_agent
+category: integration
+description: >
+  Integrates with Slack for sending messages, managing channels, and
+  handling interactive components. Supports Slack App features.
+
+capabilities:
+  - Post messages to channels
+  - Send direct messages
+  - Create and manage channels
+  - Handle slash commands
+  - Interactive buttons and modals
+  - File uploads
+
+use_cases:
+  - Team notifications
+  - ChatOps workflows
+  - Incident management
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - Slack SDK
+  - Slack API credentials
+
+dependencies: []
+
+example_workflow: examples/slack_integration_workflow
+
+metadata:
+  complexity: medium
+  domain: collaboration
+  integration_level: moderate
+  tags:
+    - slack
+    - chatops
+    - collaboration

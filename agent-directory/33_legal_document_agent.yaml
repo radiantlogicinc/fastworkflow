@@ -1,0 +1,39 @@
+name: legal_document_agent
+type: domain_agent
+category: specialized_domain
+description: >
+  Manages legal document lifecycle including drafting, review, approval,
+  and archival. Includes template management and clause libraries.
+
+capabilities:
+  - Document template management
+  - Automated document generation
+  - Review and approval workflows
+  - Clause library management
+  - Version control
+  - Secure archival
+
+use_cases:
+  - Contract management
+  - Legal department workflows
+  - Compliance documentation
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - Document storage
+  - Template engine
+
+dependencies:
+  - document_processing_agent
+  - approval_workflow_agent
+
+example_workflow: examples/legal_document_workflow
+
+metadata:
+  complexity: high
+  domain: legal
+  integration_level: complex
+  tags:
+    - legal
+    - contracts
+    - compliance

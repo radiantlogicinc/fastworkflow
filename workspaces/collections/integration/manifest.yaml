@@ -1,0 +1,81 @@
+collection_name: integration
+collection_type: external_connectivity
+total_agents: 10
+description: Agents that integrate with external systems and services
+
+agents:
+  - agent_id: "11"
+    name: database_connector_agent
+    path: ../../agent-directory/11_database_connector_agent.yaml
+    complexity: medium
+    integration_level: moderate
+    tags: [database, sql, integration]
+    
+  - agent_id: "12"
+    name: rest_api_agent
+    path: ../../agent-directory/12_rest_api_agent.yaml
+    complexity: medium
+    integration_level: moderate
+    tags: [rest, api, http]
+    
+  - agent_id: "13"
+    name: email_integration_agent
+    path: ../../agent-directory/13_email_integration_agent.yaml
+    complexity: medium
+    integration_level: moderate
+    tags: [email, smtp, communication]
+    
+  - agent_id: "14"
+    name: slack_integration_agent
+    path: ../../agent-directory/14_slack_integration_agent.yaml
+    complexity: medium
+    integration_level: moderate
+    tags: [slack, chatops, collaboration]
+    
+  - agent_id: "15"
+    name: github_integration_agent
+    path: ../../agent-directory/15_github_integration_agent.yaml
+    complexity: medium
+    integration_level: moderate
+    tags: [github, git, devops]
+    
+  - agent_id: "16"
+    name: aws_integration_agent
+    path: ../../agent-directory/16_aws_integration_agent.yaml
+    complexity: high
+    integration_level: complex
+    tags: [aws, cloud, infrastructure]
+    
+  - agent_id: "17"
+    name: google_cloud_integration_agent
+    path: ../../agent-directory/17_google_cloud_integration_agent.yaml
+    complexity: high
+    integration_level: complex
+    tags: [gcp, cloud, bigquery]
+    
+  - agent_id: "18"
+    name: stripe_payment_agent
+    path: ../../agent-directory/18_stripe_payment_agent.yaml
+    complexity: medium
+    integration_level: moderate
+    tags: [payments, stripe, billing]
+    
+  - agent_id: "19"
+    name: twilio_sms_agent
+    path: ../../agent-directory/19_twilio_sms_agent.yaml
+    complexity: medium
+    integration_level: moderate
+    tags: [sms, twilio, 2fa]
+    
+  - agent_id: "20"
+    name: sendgrid_email_agent
+    path: ../../agent-directory/20_sendgrid_email_agent.yaml
+    complexity: medium
+    integration_level: moderate
+    tags: [email, sendgrid, marketing]
+
+metadata:
+  average_complexity: medium
+  recommended_for: system_integration, api_connectivity, cloud_automation
+  prerequisites: API keys, external service accounts
+  estimated_setup_time_minutes: 60

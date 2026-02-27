@@ -1,0 +1,36 @@
+name: rest_api_agent
+type: integration_agent
+category: integration
+description: >
+  Makes HTTP requests to RESTful APIs with support for authentication,
+  rate limiting, and retry logic. Handles request/response transformation.
+
+capabilities:
+  - HTTP methods (GET, POST, PUT, DELETE, PATCH)
+  - Authentication (OAuth, API keys, JWT)
+  - Request rate limiting
+  - Automatic retry with exponential backoff
+  - Response parsing and validation
+
+use_cases:
+  - Third-party API integration
+  - Microservices communication
+  - Webhook handling
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - requests or httpx library
+  - authentication libraries
+
+dependencies: []
+
+example_workflow: examples/rest_api_workflow
+
+metadata:
+  complexity: medium
+  domain: api_integration
+  integration_level: moderate
+  tags:
+    - rest
+    - api
+    - http

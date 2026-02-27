@@ -1,0 +1,40 @@
+name: retail_workflow_agent
+type: workflow_agent
+category: complex_workflow
+description: >
+  Manages complex retail operations including inventory, orders, customers,
+  and product management. Demonstrates multi-context workflows with state
+  management and inheritance.
+
+capabilities:
+  - Inventory management
+  - Order processing and tracking
+  - Customer management
+  - Product catalog operations
+  - Return and refund handling
+  - Analytics and reporting
+
+use_cases:
+  - E-commerce platforms
+  - Retail management systems
+  - Order fulfillment workflows
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - Database connector
+  - Payment integration
+
+dependencies:
+  - database_connector_agent
+  - stripe_payment_agent
+
+example_workflow: examples/retail_workflow
+
+metadata:
+  complexity: high
+  domain: retail
+  integration_level: complex
+  tags:
+    - retail
+    - ecommerce
+    - inventory

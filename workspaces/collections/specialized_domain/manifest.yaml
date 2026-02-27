@@ -1,0 +1,128 @@
+collection_name: specialized_domain
+collection_type: industry_specific
+total_agents: 13
+description: Domain-specific agents for particular industries and use cases
+
+agents:
+  - agent_id: "31"
+    name: healthcare_patient_agent
+    path: ../../agent-directory/31_healthcare_patient_agent.yaml
+    complexity: high
+    integration_level: complex
+    domain: healthcare
+    tags: [healthcare, hipaa, patient-management]
+    
+  - agent_id: "32"
+    name: financial_trading_agent
+    path: ../../agent-directory/32_financial_trading_agent.yaml
+    complexity: high
+    integration_level: complex
+    domain: finance
+    tags: [finance, trading, algorithmic]
+    
+  - agent_id: "33"
+    name: legal_document_agent
+    path: ../../agent-directory/33_legal_document_agent.yaml
+    complexity: high
+    integration_level: complex
+    domain: legal
+    tags: [legal, contracts, compliance]
+    
+  - agent_id: "34"
+    name: hr_recruitment_agent
+    path: ../../agent-directory/34_hr_recruitment_agent.yaml
+    complexity: medium
+    integration_level: moderate
+    domain: human_resources
+    tags: [hr, recruitment, ats]
+    
+  - agent_id: "35"
+    name: real_estate_listing_agent
+    path: ../../agent-directory/35_real_estate_listing_agent.yaml
+    complexity: medium
+    integration_level: moderate
+    domain: real_estate
+    tags: [real-estate, property, mls]
+    
+  - agent_id: "36"
+    name: education_course_agent
+    path: ../../agent-directory/36_education_course_agent.yaml
+    complexity: medium
+    integration_level: moderate
+    domain: education
+    tags: [education, lms, courses]
+    
+  - agent_id: "37"
+    name: insurance_claims_agent
+    path: ../../agent-directory/37_insurance_claims_agent.yaml
+    complexity: high
+    integration_level: complex
+    domain: insurance
+    tags: [insurance, claims, fraud-detection]
+    
+  - agent_id: "38"
+    name: restaurant_ordering_agent
+    path: ../../agent-directory/38_restaurant_ordering_agent.yaml
+    complexity: medium
+    integration_level: moderate
+    domain: hospitality
+    tags: [restaurant, ordering, hospitality]
+    
+  - agent_id: "39"
+    name: logistics_shipping_agent
+    path: ../../agent-directory/39_logistics_shipping_agent.yaml
+    complexity: medium
+    integration_level: moderate
+    domain: logistics
+    tags: [logistics, shipping, fulfillment]
+    
+  - agent_id: "40"
+    name: manufacturing_production_agent
+    path: ../../agent-directory/40_manufacturing_production_agent.yaml
+    complexity: high
+    integration_level: complex
+    domain: manufacturing
+    tags: [manufacturing, production, mes]
+    
+  - agent_id: "41"
+    name: event_management_agent
+    path: ../../agent-directory/41_event_management_agent.yaml
+    complexity: medium
+    integration_level: moderate
+    domain: events
+    tags: [events, ticketing, conferences]
+    
+  - agent_id: "42"
+    name: booking_reservation_agent
+    path: ../../agent-directory/42_booking_reservation_agent.yaml
+    complexity: medium
+    integration_level: moderate
+    domain: hospitality
+    tags: [booking, reservations, scheduling]
+    
+  - agent_id: "43"
+    name: social_media_management_agent
+    path: ../../agent-directory/43_social_media_management_agent.yaml
+    complexity: medium
+    integration_level: moderate
+    domain: marketing
+    tags: [social-media, marketing, content-management]
+
+metadata:
+  average_complexity: medium_to_high
+  recommended_for: industry_specific_automation, vertical_solutions
+  prerequisites: domain knowledge, industry compliance understanding
+  estimated_setup_time_minutes: 120
+  industries_covered:
+    - healthcare
+    - finance
+    - legal
+    - human_resources
+    - real_estate
+    - education
+    - insurance
+    - hospitality
+    - logistics
+    - manufacturing
+    - events
+    - marketing

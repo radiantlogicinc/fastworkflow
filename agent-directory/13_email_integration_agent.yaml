@@ -1,0 +1,38 @@
+name: email_integration_agent
+type: integration_agent
+category: integration
+description: >
+  Integrates with email services (SMTP, IMAP, Gmail API) for sending,
+  receiving, and processing emails. Supports attachments and templates.
+
+capabilities:
+  - Send emails via SMTP
+  - Receive and parse emails via IMAP
+  - Gmail API integration
+  - Email template rendering
+  - Attachment handling
+  - Email filtering and routing
+
+use_cases:
+  - Email automation workflows
+  - Support ticket systems
+  - Email-based reporting
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - smtplib, imaplib
+  - Google API client (for Gmail)
+  - Email template engine
+
+dependencies: []
+
+example_workflow: examples/email_integration_workflow
+
+metadata:
+  complexity: medium
+  domain: communication
+  integration_level: moderate
+  tags:
+    - email
+    - smtp
+    - communication

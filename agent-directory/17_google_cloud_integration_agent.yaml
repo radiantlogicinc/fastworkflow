@@ -1,0 +1,37 @@
+name: google_cloud_integration_agent
+type: integration_agent
+category: integration
+description: >
+  Integrates with Google Cloud Platform services including Cloud Storage,
+  Compute Engine, BigQuery, and Pub/Sub.
+
+capabilities:
+  - Cloud Storage operations
+  - Compute Engine management
+  - BigQuery data operations
+  - Pub/Sub messaging
+  - Cloud Functions deployment
+  - Service account management
+
+use_cases:
+  - GCP resource automation
+  - Data pipeline orchestration
+  - Serverless workflow execution
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - google-cloud-* libraries
+  - GCP credentials
+
+dependencies: []
+
+example_workflow: examples/gcp_integration_workflow
+
+metadata:
+  complexity: high
+  domain: cloud
+  integration_level: complex
+  tags:
+    - gcp
+    - cloud
+    - bigquery

@@ -1,0 +1,81 @@
+collection_name: complex_workflow
+collection_type: advanced_orchestration
+total_agents: 10
+description: Sophisticated agents with multi-step workflows and state management
+
+agents:
+  - agent_id: "21"
+    name: retail_workflow_agent
+    path: ../../agent-directory/21_retail_workflow_agent.yaml
+    complexity: high
+    integration_level: complex
+    tags: [retail, ecommerce, inventory]
+    
+  - agent_id: "22"
+    name: chat_room_agent
+    path: ../../agent-directory/22_chat_room_agent.yaml
+    complexity: high
+    integration_level: complex
+    tags: [chat, messaging, real-time]
+    
+  - agent_id: "23"
+    name: work_item_manager_agent
+    path: ../../agent-directory/23_work_item_manager_agent.yaml
+    complexity: high
+    integration_level: complex
+    tags: [project-management, workflow, state-machine]
+    
+  - agent_id: "24"
+    name: approval_workflow_agent
+    path: ../../agent-directory/24_approval_workflow_agent.yaml
+    complexity: high
+    integration_level: complex
+    tags: [approval, workflow, business-process]
+    
+  - agent_id: "25"
+    name: document_processing_agent
+    path: ../../agent-directory/25_document_processing_agent.yaml
+    complexity: high
+    integration_level: complex
+    tags: [documents, ocr, automation]
+    
+  - agent_id: "26"
+    name: etl_pipeline_agent
+    path: ../../agent-directory/26_etl_pipeline_agent.yaml
+    complexity: high
+    integration_level: complex
+    tags: [etl, data-pipeline, data-engineering]
+    
+  - agent_id: "27"
+    name: customer_onboarding_agent
+    path: ../../agent-directory/27_customer_onboarding_agent.yaml
+    complexity: high
+    integration_level: complex
+    tags: [onboarding, customer-success, activation]
+    
+  - agent_id: "28"
+    name: incident_management_agent
+    path: ../../agent-directory/28_incident_management_agent.yaml
+    complexity: high
+    integration_level: complex
+    tags: [incident, devops, itops]
+    
+  - agent_id: "29"
+    name: cicd_pipeline_agent
+    path: ../../agent-directory/29_cicd_pipeline_agent.yaml
+    complexity: high
+    integration_level: complex
+    tags: [cicd, deployment, automation]
+    
+  - agent_id: "30"
+    name: lead_management_agent
+    path: ../../agent-directory/30_lead_management_agent.yaml
+    complexity: high
+    integration_level: complex
+    tags: [sales, crm, lead-management]
+
+metadata:
+  average_complexity: high
+  recommended_for: enterprise_automation, business_processes, orchestration
+  prerequisites: advanced fastWorkflow knowledge, state machine concepts
+  estimated_setup_time_minutes: 120

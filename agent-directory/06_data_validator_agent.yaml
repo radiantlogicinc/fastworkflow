@@ -1,0 +1,35 @@
+name: data_validator_agent
+type: utility_agent
+category: basic_workflow
+description: >
+  Validates data against defined schemas, performs type checking, and ensures
+  data quality. Uses Pydantic for robust validation.
+
+capabilities:
+  - Schema-based data validation
+  - Type checking and coercion
+  - Custom validation rules
+  - Batch validation of datasets
+
+use_cases:
+  - API input validation
+  - Data quality assurance
+  - ETL pipeline validation
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - Pydantic
+  - fastworkflow validation pipeline
+
+dependencies: []
+
+example_workflow: examples/data_validation_workflow
+
+metadata:
+  complexity: low
+  domain: data_quality
+  integration_level: simple
+  tags:
+    - validation
+    - data-quality
+    - schema

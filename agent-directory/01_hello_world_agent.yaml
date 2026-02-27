@@ -1,0 +1,34 @@
+name: hello_world_agent
+type: workflow_agent
+category: basic_workflow
+description: >
+  A simple agent that demonstrates basic fastWorkflow functionality by handling
+  greeting commands and simple arithmetic operations. Perfect for learning and
+  testing the framework.
+
+capabilities:
+  - Process simple greeting commands
+  - Perform basic arithmetic operations
+  - Demonstrate command routing and parameter extraction
+
+use_cases:
+  - Learning fastWorkflow basics
+  - Testing framework installation
+  - Demonstrating simple workflows to stakeholders
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - fastworkflow.Workflow
+
+dependencies: []
+
+example_workflow: examples/hello_world
+
+metadata:
+  complexity: low
+  domain: general
+  integration_level: simple
+  tags:
+    - beginner
+    - demo
+    - tutorial

@@ -1,0 +1,40 @@
+name: customer_onboarding_agent
+type: workflow_agent
+category: complex_workflow
+description: >
+  Manages end-to-end customer onboarding process including verification,
+  account setup, training, and activation. Tracks progress and engagement.
+
+capabilities:
+  - Customer registration and verification
+  - Account provisioning
+  - Automated training and tutorials
+  - Progress tracking
+  - Engagement scoring
+  - Handoff to customer success
+
+use_cases:
+  - SaaS customer onboarding
+  - Enterprise client onboarding
+  - User activation workflows
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - Email integration
+  - Database connector
+
+dependencies:
+  - email_integration_agent
+  - notification_agent
+  - database_connector_agent
+
+example_workflow: examples/customer_onboarding_workflow
+
+metadata:
+  complexity: high
+  domain: customer_success
+  integration_level: complex
+  tags:
+    - onboarding
+    - customer-success
+    - activation

@@ -1,0 +1,88 @@
+# Agent Definition Schema
+# This file defines the standardized structure for all agent definitions
+
+schema_version: "1.0"
+
+required_fields:
+  - name
+  - type
+  - category
+  - description
+  - capabilities
+  - use_cases
+
+optional_fields:
+  - required_tools
+  - dependencies
+  - example_workflow
+  - metadata
+
+field_definitions:
+  name:
+    type: string
+    description: "Unique name for the agent"
+    pattern: "^[A-Za-z0-9_-]+$"
+  
+  type:
+    type: string
+    description: "Type of agent"
+    allowed_values:
+      - workflow_agent
+      - integration_agent
+      - data_agent
+      - domain_agent
+      - utility_agent
+  
+  category:
+    type: string
+    description: "Collection category this agent belongs to"
+    allowed_values:
+      - basic_workflow
+      - integration
+      - complex_workflow
+      - specialized_domain
+  
+  description:
+    type: string
+    description: "Brief description of agent's purpose and functionality"
+    min_length: 20
+    max_length: 500
+  
+  capabilities:
+    type: array
+    description: "List of specific capabilities this agent provides"
+    min_items: 1
+  
+  use_cases:
+    type: array
+    description: "Concrete use cases where this agent is applicable"
+    min_items: 1
+  
+  required_tools:
+    type: array
+    description: "Tools/dependencies required for this agent to function"
+    default: []
+  
+  dependencies:
+    type: array
+    description: "Other agents or services this agent depends on"
+    default: []
+  
+  example_workflow:
+    type: string
+    description: "Path to example workflow demonstrating this agent"
+  
+  metadata:
+    type: object
+    description: "Additional metadata about the agent"
+    properties:
+      complexity:
+        type: string
+        allowed_values: [low, medium, high]
+      domain:
+        type: string
+      integration_level:
+        type: string
+        allowed_values: [simple, moderate, complex]
+      tags:
+        type: array

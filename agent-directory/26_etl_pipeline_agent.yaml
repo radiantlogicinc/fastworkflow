@@ -1,0 +1,39 @@
+name: etl_pipeline_agent
+type: data_agent
+category: complex_workflow
+description: >
+  Orchestrates Extract-Transform-Load pipelines with error handling,
+  data quality checks, and monitoring. Supports various data sources and targets.
+
+capabilities:
+  - Multi-source data extraction
+  - Data transformation and enrichment
+  - Data quality validation
+  - Load to multiple targets
+  - Error handling and retry logic
+  - Pipeline monitoring and alerts
+
+use_cases:
+  - Data warehouse loading
+  - Data migration projects
+  - Analytics pipeline automation
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - Database connectors
+  - Data transformation libraries
+
+dependencies:
+  - database_connector_agent
+  - data_validator_agent
+
+example_workflow: examples/etl_pipeline_workflow
+
+metadata:
+  complexity: high
+  domain: data_engineering
+  integration_level: complex
+  tags:
+    - etl
+    - data-pipeline
+    - data-engineering

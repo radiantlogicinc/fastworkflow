@@ -1,0 +1,40 @@
+name: document_processing_agent
+type: workflow_agent
+category: complex_workflow
+description: >
+  Processes documents through multiple stages including extraction, validation,
+  classification, and archival. Uses AI for intelligent document processing.
+
+capabilities:
+  - Document upload and ingestion
+  - Text extraction from various formats
+  - Document classification
+  - Data validation and verification
+  - Metadata extraction
+  - Archive and retrieval
+
+use_cases:
+  - Invoice processing automation
+  - Contract management
+  - Document digitization workflows
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - OCR engine
+  - AI/ML models for classification
+  - Storage integration
+
+dependencies:
+  - file_manager_agent
+  - aws_integration_agent
+
+example_workflow: examples/document_processing_workflow
+
+metadata:
+  complexity: high
+  domain: document_management
+  integration_level: complex
+  tags:
+    - documents
+    - ocr
+    - automation

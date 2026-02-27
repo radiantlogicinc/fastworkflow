@@ -1,0 +1,35 @@
+name: scheduler_agent
+type: utility_agent
+category: basic_workflow
+description: >
+  Schedules and manages recurring tasks, one-time jobs, and cron-like
+  operations. Provides task queue management and execution monitoring.
+
+capabilities:
+  - Schedule one-time tasks
+  - Configure recurring tasks
+  - Cron-like scheduling
+  - Task queue management
+  - Execution monitoring and reporting
+
+use_cases:
+  - Automated report generation
+  - Periodic data synchronization
+  - Scheduled maintenance tasks
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - APScheduler or similar library
+
+dependencies: []
+
+example_workflow: examples/scheduler_workflow
+
+metadata:
+  complexity: medium
+  domain: automation
+  integration_level: simple
+  tags:
+    - scheduling
+    - automation
+    - cron

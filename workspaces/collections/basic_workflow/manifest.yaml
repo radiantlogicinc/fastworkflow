@@ -1,0 +1,81 @@
+collection_name: basic_workflow
+collection_type: beginner_friendly
+total_agents: 10
+description: Simple, foundational agents for learning and basic automation
+
+agents:
+  - agent_id: "01"
+    name: hello_world_agent
+    path: ../../agent-directory/01_hello_world_agent.yaml
+    complexity: low
+    integration_level: simple
+    tags: [beginner, demo, tutorial]
+    
+  - agent_id: "02"
+    name: messaging_agent
+    path: ../../agent-directory/02_messaging_agent.yaml
+    complexity: low
+    integration_level: simple
+    tags: [messaging, communication, basic]
+    
+  - agent_id: "03"
+    name: todo_manager_agent
+    path: ../../agent-directory/03_todo_manager_agent.yaml
+    complexity: low
+    integration_level: simple
+    tags: [todo, task-management, persistence]
+    
+  - agent_id: "04"
+    name: calculator_agent
+    path: ../../agent-directory/04_calculator_agent.yaml
+    complexity: low
+    integration_level: simple
+    tags: [math, calculations, utility]
+    
+  - agent_id: "05"
+    name: file_manager_agent
+    path: ../../agent-directory/05_file_manager_agent.yaml
+    complexity: low
+    integration_level: simple
+    tags: [files, filesystem, utility]
+    
+  - agent_id: "06"
+    name: data_validator_agent
+    path: ../../agent-directory/06_data_validator_agent.yaml
+    complexity: low
+    integration_level: simple
+    tags: [validation, data-quality, schema]
+    
+  - agent_id: "07"
+    name: text_processor_agent
+    path: ../../agent-directory/07_text_processor_agent.yaml
+    complexity: low
+    integration_level: simple
+    tags: [text, nlp, preprocessing]
+    
+  - agent_id: "08"
+    name: logger_agent
+    path: ../../agent-directory/08_logger_agent.yaml
+    complexity: low
+    integration_level: simple
+    tags: [logging, monitoring, observability]
+    
+  - agent_id: "09"
+    name: notification_agent
+    path: ../../agent-directory/09_notification_agent.yaml
+    complexity: medium
+    integration_level: simple
+    tags: [notifications, alerts, communication]
+    
+  - agent_id: "10"
+    name: scheduler_agent
+    path: ../../agent-directory/10_scheduler_agent.yaml
+    complexity: medium
+    integration_level: simple
+    tags: [scheduling, automation, cron]
+
+metadata:
+  average_complexity: low
+  recommended_for: beginners, prototyping, simple_automation
+  prerequisites: basic Python knowledge
+  estimated_setup_time_minutes: 30

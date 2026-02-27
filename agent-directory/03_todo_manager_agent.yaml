@@ -1,0 +1,34 @@
+name: todo_manager_agent
+type: workflow_agent
+category: basic_workflow
+description: >
+  Manages todo lists with CRUD operations, priority assignment, and basic
+  filtering. Demonstrates simple stateful operations with JSON persistence.
+
+capabilities:
+  - Create, read, update, delete todo items
+  - Assign priorities to tasks
+  - Filter todos by status and priority
+  - Persist todos to JSON file
+
+use_cases:
+  - Personal task management
+  - Simple project tracking
+  - Learning stateful workflows
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - JSON file storage
+
+dependencies: []
+
+example_workflow: tests/todo_list_workflow
+
+metadata:
+  complexity: low
+  domain: productivity
+  integration_level: simple
+  tags:
+    - todo
+    - task-management
+    - persistence

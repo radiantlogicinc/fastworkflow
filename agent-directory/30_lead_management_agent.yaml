@@ -1,0 +1,40 @@
+name: lead_management_agent
+type: workflow_agent
+category: complex_workflow
+description: >
+  Manages sales lead lifecycle from capture to conversion. Includes scoring,
+  routing, nurturing, and qualification workflows.
+
+capabilities:
+  - Lead capture from multiple sources
+  - Lead scoring and prioritization
+  - Automatic routing and assignment
+  - Nurture campaign management
+  - Qualification workflows
+  - Conversion tracking
+
+use_cases:
+  - Sales automation
+  - Marketing automation
+  - CRM workflow automation
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - CRM integration
+  - Email marketing
+
+dependencies:
+  - email_integration_agent
+  - database_connector_agent
+  - notification_agent
+
+example_workflow: examples/lead_management_workflow
+
+metadata:
+  complexity: high
+  domain: sales
+  integration_level: complex
+  tags:
+    - sales
+    - crm
+    - lead-management

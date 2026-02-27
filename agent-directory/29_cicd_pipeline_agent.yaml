@@ -1,0 +1,41 @@
+name: cicd_pipeline_agent
+type: workflow_agent
+category: complex_workflow
+description: >
+  Orchestrates continuous integration and deployment pipelines with build,
+  test, security scanning, and deployment stages. Supports multiple environments.
+
+capabilities:
+  - Source code checkout
+  - Build and compilation
+  - Automated testing
+  - Security and quality scans
+  - Artifact management
+  - Multi-environment deployment
+
+use_cases:
+  - Software release automation
+  - Continuous deployment workflows
+  - Infrastructure as code deployments
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - Git integration
+  - Container orchestration
+  - Cloud provider APIs
+
+dependencies:
+  - github_integration_agent
+  - aws_integration_agent
+  - notification_agent
+
+example_workflow: examples/cicd_pipeline_workflow
+
+metadata:
+  complexity: high
+  domain: devops
+  integration_level: complex
+  tags:
+    - cicd
+    - deployment
+    - automation

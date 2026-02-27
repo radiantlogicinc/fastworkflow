@@ -1,0 +1,39 @@
+name: healthcare_patient_agent
+type: domain_agent
+category: specialized_domain
+description: >
+  Manages patient information, appointments, medical records, and care
+  coordination in healthcare settings. HIPAA-compliant workflows.
+
+capabilities:
+  - Patient registration and demographics
+  - Appointment scheduling
+  - Medical record management
+  - Prescription handling
+  - Care team coordination
+  - HIPAA-compliant data handling
+
+use_cases:
+  - Hospital management systems
+  - Clinic patient workflows
+  - Telemedicine platforms
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - Secure database connector
+  - Encryption libraries
+
+dependencies:
+  - database_connector_agent
+  - notification_agent
+
+example_workflow: examples/healthcare_patient_workflow
+
+metadata:
+  complexity: high
+  domain: healthcare
+  integration_level: complex
+  tags:
+    - healthcare
+    - hipaa
+    - patient-management

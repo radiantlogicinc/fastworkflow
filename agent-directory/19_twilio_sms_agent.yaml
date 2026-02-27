@@ -1,0 +1,37 @@
+name: twilio_sms_agent
+type: integration_agent
+category: integration
+description: >
+  Integrates with Twilio for SMS messaging, voice calls, and verification
+  services. Supports two-factor authentication workflows.
+
+capabilities:
+  - Send SMS messages
+  - Receive SMS via webhooks
+  - Make voice calls
+  - Two-factor authentication
+  - Phone number verification
+  - Message templating
+
+use_cases:
+  - SMS notifications
+  - Two-factor authentication
+  - Voice-based verification
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - Twilio SDK
+  - Twilio credentials
+
+dependencies: []
+
+example_workflow: examples/twilio_integration_workflow
+
+metadata:
+  complexity: medium
+  domain: communication
+  integration_level: moderate
+  tags:
+    - sms
+    - twilio
+    - 2fa

@@ -1,0 +1,40 @@
+name: manufacturing_production_agent
+type: domain_agent
+category: specialized_domain
+description: >
+  Manages manufacturing production planning, scheduling, quality control,
+  and resource allocation. Integrates with MES and ERP systems.
+
+capabilities:
+  - Production planning and scheduling
+  - Resource allocation
+  - Quality control tracking
+  - Inventory management
+  - Equipment monitoring
+  - MES/ERP integration
+
+use_cases:
+  - Manufacturing execution
+  - Production planning
+  - Quality management
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - MES/ERP APIs
+  - IoT sensor integration
+
+dependencies:
+  - database_connector_agent
+  - rest_api_agent
+  - notification_agent
+
+example_workflow: examples/manufacturing_production_workflow
+
+metadata:
+  complexity: high
+  domain: manufacturing
+  integration_level: complex
+  tags:
+    - manufacturing
+    - production
+    - mes

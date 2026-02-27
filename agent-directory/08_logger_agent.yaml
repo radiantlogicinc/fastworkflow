@@ -1,0 +1,34 @@
+name: logger_agent
+type: utility_agent
+category: basic_workflow
+description: >
+  Handles logging operations with different severity levels, log rotation,
+  and structured logging. Integrates with monitoring systems.
+
+capabilities:
+  - Multi-level logging (debug, info, warning, error)
+  - Structured logging with JSON output
+  - Log rotation and archiving
+  - Integration with monitoring tools
+
+use_cases:
+  - Application monitoring
+  - Audit trail creation
+  - Debugging and troubleshooting
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - Python logging module
+
+dependencies: []
+
+example_workflow: examples/logging_workflow
+
+metadata:
+  complexity: low
+  domain: observability
+  integration_level: simple
+  tags:
+    - logging
+    - monitoring
+    - observability

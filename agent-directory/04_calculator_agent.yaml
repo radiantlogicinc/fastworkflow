@@ -1,0 +1,35 @@
+name: calculator_agent
+type: utility_agent
+category: basic_workflow
+description: >
+  Performs mathematical calculations including arithmetic, statistical operations,
+  and unit conversions. Demonstrates parameter validation and DSPy integration.
+
+capabilities:
+  - Basic arithmetic (add, subtract, multiply, divide)
+  - Statistical operations (mean, median, mode)
+  - Unit conversions
+  - Expression evaluation
+
+use_cases:
+  - Data analysis workflows
+  - Financial calculations
+  - Scientific computations
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - math libraries
+  - DSPy for natural language parsing
+
+dependencies: []
+
+example_workflow: examples/calculator_workflow
+
+metadata:
+  complexity: low
+  domain: mathematics
+  integration_level: simple
+  tags:
+    - math
+    - calculations
+    - utility

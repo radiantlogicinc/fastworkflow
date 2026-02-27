@@ -1,0 +1,37 @@
+name: notification_agent
+type: utility_agent
+category: basic_workflow
+description: >
+  Sends notifications through multiple channels including email, SMS, and
+  push notifications. Handles notification templating and scheduling.
+
+capabilities:
+  - Send email notifications
+  - SMS notifications
+  - Push notifications
+  - Template-based messaging
+  - Notification scheduling
+
+use_cases:
+  - Alert systems
+  - User notifications
+  - Event-driven messaging
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - Email service (SMTP)
+  - SMS service API
+  - Push notification service
+
+dependencies: []
+
+example_workflow: examples/notification_workflow
+
+metadata:
+  complexity: medium
+  domain: communication
+  integration_level: simple
+  tags:
+    - notifications
+    - alerts
+    - communication

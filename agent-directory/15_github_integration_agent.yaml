@@ -1,0 +1,37 @@
+name: github_integration_agent
+type: integration_agent
+category: integration
+description: >
+  Integrates with GitHub for repository operations, issue management,
+  PR workflows, and CI/CD automation.
+
+capabilities:
+  - Repository operations (clone, push, pull)
+  - Issue and PR management
+  - GitHub Actions integration
+  - Webhook handling
+  - Code review automation
+  - Release management
+
+use_cases:
+  - CI/CD workflows
+  - Automated code reviews
+  - Issue tracking automation
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - PyGithub or GitHub CLI
+  - Git client
+
+dependencies: []
+
+example_workflow: examples/github_integration_workflow
+
+metadata:
+  complexity: medium
+  domain: devops
+  integration_level: moderate
+  tags:
+    - github
+    - git
+    - devops

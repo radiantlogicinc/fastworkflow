@@ -1,0 +1,37 @@
+name: aws_integration_agent
+type: integration_agent
+category: integration
+description: >
+  Integrates with AWS services including S3, EC2, Lambda, and more.
+  Provides resource management and automation capabilities.
+
+capabilities:
+  - S3 bucket operations
+  - EC2 instance management
+  - Lambda function invocation
+  - CloudWatch monitoring
+  - IAM management
+  - Resource tagging and organization
+
+use_cases:
+  - Cloud infrastructure automation
+  - Resource provisioning
+  - Cost optimization workflows
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - boto3 (AWS SDK)
+  - AWS credentials
+
+dependencies: []
+
+example_workflow: examples/aws_integration_workflow
+
+metadata:
+  complexity: high
+  domain: cloud
+  integration_level: complex
+  tags:
+    - aws
+    - cloud
+    - infrastructure

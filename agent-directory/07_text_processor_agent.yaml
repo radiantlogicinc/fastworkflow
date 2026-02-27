@@ -1,0 +1,34 @@
+name: text_processor_agent
+type: utility_agent
+category: basic_workflow
+description: >
+  Processes text data with operations like formatting, cleaning, tokenization,
+  and basic NLP tasks. Useful for text preprocessing workflows.
+
+capabilities:
+  - Text cleaning and normalization
+  - Tokenization and stemming
+  - Basic sentiment analysis
+  - Text formatting and transformation
+
+use_cases:
+  - Text preprocessing for ML pipelines
+  - Document cleaning and formatting
+  - Content moderation workflows
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - NLP libraries (nltk, spacy)
+
+dependencies: []
+
+example_workflow: examples/text_processing_workflow
+
+metadata:
+  complexity: low
+  domain: nlp
+  integration_level: simple
+  tags:
+    - text
+    - nlp
+    - preprocessing

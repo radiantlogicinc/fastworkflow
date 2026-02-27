@@ -1,0 +1,40 @@
+name: incident_management_agent
+type: workflow_agent
+category: complex_workflow
+description: >
+  Manages IT incident lifecycle from detection to resolution. Includes
+  alerting, triage, assignment, escalation, and post-mortem workflows.
+
+capabilities:
+  - Incident detection and creation
+  - Severity classification
+  - Auto-assignment and routing
+  - Escalation management
+  - Communication coordination
+  - Post-mortem generation
+
+use_cases:
+  - IT operations management
+  - DevOps incident response
+  - Service desk automation
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - Monitoring integration
+  - Notification system
+
+dependencies:
+  - notification_agent
+  - slack_integration_agent
+  - github_integration_agent
+
+example_workflow: examples/incident_management_workflow
+
+metadata:
+  complexity: high
+  domain: operations
+  integration_level: complex
+  tags:
+    - incident
+    - devops
+    - itops

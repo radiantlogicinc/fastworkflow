@@ -1,0 +1,35 @@
+name: file_manager_agent
+type: utility_agent
+category: basic_workflow
+description: >
+  Manages file operations including reading, writing, copying, and organizing
+  files. Provides safe file manipulation with validation and error handling.
+
+capabilities:
+  - Read and write files
+  - Copy and move files
+  - Create and delete directories
+  - List directory contents
+  - File search and filtering
+
+use_cases:
+  - File organization automation
+  - Backup and archiving workflows
+  - Document management systems
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - os and shutil libraries
+
+dependencies: []
+
+example_workflow: examples/file_management_workflow
+
+metadata:
+  complexity: low
+  domain: file_system
+  integration_level: simple
+  tags:
+    - files
+    - filesystem
+    - utility

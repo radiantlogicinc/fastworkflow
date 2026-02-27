@@ -1,0 +1,36 @@
+# Agent Definition Template
+# Copy this template to create new agent definitions
+
+name: agent_name_here
+type: workflow_agent
+category: basic_workflow
+description: >
+  Describe what this agent does, its primary purpose, and when to use it.
+  Be specific about the problems it solves.
+
+capabilities:
+  - Capability 1: Describe what the agent can do
+  - Capability 2: Another specific capability
+  - Capability 3: Yet another capability
+
+use_cases:
+  - Use case 1: When you need to...
+  - Use case 2: For scenarios where...
+  - Use case 3: Applicable when...
+
+required_tools:
+  - tool_1
+  - tool_2
+
+dependencies:
+  - other_agent_or_service
+
+example_workflow: examples/workflow_name
+
+metadata:
+  complexity: medium
+  domain: general
+  integration_level: simple
+  tags:
+    - tag1
+    - tag2

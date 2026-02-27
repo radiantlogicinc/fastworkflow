@@ -1,0 +1,50 @@
+# Agent Collections Index
+# Central registry of all agent collections
+
+version: "1.0"
+total_agents: 43
+total_collections: 4
+
+collections:
+  - id: basic_workflow
+    name: "Basic Workflow Agents"
+    path: ./basic_workflow
+    manifest: ./basic_workflow/manifest.yaml
+    agent_count: 10
+    complexity: low
+    description: "Simple, foundational agents for learning and basic automation"
+    
+  - id: integration
+    name: "Integration Agents"
+    path: ./integration
+    manifest: ./integration/manifest.yaml
+    agent_count: 10
+    complexity: medium
+    description: "Agents that integrate with external systems and services"
+    
+  - id: complex_workflow
+    name: "Complex Workflow Agents"
+    path: ./complex_workflow
+    manifest: ./complex_workflow/manifest.yaml
+    agent_count: 10
+    complexity: high
+    description: "Sophisticated agents with multi-step workflows and state management"
+    
+  - id: specialized_domain
+    name: "Specialized Domain Agents"
+    path: ./specialized_domain
+    manifest: ./specialized_domain/manifest.yaml
+    agent_count: 13
+    complexity: medium_to_high
+    description: "Domain-specific agents for particular industries and use cases"
+
+categorization:
+  rules_document: ./categorization_rules.md
+  schema: ../../agent-directory/schema.yaml
+  template: ../../agent-directory/template.yaml
+
+metadata:
+  created: 2026-02-27
+  version: 1.0
+  maintainer: fastWorkflow Team
+  last_updated: 2026-02-27

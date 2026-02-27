@@ -1,0 +1,37 @@
+name: sendgrid_email_agent
+type: integration_agent
+category: integration
+description: >
+  Integrates with SendGrid for transactional and marketing emails.
+  Provides template management and analytics integration.
+
+capabilities:
+  - Send transactional emails
+  - Email template management
+  - Contact list management
+  - Email campaign creation
+  - Delivery analytics
+  - Suppression list handling
+
+use_cases:
+  - Transactional email delivery
+  - Email marketing campaigns
+  - User onboarding emails
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - SendGrid SDK
+  - SendGrid API key
+
+dependencies: []
+
+example_workflow: examples/sendgrid_integration_workflow
+
+metadata:
+  complexity: medium
+  domain: email_marketing
+  integration_level: moderate
+  tags:
+    - email
+    - sendgrid
+    - marketing

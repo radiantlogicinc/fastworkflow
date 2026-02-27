@@ -1,0 +1,39 @@
+name: work_item_manager_agent
+type: workflow_agent
+category: complex_workflow
+description: >
+  Manages complex work items with hierarchical relationships, workflows,
+  and state transitions. Supports project management and issue tracking.
+
+capabilities:
+  - Create and manage work items
+  - Hierarchical work item relationships
+  - Workflow state management
+  - Assignment and ownership tracking
+  - Due date and priority management
+  - Commenting and collaboration
+
+use_cases:
+  - Project management systems
+  - Issue tracking platforms
+  - Task management workflows
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - Database for persistence
+  - Notification system
+
+dependencies:
+  - database_connector_agent
+  - notification_agent
+
+example_workflow: examples/extended_workflow_example
+
+metadata:
+  complexity: high
+  domain: project_management
+  integration_level: complex
+  tags:
+    - project-management
+    - workflow
+    - state-machine

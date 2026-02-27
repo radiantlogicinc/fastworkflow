@@ -1,0 +1,39 @@
+name: approval_workflow_agent
+type: workflow_agent
+category: complex_workflow
+description: >
+  Manages multi-stage approval workflows with role-based permissions,
+  escalation rules, and audit trails. Supports parallel and sequential approvals.
+
+capabilities:
+  - Define approval chains
+  - Role-based approval routing
+  - Parallel and sequential approvals
+  - Escalation and timeout handling
+  - Audit trail and history
+  - Delegation and substitution
+
+use_cases:
+  - Purchase order approvals
+  - Document review workflows
+  - Access request management
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - State machine engine
+  - Notification system
+
+dependencies:
+  - notification_agent
+  - database_connector_agent
+
+example_workflow: examples/approval_workflow
+
+metadata:
+  complexity: high
+  domain: business_process
+  integration_level: complex
+  tags:
+    - approval
+    - workflow
+    - business-process

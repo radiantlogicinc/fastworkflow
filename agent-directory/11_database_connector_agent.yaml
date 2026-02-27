@@ -1,0 +1,37 @@
+name: database_connector_agent
+type: integration_agent
+category: integration
+description: >
+  Connects to various databases (PostgreSQL, MySQL, SQLite, MongoDB) and
+  executes queries. Provides connection pooling and transaction management.
+
+capabilities:
+  - Multi-database connectivity
+  - SQL query execution
+  - NoSQL operations
+  - Connection pooling
+  - Transaction management
+  - Query result transformation
+
+use_cases:
+  - Database migration workflows
+  - Data extraction and loading
+  - Database administration tasks
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - SQLAlchemy or database-specific drivers
+  - Connection pool manager
+
+dependencies: []
+
+example_workflow: examples/database_integration_workflow
+
+metadata:
+  complexity: medium
+  domain: data_storage
+  integration_level: moderate
+  tags:
+    - database
+    - sql
+    - integration

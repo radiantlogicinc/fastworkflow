@@ -1,0 +1,40 @@
+name: insurance_claims_agent
+type: domain_agent
+category: specialized_domain
+description: >
+  Manages insurance claims from submission to settlement. Includes fraud
+  detection, adjudication, and payment processing.
+
+capabilities:
+  - Claims submission and intake
+  - Document verification
+  - Fraud detection
+  - Claims adjudication
+  - Payment processing
+  - Appeals handling
+
+use_cases:
+  - Insurance claims processing
+  - Claims management systems
+  - Fraud detection workflows
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - Document processing
+  - Fraud detection AI
+
+dependencies:
+  - document_processing_agent
+  - stripe_payment_agent
+  - notification_agent
+
+example_workflow: examples/insurance_claims_workflow
+
+metadata:
+  complexity: high
+  domain: insurance
+  integration_level: complex
+  tags:
+    - insurance
+    - claims
+    - fraud-detection

@@ -1,0 +1,40 @@
+name: chat_room_agent
+type: workflow_agent
+category: complex_workflow
+description: >
+  Manages multi-user chat rooms with user roles, permissions, message
+  history, and premium features. Demonstrates context hierarchies and
+  inheritance in fastWorkflow.
+
+capabilities:
+  - Create and manage chat rooms
+  - User role management (admin, premium, regular)
+  - Message broadcasting and filtering
+  - Private messaging
+  - Chat history and archiving
+  - Moderation features
+
+use_cases:
+  - Team collaboration platforms
+  - Customer support chat systems
+  - Community forums
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - Database for persistence
+  - WebSocket support for real-time
+
+dependencies:
+  - database_connector_agent
+  - notification_agent
+
+example_workflow: examples/messaging_app_4
+
+metadata:
+  complexity: high
+  domain: messaging
+  integration_level: complex
+  tags:
+    - chat
+    - messaging
+    - real-time

@@ -1,0 +1,37 @@
+name: stripe_payment_agent
+type: integration_agent
+category: integration
+description: >
+  Integrates with Stripe for payment processing, subscription management,
+  and financial operations. Handles secure payment workflows.
+
+capabilities:
+  - Create and process payments
+  - Manage subscriptions
+  - Handle refunds and disputes
+  - Customer management
+  - Invoice generation
+  - Webhook event processing
+
+use_cases:
+  - E-commerce payment processing
+  - Subscription billing systems
+  - Payment reconciliation workflows
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - Stripe SDK
+  - Stripe API keys
+
+dependencies: []
+
+example_workflow: examples/stripe_integration_workflow
+
+metadata:
+  complexity: medium
+  domain: payments
+  integration_level: moderate
+  tags:
+    - payments
+    - stripe
+    - billing

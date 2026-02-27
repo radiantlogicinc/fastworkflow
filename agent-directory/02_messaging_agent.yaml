@@ -1,0 +1,33 @@
+name: messaging_agent
+type: workflow_agent
+category: basic_workflow
+description: >
+  Handles basic messaging operations including sending messages, managing
+  users, and simple message routing. Demonstrates stateless command execution.
+
+capabilities:
+  - Send messages to users
+  - Validate email addresses
+  - Route messages based on user preferences
+
+use_cases:
+  - Simple notification systems
+  - Basic messaging applications
+  - Email workflow automation
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - email validation library
+
+dependencies: []
+
+example_workflow: examples/messaging_app_1
+
+metadata:
+  complexity: low
+  domain: messaging
+  integration_level: simple
+  tags:
+    - messaging
+    - communication
+    - basic

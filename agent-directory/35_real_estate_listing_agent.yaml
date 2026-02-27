@@ -1,0 +1,40 @@
+name: real_estate_listing_agent
+type: domain_agent
+category: specialized_domain
+description: >
+  Manages real estate property listings, viewings, offers, and transactions.
+  Includes MLS integration and property marketing automation.
+
+capabilities:
+  - Property listing management
+  - MLS integration
+  - Viewing scheduling
+  - Offer tracking and negotiation
+  - Document management
+  - Marketing automation
+
+use_cases:
+  - Real estate agency workflows
+  - Property management systems
+  - MLS listing automation
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - MLS API integration
+  - Image/video storage
+
+dependencies:
+  - database_connector_agent
+  - email_integration_agent
+  - document_processing_agent
+
+example_workflow: examples/real_estate_workflow
+
+metadata:
+  complexity: medium
+  domain: real_estate
+  integration_level: moderate
+  tags:
+    - real-estate
+    - property
+    - mls

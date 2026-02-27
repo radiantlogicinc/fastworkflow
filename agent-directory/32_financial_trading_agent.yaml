@@ -1,0 +1,39 @@
+name: financial_trading_agent
+type: domain_agent
+category: specialized_domain
+description: >
+  Manages financial trading operations including order execution, portfolio
+  management, and risk assessment. Supports algorithmic trading strategies.
+
+capabilities:
+  - Order execution (buy/sell)
+  - Portfolio tracking and rebalancing
+  - Risk assessment and limits
+  - Market data integration
+  - Trading strategy execution
+  - Compliance and reporting
+
+use_cases:
+  - Algorithmic trading platforms
+  - Portfolio management systems
+  - Trading desk automation
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - Market data feeds
+  - Trading APIs
+
+dependencies:
+  - database_connector_agent
+  - rest_api_agent
+
+example_workflow: examples/financial_trading_workflow
+
+metadata:
+  complexity: high
+  domain: finance
+  integration_level: complex
+  tags:
+    - finance
+    - trading
+    - algorithmic

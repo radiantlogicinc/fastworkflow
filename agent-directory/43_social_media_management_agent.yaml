@@ -1,0 +1,40 @@
+name: social_media_management_agent
+type: domain_agent
+category: specialized_domain
+description: >
+  Manages social media presence across multiple platforms including content
+  scheduling, engagement tracking, and analytics. Supports multi-platform posting.
+
+capabilities:
+  - Multi-platform content publishing
+  - Post scheduling and automation
+  - Engagement tracking and response
+  - Analytics and reporting
+  - Content calendar management
+  - Hashtag and trend analysis
+
+use_cases:
+  - Social media marketing
+  - Brand management
+  - Community management
+
+required_tools:
+  - fastworkflow.CommandExecutor
+  - Social media APIs (Twitter, Facebook, Instagram, LinkedIn)
+  - Analytics tools
+
+dependencies:
+  - rest_api_agent
+  - scheduler_agent
+  - database_connector_agent
+
+example_workflow: examples/social_media_management_workflow
+
+metadata:
+  complexity: medium
+  domain: marketing
+  integration_level: moderate
+  tags:
+    - social-media
+    - marketing
+    - content-management
