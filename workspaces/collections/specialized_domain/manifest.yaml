@@ -109,7 +109,8 @@ agents:
     tags: [social-media, marketing, content-management]
 
 metadata:
-  average_complexity: medium_to_high
+  average_complexity: high
+  complexity_notes: typically ranges from medium to high depending on domain depth and regulatory complexity
   recommended_for: industry_specific_automation, vertical_solutions
   prerequisites: domain knowledge, industry compliance understanding
   estimated_setup_time_minutes: 120
