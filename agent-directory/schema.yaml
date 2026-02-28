@@ -86,3 +86,5 @@ field_definitions:
         allowed_values: [simple, moderate, complex]
       tags:
         type: array
+        items:
+          type: string

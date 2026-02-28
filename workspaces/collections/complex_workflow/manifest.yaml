@@ -1,5 +1,6 @@
 collection_name: complex_workflow
 collection_type: advanced_orchestration
+# total_agents must match the actual count in the agents list below (validated by tests)
 total_agents: 10
 description: Sophisticated agents with multi-step workflows and state management
 

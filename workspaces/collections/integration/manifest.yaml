@@ -1,5 +1,6 @@
 collection_name: integration
 collection_type: external_connectivity
+# total_agents must match the actual count in the agents list below (validated by tests)
 total_agents: 10
 description: Agents that integrate with external systems and services
 

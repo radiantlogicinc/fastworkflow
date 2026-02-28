@@ -20,6 +20,10 @@ WORKSPACE_ROOT = Path(__file__).parent.parent
 AGENT_DIR = WORKSPACE_ROOT / "agent-directory"
 COLLECTIONS_DIR = WORKSPACE_ROOT / "workspaces" / "collections"
 
+# Shared constants to avoid duplication across tests
+AGENT_COUNT = 43
+COLLECTIONS = ["basic_workflow", "integration", "complex_workflow", "specialized_domain"]
+
 
 class TestAgentDefinitions:
     """Test agent definition files"""
@@ -47,9 +51,9 @@ class TestAgentDefinitions:
         assert template_file.exists(), "template.yaml not found"
     
     def test_exactly_43_agents(self):
-        """Verify exactly 43 agent definition files exist"""
+        """Verify exactly AGENT_COUNT agent definition files exist"""
         agent_files = list(AGENT_DIR.glob("[0-9][0-9]_*.yaml"))
-        assert len(agent_files) == 43, f"Expected 43 agents, found {len(agent_files)}"
+        assert len(agent_files) == AGENT_COUNT, f"Expected {AGENT_COUNT} agents, found {len(agent_files)}"
     
     def test_agent_naming_convention(self):
         """Verify agent files follow naming convention"""
@@ -64,11 +68,11 @@ class TestAgentDefinitions:
             assert len(parts[0]) == 2, f"Agent number should be 2 digits: {parts[0]}"
     
     def test_agent_sequential_numbering(self):
-        """Verify agents are numbered 01-43"""
+        """Verify agents are numbered sequentially from 01 to AGENT_COUNT"""
         agent_files = sorted(AGENT_DIR.glob("[0-9][0-9]_*.yaml"))
         numbers = [int(f.stem.split("_")[0]) for f in agent_files]
         
-        assert numbers == list(range(1, 44)), "Agent numbering is not sequential 1-43"
+        assert numbers == list(range(1, AGENT_COUNT + 1)), f"Agent numbering is not sequential 1-{AGENT_COUNT}"
     
     def test_agent_schema_compliance(self):
         """Verify each agent follows the schema"""
@@ -136,27 +140,22 @@ class TestCollectionStructure:
         assert COLLECTIONS_DIR.exists(), "collections directory not found"
     
     def test_four_collections_exist(self):
-        """Verify exactly 4 collections exist"""
+        """Verify expected collections exist"""
         collections = [d for d in COLLECTIONS_DIR.iterdir() if d.is_dir()]
         collection_names = [c.name for c in collections]
         
-        expected = ["basic_workflow", "integration", "complex_workflow", "specialized_domain"]
-        assert sorted(collection_names) == sorted(expected), \
-            f"Expected collections {expected}, found {collection_names}"
+        assert sorted(collection_names) == sorted(COLLECTIONS), \
+            f"Expected collections {COLLECTIONS}, found {collection_names}"
     
     def test_collection_manifests_exist(self):
         """Verify each collection has a manifest"""
-        collections = ["basic_workflow", "integration", "complex_workflow", "specialized_domain"]
-        
-        for collection in collections:
+        for collection in COLLECTIONS:
             manifest = COLLECTIONS_DIR / collection / "manifest.yaml"
             assert manifest.exists(), f"Manifest not found for {collection}"
     
     def test_collection_readmes_exist(self):
         """Verify each collection has a README"""
-        collections = ["basic_workflow", "integration", "complex_workflow", "specialized_domain"]
-        
-        for collection in collections:
+        for collection in COLLECTIONS:
             readme = COLLECTIONS_DIR / collection / "README.md"
             assert readme.exists(), f"README not found for {collection}"
     
@@ -168,9 +167,9 @@ class TestCollectionStructure:
         with open(index) as f:
             data = yaml.safe_load(f)
         
-        assert data["total_agents"] == 43
-        assert data["total_collections"] == 4
-        assert len(data["collections"]) == 4
+        assert data["total_agents"] == AGENT_COUNT
+        assert data["total_collections"] == len(COLLECTIONS)
+        assert len(data["collections"]) == len(COLLECTIONS)
 
 
 class TestManifests:
@@ -178,9 +177,7 @@ class TestManifests:
     
     def test_manifest_structure(self):
         """Verify manifest structure is valid"""
-        collections = ["basic_workflow", "integration", "complex_workflow", "specialized_domain"]
-        
-        for collection in collections:
+        for collection in COLLECTIONS:
             manifest_path = COLLECTIONS_DIR / collection / "manifest.yaml"
             with open(manifest_path) as f:
                 manifest = yaml.safe_load(f)
@@ -210,24 +207,21 @@ class TestManifests:
             assert len(manifest["agents"]) == expected_count, \
                 f"{collection}: expected {expected_count} agents, found {len(manifest['agents'])}"
     
-    def test_total_agents_equals_43(self):
-        """Verify all manifests together reference 43 agents"""
-        collections = ["basic_workflow", "integration", "complex_workflow", "specialized_domain"]
+    def test_total_agents_equals_expected(self):
+        """Verify all manifests together reference AGENT_COUNT agents"""
         total = 0
         
-        for collection in collections:
+        for collection in COLLECTIONS:
             manifest_path = COLLECTIONS_DIR / collection / "manifest.yaml"
             with open(manifest_path) as f:
                 manifest = yaml.safe_load(f)
             total += len(manifest["agents"])
         
-        assert total == 43, f"Expected 43 total agents across all collections, found {total}"
+        assert total == AGENT_COUNT, f"Expected {AGENT_COUNT} total agents across all collections, found {total}"
     
     def test_manifest_agent_ids_match_files(self):
         """Verify manifest agent IDs match actual files"""
-        collections = ["basic_workflow", "integration", "complex_workflow", "specialized_domain"]
-        
-        for collection in collections:
+        for collection in COLLECTIONS:
             manifest_path = COLLECTIONS_DIR / collection / "manifest.yaml"
             with open(manifest_path) as f:
                 manifest = yaml.safe_load(f)
@@ -240,10 +234,9 @@ class TestManifests:
     
     def test_no_duplicate_agents_across_collections(self):
         """Verify no agent appears in multiple collections"""
-        collections = ["basic_workflow", "integration", "complex_workflow", "specialized_domain"]
         all_agents: Set[str] = set()
         
-        for collection in collections:
+        for collection in COLLECTIONS:
             manifest_path = COLLECTIONS_DIR / collection / "manifest.yaml"
             with open(manifest_path) as f:
                 manifest = yaml.safe_load(f)
@@ -340,16 +333,15 @@ class TestIntegrity:
     """Test overall system integrity"""
     
     def test_all_agent_numbers_accounted_for(self):
-        """Verify agents numbered 01-43 all exist and are in manifests"""
+        """Verify all agents exist and are in manifests"""
         # Get all agent files
         agent_files = {int(f.stem.split("_")[0]): f for f in AGENT_DIR.glob("[0-9][0-9]_*.yaml")}
-        assert len(agent_files) == 43
+        assert len(agent_files) == AGENT_COUNT
         
         # Get all agents from manifests
-        collections = ["basic_workflow", "integration", "complex_workflow", "specialized_domain"]
         manifest_agents: Set[int] = set()
         
-        for collection in collections:
+        for collection in COLLECTIONS:
             manifest_path = COLLECTIONS_DIR / collection / "manifest.yaml"
             with open(manifest_path) as f:
                 manifest = yaml.safe_load(f)
@@ -363,9 +355,7 @@ class TestIntegrity:
     
     def test_agent_names_match_between_definition_and_manifest(self):
         """Verify agent names are consistent"""
-        collections = ["basic_workflow", "integration", "complex_workflow", "specialized_domain"]
-        
-        for collection in collections:
+        for collection in COLLECTIONS:
             manifest_path = COLLECTIONS_DIR / collection / "manifest.yaml"
             with open(manifest_path) as f:
                 manifest = yaml.safe_load(f)
@@ -385,9 +375,7 @@ class TestIntegrity:
     
     def test_agent_categories_match_collection(self):
         """Verify agent category field matches its collection"""
-        collections = ["basic_workflow", "integration", "complex_workflow", "specialized_domain"]
-        
-        for collection in collections:
+        for collection in COLLECTIONS:
             manifest_path = COLLECTIONS_DIR / collection / "manifest.yaml"
             with open(manifest_path) as f:
                 manifest = yaml.safe_load(f)
@@ -404,7 +392,50 @@ class TestIntegrity:
                 # Verify category matches collection
                 assert agent_def["category"] == collection, \
                     f"Category mismatch for {manifest_name}: in {collection} collection but category is {agent_def['category']}"
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    
+    def test_index_matches_collection_manifests(self):
+        """Cross-check index.yaml contents against per-collection manifests"""
+        index_path = COLLECTIONS_DIR / "index.yaml"
+        assert index_path.exists(), "index.yaml not found"
+        
+        with open(index_path) as f:
+            index_data = yaml.safe_load(f) or {}
+        
+        index_collections = index_data.get("collections", [])
+        assert isinstance(index_collections, list), "`collections` in index.yaml must be a list"
+        
+        for collection_entry in index_collections:
+            # Verify collection entry structure
+            assert "id" in collection_entry, "Each collection entry in index.yaml must have an 'id' field"
+            collection_id = collection_entry["id"]
+            
+            # Verify collection directory exists
+            collection_dir = COLLECTIONS_DIR / collection_id
+            assert collection_dir.exists(), f"Collection directory missing for {collection_id}"
+            
+            # Load manifest
+            manifest_path = collection_dir / "manifest.yaml"
+            assert manifest_path.exists(), f"manifest.yaml not found for collection {collection_id}"
+            
+            with open(manifest_path) as f:
+                manifest = yaml.safe_load(f) or {}
+            
+            # Get agents from manifest
+            manifest_agents = manifest.get("agents", [])
+            assert isinstance(manifest_agents, list), \
+                f"'agents' in manifest.yaml for {collection_id} must be a list"
+            
+            manifest_agent_count = len(manifest_agents)
+            manifest_total_agents = manifest.get("total_agents")
+            
+            # Verify manifest's total_agents matches actual count
+            if manifest_total_agents is not None:
+                assert manifest_total_agents == manifest_agent_count, \
+                    f"Manifest {collection_id}: total_agents={manifest_total_agents} but has {manifest_agent_count} agents"
+            
+            # Verify index's agent_count matches manifest
+            index_agent_count = collection_entry.get("agent_count")
+            if index_agent_count is not None:
+                assert index_agent_count == manifest_agent_count, \
+                    f"Agent count mismatch for {collection_id}: " \
+                    f"{index_agent_count} in index.yaml vs {manifest_agent_count} in manifest.yaml"

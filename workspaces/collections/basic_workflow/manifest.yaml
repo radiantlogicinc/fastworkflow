@@ -1,5 +1,6 @@
 collection_name: basic_workflow
 collection_type: beginner_friendly
+# total_agents must match the actual count in the agents list below (validated by tests)
 total_agents: 10
 description: Simple, foundational agents for learning and basic automation
 

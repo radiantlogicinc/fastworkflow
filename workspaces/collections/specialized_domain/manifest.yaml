@@ -1,5 +1,6 @@
 collection_name: specialized_domain
 collection_type: industry_specific
+# total_agents must match the actual count in the agents list below (validated by tests)
 total_agents: 13
 description: Domain-specific agents for particular industries and use cases
 
