@@ -208,7 +208,11 @@ This step builds the NLP models that help the workflow understand user commands.
 Once training is complete, run the interactive assistant:
 
 ```sh
+# Run in agentic mode (default)
 fastworkflow run ./examples/hello_world ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env
+
+# Or run in assistant (non-agentic) mode
+fastworkflow run ./examples/hello_world ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env --assistant
 ```
 
 You will be greeted with a `User >` prompt. Try it out by asking "what can you do?" or "add 49 + 51"!
@@ -240,8 +244,11 @@ fastworkflow build --app-dir <app_dir> --workflow-folderpath <workflow_dir>
 # Train a workflow's intent detection models
 fastworkflow train <workflow_dir> <env_file> <passwords_file>
 
-# Run a workflow
+# Run a workflow (agentic mode, default)
 fastworkflow run <workflow_dir> <env_file> <passwords_file>
+
+# Run a workflow in assistant (non-agentic) mode
+fastworkflow run <workflow_dir> <env_file> <passwords_file> --assistant
 ```
 
 > [!tip]
@@ -669,6 +676,7 @@ This single command will generate the `greet.py` command, `get_properties` and `
 | Variable | Purpose | When Needed | Default |
 |:---|:---|:---|:---|
 | `SPEEDDICT_FOLDERNAME` | Directory name for workflow contexts | Always | `___workflow_contexts` |
+| `LOG_LEVEL` | Logging level for fastWorkflow and uvicorn (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`) | Optional | `INFO` |
 | `LLM_SYNDATA_GEN` | LiteLLM model string for synthetic utterance generation | `train` | `mistral/mistral-small-latest` |
 | `LLM_PARAM_EXTRACTION` | LiteLLM model string for parameter extraction | `train`, `run` | `mistral/mistral-small-latest` |
 | `LLM_RESPONSE_GEN` | LiteLLM model string for response generation | `run` | `mistral/mistral-small-latest` |
