@@ -215,7 +215,7 @@ def _ask_user_tool(clarification_request: str, chat_session_obj: fastworkflow.Ch
         }
         f.write(json.dumps(agent_user_dialog, ensure_ascii=False) + "\n")
 
-    # store the message as 'raw_user_input' in workflow_context. This is useful in agentic mode
+    # store the message as 'raw_user_message' in workflow_context. This is useful in agentic mode
     # when command implementations want to get the exact message that user entered (no refinement)
     workflow = chat_session_obj.get_active_workflow()
     workflow.context['raw_user_message'] = user_query

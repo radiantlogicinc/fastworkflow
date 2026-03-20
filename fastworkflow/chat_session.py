@@ -475,7 +475,7 @@ class ChatSession:
         if os.path.exists("action.jsonl"):
             os.remove("action.jsonl")
 
-        # store the message as 'raw_user_input' in workflow_context. This is useful in agentic mode
+        # store the message as 'raw_user_message' in workflow_context. This is useful in agentic mode
         # when command implementations want to get the exact message that user entered (no refinement)
         self._current_workflow.context['raw_user_message'] = message
 

@@ -74,14 +74,18 @@ class CommandExecutor(CommandExecutorInterface):
             )
         response_generation_object = response_generation_class()
 
+        raw_user_message = command
+        if "raw_user_message" in workflow.context:
+            raw_user_message = workflow.context['raw_user_message']
+
         if command_parameters_class := (
             command_routing_definition.get_command_class(
                 command_name, ModuleType.COMMAND_PARAMETERS_CLASS
             )
         ):
-            command_output = response_generation_object(workflow, command, input_obj)
+            command_output = response_generation_object(workflow, raw_user_message, input_obj)
         else:
-            command_output = response_generation_object(workflow, command)
+            command_output = response_generation_object(workflow, raw_user_message)
 
         # Set the additional attributes
         command_output.workflow_name = workflow_name

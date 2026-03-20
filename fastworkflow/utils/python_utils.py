@@ -73,10 +73,10 @@ def get_module(module_path: str, search_root: Optional[str] = None) -> Any:
 
         fw_pkg_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 
-        if abs_module_path.startswith(project_root):
-            relative_base = project_root
-        elif abs_module_path.startswith(fw_pkg_root):
+        if abs_module_path.startswith(fw_pkg_root):
             relative_base = fw_pkg_root
+        elif abs_module_path.startswith(project_root):
+            relative_base = project_root
         else:
             raise ImportError(
                 f"Module {abs_module_path} is outside of permitted roots: {project_root} or {fw_pkg_root}")
