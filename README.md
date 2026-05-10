@@ -3,7 +3,7 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE) [![CI](https://img.shields.io/badge/ci-passing-brightgreen)](<LINK_TO_CI>)
 
-📄 **Read the paper:** [fastWorkflow: Closing the Performance Gap Between Small and Frontier Language Models for Conversational Agents](paper/fastWorkflow_Closing_the_Performance_Gap_Between_Small_and_Frontier_Language_Models_for_Conversational_Agents.pdf)
+📄 **Read the paper:** [fastWorkflow: Closing the Performance Gap Between Small and Frontier Language Models for Conversational Agents](https://github.com/radiantlogicinc/fastworkflow/blob/main/paper/fastWorkflow_Closing_the_Performance_Gap_Between_Small_and_Frontier_Language_Models_for_Conversational_Agents.pdf)
 
 Build agents and assistants for complex workflows and large-scale Python applications, with deterministic or AI-powered business logic.
 
@@ -25,10 +25,10 @@ While [DSPy](https://dspy.ai) ([Why DSPy](https://x.com/lateinteraction/status/1
   <table>
     <tr>
       <td align="center" width="50%">
-        <img src="tau_bench_retail_performance.png" alt="TauBench Retail Performance" style="max-width: 100%; height: auto;"/>
+        <img src="tau_bench_retail_performance.png" alt="Tau-Bench Retail Performance" style="max-width: 100%; height: auto;"/>
       </td>
       <td align="center" width="50%">
-        <img src="tau_bench_airline_performance.png" alt="TauBench Airline Performance" style="max-width: 100%; height: auto;"/>
+        <img src="tau_bench_airline_performance.png" alt="Tau-Bench Airline Performance" style="max-width: 100%; height: auto;"/>
       </td>
     </tr>
   </table>
