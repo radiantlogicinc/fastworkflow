@@ -1,5 +1,5 @@
 import os
-from typing import Optional, ClassVar
+from typing import ClassVar
 from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification
 from torch.optim import AdamW
 from sklearn.decomposition import PCA
@@ -23,8 +23,18 @@ from fastworkflow.command_routing import RoutingDefinition
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+# transformers 5.x emits a tqdm "Loading weights" progress bar on every
+# from_pretrained() call. fastWorkflow loads one intent-detection model per
+# context, so these bars are noise when running/training a workflow. Suppress them.
+try:
+    from transformers.utils.logging import disable_progress_bar
+    disable_progress_bar()
+except Exception:  # noqa: BLE001 - older transformers may not expose this
+    pass
+
 dataset=None
 label_encoder=LabelEncoder()
+
 
 def save_label_encoder(filepath):
     global label_encoder
@@ -823,12 +833,20 @@ def train(workflow: fastworkflow.Workflow):
         X, y = zip(*utterance_command_tuples)
         num= len(set(y))
         k_val = 3 if num>2 else 2
-        model_name = "prajjwal1/bert-tiny"
+        # Base models are configurable so downstream apps can swap them without
+        # code changes. The defaults are transformers 5.x-compatible BERT/DistilBERT
+        # checkpoints that ship a `model_type` and a loadable tokenizer.
+        tiny_model_name = fastworkflow.get_env_var(
+            "INTENT_DETECTION_TINY_MODEL", default="google/bert_uncased_L-4_H-128_A-2")
+        large_model_name = fastworkflow.get_env_var(
+            "INTENT_DETECTION_LARGE_MODEL", default="distilbert-base-uncased")
+
+        model_name = tiny_model_name
         print(f"\nLoading {model_name}...")
         tiny_tokenizer = AutoTokenizer.from_pretrained(model_name)
         tiny_model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num).to(device)
 
-        model_name = "distilbert-base-uncased"
+        model_name = large_model_name
         print(f"Loading {model_name}...")
         distil_tokenizer = AutoTokenizer.from_pretrained(model_name)
         #large_model = AutoModel.from_pretrained(model_name).to(device)

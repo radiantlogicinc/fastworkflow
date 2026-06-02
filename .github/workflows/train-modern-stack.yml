@@ -1,0 +1,47 @@
+name: train-modern-stack
+
+# Verifies that `fastworkflow train` works end-to-end on the modern ML/LLM stack
+# (transformers 5.x, dspy 3.x, openai 2.x) by training the bundled hello_world
+# example and asserting that trained model artifacts are produced and an
+# utterance routes correctly.
+#
+# Producing model artifacts requires synthetic utterance generation, which needs
+# a real LLM key. Configure the repository secrets below to run the full test;
+# without them the regression test skips cleanly (the job still passes).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  train-modern-stack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install fastworkflow + modern stack
+        run: |
+          python -m pip install --upgrade pip
+          # Install the package (declares its own closure: transformers >=4.48,<6,
+          # sentencepiece, mmh3, etc.) plus the training extra (datasets).
+          pip install ".[training]"
+          # Pin the modern-stack floors the downstream app requires.
+          pip install "transformers>=5.0.0,<6.0.0" "dspy>=3.0.1,<4.0.0" "openai>=2.8.0"
+          pip install pytest
+          python -c "import transformers, dspy, openai; print('transformers', transformers.__version__); print('dspy', dspy.__version__); print('openai', openai.__version__)"
+
+      - name: Run modern-stack training regression test
+        env:
+          # The syndata model + key. If LITELLM_API_KEY_SYNDATA_GEN secret is not
+          # configured, the test skips (no model artifacts can be produced offline).
+          LLM_SYNDATA_GEN: ${{ vars.LLM_SYNDATA_GEN || 'mistral/mistral-small-latest' }}
+          LITELLM_API_KEY_SYNDATA_GEN: ${{ secrets.LITELLM_API_KEY_SYNDATA_GEN }}
+        run: |
+          python -m pytest tests/test_train_modern_stack.py -v

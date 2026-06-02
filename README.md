@@ -149,6 +149,22 @@ uv pip install fastworkflow
 - `fastWorkflow` requires Python 3.11+ or higher.
 - Training (`fastworkflow train`) also expects the optional Hugging Face `datasets` package. Install it by including the dev group when using Poetry.
 
+### Dependency compatibility
+
+`fastWorkflow` is designed to co-install with modern ML/LLM stacks. The key supported ranges are:
+
+| Package | Supported range | Notes |
+| --- | --- | --- |
+| `transformers` | `>=4.48.2,<6.0.0` | Works on transformers 5.x. The intent-detection base models are BERT/DistilBERT checkpoints that load natively on 5.x (no slow→fast tokenizer conversion required). |
+| `dspy` | `>=3.0.1,<4.0.0` | Migrated off the dspy 2.x API. |
+| `openai` | `>=2.8.0` | Compatible with openai 2.x. |
+| `litellm` | `>=1.81.4,<2.0.0` | Compatible with litellm 1.83+. |
+| `sentence-transformers` | not a dependency | `fastWorkflow` does not depend on `sentence-transformers`, so it imposes no constraint (use any 5.x version downstream). |
+
+`sentencepiece` is bundled as a dependency because transformers 5.x can require it to instantiate certain tokenizers.
+
+The intent-detection base models are configurable via environment variables (`INTENT_DETECTION_TINY_MODEL`, `INTENT_DETECTION_LARGE_MODEL`); see `fastworkflow.env`.
+
 ---
 
 ## Quick Start: Running an Example in 5 Minutes
@@ -684,6 +700,8 @@ This single command will generate the `greet.py` command, `get_properties` and `
 | `LLM_AGENT` | LiteLLM model string for the DSPy agent | `run` (agent mode) | `mistral/mistral-small-latest` |
 | `LLM_CONVERSATION_STORE` | LiteLLM model string for conversation topic/summary generation | FastAPI service | `mistral/mistral-small-latest` |
 | `LITELLM_PROXY_API_BASE` | URL of your LiteLLM Proxy server | When using `litellm_proxy/` models | *not set* |
+| `INTENT_DETECTION_TINY_MODEL` | HuggingFace model id for the small intent-detection model | `train` (optional) | `google/bert_uncased_L-4_H-128_A-2` |
+| `INTENT_DETECTION_LARGE_MODEL` | HuggingFace model id for the large intent-detection model | `train` (optional) | `distilbert-base-uncased` |
 | `NOT_FOUND` | Placeholder value for missing parameters during extraction | Always | `"NOT_FOUND"` |
 | `MISSING_INFORMATION_ERRMSG` | Error message prefix for missing parameters | Always | `"Missing required..."` |
 | `INVALID_INFORMATION_ERRMSG` | Error message prefix for invalid parameters | Always | `"Invalid information..."` |

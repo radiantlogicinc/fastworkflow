@@ -160,7 +160,7 @@ def _how_to_use():
 
             self.generate_answer = dspy.Predict("topic, question -> answer")
 
-        gpt3_turbo = dspy.OpenAI(model="gpt-3.5-turbo", api_key="<YOUR_API_KEY>")
+        gpt3_turbo = dspy.LM(model="openai/gpt-3.5-turbo", api_key="<YOUR_API_KEY>")
 
         @DSPyForward.intercept
         def forward(self, topic, question):
