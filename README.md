@@ -149,6 +149,17 @@ uv pip install fastworkflow
 - `fastWorkflow` requires Python 3.11+ or higher.
 - Training (`fastworkflow train`) also expects the optional Hugging Face `datasets` package. Install it by including the dev group when using Poetry.
 
+### Optional extras
+
+The core install depends on **plain** `litellm` (used only as a client via `dspy.LM`) and pulls **no** proxy-server packages, so it stays lean and co-installs cleanly with downstream apps that pin a plain `litellm` (e.g. `litellm>=1.83.11,<1.84.0`). Server- and training-only dependencies are gated behind extras:
+
+| Extra | Install | Provides |
+| --- | --- | --- |
+| `server` | `pip install "fastworkflow[server]"` | The FastAPI-MCP HTTP service (`fastworkflow run_fastapi_mcp`): `fastapi`, `uvicorn`, `fastapi-mcp`, `pyjwt[crypto]`, `python-multipart`, `starlette` (with security-patched floors). |
+| `training` | `pip install "fastworkflow[training]"` | The Hugging Face `datasets` package required by `fastworkflow train` for synthetic-utterance / parameter-example generation. |
+
+The `server` extra is only needed to *host* the FastAPI-MCP service.
+
 ### Dependency compatibility
 
 `fastWorkflow` is designed to co-install with modern ML/LLM stacks. The key supported ranges are:
@@ -158,7 +169,7 @@ uv pip install fastworkflow
 | `transformers` | `>=4.48.2,<6.0.0` | Works on transformers 5.x. The intent-detection base models are BERT/DistilBERT checkpoints that load natively on 5.x (no slow→fast tokenizer conversion required). |
 | `dspy` | `>=3.0.1,<4.0.0` | Migrated off the dspy 2.x API. |
 | `openai` | `>=2.8.0` | Compatible with openai 2.x. |
-| `litellm` | `>=1.81.4,<2.0.0` | Compatible with litellm 1.83+. |
+| `litellm` | `>=1.83.7,<2.0.0` | Core depends on **plain** `litellm` (client only, no `[proxy]` extra), so downstreams can pin e.g. `litellm>=1.83.11,<1.84.0` without pulling the proxy server stack. The FastAPI-MCP server deps live in the optional `fastworkflow[server]` extra. |
 | `sentence-transformers` | not a dependency | `fastWorkflow` does not depend on `sentence-transformers`, so it imposes no constraint (use any 5.x version downstream). |
 
 `sentencepiece` is bundled as a dependency because transformers 5.x can require it to instantiate certain tokenizers.
@@ -566,6 +577,9 @@ For workflows with complex initialization requirements, creating a dedicated sta
 ### Running FastWorkflow as a FastAPI Service
 
 For production deployments and integrations, fastWorkflow provides a FastAPI-based HTTP service via the `run_fastapi_mcp` module. This exposes your workflow as REST endpoints with JWT authentication, SSE streaming, and MCP (Model Context Protocol) support.
+
+> [!note]
+> The FastAPI-MCP service requires the optional `server` extra: `pip install "fastworkflow[server]"` (or `poetry install --extras server`). Running `fastworkflow run_fastapi_mcp` without it fails fast with a clear install hint.
 
 ```sh
 # Run the FastAPI service

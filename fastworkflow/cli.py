@@ -381,8 +381,41 @@ def run_with_defaults(args):  # sourcery skip: extract-duplicate-method
     from .run.__main__ import run_main as _run_main
     return _run_main(args)
 
+def _require_server_extra():
+    """Ensure the optional `server` extra is installed before launching the FastAPI-MCP service.
+
+    The FastAPI-MCP server (`fastworkflow run_fastapi_mcp`) is the only feature that
+    needs the server-only dependencies (fastapi, uvicorn, fastapi-mcp, pyjwt). These
+    live behind the optional `fastworkflow[server]` extra so that the core/client
+    install (and `fastworkflow train`) stays lean. Fail early with a clear, actionable
+    message instead of letting the subprocess die with a bare ImportError.
+    """
+    import importlib.util
+
+    if missing := [
+        pkg
+        for pkg, mod in (
+            ("fastapi", "fastapi"),
+            ("uvicorn", "uvicorn"),
+            ("fastapi-mcp", "fastapi_mcp"),
+            ("pyjwt", "jwt"),
+        )
+        if importlib.util.find_spec(mod) is None
+    ]:
+        rprint(
+            "[bold red]Error:[/bold red] the FastAPI-MCP server requires the optional "
+            "'server' extra, which is not installed.\n"
+            f"Missing packages: {', '.join(missing)}\n\n"
+            "Install it with one of:\n"
+            "  pip install \"fastworkflow[server]\"\n"
+            "  poetry install --extras server"
+        )
+        sys.exit(1)
+
+
 def run_fastapi_mcp_with_defaults(args):  # sourcery skip: extract-duplicate-method
     """Wrapper for fastapi mcp server that sets default env file paths based on context."""
+    _require_server_extra()
     if args.env_file_path is None or args.passwords_file_path is None:
         default_env, default_passwords = find_default_env_files(args.workflow_path)
     if args.env_file_path is None:
