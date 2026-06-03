@@ -76,29 +76,97 @@ def test_process_message_agent_mode_mocked_agent(
     mock_agent.assert_called_once()
 
 
-def test_ask_user_timeout_raises_command_cancelled(
+def test_ask_user_timeout_does_not_apply_to_topology_a(
     initialized_fastworkflow,
     todo_workflow_path,
+    monkeypatch,
 ):
+    """Topology A (queue present) blocks for the human; ask_user_timeout is ignored."""
     from fastworkflow.workflow_agent import _ask_user_tool
 
-    ctx = WorkflowExecutionContext(run_as_agent=True, ask_user_timeout=0.05)
+    ctx = WorkflowExecutionContext(run_as_agent=True, ask_user_timeout=0.01)
     wf = fastworkflow.Workflow.create(
         todo_workflow_path,
         workflow_id_str=f"ask-timeout-{uuid.uuid4().hex}",
     )
     ctx.bind_app_workflow(wf)
+    user_queue: Queue = Queue()
     ctx.set_transport_queues(
-        user_message_queue=Queue(),
+        user_message_queue=user_queue,
         command_output_queue=Queue(),
     )
 
+    monkeypatch.setattr(
+        "fastworkflow.workflow_agent.build_query_with_next_steps",
+        lambda user_query, session, with_agent_inputs_and_trajectory=False: user_query,
+    )
+
+    # Feed the answer only AFTER the (tiny) timeout would have elapsed in the old design.
+    def deliver_late():
+        time.sleep(0.1)
+        user_queue.put("late human answer")
+
+    threading.Thread(target=deliver_late, daemon=True).start()
+
     ctx.push_active_workflow(wf)
     try:
-        with pytest.raises(CommandCancelledError):
-            _ask_user_tool("Need more info?", ctx)
+        # Must NOT raise CommandCancelledError; it blocks until the human answers.
+        observation = _ask_user_tool("Need more info?", ctx)
     finally:
         ctx.pop_active_workflow()
+
+    assert "late human answer" in observation
+
+
+def test_topology_b_ask_user_timeout_expires_to_fresh_turn(
+    initialized_fastworkflow,
+    todo_workflow_path,
+    monkeypatch,
+):
+    ctx, _wf = _make_agent_ctx(initialized_fastworkflow, todo_workflow_path, monkeypatch)
+    ctx._ask_user_timeout = 0.01
+
+    suspended = SimpleNamespace(suspended=True, clarification="Which one?")
+    completed = SimpleNamespace(final_answer="fresh turn done")
+
+    mock_agent = MagicMock()
+    mock_agent.return_value = suspended
+    ctx._workflow_tool_agent = mock_agent
+
+    ctx.process_message("start")
+    assert ctx.awaiting_user
+    assert not ctx.pending_clarification_expired  # not yet
+
+    time.sleep(0.05)
+    assert ctx.pending_clarification_expired
+
+    mock_agent.return_value = completed
+    out = ctx.process_message("late answer")
+
+    assert not ctx.awaiting_user
+    assert "fresh turn done" in out.command_responses[0].response
+    mock_agent.resume.assert_not_called()
+    assert mock_agent.call_count == 2  # fresh turn, not a resume
+
+
+def test_topology_b_ask_user_timeout_none_never_expires(
+    initialized_fastworkflow,
+    todo_workflow_path,
+    monkeypatch,
+):
+    ctx, _wf = _make_agent_ctx(initialized_fastworkflow, todo_workflow_path, monkeypatch)
+    assert ctx.ask_user_timeout is None
+
+    mock_agent = MagicMock()
+    mock_agent.return_value = SimpleNamespace(
+        suspended=True, clarification="Which one?"
+    )
+    ctx._workflow_tool_agent = mock_agent
+
+    ctx.process_message("start")
+    assert ctx.awaiting_user
+    time.sleep(0.02)
+    assert not ctx.pending_clarification_expired
 
 
 def test_process_message_converts_ask_user_cancel_to_output(

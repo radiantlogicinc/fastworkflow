@@ -4,8 +4,6 @@ Specialized agent for handling intent detection errors.
 """
 
 import json
-from queue import Empty
-
 import dspy
 
 import fastworkflow
@@ -84,17 +82,10 @@ def _ask_user_for_clarification(
     if output_queue is not None:
         output_queue.put(command_output)
 
-    timeout = getattr(chat_session, "ask_user_timeout", None)
-    try:
-        user_response = user_queue.get(timeout=timeout)
-    except Empty:
-        logger.warning(
-            "intent clarification ask_user timed out after %s seconds",
-            timeout,
-        )
-        raise CommandCancelledError(
-            f"no user response within {timeout} seconds"
-        ) from None
+    # Topology A (blocking): block indefinitely for the human's answer. The nested
+    # intent-clarification ask_user is last-resort; in Topology B there is no queue
+    # and it aborts via CommandCancelledError above (no timeout involved).
+    user_response = user_queue.get()
 
     # Log to action.jsonl (shared with main agent)
     with open("action.jsonl", "a", encoding="utf-8") as f:

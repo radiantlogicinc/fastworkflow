@@ -5,7 +5,6 @@ Provides workflow tool agent functionality for intelligent tool selection.
 
 import json
 import time
-from queue import Empty
 import dspy
 
 import fastworkflow
@@ -249,17 +248,10 @@ def _ask_user_tool(clarification_request: str, chat_session_obj: fastworkflow.Ch
     if output_queue is not None:
         output_queue.put(command_output)
 
-    timeout = getattr(chat_session_obj, "ask_user_timeout", None)
-    try:
-        user_query = user_queue.get(timeout=timeout)
-    except Empty:
-        logger.warning(
-            "ask_user timed out after %s seconds; cancelling command",
-            timeout,
-        )
-        raise CommandCancelledError(
-            f"no user response within {timeout} seconds"
-        ) from None
+    # Topology A (blocking): a persistent worker thread runs the agent and a human
+    # is expected to answer, so we block indefinitely. ask_user_timeout does NOT
+    # apply here -- it governs Topology B (suspend/resume) only.
+    user_query = user_queue.get()
 
     return _post_ask_user_response(
         clarification_request, user_query, chat_session_obj

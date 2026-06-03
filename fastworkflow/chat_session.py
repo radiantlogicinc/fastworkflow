@@ -109,8 +109,10 @@ class ChatSession:
         Args:
             run_as_agent: If True, use agent mode (DSPy-based tool selection).
                          If False (default), use traditional command execution.
-            ask_user_timeout: Seconds to wait on ask_user before cancelling a turn.
-                              None blocks forever (CLI default).
+            ask_user_timeout: Topology B (suspend/resume) safety net only; it has
+                              NO effect here. ChatSession is Topology A (blocking
+                              CLI worker) and always waits for the human on
+                              ask_user. Kept for API compatibility with the core.
         
         A chat session can run multiple workflows that share the same message queues.
         Use start_workflow() to start a specific workflow within this session.
