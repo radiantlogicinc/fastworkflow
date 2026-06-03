@@ -1,11 +1,8 @@
 from enum import Enum
 from queue import Empty, Queue
-from threading import Thread, Lock
+from threading import Thread
 from typing import Optional
-from collections import deque
-import json
 import contextlib
-import uuid
 from pathlib import Path
 import os
 import time
@@ -14,8 +11,9 @@ import dspy
 from dspy.clients import litellm
 
 import fastworkflow
+from fastworkflow import active_workflow
+from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 from fastworkflow.utils.logging import logger
-from fastworkflow.utils import dspy_utils
 from fastworkflow.model_pipeline_training import CommandRouter
 from fastworkflow.utils.startup_progress import StartupProgress
 
@@ -36,8 +34,9 @@ class ChatWorker(Thread):
         """Process messages for the root workflow"""
         try:
             self.chat_session._status = SessionStatus.RUNNING
-            workflow = self.chat_session.get_active_workflow()
-            logger.debug(f"Started root workflow {workflow.id}")
+            workflow = self.chat_session._current_workflow
+            if workflow:
+                logger.debug(f"Started root workflow {workflow.id}")
             
             # Run the workflow loop
             self.chat_session._run_workflow_loop()
@@ -50,30 +49,28 @@ class ChatWorker(Thread):
 
 class ChatSession:
     def get_active_workflow(self) -> Optional[fastworkflow.Workflow]:
-        """Get the currently active workflow (top of stack)"""
-        with self._workflow_stack_lock:
-            return self._workflow_stack[-1] if self._workflow_stack else None
-    
-    def push_active_workflow(self, workflow: fastworkflow.Workflow) -> None:
-        """Push a workflow onto this session's stack"""
-        with self._workflow_stack_lock:
-            self._workflow_stack.append(workflow)
-            logger.debug(f"Workflow stack: {[w.id for w in self._workflow_stack]}")
-    
-    def pop_active_workflow(self) -> Optional[fastworkflow.Workflow]:
-        """Pop a workflow from this session's stack"""
-        with self._workflow_stack_lock:
-            if not self._workflow_stack:
-                return None
-            workflow = self._workflow_stack.pop()
-            logger.debug(f"Workflow stack after pop: {[w.id for w in self._workflow_stack]}")
+        """Get the currently active workflow.
+
+        Returns the top of the context-local stack when set (e.g. during a
+        message turn or explicit push); otherwise falls back to the bound app
+        workflow so callers on other threads see the session's workflow.
+        """
+        workflow = active_workflow.get_active_workflow()
+        if workflow is not None:
             return workflow
+        return self._core.app_workflow if self._core else None
+
+    def push_active_workflow(self, workflow: fastworkflow.Workflow) -> None:
+        """Push a workflow onto the context-local stack."""
+        active_workflow.push_active_workflow(workflow)
+
+    def pop_active_workflow(self) -> Optional[fastworkflow.Workflow]:
+        """Pop a workflow from the context-local stack."""
+        return active_workflow.pop_active_workflow()
 
     def clear_workflow_stack(self) -> None:
-        """Clear the entire workflow stack for this session"""
-        with self._workflow_stack_lock:
-            self._workflow_stack.clear()
-            logger.debug("Workflow stack cleared")
+        """Clear the entire workflow stack for this context."""
+        active_workflow.clear_workflow_stack()
 
     def stop_workflow(self) -> None:
         """
@@ -101,50 +98,45 @@ class ChatSession:
         
         logger.debug("Workflow stopped and workflow stack cleared")
 
-    def __init__(self, run_as_agent: bool = False):
+    def __init__(
+        self,
+        run_as_agent: bool = False,
+        ask_user_timeout: Optional[float] = None,
+    ):
         """
         Initialize a chat session.
         
         Args:
             run_as_agent: If True, use agent mode (DSPy-based tool selection).
                          If False (default), use traditional command execution.
+            ask_user_timeout: Seconds to wait on ask_user before cancelling a turn.
+                              None blocks forever (CLI default).
         
         A chat session can run multiple workflows that share the same message queues.
         Use start_workflow() to start a specific workflow within this session.
         """
-        # Create instance-level workflow stack (supports nested workflows within this session)
-        self._workflow_stack: deque[fastworkflow.Workflow] = deque()
-        self._workflow_stack_lock = Lock()
-        
-        # Create queues for user messages and command outputs
+        self._core = WorkflowExecutionContext(
+            run_as_agent=run_as_agent,
+            ask_user_timeout=ask_user_timeout,
+        )
+
+        # Create queues for user messages and command outputs (CLI transport)
         self._user_message_queue = Queue()
         self._command_output_queue = Queue()
         self._command_trace_queue = Queue()
+        self._core.set_transport_queues(
+            user_message_queue=self._user_message_queue,
+            command_output_queue=self._command_output_queue,
+            command_trace_queue=self._command_trace_queue,
+        )
+
         self._status = SessionStatus.STOPPED
         self._chat_worker = None
+        self._current_workflow = None
+        self._keep_alive = False
 
-        self._conversation_history: dspy.History = dspy.History(messages=[])
-        
-        # Import here to avoid circular imports
         from fastworkflow.command_executor import CommandExecutor
         self._CommandExecutor = CommandExecutor
-        
-        # Initialize workflow-related attributes that will be set in start_workflow
-        self._current_workflow = None
-        
-        # Initialize agent-related attributes
-        self._run_as_agent = run_as_agent
-        self._workflow_tool_agent = None
-        self._intent_clarification_agent = None            
-        
-        # Create the command metadata extraction workflow with a unique ID
-        self._cme_workflow = fastworkflow.Workflow.create(
-            fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
-            workflow_id_str=f"cme_{uuid.uuid4().hex}",
-            workflow_context={
-                "NLU_Pipeline_Stage": fastworkflow.NLUPipelineStage.INTENT_DETECTION,
-            }
-        )
 
         # this intializes the conversation traces file name also
         # which is necessary when starting a brand new chat session
@@ -200,7 +192,7 @@ class ChatSession:
 
         # Check if we need to stop the current workflow
         # Stop if this is a new root workflow (no parent, keep_alive=True)
-        current_workflow = self.get_active_workflow()
+        current_workflow = self._current_workflow
         if (current_workflow and 
             parent_workflow_id is None and 
             self._keep_alive):
@@ -237,8 +229,8 @@ class ChatSession:
         except Exception as warm_err:  # pragma: no cover – warm-up must never fail
             logger.debug(f"Model warm-up skipped due to error: {warm_err}")
 
-        # Update the command metadata extraction workflow's context with the app workflow
-        self._cme_workflow.context["app_workflow"] = workflow
+        self._core.bind_app_workflow(workflow)
+        self._core.keep_alive = self._keep_alive
 
         # Start the workflow
         if self._status != SessionStatus.STOPPED:
@@ -246,14 +238,7 @@ class ChatSession:
         
         self._status = SessionStatus.STARTING
         
-        # Push this workflow as active
-        self.push_active_workflow(workflow)
-        
-        # Initialize workflow tool agent if in agent mode
-        # This must happen after pushing the workflow to the stack
-        # so that get_active_workflow() returns the correct workflow
-        if self._run_as_agent:
-            self._initialize_agent_functionality()
+        # Agent + MCP tooling initialize lazily on first agent message (after contextvar push)
         
         command_output = None
         if self._keep_alive:
@@ -267,41 +252,35 @@ class ChatSession:
 
         return command_output
 
-    def _initialize_agent_functionality(self):
-        """
-        Initialize the workflow tool agent for agent mode.
-        This agent handles individual tool selection and execution.
-        """
-        self._cme_workflow.context["run_as_agent"] = True
-        self._current_workflow.context["run_as_agent"] = True
-
-        # Initialize the workflow tool agent
-        from fastworkflow.workflow_agent import initialize_workflow_tool_agent
-        self._workflow_tool_agent = initialize_workflow_tool_agent(self)
-
-        # Initialize the intent clarification agent
-        from fastworkflow.intent_clarification_agent import initialize_intent_clarification_agent
-        self._intent_clarification_agent = initialize_intent_clarification_agent(self)
-
     @property
     def workflow_tool_agent(self):
         """Get the workflow tool agent for agent mode."""
-        return self._workflow_tool_agent
+        return self._core.workflow_tool_agent
 
     @property
     def intent_clarification_agent(self):
         """Get the intent clarification agent for agent mode."""
-        return self._intent_clarification_agent
+        return self._core.intent_clarification_agent
 
     @property
     def cme_workflow(self) -> fastworkflow.Workflow:
         """Get the command metadata extraction workflow."""
-        return self._cme_workflow
+        return self._core.cme_workflow
+
+    @property
+    def app_workflow(self) -> Optional[fastworkflow.Workflow]:
+        """Get the bound application workflow."""
+        return self._core.app_workflow
     
     @property
     def run_as_agent(self) -> bool:
         """Check if running in agent mode."""
-        return self._run_as_agent
+        return self._core.run_as_agent
+
+    @property
+    def ask_user_timeout(self) -> Optional[float]:
+        """Seconds to wait on ask_user before cancelling (None = block forever)."""
+        return self._core.ask_user_timeout
 
     @property
     def user_message_queue(self) -> Queue:
@@ -317,18 +296,26 @@ class ChatSession:
 
     @property
     def workflow_is_complete(self) -> bool:
-        workflow = self.get_active_workflow()
+        workflow = self._core.app_workflow
         return workflow.is_complete if workflow else True
     
     @workflow_is_complete.setter
     def workflow_is_complete(self, value: bool) -> None:
-        if workflow := self.get_active_workflow():
+        if workflow := self._core.app_workflow:
             workflow.is_complete = value
     
     @property
     def conversation_history(self) -> dspy.History:
         """Return the conversation history."""
-        return self._conversation_history
+        return self._core.conversation_history
+
+    @property
+    def _conversation_history(self) -> dspy.History:
+        return self._core.conversation_history
+
+    @_conversation_history.setter
+    def _conversation_history(self, value: dspy.History) -> None:
+        self._core._conversation_history = value
 
     # def clear_conversation_history(self, trace_filename_suffix: Optional[str] = None) -> None:
     def clear_conversation_history(self) -> None:
@@ -336,7 +323,7 @@ class ChatSession:
         Clear the conversation history.
         This resets the conversation history to an empty state.
         """
-        self._conversation_history = dspy.History(messages=[])
+        self._core.clear_conversation_history()
         # Filename for conversation traces
         # if trace_filename_suffix:
         #     self._conversation_traces_file_name: str = (
@@ -355,18 +342,14 @@ class ChatSession:
         - All outputs (success or failure) are sent to queue during processing
         """
         last_output = None
-        workflow = self.get_active_workflow()
+        workflow = self._current_workflow
 
         try:
             # Handle startup command/action
             if self._startup_command:
-                if self._run_as_agent and not self._startup_command.startswith('/'):
-                    # In agent mode, use workflow tool agent for processing
-                    last_output = self._process_agent_message(self._startup_command)
-                else:
-                    last_output = self._process_message(self._startup_command)
+                last_output = self._core.process_message(self._startup_command)
             elif self._startup_action:
-                last_output = self._process_action(self._startup_action)
+                last_output = self._core.process_action(self._startup_action)
 
             while (
                 not self.workflow_is_complete or self._keep_alive
@@ -374,24 +357,11 @@ class ChatSession:
                 try:
                     message = self.user_message_queue.get()
 
-                    # Handle Action objects directly
                     if isinstance(message, fastworkflow.Action):
-                        last_output = self._process_action(message)
+                        last_output = self._core.process_action(message)
                     else:
-                        if ((
-                                "NLU_Pipeline_Stage" not in self._cme_workflow.context or
-                                self._cme_workflow.context["NLU_Pipeline_Stage"] == fastworkflow.NLUPipelineStage.INTENT_DETECTION) and
-                            message.startswith('/')
-                        ):
-                            self._cme_workflow.context["is_assistant_mode_command"] = True
+                        last_output = self._core.process_message(message)
 
-                        # Route based on mode and message type
-                        if self._run_as_agent and "is_assistant_mode_command" not in self._cme_workflow.context:
-                            # In agent mode, use workflow tool agent for processing
-                            last_output = self._process_agent_message(message)
-                        else:
-                            last_output = self._process_message(message)
-                        
                 except Empty:
                     continue
 
@@ -401,7 +371,8 @@ class ChatSession:
 
         finally:
             self._status = SessionStatus.STOPPED
-            self.pop_active_workflow()
+            if self.get_active_workflow() is not None:
+                self.clear_workflow_stack()
             logger.debug(f"Workflow {workflow.id if workflow else 'unknown'} completed")
 
         return None
@@ -465,308 +436,18 @@ class ChatSession:
     #     command_output._mcp_source = mcp_result  # Mark for special formatting
     #     return command_output
     
-    def _process_agent_message(self, message: str) -> fastworkflow.CommandOutput:
-        # sourcery skip: class-extract-method
-        """Process a message in agent mode using workflow tool agent"""
-        # The agent processes the user's message and may make multiple tool calls
-        # to the workflow internally (directly via CommandExecutor)
-
-        # Ensure any prior action log is removed before a fresh agent run
-        if os.path.exists("action.jsonl"):
-            os.remove("action.jsonl")
-
-        # store the message as 'raw_user_message' in workflow_context. This is useful in agentic mode
-        # when command implementations want to get the exact message that user entered (no refinement)
-        self._current_workflow.context['raw_user_message'] = message
-
-        refined_user_query = self._refine_user_query(message, self.conversation_history)
-
-        from fastworkflow.workflow_agent import build_query_with_next_steps
-        command_info_and_refined_message_with_todolist = build_query_with_next_steps(
-            refined_user_query, 
-            self
-        )
-
-        # Get available commands for current context and pass to agent.
-        # The CommandsSystemPreludeAdapter will inject these commands into the system 
-        # message, keeping them out of the trajectory to avoid token bloat while still 
-        # providing context-specific command info.
-        from fastworkflow.workflow_agent import _what_can_i_do
-        available_commands = _what_can_i_do(self)
-
-        lm = dspy_utils.get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")
-        from dspy.utils.exceptions import AdapterParseError
-        from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
-        
-        # Use CommandsSystemPreludeAdapter specifically for workflow agent calls
-        agent_adapter = CommandsSystemPreludeAdapter()
-        
-        # Retry logic for AdapterParseError
-        max_retries = 2
-        for attempt in range(max_retries):
-            try:
-                with dspy.context(lm=lm, adapter=agent_adapter):
-                    agent_result = self._workflow_tool_agent(
-                        user_query=command_info_and_refined_message_with_todolist,
-                        available_commands=available_commands
-                    )
-                break  # Success, exit retry loop
-            except AdapterParseError as _:
-                if attempt == max_retries - 1:  # Last attempt
-                    raise  # Re-raise the exception if all retries failed
-                # Continue to next attempt
-
-            # dspy.inspect_history(n=1)
-
-        # Extract the final result from the agent
-        result_text = (
-            agent_result.final_answer
-            if hasattr(agent_result, 'final_answer')
-            else str(agent_result)
-        )
-
-        # Create CommandOutput with the agent's response
-        command_response = fastworkflow.CommandResponse(response=result_text)
-
-        conversation_traces = None
-        conversation_summary = message
-        # Attach actions captured during agent execution as artifacts if available
-        if os.path.exists("action.jsonl"):
-            with open("action.jsonl", "r", encoding="utf-8") as f:
-                actions = [json.loads(line) for line in f if line.strip()]
-            conversation_summary, conversation_traces = self._extract_conversation_summary(message, actions, result_text)
-            command_response.artifacts["conversation_summary"] = conversation_summary
-
-        self.conversation_history.messages.append(
-            {
-                "conversation summary": conversation_summary,
-                "conversation_traces": conversation_traces,
-                "feedback": None  # Initialize feedback slot for this turn
-            }
-        )
-
-        command_output = fastworkflow.CommandOutput(
-            command_responses=[command_response]
-        )
-        command_output.workflow_name = self._current_workflow.folderpath.split('/')[-1]
-
-        # Put output in queue (following same pattern as _process_message)
-        if (not command_output.success or self._keep_alive) and \
-                    self.command_output_queue:
-            self.command_output_queue.put(command_output)
-
-        # Signal trace consumer that all events for this turn have been sent
-        if self.command_trace_queue:
-            self.command_trace_queue.put(None)
-
-        # Persist workflow state changes
-        if workflow := self.get_active_workflow():
-            workflow.flush()
-
-        return command_output
-
     def _process_message(self, message: str) -> fastworkflow.CommandOutput:
-        """Process a single message"""
-        # Pre-execution trace
-        if self.command_trace_queue:
-            self.command_trace_queue.put(fastworkflow.CommandTraceEvent(
-                direction=fastworkflow.CommandTraceEventDirection.AGENT_TO_WORKFLOW,
-                raw_command=message,
-                command_name=None,
-                parameters=None,
-                response_text=None,
-                success=None,
-                timestamp_ms=int(time.time() * 1000),
-            ))
-        
-        # Execute command
-        command_output = self._CommandExecutor.invoke_command(self, message)
+        """Back-compat shim: delegate single-message execution to the core."""
+        return self._core.process_message(message)
 
-        # Extract response text and parameters for traces
-        response_text = ""
-        if command_output.command_responses:
-            response_text = command_output.command_responses[0].response or ""
-        
-        # Convert parameters to dict if it's a Pydantic model or other complex object
-        params = command_output.command_parameters or {}
-        if hasattr(params, 'model_dump'):
-            params_dict = params.model_dump()
-        elif hasattr(params, 'dict'):
-            params_dict = params.dict()
-        else:
-            params_dict = params
-        
-        # Post-execution trace
-        if self.command_trace_queue:
-            self.command_trace_queue.put(fastworkflow.CommandTraceEvent(
-                direction=fastworkflow.CommandTraceEventDirection.WORKFLOW_TO_AGENT,
-                raw_command=None,
-                command_name=command_output.command_name or "",
-                parameters=params_dict,
-                response_text=response_text,
-                success=bool(command_output.success),
-                timestamp_ms=int(time.time() * 1000),
-            ))
-        
-        # Record assistant mode trace to action.jsonl (similar to agent mode in workflow_agent.py)
-        # This ensures assistant commands are captured even when interspersed with agent commands
-        record = {
-            "command": message,
-            "command_name": command_output.command_name or "",
-            "parameters": params_dict,
-            "response": response_text
-        }
-
-        self.conversation_history.messages.append(
-            {
-                "conversation summary": "assistant_mode_command",
-                "conversation_traces": json.dumps(record),
-                "feedback": None  # Initialize feedback slot for this turn
-            }
-        )
-
-        if (not command_output.success or self._keep_alive) and \
-            self.command_output_queue:
-            self.command_output_queue.put(command_output)
-
-        # Signal trace consumer that all events for this turn have been sent
-        if self.command_trace_queue:
-            self.command_trace_queue.put(None)
-
-        # Persist workflow state changes lazily accumulated during message processing.
-        if workflow := self.get_active_workflow():
-            workflow.flush()
-
-        return command_output
+    def _process_agent_message(self, message: str) -> fastworkflow.CommandOutput:
+        """Back-compat shim: delegate agent-message execution to the core."""
+        return self._core.process_message(message)
 
     def _process_action(self, action: fastworkflow.Action) -> fastworkflow.CommandOutput:
-        """Process a startup action"""
-        workflow = self.get_active_workflow()
-        
-        # Serialize action parameters for trace
-        params = action.parameters or {}
-        if hasattr(params, 'model_dump'):
-            params_dict = params.model_dump()
-        elif hasattr(params, 'dict'):
-            params_dict = params.dict()
-        else:
-            params_dict = params
-        
-        # Pre-execution trace: serialize action as raw_command
-        raw_command = f"{action.command_name} {json.dumps(params_dict)}"
-        if self.command_trace_queue:
-            self.command_trace_queue.put(fastworkflow.CommandTraceEvent(
-                direction=fastworkflow.CommandTraceEventDirection.AGENT_TO_WORKFLOW,
-                raw_command=raw_command,
-                command_name=None,
-                parameters=None,
-                response_text=None,
-                success=None,
-                timestamp_ms=int(time.time() * 1000),
-            ))
-        
-        # Execute the action
-        command_output = self._CommandExecutor.perform_action(workflow, action)
+        """Back-compat shim: delegate action execution to the core."""
+        return self._core.process_action(action)
 
-        # Extract response text for post-execution trace
-        response_text = ""
-        if command_output.command_responses:
-            response_text = command_output.command_responses[0].response or ""
-        
-        # Post-execution trace
-        if self.command_trace_queue:
-            self.command_trace_queue.put(fastworkflow.CommandTraceEvent(
-                direction=fastworkflow.CommandTraceEventDirection.WORKFLOW_TO_AGENT,
-                raw_command=None,
-                command_name=command_output.command_name,
-                parameters=params_dict,
-                response_text=response_text,
-                success=bool(command_output.success),
-                timestamp_ms=int(time.time() * 1000),
-            ))
-        
-        # Record action trace to action.jsonl
-        record = {
-            "command": "process_action",
-            "command_name": action.command_name,
-            "parameters": params_dict,
-            "response": response_text
-        }
-
-        self.conversation_history.messages.append(
-            {
-                "conversation summary": "process_action command",
-                "conversation_traces": json.dumps(record),
-                "feedback": None  # Initialize feedback slot for this turn
-            }
-        )
-
-        if (not command_output.success or self._keep_alive) and \
-            self.command_output_queue:
-            self.command_output_queue.put(command_output)
-
-        # Signal trace consumer that all events for this turn have been sent
-        if self.command_trace_queue:
-            self.command_trace_queue.put(None)
-
-        # Flush any pending workflow updates triggered by this startup action.
-        if workflow:
-            workflow.flush()
-
-        return command_output
-
-    def _refine_user_query(self, user_query: str, conversation_history: dspy.History) -> str:
-        """
-        Refine user query using conversation history. 
-        Return the refined user query
-        """
-        if conversation_history.messages:
-            messages = []
-            for conv_dict in conversation_history.messages[-5:]:
-                messages.extend([
-                    f'{k}: {v}' for k, v in conv_dict.items()
-                ])
-            messages.append(f'new_user_query: {user_query}')
-            return '\n'.join(messages)
-
-        return user_query    
-
-    def _extract_conversation_summary(self, 
-        user_query: str, workflow_actions: list[dict[str, str]], final_agent_response: str) -> str:
-        """
-        Summarizes conversation based on original user query, workflow actions and agent response.
-        Returns the conversation summary and the log entry
-        """
-        # Lets log everything to a file called action_log.jsonl, if it exists
-        conversation_traces = {
-            "user_query": user_query,
-            "agent_workflow_interactions": workflow_actions,
-            "final_agent_response": final_agent_response
-        }
-        # with open(self._conversation_traces_file_name, "a", encoding="utf-8") as f:
-        #     f.write(json.dumps(log_entry) + "\n")
-
-        class ConversationSummarySignature(dspy.Signature):
-            """
-            A summary of conversation
-            Omit descriptions of action sequences 
-            Capture relevant facts and parameter values from user query, workflow actions and agent response
-            """
-            user_query: str = dspy.InputField()
-            workflow_actions: list[dict[str, str]] = dspy.InputField()
-            final_agent_response: str = dspy.InputField()
-            conversation_summary: str = dspy.OutputField(desc="A multiline paragraph summary")
-
-        planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
-        with dspy.context(lm=planner_lm):
-            cs_func = dspy.ChainOfThought(ConversationSummarySignature)
-            prediction = cs_func(
-                user_query=user_query, 
-                workflow_actions=workflow_actions, 
-                final_agent_response=final_agent_response)
-            return prediction.conversation_summary, json.dumps(conversation_traces)
-
-    
     def profile_invoke_command(self, message: str):
         """
         Profile the invoke_command method with detailed focus on performance issues.
@@ -797,7 +478,13 @@ class ChatSession:
         
         # Execute invoke_command and time it
         start_time = time.time()
-        result = self._CommandExecutor.invoke_command(self, message)
+        if self._core.app_workflow:
+            self.push_active_workflow(self._core.app_workflow)
+        try:
+            result = self._CommandExecutor.invoke_command(self, message)
+        finally:
+            if self._core.app_workflow:
+                self.pop_active_workflow()
         elapsed = time.time() - start_time
         
         # Disable profiling

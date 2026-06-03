@@ -4,9 +4,13 @@ Specialized agent for handling intent detection errors.
 """
 
 import json
+from queue import Empty
+
 import dspy
 
 import fastworkflow
+from fastworkflow.utils.logging import logger
+from fastworkflow.workflow_execution_context import CommandCancelledError
 from fastworkflow.utils.react import fastWorkflowReAct
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 
@@ -64,13 +68,33 @@ def _ask_user_for_clarification(
     Returns:
         User's response
     """
+    user_queue = chat_session.user_message_queue
+    output_queue = chat_session.command_output_queue
+    if user_queue is None:
+        raise CommandCancelledError(
+            "ask_user requires a user_message_queue (not available in this context)"
+        )
+
+    active = chat_session.get_active_workflow()
+    workflow_name = active.folderpath.split("/")[-1] if active else ""
     command_output = fastworkflow.CommandOutput(
         command_responses=[fastworkflow.CommandResponse(response=clarification_request)],
-        workflow_name=chat_session.get_active_workflow().folderpath.split('/')[-1]
+        workflow_name=workflow_name,
     )
-    chat_session.command_output_queue.put(command_output)
+    if output_queue is not None:
+        output_queue.put(command_output)
 
-    user_response = chat_session.user_message_queue.get()
+    timeout = getattr(chat_session, "ask_user_timeout", None)
+    try:
+        user_response = user_queue.get(timeout=timeout)
+    except Empty:
+        logger.warning(
+            "intent clarification ask_user timed out after %s seconds",
+            timeout,
+        )
+        raise CommandCancelledError(
+            f"no user response within {timeout} seconds"
+        ) from None
 
     # Log to action.jsonl (shared with main agent)
     with open("action.jsonl", "a", encoding="utf-8") as f:

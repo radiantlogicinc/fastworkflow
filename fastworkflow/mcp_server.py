@@ -5,9 +5,11 @@ This demonstrates how to wrap FastWorkflow's CommandExecutor
 to provide MCP-compliant tool execution.
 """
 
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Union
 import fastworkflow
+from fastworkflow.active_workflow import get_active_workflow
 from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 from fastworkflow.command_directory import CommandDirectory
 from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry, ModuleType
 from uuid import uuid4
@@ -22,14 +24,27 @@ class FastWorkflowMCPServer:
     the existing FastWorkflow command execution infrastructure.
     """
     
-    def __init__(self, chat_session: fastworkflow.ChatSession):
+    def __init__(
+        self,
+        chat_session: Union[fastworkflow.ChatSession, WorkflowExecutionContext],
+    ):
         """
         Initialize the MCP server.
         
         Args:
-            chat_session: Active FastWorkflow chat session
+            chat_session: Active FastWorkflow chat session or execution context
         """
         self.chat_session = chat_session
+
+    def _active_workflow(self) -> fastworkflow.Workflow:
+        """Contextvar stack top, or the bound app workflow when outside process_message."""
+        workflow = get_active_workflow()
+        if workflow is not None:
+            return workflow
+        bound = self.chat_session.app_workflow
+        if bound is None:
+            raise RuntimeError("No active workflow: bind an app workflow before using the MCP server")
+        return bound
     
     def list_tools(self) -> List[Dict[str, Any]]:
         """
@@ -41,7 +56,7 @@ class FastWorkflowMCPServer:
         NOT_FOUND = fastworkflow.get_env_var('NOT_FOUND')
 
         # Get available commands from workflow
-        workflow = fastworkflow.chat_session.get_active_workflow()
+        workflow = self._active_workflow()
         workflow_folderpath = workflow.folderpath
         # Use cached routing definition instead of rebuilding every time
         routing = RoutingRegistry.get_definition(workflow_folderpath)
@@ -147,7 +162,7 @@ class FastWorkflowMCPServer:
             arguments=arguments
         )
         
-        workflow = fastworkflow.chat_session.get_active_workflow()
+        workflow = self._active_workflow()
         # Execute using MCP-compliant method
         return CommandExecutor.perform_mcp_tool_call(
             workflow,
@@ -203,7 +218,7 @@ class FastWorkflowMCPServer:
 
         Falls back to the first available path if the active context is none.
         """
-        workflow = fastworkflow.chat_session.get_active_workflow()
+        workflow = self._active_workflow()
         return workflow.current_command_context_name
 
 

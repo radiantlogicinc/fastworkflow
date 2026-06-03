@@ -5,13 +5,15 @@ Provides workflow tool agent functionality for intelligent tool selection.
 
 import json
 import time
+from queue import Empty
 import dspy
 
 import fastworkflow
 from fastworkflow.utils.logging import logger
+from fastworkflow.workflow_execution_context import CommandCancelledError
 from fastworkflow.utils import dspy_utils
 from fastworkflow.command_metadata_api import CommandMetadataAPI
-from fastworkflow.utils.react import fastWorkflowReAct
+from fastworkflow.utils.react import AskUserSuspend, fastWorkflowReAct
 from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
 
 class WorkflowAgentSignature(dspy.Signature):
@@ -49,7 +51,10 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     Don't use this tool to respond to a clarification requests in PARAMETER EXTRACTION ERROR state
     """
     # Emit trace event before execution
-    chat_session_obj.command_trace_queue.put(fastworkflow.CommandTraceEvent(
+    if chat_session_obj.command_trace_queue is None:
+        pass
+    else:
+        chat_session_obj.command_trace_queue.put(fastworkflow.CommandTraceEvent(
         direction=fastworkflow.CommandTraceEventDirection.AGENT_TO_WORKFLOW,
         raw_command=command,
         command_name=None,
@@ -57,7 +62,7 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
         response_text=None,
         success=None,
         timestamp_ms=int(time.time() * 1000),
-    ))
+        ))
 
     # Directly invoke the command without going through queues
     # This allows the agent to synchronously call workflow tools
@@ -84,15 +89,16 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
         response_text = "\n".join(response_parts) \
             if response_parts else "Command executed successfully but produced no output."
 
-    chat_session_obj.command_trace_queue.put(fastworkflow.CommandTraceEvent(
-        direction=fastworkflow.CommandTraceEventDirection.WORKFLOW_TO_AGENT,
-        raw_command=None,
-        command_name=name,
-        parameters=params_dict,
-        response_text=response_text,
-        success=bool(command_output.success),
-        timestamp_ms=int(time.time() * 1000),
-    ))
+    if chat_session_obj.command_trace_queue is not None:
+        chat_session_obj.command_trace_queue.put(fastworkflow.CommandTraceEvent(
+            direction=fastworkflow.CommandTraceEventDirection.WORKFLOW_TO_AGENT,
+            raw_command=None,
+            command_name=name,
+            parameters=params_dict,
+            response_text=response_text,
+            success=bool(command_output.success),
+            timestamp_ms=int(time.time() * 1000),
+        ))
 
     # Append executed action to action.jsonl for external consumers (agent mode only)
     record = {
@@ -193,34 +199,71 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     
     return response_text
 
+
+def _post_ask_user_response(
+    clarification_request: str,
+    user_response: str,
+    chat_session_obj,
+) -> str:
+    """
+    Steps 2-4 after the user answers an ask_user clarification (Topology-A parity).
+
+    Appends the dialog to action.jsonl, sets raw_user_message, and replans with
+    the agent trajectory. Returns the observation string for the ReAct loop.
+    """
+    with open("action.jsonl", "a", encoding="utf-8") as f:
+        agent_user_dialog = {
+            "agent_query": clarification_request,
+            "user_response": user_response,
+        }
+        f.write(json.dumps(agent_user_dialog, ensure_ascii=False) + "\n")
+
+    workflow = chat_session_obj.get_active_workflow()
+    if workflow:
+        workflow.context["raw_user_message"] = user_response
+
+    return build_query_with_next_steps(
+        user_response,
+        chat_session_obj,
+        with_agent_inputs_and_trajectory=True,
+    )
+
+
 def _ask_user_tool(clarification_request: str, chat_session_obj: fastworkflow.ChatSession) -> str:
     """
     If the missing_information_guidance_tool does not help and only as the last resort, request clarification for missing information from the human user. 
     The clarification_request must be plain text without any formatting.
     Note that using the wrong command name can produce missing information errors. Double-check with the missing_information_guidance_tool to verify that the correct command name is being used 
     """
+    user_queue = chat_session_obj.user_message_queue
+    output_queue = chat_session_obj.command_output_queue
+    if user_queue is None:
+        raise CommandCancelledError("ask_user requires a user_message_queue (not available in this context)")
+
+    active = chat_session_obj.get_active_workflow()
+    workflow_name = active.folderpath.split('/')[-1] if active else ""
     command_output = fastworkflow.CommandOutput(
         command_responses=[fastworkflow.CommandResponse(response=clarification_request)],
-        workflow_name = chat_session_obj.get_active_workflow().folderpath.split('/')[-1]
-    )    
-    chat_session_obj.command_output_queue.put(command_output)
+        workflow_name=workflow_name,
+    )
+    if output_queue is not None:
+        output_queue.put(command_output)
 
-    user_query = chat_session_obj.user_message_queue.get()
+    timeout = getattr(chat_session_obj, "ask_user_timeout", None)
+    try:
+        user_query = user_queue.get(timeout=timeout)
+    except Empty:
+        logger.warning(
+            "ask_user timed out after %s seconds; cancelling command",
+            timeout,
+        )
+        raise CommandCancelledError(
+            f"no user response within {timeout} seconds"
+        ) from None
 
-    # add the agent user dialog to the log
-    with open("action.jsonl", "a", encoding="utf-8") as f:
-        agent_user_dialog = {
-            "agent_query": clarification_request,
-            "user_response": user_query
-        }
-        f.write(json.dumps(agent_user_dialog, ensure_ascii=False) + "\n")
-
-    # store the message as 'raw_user_message' in workflow_context. This is useful in agentic mode
-    # when command implementations want to get the exact message that user entered (no refinement)
-    workflow = chat_session_obj.get_active_workflow()
-    workflow.context['raw_user_message'] = user_query
-
-    return build_query_with_next_steps(user_query, chat_session_obj, with_agent_inputs_and_trajectory = True)
+    return _post_ask_user_response(
+        clarification_request, user_query, chat_session_obj
+    )
 
 def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_iters: int = 25):
     """
@@ -290,7 +333,9 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
         # if command passed to execute_workflow_query() originated either:
         # externally or inside agent loop immediately after an ask_user()_call 
         chat_session_obj.workflow_tool_agent.iteration_counter = -1
-        return _ask_user_tool(clarification_request, chat_session_obj=chat_session_obj)
+        if chat_session_obj.user_message_queue is not None:
+            return _ask_user_tool(clarification_request, chat_session_obj=chat_session_obj)
+        raise AskUserSuspend(clarification_request)
 
     tools = [
         what_can_i_do,

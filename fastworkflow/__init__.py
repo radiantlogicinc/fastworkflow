@@ -224,3 +224,13 @@ def get_workflow_id(workflow_id_str: str) -> int:
 
 from .workflow import Workflow as Workflow
 from .chat_session import ChatSession as ChatSession
+from .active_workflow import (
+    get_active_workflow,
+    push_active_workflow,
+    pop_active_workflow,
+    clear_workflow_stack,
+)
+from .workflow_execution_context import (
+    WorkflowExecutionContext,
+    CommandCancelledError,
+)

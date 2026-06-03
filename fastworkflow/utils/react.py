@@ -15,6 +15,19 @@ if TYPE_CHECKING:
     from dspy.signatures.signature import Signature
 
 
+class AskUserSuspend(BaseException):
+    """
+    Raised by ask_user when no user_message_queue is configured (Topology B).
+
+    Subclasses BaseException so fastWorkflowReAct's ``except Exception`` does not
+    swallow it; the loop catches this explicitly and returns a suspended sentinel.
+    """
+
+    def __init__(self, clarification_request: str):
+        self.clarification_request = clarification_request
+        super().__init__(clarification_request)
+
+
 class fastWorkflowReAct(Module):
     def __init__(self, signature: type["Signature"], tools: list[Callable], max_iters: int = 10):
         """
@@ -95,6 +108,11 @@ class fastWorkflowReAct(Module):
 
         self.inputs = {}
         self.current_trajectory = {}
+        self._suspended: dict[str, Any] | None = None
+
+    def clear_suspension(self) -> None:
+        """Drop any in-memory suspended ReAct state (used on abort/finalize)."""
+        self._suspended = None
 
     def _format_trajectory(self, trajectory: dict[str, Any]):
         adapter = dspy.settings.adapter or dspy.ChatAdapter()
@@ -103,50 +121,125 @@ class fastWorkflowReAct(Module):
 
     def forward(self, **input_args):
         self.inputs = input_args
+        self.clear_suspension()
 
-        trajectory = {}
+        trajectory: dict[str, Any] = {}
         max_iters = input_args.pop("max_iters", self.max_iters)
         idx = 0
         exception_count = 0
+
+        suspended = self._run_loop(
+            trajectory, idx, input_args, max_iters, exception_count
+        )
+        if suspended is not None:
+            return suspended
+
+        extract = self._call_with_potential_trajectory_truncation(
+            self.extract, trajectory, **input_args
+        )
+        return dspy.Prediction(trajectory=trajectory, **extract)
+
+    def resume(self, observation: str):
+        """Resume a suspended run after the user answered an ask_user clarification."""
+        if self._suspended is None:
+            raise RuntimeError("No suspended ReAct state to resume")
+
+        stash = self._suspended
+        trajectory = stash["trajectory"]
+        idx = stash["idx"]
+        input_args = stash["input_args"]
+        max_iters = stash["max_iters"]
+
+        trajectory[f"observation_{idx}"] = observation
+        idx += 1
+        self.iteration_counter += 1
+        self._suspended = None
+
+        suspended = self._run_loop(trajectory, idx, input_args, max_iters, 0)
+        if suspended is not None:
+            return suspended
+
+        extract = self._call_with_potential_trajectory_truncation(
+            self.extract, trajectory, **input_args
+        )
+        return dspy.Prediction(trajectory=trajectory, **extract)
+
+    def _run_loop(
+        self,
+        trajectory: dict[str, Any],
+        idx: int,
+        input_args: dict[str, Any],
+        max_iters: int,
+        exception_count: int,
+    ):
+        """
+        Run the ReAct tool loop until finish, max_iters, or AskUserSuspend.
+
+        Returns a suspended Prediction, or None when the loop completed normally.
+        """
         while True:
             try:
-                pred = self._call_with_potential_trajectory_truncation(self.react, trajectory, **input_args)
+                pred = self._call_with_potential_trajectory_truncation(
+                    self.react, trajectory, **input_args
+                )
             except ValueError as err:
-                trajectory[f"observation_{idx}"] = f"Agent failed to select a valid tool: {_fmt_exc(err)}"
-                idx += 1 # this is the counter for the index of the entire trajectory
+                trajectory[f"observation_{idx}"] = (
+                    f"Agent failed to select a valid tool: {_fmt_exc(err)}"
+                )
+                idx += 1
                 trajectory[f"thought_{idx}"] = (
                     "To execute a command, I should use the execute_workflow_query tool"
                 )
-                trajectory[f"observation_{idx}"] = "Use the execute_workflow_query tool with a single argument called 'command' formatted as plain text using the command name and parameter values"
-                idx += 1 # this is the counter for the index of the entire trajectory
+                trajectory[f"observation_{idx}"] = (
+                    "Use the execute_workflow_query tool with a single argument called "
+                    "'command' formatted as plain text using the command name and "
+                    "parameter values"
+                )
+                idx += 1
                 exception_count += 1
                 if exception_count > 2:
                     break
-                else:
-                    continue
+                continue
 
             trajectory[f"thought_{idx}"] = pred.next_thought
             trajectory[f"tool_name_{idx}"] = pred.next_tool_name
             trajectory[f"tool_args_{idx}"] = pred.next_tool_args
 
-            self.current_trajectory[f"action_{idx}"] = f'{pred.next_tool_name}: {pred.next_tool_args}'
+            self.current_trajectory[f"action_{idx}"] = (
+                f"{pred.next_tool_name}: {pred.next_tool_args}"
+            )
 
             try:
-                trajectory[f"observation_{idx}"] = self.tools[pred.next_tool_name](**pred.next_tool_args)
+                trajectory[f"observation_{idx}"] = self.tools[pred.next_tool_name](
+                    **pred.next_tool_args
+                )
+            except AskUserSuspend as err:
+                self._suspended = {
+                    "trajectory": trajectory,
+                    "idx": idx,
+                    "input_args": input_args,
+                    "max_iters": max_iters,
+                    "clarification": err.clarification_request,
+                }
+                return dspy.Prediction(
+                    suspended=True,
+                    clarification=err.clarification_request,
+                )
             except Exception as err:
-                trajectory[f"observation_{idx}"] = f"Execution error in {pred.next_tool_name}: {_fmt_exc(err)}"
+                trajectory[f"observation_{idx}"] = (
+                    f"Execution error in {pred.next_tool_name}: {_fmt_exc(err)}"
+                )
 
             if pred.next_tool_name == "finish":
                 break
 
-            idx += 1 # this is the counter for the index of the entire trajectory
-            self.iteration_counter += 1 # this counter just determines the number of times we run the react agent and it's reset everytime we call the user for clarification
+            idx += 1
+            self.iteration_counter += 1
             if self.iteration_counter >= max_iters:
                 logger.warning("Max iterations reached")
                 break
 
-        extract = self._call_with_potential_trajectory_truncation(self.extract, trajectory, **input_args)
-        return dspy.Prediction(trajectory=trajectory, **extract)
+        return None
 
     async def aforward(self, **input_args):
         trajectory = {}
