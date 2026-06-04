@@ -209,3 +209,9 @@ redoc.html
 # Local security audit artifacts
 .audit-requirements.txt
 audit-report.json
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+config.yaml
