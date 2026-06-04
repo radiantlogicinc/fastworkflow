@@ -19,6 +19,23 @@ from fastworkflow.workflow_execution_context import (
     CommandCancelledError,
     WorkflowExecutionContext,
 )
+
+
+def _set_agents(ctx, agent, clarification_agent=None):
+    """
+    Set the main workflow tool agent, always setting a clarification agent too.
+
+    Mirrors the production invariant in
+    WorkflowExecutionContext._initialize_agent_functionality, where the main agent
+    and the intent clarification agent are initialized together. A MagicMock is a
+    fine non-None default for tests that never exercise the clarification path.
+    """
+    ctx._workflow_tool_agent = agent
+    ctx._intent_clarification_agent = (
+        clarification_agent if clarification_agent is not None else MagicMock()
+    )
+
+
 @pytest.fixture
 def todo_workflow_path() -> str:
     return str(
@@ -67,7 +84,7 @@ def test_process_message_agent_mode_mocked_agent(
         "_extract_conversation_summary",
         lambda user_query, actions, final: ("summary", "{}"),
     )
-    ctx._workflow_tool_agent = mock_agent
+    _set_agents(ctx, mock_agent)
 
     output = ctx.process_message("list my tasks")
 
@@ -88,7 +105,7 @@ def test_topology_b_ask_user_is_non_blocking_and_suspends_indefinitely(
     mock_agent.return_value = SimpleNamespace(
         suspended=True, clarification="Which one?"
     )
-    ctx._workflow_tool_agent = mock_agent
+    _set_agents(ctx, mock_agent)
 
     out = ctx.process_message("start")  # returns without blocking
     assert ctx.awaiting_user
@@ -127,7 +144,7 @@ def test_process_message_converts_ask_user_cancel_to_output(
         lambda session: "commands",
     )
     monkeypatch.setattr(ctx, "_ensure_agent_initialized", lambda: None)
-    ctx._workflow_tool_agent = failing_agent
+    _set_agents(ctx, failing_agent)
 
     output = ctx.process_message("do something")
 
@@ -173,7 +190,7 @@ def test_topology_b_ask_user_suspend_resume_round_trip(
     mock_agent = MagicMock()
     mock_agent.return_value = suspended
     mock_agent.resume.return_value = completed
-    ctx._workflow_tool_agent = mock_agent
+    _set_agents(ctx, mock_agent)
 
     first = ctx.process_message("list my tasks")
 
@@ -230,7 +247,7 @@ def test_topology_b_resume_parity_steps(
     mock_agent.iteration_counter = 3
     mock_agent.return_value = suspended
     mock_agent.resume.return_value = completed
-    ctx._workflow_tool_agent = mock_agent
+    _set_agents(ctx, mock_agent)
 
     ctx.process_message("start")
     ctx.process_message("user answer")
@@ -256,7 +273,7 @@ def test_abort_resets_awaiting_user(
     mock_agent = MagicMock()
     mock_agent.return_value = suspended
     mock_agent.resume.side_effect = CommandCancelledError("aborted during resume")
-    ctx._workflow_tool_agent = mock_agent
+    _set_agents(ctx, mock_agent)
 
     ctx.process_message("first turn")
     assert ctx.awaiting_user
@@ -284,7 +301,7 @@ def test_cancel_pending_clears_awaiting_user(
     mock_agent.return_value = SimpleNamespace(
         suspended=True, clarification="Still waiting?"
     )
-    ctx._workflow_tool_agent = mock_agent
+    _set_agents(ctx, mock_agent)
 
     ctx.process_message("question me")
     assert ctx.awaiting_user
@@ -293,24 +310,73 @@ def test_cancel_pending_clears_awaiting_user(
     assert ctx.cancel_pending() is False
 
 
-def test_nested_intent_clarification_ask_user_aborts_topology_b(
+def test_resolve_or_escalate_executes_clarified_command(
     initialized_fastworkflow,
     todo_workflow_path,
+    monkeypatch,
 ):
-    from fastworkflow.intent_clarification_agent import _ask_user_for_clarification
+    from fastworkflow.workflow_agent import _resolve_or_escalate
 
     ctx = WorkflowExecutionContext(run_as_agent=True)
     wf = fastworkflow.Workflow.create(
         todo_workflow_path,
-        workflow_id_str=f"intent-ask-{uuid.uuid4().hex}",
+        workflow_id_str=f"intent-resolve-{uuid.uuid4().hex}",
     )
     ctx.bind_app_workflow(wf)
-    ctx.push_active_workflow(wf)
-    try:
-        with pytest.raises(CommandCancelledError, match="user_message_queue"):
-            _ask_user_for_clarification("Which command did you mean?", ctx)
-    finally:
-        ctx.pop_active_workflow()
+    calls: list[str] = []
+
+    def record_execute(cmd, chat_session_obj):
+        calls.append(cmd)
+        return f"executed:{cmd}"
+
+    monkeypatch.setattr(
+        "fastworkflow.workflow_agent._execute_workflow_query",
+        record_execute,
+    )
+
+    result = SimpleNamespace(
+        clarified_command="add_task <title>x</title>",
+        needs_human=False,
+        clarification_question="",
+    )
+    observation = _resolve_or_escalate(result, ctx, "ambiguous error")
+    assert observation == "executed:add_task <title>x</title>"
+    assert calls == ["add_task <title>x</title>"]
+
+
+def test_resolve_or_escalate_escalates_to_outer_ask_user(
+    initialized_fastworkflow,
+    todo_workflow_path,
+    monkeypatch,
+):
+    from fastworkflow.workflow_agent import _resolve_or_escalate
+
+    ctx = WorkflowExecutionContext(run_as_agent=True)
+    wf = fastworkflow.Workflow.create(
+        todo_workflow_path,
+        workflow_id_str=f"intent-escalate-{uuid.uuid4().hex}",
+    )
+    ctx.bind_app_workflow(wf)
+    calls: list[str] = []
+
+    def record_execute(cmd, chat_session_obj):
+        calls.append(cmd)
+        return "abort confirmed"
+
+    monkeypatch.setattr(
+        "fastworkflow.workflow_agent._execute_workflow_query",
+        record_execute,
+    )
+
+    result = SimpleNamespace(
+        clarified_command="",
+        needs_human=True,
+        clarification_question="Which list?",
+    )
+    observation = _resolve_or_escalate(result, ctx, "fallback error text")
+    assert calls == ["abort"]
+    assert "ask_user" in observation
+    assert "Which list?" in observation
 
 
 def test_topology_a_cli_ask_user_blocks_with_queue(

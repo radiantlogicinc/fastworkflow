@@ -42,6 +42,24 @@ def _intent_misunderstood(
     """
     return _what_can_i_do(chat_session_obj = chat_session_obj)
 
+
+def _resolve_or_escalate(result, chat_session_obj: fastworkflow.ChatSession, response_text: str) -> str:
+    """
+    Route intent-clarification predictor output: recurse on resolve, or escalate to outer ask_user.
+    """
+    clarified_cmd = getattr(result, "clarified_command", "") or ""
+    if bool(getattr(result, "needs_human", False)) or not clarified_cmd:
+        # Break recursion: reset CME clarification stage to INTENT_DETECTION.
+        _execute_workflow_query("abort", chat_session_obj=chat_session_obj)
+        question = getattr(result, "clarification_question", "") or response_text
+        # Directive observation -> outer agent calls its own ask_user (blocks in A, suspends in B).
+        return (
+            "Intent clarification needs the user. "
+            f"Use the ask_user tool to ask: {question}"
+        )
+    return _execute_workflow_query(clarified_cmd, chat_session_obj=chat_session_obj)
+
+
 def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSession) -> str:
     """
     Executes the command and returns either a response, or a clarification request.
@@ -50,9 +68,7 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     Don't use this tool to respond to a clarification requests in PARAMETER EXTRACTION ERROR state
     """
     # Emit trace event before execution
-    if chat_session_obj.command_trace_queue is None:
-        pass
-    else:
+    if chat_session_obj.command_trace_queue is not None:
         chat_session_obj.command_trace_queue.put(fastworkflow.CommandTraceEvent(
         direction=fastworkflow.CommandTraceEventDirection.AGENT_TO_WORKFLOW,
         raw_command=command,
@@ -113,76 +129,19 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     cme_workflow = chat_session_obj.cme_workflow
     nlu_stage = cme_workflow.context.get("NLU_Pipeline_Stage")
 
-    # Handle intent ambiguity clarification state with specialized agent
+    # Handle intent ambiguity clarification state with specialized agent.
+    # The intent clarification agent is always present here: _execute_workflow_query
+    # is only reachable as a tool of the workflow_tool_agent, and both agents are
+    # initialized together in WorkflowExecutionContext._initialize_agent_functionality.
     if nlu_stage == fastworkflow.NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION:
-        if intent_agent := chat_session_obj.intent_clarification_agent: 
-            # Use CommandsSystemPreludeAdapter specifically for workflow agent calls
-            agent_adapter = CommandsSystemPreludeAdapter()
-
-            # Get suggested commands from intent detection system
-            from fastworkflow._workflows.command_metadata_extraction.intent_detection import CommandNamePrediction
-            predictor = CommandNamePrediction(cme_workflow)
-            suggested_commands = predictor._get_suggested_commands(predictor.path)
-
-            suggested_commands = list(suggested_commands) if suggested_commands is not None else []
-
-            # Get metadata for only the suggested commands
-            current_workflow = chat_session_obj.get_active_workflow()
-            suggested_commands_metadata = CommandMetadataAPI.get_suggested_commands_metadata(
-                subject_workflow_path=current_workflow.folderpath,
-                cme_workflow_path=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
-                active_context_name=current_workflow.current_command_context_name,
-                suggested_command_names=suggested_commands
-            )
-
-            # Get the workflow agent's trajectory and inputs for context
-            workflow_tool_agent = chat_session_obj.workflow_tool_agent
-            agent_inputs = workflow_tool_agent.inputs if workflow_tool_agent else {}
-            agent_trajectory = workflow_tool_agent.current_trajectory if workflow_tool_agent else {}
-
-            lm = dspy_utils.get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")
-            with dspy.context(lm=lm, adapter=agent_adapter):
-                result = intent_agent(
-                    original_command=command,
-                    error_message=response_text,
-                    agent_inputs=agent_inputs,
-                    agent_trajectory=agent_trajectory,
-                    available_commands=suggested_commands_metadata  # Note that this is not part of the signature. It is extra metadata that will be picked up by the CommandsSystemPreludeAdapter
-                )
-            # The clarified command should have the correct name with all original parameters
-            clarified_cmd = result.clarified_command if hasattr(result, 'clarified_command') else str(result)
-            # Execute the clarified command
-            return _execute_workflow_query(clarified_cmd, chat_session_obj=chat_session_obj)
-        else:
-            # No intent clarification agent available, fall back to abort
-            abort_confirmation = _execute_workflow_query('abort', chat_session_obj=chat_session_obj)
-            return f'{response_text}\n{abort_confirmation}'
-
+        return _resolve_intent_ambiguity(
+            chat_session_obj, cme_workflow, command, response_text
+        )
     # Handle intent misunderstanding clarification state with specialized agent
     if nlu_stage == fastworkflow.NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION:
-        if intent_agent := chat_session_obj.intent_clarification_agent:
-            # Get the workflow agent's trajectory and inputs for context
-            workflow_tool_agent = chat_session_obj.workflow_tool_agent
-            agent_inputs = workflow_tool_agent.inputs if workflow_tool_agent else {}
-            agent_trajectory = workflow_tool_agent.current_trajectory if workflow_tool_agent else {}
-
-            lm = dspy_utils.get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")
-            with dspy.context(lm=lm):
-                result = intent_agent(
-                    original_command=command,
-                    error_message=response_text,
-                    agent_inputs=agent_inputs,
-                    agent_trajectory=agent_trajectory,
-                )
-
-            clarified_cmd = result.clarified_command if hasattr(result, 'clarified_command') else str(result)
-
-            return _execute_workflow_query(clarified_cmd, chat_session_obj=chat_session_obj)
-        else:
-            # No intent clarification agent available, fall back to abort
-            abort_confirmation = _execute_workflow_query('abort', chat_session_obj=chat_session_obj)
-            return f'{response_text}\n{abort_confirmation}'
-
+        return _resolve_intent_misunderstanding(
+            chat_session_obj, command, response_text
+        )
     # Handle parameter extraction errors with abort
     if nlu_stage == fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION:
         abort_confirmation = _execute_workflow_query('abort', chat_session_obj=chat_session_obj)
@@ -195,8 +154,67 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     workflow = chat_session_obj.get_active_workflow()
     if "is_user_command" in workflow.context:
         del workflow.context["is_user_command"]
-    
+
     return response_text
+
+
+# TODO Rename this here and in `_execute_workflow_query`
+def _resolve_intent_misunderstanding(chat_session_obj, command, response_text):
+    intent_agent = chat_session_obj.intent_clarification_agent
+    # Get the workflow agent's trajectory and inputs for context
+    workflow_tool_agent = chat_session_obj.workflow_tool_agent
+    agent_inputs = workflow_tool_agent.inputs if workflow_tool_agent else {}
+    agent_trajectory = workflow_tool_agent.current_trajectory if workflow_tool_agent else {}
+
+    lm = dspy_utils.get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")
+    with dspy.context(lm=lm):
+        result = intent_agent(
+            original_command=command,
+            error_message=response_text,
+            agent_inputs=agent_inputs,
+            agent_trajectory=agent_trajectory,
+        )
+
+    return _resolve_or_escalate(result, chat_session_obj, response_text)
+
+
+# TODO Rename this here and in `_execute_workflow_query`
+def _resolve_intent_ambiguity(chat_session_obj, cme_workflow, command, response_text):
+    intent_agent = chat_session_obj.intent_clarification_agent
+    # Use CommandsSystemPreludeAdapter specifically for workflow agent calls
+    agent_adapter = CommandsSystemPreludeAdapter()
+
+    # Get suggested commands from intent detection system
+    from fastworkflow._workflows.command_metadata_extraction.intent_detection import CommandNamePrediction
+    predictor = CommandNamePrediction(cme_workflow)
+    suggested_commands = predictor._get_suggested_commands(predictor.path)
+
+    suggested_commands = list(suggested_commands) if suggested_commands is not None else []
+
+    # Get metadata for only the suggested commands
+    current_workflow = chat_session_obj.get_active_workflow()
+    suggested_commands_metadata = CommandMetadataAPI.get_suggested_commands_metadata(
+        subject_workflow_path=current_workflow.folderpath,
+        cme_workflow_path=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
+        active_context_name=current_workflow.current_command_context_name,
+        suggested_command_names=suggested_commands
+    )
+
+    # Get the workflow agent's trajectory and inputs for context
+    workflow_tool_agent = chat_session_obj.workflow_tool_agent
+    agent_inputs = workflow_tool_agent.inputs if workflow_tool_agent else {}
+    agent_trajectory = workflow_tool_agent.current_trajectory if workflow_tool_agent else {}
+
+    lm = dspy_utils.get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")
+    with dspy.context(lm=lm, adapter=agent_adapter):
+        result = intent_agent(
+            original_command=command,
+            error_message=response_text,
+            agent_inputs=agent_inputs,
+            agent_trajectory=agent_trajectory,
+            available_commands=suggested_commands_metadata  # Note that this is not part of the signature. It is extra metadata that will be picked up by the CommandsSystemPreludeAdapter
+        )
+    return _resolve_or_escalate(result, chat_session_obj, response_text)
 
 
 def _post_ask_user_response(
