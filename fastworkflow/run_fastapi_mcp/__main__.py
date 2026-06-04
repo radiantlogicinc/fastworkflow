@@ -25,6 +25,7 @@ import os
 import queue
 import time
 import traceback
+from typing import Any
 from contextlib import asynccontextmanager
 import argparse
 
@@ -55,7 +56,10 @@ from .utils import (
     ActivateConversationRequest,
     DumpConversationsRequest,
     GenerateMCPTokenRequest,
-    wait_for_command_output,
+    run_process_message,
+    run_process_action,
+    run_process_message_with_trace_stream,
+    _run_startup_sync,
     collect_trace_events,
     collect_trace_events_async,
     get_session_from_jwt,
@@ -296,7 +300,7 @@ async def lifespan(_app: FastAPI):
             runtime = await session_manager.get_session(channel_id)
             if not runtime:
                 continue
-            if turns := extract_turns_from_history(runtime.chat_session.conversation_history):
+            if turns := extract_turns_from_history(runtime.execution_context.conversation_history):
                 try:
                     topic, summary = generate_topic_and_summary(turns)
                     if runtime.active_conversation_id > 0:
@@ -315,7 +319,7 @@ async def lifespan(_app: FastAPI):
         for channel_id in list(session_manager._sessions.keys()):
             runtime = await session_manager.get_session(channel_id)
             if runtime:
-                runtime.chat_session.stop_workflow()
+                runtime.execution_context.close()
 
     try:
         initialize_fastworkflow_on_startup()
@@ -602,29 +606,23 @@ async def initialize(request: InitializationRequest) -> InitializeResponse:
                     detail=f"Runtime not found after creation for channel_id: {channel_id}"
                 )
             
-            chat_session = runtime.chat_session
-            
-            # Execute startup action or command
-            if startup_action:
-                # Execute action directly (like perform_action)
-                logger.info(f"Executing startup action for channel_id {channel_id}: {startup_action.command_name}")
-                chat_session.user_message_queue.put(startup_action)
-            else:
-                # Execute command via assistant path (deterministic) - needs / prefix
-                assistant_command = f"/{startup_command_str.lstrip('/')}"
-                logger.info(f"Executing startup command for channel_id {channel_id}: {assistant_command}")
-                chat_session.user_message_queue.put(assistant_command)
-            
-            # Wait for output
+            ctx = runtime.execution_context
+
+            logger.info(
+                f"Executing startup for channel_id {channel_id}: "
+                f"{'action' if startup_action else 'command'}"
+            )
             try:
-                startup_output = await wait_for_command_output(
-                    runtime=runtime,
-                    timeout_seconds=60
+                loop = asyncio.get_running_loop()
+                startup_output = await loop.run_in_executor(
+                    None,
+                    lambda: _run_startup_sync(
+                        ctx, startup_command_str, startup_action
+                    ),
                 )
-                
-                # Collect traces
+
                 traces = await collect_trace_events_async(
-                    trace_queue=chat_session.command_trace_queue,
+                    trace_queue=ctx.command_trace_queue,
                     user_id=user_id
                 )
                 
@@ -784,14 +782,13 @@ async def invoke_agent(
             )
 
         async with runtime.lock:
-            # Strip leading slashes from user query
             user_query = request.user_query.lstrip('/')
-
-            # Enqueue the user message
-            runtime.chat_session.user_message_queue.put(user_query)
-
-            # Wait for command output
-            command_output = await wait_for_command_output(runtime, request.timeout_seconds)
+            command_output = await run_process_message(
+                runtime,
+                user_query,
+                request.timeout_seconds,
+                session_manager,
+            )
 
             # Incrementally save conversation turns (without generating topic/summary)
             save_conversation_incremental(runtime, extract_turns_from_history, logger)
@@ -857,144 +854,116 @@ async def invoke_agent_stream(
             content={"detail": f"User session not found: {channel_id}"}
         )
 
-    async def ndjson_stream():
+    async def _run_streaming_turn(emit_trace, emit_output, emit_error):
         try:
             if runtime.lock.locked():
-                yield {"type": "error", "data": {"detail": f"A turn is already in progress for user: {channel_id}"}}
+                await emit_error(
+                    f"A turn is already in progress for user: {channel_id}"
+                )
                 return
-            
+
+            trace_queue_async: asyncio.Queue = asyncio.Queue()
+
+            async def on_trace(trace_json: dict) -> None:
+                await trace_queue_async.put(trace_json)
+
             async with runtime.lock:
-                runtime.chat_session.user_message_queue.put(request.user_query.lstrip("/"))
-                start_time = time.time()
-                command_output = None
-                
-                while time.time() - start_time < request.timeout_seconds:
-                    while True:
-                        try:
-                            evt = runtime.chat_session.command_trace_queue.get_nowait()
-                            if evt is None:
-                                break
-                            trace_json = {
-                                "direction": evt.direction.value if hasattr(evt.direction, "value") else str(evt.direction),
-                                "raw_command": evt.raw_command,
-                                "command_name": evt.command_name,
-                                "parameters": evt.parameters,
-                                "response_text": evt.response_text,
-                                "success": evt.success,
-                                "timestamp_ms": evt.timestamp_ms,
-                            }
-                            if user_id is not None:
-                                trace_json["user_id"] = user_id
-                            yield {"type": "trace", "data": trace_json}
-                        except queue.Empty:
-                            break
-                    
+                turn_task = asyncio.create_task(
+                    run_process_message_with_trace_stream(
+                        runtime,
+                        request.user_query.lstrip("/"),
+                        request.timeout_seconds,
+                        session_manager,
+                        on_trace,
+                        user_id=user_id,
+                    )
+                )
+
+                while not turn_task.done():
                     try:
-                        command_output = runtime.chat_session.command_output_queue.get_nowait()
-                        break
-                    except queue.Empty:
-                        await asyncio.sleep(0.1)
+                        trace_json = await asyncio.wait_for(
+                            trace_queue_async.get(), timeout=0.05
+                        )
+                        await emit_trace(trace_json)
+                    except asyncio.TimeoutError:
                         continue
-                
-                # Drain remaining traces
-                while True:
-                    try:
-                        evt = runtime.chat_session.command_trace_queue.get_nowait()
-                        if evt is None:
-                            break
-                        trace_json = {
-                            "direction": evt.direction.value if hasattr(evt.direction, "value") else str(evt.direction),
-                            "raw_command": evt.raw_command,
-                            "command_name": evt.command_name,
-                            "parameters": evt.parameters,
-                            "response_text": evt.response_text,
-                            "success": evt.success,
-                            "timestamp_ms": evt.timestamp_ms,
-                        }
-                        if user_id is not None:
-                            trace_json["user_id"] = user_id
-                        yield {"type": "trace", "data": trace_json}
-                    except queue.Empty:
-                        break
-                
-                if command_output is None:
-                    logger.error(f"Command execution timed out after {request.timeout_seconds} seconds for channel_id: {channel_id}")
-                    yield {"type": "error", "data": {"detail": f"Command execution timed out after {request.timeout_seconds} seconds"}}
+
+                try:
+                    command_output = await turn_task
+                except HTTPException as http_exc:
+                    await emit_error(str(http_exc.detail))
                     return
-                
-                save_conversation_incremental(runtime, extract_turns_from_history, logger)
-                yield {"type": "output", "data": command_output.model_dump()}
-        
+
+                while not trace_queue_async.empty():
+                    trace_json = await trace_queue_async.get()
+                    await emit_trace(trace_json)
+
+                save_conversation_incremental(
+                    runtime, extract_turns_from_history, logger
+                )
+                await emit_output(command_output.model_dump())
+
         except Exception as e:
             logger.error(f"Error in invoke_agent_stream for user {channel_id}: {e}")
             traceback.print_exc()
-            yield {"type": "error", "data": {"detail": f"Internal error in invoke_agent_stream() for channel_id: {channel_id}"}}
+            await emit_error(
+                f"Internal error in invoke_agent_stream() for channel_id: {channel_id}"
+            )
+
+    async def ndjson_stream():
+        events: asyncio.Queue = asyncio.Queue()
+
+        async def pump():
+            async def et(t):
+                await events.put({"type": "trace", "data": t})
+
+            async def eo(d):
+                await events.put({"type": "output", "data": d})
+
+            async def ee(d):
+                await events.put({"type": "error", "data": {"detail": d}})
+
+            await _run_streaming_turn(et, eo, ee)
+            await events.put(None)
+
+        pump_task = asyncio.create_task(pump())
+        while True:
+            item = await events.get()
+            if item is None:
+                break
+            yield item
+        await pump_task
 
     async def sse_stream():
-        try:
-            if runtime.lock.locked():
-                yield "event: error\n" + f"data: {json.dumps({'detail': f'A turn is already in progress for user: {channel_id}'})}\n\n"
-                return
-            
-            async with runtime.lock:
-                runtime.chat_session.user_message_queue.put(request.user_query.lstrip("/"))
-                
-                def fmt(evt):
-                    trace_data = {
-                        "direction": evt.direction.value if hasattr(evt.direction, "value") else str(evt.direction),
-                        "raw_command": evt.raw_command,
-                        "command_name": evt.command_name,
-                        "parameters": evt.parameters,
-                        "response_text": evt.response_text,
-                        "success": evt.success,
-                        "timestamp_ms": evt.timestamp_ms,
-                    }
-                    if user_id is not None:
-                        trace_data["user_id"] = user_id
-                    return f"event: trace\ndata: {json.dumps(trace_data)}\n\n"
-                
-                start_time = time.time()
-                command_output = None
-                
-                while time.time() - start_time < request.timeout_seconds:
-                    while True:
-                        try:
-                            evt = runtime.chat_session.command_trace_queue.get_nowait()
-                            if evt is None:
-                                break
-                            yield fmt(evt)
-                        except queue.Empty:
-                            break
-                    
-                    try:
-                        command_output = runtime.chat_session.command_output_queue.get_nowait()
-                        break
-                    except queue.Empty:
-                        await asyncio.sleep(0.1)
-                        continue
-                
-                # Drain remaining traces
-                while True:
-                    try:
-                        evt = runtime.chat_session.command_trace_queue.get_nowait()
-                        if evt is None:
-                            break
-                        yield fmt(evt)
-                    except queue.Empty:
-                        break
-                
-                if command_output is None:
-                    logger.error(f"Command execution timed out after {request.timeout_seconds} seconds for channel_id: {channel_id}")
-                    yield "event: error\n" + f"data: {json.dumps({'detail': f'Command execution timed out after {request.timeout_seconds} seconds'})}\n\n"
-                    return
-                
-                save_conversation_incremental(runtime, extract_turns_from_history, logger)
-                yield "event: output\n" + f"data: {json.dumps(command_output.model_dump())}\n\n"
-        
-        except Exception as e:
-            logger.error(f"Error in invoke_agent_stream SSE for user {channel_id}: {e}")
-            traceback.print_exc()
-            yield "event: error\n" + f"data: {json.dumps({'detail': f'Internal error in invoke_agent_stream() for channel_id: {channel_id}'})}\n\n"
+        events: asyncio.Queue = asyncio.Queue()
+
+        async def pump():
+            async def et(t):
+                await events.put(
+                    "event: trace\n" + f"data: {json.dumps(t)}\n\n"
+                )
+
+            async def eo(d):
+                await events.put(
+                    "event: output\n" + f"data: {json.dumps(d)}\n\n"
+                )
+
+            async def ee(d):
+                await events.put(
+                    "event: error\n"
+                    + f"data: {json.dumps({'detail': d})}\n\n"
+                )
+
+            await _run_streaming_turn(et, eo, ee)
+            await events.put(None)
+
+        pump_task = asyncio.create_task(pump())
+        while True:
+            item = await events.get()
+            if item is None:
+                break
+            yield item
+        await pump_task
 
     # Route to appropriate stream format
     if runtime.stream_format == "sse":
@@ -1052,20 +1021,18 @@ async def invoke_assistant(
             )
 
         async with runtime.lock:
-            # Check if already in assistant mode (handling error state corrections)
-            if "is_assistant_mode_command" in runtime.chat_session.cme_workflow.context:
-                # Already in assistant mode - pass message as-is (no '/' prefix)
-                # User is providing corrections for ambiguity/misunderstanding/parameter errors
+            ctx = runtime.execution_context
+            if "is_assistant_mode_command" in ctx.cme_workflow.context:
                 assistant_query = request.user_query
             else:
-                # Starting new assistant command - prepend '/' to enter assistant mode
                 assistant_query = f"/{request.user_query.lstrip('/')}"
 
-            # Enqueue the message
-            runtime.chat_session.user_message_queue.put(assistant_query)
-
-            # Wait for output
-            command_output = await wait_for_command_output(runtime, request.timeout_seconds)
+            command_output = await run_process_message(
+                runtime,
+                assistant_query,
+                request.timeout_seconds,
+                session_manager,
+            )
 
             # Incrementally save conversation turns (without generating topic/summary)
             save_conversation_incremental(runtime, extract_turns_from_history, logger)
@@ -1137,9 +1104,12 @@ async def perform_action(
                     detail=f"Invalid action format: {e}",
                 ) from e
             
-            # Directly call _process_action to bypass parameter extraction
-            # This executes synchronously in the current thread (not via queue)
-            command_output = runtime.chat_session._process_action(action)
+            command_output = await run_process_action(
+                runtime,
+                action,
+                request.timeout_seconds,
+                session_manager,
+            )
 
             traces = collect_trace_events(runtime, user_id=user_id)
             response_data = command_output.model_dump()
@@ -1157,6 +1127,37 @@ async def perform_action(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal error in perform_action() for channel_id: {channel_id}",
         ) from e
+
+
+@app.post(
+    "/cancel_pending",
+    operation_id="cancel_pending",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "Pending ask_user clarification abandoned"},
+        401: {"description": "Invalid or expired JWT token"},
+        404: {"description": "Session not found"},
+    },
+)
+async def cancel_pending(
+    session: SessionData = Depends(get_session_and_ensure_runtime),
+) -> dict[str, Any]:
+    """
+    Abandon a suspended Topology-B ask_user turn and clear durable pending state.
+    """
+    channel_id = session.channel_id
+    runtime = await session_manager.get_session(channel_id)
+    if not runtime:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User session not found: {channel_id}",
+        )
+
+    async with runtime.lock:
+        cleared = runtime.execution_context.cancel_pending()
+        session_manager.session_state_store.clear(channel_id)
+
+    return {"status": "ok", "cleared": cleared}
 
 
 @app.post(
@@ -1189,7 +1190,7 @@ async def new_conversation(
             )
 
         # Extract turns from chat_session conversation history
-        if turns := extract_turns_from_history(runtime.chat_session.conversation_history):
+        if turns := extract_turns_from_history(runtime.execution_context.conversation_history):
             # Generate topic and summary synchronously (turns already saved incrementally)
             topic, summary = generate_topic_and_summary(turns)
 
@@ -1209,13 +1210,13 @@ async def new_conversation(
             # Reserve next conversation ID for the next conversation
             next_id = runtime.conversation_store.reserve_next_conversation_id()
             runtime.active_conversation_id = next_id
-            runtime.chat_session.clear_conversation_history()
+            runtime.execution_context.clear_conversation_history()
 
             logger.info(f"Ready for new conversation {runtime.active_conversation_id} for session {channel_id}")
             return {"status": "ok"}
         else:
             # No turns to save, just clear history and start fresh
-            runtime.chat_session.clear_conversation_history()
+            runtime.execution_context.clear_conversation_history()
             logger.info(f"No turns to save for session {channel_id}, cleared history")
             return {"status": "ok", "message": "No turns to save"}
 
@@ -1304,14 +1305,14 @@ async def post_feedback(
             )
 
         # Check if there are any in-memory turns to give feedback on
-        if not runtime.chat_session.conversation_history.messages:
+        if not runtime.execution_context.conversation_history.messages:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"No turns available to give feedback on for user: {channel_id}"
             )
 
         # Update feedback on the last turn in the in-memory conversation history
-        last_turn = runtime.chat_session.conversation_history.messages[-1]
+        last_turn = runtime.execution_context.conversation_history.messages[-1]
         last_turn["feedback"] = {
             "binary_or_numeric_score": request.binary_or_numeric_score,
             "nl_feedback": request.nl_feedback,
@@ -1375,7 +1376,7 @@ async def activate_conversation(
         
         # Restore conversation history to chat_session
         restored_history = restore_history_from_turns(conv["turns"])
-        runtime.chat_session._conversation_history = restored_history
+        runtime.execution_context._conversation_history = restored_history
         logger.info(f"Activated conversation {request.conversation_id} for session {channel_id}")
         
         return {"status": "ok"}

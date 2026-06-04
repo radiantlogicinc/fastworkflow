@@ -222,16 +222,12 @@ def test_topology_b_resume_parity_steps(
         parity_log["clarification"] = clarification_request
         parity_log["user_response"] = user_response
         wf.context["raw_user_message"] = user_response
-        with open("action.jsonl", "a", encoding="utf-8") as f:
-            f.write(
-                json.dumps(
-                    {
-                        "agent_query": clarification_request,
-                        "user_response": user_response,
-                    }
-                )
-                + "\n"
-            )
+        chat_session_obj.append_action_log(
+            {
+                "agent_query": clarification_request,
+                "user_response": user_response,
+            }
+        )
         parity_log["replan_called"] = True
         return "replanned observation"
 
@@ -257,7 +253,8 @@ def test_topology_b_resume_parity_steps(
     assert parity_log["user_response"] == "user answer"
     assert parity_log["replan_called"] is True
     assert wf.context["raw_user_message"] == "user answer"
-    assert os.path.exists("action.jsonl")
+    assert len(ctx.action_log) == 1
+    assert ctx.action_log[0]["user_response"] == "user answer"
 
 
 def test_abort_resets_awaiting_user(
@@ -419,4 +416,4 @@ def test_topology_a_cli_ask_user_blocks_with_queue(
 
     assert observation == "replanned:user picks option A"
     assert wf.context["raw_user_message"] == "user picks option A"
-    assert os.path.exists("action.jsonl")
+    assert len(ctx.action_log) == 1

@@ -17,65 +17,10 @@ from fastworkflow.utils.logging import logger
 from fastworkflow.utils.dspy_utils import get_lm
 
 
-def extract_turns_from_history(conversation_history: 'dspy.History') -> list[dict[str, Any]]:
-    # sourcery skip: remove-unused-enumerate
-    """
-    Extract turns from dspy.History format to Rdict format.
-    
-    dspy.History.messages format:
-    [
-        {
-            "conversation summary": "summary text1", 
-            "conversation_traces": "conversation_traces1",
-            "feedback": {...} or None
-        },
-        ...
-    ]
-    
-    Rdict turn format:
-    [
-        {
-            "conversation summary": "...",
-            "conversation_traces": "...",
-            "feedback": {...} or None
-        },
-        ...
-    ]
-    
-    Note: dspy.History stores conversation summaries, detailed traces, and optional feedback.
-    All fields are extracted and preserved for complete conversation persistence.
-    """
-    turns = []
-
-    turns.extend(
-        {
-            "conversation summary": msg_dict.get("conversation summary"),
-            "conversation_traces": msg_dict.get("conversation_traces"),
-            "feedback": msg_dict.get("feedback"),  # Preserve existing feedback
-        }
-        for msg_dict in conversation_history.messages
-    )
-    return turns
-
-
-def restore_history_from_turns(turns: list[dict[str, Any]]) -> 'dspy.History':
-    """
-    Restore dspy.History from Rdict turns.
-    
-    Converts back from Rdict format to dspy.History format.
-    Restores conversation summary, conversation_traces, and feedback for each turn.
-    """
-    messages = []
-
-    messages.extend(
-        {
-            "conversation summary": turn.get("conversation summary"),
-            "conversation_traces": turn.get("conversation_traces"),
-            "feedback": turn.get("feedback"),  # Restore feedback if present
-        }
-        for turn in turns
-    )
-    return dspy.History(messages=messages)
+from fastworkflow.conversation_history_io import (
+    extract_turns_from_history,
+    restore_history_from_turns,
+)
 
 
 class ConversationSummary(BaseModel):

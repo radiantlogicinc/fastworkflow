@@ -22,12 +22,13 @@ import os
 import time
 import uuid
 from queue import Queue
-from typing import Optional
+from typing import Any, Optional
 
 import dspy
 
 import fastworkflow
 from fastworkflow import active_workflow
+from fastworkflow.session_state_store import SCHEMA_VERSION
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_utils
 
@@ -53,16 +54,27 @@ class WorkflowExecutionContext:
     def __init__(
         self,
         run_as_agent: bool = False,
+        session_key: Optional[str] = None,
+        mirror_action_log_to_file: bool = False,
     ):
+        """
+        Args:
+            session_key: Stable id (e.g. channel_id) for cme/app workflow persistence.
+                         When omitted, cme uses an ephemeral uuid (CLI one-off sessions).
+            mirror_action_log_to_file: If True, also append to cwd action.jsonl (debug).
+        """
+        self._session_key = session_key
         self._run_as_agent = run_as_agent
         self._app_workflow: Optional[fastworkflow.Workflow] = None
         self._keep_alive = False
+        self._mirror_action_log_to_file = mirror_action_log_to_file
 
         self._user_message_queue: Optional[Queue] = None
         self._command_output_queue: Optional[Queue] = None
         self._command_trace_queue: Optional[Queue] = None
 
         self._conversation_history: dspy.History = dspy.History(messages=[])
+        self._action_log: list[dict[str, Any]] = []
 
         from fastworkflow.command_executor import CommandExecutor
         self._CommandExecutor = CommandExecutor
@@ -74,15 +86,39 @@ class WorkflowExecutionContext:
         self._suspended_user_message: Optional[str] = None
         self._pending_clarification_request: Optional[str] = None
 
+        cme_id = (
+            f"cme_{session_key}"
+            if session_key
+            else f"cme_{uuid.uuid4().hex}"
+        )
         self._cme_workflow = fastworkflow.Workflow.create(
             fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
-            workflow_id_str=f"cme_{uuid.uuid4().hex}",
+            workflow_id_str=cme_id,
             workflow_context={
                 "NLU_Pipeline_Stage": fastworkflow.NLUPipelineStage.INTENT_DETECTION,
             },
         )
 
         self.clear_conversation_history()
+
+    @property
+    def session_key(self) -> Optional[str]:
+        return self._session_key
+
+    def clear_action_log(self) -> None:
+        """Clear in-memory action log for a new agent turn."""
+        self._action_log.clear()
+
+    def append_action_log(self, record: dict[str, Any]) -> None:
+        """Append one agent/workflow interaction record (replaces action.jsonl)."""
+        self._action_log.append(record)
+        if self._mirror_action_log_to_file:
+            with open("action.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    @property
+    def action_log(self) -> list[dict[str, Any]]:
+        return self._action_log
 
     # ------------------------------------------------------------------
     # Queue injection (CLI driver only)
@@ -153,6 +189,102 @@ class WorkflowExecutionContext:
     def awaiting_user(self) -> bool:
         """True when the agent suspended on ask_user and awaits the next process_message."""
         return self._awaiting_user
+
+    def serialize_state(self, *, channel_id: str) -> dict[str, Any]:
+        """
+        Export durable Topology-B state for cross-process resume.
+
+        Requires session_key and bound app_workflow when persisting.
+        """
+        react_blob = None
+        if self._workflow_tool_agent is not None:
+            react_blob = self._workflow_tool_agent.export_suspended()
+
+        nlu_stage = self._cme_workflow.context.get("NLU_Pipeline_Stage")
+        if hasattr(nlu_stage, "value"):
+            nlu_stage = nlu_stage.value
+        elif nlu_stage is not None:
+            nlu_stage = str(nlu_stage)
+
+        current_context_name = None
+        if self._app_workflow and self._app_workflow.current_command_context is not None:
+            current_context_name = self._app_workflow.current_command_context_name
+
+        from fastworkflow.conversation_history_io import extract_turns_from_history
+
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "channel_id": channel_id,
+            "session_key": self._session_key,
+            "app_workflow_id_str": self._session_key or channel_id,
+            "cme_workflow_id_str": (
+                f"cme_{self._session_key}" if self._session_key else None
+            ),
+            "workflow_folderpath": (
+                self._app_workflow.folderpath if self._app_workflow else None
+            ),
+            "awaiting_user": self._awaiting_user,
+            "suspended_user_message": self._suspended_user_message,
+            "pending_clarification_request": self._pending_clarification_request,
+            "react": react_blob,
+            "nlu_stage": nlu_stage,
+            "current_command_context_name": current_context_name,
+            "action_log": list(self._action_log),
+            "conversation_history_turns": extract_turns_from_history(
+                self.conversation_history
+            ),
+        }
+        return json.loads(json.dumps(payload, default=str))
+
+    def apply_serialized_state(self, state: dict[str, Any]) -> None:
+        """Restore fields from serialize_state() onto this context."""
+        if state.get("schema_version", 0) != SCHEMA_VERSION:
+            logger.warning(
+                f"Session state schema mismatch: {state.get('schema_version')}"
+            )
+
+        self._awaiting_user = bool(state.get("awaiting_user"))
+        self._suspended_user_message = state.get("suspended_user_message")
+        self._pending_clarification_request = state.get(
+            "pending_clarification_request"
+        )
+
+        self._action_log = list(state.get("action_log") or [])
+
+        turns = state.get("conversation_history_turns") or []
+        if turns:
+            from fastworkflow.conversation_history_io import restore_history_from_turns
+
+            self._conversation_history = restore_history_from_turns(turns)
+
+        nlu_stage = state.get("nlu_stage")
+        if nlu_stage is not None:
+            try:
+                self._cme_workflow.context["NLU_Pipeline_Stage"] = (
+                    fastworkflow.NLUPipelineStage(nlu_stage)
+                )
+            except (ValueError, TypeError):
+                self._cme_workflow.context["NLU_Pipeline_Stage"] = nlu_stage
+
+        react_blob = state.get("react")
+        if react_blob and self._awaiting_user:
+            self._ensure_agent_initialized()
+            if self._workflow_tool_agent is not None:
+                self._workflow_tool_agent.import_suspended(react_blob)
+
+        saved_context_name = state.get("current_command_context_name")
+        if (
+            saved_context_name
+            and self._app_workflow
+            and self._app_workflow.current_command_context is not None
+            and self._app_workflow.current_command_context_name != saved_context_name
+        ):
+            logger.debug(
+                "Command context name after rehydrate (%s) differs from saved (%s); "
+                "navigation depth may not match until workflow-specific restore is added",
+                self._app_workflow.current_command_context_name,
+                saved_context_name,
+            )
 
     def cancel_pending(self) -> bool:
         """
@@ -354,7 +486,8 @@ class WorkflowExecutionContext:
 
     def _run_agent(self, message: str):
         """Fresh agent turn setup and ReAct forward call."""
-        if os.path.exists("action.jsonl"):
+        self.clear_action_log()
+        if self._mirror_action_log_to_file and os.path.exists("action.jsonl"):
             os.remove("action.jsonl")
 
         if self._app_workflow:
@@ -407,11 +540,9 @@ class WorkflowExecutionContext:
 
         conversation_traces = None
         conversation_summary = original_message
-        if os.path.exists("action.jsonl"):
-            with open("action.jsonl", "r", encoding="utf-8") as f:
-                actions = [json.loads(line) for line in f if line.strip()]
+        if self._action_log:
             conversation_summary, conversation_traces = self._extract_conversation_summary(
-                original_message, actions, result_text
+                original_message, self._action_log, result_text
             )
             command_response.artifacts["conversation_summary"] = conversation_summary
 

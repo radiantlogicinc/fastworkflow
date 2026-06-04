@@ -23,6 +23,19 @@ class WorkflowAgentSignature(dspy.Signature):
     user_query = dspy.InputField(desc="The natural language user query.")
     final_answer = dspy.OutputField(desc="Comprehensive final answer with supporting evidence to demonstrate that every user intent has been fully addressed.")
 
+def _append_action_record(chat_session_obj, record: dict) -> None:
+    """Append to session-scoped action log (WEC or ChatSession delegating to core)."""
+    if hasattr(chat_session_obj, "append_action_log"):
+        chat_session_obj.append_action_log(record)
+        return
+    core = getattr(chat_session_obj, "_core", None)
+    if core is not None and hasattr(core, "append_action_log"):
+        core.append_action_log(record)
+        return
+    with open("action.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 def _what_can_i_do(chat_session_obj: fastworkflow.ChatSession) -> str:
     """
     Returns a list of available commands, including their names and parameters.
@@ -122,8 +135,7 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
         "parameters": params_dict,
         "response": response_text
     }
-    with open("action.jsonl", "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    _append_action_record(chat_session_obj, record)
 
     # Check workflow context to determine if we're in an error state that needs specialized handling
     cme_workflow = chat_session_obj.cme_workflow
@@ -225,15 +237,16 @@ def _post_ask_user_response(
     """
     Steps 2-4 after the user answers an ask_user clarification (Topology-A parity).
 
-    Appends the dialog to action.jsonl, sets raw_user_message, and replans with
-    the agent trajectory. Returns the observation string for the ReAct loop.
+    Appends the dialog to the session action log, sets raw_user_message, and replans.
+    Returns the observation string for the ReAct loop.
     """
-    with open("action.jsonl", "a", encoding="utf-8") as f:
-        agent_user_dialog = {
+    _append_action_record(
+        chat_session_obj,
+        {
             "agent_query": clarification_request,
             "user_response": user_response,
-        }
-        f.write(json.dumps(agent_user_dialog, ensure_ascii=False) + "\n")
+        },
+    )
 
     workflow = chat_session_obj.get_active_workflow()
     if workflow:

@@ -2,8 +2,10 @@ import asyncio
 import os
 import queue
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Optional
+from queue import Queue
+from typing import Any, Callable, Optional
 
 from fastapi import HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -11,6 +13,8 @@ from jwt.exceptions import PyJWTError as JWTError
 from pydantic import BaseModel, field_validator
 
 import fastworkflow
+from fastworkflow.session_state_store import SessionStateStore, get_session_state_store
+from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 from fastworkflow.utils.logging import logger
 
 from .conversation_store import ConversationStore, restore_history_from_turns
@@ -116,6 +120,11 @@ class GenerateMCPTokenRequest(BaseModel):
     expires_days: int = 365
 
 
+class CancelPendingRequest(BaseModel):
+    """Optional body for /cancel_pending (channel from JWT)."""
+    pass
+
+
 # class CommandOutputWithTraces(BaseModel):
 #     """CommandOutput extended with optional traces for HTTP responses"""
 #     command_responses: list[dict[str, Any]]
@@ -214,123 +223,121 @@ def get_session_from_jwt(
         ) from e
 
 
+def _merge_workflow_context(
+    context: Optional[dict],
+    http_bearer_token: Optional[str],
+) -> Optional[dict]:
+    if not http_bearer_token:
+        return context
+    merged = dict(context) if context else {}
+    merged["http_bearer_token"] = http_bearer_token
+    return merged
+
+
+def _update_http_bearer_token(runtime: "ChannelRuntime", token: str) -> None:
+    workflow = runtime.execution_context.get_active_workflow()
+    if workflow and workflow.context is not None:
+        workflow.context["http_bearer_token"] = token
+
+
+def _run_startup_sync(
+    ctx: WorkflowExecutionContext,
+    startup_command: Optional[str],
+    startup_action: Optional[fastworkflow.Action],
+) -> Optional[fastworkflow.CommandOutput]:
+    if startup_action:
+        if startup_action.workflow_id is None and ctx.app_workflow:
+            startup_action.workflow_id = ctx.app_workflow.id
+        return ctx.process_action(startup_action)
+    if startup_command:
+        assistant_command = f"/{startup_command.lstrip('/')}"
+        return ctx.process_message(assistant_command)
+    return None
+
+
 async def ensure_user_runtime_exists(
     channel_id: str,
-    session_manager: 'ChannelSessionManager',
+    session_manager: "ChannelSessionManager",
     workflow_path: str,
     context: Optional[dict] = None,
     startup_command: Optional[str] = None,
-    startup_action: Optional['fastworkflow.Action'] = None,
+    startup_action: Optional["fastworkflow.Action"] = None,
     stream_format: str = "ndjson",
-    http_bearer_token: Optional[str] = None
+    http_bearer_token: Optional[str] = None,
+    *,
+    run_startup: bool = True,
 ) -> None:
     """
-    Ensure a user runtime exists in the session manager. If not, create it.
-    
-    This function encapsulates the session creation logic from the initialize endpoint,
-    allowing it to be reused across different parts of the application without duplicating code.
-    
-    Args:
-        channel_id: The user identifier
-        session_manager: The ChannelSessionManager instance
-        workflow_path: Path to the workflow directory (validated at server startup)
-        context: Optional workflow context dictionary
-        startup_command: Optional startup command
-        startup_action: Optional startup action
-        stream_format: Stream format preference ("ndjson" or "sse", default "ndjson")
-        http_bearer_token: Optional JWT token to update in workflow context
-        
-    Raises:
-        HTTPException: If session creation fails
+    Ensure a Topology-B runtime exists for channel_id (WorkflowExecutionContext, no worker thread).
     """
-    # Check if user already has an active session
     existing_runtime = await session_manager.get_session(channel_id)
     if existing_runtime:
         logger.debug(f"Session for channel_id {channel_id} already exists, skipping creation")
-        
-        # Update the workflow's context with the current token if provided
-        if http_bearer_token and existing_runtime.chat_session:
-            active_workflow = existing_runtime.chat_session.get_active_workflow()
-            if active_workflow and active_workflow.context:
-                # Update the workflow's context with the current token
-                # Note: We mutate the dictionary in-place (no setter call), which means:
-                # 1. The change is immediate and visible to workflow code
-                # 2. The workflow is NOT marked dirty (won't persist to disk)
-                # 3. This is intentional for JWT tokens - we don't want to persist sensitive tokens
-                active_workflow.context['http_bearer_token'] = http_bearer_token
-                logger.debug(f"Updated http_bearer_token in workflow context for channel_id {channel_id}")
-        
+        if http_bearer_token:
+            _update_http_bearer_token(existing_runtime, http_bearer_token)
         return
-    
-    # Prepare workflow context, ensuring http_bearer_token is available
-    if http_bearer_token:
-        if context:
-            # Add or replace http_bearer_token in the context
-            context['http_bearer_token'] = http_bearer_token
-        else:
-            # Initialize context with http_bearer_token
-            context = {'http_bearer_token': http_bearer_token}
-    
-    logger.info(f"Creating new session for channel_id: {channel_id}")
-    
-    # Resolve conversation store base folder from SPEEDDICT_FOLDERNAME/channel_conversations
-    conv_base_folder = get_channelconversations_dir()
 
-    # Create conversation store for this user
+    context = _merge_workflow_context(context, http_bearer_token)
+    logger.info(f"Creating new Topology-B session for channel_id: {channel_id}")
+
+    conv_base_folder = get_channelconversations_dir()
     conversation_store = ConversationStore(channel_id, conv_base_folder)
 
-    # Create ChatSession in agent mode (forced)
-    chat_session = fastworkflow.ChatSession(run_as_agent=True)
+    ctx = WorkflowExecutionContext(run_as_agent=True, session_key=channel_id)
+    trace_queue: Queue = Queue()
+    ctx.set_transport_queues(command_trace_queue=trace_queue)
 
-    # Restore last conversation if it exists; else start new
+    app_workflow = fastworkflow.Workflow.create(
+        workflow_path,
+        workflow_id_str=channel_id,
+        workflow_context=context,
+    )
+    ctx.bind_app_workflow(app_workflow)
+
     conv_id_to_restore = None
     if conv_id_to_restore := conversation_store.get_last_conversation_id():
         conversation = conversation_store.get_conversation(conv_id_to_restore)
         if not conversation:
-            # this means a new conversation was started but not saved
-            conv_id_to_restore = conv_id_to_restore-1
+            conv_id_to_restore = conv_id_to_restore - 1
             conversation = conversation_store.get_conversation(conv_id_to_restore)
-        
         if conversation:
-            # Restore the conversation history from saved turns
-            restored_history = restore_history_from_turns(conversation["turns"])
-            chat_session._conversation_history = restored_history
+            ctx._conversation_history = restore_history_from_turns(conversation["turns"])
             logger.info(f"Restored conversation {conv_id_to_restore} for user {channel_id}")
         else:
-            logger.info(f"No conversations available for user {channel_id}, starting new")
             conv_id_to_restore = None
 
-    # Start the workflow
-    chat_session.start_workflow(
-        workflow_folderpath=workflow_path,
-        workflow_context=context,
-        startup_command=startup_command,
-        startup_action=startup_action,
-        keep_alive=True
-    )
+    loop = asyncio.get_running_loop()
+    startup_ran = False
+    if run_startup and (startup_command or startup_action):
+        await loop.run_in_executor(
+            None,
+            lambda: _run_startup_sync(ctx, startup_command, startup_action),
+        )
+        startup_ran = True
 
-    # Create and store user runtime
+    pending = session_manager.session_state_store.load(channel_id)
+    if pending:
+        ctx.apply_serialized_state(pending)
+        logger.info(f"Restored pending suspended session for channel_id {channel_id}")
+
     await session_manager.create_session(
         channel_id=channel_id,
-        chat_session=chat_session,
+        execution_context=ctx,
         conversation_store=conversation_store,
         active_conversation_id=conv_id_to_restore,
-        stream_format=stream_format
+        stream_format=stream_format,
+        workflow_path=workflow_path,
+        startup_ran=startup_ran,
     )
-
     logger.info(f"Successfully created session for channel_id: {channel_id}")
-    
-    # Wait for workflow to be ready (background thread sets status to RUNNING)
-    import asyncio
-    import time
-    max_wait = 5  # seconds
-    wait_start = time.time()
-    from fastworkflow.chat_session import SessionStatus
-    while chat_session._status != SessionStatus.RUNNING and time.time() - wait_start < max_wait:
-        await asyncio.sleep(0.1)
-    
-    if chat_session._status != SessionStatus.RUNNING:
-        logger.warning(f"Workflow not fully started after {max_wait}s, status={chat_session._status}")
+
+
+def get_channel_session_state_dir() -> str:
+    """SPEEDDICT_FOLDERNAME/channel_session_state for suspended Topology-B blobs."""
+    speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
+    session_state_dir = os.path.join(speedict_foldername, "channel_session_state")
+    os.makedirs(session_state_dir, exist_ok=True)
+    return session_state_dir
 
 
 def get_channelconversations_dir() -> str:
@@ -344,28 +351,172 @@ def get_channelconversations_dir() -> str:
     return user_conversations_dir
 
 
-async def wait_for_command_output(
-    runtime: 'ChannelRuntime',
-    timeout_seconds: int
-) -> 'fastworkflow.CommandOutput':
-    """Wait for command output from the queue with timeout"""
-    start_time = time.time()
+def _is_awaiting_user_output(output: fastworkflow.CommandOutput) -> bool:
+    if not output.command_responses:
+        return False
+    return bool(output.command_responses[0].artifacts.get("awaiting_user"))
 
-    while time.time() - start_time < timeout_seconds:
-        try:
-            return runtime.chat_session.command_output_queue.get(timeout=0.5)
-        except queue.Empty:
-            await asyncio.sleep(0.1)
-            continue
 
-    logger.error(f"Command execution timed out after {timeout_seconds} seconds for channel_id: {runtime.channel_id}")
-    raise HTTPException(
-        status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-        detail=f"Command execution timed out after {timeout_seconds} seconds"
+def persist_pending_after_turn(
+    session_manager: "ChannelSessionManager",
+    runtime: "ChannelRuntime",
+    output: fastworkflow.CommandOutput,
+) -> None:
+    """Save or clear durable suspended state after a Topology-B turn."""
+    ctx = runtime.execution_context
+    if ctx.awaiting_user or _is_awaiting_user_output(output):
+        session_manager.session_state_store.save(
+            runtime.channel_id,
+            ctx.serialize_state(channel_id=runtime.channel_id),
+        )
+    else:
+        session_manager.session_state_store.clear(runtime.channel_id)
+
+
+async def run_process_message(
+    runtime: "ChannelRuntime",
+    message: str,
+    timeout_seconds: int,
+    session_manager: "ChannelSessionManager",
+) -> fastworkflow.CommandOutput:
+    """Run process_message in a thread pool with timeout (Topology B)."""
+    loop = asyncio.get_running_loop()
+    ctx = runtime.execution_context
+
+    def _run() -> fastworkflow.CommandOutput:
+        return ctx.process_message(message)
+
+    try:
+        output = await asyncio.wait_for(
+            loop.run_in_executor(None, _run),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError as exc:
+        logger.error(
+            f"Command execution timed out after {timeout_seconds}s "
+            f"for channel_id: {runtime.channel_id}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=f"Command execution timed out after {timeout_seconds} seconds",
+        ) from exc
+
+    persist_pending_after_turn(session_manager, runtime, output)
+    return output
+
+
+async def run_process_action(
+    runtime: "ChannelRuntime",
+    action: fastworkflow.Action,
+    timeout_seconds: int,
+    session_manager: "ChannelSessionManager",
+) -> fastworkflow.CommandOutput:
+    loop = asyncio.get_running_loop()
+    ctx = runtime.execution_context
+
+    def _run() -> fastworkflow.CommandOutput:
+        return ctx.process_action(action)
+
+    try:
+        output = await asyncio.wait_for(
+            loop.run_in_executor(None, _run),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=f"Action execution timed out after {timeout_seconds} seconds",
+        ) from exc
+
+    persist_pending_after_turn(session_manager, runtime, output)
+    return output
+
+
+def _format_trace_event(evt: Any, user_id: Optional[str]) -> dict[str, Any]:
+    trace = {
+        "direction": evt.direction.value if hasattr(evt.direction, "value") else str(evt.direction),
+        "raw_command": evt.raw_command,
+        "command_name": evt.command_name,
+        "parameters": evt.parameters,
+        "response_text": evt.response_text,
+        "success": evt.success,
+        "timestamp_ms": evt.timestamp_ms,
+    }
+    if user_id is not None:
+        trace["user_id"] = user_id
+    return trace
+
+
+async def _emit_trace_callback(
+    on_trace: Callable[[dict[str, Any]], Any],
+    trace_dict: dict[str, Any],
+    _user_id: Optional[str],
+) -> None:
+    result = on_trace(trace_dict)
+    if asyncio.iscoroutine(result):
+        await result
+
+
+async def run_process_message_with_trace_stream(
+    runtime: "ChannelRuntime",
+    message: str,
+    timeout_seconds: int,
+    session_manager: "ChannelSessionManager",
+    on_trace: Callable[[dict[str, Any]], Any],
+    user_id: Optional[str] = None,
+) -> fastworkflow.CommandOutput:
+    """
+    Run process_message in an executor while draining command_trace_queue concurrently.
+    """
+    loop = asyncio.get_running_loop()
+    ctx = runtime.execution_context
+    trace_queue = ctx.command_trace_queue
+    if trace_queue is None:
+        return await run_process_message(
+            runtime, message, timeout_seconds, session_manager
+        )
+
+    exec_future = loop.run_in_executor(
+        None, lambda: ctx.process_message(message)
     )
+    start = time.time()
+
+    while not exec_future.done() and time.time() - start < timeout_seconds:
+        while True:
+            try:
+                evt = trace_queue.get_nowait()
+            except queue.Empty:
+                break
+            if evt is None:
+                continue
+            await _emit_trace_callback(
+                on_trace, _format_trace_event(evt, user_id), user_id
+            )
+        await asyncio.sleep(0.05)
+
+    if not exec_future.done():
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=f"Command execution timed out after {timeout_seconds} seconds",
+        )
+
+    output = await exec_future
+
+    while True:
+        try:
+            evt = trace_queue.get_nowait()
+        except queue.Empty:
+            break
+        if evt is None:
+            continue
+        await _emit_trace_callback(
+            on_trace, _format_trace_event(evt, user_id), user_id
+        )
+    persist_pending_after_turn(session_manager, runtime, output)
+    return output
 
 
-def collect_trace_events(runtime: 'ChannelRuntime', user_id: Optional[str] = None) -> list[dict[str, Any]]:
+def collect_trace_events(runtime: "ChannelRuntime", user_id: Optional[str] = None) -> list[dict[str, Any]]:
     """
     Drain and collect all trace events from the queue.
     
@@ -378,26 +529,19 @@ def collect_trace_events(runtime: 'ChannelRuntime', user_id: Optional[str] = Non
     """
     traces = []
     
+    trace_queue = runtime.execution_context.command_trace_queue
+    if trace_queue is None:
+        return traces
+
     while True:
         try:
-            evt = runtime.chat_session.command_trace_queue.get_nowait()
+            evt = trace_queue.get_nowait()
             if evt is None:
                 break
-            trace = {
-                "direction": evt.direction.value if hasattr(evt.direction, 'value') else str(evt.direction),
-                "raw_command": evt.raw_command,
-                "command_name": evt.command_name,
-                "parameters": evt.parameters,
-                "response_text": evt.response_text,
-                "success": evt.success,
-                "timestamp_ms": evt.timestamp_ms
-            }
-            if user_id is not None:
-                trace["user_id"] = user_id
-            traces.append(trace)
+            traces.append(_format_trace_event(evt, user_id))
         except queue.Empty:
             break
-    
+
     return traces
 
 
@@ -446,53 +590,100 @@ async def collect_trace_events_async(
 
 @dataclass
 class ChannelRuntime:
-    """Per-channel runtime state"""
+    """Per-channel Topology-B runtime (live WEC + metadata)."""
+
     channel_id: str
     active_conversation_id: int
-    chat_session: 'fastworkflow.ChatSession'
+    execution_context: WorkflowExecutionContext
     lock: asyncio.Lock
-    conversation_store: 'ConversationStore'
-    stream_format: str = "ndjson"  # "ndjson" | "sse"
+    conversation_store: ConversationStore
+    stream_format: str = "ndjson"
+    workflow_path: str = ""
+    startup_ran: bool = False
+
+    @property
+    def chat_session(self) -> WorkflowExecutionContext:
+        """Backward-compatible alias for endpoints that referenced chat_session."""
+        return self.execution_context
 
 
 class ChannelSessionManager:
-    """Process-wide manager for channel sessions"""
-    
-    def __init__(self):
-        self._sessions: dict[str, ChannelRuntime] = {}
+    """
+    Process-local cache of live WorkflowExecutionContext instances.
+
+    Suspended (awaiting_user) state is persisted via SessionStateStore so any
+    worker can cold-rehydrate after eviction or restart.
+    """
+
+    def __init__(
+        self,
+        session_state_store: Optional[SessionStateStore] = None,
+        max_live_sessions: int = 2000,
+    ):
+        self._sessions: OrderedDict[str, ChannelRuntime] = OrderedDict()
         self._lock = asyncio.Lock()
-    
+        self._max_live_sessions = max_live_sessions
+        self.session_state_store = session_state_store or get_session_state_store(
+            base_folder=get_channel_session_state_dir()
+        )
+
+    def _touch(self, channel_id: str) -> None:
+        if channel_id in self._sessions:
+            self._sessions.move_to_end(channel_id)
+
+    async def _evict_oldest_if_needed(self) -> None:
+        while len(self._sessions) > self._max_live_sessions:
+            channel_id, runtime = self._sessions.popitem(last=False)
+            if runtime.execution_context.awaiting_user:
+                self.session_state_store.save(
+                    channel_id,
+                    runtime.execution_context.serialize_state(channel_id=channel_id),
+                )
+            runtime.execution_context.close()
+            logger.debug(f"Evicted live session cache for channel_id {channel_id}")
+
     async def get_session(self, channel_id: str) -> Optional[ChannelRuntime]:
-        """Get a session by channel_id"""
         async with self._lock:
-            return self._sessions.get(channel_id)
-    
+            runtime = self._sessions.get(channel_id)
+            if runtime:
+                self._touch(channel_id)
+            return runtime
+
     async def create_session(
         self,
         channel_id: str,
-        chat_session: 'fastworkflow.ChatSession',
-        conversation_store: 'ConversationStore',
+        execution_context: WorkflowExecutionContext,
+        conversation_store: ConversationStore,
         active_conversation_id: Optional[int] = None,
-        stream_format: str = "ndjson"
+        stream_format: str = "ndjson",
+        workflow_path: str = "",
+        startup_ran: bool = False,
     ) -> ChannelRuntime:
-        """Create or update a session"""
-        async with self._lock:            
+        async with self._lock:
             runtime = ChannelRuntime(
                 channel_id=channel_id,
                 active_conversation_id=active_conversation_id or 0,
-                chat_session=chat_session,
+                execution_context=execution_context,
                 lock=asyncio.Lock(),
                 conversation_store=conversation_store,
-                stream_format=stream_format
+                stream_format=stream_format,
+                workflow_path=workflow_path,
+                startup_ran=startup_ran,
             )
             self._sessions[channel_id] = runtime
+            self._touch(channel_id)
+            await self._evict_oldest_if_needed()
             return runtime
-    
+
     async def remove_session(self, channel_id: str) -> None:
-        """Remove a session"""
         async with self._lock:
-            if channel_id in self._sessions:
-                del self._sessions[channel_id]
+            runtime = self._sessions.pop(channel_id, None)
+            if runtime:
+                runtime.execution_context.close()
+
+    async def evict_live_session(self, channel_id: str) -> None:
+        """Drop from process cache without clearing durable pending state."""
+        await self.remove_session(channel_id)
 
 
 # ============================================================================
@@ -505,7 +696,7 @@ def save_conversation_incremental(runtime: ChannelRuntime, extract_turns_func, l
     This provides crash protection - all turns except the last will be preserved.
     """
     # Extract turns from conversation history
-    if turns := extract_turns_func(runtime.chat_session.conversation_history):
+    if turns := extract_turns_func(runtime.execution_context.conversation_history):
         # Initialize conversation ID for first conversation if needed
         if runtime.active_conversation_id == 0:
             # This is the first conversation for this session

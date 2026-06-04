@@ -114,6 +114,30 @@ class fastWorkflowReAct(Module):
         """Drop any in-memory suspended ReAct state (used on abort/finalize)."""
         self._suspended = None
 
+    def export_suspended(self) -> dict[str, Any] | None:
+        """Return a JSON-serializable copy of suspended ReAct state, or None."""
+        if self._suspended is None:
+            return None
+        return {
+            "trajectory": dict(self._suspended["trajectory"]),
+            "idx": self._suspended["idx"],
+            "input_args": dict(self._suspended["input_args"]),
+            "max_iters": self._suspended["max_iters"],
+            "clarification": self._suspended.get("clarification"),
+            "iteration_counter": self.iteration_counter,
+        }
+
+    def import_suspended(self, data: dict[str, Any]) -> None:
+        """Restore suspended ReAct state from export_suspended() output."""
+        self._suspended = {
+            "trajectory": dict(data["trajectory"]),
+            "idx": data["idx"],
+            "input_args": dict(data["input_args"]),
+            "max_iters": data["max_iters"],
+            "clarification": data.get("clarification"),
+        }
+        self.iteration_counter = data.get("iteration_counter", 0)
+
     def _format_trajectory(self, trajectory: dict[str, Any]):
         adapter = dspy.settings.adapter or dspy.ChatAdapter()
         trajectory_signature = dspy.Signature(f"{', '.join(trajectory.keys())} -> x")

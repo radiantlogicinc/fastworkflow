@@ -115,6 +115,7 @@ class ChatSession:
         """
         self._core = WorkflowExecutionContext(
             run_as_agent=run_as_agent,
+            mirror_action_log_to_file=True,
         )
 
         # Create queues for user messages and command outputs (CLI transport)
@@ -296,6 +297,12 @@ class ChatSession:
         if workflow := self._core.app_workflow:
             workflow.is_complete = value
     
+    def append_action_log(self, record: dict) -> None:
+        self._core.append_action_log(record)
+
+    def clear_action_log(self) -> None:
+        self._core.clear_action_log()
+
     @property
     def conversation_history(self) -> dspy.History:
         """Return the conversation history."""
