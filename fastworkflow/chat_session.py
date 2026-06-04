@@ -194,7 +194,7 @@ class ChatSession:
 
         # Check if we need to stop the current workflow
         # Stop if this is a new root workflow (no parent, keep_alive=True)
-        current_workflow = self._current_workflow
+        current_workflow = self.get_active_workflow()
         if (current_workflow and 
             parent_workflow_id is None and 
             self._keep_alive):

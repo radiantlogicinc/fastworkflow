@@ -5,6 +5,7 @@ This demonstrates how to wrap FastWorkflow's CommandExecutor
 to provide MCP-compliant tool execution.
 """
 
+import os
 from typing import Dict, Any, List, Union
 import fastworkflow
 from fastworkflow.active_workflow import get_active_workflow
@@ -241,7 +242,20 @@ def create_mcp_server_for_workflow(workflow_path: str) -> FastWorkflowMCPServer:
         RoutingRegistry.get_definition(workflow_path)
     except Exception:
         RoutingDefinition.build(workflow_path)
-    
+
+    # Fail fast if the workflow has not been trained. Otherwise intent detection
+    # crashes on the first command when CommandRouter cannot find the model
+    # artifacts (e.g. ___command_info/global/threshold.json).
+    from fastworkflow.model_pipeline_training import is_workflow_trained
+    trained, missing_contexts = is_workflow_trained(workflow_path)
+    if not trained:
+        workflow_name = os.path.basename(os.path.normpath(workflow_path))
+        raise RuntimeError(
+            f"Workflow '{workflow_name}' is not trained "
+            f"(missing model artifacts for context(s): {', '.join(missing_contexts)}). "
+            f"Train it first with: fastworkflow train {workflow_path} <env_file> <passwords_file>"
+        )
+
     # Create workflow chat session and start the workflow so an active workflow exists
     chat_session = fastworkflow.ChatSession()
     # Start in keep-alive mode so creation does not block on the workflow loop

@@ -620,6 +620,59 @@ def get_artifact_path(workflow_folderpath: str, context_name: str, filename: str
     base_dir.mkdir(parents=True, exist_ok=True)
     return str(base_dir / filename)
 
+
+def is_workflow_trained(workflow_folderpath: str) -> Tuple[bool, List[str]]:
+    """Return ``(is_trained, missing_context_folders)`` for *workflow_folderpath*.
+
+    A workflow is considered trained when every routing context declared in its
+    ``___command_info/routing_definition.json`` has a ``threshold.json`` model
+    artifact under ``___command_info/<context>/`` (the special context ``"*"``
+    maps to ``GLOBAL_CONTEXT_FOLDER``).
+
+    This is a lightweight, filesystem-only check used to fail fast *before*
+    starting a chat session on an untrained workflow. Without it, intent
+    detection crashes on the first command when ``CommandRouter`` cannot open
+    the missing ``threshold.json`` (e.g. ``___command_info/global/threshold.json``).
+    """
+    command_info_root = os.path.join(workflow_folderpath, "___command_info")
+    routing_def_path = os.path.join(command_info_root, "routing_definition.json")
+    if not os.path.isfile(routing_def_path):
+        return False, ["<workflow not built>"]
+
+    try:
+        with open(routing_def_path, "r") as f:
+            routing_definition = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False, ["<unreadable routing_definition.json>"]
+
+    contexts = routing_definition.get("contexts") or {}
+    if not contexts:
+        return False, ["<no contexts in routing_definition.json>"]
+
+    # Only check the contexts that training actually produces artifacts for. This
+    # mirrors the context selection in train(): the internal
+    # command_metadata_extraction contexts (e.g. IntentDetection, ErrorCorrection)
+    # are NOT trained per app workflow - their models live in the internal CME
+    # workflow - and the global wildcard context "*" is always included.
+    try:
+        internal_wf_path = fastworkflow.get_internal_workflow_path("command_metadata_extraction")
+        internal_contexts = set(
+            fastworkflow.CommandContextModel.load(internal_wf_path)._command_contexts.keys()
+        )
+    except Exception:
+        internal_contexts = set()
+
+    contexts_to_check = (set(contexts.keys()) - internal_contexts) | {"*"}
+
+    missing: List[str] = []
+    for context_name in contexts_to_check:
+        context_folder = GLOBAL_CONTEXT_FOLDER if context_name == "*" else context_name
+        threshold_path = os.path.join(command_info_root, context_folder, "threshold.json")
+        if not os.path.isfile(threshold_path):
+            missing.append(context_folder)
+
+    return (not missing), sorted(missing)
+
 # ---------------------------------------------------------------------
 
 # After training loop is complete

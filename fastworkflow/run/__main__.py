@@ -152,6 +152,25 @@ def run_main(args):
     fastworkflow.init(env_vars=env_vars)
     StartupProgress.advance("fastworkflow.init complete")
 
+    # Fail fast if the workflow has not been trained. Otherwise intent detection
+    # crashes on the first command when CommandRouter cannot find the model
+    # artifacts (e.g. ___command_info/global/threshold.json).
+    from fastworkflow.model_pipeline_training import is_workflow_trained
+    trained, missing_contexts = is_workflow_trained(args.workflow_path)
+    if not trained:
+        StartupProgress.end()
+        workflow_name = os.path.basename(os.path.normpath(args.workflow_path))
+        console.print(
+            f"[bold red]Error:[/bold red] Workflow '{workflow_name}' is not trained "
+            f"(missing model artifacts for context(s): {', '.join(missing_contexts)})."
+        )
+        console.print(
+            "Train it first with:\n"
+            f"  [bold]fastworkflow train {args.workflow_path} "
+            f"{args.env_file_path} {args.passwords_file_path}[/bold]"
+        )
+        exit(1)
+
     startup_action: Optional[fastworkflow.Action] = None
     if args.startup_action:
         with open(args.startup_action, 'r') as file:
