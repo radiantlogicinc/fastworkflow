@@ -76,86 +76,13 @@ def test_process_message_agent_mode_mocked_agent(
     mock_agent.assert_called_once()
 
 
-def test_ask_user_timeout_does_not_apply_to_topology_a(
+def test_topology_b_ask_user_is_non_blocking_and_suspends_indefinitely(
     initialized_fastworkflow,
     todo_workflow_path,
     monkeypatch,
 ):
-    """Topology A (queue present) blocks for the human; ask_user_timeout is ignored."""
-    from fastworkflow.workflow_agent import _ask_user_tool
-
-    ctx = WorkflowExecutionContext(run_as_agent=True, ask_user_timeout=0.01)
-    wf = fastworkflow.Workflow.create(
-        todo_workflow_path,
-        workflow_id_str=f"ask-timeout-{uuid.uuid4().hex}",
-    )
-    ctx.bind_app_workflow(wf)
-    user_queue: Queue = Queue()
-    ctx.set_transport_queues(
-        user_message_queue=user_queue,
-        command_output_queue=Queue(),
-    )
-
-    monkeypatch.setattr(
-        "fastworkflow.workflow_agent.build_query_with_next_steps",
-        lambda user_query, session, with_agent_inputs_and_trajectory=False: user_query,
-    )
-
-    # Feed the answer only AFTER the (tiny) timeout would have elapsed in the old design.
-    def deliver_late():
-        time.sleep(0.1)
-        user_queue.put("late human answer")
-
-    threading.Thread(target=deliver_late, daemon=True).start()
-
-    ctx.push_active_workflow(wf)
-    try:
-        # Must NOT raise CommandCancelledError; it blocks until the human answers.
-        observation = _ask_user_tool("Need more info?", ctx)
-    finally:
-        ctx.pop_active_workflow()
-
-    assert "late human answer" in observation
-
-
-def test_topology_b_ask_user_timeout_expires_to_fresh_turn(
-    initialized_fastworkflow,
-    todo_workflow_path,
-    monkeypatch,
-):
+    """No queue: ask_user returns immediately as awaiting_user and never times out."""
     ctx, _wf = _make_agent_ctx(initialized_fastworkflow, todo_workflow_path, monkeypatch)
-    ctx._ask_user_timeout = 0.01
-
-    suspended = SimpleNamespace(suspended=True, clarification="Which one?")
-    completed = SimpleNamespace(final_answer="fresh turn done")
-
-    mock_agent = MagicMock()
-    mock_agent.return_value = suspended
-    ctx._workflow_tool_agent = mock_agent
-
-    ctx.process_message("start")
-    assert ctx.awaiting_user
-    assert not ctx.pending_clarification_expired  # not yet
-
-    time.sleep(0.05)
-    assert ctx.pending_clarification_expired
-
-    mock_agent.return_value = completed
-    out = ctx.process_message("late answer")
-
-    assert not ctx.awaiting_user
-    assert "fresh turn done" in out.command_responses[0].response
-    mock_agent.resume.assert_not_called()
-    assert mock_agent.call_count == 2  # fresh turn, not a resume
-
-
-def test_topology_b_ask_user_timeout_none_never_expires(
-    initialized_fastworkflow,
-    todo_workflow_path,
-    monkeypatch,
-):
-    ctx, _wf = _make_agent_ctx(initialized_fastworkflow, todo_workflow_path, monkeypatch)
-    assert ctx.ask_user_timeout is None
 
     mock_agent = MagicMock()
     mock_agent.return_value = SimpleNamespace(
@@ -163,10 +90,17 @@ def test_topology_b_ask_user_timeout_none_never_expires(
     )
     ctx._workflow_tool_agent = mock_agent
 
-    ctx.process_message("start")
+    out = ctx.process_message("start")  # returns without blocking
     assert ctx.awaiting_user
-    time.sleep(0.02)
-    assert not ctx.pending_clarification_expired
+    assert out.command_responses[0].artifacts.get("awaiting_user") is True
+
+    # A suspended Topology B turn never expires on its own; it waits in memory.
+    time.sleep(0.05)
+    assert ctx.awaiting_user
+
+    # The embedder abandons it explicitly via cancel_pending().
+    assert ctx.cancel_pending() is True
+    assert not ctx.awaiting_user
 
 
 def test_process_message_converts_ask_user_cancel_to_output(
@@ -174,16 +108,15 @@ def test_process_message_converts_ask_user_cancel_to_output(
     todo_workflow_path,
     monkeypatch,
 ):
-    ctx = WorkflowExecutionContext(run_as_agent=True, ask_user_timeout=0.05)
+    ctx = WorkflowExecutionContext(run_as_agent=True)
     wf = fastworkflow.Workflow.create(
         todo_workflow_path,
         workflow_id_str=f"cancel-turn-{uuid.uuid4().hex}",
     )
     ctx.bind_app_workflow(wf)
-    ctx.set_transport_queues(user_message_queue=Queue())
 
     def failing_agent(**kwargs):
-        raise CommandCancelledError("no user response within 0.05 seconds")
+        raise CommandCancelledError("ask_user requires a user_message_queue")
 
     monkeypatch.setattr(
         "fastworkflow.workflow_agent.build_query_with_next_steps",

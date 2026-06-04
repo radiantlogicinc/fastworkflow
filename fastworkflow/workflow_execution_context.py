@@ -6,12 +6,11 @@ bind_app_workflow once, call process_message per request in a worker thread or
 asyncio task (ContextVar isolates active workflow per thread/task), and close()
 on session end.
 
-Topology B (no user_message_queue): ask_user suspends the ReAct trajectory and
-process_message returns an awaiting_user CommandOutput; the next
-process_message(answer) resumes it. ask_user_timeout bounds how long that
-suspended state stays valid (enforced lazily on the next call / via
-pending_clarification_expired); it applies ONLY to Topology B, never to the
-blocking CLI path (Topology A).
+Topology B (no user_message_queue): ask_user is non-blocking — it suspends the
+ReAct trajectory in memory and process_message returns an awaiting_user
+CommandOutput; the next process_message(answer) resumes it. A suspended turn
+never hangs, so there is no timeout; embedders abandon an unanswered
+clarification with cancel_pending() per their own session lifecycle.
 
 ChatSession composes this core for CLI/REPL (queues, ChatWorker, keep_alive).
 """
@@ -35,7 +34,8 @@ from fastworkflow.utils import dspy_utils
 
 class CommandCancelledError(BaseException):
     """
-    Raised when a command cannot continue (e.g. ask_user timed out).
+    Raised when a command cannot continue (e.g. the nested intent-clarification
+    ask_user is reached with no user_message_queue).
 
     Subclasses BaseException so fastWorkflowReAct's ``except Exception`` does not
     swallow it; process_message converts it to a failed CommandOutput.
@@ -53,10 +53,8 @@ class WorkflowExecutionContext:
     def __init__(
         self,
         run_as_agent: bool = False,
-        ask_user_timeout: Optional[float] = None,
     ):
         self._run_as_agent = run_as_agent
-        self._ask_user_timeout = ask_user_timeout
         self._app_workflow: Optional[fastworkflow.Workflow] = None
         self._keep_alive = False
 
@@ -75,7 +73,6 @@ class WorkflowExecutionContext:
         self._awaiting_user = False
         self._suspended_user_message: Optional[str] = None
         self._pending_clarification_request: Optional[str] = None
-        self._suspended_at: Optional[float] = None
 
         self._cme_workflow = fastworkflow.Workflow.create(
             fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
@@ -115,16 +112,6 @@ class WorkflowExecutionContext:
     @property
     def command_trace_queue(self) -> Optional[Queue]:
         return self._command_trace_queue
-
-    @property
-    def ask_user_timeout(self) -> Optional[float]:
-        """
-        Topology B only: seconds a suspended ask_user clarification stays valid.
-
-        Enforced lazily (see pending_clarification_expired); has NO effect on the
-        blocking CLI path (Topology A), which always waits for the human.
-        """
-        return self._ask_user_timeout
 
     @property
     def keep_alive(self) -> bool:
@@ -167,28 +154,14 @@ class WorkflowExecutionContext:
         """True when the agent suspended on ask_user and awaits the next process_message."""
         return self._awaiting_user
 
-    @property
-    def pending_clarification_expired(self) -> bool:
-        """
-        Topology B: True when a suspended ask_user clarification has outlived
-        ask_user_timeout.
-
-        Returns False when not awaiting a user, when no timeout is configured, or
-        before the timeout elapses. Embedders can poll this between turns to
-        proactively cancel_pending(); process_message also checks it and abandons
-        the stale trajectory (starting a fresh turn) instead of resuming.
-        """
-        if (
-            not self._awaiting_user
-            or self._ask_user_timeout is None
-            or self._suspended_at is None
-        ):
-            return False
-        return (time.monotonic() - self._suspended_at) > self._ask_user_timeout
-
     def cancel_pending(self) -> bool:
         """
         Abort a pending ask_user clarification (Topology B).
+
+        ask_user is non-blocking in Topology B (the clarification is returned as a
+        CommandOutput), so a suspended trajectory never hangs — it simply waits in
+        memory. Embedders call this to abandon it per their own session lifecycle
+        (e.g. request timeout, user navigated away).
 
         Returns True if a pending clarification was cleared, False otherwise.
         """
@@ -258,11 +231,6 @@ class WorkflowExecutionContext:
             self._prepare_message_routing(message)
             if self._should_run_agent_for_message(message):
                 if self._awaiting_user:
-                    if self.pending_clarification_expired:
-                        # Topology B: the clarification window lapsed; abandon the
-                        # stale suspended trajectory and treat this as a fresh turn.
-                        self._reset_agent_suspension()
-                        return self._process_agent_message(message)
                     return self._resume_agent_message(message)
                 return self._process_agent_message(message)
             return self._process_message(message)
@@ -359,7 +327,6 @@ class WorkflowExecutionContext:
         self._awaiting_user = False
         self._suspended_user_message = None
         self._pending_clarification_request = None
-        self._suspended_at = None
         if self._workflow_tool_agent is not None and hasattr(
             self._workflow_tool_agent, "clear_suspension"
         ):
@@ -416,8 +383,6 @@ class WorkflowExecutionContext:
         )
 
     def _awaiting_user_output(self, clarification: str) -> fastworkflow.CommandOutput:
-        # Topology B: start the clarification validity clock for ask_user_timeout.
-        self._suspended_at = time.monotonic()
         command_response = fastworkflow.CommandResponse(response=clarification)
         command_response.artifacts["awaiting_user"] = True
         command_output = fastworkflow.CommandOutput(

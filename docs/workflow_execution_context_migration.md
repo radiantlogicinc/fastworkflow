@@ -11,10 +11,7 @@ from fastworkflow import WorkflowExecutionContext
 
 fastworkflow.init(env_vars)
 
-ctx = WorkflowExecutionContext(
-    run_as_agent=True,
-    ask_user_timeout=120.0,  # Topology B ONLY: how long a suspended ask_user stays valid
-)
+ctx = WorkflowExecutionContext(run_as_agent=True)
 
 app = fastworkflow.Workflow.create(workflow_path, workflow_id_str=session_id)
 ctx.bind_app_workflow(app)
@@ -45,10 +42,9 @@ This is exactly what `ChatSession(keep_alive=True)` + `ChatWorker` provides, and
   queue. The SAME worker thread resumes inside the same `process_message` call, so the
   full ReAct trajectory is preserved.
 
-**`ask_user_timeout` does NOT apply to Topology A.** A blocking, human-in-the-loop session
-is supposed to wait for the human, so the worker blocks forever on `user_message_queue.get()`.
-`ask_user_timeout` is read only by the Topology B suspend/resume path; passing it to
-`ChatSession` (which is always Topology A) has no effect.
+There is **no `ask_user` timeout** in either topology. Topology A blocks forever for the
+human (that is the point of a human-in-the-loop session). Topology B does not block at all
+(see below).
 
 **`user_message_queue` is CLI/Topology-A only.** If you need true blocking,
 human-in-the-loop `ask_user`, use `ChatSession(keep_alive=True)` or replicate its worker
@@ -57,7 +53,8 @@ loop around `WorkflowExecutionContext` with transport queues injected.
 ### Topology B — per-request suspend/resume (bare core)
 
 Each HTTP request calls `process_message` on its own thread/task. When the agent calls
-`ask_user` and no `user_message_queue` is set:
+`ask_user` and no `user_message_queue` is set, **`ask_user` is non-blocking**: it suspends
+the ReAct trajectory in memory and `process_message` returns. Concretely:
 
 1. The ReAct trajectory is suspended in-memory on the `WorkflowExecutionContext`.
 2. `process_message` returns immediately with a normal `CommandOutput` whose first response
@@ -68,41 +65,32 @@ Each HTTP request calls `process_message` on its own thread/task. When the agent
 5. On final completion, conversation history is appended once, keyed on the **original**
    user message from step 1.
 
+Because nothing blocks, a suspended turn never hangs — there is no timeout. The suspended
+trajectory simply waits in memory until the user answers or the embedder abandons it.
+
 ```python
-ctx = WorkflowExecutionContext(run_as_agent=True, ask_user_timeout=120.0)
+ctx = WorkflowExecutionContext(run_as_agent=True)
 ctx.bind_app_workflow(app)
 
 output = ctx.process_message("delete my task")
 if output.command_responses[0].artifacts.get("awaiting_user"):
     question = output.command_responses[0].response
     # ... show `question` to the user and collect their reply ...
+    output = ctx.process_message(user_answer)   # resumes the same trajectory
 
-    # If the reply comes back in time, resume the same trajectory:
-    output = ctx.process_message(user_answer)
-    # If `ask_user_timeout` already elapsed, this same call transparently abandons
-    # the stale trajectory and runs `user_answer` as a fresh turn instead.
-
-# Between turns you can also enforce the timeout proactively without a new message:
-if ctx.pending_clarification_expired:
-    ctx.cancel_pending()   # drop the suspended trajectory; next message is a fresh turn
+# If the user never answers, abandon the suspended turn per your own session lifecycle
+# (request timeout, user navigated away, etc.):
+ctx.cancel_pending()   # drop the suspended trajectory; next message starts a fresh turn
 ```
 
 **Do NOT set `user_message_queue` in Topology B** — it is unused for suspend/resume and
 was only needed for the old blocking model.
 
-### `ask_user_timeout` in Topology B
+### Abandoning an unanswered clarification
 
-`ask_user_timeout` is the **Topology B** safety net (and the only place it has any effect).
-It bounds how long a suspended `ask_user` clarification stays resumable:
-
-- When the agent suspends, the context records the suspend time.
-- `pending_clarification_expired` becomes `True` once `ask_user_timeout` seconds elapse
-  while still `awaiting_user`. With `ask_user_timeout=None` (default) it never expires.
-- The timeout is enforced **lazily** — the core has no background thread. It is checked on
-  the next `process_message`: if expired, the suspended trajectory is abandoned and the
-  incoming message is processed as a fresh turn (not a resume). Embedders that want to
-  reclaim resources without waiting for another message can poll
-  `pending_clarification_expired` and call `cancel_pending()`.
+There is no built-in timeout. The embedder owns session lifecycle: when it decides a
+clarification has been abandoned, it calls `cancel_pending()` (returns `True` if a pending
+clarification was cleared). After that, the next `process_message` starts a fresh turn.
 
 Requirements:
 
@@ -136,8 +124,7 @@ Specify a queue only when you need its specific channel:
 from queue import Queue
 
 # Topology B example: trace streaming only; NO user_message_queue (suspend/resume).
-# ask_user_timeout is the Topology-B-only safety net for a suspended clarification.
-ctx = WorkflowExecutionContext(run_as_agent=True, ask_user_timeout=120.0)
+ctx = WorkflowExecutionContext(run_as_agent=True)
 ctx.bind_app_workflow(app)
 
 command_trace_queue = Queue()  # drained by a separate consumer for live traces
@@ -161,11 +148,10 @@ fail). Resume with the next `process_message(answer)`. Use `cancel_pending()` to
 - `get_active_workflow()` is set only for the duration of `process_message` / `process_action`.
 - Topology A (blocking `ask_user`): `ChatSession(keep_alive=True)` or a persistent worker
   with `user_message_queue` injected.
-- Topology B (suspend/resume): bare `process_message` per request; check
-  `artifacts["awaiting_user"]` or `ctx.awaiting_user`; resume with the next
-  `process_message(answer)`; `cancel_pending()` to abandon. `ask_user_timeout` is the
-  Topology-B-only validity window (lazily enforced; see `pending_clarification_expired`)
-  and has no effect on Topology A.
+- Topology B (suspend/resume): bare `process_message` per request; `ask_user` is
+  non-blocking; check `artifacts["awaiting_user"]` or `ctx.awaiting_user`; resume with the
+  next `process_message(answer)`; `cancel_pending()` to abandon. No timeout — a suspended
+  turn waits in memory and never hangs.
 - `ChatSession` remains the CLI/persistent-worker driver: queues, `ChatWorker`, `keep_alive`,
   `start_workflow`.
 - `dspy.settings.lm` is process-global; agent/planner calls already use `dspy.context(...)`.

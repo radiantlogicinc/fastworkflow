@@ -249,8 +249,8 @@ def _ask_user_tool(clarification_request: str, chat_session_obj: fastworkflow.Ch
         output_queue.put(command_output)
 
     # Topology A (blocking): a persistent worker thread runs the agent and a human
-    # is expected to answer, so we block indefinitely. ask_user_timeout does NOT
-    # apply here -- it governs Topology B (suspend/resume) only.
+    # is expected to answer, so we block indefinitely. (Topology B has no queue and
+    # suspends via AskUserSuspend instead — see the ask_user tool closure.)
     user_query = user_queue.get()
 
     return _post_ask_user_response(

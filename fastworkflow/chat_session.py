@@ -101,7 +101,6 @@ class ChatSession:
     def __init__(
         self,
         run_as_agent: bool = False,
-        ask_user_timeout: Optional[float] = None,
     ):
         """
         Initialize a chat session.
@@ -109,17 +108,13 @@ class ChatSession:
         Args:
             run_as_agent: If True, use agent mode (DSPy-based tool selection).
                          If False (default), use traditional command execution.
-            ask_user_timeout: Topology B (suspend/resume) safety net only; it has
-                              NO effect here. ChatSession is Topology A (blocking
-                              CLI worker) and always waits for the human on
-                              ask_user. Kept for API compatibility with the core.
         
         A chat session can run multiple workflows that share the same message queues.
         Use start_workflow() to start a specific workflow within this session.
+        ChatSession is Topology A: ask_user blocks on the queue until the human answers.
         """
         self._core = WorkflowExecutionContext(
             run_as_agent=run_as_agent,
-            ask_user_timeout=ask_user_timeout,
         )
 
         # Create queues for user messages and command outputs (CLI transport)
@@ -278,11 +273,6 @@ class ChatSession:
     def run_as_agent(self) -> bool:
         """Check if running in agent mode."""
         return self._core.run_as_agent
-
-    @property
-    def ask_user_timeout(self) -> Optional[float]:
-        """Seconds to wait on ask_user before cancelling (None = block forever)."""
-        return self._core.ask_user_timeout
 
     @property
     def user_message_queue(self) -> Queue:

@@ -58,9 +58,12 @@ Key takeaways (verified by quiz + capstone):
   - One core feeds both: `bind_app_workflow` writes Path 1; `process_message`
     pushes the contextvar for Path 2.
 - ContextVar = "magic whiteboard": one name, a private copy per thread/task.
-- ask_user deadlock: in a server, the request thread blocks on
-  `user_message_queue.get()` and the answer can only arrive in a FUTURE request,
-  so nothing feeds the blocked call. Fix: `ask_user_timeout` + `CommandCancelledError`.
+- ask_user deadlock (the original problem): in a server, the request thread blocks on
+  `user_message_queue.get()` and the answer can only arrive in a FUTURE request, so nothing
+  feeds the blocked call. Fix (Topology B): no queue — `ask_user` is non-blocking; it
+  suspends the ReAct trajectory and `process_message` returns an `awaiting_user`
+  CommandOutput; the next `process_message(answer)` resumes it. No timeout needed; abandon
+  via `cancel_pending()`.
 - CommandCancelledError subclasses BaseException specifically to slip past ReAct's
   `except Exception` (react.py:136), which would otherwise swallow it into an
   observation and keep looping.
