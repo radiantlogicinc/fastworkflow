@@ -832,3 +832,21 @@ Consequences:
    Reviewer's note for the record: `command_aborted` and `not_what_i_meant` were verified to
    have zero consumers in the framework and tests; they are retained deliberately as public
    API. Formalizing the handshake protocol is possible future work, out of scope here.
+
+### A4 — Cancelled turns are recorded; memory projects completed turns only (resolves R39) — 2026-06-10
+
+1. **Record, don't shred.** `/cancel_pending` and the A2 auto-cancel-on-switch paths write a
+   turn record with `status=cancelled` under the turn's *original* conversation: the partial
+   event sequence (commands executed so far + the unanswered clarification question; event
+   shape per R1) and the payload handles already offloaded at suspend. Payload ownership
+   transfers from the pending blob to the cancelled record — no cleanup step; the R24 orphan
+   concern is dissolved for the cancel path. Sequence under the per-session lock: serialize
+   partial `TurnResult` (status=cancelled) → write record → clear pending blob.
+   (`cancel_pending()` today only resets in-memory state; it gains the record write.)
+2. **R7 interplay:** when review persistence is disabled by deployment config, cancel falls
+   back to shredding, and only that mode performs an explicit suspend-payload delete.
+3. **Agent-memory projection rule (clarifies A1.2):** the rebuilt `dspy.History` projects from
+   `status=completed` records **only**. Cancelled / failed / abandoned records are
+   review-and-observability-only and never enter agent working memory — matching today's
+   behavior, where a turn that never reached `_finalize_agent_output` never appends to
+   conversation history.

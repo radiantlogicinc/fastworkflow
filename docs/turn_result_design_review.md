@@ -30,7 +30,7 @@ refinements. "Open questions: none remaining" (section 13 of the design doc) is 
 | R40 | `TurnResult` has no turn-level success semantics | Blocking | 5.4, 5.5, 11 |
 | R41 | Live response path ambiguous: in-memory payloads vs put-then-get round trip | High | 10.3, 8.2 |
 | R38 | `/post_feedback` vs write-once review records | High | 7.5, 8.1 |
-| R39 | `/cancel_pending` (cancelled turns) unaccounted for | High | 7.6, 10.1 |
+| R39 | `/cancel_pending` (cancelled turns) unaccounted for | **RESOLVED 2026-06-10** — cancelled turns recorded; memory projects completed-only | 7.6, 10.1 |
 | R43 | CLI / `command_output_queue` contract undefined after redesign | High | 5.6, 11 |
 | R9 | `channel_id` vs conversation boundary | **RESOLVED 2026-06-10** — structural via A1; eager id reservation; auto-cancel on switch | 7.7, 8.1 |
 | R10 | Answer aliasing: copy-on-serialize hazard + headline/gallery duplication | High | 5.5, 8.3, 10.3 |
@@ -409,6 +409,28 @@ redesign this path must decide: does a cancelled turn write a review record
 (`status="cancelled"` with the partial event sequence — recommended, it is real history)? Who
 cleans up the payloads offloaded at the suspend boundary (ties to R24 — they are now referenced
 by nothing)? The design has no cancellation concept at all.
+
+**RESOLVED 2026-06-10 (with Dhar).** Decisions:
+
+1. **Cancelled turns are recorded, not shredded.** `/cancel_pending` and the A2
+   auto-cancel-on-switch paths write a turn record with `status=cancelled` under the turn's
+   *original* conversation, carrying the partial event sequence — commands executed so far plus
+   the unanswered clarification question (exact event shape per R1, pending) — and the payload
+   handles already offloaded at the suspend boundary. Payload ownership simply transfers from
+   the pending blob to the cancelled record: no special cleanup, and R24's orphan concern is
+   dissolved for the cancel path (the abandoned path remains tied to R6.3). Sequence, under the
+   per-session lock: serialize partial `TurnResult` (status=cancelled) → write record → clear
+   pending blob. Today's `cancel_pending()` (`workflow_execution_context.py:289`) only resets
+   in-memory state — it gains the record write.
+2. **R7 interplay:** if review persistence is disabled by deployment config, cancel falls back
+   to today's shred — and only in that mode does an explicit suspend-payload delete step exist.
+3. **Agent-memory projection rule (clarifies A1.2):** the rebuilt `dspy.History` is projected
+   from `status=completed` records **only**. Cancelled, failed, and abandoned records are
+   review/observability-only and never enter the agent's working memory — exactly matching
+   today's behavior (a turn that never reached `_finalize_agent_output` never appends to
+   history).
+
+Recorded in `docs/turn_result_design.md`, Amendments A4.
 
 ---
 
