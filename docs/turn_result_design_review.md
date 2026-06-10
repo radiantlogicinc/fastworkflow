@@ -24,7 +24,7 @@ refinements. "Open questions: none remaining" (section 13 of the design doc) is 
 | R3 | HTTP/MCP wire-contract break undocumented; external authors break | Blocking | 11, decisions 4, 8 |
 | R4 | Build-time generators and internal `_workflows` commands missing from change list | Blocking | 11 |
 | R5 | Artifact serialization/offload contract unspecified | Blocking | 8.2, 8.3, decision 16 |
-| R6 | Failed executions and failed turns invisible to review | Blocking | 3.1, 5.5, 7.6 |
+| R6 | Failed executions and failed turns invisible to review | **RESOLVED 2026-06-10** — capture-with-detail; record+re-raise; TTL+lazy abandon | 3.1, 5.5, 7.6 |
 | R7 | Sensitive data flips from ephemeral to durably-persisted-by-default | Blocking (compliance) | 7, 7.8 |
 | R8 | `process_action` / MCP paths not covered | Blocking | 5.5, 5.6, 10 |
 | R40 | `TurnResult` has no turn-level success semantics | Blocking | 5.4, 5.5, 11 |
@@ -342,6 +342,36 @@ Three distinct holes:
 
 See R11 for the `status` field that unifies all three, and R39 for the fourth terminal state
 (cancelled).
+
+**RESOLVED 2026-06-10 (with Dhar).** Decisions (all three holes):
+
+1. **Failed tool calls: capture with detail.** The capture point in `_execute_workflow_query`
+   wraps `invoke_command` in try/except; on failure it appends a `CommandOutput` with
+   `success=False` carrying the error type, message, and a truncated traceback in artifacts
+   (traceback surfaced only in the developer projection, R30), then lets the error flow to the
+   agent exactly as today (the ReAct loop at `utils/react.py:252` already formats it as an
+   observation). Suspension signals pass through untouched — `AskUserSuspend` already
+   subclasses `BaseException` for exactly this reason, and `CommandCancelledError` must be
+   explicitly re-raised by the wrapper.
+2. **Failed turns: record + re-raise.** `process_message` wraps the agent loop; on a fatal
+   error it writes a partial turn record (`status=failed`, the executions completed so far,
+   the exception summary) and then **re-raises**. Caller behavior is unchanged (HTTP 500s,
+   retry semantics for transient LLM/infra errors); the evidence now exists for review. The
+   never-raise alternative (always return `status=failed`) was rejected: it blurs
+   transient-infra retry semantics and changes error handling in every caller.
+3. **Abandoned turns: TTL + lazy filing.** A suspended turn older than a configurable TTL
+   (order of days; named env var to be fixed in the config inventory) is *not* resumed when
+   the channel is next touched: it is filed as `status=abandoned` (partial record; payload
+   handles transfer as in A4 cancellation) and the incoming message starts a fresh turn. No
+   background process is required for active channels; the pre-existing backlog item
+   `fix-6b4` (TTL/reaper for orphaned suspended-session blobs) remains optional future work
+   for channels that are never touched again, now scoped to that residue. Documented UX
+   change: an answer arriving after the TTL starts a fresh turn instead of resuming a stale
+   question.
+
+This also closes R24's remaining open path: cancel-path orphans were dissolved by A4, and
+abandoned-path payloads now transfer to the abandoned record at lazy-filing time. Recorded in
+`docs/turn_result_design.md`, Amendments A5.
 
 ### R7. The design silently flips sensitive data from ephemeral to durably-persisted-by-default
 

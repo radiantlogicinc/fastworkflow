@@ -850,3 +850,26 @@ Consequences:
    review-and-observability-only and never enter agent working memory — matching today's
    behavior, where a turn that never reached `_finalize_agent_output` never appends to
    conversation history.
+
+### A5 — Failure and abandonment capture (resolves R6; closes R24's remaining path) — 2026-06-10
+
+1. **Failed tool calls are captured with detail.** `_execute_workflow_query` wraps
+   `invoke_command` in try/except; on failure it appends
+   `CommandOutput(success=False)` with error type, message, and truncated traceback in
+   artifacts (traceback visible only in the developer projection), then re-raises so the
+   ReAct loop formats the observation for the agent as today. Suspension signals are passed
+   through: `AskUserSuspend` subclasses `BaseException` (immune to the wrapper);
+   `CommandCancelledError` is explicitly re-raised without capture.
+2. **Failed turns: record + re-raise.** `process_message` wraps the agent loop; a fatal error
+   writes a partial turn record (`status=failed`, executions so far, exception summary) and
+   re-raises. Caller-visible error behavior (HTTP 500s, transient-error retry semantics) is
+   unchanged.
+3. **Abandoned turns: TTL + lazy filing.** A pending suspended turn older than a configurable
+   TTL is not resumed on the channel's next touch: it is filed as `status=abandoned` (partial
+   record; payload handles transfer as in A4) and the incoming message starts a fresh turn.
+   No background reaper is required for active channels; backlog item `fix-6b4` covers the
+   never-touched-again residue as optional future work. UX note: answers arriving after the
+   TTL start a fresh turn rather than resuming the stale question.
+4. **R24 closure:** with A4 (cancel) and A5.3 (abandon), every suspend-offloaded payload ends
+   up owned by a terminal turn record; no orphan class remains except review-persistence-off
+   deployments, which delete payloads at the terminal transition instead.
