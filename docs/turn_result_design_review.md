@@ -19,7 +19,7 @@ refinements. "Open questions: none remaining" (section 13 of the design doc) is 
 |---|---------|----------|--------------------------|
 | R1 | ask_user exchanges lost; turn transcript not interleaved | **Blocking — design contradiction** | 3.1, 5.4, 7.6, 9, decision 18 |
 | R2 | Content-addressing makes co-GC incoherent; cross-tenant handle sharing | **Blocking — design contradiction** | 7.8, 8.2, decisions 13, 19 |
-| R37 | Framework already persists per-turn records (`ConversationStore`); design premises false; third overlapping store | **Blocking — design contradiction** | 7.1, 7.2, 9.1, decisions 11, 18 |
+| R37 | Framework already persists per-turn records (`ConversationStore`); design premises false; third overlapping store | **RESOLVED 2026-06-10** — full absorption into unified `ConversationTurnStore` | 7.1, 7.2, 9.1, decisions 11, 18 |
 | R42 | `next_actions`/`recommendations` still die at the agent boundary — the original bug class survives the fix | **Blocking — design contradiction** | 2.4, 5.4, 10.3, decision 2 |
 | R3 | HTTP/MCP wire-contract break undocumented; external authors break | Blocking | 11, decisions 4, 8 |
 | R4 | Build-time generators and internal `_workflows` commands missing from change list | Blocking | 11 |
@@ -198,6 +198,40 @@ single per-turn persistence unit:
 - Backend unification (Rdict → the disk/redis pair, or vice versa) can be staged, but the
   design must at minimum *decide and document* the relationship between the three stores. The
   current design is silent because it never discovered `ConversationStore`.
+
+**RESOLVED 2026-06-10 (with Dhar) — full absorption.** Decisions:
+
+1. **`ConversationStore` is eliminated as a subsystem.** A single unified store (working name
+   **`ConversationTurnStore`**) replaces both it and the previously proposed `TurnReviewStore`,
+   owning two record types:
+   - *Conversation metadata records* — key `fw:conv:{channel_id}:{conv_id}`; value
+     `{topic, summary, status (active|closed), created_at, updated_at, schema_version, metadata}`.
+   - *Turn records* — key `fw:turn:{channel_id}:{conv_id}:{sortable-ts}-{uuid}`; value = the
+     light `TurnResult` (serialization per R5/R25).
+2. **`save_conversation_incremental` is deleted.** The once-per-logical-turn record write is the
+   *only* durable turn write (the unamended design would have made the bundled server write
+   twice per turn: Rdict + review record).
+3. **All eight consumers re-point to the unified store:** session restore and
+   `/activate_conversation` project the agent's `dspy.History` from turn records
+   (`restore_history_from_turns` already shows the projection shape); `/list_conversations`
+   reads conversation metadata records; `/new_conversation` and the shutdown hook finalize the
+   metadata record (LLM topic/summary) and open the next; `/dump_conversations` iterates the
+   keyspace; `/post_feedback` attaches per R38 (now unblocked).
+4. **Source of truth for agent memory = turn records.** `conversation_history` becomes a
+   per-session in-memory cache rebuilt by projection on restore/activation. Constraint: turn
+   records must always carry the projection fields (conversation summary, traces-equivalent
+   text view, feedback reference).
+5. **Backend:** the unified store ships on the existing disk/redis split (factory mirroring
+   `get_session_state_store()`). Rdict exits the conversation subsystem entirely (it remains
+   only for `Workflow` state, out of scope).
+6. **Migration: accept loss.** Existing Rdict conversation data is neither read nor migrated;
+   agent memory starts fresh at upgrade. No legacy read path (consistent with decision 22's
+   stance for pending blobs).
+7. **Structural side effects:** R9 is resolved structurally (conversation id is a key component
+   of every turn record); with R2's turn-scoped payload keys, deleting a conversation prefix
+   co-GCs metadata, turns, and payloads under one lifecycle; design decision 11 is superseded
+   (the store pair is now *pending store + unified conversation-turn store*) and the
+   `TurnReviewStore` name is retired. Recorded in `docs/turn_result_design.md`, Amendments A1.
 
 ### R42. `next_actions` and `recommendations` still die at the agent boundary — the design fixes payloads but not the rest of the original bug class
 

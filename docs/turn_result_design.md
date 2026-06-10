@@ -196,7 +196,7 @@ This realizes "single answer + gallery of data outputs," which the existing list
 | 8 | `process_message` returns `TurnResult` (breaking) | Explicit > hidden mutable state; avoids stale-read footgun |
 | 9 | Streaming stays text-only via existing `command_trace_queue` | No live payloads needed; no durable mid-turn writes |
 | 10 | Durability = option D (light record + payload offload), once per logical turn | Preserves `action_log`-level latency; meets review |
-| 11 | Separate `TurnReviewStore` (enumerable) from pending `SessionStateStore` | Different lifecycle/access pattern |
+| 11 | ~~Separate `TurnReviewStore` (enumerable) from pending `SessionStateStore`~~ **Superseded by Amendment A1**: pending `SessionStateStore` + unified `ConversationTurnStore` (absorbs `ConversationStore`) | Different lifecycle/access pattern |
 | 12 | Enumeration only on `TurnReviewStore` | Pending store holds one in-flight turn; never lists |
 | 13 | `PayloadStore` content-addressed, disk/redis mirror | Idempotent, concurrency-safe; matches existing split |
 | 14 | Key = channel + sortable ISO-8601 GMT ts + uuid; ordinal by sorting | Backends don't preserve insertion order |
@@ -553,6 +553,10 @@ else:
 On a normal completed turn it `clear`s. So today there is **no per-turn or per-command durable
 write** on the happy path.
 
+> **[Correction — review finding R37, see Amendments A1]** This baseline holds only for the
+> xray runner. The bundled FastAPI server *does* durably persist a per-turn record on the happy
+> path (`save_conversation_incremental` → Rdict `ConversationStore`) after every turn.
+
 ### 7.2 The reframing
 
 "Can durable `command_outputs` match `action_log`'s latency?" decomposes into two independent
@@ -723,6 +727,12 @@ only when a reviewer opens that node.
 - **Plumbing:** serialized in `serialize_state` (`"action_log"`), restored in `apply_serialized_state`.
 - **No external consumer.** xray never reads `action_log` or `action.jsonl` (verified by repo grep:
   the only `_store.*` and `serialize_state` references are the runner's pending-store calls).
+
+  > **[Correction — review finding R37, see Amendments A1]** The "sole consumer" framing is
+  > incomplete. The full chain is: `action_log` → `(summary, traces)` →
+  > `conversation_history` (dspy.History) → (a) the agent's cross-turn memory
+  > (`_refine_user_query`, session restore), (b) durable `ConversationStore` persistence in the
+  > bundled server, and (c) the `/post_feedback` target. Retiring `action_log` touches all three.
 - **`action.jsonl` mirroring is CLI-only** (`ChatSession` sets `mirror_action_log_to_file=True`;
   the WEC/FastAPI path leaves it `False`), so in serving there is **zero file I/O** for `action_log`.
 - **Perf profile:** in-memory `list[dict]`, O(1) append, read once per turn, serialized only inside
@@ -741,3 +751,47 @@ durability" does not gate this: the in-memory subsumption is independent of how/
 `TurnResult`** (records + payload handles), per section 7.6. The CLI `action.jsonl` mirror, if kept
 for debugging, derives from `command_outputs`; otherwise it is dropped (CLI-only, no external
 contract).
+
+---
+
+## Amendments from the critical review
+
+Resolutions adopted after the systematic review of `docs/turn_result_design_review.md`
+(beads epic `fix-vof`). Each amendment supersedes the referenced sections/decisions above.
+
+### A1 — Unified `ConversationTurnStore` (resolves R37; supersedes decision 11; corrects 7.1/7.2 and 9.1) — 2026-06-10
+
+The review discovered that the framework already persists per-turn records durably: every
+resolution path appends `{conversation summary, conversation_traces, feedback}` to
+`conversation_history` (dspy.History), and the bundled FastAPI server persists it after every
+turn via `save_conversation_incremental` into the Rdict-backed `ConversationStore`
+(conversation ids, LLM topics/summaries, `/list_conversations`, `/activate_conversation`,
+`/post_feedback`, admin dump, session-restore of agent memory).
+
+**Decision: full absorption.** `ConversationStore` is eliminated as a subsystem and
+`TurnReviewStore` is not built under that name. A single unified store —
+**`ConversationTurnStore`** — owns two record types:
+
+- **Conversation metadata records:** key `fw:conv:{channel_id}:{conv_id}`; value
+  `{topic, summary, status (active|closed), created_at, updated_at, schema_version, metadata}`.
+- **Turn records:** key `fw:turn:{channel_id}:{conv_id}:{sortable-ts}-{uuid}`; value = the
+  light `TurnResult`.
+
+Consequences:
+
+1. `save_conversation_incremental` is deleted; the once-per-logical-turn record write is the
+   only durable turn write (one write per turn, not two).
+2. All consumers re-point: session restore and `/activate_conversation` rebuild `dspy.History`
+   by **projection from turn records** (turn records are the source of truth for agent
+   cross-turn memory; the in-memory History is a per-session cache). Turn records must always
+   carry the projection fields (conversation summary, traces-equivalent text view, feedback
+   reference). `/list_conversations` reads metadata records; `/new_conversation` and the
+   shutdown hook finalize the metadata record and open the next; `/dump_conversations`
+   iterates the keyspace; `/post_feedback` attaches per R38.
+3. The conversation id becomes a structural component of every turn key (resolves R9's
+   namespace question); with turn-scoped payload keys (R2, pending resolution), deleting a
+   conversation prefix co-GCs metadata, turns, and payloads under one lifecycle.
+4. Backend: disk/redis split, factory mirroring `get_session_state_store()`. Rdict exits the
+   conversation subsystem (remains only for `Workflow` state).
+5. Migration: **accept loss** — existing Rdict conversation data is neither read nor migrated;
+   no legacy read path (consistent with decision 22).
