@@ -32,7 +32,7 @@ refinements. "Open questions: none remaining" (section 13 of the design doc) is 
 | R38 | `/post_feedback` vs write-once review records | High | 7.5, 8.1 |
 | R39 | `/cancel_pending` (cancelled turns) unaccounted for | High | 7.6, 10.1 |
 | R43 | CLI / `command_output_queue` contract undefined after redesign | High | 5.6, 11 |
-| R9 | `channel_id` vs conversation boundary | High | 7.7, 8.1 |
+| R9 | `channel_id` vs conversation boundary | **RESOLVED 2026-06-10** — structural via A1; eager id reservation; auto-cancel on switch | 7.7, 8.1 |
 | R10 | Answer aliasing: copy-on-serialize hazard + headline/gallery duplication | High | 5.5, 8.3, 10.3 |
 | R11 | `awaiting_user` artifact-sniffing → first-class turn status | High | 5.5, 7.6, 10.1 |
 | R46 | Big-bang release sequencing; no staged migration path | High (process) | 11, decisions 4, 8, 22 |
@@ -423,6 +423,33 @@ across conversations with no way to scope a review to one conversation. Include 
 conversation id in the key (or as required record metadata with a filtered listing) — sourced
 from `ConversationStore`, which already owns that counter. Also define the edge case: switching
 conversations (`/new_conversation`, `/activate_conversation`) while a turn is suspended.
+
+**RESOLVED 2026-06-10 (with Dhar).** Decisions:
+
+1. **Namespace: resolved structurally by R37/A1.** The conversation id is a key component of
+   every turn record (`fw:turn:{channel_id}:{conv_id}:{sortable-ts}-{uuid}`). Per-conversation
+   review listing is a prefix scan; channel-wide observability scans remain possible via the
+   channel prefix (ordering via the timestamp segment / stored ordinal per R18).
+2. **Conversation id reservation is eager.** `active_conversation_id` is guaranteed to exist at
+   session creation (restore-last or reserve-new), not reserved lazily on first save — required
+   because R16 mints the turn key at logical-turn start. Deployments that never rotate
+   conversations (e.g., xray today) get a single implicit conversation with zero management
+   burden.
+3. **Switch policy: auto-cancel.** Verified that neither `/new_conversation`
+   (`__main__.py:1174`) nor `/activate_conversation` (`:1349`) checks `awaiting_user` or the
+   pending store today — a suspended turn silently survives the switch and the next message
+   resumes a clarification from the previous conversation, which under A1 would diverge agent
+   memory from the store. Decision: when a turn is suspended, both endpoints first **cancel**
+   it — record the partial turn under its *original* conversation with `status=cancelled` (R39
+   semantics), clean up the pending blob and suspend-offloaded payloads (R24) — then proceed
+   with the switch. The "carry across" status quo is rejected as incoherent with A1; "block
+   with 409" rejected on UX grounds (clients shouldn't need a resolve-or-cancel modal).
+4. **Implementation note:** both endpoints currently run without `runtime.lock`; the
+   cancel-then-switch sequence must execute under the per-session lock (as `/cancel_pending`
+   already does).
+
+Cross-references: depends on R39's `cancelled` status (direction set by the R11 enum) and
+R24's orphan cleanup. Recorded in `docs/turn_result_design.md`, Amendments A2.
 
 ### R38. `/post_feedback` conflicts with write-once review records
 

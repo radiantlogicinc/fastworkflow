@@ -795,3 +795,21 @@ Consequences:
    conversation subsystem (remains only for `Workflow` state).
 5. Migration: **accept loss** — existing Rdict conversation data is neither read nor migrated;
    no legacy read path (consistent with decision 22).
+
+### A2 — Conversation scoping and switch semantics (resolves R9) — 2026-06-10
+
+1. **Turn namespace:** per A1, the conversation id is structural in every turn key
+   (`fw:turn:{channel_id}:{conv_id}:{sortable-ts}-{uuid}`). Per-conversation review listing is
+   a prefix scan; channel-wide scans use the channel prefix.
+2. **Eager conversation-id reservation:** `active_conversation_id` is guaranteed at session
+   creation (restore-last or reserve-new). Required because the turn key is minted at
+   logical-turn start (R16). Deployments that never call `/new_conversation` operate in a
+   single implicit conversation.
+3. **Auto-cancel on conversation switch:** `/new_conversation` and `/activate_conversation`,
+   when a turn is suspended (`awaiting_user` or a durable pending blob), first cancel it —
+   recording the partial turn under its *original* conversation with `status=cancelled` and
+   cleaning up the pending blob plus suspend-offloaded payloads — then proceed with the
+   switch. (Today neither endpoint checks suspension at all; the pending turn silently
+   survives the switch and the next message resumes a clarification from the previous
+   conversation.) The cancel-then-switch sequence runs under the per-session lock, which
+   these endpoints currently do not acquire.
