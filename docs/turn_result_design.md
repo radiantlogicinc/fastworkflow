@@ -1,0 +1,743 @@
+# TurnResult, `CommandOutput` redesign, and durable turn-output persistence
+
+Design note for fastWorkflow (framework-owned) plus its xray integration. This document
+captures the **complete** investigation, the full design debate, and the **minutiae of every
+decision** that produced the design below. Nothing is omitted; minor and "obvious" decisions
+are recorded deliberately so the rationale survives.
+
+Status: **design complete, not yet implemented.** No code has been changed. No bd epic filed
+(by request).
+
+---
+
+## 0. Origin: the bug that started this
+
+### 0.1 Symptom
+
+`POST /invoke` (xray FastAPI) always returns `payload = None`, even for natural-language data
+questions that clearly produced a table or chart.
+
+### 0.2 The producer is correct
+
+`NLQueryTool.process_query_results` (`shared/src/tools/nlquery_tool.py`) builds a `ResponseTuple`
+with a real payload:
+
+- `payload_hint` is computed as `"chart"` / `"table"` / `"text"`.
+- `payload` is a CSV string: `df.write_csv(...)` for charts, or
+  `df.head(MAXROWS_TABLEPAYLOAD).write_csv(...)` for tables.
+- Returns `ResponseTuple(request_id, response=data_summary, payload_hint, payload, actions=None)`.
+
+### 0.3 The mapping layer is correct
+
+`shared/src/fastworkflows/access_review/_commands/_response_mapping.py` round-trips the tuple
+through fastWorkflow's `CommandOutput`:
+
+- `response_tuple_to_command_output()` packs `payload_hint`, `payload`, `actions`, `request_id`
+  into `CommandOutput.command_responses[0].artifacts`.
+- `command_output_to_response_tuples()` reads them back out, iterating
+  `command_output.command_responses` and returning a `List[ResponseTuple]`.
+
+The module docstring explicitly notes this is "intentional framework glue": the table/chart
+payload travels through `artifacts` because `CommandResponse` only carries a text `response`.
+
+### 0.4 The command handler is correct
+
+`answer_data_question.ResponseGenerator.__call__` calls `process_sql_query`, gets the
+`ResponseTuple`, and returns `response_tuple_to_command_output(workflow.id, response)`. The
+payload is present in the `CommandOutput` it returns.
+
+So every xray-owned component preserves the payload. The loss is inside the framework.
+
+---
+
+## 1. Root-cause investigation (agent mode drops artifacts)
+
+The xray runner constructs each per-session `WorkflowExecutionContext` (WEC) with
+`run_as_agent=True` (`shared/src/application/fastworkflow_runner.py`, `_create_runtime`). In agent
+mode, `WorkflowExecutionContext.process_message` does **not** return the command's `CommandOutput`.
+It routes:
+
+```
+process_message
+  -> _should_run_agent_for_message == True (run_as_agent and not assistant '/'-command)
+  -> _process_agent_message            (or _resume_agent_message when awaiting_user)
+  -> _finalize_agent_output
+```
+
+Two places destroy the payload:
+
+### 1.1 The ReAct tool boundary is text-only
+
+The agent invokes commands as a DSPy ReAct tool, `execute_workflow_query`, implemented by
+`_execute_workflow_query` in `fastworkflow/workflow_agent.py`. It calls
+`CommandExecutor.invoke_command(...)`, which returns the full `CommandOutput` (artifacts intact),
+but then extracts **only the text**:
+
+```python
+response_text = ""
+if command_output.command_responses:
+    response_parts = [cr.response for cr in command_output.command_responses if cr.response]
+    response_text = "\n".join(response_parts) or "Command executed successfully but produced no output."
+...
+return response_text
+```
+
+The `artifacts` dict (`payload`, `payload_hint`, `request_id`, `actions`) is never read. Only the
+`response` text enters the agent's reasoning. This is by design: DSPy ReAct tools return string
+observations, so the agent reasons over text only.
+
+### 1.2 The agent synthesizes a fresh `CommandOutput`
+
+After the ReAct loop, `_finalize_agent_output` builds a **brand-new** `CommandOutput` from the
+agent's `final_answer`, attaching only a `conversation_summary` artifact:
+
+```python
+command_response = fastworkflow.CommandResponse(response=result_text)
+if self._action_log:
+    conversation_summary, conversation_traces = self._extract_conversation_summary(...)
+    command_response.artifacts["conversation_summary"] = conversation_summary
+command_output = fastworkflow.CommandOutput(command_responses=[command_response])
+```
+
+So the `CommandOutput` that reaches the runner's `command_output_to_response_tuples` has artifacts
+`{conversation_summary, maybe awaiting_user}` — **no `payload` key**. Therefore:
+
+- `artifacts.get("payload")` -> `None`
+- `payload_hint` falls back to its default `"text"`
+- `request_id` falls back to `-1`
+
+### 1.3 Confirming signature
+
+In agent mode the FastAPI response shows **not just** `payload=None` but also `payload_hint="text"`
+and `request_id=-1`, regardless of the query, and `response` is the LLM-rephrased `final_answer`
+rather than the exact `data_summary`. By contrast, the deterministic `/`-prefixed assistant-mode
+path (`_process_message`) returns the command's **actual** `CommandOutput` verbatim, so payload
+*would* survive there. That divergence is the tell: the agent path is the culprit, not the mapping
+module.
+
+### 1.4 Why this is architectural, not a mapping bug
+
+`_response_mapping.py` assumes the `CommandOutput` round-trips intact. That holds for direct command
+execution but is violated by ReAct agent mode, where the framework deliberately collapses tool
+outputs to text (the agent reasons over text observations) and emits its own final answer.
+Artifacts are framework-internal and are not part of the agent's tool -> observation -> final-answer
+contract.
+
+---
+
+## 10. Runner and xray integration
+
+### 10.1 Runner: write review on the completion branch
+
+`shared/src/application/fastworkflow_runner.py` `_persist_pending_after_turn` currently does:
+
+```python
+if runtime.ctx.awaiting_user or _output_is_awaiting_user(command_output):
+    self._store.save(key, runtime.ctx.serialize_state(channel_id=key))   # pending (light partial)
+else:
+    self._store.clear(key)                                               # completed
+```
+
+**Change:** the `else` (completed, not-awaiting) branch must ALSO write the completed `TurnResult` to
+the `TurnReviewStore` (after offloading payloads). This runs **inside the per-session lock**
+(`run_turn` holds `runtime.lock`), so per-session review writes are serialized and safe. It must NOT
+be wired only into the suspend path. The pending-store `save` continues to carry the light partial
+across suspends.
+
+### 10.2 `process_message` return type
+
+`run_turn` will receive a `TurnResult` from `ctx.process_message` (section 5.6) rather than a
+`CommandOutput`. The runner maps it to the xray API (`List[ResponseTuple]`).
+
+### 10.3 xray `command_output_to_response_tuples` change
+
+Today it iterates `command_output.command_responses`. After the redesign it consumes a `TurnResult`:
+
+- The **headline** `ResponseTuple` is built from `TurnResult.answer` (the narrative; `payload` may be
+  `None`).
+- Then one `ResponseTuple` per **payload-bearing** `CommandOutput` in `TurnResult.command_outputs`
+  (the gallery), fetching payloads lazily from the `PayloadStore` by handle.
+- **The UI decides which payload is the headline, if any** (user decision); the framework/mapping does
+  not designate a primary payload. The gallery is the raw payload-bearing outputs in turn order.
+
+This realizes "single answer + gallery of data outputs," which the existing list-returning shape of
+`command_output_to_response_tuples` already accommodates.
+
+---
+
+## 11. Mechanical changes (no design debate, recorded for completeness)
+
+- **`CommandOutput.to_mcp_result()`** currently iterates `command_responses` to build MCP content;
+  update for the single `command_response` collapse.
+- **`CommandExecutor`** accessors `command_output.command_responses[0]` (e.g. `command_executor.py`
+  lines 56-57, the `artifacts["command_name"]` / `artifacts["cmd_parameters"]` reads) update to
+  `command_output.command_response`.
+- **`workflow_execution_context.py`** construction sites (lines 419, 522, 558) and
+  **`workflow_agent.py:276`** switch from `command_responses=[r]` to `command_response=r`.
+- **All command authors / examples** that return `CommandOutput(command_responses=[r])` migrate to
+  `command_response=r` (mechanical; section 4.1 shows all are single-element).
+- **`SCHEMA_VERSION`** bump in `session_state_store.py` for the new serialized shape.
+- **Old-schema migration is out of scope** (user decision): handled by a separate migration tool if
+  deemed necessary. In-flight suspended sessions serialized under the old shape are not auto-migrated.
+
+---
+
+## 12. Decision log (quick reference)
+
+| # | Decision | Rationale |
+|---|----------|-----------|
+| 1 | Patch the framework (not arc side-channel / agent bypass) | User owns fastWorkflow; most correct |
+| 2 | Accumulate ALL tool-call outputs per turn | Full fidelity; last-wins/attributed rejected |
+| 3 | Unit of accumulation is `CommandOutput`, not `CommandResponse` | Preserves provenance; avoids poisoning predicates |
+| 4 | Collapse `CommandOutput.command_responses` -> single `command_response` | Provably-unused list; removes competing multiplicity axis |
+| 5 | Recursion seam is `CommandOutput.nested_turn`, modeled now | Recursion belongs on execution node; nested agents imminent |
+| 6 | `TurnResult.answer` is a `CommandResponse` | Answer is a value, not an execution; str too lossy |
+| 7 | Turn metadata on `TurnResult`, not on `answer` | Answer spans contexts; entry context is a turn property |
+| 8 | `process_message` returns `TurnResult` (breaking) | Explicit > hidden mutable state; avoids stale-read footgun |
+| 9 | Streaming stays text-only via existing `command_trace_queue` | No live payloads needed; no durable mid-turn writes |
+| 10 | Durability = option D (light record + payload offload), once per logical turn | Preserves `action_log`-level latency; meets review |
+| 11 | Separate `TurnReviewStore` (enumerable) from pending `SessionStateStore` | Different lifecycle/access pattern |
+| 12 | Enumeration only on `TurnReviewStore` | Pending store holds one in-flight turn; never lists |
+| 13 | `PayloadStore` content-addressed, disk/redis mirror | Idempotent, concurrency-safe; matches existing split |
+| 14 | Key = channel + sortable ISO-8601 GMT ts + uuid; ordinal by sorting | Backends don't preserve insertion order |
+| 15 | Summary is value metadata, not key | Unsafe/long/collision-prone; couples to LLM call |
+| 16 | Offload payloads at every persistence boundary (suspend + completion) | Keeps suspend blob light; resume needs no payload fetch |
+| 17 | Review write on the completion branch, inside per-session lock | Serialized + safe; not the suspend path |
+| 18 | Retire `action_log`; derive summary text view from `command_outputs` | Zero regression; removes divergence |
+| 19 | Retention/GC out of scope; infra co-GC record+payload under one lifecycle key | Plus reader tolerates missing payload |
+| 20 | Nested turns embedded-only; top-level keys for user-message turns | Serializer recurses; nested addressed by path |
+| 21 | UI decides headline payload | Framework surfaces raw gallery in turn order |
+| 22 | Old-schema migration out of scope (separate tool) | Bump `SCHEMA_VERSION` |
+
+---
+
+## 13. Open questions
+
+None remaining. The capture side (types, single-producer/three-sinks, `action_log` retirement) and
+the review side (key schema, two stores, payload offload, persistence boundaries, recursion,
+GC contract) are all resolved per the decision log above. Remaining work is implementation, tracked
+separately from this document.
+
+### 1.5 Fix options considered for the symptom (before going deeper)
+
+Three options were enumerated for getting payload back to the API:
+
+1. **Side-channel through the `arc`.** `process_query_results` already holds the
+   `AccessReviewContext` and `request_id`; stash the last `(payload_hint, payload, actions)` on the
+   arc, read it in the runner after `run_turn`. Least invasive, framework-agnostic.
+2. **Bypass the agent for pure data questions.** Route data-query turns through the deterministic
+   `_process_message` path so the real `CommandOutput` survives.
+3. **Patch the framework** to carry artifacts through the agent path. Most correct, but the user
+   owns fastWorkflow, so this is viable — and it raised the central question below.
+
+The user owns fastWorkflow and chose to patch the framework. That immediately surfaced the design
+question that drives the rest of this document.
+
+---
+
+## 2. The central question: multiple tool calls per turn
+
+> "Since an agent is involved, the output could include command artifacts from multiple tool calls.
+> Is fastWorkflow designed to handle this scenario?"
+
+### 2.1 Where multiplicity is *supported* by the data model
+
+- `CommandOutput.command_responses` is a **list** of `CommandResponse`.
+- Each `CommandResponse` carries its own `artifacts: dict`, plus `next_actions: list[Action]` and
+  `recommendations: list[Recommendation]`.
+- xray's `command_output_to_response_tuples` already **iterates** that list and returns a
+  `List[ResponseTuple]`, and `FastWorkflowRunner.invoke` returns `List[ResponseTuple]`.
+
+So the plumbing from `CommandOutput` outward is already built to surface N results with N payloads.
+
+### 2.2 Where multiplicity is *dropped* by the agent
+
+1. The tool boundary returns `str` (section 1.1).
+2. The only per-turn accumulator, `action_log`, stores text-only records
+   `{command, command_name, parameters, response}` — no artifacts.
+3. The turn collapses to a single synthesized `CommandResponse` (section 1.2).
+
+### 2.3 Conclusion
+
+- **Transport/model layer:** yes, structurally supports multiple results, each with artifacts.
+- **Agent layer:** no, deliberately not. ReAct's contract is *N text observations -> 1 text final
+  answer*. Artifacts never enter the agent's reasoning or output.
+
+Therefore a patch is not a one-liner: the semantics of "which artifacts, from which of several tool
+calls" must be defined first, because the synthesized `final_answer` is a single narrative while
+payloads come from individual, possibly multiple, tool calls.
+
+### 2.4 Semantic options enumerated
+
+- **Last-payload-wins:** track the most recent artifact-bearing output; wrong for multi-part answers.
+- **Accumulate all:** collect every tool call's result for the turn and surface them.
+- **Attributed:** surface only payloads the `final_answer` actually used; requires the agent to emit
+  references/citations (a signature/prompt change).
+
+The user selected **accumulate all** for full fidelity.
+
+---
+
+## 3. Unit of accumulation: `CommandOutput`, not `CommandResponse`
+
+An initial proposal was to emit each tool call's artifacts as **additional `CommandResponse`
+entries** in the final `CommandOutput`. The user rejected this, and was correct. Critique:
+
+1. **It corrupts derived predicates.** `CommandOutput` has `success = all(r.success ...)`,
+   `command_aborted = any(r.artifacts.get("command_name") == "abort" ...)`,
+   `command_handled = any(r.artifacts.get("command_handled") ...)`, and
+   `not_what_i_meant = any(r.artifacts.get("command_name") == "misunderstood_intent" ...)`.
+   Injecting intermediate tool outputs into `command_responses` poisons all of these aggregates.
+2. **`CommandResponse` is the wrong unit.** A tool call returns a whole `CommandOutput`:
+   `command_name`, `command_parameters`, `workflow_name`, `context`, `success`, **and**
+   `command_responses[*].artifacts`. Flattening to a bare `CommandResponse` discards provenance.
+3. **Execution unit == storage unit.** Each `execute_workflow_query` -> `invoke_command` produces
+   exactly one `CommandOutput`. A `list[CommandOutput]` per `process_message` is a faithful 1:1
+   transcript of the turn.
+
+**Decision:** the turn stores a `list[CommandOutput]`. The synthesized final answer stays a separate,
+pristine object; per-tool-call outputs live in their own container.
+
+### 3.1 Single clean insertion point
+
+Every command execution — including nested intent-clarification commands and the
+`PARAMETER_EXTRACTION` abort — funnels through one call in `_execute_workflow_query`:
+
+```python
+command_output = CommandExecutor.invoke_command(chat_session_obj, command)
+```
+
+Appending `command_output` to a WEC-held turn list right here captures everything with no
+path-by-path plumbing. The agent helper tools `what_can_i_do`, `intent_misunderstood`, and
+`ask_user` return strings and never reach `invoke_command`, so they are naturally excluded.
+
+---
+
+## 4. Empirical findings that grounded the type redesign
+
+### 4.1 `list[CommandResponse]` is never used with more than one element
+
+A search of the entire installed framework **and** its bundled examples
+(`fastworkflow/examples/retail_workflow/...`) found:
+
+- Every `CommandOutput(command_responses=[...])` construction uses a **single-element** list.
+- **Zero** `command_responses.append(...)` or `.extend(...)` sites.
+
+Construction sites observed: all retail example commands, `workflow_execution_context.py` (lines
+419, 522, 558 — the cancelled/awaiting/finalize paths), `workflow_agent.py:276` (ask_user tool),
+`command_executor.py:34` (empty-command guard). All single-element.
+
+Conclusion: the `list[CommandResponse]` is **speculative generality**, never exercised. Collapsing
+it to a single `CommandResponse` is lossless in practice.
+
+### 4.2 The command `ResponseGenerator` returns the `CommandOutput`
+
+`CommandExecutor.perform_action` calls `response_generation_object(workflow, ...)` and type-checks
+that the result is a `CommandOutput` (raises `TypeError` otherwise). `invoke_command` then sets
+`workflow_name`, `context`, `command_name`, `command_parameters` on it. So the only multiplicity that
+exists is author-controlled and unused.
+
+### 4.3 There is no nested-workflow execution loop today
+
+There is no separate "run a child workflow as its own turn" mechanism. Nesting today is **context
+switching within one WEC** (the `active_workflow` ContextVar push/pop and
+`current_command_context`), and each step still yields one flat `CommandOutput` tagged with
+`workflow_name` / `context`. `command_executor.py` references `MAX_DELEGATION_DEPTH` and "delegation
+hops," but no recursion into a sub-turn is produced at runtime. So today the turn is a flat list;
+recursion is a future concern (see section 5.3 and the user's "nested agents almost right away").
+
+---
+
+## 5. The type algebra (final)
+
+Three levels of granularity were identified: a command's result *value*, a command *execution*, and
+a *turn*. The redesign assigns one type to each.
+
+### 5.1 `CommandResponse` — the result value (unchanged)
+
+```python
+class CommandResponse(BaseModel):
+    response: str
+    success: bool = True
+    artifacts: dict[str, Any] = {}
+    next_actions: list[Action] = []
+    recommendations: list[Recommendation] = []
+```
+
+A pure value: human-facing text + structured artifacts + follow-ups. **No execution provenance.**
+
+### 5.2 `CommandOutput` — one command execution (collapsed + recursion seam)
+
+```python
+class CommandOutput(BaseModel):
+    command_response: CommandResponse          # was: command_responses: list[CommandResponse]
+    command_name: str = ""
+    command_parameters: str = ""
+    workflow_name: str = ""
+    context: str = ""
+    nested_turn: Optional["TurnResult"] = None # set only when this command ran a sub-agent/workflow
+
+    @property
+    def success(self) -> bool:
+        return self.command_response.success
+    @property
+    def command_aborted(self) -> bool:
+        return self.command_response.artifacts.get("command_name") == "abort"
+    @property
+    def command_handled(self) -> bool:
+        return self.command_response.artifacts.get("command_handled", False) is True
+    @property
+    def not_what_i_meant(self) -> bool:
+        return self.command_response.artifacts.get("command_name") == "misunderstood_intent"
+```
+
+**Decisions captured:**
+
+- Collapse `command_responses: list` -> `command_response: CommandResponse` (section 4.1 proves it
+  is lossless). This removes the *competing multiplicity axis*: multiplicity now lives in exactly one
+  place — `TurnResult.command_outputs` ("the commands this turn ran") — instead of being split between
+  "multiple responses per command" and "multiple commands per turn."
+- The predicates simplify from `all(...)`/`any(...)` folds to single reads.
+- `nested_turn` is the **recursion seam** (section 5.3).
+
+### 5.3 Recursion belongs on the execution node, not the value
+
+The question "could a `CommandResponse` be a `TurnResult`?" was rejected: it conflates a *leaf value*
+with an *aggregate*, and would make the simplest type the recursive one. When a command delegates to a
+sub-agent over a child workflow, the thing that recurses is the **execution**. So the seam is
+`CommandOutput.nested_turn: Optional[TurnResult]`.
+
+- The common (flat) case stays flat; a tree appears only where real nesting happens.
+- The user foresees nested agents "almost right away," so `nested_turn` is modeled **now** (not just
+  reserved), and the serializer is designed to recurse from the start (section 8).
+- Today's context-switch nesting is still captured by `workflow_name`/`context` on flat outputs;
+  `nested_turn` is for true sub-agent turns.
+
+### 5.4 `TurnResult` — one logical turn (new)
+
+```python
+class TurnResult(BaseModel):
+    user_message: str
+    entry_workflow_name: str = ""
+    entry_context: str = ""
+    answer: CommandResponse              # synthesized agent answer (NOT a command execution)
+    command_outputs: list[CommandOutput] = []
+```
+
+**Decisions captured:**
+
+- **`answer` is a `CommandResponse`, not a `CommandOutput`.** The agent's answer is *not* a command
+  execution: it has no `command_name`/`command_parameters`, and predicates like `command_aborted`
+  are meaningless for a synthesized narrative. Typing it as `CommandOutput` would force fabricated
+  empty provenance and carry never-true predicates — that was the "smell." A `CommandResponse` is the
+  right shape: text + artifacts + next_actions + recommendations, without provenance.
+- **`answer` is not plain `str`.** Plain text is too lossy: the answer legitimately wants artifacts
+  (a headline payload reference), `next_actions`, and `recommendations`.
+- **Turn metadata (`user_message`, `entry_workflow_name`, `entry_context`) lives on `TurnResult`,
+  not on the answer.** The answer can span multiple workflows/contexts (the agent called commands
+  across contexts), so "the workflow of the answer" is ill-defined; "the workflow the turn entered
+  in" is well-defined and is a turn property. Per-command workflow/context already live on each
+  `CommandOutput`.
+
+### 5.5 Uniformity across the three resolution paths
+
+`process_message` resolves a turn in three ways; all must populate `command_outputs` identically so
+consumers never branch on mode:
+
+- **Agent** (`_finalize_agent_output`): `answer` = synthesized `final_answer` wrapped as
+  `CommandResponse` (+ `conversation_summary` artifact when available); `command_outputs` = the
+  accumulated executions.
+- **Deterministic `/`-command** (`_process_message`): `command_outputs == [the one CommandOutput]`
+  and `answer == command_outputs[-1].command_response`. No mode-branching for consumers.
+- **Suspend/resume** (`_resume_agent_message`): accumulation spans the **logical** turn (section 7).
+
+### 5.6 `process_message` return contract
+
+**Decision:** break the `process_message` signature to return a `TurnResult` (or
+`(answer, command_outputs)`), rather than exposing the accumulated list as hidden mutable WEC state.
+
+Rationale: a side-channel property (`ctx.last_turn_command_outputs`) creates temporal coupling — the
+value is valid only until the next turn clears it, and a caller who forgets to read-before-next-message
+gets silently stale data. The user owns the framework and accepted the breaking change, so the
+explicit typed return is preferred and removes the footgun.
+
+---
+
+## 6. Streaming investigation (does durability need to be mid-turn?)
+
+The user streams agent activity in the UX (CLI / Chat UI) so the user sees progress. Question: does
+that require **durable** mid-turn writes?
+
+### 6.1 Streaming uses a separate in-memory channel
+
+Streaming rides the `command_trace_queue` carrying `CommandTraceEvent`s — **not** persistence. The
+producer emits two events per command execution at the same `invoke_command` choke point:
+`AGENT_TO_WORKFLOW` (before) and `WORKFLOW_TO_AGENT` (after), in `_process_message`,
+`_process_action`, and `_execute_workflow_query`.
+
+Consumers drain it live:
+
+- **CLI** `fastworkflow/run/__main__.py` (`command_trace_queue.get_nowait()` / `get(timeout=0.1)`).
+- **Bundled FastAPI MCP server** `fastworkflow/run_fastapi_mcp/utils.py`: runs `process_message` in
+  an executor and polls the queue every 50 ms, firing `on_trace` callbacks while the turn runs, then
+  calls `persist_pending_after_turn` **once after** the turn. Streaming and persistence are already
+  cleanly separated.
+
+### 6.2 The trace event is text-only
+
+```python
+@dataclass
+class CommandTraceEvent:
+    direction: CommandTraceEventDirection
+    raw_command: str | None
+    command_name: str | None
+    parameters: dict | str | None
+    response_text: str | None
+    success: bool | None
+    timestamp_ms: int
+```
+
+No artifacts/payloads. So today the UI can stream "ran answer_data_question ✓" but cannot stream the
+table/chart into a gallery mid-turn. Streaming live payloads would require **enriching the trace
+carrier** with the `CommandOutput`/payload-handle — still an in-memory queue change, zero durable
+hot-path I/O.
+
+### 6.3 Decisions
+
+- **Mid-turn durable writes (option C below) are NOT required for streaming.** Streaming is an
+  ephemeral in-memory queue; durable `command_outputs` is for post-hoc review and is written once per
+  (logical) turn.
+- **Live payloads in the gallery are NOT needed** (user decision): text-trace streaming is enough.
+  Therefore `CommandTraceEvent` is **left unchanged** and the producer does not need a fourth sink.
+
+### 6.4 Gap noted (not in scope to fix here)
+
+xray's own `shared/src/application/main.py` wires **none** of the streaming machinery — no queues, no
+SSE — it is pure request/response (only a lifespan `yield`). The runner never calls
+`set_transport_queues`. So the Chat UI streaming runs through the bundled fastWorkflow MCP server or a
+separate frontend, **not** xray's `/invoke`. If the Chat UI is meant to stream through xray, that
+wiring does not exist in this repo yet. Recorded as a known gap.
+
+### 6.5 Architecture: one producer, three sinks
+
+The same `CommandOutput` from the `invoke_command` choke point fans out to three sinks differing only
+in lifetime/transport:
+
+1. **Live `command_trace_queue`** -> streaming UX (text-only today; unchanged per 6.3).
+2. **In-memory `command_outputs` list** -> turn accumulation (subsumes `action_log`, section 9).
+3. **Durable store, once per logical turn** -> review (section 7, option D).
+
+---
+
+## 7. Durability for review
+
+### 7.1 Current persistence mechanism (baseline)
+
+`fastworkflow/session_state_store.py` defines `SessionStateStore` (ABC) with
+`load`/`save`/`clear`/`exists`, keyed by `channel_id`, with two backends:
+
+- `DiskSessionStateStore` — one JSON file per channel (`{safe_id}_pending.json`), `json.dump(..., default=str)`.
+- `RedisSessionStateStore` — one JSON string per channel under `fw:session:pending:{channel_id}`.
+
+Factory `get_session_state_store()` selects via `SESSION_STATE_STORE=disk|redis`.
+
+In the xray runner, durable I/O fires **only at suspend/eviction**:
+
+```python
+if runtime.ctx.awaiting_user or _output_is_awaiting_user(command_output):
+    self._store.save(key, runtime.ctx.serialize_state(channel_id=key))
+else:
+    self._store.clear(key)
+```
+
+On a normal completed turn it `clear`s. So today there is **no per-turn or per-command durable
+write** on the happy path.
+
+### 7.2 The reframing
+
+"Can durable `command_outputs` match `action_log`'s latency?" decomposes into two independent
+questions:
+
+1. **In-memory turn accumulation** (subsumes `action_log`): `command_outputs` is also just an
+   in-memory list with O(1) append. **Zero regression.** Unconditionally safe.
+2. **Durability for review** (new requirement): `action_log` never persisted on completed turns, so
+   there is no baseline to regress against. Cost depends entirely on when/where/what we persist.
+
+### 7.3 Options enumerated with latency profiles
+
+- **A — In-memory + whole-blob at suspend only (status quo extended).** Hot-path cost identical to
+  `action_log` (zero on completed turns), but completed turns are cleared, so it does **not** satisfy
+  "available for review." Rejected as the primary mechanism.
+- **B — Persist `TurnResult` once per turn (whole-blob).** One write at turn end (~ms disk / sub-ms
+  Redis), trivial behind a multi-second LLM turn. Meets review. Risk: large values if payloads are
+  inlined.
+- **C — Incremental per-command append (append-only log).** N writes per turn; the only option that
+  reintroduces hot-path I/O comparable to CLI's `action.jsonl` mirror (esp. disk `fsync`). Needed
+  only for streaming/mid-turn durability — and section 6 shows streaming does **not** need it.
+- **D — Split storage: light metadata fast-path + payload offload (CHOSEN).** Keep in-memory
+  `command_outputs`; persist a **light** `TurnResult` (records + artifact keys + payload **handles**)
+  into the store, and offload large payloads (CSV) to a separate content-addressed payload store,
+  fetched lazily on review. Keeps the suspend blob and the per-turn record `action_log`-sized,
+  preserving latency; "single answer + gallery" lists cheaply and hydrates payloads on demand.
+
+### 7.4 Decisions
+
+- **Persist timing:** once per **logical** turn (B-style timing), payloads offloaded (D). No
+  per-command durable writes.
+- **Payloads are offloaded** to a `PayloadStore`; the `TurnResult` carries handles. This also keeps
+  the **suspend** blob light (section 7.6).
+
+### 7.5 Two stores, two animals: introduce `TurnReviewStore`
+
+The existing `SessionStateStore` is the **pending/suspend** store: one transient blob per channel,
+**cleared on completion**, single-key `load`/`save`/`clear`/`exists`. The **review** store is
+**write-once, keep-many, enumerable**. Different access patterns and lifecycles.
+
+**Decision:** do **not** overload `SessionStateStore`. Introduce a separate **`TurnReviewStore`**,
+mirroring the disk/redis split, so the pending path stays single-key get/set/clear and review gets
+prefix-scan semantics. **Enumeration is added only to `TurnReviewStore`**, never to the pending store
+(the pending store only ever holds the single in-flight suspended turn, so it never needs to list).
+
+### 7.6 Persistence boundaries (suspend AND completion)
+
+Retiring `action_log` (section 9) means `serialize_state` must carry the **partial** `TurnResult`
+(outputs produced before an `ask_user`) so a suspended turn can resume. To keep the suspend blob
+light, payloads are offloaded to the `PayloadStore` **at the suspend boundary too**, not only at
+completion. Rule: **offload payloads at every persistence boundary (suspend and completion)**, with
+the logical-turn accumulation spanning them.
+
+Cheap consequences (confirmed desirable):
+
+- **Resume needs no payload fetch.** The agent reasons only over text, so on rehydrate we restore the
+  light records (text + handles) and continue; payloads stay in the `PayloadStore` and are only
+  referenced by the final `TurnResult`. No read-back on the hot path.
+- **`TurnReviewStore` write fires once, at logical-turn completion** (the `else`/not-awaiting branch).
+  Suspends write only the light partial to the **pending** store. A turn that suspended three times
+  still produces exactly **one** review record.
+- A suspended turn's "answer" is the clarification `CommandResponse` (`awaiting_user` artifact) and is
+  **not** written to review — correct by construction.
+
+### 7.7 Turn key schema
+
+**Decision (corrected from the user's first proposal):**
+
+- Key = `channel_id` + **lexicographically-sortable** GMT timestamp (ISO-8601 UTC, fixed-width,
+  zero-padded, ms/µs precision, e.g. `2026-06-10T17:04:03.123456Z`) + a short disambiguator
+  (`uuid4` suffix, or µs precision) to avoid collisions.
+- **Ordinal is derived by sorting keys by the timestamp prefix**, **not** by store iteration order.
+  Rationale: neither durable backend preserves insertion order — `os.listdir`/`os.scandir` directory
+  order is arbitrary, and Redis `SCAN`/`KEYS` is explicitly unordered. The user's original
+  "infer ordinal from position in the store, assuming Python dict ordering" only holds for an
+  in-memory dict and was rejected for that reason.
+- **The conversation summary is NOT part of the key.** It is an LLM output (long, may contain
+  newlines/slashes/unicode, >255-byte filename risk, collision-prone) and is produced by
+  `_extract_conversation_summary` (a `ChainOfThought` call) **only** for agent turns with a non-empty
+  `action_log`. Deterministic `/`-command turns have no summary. Keying on it would (a) be unsafe as a
+  filesystem/Redis key, (b) couple persistence to an LLM call, and (c) leave deterministic turns
+  without a key. The summary is stored as **searchable metadata inside the value** when present.
+- **Namespacing by `channel_id`** prevents turns from different sessions interleaving in one keyspace.
+
+### 7.8 Retention / GC — out of scope (with a required contract)
+
+Retention/GC is **out of scope** and handled at the infrastructure/deployment level (user decision).
+But because the light `TurnResult` references payloads by handle in a **separate** payload store,
+independent GC schedules would produce dangling handles (record -> deleted payload) or orphans
+(payload kept, record gone).
+
+**Documented contract:** infrastructure MUST GC the review record and its referenced payloads **under
+one lifecycle key** (co-GC). Additionally, the review reader SHOULD tolerate a missing payload
+gracefully (render "payload expired") as defense in depth.
+
+### 7.9 Nested-turn addressing in review — embedded-only
+
+Nested turns are **embedded** in the parent `CommandOutput.nested_turn` (the serializer recurses,
+section 8). **Top-level `TurnReviewStore` keys are for user-message turns only**; nested turns are
+addressed by **path within the parent record**, not as first-class top-level keys. So the
+timestamp+uuid key scheme applies only to top-level turns.
+
+---
+
+## 8. Store interfaces and serializer
+
+### 8.1 `TurnReviewStore` (new)
+
+```python
+class TurnReviewStore(ABC):
+    @abstractmethod
+    def put(self, channel_id: str, turn_key: str, turn: dict[str, Any]) -> None:
+        """Write-once persist of a completed (light) TurnResult."""
+    @abstractmethod
+    def get(self, channel_id: str, turn_key: str) -> Optional[dict[str, Any]]: ...
+    @abstractmethod
+    def list(self, channel_id: str) -> list[str]:
+        """Return this channel's turn keys, sorted by the ISO-8601 timestamp prefix
+        (NOT by store iteration order). Ordinal == index in this sorted list."""
+```
+
+- `DiskTurnReviewStore` — directory per `channel_id`, one JSON file per `turn_key`; `list` sorts
+  filenames by the timestamp prefix.
+- `RedisTurnReviewStore` — keys `fw:turn:{channel_id}:{turn_key}`; `list` does a `SCAN MATCH` on the
+  channel prefix then sorts by the timestamp prefix.
+- Factory mirrors `get_session_state_store()` (`TURN_REVIEW_STORE=disk|redis`, defaulting consistent
+  with the pending store).
+
+### 8.2 `PayloadStore` (new, content-addressed, disk/redis mirror)
+
+```python
+class PayloadStore(ABC):
+    @abstractmethod
+    def put(self, data: bytes | str) -> str:
+        """Store a payload, return an opaque handle (content-addressed hash recommended)."""
+    @abstractmethod
+    def get(self, handle: str) -> Optional[bytes]:
+        """Fetch a payload by handle, or None if GC'd (reader tolerates None, section 7.8)."""
+```
+
+- `DiskPayloadStore` — content-addressed blob directory (single-node).
+- `RedisPayloadStore` — `fw:payload:{handle}` (multi-pod). TTL is an infra concern (section 7.8).
+- Content addressing makes writes idempotent and concurrency-safe (same bytes -> same handle).
+- **User decision:** payload store mirrors the existing disk/redis split for now. No external object
+  store (e.g. S3) targeted yet; revisit if the xray deployment provides one.
+
+### 8.3 Recursive serialization (designed for `nested_turn` from the start)
+
+The (light) `TurnResult` serializer MUST recurse: serializing a `TurnResult` serializes its
+`command_outputs`, and each `CommandOutput` that has a `nested_turn` serializes that nested
+`TurnResult` the same way. Payload offload applies at **every** level: any `CommandResponse.artifacts`
+payload (top-level or nested) is replaced by a `PayloadStore` handle during serialization, and the
+text/records are kept inline. Deserialization restores the tree; payloads are fetched lazily by handle
+only when a reviewer opens that node.
+
+---
+
+## 9. Retiring `action_log`
+
+### 9.1 How `action_log` is used today
+
+- **Lifecycle:** `clear_action_log()` at the start of each agent turn (`_run_agent`); appended in
+  `_execute_workflow_query` (`workflow_agent.py`) and `_post_ask_user_response`.
+- **Sole data consumer:** `_finalize_agent_output` passes it to `_extract_conversation_summary` (an
+  LLM `ChainOfThought`) when non-empty. That consumer needs only the **text projection**
+  `{command, command_name, parameters, response}` — derivable from `command_outputs` by dropping
+  artifacts/payloads.
+- **Plumbing:** serialized in `serialize_state` (`"action_log"`), restored in `apply_serialized_state`.
+- **No external consumer.** xray never reads `action_log` or `action.jsonl` (verified by repo grep:
+  the only `_store.*` and `serialize_state` references are the runner's pending-store calls).
+- **`action.jsonl` mirroring is CLI-only** (`ChatSession` sets `mirror_action_log_to_file=True`;
+  the WEC/FastAPI path leaves it `False`), so in serving there is **zero file I/O** for `action_log`.
+- **Perf profile:** in-memory `list[dict]`, O(1) append, read once per turn, serialized only inside
+  the suspend blob (fires only on `ask_user`). Effectively free.
+
+### 9.2 Decision
+
+**Retire `action_log`** unconditionally; make in-memory `command_outputs` the single source of truth
+and **derive the LLM-summary text view** from it. Zero hot-path regression (both are in-memory O(1)
+append), and it removes a divergence risk (two parallel turn logs). The dependency from "review
+durability" does not gate this: the in-memory subsumption is independent of how/where review persists.
+
+### 9.3 Consequence for `serialize_state`
+
+`serialize_state`/`apply_serialized_state` replace the `"action_log"` field with the **light partial
+`TurnResult`** (records + payload handles), per section 7.6. The CLI `action.jsonl` mirror, if kept
+for debugging, derives from `command_outputs`; otherwise it is dropped (CLI-only, no external
+contract).
