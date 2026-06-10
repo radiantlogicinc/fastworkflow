@@ -813,3 +813,22 @@ Consequences:
    survives the switch and the next message resumes a clarification from the previous
    conversation.) The cancel-then-switch sequence runs under the per-session lock, which
    these endpoints currently do not acquire.
+
+### A3 — First-class `TurnStatus`; `awaiting_user` artifact removed (resolves R11) — 2026-06-10
+
+1. **`TurnResult.status: TurnStatus`** with five values: `completed`, `awaiting_user`,
+   `failed`, `cancelled`, `abandoned`. `cancelled` is written by `/cancel_pending` and the A2
+   auto-cancel paths; `abandoned` is reserved (written only if a stale-pending sweep is built);
+   `failed` covers turns whose agent loop raises (R6, pending resolution of capture shape).
+2. **The `artifacts["awaiting_user"]` protocol is removed in the same release** that
+   introduces `TurnResult`. `_awaiting_user_output` no longer stamps the artifact; the runner
+   and the bundled server branch on `turn.status == AWAITING_USER`. No dual-publish window:
+   every consumer of the old signal is rewritten for the `TurnResult` return type in the same
+   release anyway.
+3. **Everything else carries unchanged (user decision: no further cleanup).** The four
+   `CommandOutput` predicates and the NLU-internal artifact handshake
+   (`command_handled` / `command_name` / `cmd_parameters` between
+   `wildcard.py` and `CommandExecutor`) survive the redesign exactly as section 5.2 specifies.
+   Reviewer's note for the record: `command_aborted` and `not_what_i_meant` were verified to
+   have zero consumers in the framework and tests; they are retained deliberately as public
+   API. Formalizing the handshake protocol is possible future work, out of scope here.

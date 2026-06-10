@@ -34,7 +34,7 @@ refinements. "Open questions: none remaining" (section 13 of the design doc) is 
 | R43 | CLI / `command_output_queue` contract undefined after redesign | High | 5.6, 11 |
 | R9 | `channel_id` vs conversation boundary | **RESOLVED 2026-06-10** — structural via A1; eager id reservation; auto-cancel on switch | 7.7, 8.1 |
 | R10 | Answer aliasing: copy-on-serialize hazard + headline/gallery duplication | High | 5.5, 8.3, 10.3 |
-| R11 | `awaiting_user` artifact-sniffing → first-class turn status | High | 5.5, 7.6, 10.1 |
+| R11 | `awaiting_user` artifact-sniffing → first-class turn status | **RESOLVED 2026-06-10** — 5-value `TurnStatus`; artifact removed immediately; no further cleanup | 5.5, 7.6, 10.1 |
 | R46 | Big-bang release sequencing; no staged migration path | High (process) | 11, decisions 4, 8, 22 |
 | R12 | `nested_turn`: speculative, singular, suspension semantics undefined | Medium | 5.2, 5.3, 7.9, 8.3 |
 | R13 | Assistant-mode clarification spans N unlinked records | Medium | 5.5, 7.6 |
@@ -527,6 +527,33 @@ This replaces `_output_is_awaiting_user`, gives R6/R39 their terminal states, gi
 an honest branch condition, and gives review records a queryable lifecycle field. The
 predicates' magic-string protocol (`artifacts["command_name"] == "abort"`) is a pre-existing
 wart, but `status` at the turn level removes the worst consumer of it.
+
+**RESOLVED 2026-06-10 (with Dhar).** Decisions:
+
+1. **Enum: all five values** — `completed`, `awaiting_user`, `failed`, `cancelled`,
+   `abandoned`. `cancelled` is already required by R9's auto-cancel-on-switch; `abandoned` is
+   reserved now (written only if the R6.3 stale-pending sweep is built) so readers never need
+   a schema bump for it.
+2. **The `awaiting_user` artifact is removed immediately** — `TurnResult.status` is the only
+   turn-lifecycle signal from the release that introduces it. `_awaiting_user_output` stops
+   stamping `artifacts["awaiting_user"]`; `_output_is_awaiting_user`-style sniffing
+   (`utils.py:354-357`, xray runner) is deleted and the branch becomes
+   `turn.status == AWAITING_USER`. This is contained because every consumer of the old signal
+   is in-repo or user-owned and is already being rewritten for the `TurnResult` return type in
+   the same release. (Note: this is a deliberate exception to dual-publish thinking — it does
+   not by itself force a big-bang release in R46; it only requires the lifecycle-signal
+   consumers to move in lockstep, which they must anyway.)
+3. **No further cleanup (user decision)** — all four `CommandOutput` predicates (`success`,
+   `command_handled`, `command_aborted`, `not_what_i_meant`) and the NLU-internal artifact
+   protocol (`command_handled`, `command_name`, `cmd_parameters` — the wildcard→executor
+   handshake) carry into the redesigned model unchanged, exactly as design section 5.2 has
+   them (predicates simplify to single reads under the collapse). For the record: review
+   verified that `command_aborted` and `not_what_i_meant` have zero consumers in the framework
+   and its tests (definitions only, `__init__.py:78,86`); they are preserved deliberately as
+   public API surface. The handshake protocol remains undocumented-internal; formalizing it is
+   available as future work but is explicitly out of scope for this redesign.
+
+Recorded in `docs/turn_result_design.md`, Amendments A3. Unblocks R6, R39, R40.
 
 ### R12. `nested_turn` issues
 
