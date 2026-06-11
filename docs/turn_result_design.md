@@ -649,6 +649,10 @@ Cheap consequences (confirmed desirable):
   `action_log`. Deterministic `/`-command turns have no summary. Keying on it would (a) be unsafe as a
   filesystem/Redis key, (b) couple persistence to an LLM call, and (c) leave deterministic turns
   without a key. The summary is stored as **searchable metadata inside the value** when present.
+
+  > **[Corrected by Amendment A35]** "Searchable" overpromised — neither backend searches
+  > inside values. The summary is *stored* metadata riding the listing cards (A23); the
+  > supported pattern is list + filter client-side. No search index is built or implied.
 - **Namespacing by `channel_id`** prevents turns from different sessions interleaving in one keyspace.
 
 ### 7.8 Retention / GC — out of scope (with a required contract)
@@ -1285,3 +1289,10 @@ for mid-turn payload streaming is re-priced after A17/A8: **no handle exists mid
 yet). If the observability roadmap ever wants live gallery hydration, the true cost is:
 eager offload for streamed payloads (revisiting A17) + a handle slot on `CommandTraceEvent`
 + a mid-turn authorization mechanism (extending A8).
+
+### A35 — "Searchable metadata" downgraded to stored metadata (resolves R15) — 2026-06-11
+
+The summary is stored metadata riding the A23 listing cards; the supported access pattern is
+**list + filter client-side** (turn cards; conversation metadata records for topic lookup).
+No search index is built or implied; RediSearch/external indexing is future work only if a
+cross-conversation search UX demands it. Section 7.7's wording corrected in place.

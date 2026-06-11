@@ -981,6 +981,14 @@ cannot search values without an index (RediSearch module or a maintained seconda
 disk requires scan-and-parse. Either downgrade the language to "stored metadata, filterable
 client-side after listing" or specify the index strategy.
 
+**RESOLVED 2026-06-11 (confirm-and-close; language downgraded).** The summary is **stored
+metadata** that rides A23's listing cards; the supported access pattern is *list (one
+pipelined round trip) + filter client-side*, at both the turn level (cards) and the
+conversation level (A1 metadata records, which also serve topic lookup). No search index is
+built or implied; RediSearch/an external indexer is noted as future work only if a
+cross-conversation search UX ever demands it. Recorded in `docs/turn_result_design.md`,
+Amendments A35 (with the 7.7 wording corrected in place).
+
 ---
 
 ## 3. Store and durability refinements
