@@ -955,3 +955,23 @@ consumers** in the framework, examples, and tests; xray's action buttons travel 
    `ResponseTuple` has no command-identity slot, so provenance dies at that wire format. xray
    will initially embed provenance in response text; extending `ResponseTuple` is xray-repo
    scope, out of scope for fastWorkflow — recorded as a note on the section 10.3 mapping.
+
+### A10 — Artifact serialization and offload contract (resolves R5) — 2026-06-11
+
+1. **Offload rule — size threshold:** any `str`/`bytes` artifact value above a configurable
+   threshold (default ~4 KB) is offloaded to the turn-scoped `PayloadStore` (A8) and replaced
+   in place by the **envelope** `{"__fw_payload_ref__": <scoped handle>, "size": <bytes>,
+   "content_type": <best-effort>}`; smaller values stay inline. The marker key is reserved.
+2. **Strict rejection for non-serializable values:** record serialization raises — with an
+   error naming the offending artifact key and command — on any non-JSON-serializable
+   artifact value, replacing today's silent `default=str` mangling
+   (`session_state_store.py:64`). Verified safe: `Action`/`Recommendation` are typed fields,
+   not artifacts, and unused (A9); xray's mapping packs `ResponseTuple.actions` into
+   artifacts but that value is `None` in the verified flow; the framework's own
+   `cmd_parameters` object in the NLU handshake never reaches serialization. Apps that pack
+   objects into artifacts must serialize them first in their own mapping code.
+3. **`command_parameters` honesty:** the in-memory field keeps the typed Pydantic instance;
+   the declared type is corrected from the current lie (`str`); record serialization emits
+   `model_dump()` as a dict.
+4. Store-level details (hash algorithm, compression slot, atomic disk writes) remain with
+   R21.

@@ -23,7 +23,7 @@ refinements. "Open questions: none remaining" (section 13 of the design doc) is 
 | R42 | `next_actions`/`recommendations` still die at the agent boundary — the original bug class survives the fix | **RESOLVED 2026-06-11** — fields verified unused; payload-only gallery kept; answer stays bare; provenance via text (xray scope) | 2.4, 5.4, 10.3, decision 2 |
 | R3 | HTTP/MCP wire-contract break undocumented; external authors break | Blocking | 11, decisions 4, 8 |
 | R4 | Build-time generators and internal `_workflows` commands missing from change list | Blocking | 11 |
-| R5 | Artifact serialization/offload contract unspecified | Blocking | 8.2, 8.3, decision 16 |
+| R5 | Artifact serialization/offload contract unspecified | **RESOLVED 2026-06-11** — size-threshold offload; reserved-key envelope; strict rejection; honest `command_parameters` | 8.2, 8.3, decision 16 |
 | R6 | Failed executions and failed turns invisible to review | **RESOLVED 2026-06-10** — capture-with-detail; record+re-raise; TTL+lazy abandon | 3.1, 5.5, 7.6 |
 | R7 | Sensitive data flips from ephemeral to durably-persisted-by-default | Blocking (compliance) | 7, 7.8 |
 | R8 | `process_action` / MCP paths not covered | Blocking | 5.5, 5.6, 10 |
@@ -401,6 +401,34 @@ defines:
    serialize via `model_dump()` explicitly).
 
 This is the actual heart of option D and is currently a hand-wave.
+
+**RESOLVED 2026-06-11 (with Dhar).** Decisions:
+
+1. **Offload rule: size threshold.** Any `str`/`bytes` artifact value larger than a
+   configurable threshold (default ~4 KB, env var named in the config inventory) is offloaded
+   to the `PayloadStore` (turn-scoped per A8) and replaced by the envelope; smaller values
+   stay inline. App-agnostic — no key-naming convention required.
+2. **Envelope convention:** the offloaded value is replaced in place by
+   `{"__fw_payload_ref__": <scoped handle>, "size": <bytes>, "content_type": <best-effort>}`.
+   The marker key is reserved; readers detect it to distinguish references from literals.
+3. **Non-serializable values: strict rejection.** Record serialization raises (a clear error
+   naming the offending artifact key and command) on any non-JSON-serializable artifact
+   value. Clarifications established during review: (a) `Action`/`Recommendation` are typed
+   fields on `CommandResponse`, distinct from artifacts, and unused (R42) — unaffected;
+   (b) the design doc's 0.3 "packs actions into artifacts" refers to xray's mapping shuttling
+   its `ResponseTuple.actions` through the artifacts dict — and in the verified flow that
+   value is `None` (0.2), so strict rejection breaks nothing existing; (c) the framework's
+   own object-in-artifacts (the `cmd_parameters` Pydantic instance in the NLU handshake)
+   never reaches serialization — consumed in-memory inside `invoke_command`; (d) the contract
+   obligates any app packing objects into artifacts to serialize them first, in its own
+   mapping code. Replaces today's silent `json.dump(..., default=str)` mangling.
+4. **`command_parameters` honesty convention (stated, low-stakes):** the in-memory
+   `CommandOutput` keeps the typed Pydantic instance (useful to consumers; the trace path
+   already calls `model_dump()` on it); the declared type becomes honest
+   (`str | BaseModel | None`-shaped); record serialization emits `model_dump()` as a dict.
+
+Recorded in `docs/turn_result_design.md`, Amendments A10. Remaining store-level details
+(hash algorithm, compression slot, atomic disk writes) stay with R21.
 
 ### R6. Failed executions and failed turns are invisible to review — the opposite of what observability needs
 
