@@ -1009,3 +1009,17 @@ a `TurnResult` and writes a turn record like any other turn:
    PII/entitlement-grade data. Deployment obligations: encryption at rest, TLS to Redis,
    least-privilege access for the service identity. Framework obligations: record-mediated
    payload access only (A8); record contents never written to logs.
+
+### A13 — Wire-contract break policy (resolves R3) — 2026-06-11
+
+1. **Constructor shim for command authors:** `CommandOutput` gains a
+   `model_validator(mode="before")` accepting the legacy `command_responses=[x]` keyword,
+   mapping it to `command_response` with a `DeprecationWarning`. Hand-written workflows keep
+   running across the upgrade; the legacy keyword is removed at the major release following
+   its introduction (train per R46).
+2. **HTTP/SSE/MCP hard-break at the major:** endpoints return the `TurnResult` shape; no
+   `/v2` endpoints, no dual-shape responses, no reverse-mapping. Consistent with A3's
+   no-dual-publish stance; the bundled server's clients are org-controlled, and xray embeds
+   the framework behind its own API.
+3. **Deliverable: a schema-migration guide** covering HTTP bodies, the SSE final event, the
+   MCP result (`isError = not success`, A6), and the author-side constructor migration.

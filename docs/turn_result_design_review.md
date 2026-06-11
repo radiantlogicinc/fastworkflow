@@ -21,7 +21,7 @@ refinements. "Open questions: none remaining" (section 13 of the design doc) is 
 | R2 | Content-addressing makes co-GC incoherent; cross-tenant handle sharing | **RESOLVED 2026-06-11** — turn-scoped payload keys; record-mediated access | 7.8, 8.2, decisions 13, 19 |
 | R37 | Framework already persists per-turn records (`ConversationStore`); design premises false; third overlapping store | **RESOLVED 2026-06-10** — full absorption into unified `ConversationTurnStore` | 7.1, 7.2, 9.1, decisions 11, 18 |
 | R42 | `next_actions`/`recommendations` still die at the agent boundary — the original bug class survives the fix | **RESOLVED 2026-06-11** — fields verified unused; payload-only gallery kept; answer stays bare; provenance via text (xray scope) | 2.4, 5.4, 10.3, decision 2 |
-| R3 | HTTP/MCP wire-contract break undocumented; external authors break | Blocking | 11, decisions 4, 8 |
+| R3 | HTTP/MCP wire-contract break undocumented; external authors break | **RESOLVED 2026-06-11** — author shim + deprecation window; wire hard-breaks at the major; migration guide | 11, decisions 4, 8 |
 | R4 | Build-time generators and internal `_workflows` commands missing from change list | Blocking | 11 |
 | R5 | Artifact serialization/offload contract unspecified | **RESOLVED 2026-06-11** — size-threshold offload; reserved-key envelope; strict rejection; honest `command_parameters` | 8.2, 8.3, decision 16 |
 | R6 | Failed executions and failed turns invisible to review | **RESOLVED 2026-06-10** — capture-with-detail; record+re-raise; TTL+lazy abandon | 3.1, 5.5, 7.6 |
@@ -359,6 +359,26 @@ that accepts `command_responses=[x]`, maps it to `command_response`, and emits a
 `DeprecationWarning` — plus an explicit, versioned statement of the HTTP schema change (or an
 API version field in responses). If a hard break is the deliberate choice, the design must say
 so and enumerate the client-facing schema delta. See also R46 (release sequencing).
+
+**RESOLVED 2026-06-11 (with Dhar).** Decisions:
+
+1. **Python authors get a constructor shim with a deprecation window.** A
+   `model_validator(mode="before")` on `CommandOutput` accepts the legacy
+   `command_responses=[x]` keyword, maps it to `command_response`, and emits a
+   `DeprecationWarning`. Hand-written workflows (xray's and external PyPI users') keep running
+   across the upgrade; the legacy keyword is removed at the major release *following* its
+   introduction (exact train per R46).
+2. **The HTTP/SSE/MCP response schema hard-breaks at the major.** Endpoints return the
+   `TurnResult` shape; the major version bump signals it. No `/v2` endpoints, no dual-shape
+   responses, no reverse-mapping to maintain. Consistent with R11's no-dual-publish decision;
+   appropriate because the bundled server's clients are largely org-controlled deployments,
+   and xray (which embeds the framework behind its own API) is unaffected on this surface.
+3. **Stated deliverable: a written schema-migration guide** — old shape → new shape, field by
+   field, covering the HTTP response bodies, the SSE final event, and the MCP result
+   (`isError = not success` per A6), plus the constructor migration for authors.
+
+Recorded in `docs/turn_result_design.md`, Amendments A13. Release sequencing (which versions
+carry the shim) is finalized in R46.
 
 ### R4. Build-time generators and framework-internal commands are missing from the mechanical-changes list
 
