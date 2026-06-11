@@ -1183,3 +1183,12 @@ Verified sites missing from section 11, with migration releases per A14:
 3. **`TurnResult.metadata: dict[str, Any] = {}`** on the in-memory type, serialized as-is
    under A10's contract — the home for R29 timing/token slots, R31 trace ids, and A23 card
    extensions.
+
+### A26 — Key grammar and path sanitization (resolves R20) — 2026-06-11
+
+1. **Turn-key grammar:** `<compact-ts>-<uuid-hex-12>`, timestamp `YYYYMMDDTHHMMSS.ffffffZ`
+   — colon-free (NTFS-legal), sortable, human-readable.
+2. **Allowlist sanitization for every disk path component** (`[A-Za-z0-9._-]`; encode the
+   rest; reject empty/`.`/`..`) applied to `channel_id`, `conv_id`, `turn_key` — defense in
+   depth. One shared sanitizer; the pending store's weaker separator-only `safe_id`
+   (`session_state_store.py:51`) is retrofitted onto it at v3.0.

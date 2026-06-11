@@ -1031,6 +1031,17 @@ the pending store already does with `safe_id`. Additionally, `channel_id` and `t
 filesystem path components in the disk backends — sanitize both (path-traversal hardening), as
 `DiskSessionStateStore` already does for channel ids.
 
+**RESOLVED 2026-06-11 (confirm-and-close).** (1) **Canonical turn-key grammar:**
+`<compact-ts>-<uuid-hex-12>` with the compact timestamp `YYYYMMDDTHHMMSS.ffffffZ` — no
+colons, lexicographically sortable, legal on every filesystem. (2) **Allowlist sanitization
+for every disk path component** (`[A-Za-z0-9._-]`, everything else encoded; empty/`.`/`..`
+explicitly rejected) — applied to `channel_id`, `conv_id`, and `turn_key` alike (defense in
+depth even for framework-generated values). Verified during this pass: the existing pending
+store sanitizer (`session_state_store.py:51`) only replaces path separators — adequate for
+its flat filenames but too weak for directory components; **one shared sanitizer** is defined
+and the pending store is retrofitted onto it at v3.0. Recorded in
+`docs/turn_result_design.md`, Amendments A26.
+
 ### R21. `PayloadStore` API gaps
 
 - `put(data: bytes | str)` — define the hashing rule for `str` (encode UTF-8 first) and the
