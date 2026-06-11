@@ -1101,6 +1101,26 @@ Decide and document:
   post-lock best-effort step (the per-channel ordinal from R18 must then be assigned inside the
   lock even if the write happens after).
 
+**RESOLVED 2026-06-11 (with Dhar).** Decisions:
+
+1. **Write failure: best-effort + loud telemetry.** Bounded in-line retries, then the turn
+   succeeds for the user regardless — by record-write time the command's side effects are
+   committed, and erroring would invite double-execution retries. The failure is logged
+   prominently and a **monitoring counter is documented as a deployment alarm expectation**
+   (post-A1 stakes acknowledged: a lost write means the turn is missing from conversation
+   history and post-restart memory; the gap is operator-visible by contract).
+2. **Crash windows are bounded leaks (stated):** payloads under a turn prefix with no record
+   are adopted idempotently by a retry (A22 stable key + A27 hashed leaves) or removed
+   eventually by conversation-prefix retention (A12). Acceptable, documented.
+3. **Stale-pending safety net (stated):** order is record write → pending clear; at restore,
+   a pending blob whose turn key already has a record is stale and discarded — record-write
+   wins, always. (The blob carries its turn key per A22.)
+4. **Lock hold (stated):** the write stays in-lock with a tight retry budget (sub-ms/ms
+   writes vs multi-second turns); post-lock writing noted as a future optimization that A24's
+   in-lock ordinal assignment already permits.
+
+Recorded in `docs/turn_result_design.md`, Amendments A28.
+
 ### R24. Suspend-time offload creates orphans the GC contract doesn't cover
 
 Payloads are offloaded at the suspend boundary too (decision 16), referenced — at that point —

@@ -1204,3 +1204,17 @@ Verified sites missing from section 11, with migration releases per A14:
 3. **Atomic disk writes:** temp file + `os.replace()`.
 4. **No delete surface on the ABC** — dissolved by A8 (prefix delete), A12 (infra-executed
    retention), A5.5 (reaper turn-prefix variant).
+
+### A28 — Completion-sequence failure semantics (resolves R23) — 2026-06-11
+
+1. **Record-write failure never fails the turn:** bounded in-line retries, then best-effort —
+   side effects are already committed by write time; erroring would invite double-execution.
+   Prominent log + a **monitoring counter documented as a deployment alarm expectation** (the
+   post-A1 cost of a lost write — missing history/memory entry — is operator-visible by
+   contract).
+2. **Crash windows = bounded leaks:** orphan payloads under a recordless turn prefix are
+   adopted by an idempotent retry (A22/A27) or removed by retention (A12).
+3. **Stale-pending safety net:** record write → pending clear; at restore, a pending blob
+   whose turn key already has a record is discarded. Record-write wins.
+4. **Write stays in-lock** with a tight retry budget; post-lock writing is a permitted future
+   optimization (A24 assigns the ordinal in-lock either way).
