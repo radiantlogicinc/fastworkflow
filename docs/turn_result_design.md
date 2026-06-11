@@ -1057,3 +1057,16 @@ Verified sites missing from section 11, with migration releases per A14:
   `test_execution_context_agent.py`, `test_fastapi_service.py`,
   `test_session_state_serialization.py`).
 - **`refine` pipeline: audited clean** — zero references.
+
+### A16 — Live response path serves from RAM; inline cap (resolves R41) — 2026-06-11
+
+1. **Live path = in-memory.** The runner/mapping builds the user's response from the
+   in-memory `TurnResult`; payload offload happens on a serialized copy at the persistence
+   boundary (R10) and exists purely for review. Zero store reads on the hot path. Section
+   10.3's "fetching payloads lazily by handle" applies **only to the review reader**.
+2. **Bundled-server response bodies inline payloads up to a configurable cap** (generous
+   default, ~10 MB); above it the A10 envelope is returned instead, marked
+   not-inlined-available-via-review-record (depends on the future R32 read API; documented).
+3. **R45 consequence:** payloads remain in RAM until the response is built, so eager offload
+   provides no memory relief; R45 resolves to boundary-offload with a documented memory
+   profile (finalized in its own pass).

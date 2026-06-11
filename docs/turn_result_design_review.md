@@ -28,7 +28,7 @@ refinements. "Open questions: none remaining" (section 13 of the design doc) is 
 | R7 | Sensitive data flips from ephemeral to durably-persisted-by-default | **RESOLVED 2026-06-11** — no switches; infra-executed age-based retention; security contract documented | 7, 7.8 |
 | R8 | `process_action` / MCP paths not covered | **RESOLVED 2026-06-11** — full turns: TurnResult + record, empty user_message | 5.5, 5.6, 10 |
 | R40 | `TurnResult` has no turn-level success semantics | **RESOLVED 2026-06-11** — success=answer.success; max-iters → success=False; serialized | 5.4, 5.5, 11 |
-| R41 | Live response path ambiguous: in-memory payloads vs put-then-get round trip | High | 10.3, 8.2 |
+| R41 | Live response path ambiguous: in-memory payloads vs put-then-get round trip | **RESOLVED 2026-06-11** — live path serves from RAM; configurable inline cap; handles are review-only | 10.3, 8.2 |
 | R38 | `/post_feedback` vs write-once review records | High | 7.5, 8.1 |
 | R39 | `/cancel_pending` (cancelled turns) unaccounted for | **RESOLVED 2026-06-10** — cancelled turns recorded; memory projects completed-only | 7.6, 10.1 |
 | R43 | CLI / `command_output_queue` contract undefined after redesign | High | 5.6, 11 |
@@ -637,6 +637,23 @@ ballooning agent-mode responses that today are text-only.
 (inline payloads, possibly size-capped per response), handles exist for the review reader only;
 or deliberately serve the live path from handles for response-size control and accept the
 round trip. Either is workable; the design currently implies both.
+
+**RESOLVED 2026-06-11 (with Dhar).** Decisions:
+
+1. **The live response is served from RAM.** The runner/mapping reads payloads from the
+   in-memory `TurnResult`; offload happens on a serialized *copy* at the persistence boundary
+   (R10's copy-on-serialize), purely for review. Zero store reads on the hot path. Section
+   10.3's "fetching payloads lazily from the `PayloadStore` by handle" is corrected to apply
+   **only to the review reader**, never the live path.
+2. **Bundled-server responses inline payloads up to a configurable cap** (`MAX_INLINE_PAYLOAD`
+   or similar; generous default on the order of 10 MB). Above the cap, the response carries
+   the A10 envelope instead, marked not-inlined-available-via-review-record — a path that
+   depends on the future R32 read API and is documented as such.
+3. **Consequence for R45 (noted, finalized there):** with the live path pinned to RAM,
+   payloads must stay in memory until the response is built, so eager offload buys no memory
+   relief — R45 collapses to boundary-offload with a documented memory profile.
+
+Recorded in `docs/turn_result_design.md`, Amendments A16.
 
 ### R39. `/cancel_pending` exists — cancelled turns are a fourth terminal state the design doesn't model
 
