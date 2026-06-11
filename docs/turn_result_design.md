@@ -1192,3 +1192,15 @@ Verified sites missing from section 11, with migration releases per A14:
    rest; reject empty/`.`/`..`) applied to `channel_id`, `conv_id`, `turn_key` — defense in
    depth. One shared sanitizer; the pending store's weaker separator-only `safe_id`
    (`session_state_store.py:51`) is retrofitted onto it at v3.0.
+
+### A27 — PayloadStore conventions (resolves R21) — 2026-06-11
+
+1. **Hashing:** UTF-8-encode `str` payloads; SHA-256 hex truncated to 32 chars; leaf segment
+   algorithm-prefixed (`sha256-<hex32>`). `get()` returns bytes; the envelope's
+   `content_type` governs decoding.
+2. **Metadata lives in the A10 envelope** (`size`, `content_type`); the store is
+   raw-bytes-only. **Compression reserved:** optional `content_encoding` envelope slot; not
+   built now.
+3. **Atomic disk writes:** temp file + `os.replace()`.
+4. **No delete surface on the ABC** — dissolved by A8 (prefix delete), A12 (infra-executed
+   retention), A5.5 (reaper turn-prefix variant).

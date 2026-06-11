@@ -1059,6 +1059,18 @@ and the pending store is retrofitted onto it at v3.0. Recorded in
   stable, or add `delete(handle)` / `delete_prefix(...)` so co-GC tooling can stay in-tree.
   (Moot under R2 option (a), where prefix-delete is natural.)
 
+**RESOLVED 2026-06-11 (confirm-and-close).** (1) **Hashing:** `str` payloads UTF-8-encoded
+before hashing; SHA-256, hex, truncated to 32 chars (within-turn uniqueness is all the A8
+leaf needs); leaf prefixed with the algorithm (`sha256-<hex32>`) for migration-free agility;
+`get()` returns bytes, the envelope's `content_type` governs decoding. (2) **Content
+metadata: dissolved by A10** — the envelope (`size`, `content_type`) is the carrier; the
+store stays raw-bytes-only. (3) **Compression: reserved, not built** — the envelope gains an
+optional `content_encoding` slot so gzip can arrive later without migration. (4) **Atomic
+disk writes:** temp file + `os.replace()`; readers never see torn blobs. (5) **Delete
+surface: dissolved** by A8 (prefix delete is the operation), A12 (retention executes it),
+and A5.5 (the reaper's turn-prefix variant). Recorded in `docs/turn_result_design.md`,
+Amendments A27.
+
 ### R22. Backend deployment caveats are unstated
 
 - **Disk backends are single-node.** For the long-lived review store this bites much harder
