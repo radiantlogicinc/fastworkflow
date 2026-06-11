@@ -1323,3 +1323,15 @@ scope is consuming trajectories, not persisting them.
 3. **Tokens/cost:** reserved convention in A25 metadata —
    `metadata["tokens"][<model-role>] = {prompt, completion}` keyed by the env-var model
    roles; population best-effort where DSPy/LiteLLM usage data is cheaply available.
+
+### A39 — Two read-time projections; internal derived from workflow_name (resolves R30) — 2026-06-11
+
+1. **One record, two views** via a projection function beside the reader (A21).
+2. **Internal detection derived from `workflow_name`** (no schema flag); the predicate lives
+   in exactly one place — the projection function — as the single update point for future
+   internal sources (accepted caveat documented there).
+3. **User view:** non-internal executions (app commands + ask_user exchanges) + answer,
+   status, success, `user_message`, gallery; error messages without tracebacks.
+   **Developer view:** the full record — internal executions, raw parameters, tracebacks
+   (A5), `trajectory_ref` (A37), `refined_user_message` (A36). Helper-tool consultations are
+   trajectory-only.

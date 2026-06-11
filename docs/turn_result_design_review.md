@@ -1368,6 +1368,24 @@ agent's consultations of the string-returning helper tools — `what_can_i_do`,
 `intent_misunderstood` — are visible only in the trajectory, R28; note that in the projection
 docs.)
 
+**RESOLVED 2026-06-11 (with Dhar).** Decisions:
+
+1. **One record, two read-time views** — a projection function beside the record reader
+   (A21); no dual storage.
+2. **Internal detection: derived from `workflow_name`** (user decision; no schema flag). The
+   predicate is centralized in **exactly one place** — the projection function — so future
+   internal execution sources have a single update point; the accepted caveat (the read side
+   carries the name contract) is documented there.
+3. **View compositions (stated):** *user view* = non-internal executions (app commands +
+   ask_user exchanges per A7) + answer, status, success, `user_message`, gallery payloads;
+   failed executions show error *message*, never traceback. *Developer view* = the full
+   record, additionally including internal CME executions, raw parameters, tracebacks (A5),
+   `trajectory_ref` (A37), and `refined_user_message` (A36 — "what the system did to your
+   words" is developer material). Helper-tool consultations (`what_can_i_do`,
+   `intent_misunderstood`) are visible only in the trajectory, noted in the projection docs.
+
+Recorded in `docs/turn_result_design.md`, Amendments A39.
+
 ### R31. Align the serialized schema with OTel GenAI semantic conventions
 
 The tree this design builds (turn = root span, command execution = child span, `nested_turn` =
