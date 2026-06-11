@@ -801,6 +801,14 @@ conversation history before the agent sees it. `TurnResult.user_message` is unde
 axis. For review fidelity (and for debugging refinement itself — a classic "why did the agent
 do that?" cause), store both the raw message and the refined query the agent actually ran on.
 
+**RESOLVED 2026-06-11 (confirm-and-close; A7 pinned the raw half).** `user_message` holds the
+**raw original** (A7); the rewrite gets a dedicated field:
+**`TurnResult.refined_user_message: Optional[str] = None`** — populated only where refinement
+runs (agent turns), `None` for assistant/action turns, serialized inline (modest text). A
+dedicated field rather than a metadata entry because the raw-vs-refined comparison is core
+capture semantics reviewers reach for routinely, not an extensibility extra. Recorded in
+`docs/turn_result_design.md`, Amendments A36.
+
 ### R47. The conversation summary now has three homes
 
 After the redesign as written, the same LLM-generated summary would live in:

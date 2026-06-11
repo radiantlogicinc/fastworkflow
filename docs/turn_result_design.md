@@ -1296,3 +1296,10 @@ The summary is stored metadata riding the A23 listing cards; the supported acces
 **list + filter client-side** (turn cards; conversation metadata records for topic lookup).
 No search index is built or implied; RediSearch/external indexing is future work only if a
 cross-conversation search UX demands it. Section 7.7's wording corrected in place.
+
+### A36 — Refined user message captured (resolves R44) — 2026-06-11
+
+`user_message` = the raw original (A7). The `_refine_user_query` rewrite gets a dedicated
+field: **`TurnResult.refined_user_message: Optional[str] = None`** — populated on agent turns
+where refinement runs, `None` elsewhere, serialized inline. Dedicated field (not metadata)
+because raw-vs-refined comparison is core refinement-debugging semantics.
