@@ -33,7 +33,7 @@ refinements. "Open questions: none remaining" (section 13 of the design doc) is 
 | R39 | `/cancel_pending` (cancelled turns) unaccounted for | **RESOLVED 2026-06-10** — cancelled turns recorded; memory projects completed-only | 7.6, 10.1 |
 | R43 | CLI / `command_output_queue` contract undefined after redesign | **RESOLVED 2026-06-11** — status-stamped TurnResults only; trace queue untouched; ask_user sentinel pairing (bug `fix-5fv`) | 5.6, 11 |
 | R9 | `channel_id` vs conversation boundary | **RESOLVED 2026-06-10** — structural via A1; eager id reservation; auto-cancel on switch | 7.7, 8.1 |
-| R10 | Answer aliasing: copy-on-serialize hazard + headline/gallery duplication | High | 5.5, 8.3, 10.3 |
+| R10 | Answer aliasing: copy-on-serialize hazard + headline/gallery duplication | **RESOLVED 2026-06-11** — selective copy-on-serialize; headline never carries payloads | 5.5, 8.3, 10.3 |
 | R11 | `awaiting_user` artifact-sniffing → first-class turn status | **RESOLVED 2026-06-10** — 5-value `TurnStatus`; artifact removed immediately; no further cleanup | 5.5, 7.6, 10.1 |
 | R46 | Big-bang release sequencing; no staged migration path | **RESOLVED 2026-06-11** — quick-fix minor (process_turn + shim) then one major; graceful expiry on upgrade | 11, decisions 4, 8, 22 |
 | R12 | `nested_turn`: speculative, singular, suspension semantics undefined | Medium | 5.2, 5.3, 7.9, 8.3 |
@@ -823,6 +823,23 @@ In the deterministic path, `answer == command_outputs[-1].command_response` — 
    gallery `ResponseTuple` per payload-bearing output. In deterministic mode the single
    command_response is both — the same payload renders twice. The mapping needs an identity
    dedup rule (skip gallery entries whose `command_response is answer`).
+
+**RESOLVED 2026-06-11 (with Dhar).** Decisions:
+
+1. **Copy-on-serialize, selectively (stated; implied by A10/A16):** the serializer never
+   mutates the live `TurnResult`/`CommandOutput` objects and never blind-deep-copies them
+   (artifacts can hold live application objects; `command_parameters` holds a typed model).
+   It builds a new structure: small fields copied, values converted per A10's contract
+   (threshold offload → envelope; `model_dump()` for the parameters; strict rejection
+   otherwise), originals untouched — A16's pristine-in-RAM requirement depends on this.
+2. **Headline never carries payloads** (supersedes the identity-skip suggestion above): the
+   headline `ResponseTuple` is always narrative text + metadata; the gallery always contains
+   **all** payload-bearing outputs in turn order. One uniform invariant across
+   agent/assistant/action turns, and the faithful reading of decision 21 — the UI, not the
+   framework, picks which payload to feature. Deterministic-turn duplication is gone by
+   construction.
+
+Recorded in `docs/turn_result_design.md`, Amendments A20.
 
 ### R11. Replace `awaiting_user` artifact-sniffing with a first-class `TurnResult.status`
 

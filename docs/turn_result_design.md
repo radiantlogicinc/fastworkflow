@@ -1110,3 +1110,15 @@ Verified sites missing from section 11, with migration releases per A14:
    without one, and the CLI reads the output queue only after a sentinel — an apparent
    agent-mode mid-turn hang, filed for runtime verification and fixed by this rule.
 4. **Timing:** lands at v3.0 with the CLI surface (A14/A15).
+
+### A20 — Selective copy-on-serialize; headline never carries payloads (resolves R10) — 2026-06-11
+
+1. **Selective copy-on-serialize:** the serializer never mutates live
+   `TurnResult`/`CommandOutput` objects and never blind-deep-copies them (live objects in
+   artifacts; typed model in `command_parameters`). It builds a new structure — small fields
+   copied, values converted per A10 — leaving originals untouched, as A16's
+   pristine-in-RAM live path requires.
+2. **Headline never carries payloads:** the headline `ResponseTuple` is narrative text +
+   metadata, always; the gallery contains **all** payload-bearing outputs in turn order,
+   always. One invariant for every turn type; decision 21 honored (the UI picks the featured
+   payload); deterministic-turn duplication eliminated by construction.
