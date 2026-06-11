@@ -949,6 +949,17 @@ A stable turn id from turn start also lets traces and logs reference the turn mi
 runner reads it off the `TurnResult`). Enforce write-once where cheap: Redis `SET NX`, disk
 `O_EXCL` — a failed write-once is a loud signal of a key-minting bug.
 
+**RESOLVED 2026-06-11 (confirm-and-close; A2 already depended on the core).** (1) The key is
+minted once at **logical-turn start** by the **WEC** (when accumulation starts), rides on the
+`TurnResult`, and is read — never re-minted — by the runner and stores. It is stable across
+retries *and* across suspend/resume: one logical turn = one key = one eventual record (7.6's
+promise, now mechanical). A2's eager conversation-id reservation exists precisely to make this
+possible. (2) Write-once enforced where free: Redis `SET NX`, disk `O_EXCL`. Collision
+semantics: idempotent success during a retry (debug log); loud error otherwise (key-minting
+bug signal). (3) Mid-flight referenceability noted as a deliberate benefit: the id exists from
+turn start for logs/traces/observability (feeds R28/R29/R31). Recorded in
+`docs/turn_result_design.md`, Amendments A22.
+
 ### R17. `list()` returning bare keys forces N+1 reads
 
 Any review UI listing a channel does `list()` + N `get()`s. Add a metadata projection to the

@@ -1141,3 +1141,14 @@ Verified sites missing from section 11, with migration releases per A14:
    reader, tolerate-missing-payload.
 4. **Placement:** transport-free core beside the stores; callable from WEC, runner, and
    bundled server; no FastAPI dependencies.
+
+### A22 — Turn-key minting (resolves R16) — 2026-06-11
+
+1. **Minted once at logical-turn start, by the WEC** (when accumulation starts); rides on the
+   `TurnResult`; runner and stores read it, never re-mint. Stable across retries and across
+   suspend/resume — one logical turn = one key = one record (makes 7.6 mechanical). A2's
+   eager conversation-id reservation exists to enable this.
+2. **Write-once enforced where free:** Redis `SET NX`; disk `O_EXCL`. Collision during a
+   retry = idempotent success (debug log); collision otherwise = loud error (key-minting bug).
+3. **Mid-flight referenceability** is a deliberate benefit: the turn id exists from turn
+   start for logs, traces, and observability metadata (R28/R29/R31).
