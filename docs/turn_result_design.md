@@ -433,6 +433,11 @@ class TurnResult(BaseModel):
   right shape: text + artifacts + next_actions + recommendations, without provenance.
 - **`answer` is not plain `str`.** Plain text is too lossy: the answer legitimately wants artifacts
   (a headline payload reference), `next_actions`, and `recommendations`.
+
+  > **[Corrected by Amendment A9]** The `next_actions`/`recommendations` part of this
+  > motivation was circular — nothing populates them on the agent answer, and they stay empty
+  > by decision. The answer is typed `CommandResponse` for its text+artifacts shape; buttons
+  > belong on gallery entries where provenance is clear.
 - **Turn metadata (`user_message`, `entry_workflow_name`, `entry_context`) lives on `TurnResult`,
   not on the answer.** The answer can span multiple workflows/contexts (the agent called commands
   across contexts), so "the workflow of the answer" is ill-defined; "the workflow the turn entered
@@ -931,3 +936,22 @@ Supersedes the reviewer-proposed discriminated-union event sequence with a simpl
 3. **Record-mediated access contract:** payload reads always authorize the referencing turn
    record first, then resolve handles found inside it; bare-handle fetch endpoints are
    forbidden. Closes the hash-oracle / cross-tenant-probe exposure.
+
+### A9 — `next_actions`/`recommendations` policy; gallery provenance (resolves R42) — 2026-06-11
+
+Empirical basis: `next_actions` and `recommendations` have **zero producers and zero
+consumers** in the framework, examples, and tests; xray's action buttons travel via
+`artifacts`, which the design preserves. Post-A7, durable records keep complete
+`CommandResponse`s, so these fields are automatically preserved if they ever gain producers.
+
+1. **Gallery rule stays payload-bearing only** (conservative; user decision). Documented and
+   accepted: an output bearing only buttons/recommendations would appear in the durable
+   record but not the live gallery — currently unreachable (zero producers), recoverable from
+   the record if it occurs.
+2. **The agent answer's `next_actions`/`recommendations` stay empty.** Section 5.4's
+   motivation is corrected in place (see the bracketed note there).
+3. **Gallery provenance:** `TurnResult` preserves full per-entry provenance
+   (`command_name`, `command_parameters`, `workflow_name`, `context`), but xray's
+   `ResponseTuple` has no command-identity slot, so provenance dies at that wire format. xray
+   will initially embed provenance in response text; extending `ResponseTuple` is xray-repo
+   scope, out of scope for fastWorkflow — recorded as a note on the section 10.3 mapping.

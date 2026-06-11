@@ -20,7 +20,7 @@ refinements. "Open questions: none remaining" (section 13 of the design doc) is 
 | R1 | ask_user exchanges lost; turn transcript not interleaved | **RESOLVED 2026-06-11** — ask_user modeled as a `CommandOutput` in the ordered list (Dhar's simplification) | 3.1, 5.4, 7.6, 9, decision 18 |
 | R2 | Content-addressing makes co-GC incoherent; cross-tenant handle sharing | **RESOLVED 2026-06-11** — turn-scoped payload keys; record-mediated access | 7.8, 8.2, decisions 13, 19 |
 | R37 | Framework already persists per-turn records (`ConversationStore`); design premises false; third overlapping store | **RESOLVED 2026-06-10** — full absorption into unified `ConversationTurnStore` | 7.1, 7.2, 9.1, decisions 11, 18 |
-| R42 | `next_actions`/`recommendations` still die at the agent boundary — the original bug class survives the fix | **Blocking — design contradiction** | 2.4, 5.4, 10.3, decision 2 |
+| R42 | `next_actions`/`recommendations` still die at the agent boundary — the original bug class survives the fix | **RESOLVED 2026-06-11** — fields verified unused; payload-only gallery kept; answer stays bare; provenance via text (xray scope) | 2.4, 5.4, 10.3, decision 2 |
 | R3 | HTTP/MCP wire-contract break undocumented; external authors break | Blocking | 11, decisions 4, 8 |
 | R4 | Build-time generators and internal `_workflows` commands missing from change list | Blocking | 11 |
 | R5 | Artifact serialization/offload contract unspecified | Blocking | 8.2, 8.3, decision 16 |
@@ -312,6 +312,32 @@ aggregated from the final command's output (last-command-wins, documented); (c) 
 declare them dead on the agent path and remove the 5.4 motivation. Any of these is defensible;
 silence is not — this is the same "which structured outputs, from which tool calls" question
 the whole design exists to answer (section 2.4), asked only about payloads.
+
+**RESOLVED 2026-06-11 (with Dhar).** New empirical finding first: **`next_actions` and
+`recommendations` have zero producers and zero consumers** anywhere in the framework, bundled
+examples, or tests (verified by grep; only the field declarations exist). Even xray — the one
+application with real action buttons — ships them through `artifacts`
+(`_response_mapping.py` packs `actions` there), a channel the design already preserves. And
+post-R1/A7, the durable record keeps complete `CommandResponse`s for every execution, so these
+fields are preserved in records automatically if they ever gain producers. Decisions:
+
+1. **Gallery rule: payload-bearing only** (user decision, conservative). The live gallery
+   filter stays as the design states. Accepted consequence, documented: a command returning
+   buttons/recommendations without a payload appears in the durable record but not the live
+   response — a drop scenario that is currently unreachable (zero producers) and recoverable
+   from the record if it ever occurs.
+2. **The agent answer's `next_actions`/`recommendations` stay empty**, and section 5.4's
+   circular motivation is corrected: the answer is typed `CommandResponse` for its
+   text+artifacts shape; buttons belong on gallery entries where provenance is clear.
+3. **Gallery provenance** (raised during review — `ResponseTuple` has no command-identity
+   slot, so per-entry provenance dies at xray's wire format even though `TurnResult`
+   preserves `command_name`/`command_parameters`/`workflow_name`/`context` per entry):
+   xray will initially embed provenance in the response text; extending `ResponseTuple` with
+   structured provenance fields is **xray-repo scope and out of scope here** — documented as a
+   note on the section 10.3 mapping. fastWorkflow's obligation is met by preserving full
+   provenance in `TurnResult`.
+
+Recorded in `docs/turn_result_design.md`, Amendments A9.
 
 ### R3. The breaking change is bigger than section 11 admits — it breaks the wire contract and every external workflow author
 
