@@ -1086,6 +1086,18 @@ Amendments A27.
 - **No per-channel quota:** a buggy or hostile session can grow the store without bound; note
   it as an infra expectation alongside retention.
 
+**RESOLVED 2026-06-11 (confirm-and-close; three caveats written into the deployment
+contract).** (1) **Disk = development/single-node only** for `ConversationTurnStore` and
+`PayloadStore` (years-lived data; invisible cross-pod; lost on pod replacement without a
+PVC). Cross-pod failover note: A17's envelope-fetch fallback renders "payload unavailable"
+against a dead pod's disk rather than erroring — tolerated, but one more reason disk is
+dev-only. (2) **Redis eviction:** records are NOT covered by the tolerate-missing rule (it
+covers payloads); the conversation store's Redis must run `noeviction` (or deliberate
+`volatile-*` TTLs as part of A12 retention), ideally a dedicated logical database never
+shared with an LRU cache. (3) **Per-channel quota** is named in the A12 infra contract
+alongside retention — a conscious deployment decision, not an unconsidered absence. Recorded
+in `docs/turn_result_design.md`, Amendments A29.
+
 ### R23. Completion-sequence atomicity and failure semantics are undefined
 
 The completion branch does: offload payloads → `put` review record → `clear` pending → return.

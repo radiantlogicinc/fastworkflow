@@ -1218,3 +1218,13 @@ Verified sites missing from section 11, with migration releases per A14:
    whose turn key already has a record is discarded. Record-write wins.
 4. **Write stays in-lock** with a tight retry budget; post-lock writing is a permitted future
    optimization (A24 assigns the ordinal in-lock either way).
+
+### A29 — Deployment caveats (resolves R22) — 2026-06-11
+
+1. **Disk backends = development/single-node only** for the unified store and `PayloadStore`
+   (years-lived data, invisible cross-pod, lost without a PVC). A17's fetch fallback renders
+   "payload unavailable" after a cross-pod failover on disk — tolerated, but dev-only.
+2. **Redis policy:** records are not covered by tolerate-missing (payloads are); run
+   `noeviction` (or deliberate `volatile-*` TTLs under A12 retention) on a dedicated logical
+   DB, never shared with an LRU cache.
+3. **Per-channel quota** is named in the A12 infra contract alongside retention.
