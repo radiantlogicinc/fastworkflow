@@ -1437,6 +1437,15 @@ client is expected to read `success` off a serialized `TurnResult`/`CommandOutpu
 them as `@computed_field` — and note it as a deliberate wire-schema addition. (Interacts with
 R40: turn-level success must exist before it can be serialized.)
 
+**RESOLVED 2026-06-11 (confirm-and-close).** **`TurnResult.success` is the only computed
+field on the wire** (decided by A6; drives MCP `isError`). Every `CommandOutput` predicate
+stays property-only: post-collapse, `CommandOutput.success` is literally
+`command_response.success` (a real field already serialized — promotion would duplicate the
+byte); `command_handled`/`command_aborted`/`not_what_i_meant` read artifacts entries that are
+already serialized (clients derive trivially), and promoting them would freeze the internal
+NLU artifact protocol — kept deliberately private in A3/R11 — into the public wire contract.
+Recorded in `docs/turn_result_design.md`, Amendments A42.
+
 ---
 
 ## 5. Editorial and process

@@ -1357,3 +1357,11 @@ scope is consuming trajectories, not persisting them.
 3. **Admin/developer surface:** cross-channel via the admin-authenticated precedent
    (`/dump_conversations`, MCP tokens); developer projection lives here. Building the API is
    out of scope; its shape is constrained by this contract.
+
+### A42 — `TurnResult.success` is the only wire-exposed predicate (resolves R33) — 2026-06-11
+
+`TurnResult.success` serializes as a `computed_field` (A6; drives MCP `isError`). All
+`CommandOutput` predicates remain property-only: `success` duplicates the already-serialized
+`command_response.success`; the artifact-reading predicates are client-derivable from the
+serialized artifacts dict, and promoting them would freeze the deliberately-private NLU
+artifact protocol (A3) into the public schema.
