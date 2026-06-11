@@ -880,6 +880,11 @@ Consequences:
    up owned by a terminal turn record; no orphan class remains. ~~(except review-persistence-off
    deployments, which delete payloads at the terminal transition instead)~~ **Superseded by
    A12:** there is no persistence switch.
+5. **R24 residuals (added 2026-06-11 at final confirmation):** (a) never-touched channels —
+   the `fix-6b4` reaper deletes the stale pending blob *plus the in-flight turn's payload
+   prefix* (trivial under A8's turn-scoped keys); (b) upgrade day orphans nothing — A14's
+   graceful expiry clears pre-3.0 pending blobs, which predate the stores (suspend-time
+   offload begins at v3.0), so no payload copies exist to orphan.
 
 ### A6 — Turn-level success semantics (resolves R40) — 2026-06-11
 

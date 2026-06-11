@@ -1036,6 +1036,20 @@ only by the **pending** blob. If the turn is abandoned (R6.3) or cancelled (R39)
 payloads are referenced by nothing the co-GC contract knows about. The lifecycle contract must
 cover pending-blob references, or the abandoned/cancelled paths must adopt-or-delete them.
 
+**RESOLVED 2026-06-11 (confirm-and-close; the orphan class is empty by prior amendments).**
+Cancelled → A4 (payloads transfer to the cancelled record); abandoned → A5.3 (lazy filing,
+same transfer); the persistence-off delete mode no longer exists (A12). Two residuals
+verified and recorded:
+
+1. **Never-touched channels** (the `fix-6b4` reaper residue): with A8's turn-scoped payload
+   keys, the reaper deletes the stale pending blob *plus the in-flight turn's payload
+   prefix* in the same stroke — one line added to the reaper contract.
+2. **Upgrade day orphans nothing:** A14's graceful expiry clears pre-3.0 pending blobs, which
+   predate the stores entirely (suspend-time offload begins at v3.0) — no warehouse copies
+   exist to orphan.
+
+Recorded as an addition to `docs/turn_result_design.md` Amendment A5 (point 5).
+
 ### R25. Serialization responsibility is unassigned
 
 `TurnReviewStore.put` takes a `dict` — so *something else* runs the recursive offload-and-
