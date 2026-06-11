@@ -125,99 +125,6 @@ contract.
 
 ---
 
-## 10. Runner and xray integration
-
-### 10.1 Runner: write review on the completion branch
-
-`shared/src/application/fastworkflow_runner.py` `_persist_pending_after_turn` currently does:
-
-```python
-if runtime.ctx.awaiting_user or _output_is_awaiting_user(command_output):
-    self._store.save(key, runtime.ctx.serialize_state(channel_id=key))   # pending (light partial)
-else:
-    self._store.clear(key)                                               # completed
-```
-
-**Change:** the `else` (completed, not-awaiting) branch must ALSO write the completed `TurnResult` to
-the `TurnReviewStore` (after offloading payloads). This runs **inside the per-session lock**
-(`run_turn` holds `runtime.lock`), so per-session review writes are serialized and safe. It must NOT
-be wired only into the suspend path. The pending-store `save` continues to carry the light partial
-across suspends.
-
-### 10.2 `process_message` return type
-
-`run_turn` will receive a `TurnResult` from `ctx.process_message` (section 5.6) rather than a
-`CommandOutput`. The runner maps it to the xray API (`List[ResponseTuple]`).
-
-### 10.3 xray `command_output_to_response_tuples` change
-
-Today it iterates `command_output.command_responses`. After the redesign it consumes a `TurnResult`:
-
-- The **headline** `ResponseTuple` is built from `TurnResult.answer` (the narrative; `payload` may be
-  `None`).
-- Then one `ResponseTuple` per **payload-bearing** `CommandOutput` in `TurnResult.command_outputs`
-  (the gallery), fetching payloads lazily from the `PayloadStore` by handle.
-- **The UI decides which payload is the headline, if any** (user decision); the framework/mapping does
-  not designate a primary payload. The gallery is the raw payload-bearing outputs in turn order.
-
-This realizes "single answer + gallery of data outputs," which the existing list-returning shape of
-`command_output_to_response_tuples` already accommodates.
-
----
-
-## 11. Mechanical changes (no design debate, recorded for completeness)
-
-- **`CommandOutput.to_mcp_result()`** currently iterates `command_responses` to build MCP content;
-  update for the single `command_response` collapse.
-- **`CommandExecutor`** accessors `command_output.command_responses[0]` (e.g. `command_executor.py`
-  lines 56-57, the `artifacts["command_name"]` / `artifacts["cmd_parameters"]` reads) update to
-  `command_output.command_response`.
-- **`workflow_execution_context.py`** construction sites (lines 419, 522, 558) and
-  **`workflow_agent.py:276`** switch from `command_responses=[r]` to `command_response=r`.
-- **All command authors / examples** that return `CommandOutput(command_responses=[r])` migrate to
-  `command_response=r` (mechanical; section 4.1 shows all are single-element).
-- **`SCHEMA_VERSION`** bump in `session_state_store.py` for the new serialized shape.
-- **Old-schema migration is out of scope** (user decision): handled by a separate migration tool if
-  deemed necessary. In-flight suspended sessions serialized under the old shape are not auto-migrated.
-
----
-
-## 12. Decision log (quick reference)
-
-| # | Decision | Rationale |
-|---|----------|-----------|
-| 1 | Patch the framework (not arc side-channel / agent bypass) | User owns fastWorkflow; most correct |
-| 2 | Accumulate ALL tool-call outputs per turn | Full fidelity; last-wins/attributed rejected |
-| 3 | Unit of accumulation is `CommandOutput`, not `CommandResponse` | Preserves provenance; avoids poisoning predicates |
-| 4 | Collapse `CommandOutput.command_responses` -> single `command_response` | Provably-unused list; removes competing multiplicity axis |
-| 5 | Recursion seam is `CommandOutput.nested_turn`, modeled now | Recursion belongs on execution node; nested agents imminent |
-| 6 | `TurnResult.answer` is a `CommandResponse` | Answer is a value, not an execution; str too lossy |
-| 7 | Turn metadata on `TurnResult`, not on `answer` | Answer spans contexts; entry context is a turn property |
-| 8 | `process_message` returns `TurnResult` (breaking) | Explicit > hidden mutable state; avoids stale-read footgun |
-| 9 | Streaming stays text-only via existing `command_trace_queue` | No live payloads needed; no durable mid-turn writes |
-| 10 | Durability = option D (light record + payload offload), once per logical turn | Preserves `action_log`-level latency; meets review |
-| 11 | ~~Separate `TurnReviewStore` (enumerable) from pending `SessionStateStore`~~ **Superseded by Amendment A1**: pending `SessionStateStore` + unified `ConversationTurnStore` (absorbs `ConversationStore`) | Different lifecycle/access pattern |
-| 12 | Enumeration only on `TurnReviewStore` | Pending store holds one in-flight turn; never lists |
-| 13 | ~~`PayloadStore` content-addressed, disk/redis mirror~~ **Superseded by Amendment A8**: turn-scoped keys; content hash survives only as the leaf segment (within-turn idempotency) | Idempotent, concurrency-safe; matches existing split |
-| 14 | Key = channel + sortable ISO-8601 GMT ts + uuid; ordinal by sorting | Backends don't preserve insertion order |
-| 15 | Summary is value metadata, not key | Unsafe/long/collision-prone; couples to LLM call |
-| 16 | Offload payloads at every persistence boundary (suspend + completion) | Keeps suspend blob light; resume needs no payload fetch |
-| 17 | Review write on the completion branch, inside per-session lock | Serialized + safe; not the suspend path |
-| 18 | Retire `action_log`; derive summary text view from `command_outputs` | Zero regression; removes divergence |
-| 19 | Retention/GC out of scope; infra co-GC record+payload under one lifecycle key — **rewritten by Amendment A8**: the lifecycle key is literally the conversation prefix | Plus reader tolerates missing payload |
-| 20 | Nested turns embedded-only; top-level keys for user-message turns | Serializer recurses; nested addressed by path |
-| 21 | UI decides headline payload | Framework surfaces raw gallery in turn order |
-| 22 | Old-schema migration out of scope (separate tool) | Bump `SCHEMA_VERSION` |
-
----
-
-## 13. Open questions
-
-None remaining. The capture side (types, single-producer/three-sinks, `action_log` retirement) and
-the review side (key schema, two stores, payload offload, persistence boundaries, recursion,
-GC contract) are all resolved per the decision log above. Remaining work is implementation, tracked
-separately from this document.
-
 ### 1.5 Fix options considered for the symptom (before going deeper)
 
 Three options were enumerated for getting payload back to the API:
@@ -765,6 +672,104 @@ durability" does not gate this: the in-memory subsumption is independent of how/
 `TurnResult`** (records + payload handles), per section 7.6. The CLI `action.jsonl` mirror, if kept
 for debugging, derives from `command_outputs`; otherwise it is dropped (CLI-only, no external
 contract).
+
+---
+
+## 10. Runner and xray integration
+
+### 10.1 Runner: write review on the completion branch
+
+`shared/src/application/fastworkflow_runner.py` `_persist_pending_after_turn` currently does:
+
+```python
+if runtime.ctx.awaiting_user or _output_is_awaiting_user(command_output):
+    self._store.save(key, runtime.ctx.serialize_state(channel_id=key))   # pending (light partial)
+else:
+    self._store.clear(key)                                               # completed
+```
+
+**Change:** the `else` (completed, not-awaiting) branch must ALSO write the completed `TurnResult` to
+the `TurnReviewStore` (after offloading payloads). This runs **inside the per-session lock**
+(`run_turn` holds `runtime.lock`), so per-session review writes are serialized and safe. It must NOT
+be wired only into the suspend path. The pending-store `save` continues to carry the light partial
+across suspends.
+
+### 10.2 `process_message` return type
+
+`run_turn` will receive a `TurnResult` from `ctx.process_message` (section 5.6) rather than a
+`CommandOutput`. The runner maps it to the xray API (`List[ResponseTuple]`).
+
+### 10.3 xray `command_output_to_response_tuples` change
+
+Today it iterates `command_output.command_responses`. After the redesign it consumes a `TurnResult`:
+
+- The **headline** `ResponseTuple` is built from `TurnResult.answer` (the narrative; `payload` may be
+  `None`).
+- Then one `ResponseTuple` per **payload-bearing** `CommandOutput` in `TurnResult.command_outputs`
+  (the gallery), fetching payloads lazily from the `PayloadStore` by handle.
+- **The UI decides which payload is the headline, if any** (user decision); the framework/mapping does
+  not designate a primary payload. The gallery is the raw payload-bearing outputs in turn order.
+
+This realizes "single answer + gallery of data outputs," which the existing list-returning shape of
+`command_output_to_response_tuples` already accommodates.
+
+---
+
+## 11. Mechanical changes (no design debate, recorded for completeness)
+
+- **`CommandOutput.to_mcp_result()`** currently iterates `command_responses` to build MCP content;
+  update for the single `command_response` collapse.
+- **`CommandExecutor`** accessors `command_output.command_responses[0]` (e.g. `command_executor.py`
+  lines 56-57, the `artifacts["command_name"]` / `artifacts["cmd_parameters"]` reads) update to
+  `command_output.command_response`.
+- **`workflow_execution_context.py`** construction sites (lines 419, 522, 558) and
+  **`workflow_agent.py:276`** switch from `command_responses=[r]` to `command_response=r`.
+- **All command authors / examples** that return `CommandOutput(command_responses=[r])` migrate to
+  `command_response=r` (mechanical; section 4.1 shows all are single-element).
+- **`SCHEMA_VERSION`** bump in `session_state_store.py` for the new serialized shape.
+- **Old-schema migration is out of scope** (user decision): handled by a separate migration tool if
+  deemed necessary. In-flight suspended sessions serialized under the old shape are not auto-migrated.
+
+---
+
+## 12. Decision log (quick reference)
+
+| # | Decision | Rationale |
+|---|----------|-----------|
+| 1 | Patch the framework (not arc side-channel / agent bypass) | User owns fastWorkflow; most correct |
+| 2 | Accumulate ALL tool-call outputs per turn | Full fidelity; last-wins/attributed rejected |
+| 3 | Unit of accumulation is `CommandOutput`, not `CommandResponse` | Preserves provenance; avoids poisoning predicates |
+| 4 | Collapse `CommandOutput.command_responses` -> single `command_response` | Provably-unused list; removes competing multiplicity axis |
+| 5 | Recursion seam is `CommandOutput.nested_turn`, modeled now | Recursion belongs on execution node; nested agents imminent |
+| 6 | `TurnResult.answer` is a `CommandResponse` | Answer is a value, not an execution; str too lossy |
+| 7 | Turn metadata on `TurnResult`, not on `answer` | Answer spans contexts; entry context is a turn property |
+| 8 | `process_message` returns `TurnResult` (breaking) | Explicit > hidden mutable state; avoids stale-read footgun |
+| 9 | Streaming stays text-only via existing `command_trace_queue` | No live payloads needed; no durable mid-turn writes |
+| 10 | Durability = option D (light record + payload offload), once per logical turn | Preserves `action_log`-level latency; meets review |
+| 11 | ~~Separate `TurnReviewStore` (enumerable) from pending `SessionStateStore`~~ **Superseded by Amendment A1**: pending `SessionStateStore` + unified `ConversationTurnStore` (absorbs `ConversationStore`) | Different lifecycle/access pattern |
+| 12 | Enumeration only on `TurnReviewStore` | Pending store holds one in-flight turn; never lists |
+| 13 | ~~`PayloadStore` content-addressed, disk/redis mirror~~ **Superseded by Amendment A8**: turn-scoped keys; content hash survives only as the leaf segment (within-turn idempotency) | Idempotent, concurrency-safe; matches existing split |
+| 14 | Key = channel + sortable ISO-8601 GMT ts + uuid; ordinal by sorting | Backends don't preserve insertion order |
+| 15 | Summary is value metadata, not key | Unsafe/long/collision-prone; couples to LLM call |
+| 16 | Offload payloads at every persistence boundary (suspend + completion) | Keeps suspend blob light; resume needs no payload fetch |
+| 17 | Review write on the completion branch, inside per-session lock | Serialized + safe; not the suspend path |
+| 18 | Retire `action_log`; derive summary text view from `command_outputs` | Zero regression; removes divergence |
+| 19 | Retention/GC out of scope; infra co-GC record+payload under one lifecycle key — **rewritten by Amendment A8**: the lifecycle key is literally the conversation prefix | Plus reader tolerates missing payload |
+| 20 | Nested turns embedded-only; top-level keys for user-message turns | Serializer recurses; nested addressed by path |
+| 21 | UI decides headline payload | Framework surfaces raw gallery in turn order |
+| 22 | Old-schema migration out of scope (separate tool) | Bump `SCHEMA_VERSION` |
+
+---
+
+## 13. Open questions
+
+~~None remaining.~~ **Rewritten 2026-06-11:** the original "none remaining" claim was an
+overclaim — a systematic critical review (`docs/turn_result_design_review.md`, 48 findings,
+beads epic `fix-vof`) found four design contradictions and numerous unresolved questions. All
+48 findings have since been collaboratively resolved; the outcomes are recorded as
+**Amendments A1–A47** below, which supersede the affected sections and decision-log entries
+above wherever they conflict. The amendments — not the original sections — are authoritative.
+Remaining work is implementation, tracked in beads.
 
 ---
 
@@ -1365,3 +1370,50 @@ scope is consuming trajectories, not persisting them.
 `command_response.success`; the artifact-reading predicates are client-derivable from the
 serialized artifacts dict, and promoting them would freeze the deliberately-private NLU
 artifact protocol (A3) into the public schema.
+
+### A43 — Document reordered; section 13 rewritten (resolves R34) — 2026-06-11
+
+Sections 10–13 were physically relocated from their scrambled position (between 1.4 and 1.5)
+to their correct place after section 9. Section 13's "none remaining" overclaim is rewritten
+to point at the review and the amendments, with the supersession rule stated: **the
+amendments are authoritative wherever they conflict with the original sections.**
+
+### A44 — Consolidated test matrix (resolves R35) — 2026-06-11
+
+Integration tests (project philosophy: no mocks, real test workflows), consolidated from the
+amendments: store round-trips disk+redis (A1/A8/A18); suspend → resume → complete with
+offload at both boundaries (A17); cancel + auto-cancel-on-switch (A4/A2); abandon TTL lazy
+filing (A5); nested-turn round-trip with the synthetic producer (A32); failed-execution
+capture incl. suspension-signal passthrough (A5); accumulator invariant — both failure modes
+(A30); ask_user interleaving order + unanswered convention (A7); memory rebuild projection +
+conversation listing post-consolidation (A1/A23); shim deprecation path (A13); graceful
+expiry of old blobs (A14); key idempotency + write-once collisions (A22); ordinal restore
+(A24); sanitizer traversal cases (A26); strict-rejection errors (A10); copy-on-serialize
+non-mutation (A20); projection views (A39); queue contract + sentinel pairing / `fix-5fv`
+(A19); `continuation_of` chains (A33); record-write failure best-effort (A28); retention
+prefix-delete co-GC (A8). Lives in `tests/` against the real test workflows.
+
+### A45 — xray deployment coupling (resolves R36; largely absorbed by A14) — 2026-06-11
+
+xray pins the exact fastworkflow version. Under the A14 train both mismatch directions fail
+**loud**: xray on `process_turn()` against pre-2.21 → `AttributeError` at startup; a pre-A13
+client against 3.0 → schema validation failure. Rollout notes live in the A13 migration
+guide; the A14 pre-upgrade drain recommendation applies to xray deployments.
+
+### A46 — Canonical summary home (resolves R47) — 2026-06-11
+
+The **turn record's summary field** (an A1 projection field) is the single canonical home of
+the turn-level conversation summary. The dspy.History copy is a cache projected from records
+(A1); the A23 listing card carries it as a projection. The
+`answer.artifacts["conversation_summary"]` copy — verified to have **zero consumers** (only
+the setter at `workflow_execution_context.py:547` exists) — is **dropped at v3.0** as
+redundant. Conversation-*level* topic/summary is a different object and stays on the A1
+conversation metadata records.
+
+### A47 — Public exports (resolves R48) — 2026-06-11
+
+`fastworkflow/__init__.py` additionally exports: **`TurnResult`**, **`TurnStatus`** (A3), and
+the reserved envelope marker constant (**`FW_PAYLOAD_REF_KEY = "__fw_payload_ref__"`**, A10)
+so application authors can write record readers without magic strings. No event types exist
+to export (dissolved by A7). Serializer/projection helpers are exported under a submodule
+when implemented, not from the package root.

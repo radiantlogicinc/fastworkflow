@@ -817,6 +817,13 @@ metadata" (section 7.7), and the `conversation_history` turn record persisted by
 server (R37). Pick one canonical location (the review record, under R37's consolidation) and
 derive the rest.
 
+**RESOLVED 2026-06-11 (confirm-and-close).** Canonical home = **the turn record's summary
+field** (an A1 projection field); the dspy.History copy is a projected cache (A1) and the
+A23 listing card a projection. The `answer.artifacts["conversation_summary"]` copy was
+verified to have **zero consumers** (only the setter at `workflow_execution_context.py:547`)
+and is dropped at v3.0. Conversation-level topic/summary is a distinct object on the A1
+metadata records. Recorded as Amendment A46.
+
 ### R10. Answer aliasing: a mutation hazard and a duplication bug waiting to happen
 
 In the deterministic path, `answer == command_outputs[-1].command_response` — the *same object*.
@@ -1458,6 +1465,11 @@ implementation reference. Separately, given this review, section 13 should be re
 actual open-questions list (R1, R2, R5, R8, R37, R40, R41, R42 at minimum are unresolved design
 questions, not implementation details).
 
+**RESOLVED 2026-06-11 (executed).** Sections 10–13 physically relocated to their correct
+position after section 9; section 13 rewritten to reference the review and the amendments,
+with the supersession rule stated (amendments are authoritative over conflicting original
+sections). Recorded as Amendment A43.
+
 ### R35. Test-plan implications are unstated
 
 The project's testing philosophy is integration tests against real workflows; this change
@@ -1467,12 +1479,23 @@ R6.3), nested-turn serialization with a synthetic producer (R12.1), failed-execu
 (R6.1), accumulator reset invariants (R26), ask_user interleaving order (R1), conversation
 store consolidation (R37), and the compat shim's deprecation path (R3).
 
+**RESOLVED 2026-06-11 (confirm-and-close).** The test matrix accumulated across all
+amendments is consolidated into Amendment A44 (22 line items spanning stores, lifecycle
+transitions, serialization, projections, the queue contract incl. `fix-5fv`, linkage, and
+retention co-GC), living in `tests/` against the real test workflows per project philosophy.
+
 ### R36. Deployment coupling with xray
 
 The framework change and the xray mapping change (`_response_mapping.py`, runner) must deploy
 in lockstep; an old runner against a new framework fails on the `process_message` return type
 immediately (good — loud), but a new runner against an old framework fails subtly. Pin the
 fastworkflow version in xray and state the lockstep requirement in the rollout notes.
+
+**RESOLVED 2026-06-11 (confirm-and-close; largely absorbed by A14).** xray pins the exact
+fastworkflow version. The A14 train made both mismatch directions fail *loud* (the original
+"fails subtly" direction is gone): `process_turn()` against pre-2.21 → `AttributeError` at
+startup; pre-A13 clients against 3.0 → schema validation failure. Rollout notes live in the
+A13 migration guide; A14's pre-upgrade drain applies. Recorded as Amendment A45.
 
 ### R46. Release sequencing: the design couples three independently-shippable changes into one big-bang break
 
@@ -1525,6 +1548,12 @@ Recorded in `docs/turn_result_design.md`, Amendments A14.
 `CommandOutput`/`CommandResponse` are re-exported from `fastworkflow/__init__.py` (the public
 surface command authors import). `TurnResult`, `TurnStatus`, and the event types must join
 them; trivial, but it is the kind of thing section 11 exists to list.
+
+**RESOLVED 2026-06-11 (confirm-and-close).** Exports: **`TurnResult`**, **`TurnStatus`**
+(A3), and the reserved envelope marker constant **`FW_PAYLOAD_REF_KEY`** (A10 — so record
+readers need no magic strings). No event types exist to export (dissolved by A7's
+ask_user-as-CommandOutput design); serializer/projection helpers export from a submodule
+when implemented. Recorded as Amendment A47.
 
 ---
 
