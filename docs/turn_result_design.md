@@ -1239,3 +1239,12 @@ Verified sites missing from section 11, with migration releases per A14:
 4. **Exactly one terminal transition finalizes and clears** (completed/failed/cancelled/
    abandoned).
 5. Failure modes for the R35 tests: leak-forward double-count; reset-on-resume loss.
+
+### A31 — Single-writer-per-channel assumption (resolves R27) — 2026-06-11
+
+**Stated deployment assumption:** fastWorkflow requires single-writer-per-channel —
+deployments route each channel's requests to one pod (sticky sessions / consistent hashing
+on `channel_id`) or otherwise guarantee a single writer. Violations risk pending-state
+last-writer-wins races, interleaved ordinals (A24's counter is in-process), and
+conversation-id collisions. A distributed per-channel lock is the noted future alternative;
+out of scope.

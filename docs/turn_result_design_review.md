@@ -1208,6 +1208,14 @@ distinct review keys (fine) but racing pending-store writes (pre-existing issue)
 ordinals (R18's counter needs the lock). One sentence in the design acknowledging the
 sticky-session assumption would prevent a false sense of safety.
 
+**RESOLVED 2026-06-11 (confirm-and-close; the sentence, ratified):** *fastWorkflow requires
+single-writer-per-channel — deployments must route each channel's requests to one pod (sticky
+sessions / consistent hashing on `channel_id`) or otherwise guarantee a single writer.*
+Failure modes named: pending-state last-writer-wins races, interleaved ordinals (A24's
+counter is in-process), conversation-id reservation collisions. A distributed per-channel
+lock (e.g., Redis-based) is the noted future alternative if non-sticky routing is ever
+required — explicitly out of scope. Recorded in `docs/turn_result_design.md`, Amendments A31.
+
 ### R45. Payload accumulation changes the per-turn memory profile — consider eager offload
 
 Today the agent path extracts text at the tool boundary and the `CommandOutput` (with its
