@@ -1418,6 +1418,17 @@ mediated by access to the referencing turn record.* (Note `ConversationStore` al
 admin dump endpoint — `/dump_conversations` — which under R37's consolidation becomes a
 template for the review read side.)
 
+**RESOLVED 2026-06-11 (confirm-and-close; the contract that binds any future read API).**
+(1) **Record-first authorization, ratified:** every read path authorizes the turn record,
+then resolves what it references — payload handles (A8), `trajectory_ref` (A37), feedback
+cards (A18). No endpoint ever accepts a bare handle. (2) **End-user surface:** JWT
+channel-binding scopes reads to the caller's own conversations/turns, **user projection**
+(A39) by default — follows the bundled server's existing auth pattern. (3) **Admin/developer
+surface:** cross-channel access via the admin-authenticated precedent
+(`/dump_conversations`, MCP-token endpoints); the **developer projection** lives here.
+Building the API remains out of scope; its shape is now constrained. Recorded in
+`docs/turn_result_design.md`, Amendments A41.
+
 ### R33. Pydantic properties are absent from `model_dump()`
 
 `success`, `command_aborted`, etc. are properties and therefore never appear on the wire today

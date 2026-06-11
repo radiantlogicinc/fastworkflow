@@ -1346,3 +1346,14 @@ scope is consuming trajectories, not persisting them.
    embedding app runs under OTel — records join infrastructure traces.
 3. The exporter is out of scope; the future observability tool can begin as one
    (Langfuse/Phoenix/Jaeger render the result).
+
+### A41 — Read-side access contract (resolves R32) — 2026-06-11
+
+1. **Record-first authorization:** every read path authorizes the turn record, then resolves
+   its references (payloads/A8, trajectory/A37, feedback/A18). No bare-handle endpoints,
+   ever.
+2. **End-user surface:** JWT channel-binding; own conversations/turns only; user projection
+   (A39) by default.
+3. **Admin/developer surface:** cross-channel via the admin-authenticated precedent
+   (`/dump_conversations`, MCP tokens); developer projection lives here. Building the API is
+   out of scope; its shape is constrained by this contract.
