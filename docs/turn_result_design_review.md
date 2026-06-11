@@ -29,7 +29,7 @@ refinements. "Open questions: none remaining" (section 13 of the design doc) is 
 | R8 | `process_action` / MCP paths not covered | **RESOLVED 2026-06-11** — full turns: TurnResult + record, empty user_message | 5.5, 5.6, 10 |
 | R40 | `TurnResult` has no turn-level success semantics | **RESOLVED 2026-06-11** — success=answer.success; max-iters → success=False; serialized | 5.4, 5.5, 11 |
 | R41 | Live response path ambiguous: in-memory payloads vs put-then-get round trip | **RESOLVED 2026-06-11** — live path serves from RAM; configurable inline cap; handles are review-only | 10.3, 8.2 |
-| R38 | `/post_feedback` vs write-once review records | High | 7.5, 8.1 |
+| R38 | `/post_feedback` vs write-once review records | **RESOLVED 2026-06-11** — separate feedback records in the unified keyspace; turn records stay write-once | 7.5, 8.1 |
 | R39 | `/cancel_pending` (cancelled turns) unaccounted for | **RESOLVED 2026-06-10** — cancelled turns recorded; memory projects completed-only | 7.6, 10.1 |
 | R43 | CLI / `command_output_queue` contract undefined after redesign | High | 5.6, 11 |
 | R9 | `channel_id` vs conversation boundary | **RESOLVED 2026-06-10** — structural via A1; eager id reservation; auto-cancel on switch | 7.7, 8.1 |
@@ -738,6 +738,25 @@ keyed by `turn_key` (recommended — preserves write-once, trivially joined at r
 (c) feedback stays in the conversation store with a `turn_key` link (fine under R37's
 consolidation). User feedback is first-order observability data — the design must give it a
 home, and currently does not mention it.
+
+**RESOLVED 2026-06-11 (with Dhar) — separate feedback records.** Feedback is its own small
+record type in the unified keyspace: `fw:feedback:{channel_id}:{conv_id}:{turn_key}` holding
+score, comment, and timestamp. Consequences and stated conventions:
+
+1. **Turn records stay strictly write-once** — R16's enforcement and the audit-immutability
+   property hold without carve-outs.
+2. **Same prefix scans serve everything:** the review reader and the A1 memory rebuild fetch
+   turn records + feedback cards in one conversation-prefix scan; the A8/A12 retention delete
+   removes cards with their envelopes automatically.
+3. **Re-posting overwrites** (last-write-wins on the single feedback key), matching today's
+   semantics where `/post_feedback` replaces the last turn's feedback dict.
+4. **Endpoint behavior unchanged:** `/post_feedback` targets the latest completed turn of the
+   active conversation; arbitrary-turn feedback is future R32 read-API territory.
+5. **Feedback enters the agent-memory projection** for completed turns, exactly as the
+   dspy.History `feedback` slot does today (A1's projection constraint satisfied via the
+   read-time join).
+
+Recorded in `docs/turn_result_design.md`, Amendments A18.
 
 ### R43. The CLI / `command_output_queue` contract is undefined after the redesign
 

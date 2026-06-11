@@ -1081,3 +1081,16 @@ Verified sites missing from section 11, with migration releases per A14:
    envelopes only; the live mapping treats envelope entries as **fetch-by-handle** — the one
    legitimate live-path store read (server-side; A8 record-mediation holds). This is the
    correct scope of 10.3's "lazily by handle" wording.
+
+### A18 — Feedback as separate records in the unified keyspace (resolves R38) — 2026-06-11
+
+1. **Feedback record type:** `fw:feedback:{channel_id}:{conv_id}:{turn_key}` holding score,
+   comment, timestamp. Turn records remain strictly write-once (R16 enforcement and audit
+   immutability intact, no carve-outs).
+2. **Read-time join by prefix:** the review reader and the A1 memory rebuild fetch turns and
+   feedback in the same conversation-prefix scan; A8/A12 retention deletes cards with their
+   envelopes.
+3. **Conventions (match today):** re-posting overwrites (last-write-wins);
+   `/post_feedback` targets the latest completed turn of the active conversation
+   (arbitrary-turn feedback = future R32 territory); feedback enters the agent-memory
+   projection for completed turns, as the dspy.History `feedback` slot does today.
