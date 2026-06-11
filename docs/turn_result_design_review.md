@@ -22,7 +22,7 @@ refinements. "Open questions: none remaining" (section 13 of the design doc) is 
 | R37 | Framework already persists per-turn records (`ConversationStore`); design premises false; third overlapping store | **RESOLVED 2026-06-10** — full absorption into unified `ConversationTurnStore` | 7.1, 7.2, 9.1, decisions 11, 18 |
 | R42 | `next_actions`/`recommendations` still die at the agent boundary — the original bug class survives the fix | **RESOLVED 2026-06-11** — fields verified unused; payload-only gallery kept; answer stays bare; provenance via text (xray scope) | 2.4, 5.4, 10.3, decision 2 |
 | R3 | HTTP/MCP wire-contract break undocumented; external authors break | **RESOLVED 2026-06-11** — author shim + deprecation window; wire hard-breaks at the major; migration guide | 11, decisions 4, 8 |
-| R4 | Build-time generators and internal `_workflows` commands missing from change list | Blocking | 11 |
+| R4 | Build-time generators and internal `_workflows` commands missing from change list | **RESOLVED 2026-06-11** — inventory complete (refine clean; tests added); timing per A14 | 11 |
 | R5 | Artifact serialization/offload contract unspecified | **RESOLVED 2026-06-11** — size-threshold offload; reserved-key envelope; strict rejection; honest `command_parameters` | 8.2, 8.3, decision 16 |
 | R6 | Failed executions and failed turns invisible to review | **RESOLVED 2026-06-10** — capture-with-detail; record+re-raise; TTL+lazy abandon | 3.1, 5.5, 7.6 |
 | R7 | Sensitive data flips from ephemeral to durably-persisted-by-default | **RESOLVED 2026-06-11** — no switches; infra-executed age-based retention; security contract documented | 7, 7.8 |
@@ -397,6 +397,23 @@ Verified `command_responses` emission/construction/mutation sites **not** in sec
 
 If the build templates are missed, `fastworkflow build` generates broken commands the day the
 change lands. The `refine` pipeline should be audited for the same reason.
+
+**RESOLVED 2026-06-11 (confirm-and-close; no user decisions required).** Final inventory:
+
+1. **`refine` pipeline audited: clean** (zero `command_responses` references).
+2. **New category found: tests.** ~43 command files in the test workflows
+   (`tests/example_workflow`, `tests/todo_list_workflow`, `tests/hello_world_workflow`) plus
+   ~15 test modules asserting on `.command_responses[0]` and sniffing
+   `artifacts["awaiting_user"]` (notably `test_execution_context_agent.py` ×7,
+   `test_fastapi_service.py` ×5, `test_session_state_serialization.py`).
+3. **Migration timing follows A13/A14 mechanically:** generators/templates emit new-style
+   `command_response=` in **v2.21** (freshly built workflows never see deprecation warnings);
+   internal `_workflows` commands, bundled examples, and test workflows migrate in v2.21
+   under the shim; the CLI printer (R43), `utils.py:355-357` (A3), and the test modules'
+   assertions migrate in **v3.0** alongside the surfaces they exercise.
+
+Recorded in `docs/turn_result_design.md`, Amendments A15 (which completes the design's
+section 11 mechanical-changes list).
 
 ### R5. The artifact serialization/offload contract is unspecified — section 8.3 is not implementable as written
 

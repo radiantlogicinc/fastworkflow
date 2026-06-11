@@ -1040,3 +1040,20 @@ a `TurnResult` and writes a turn record like any other turn:
    on first touch and the user is told "your previous question expired, please re-ask." No
    record is synthesized. The migration guide documents this and recommends a pre-upgrade
    drain (answer or cancel pending turns).
+
+### A15 — Complete `command_responses` migration inventory (resolves R4; completes section 11) — 2026-06-11
+
+Verified sites missing from section 11, with migration releases per A14:
+
+- **v2.21** (generators emit new style; in-repo code migrates under the shim):
+  `build/command_file_template.py:134,364`; `build/command_stub_generator.py:285`;
+  `build/__main__.py:310`; `_workflows/command_metadata_extraction/_commands/` (~8 files,
+  incl. `wildcard.py`'s artifact mutations at lines 86/123); all bundled examples (45
+  files); the test workflows (`tests/example_workflow`, `tests/todo_list_workflow`,
+  `tests/hello_world_workflow`, ~43 command files).
+- **v3.0** (migrate with the surfaces they exercise): `run/__main__.py` CLI printer (R43);
+  `run_fastapi_mcp/utils.py:355-357` awaiting check (A3); ~15 test modules asserting on
+  `.command_responses[0]` / `artifacts["awaiting_user"]` (notably
+  `test_execution_context_agent.py`, `test_fastapi_service.py`,
+  `test_session_state_serialization.py`).
+- **`refine` pipeline: audited clean** — zero references.
