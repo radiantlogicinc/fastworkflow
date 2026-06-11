@@ -1059,6 +1059,18 @@ stamp, recursive `nested_turn` descent) used identically by the suspend path
 (`serialize_state`) and the completion path (runner). Two independent implementations of
 "light partial" is how the formats drift.
 
+**RESOLVED 2026-06-11 (confirm-and-close; contract written by A10/A20).** The
+**`TurnSerializer`** component is defined as the single owner of the light-record pass:
+selective copy (A20), threshold offload + envelope substitution via scoped `PayloadStore`
+puts (A10/A8), `model_dump()` for `command_parameters` (A10.4), strict rejection with
+key-and-command-named errors (A10.3), schema-version stamping (fields per R19), recursive
+`nested_turn` descent (arity per R12). **Both persistence boundaries call it** — the suspend
+path (`serialize_state` partial) and every terminal write (completed / cancelled / abandoned
+/ failed) — one implementation, drift impossible. It also owns the **reader**: envelope
+detection, lazy payload resolution for the review reader, tolerate-missing-payload. Placement:
+transport-free core beside the stores (callable from WEC, runner, and bundled server; no
+FastAPI dependencies). Recorded in `docs/turn_result_design.md`, Amendments A21.
+
 ### R26. Accumulator reset semantics need an explicit rule
 
 Today `clear_action_log()` runs at agent-turn start (`workflow_execution_context.py:489`). The

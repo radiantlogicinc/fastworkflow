@@ -1127,3 +1127,17 @@ Verified sites missing from section 11, with migration releases per A14:
    metadata, always; the gallery contains **all** payload-bearing outputs in turn order,
    always. One invariant for every turn type; decision 21 honored (the UI picks the featured
    payload); deterministic-turn duplication eliminated by construction.
+
+### A21 — The `TurnSerializer` component (resolves R25) — 2026-06-11
+
+1. **Single owner of the light-record pass:** selective copy (A20), threshold offload +
+   envelope substitution via scoped `PayloadStore` puts (A10/A8), `model_dump()` for
+   `command_parameters`, strict rejection with key-and-command-named errors (A10),
+   schema-version stamping (fields per R19), recursive `nested_turn` descent (arity per R12).
+2. **Both persistence boundaries call it** — suspend (`serialize_state` partial) and every
+   terminal write (completed / cancelled / abandoned / failed). One implementation; the
+   suspend-blob and turn-record formats cannot drift.
+3. **Owns the reader too:** envelope detection, lazy payload resolution for the review
+   reader, tolerate-missing-payload.
+4. **Placement:** transport-free core beside the stores; callable from WEC, runner, and
+   bundled server; no FastAPI dependencies.
