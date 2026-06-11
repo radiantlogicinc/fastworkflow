@@ -1248,3 +1248,16 @@ on `channel_id`) or otherwise guarantee a single writer. Violations risk pending
 last-writer-wins races, interleaved ordinals (A24's counter is in-process), and
 conversation-id collisions. A distributed per-channel lock is the noted future alternative;
 out of scope.
+
+### A32 — Nesting seam: list arity; escalation-only suspension (resolves R12; amends 5.2) — 2026-06-11
+
+1. **`CommandOutput.nested_turns: list[TurnResult] = []`** (supersedes the singular
+   `nested_turn` of section 5.2) — represents loops/fan-outs over sub-agents with no future
+   schema break.
+2. **Nested suspension always escalates** to the top-level turn (generalizing the
+   `wildcard.py` escalation pattern). Nested `TurnResult`s attach only when complete;
+   partial-inside-partial pending blobs never exist; A19/A30 machinery is depth-independent.
+   Future nested-agent designs are deliberately constrained to escalation-style clarification.
+3. **Conventions:** nested `user_message` = the parent's delegation instruction; a synthetic
+   test producer ships with the seam (R35); revisit trigger — p95 record size over ~256 KB
+   with real nested agents → promote nested turns to references.

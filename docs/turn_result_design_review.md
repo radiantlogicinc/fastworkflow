@@ -910,6 +910,26 @@ Recorded in `docs/turn_result_design.md`, Amendments A3. Unblocks R6, R39, R40.
    the whole parent to address any nested node. Acceptable now; flag as a revisit-trigger once
    nested agents are real ("if p95 record size exceeds N KB, promote nested turns to references").
 
+**RESOLVED 2026-06-11 (with Dhar).** Decisions:
+
+1. **Arity: list.** `CommandOutput.nested_turns: list[TurnResult] = []` — empty in the common
+   case, naturally represents loops/fan-outs over sub-agents, never needs a record-schema
+   break later. (The singular `nested_turn` of design section 5.2 is superseded.)
+2. **Nested suspension: always escalate.** An inner agent's question bubbles up to become the
+   **top-level** turn's suspension — generalizing the existing `wildcard.py:61-71` escalation
+   pattern. Consequence: a nested `TurnResult` attaches to its command **only when complete**;
+   partial-inside-partial pending blobs never exist; all suspend/resume machinery (A19, A30)
+   works unchanged at any nesting depth. This deliberately constrains future nested-agent
+   designs to escalation-style clarification (also the simplest user experience — one
+   question stream).
+3. **Stated conventions:** nested `user_message` = the delegation instruction the parent
+   command passed to the sub-agent; a **synthetic test producer ships with the seam** (R35
+   matrix) so the recursive serializer is never dead untested code; embedded-only revisit
+   trigger named — if p95 record size exceeds ~256 KB once nested agents are real, promote
+   nested turns to references.
+
+Recorded in `docs/turn_result_design.md`, Amendments A32.
+
 ### R13. Assistant mode fragments one logical interaction into N unlinked records
 
 In agent mode, `ask_user` makes a multi-exchange interaction one logical turn → one review
