@@ -27,7 +27,7 @@ refinements. "Open questions: none remaining" (section 13 of the design doc) is 
 | R6 | Failed executions and failed turns invisible to review | **RESOLVED 2026-06-10** — capture-with-detail; record+re-raise; TTL+lazy abandon | 3.1, 5.5, 7.6 |
 | R7 | Sensitive data flips from ephemeral to durably-persisted-by-default | Blocking (compliance) | 7, 7.8 |
 | R8 | `process_action` / MCP paths not covered | Blocking | 5.5, 5.6, 10 |
-| R40 | `TurnResult` has no turn-level success semantics | Blocking | 5.4, 5.5, 11 |
+| R40 | `TurnResult` has no turn-level success semantics | **RESOLVED 2026-06-11** — success=answer.success; max-iters → success=False; serialized | 5.4, 5.5, 11 |
 | R41 | Live response path ambiguous: in-memory payloads vs put-then-get round trip | High | 10.3, 8.2 |
 | R38 | `/post_feedback` vs write-once review records | High | 7.5, 8.1 |
 | R39 | `/cancel_pending` (cancelled turns) unaccounted for | **RESOLVED 2026-06-10** — cancelled turns recorded; memory projects completed-only | 7.6, 10.1 |
@@ -414,6 +414,28 @@ call. `all(outputs.success)` is wrong (penalizes recovered turns); `answer.succe
 loop failed; deterministic path: the command's success); per-execution success lives in the
 gallery. Document that `success != all commands succeeded`, and update `to_mcp_result`'s
 replacement accordingly.
+
+**RESOLVED 2026-06-11 (with Dhar).** Decisions:
+
+1. **`TurnResult.success = answer.success`.** Assistant mode: the executed command's own
+   success flag (extraction errors and business-logic failures read `False`). Agent mode:
+   `True` when the agent delivers an answer — crashes are already `status=failed` (A5). The
+   recovery case (failed intermediate tool calls, correct final answer) reads `True`;
+   per-execution successes remain individually visible in the gallery. `success != all
+   commands succeeded` is documented explicitly.
+2. **Iteration exhaustion is a quality signal:** when the ReAct loop hits `max_iters` and a
+   best-effort answer is synthesized from the trajectory (today indistinguishable from a
+   confident finish — `utils/react.py` runs "until finish, max_iters, or AskUserSuspend"),
+   the turn is stamped `completed` + `success=False`. The answer still enters records and the
+   completed-only memory projection; the loop must surface an *exhausted* flag to
+   `_finalize_agent_output` (small, contained change).
+3. **`success` goes on the wire:** serialized as a `computed_field` on `TurnResult` — visible
+   in HTTP/SSE responses for the first time (today's property never serializes). The MCP
+   result derives `isError = not success`. This pre-decides the `success` portion of R33;
+   R33's remaining scope is the other predicates (`command_handled`, `command_aborted`,
+   `not_what_i_meant`).
+
+Recorded in `docs/turn_result_design.md`, Amendments A6.
 
 ### R41. The live response path is ambiguous — and one reading puts a put-then-get round trip on the hot path
 

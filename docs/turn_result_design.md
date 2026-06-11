@@ -873,3 +873,19 @@ Consequences:
 4. **R24 closure:** with A4 (cancel) and A5.3 (abandon), every suspend-offloaded payload ends
    up owned by a terminal turn record; no orphan class remains except review-persistence-off
    deployments, which delete payloads at the terminal transition instead.
+
+### A6 — Turn-level success semantics (resolves R40) — 2026-06-11
+
+1. **`TurnResult.success = answer.success`.** Assistant mode: the executed command's own
+   success flag (extraction errors / business-logic failures → `False`). Agent mode: `True`
+   when an answer is delivered (crashes are `status=failed` per A5). An agent that recovers
+   from failed intermediate tool calls reads `True`; per-execution success stays visible in
+   the gallery. Documented: `success != all commands succeeded` — the old
+   `all(...)` fold is not lifted to the turn level.
+2. **Iteration exhaustion:** when the ReAct loop ends by `max_iters` rather than `finish`,
+   the synthesized best-effort answer yields `completed` + `success=False`. The loop surfaces
+   an exhausted flag to `_finalize_agent_output`; the answer still enters records and the
+   completed-only memory projection (A4).
+3. **Wire exposure:** `success` is a serialized `computed_field` on `TurnResult` (HTTP/SSE
+   visible; today's property never serialized). MCP: `isError = not success`. This decides
+   the `success` half of R33; the remaining predicates stay property-only pending R33.
