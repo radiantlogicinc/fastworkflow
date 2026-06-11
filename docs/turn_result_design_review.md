@@ -992,6 +992,16 @@ treat the stored ordinal as authoritative ordering. Also define **which** timest
 carries — recommend logical-turn start (a turn that suspends for two days should sort where it
 began; within a channel turns cannot interleave anyway, since the lock serializes them).
 
+**RESOLVED 2026-06-11 (confirm-and-close).** (1) Each turn record stores a per-conversation
+**ordinal** (monotonic sequence, incremented under the per-session lock); the stored ordinal
+is **authoritative** for ordering — if failover clock skew makes timestamps disagree, the
+ordinal wins, documented. (2) Counter source of truth on restore: the A1 memory-rebuild pass
+already reads the conversation's records — `max(ordinal) + 1` is taken in the same pass; no
+separate counter storage. (Multi-pod non-sticky caveat remains with R27.) (3) The key's
+timestamp segment = **logical-turn start**, already implied by A22 (the key is minted at turn
+start); its remaining jobs are range scans (A23) and human readability. Recorded in
+`docs/turn_result_design.md`, Amendments A24.
+
 ### R19. Review records need their own embedded schema version and an extension point
 
 The design bumps `SCHEMA_VERSION` only in `session_state_store.py` (pending blobs, short-lived).

@@ -1162,3 +1162,12 @@ Verified sites missing from section 11, with migration releases per A14:
 2. **Pagination:** `limit` + `before`/`after` time-range params; newest-first default.
 3. **No date sharding:** A1's `{channel}/{conv_id}/` layout bounds per-directory file counts
    by conversation length; the original concern predates the keyspace.
+
+### A24 — Stored ordinal; key timestamp = turn start (resolves R18) — 2026-06-11
+
+1. **Per-conversation ordinal stored in each record** (incremented under the session lock);
+   authoritative for ordering — clock-skewed timestamps never override it.
+2. **Counter restored for free:** the A1 memory-rebuild pass takes `max(ordinal) + 1` while
+   reading the conversation's records; no separate counter storage.
+3. **Key timestamp = logical-turn start** (implied by A22's mint-at-start); used for range
+   scans (A23) and readability, not ordering.
