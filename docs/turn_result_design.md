@@ -1276,3 +1276,12 @@ out of scope.
 2. **Section 5.5 corrected in place** (see the bracketed note there): the deterministic
    path's `command_outputs` holds every `invoke_command` execution of the turn, in order;
    `answer` aliases the last entry's response.
+
+### A34 — Streaming stays text-only; the revisit honestly priced (resolves R14) — 2026-06-11
+
+Decision 9 stands: `CommandTraceEvent` and the trace queue are unchanged. The revisit path
+for mid-turn payload streaming is re-priced after A17/A8: **no handle exists mid-turn**
+(boundary offload) and **no access mediator exists mid-turn** (the turn record isn't written
+yet). If the observability roadmap ever wants live gallery hydration, the true cost is:
+eager offload for streamed payloads (revisiting A17) + a handle slot on `CommandTraceEvent`
++ a mid-turn authorization mechanism (extending A8).

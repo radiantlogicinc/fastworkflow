@@ -964,6 +964,16 @@ content-addressed and offloaded at suspend boundaries anyway, putting a *handle*
 `CommandTraceEvent` is nearly free and would let a future UI hydrate gallery items mid-turn.
 Leave the seam documented even if unused — observability's importance is rising (see §4).
 
+**RESOLVED 2026-06-11 (confirm-and-close — with a correction: the "nearly free" premise died
+with later amendments).** Decision 9 (text-only streaming, `CommandTraceEvent` unchanged)
+**stands**. The footnote recorded in the design re-prices the revisit honestly: (a) **A17's
+boundary offload means no handle exists mid-turn** — there is nothing to put on a trace slip
+at emission time; (b) **A8's record-mediated access** has no mediator mid-turn (the record
+doesn't exist yet). Mid-turn payload streaming, if ever wanted, therefore costs: eager
+offload for streamed payloads (revisiting A17) + a trace-event handle slot + a mid-turn
+authorization mechanism (extending A8). Documented so the seam's true bill is visible to the
+observability roadmap. Recorded in `docs/turn_result_design.md`, Amendments A34.
+
 ### R15. "Searchable metadata" is an overpromise on Redis
 
 Section 7.7 stores the conversation summary as "searchable metadata inside the value." Redis
