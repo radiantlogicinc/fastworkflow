@@ -18,7 +18,7 @@ refinements. "Open questions: none remaining" (section 13 of the design doc) is 
 | # | Finding | Severity | Design sections affected |
 |---|---------|----------|--------------------------|
 | R1 | ask_user exchanges lost; turn transcript not interleaved | **RESOLVED 2026-06-11** — ask_user modeled as a `CommandOutput` in the ordered list (Dhar's simplification) | 3.1, 5.4, 7.6, 9, decision 18 |
-| R2 | Content-addressing makes co-GC incoherent; cross-tenant handle sharing | **Blocking — design contradiction** | 7.8, 8.2, decisions 13, 19 |
+| R2 | Content-addressing makes co-GC incoherent; cross-tenant handle sharing | **RESOLVED 2026-06-11** — turn-scoped payload keys; record-mediated access | 7.8, 8.2, decisions 13, 19 |
 | R37 | Framework already persists per-turn records (`ConversationStore`); design premises false; third overlapping store | **RESOLVED 2026-06-10** — full absorption into unified `ConversationTurnStore` | 7.1, 7.2, 9.1, decisions 11, 18 |
 | R42 | `next_actions`/`recommendations` still die at the agent boundary — the original bug class survives the fix | **Blocking — design contradiction** | 2.4, 5.4, 10.3, decision 2 |
 | R3 | HTTP/MCP wire-contract break undocumented; external authors break | Blocking | 11, decisions 4, 8 |
@@ -168,6 +168,30 @@ Options, with a recommendation:
 
 Whichever is chosen, decision 13/19 must be rewritten — currently the design hands infra an
 impossible contract and calls it out-of-scope.
+
+**RESOLVED 2026-06-11 (with Dhar).** Decisions:
+
+1. **Turn-scoped payload keys** (option a):
+   `fw:payload:{channel_id}:{conv_id}:{turn_key}:{content_hash}`. Every payload is owned by
+   exactly one turn — sharing is impossible by construction, so the co-GC contradiction
+   dissolves. `PayloadStore.put` gains scope parameters (channel, conversation, turn key); the
+   returned handle is the full scoped key, opaque to callers. Content-addressing survives only
+   as the leaf segment, providing **within-turn** retry idempotency (the only place idempotency
+   matters). Cross-turn dedup is deliberately abandoned — storage is cheap, the benefit was
+   speculative, and tenant isolation becomes structural.
+2. **Co-GC becomes literal:** with A1's keyspace, deleting a conversation prefix removes
+   conversation metadata, turn records, and payloads in one stroke (disk: directory tree;
+   Redis: prefix SCAN+DEL). Decision 19's "one lifecycle key" is now simply the conversation
+   prefix — a contract infra can actually implement. The reader still tolerates missing
+   payloads as defense in depth. R21's missing-delete-surface concern largely dissolves
+   (prefix delete is the natural operation).
+3. **Record-mediated access rule (adopted as contract):** any read API authorizes access to
+   the *turn record* first (JWT channel binding; admin path per R32), then resolves handles
+   found inside it. Bare-handle fetch endpoints are forbidden. This closes the
+   hash-oracle/cross-tenant-probe class entirely.
+
+Supersedes design decisions 13 (content-addressed global store) and 19 (co-GC wording).
+Recorded in `docs/turn_result_design.md`, Amendments A8.
 
 ### R37. The framework already persists per-turn records durably — the design's baseline is wrong, and it builds a third overlapping turn store
 

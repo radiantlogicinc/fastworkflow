@@ -198,13 +198,13 @@ This realizes "single answer + gallery of data outputs," which the existing list
 | 10 | Durability = option D (light record + payload offload), once per logical turn | Preserves `action_log`-level latency; meets review |
 | 11 | ~~Separate `TurnReviewStore` (enumerable) from pending `SessionStateStore`~~ **Superseded by Amendment A1**: pending `SessionStateStore` + unified `ConversationTurnStore` (absorbs `ConversationStore`) | Different lifecycle/access pattern |
 | 12 | Enumeration only on `TurnReviewStore` | Pending store holds one in-flight turn; never lists |
-| 13 | `PayloadStore` content-addressed, disk/redis mirror | Idempotent, concurrency-safe; matches existing split |
+| 13 | ~~`PayloadStore` content-addressed, disk/redis mirror~~ **Superseded by Amendment A8**: turn-scoped keys; content hash survives only as the leaf segment (within-turn idempotency) | Idempotent, concurrency-safe; matches existing split |
 | 14 | Key = channel + sortable ISO-8601 GMT ts + uuid; ordinal by sorting | Backends don't preserve insertion order |
 | 15 | Summary is value metadata, not key | Unsafe/long/collision-prone; couples to LLM call |
 | 16 | Offload payloads at every persistence boundary (suspend + completion) | Keeps suspend blob light; resume needs no payload fetch |
 | 17 | Review write on the completion branch, inside per-session lock | Serialized + safe; not the suspend path |
 | 18 | Retire `action_log`; derive summary text view from `command_outputs` | Zero regression; removes divergence |
-| 19 | Retention/GC out of scope; infra co-GC record+payload under one lifecycle key | Plus reader tolerates missing payload |
+| 19 | Retention/GC out of scope; infra co-GC record+payload under one lifecycle key — **rewritten by Amendment A8**: the lifecycle key is literally the conversation prefix | Plus reader tolerates missing payload |
 | 20 | Nested turns embedded-only; top-level keys for user-message turns | Serializer recurses; nested addressed by path |
 | 21 | UI decides headline payload | Framework surfaces raw gallery in turn order |
 | 22 | Old-schema migration out of scope (separate tool) | Bump `SCHEMA_VERSION` |
@@ -914,3 +914,20 @@ Supersedes the reviewer-proposed discriminated-union event sequence with a simpl
 5. Knock-ons: per-`CommandOutput` timestamps (R29) cover exchanges uniformly; R28's
    trajectory remains an offloaded blob; R30's user projection includes ask_user entries via
    `command_name` filter.
+
+### A8 — Turn-scoped payload keys; record-mediated access (resolves R2; supersedes decisions 13 and 19) — 2026-06-11
+
+1. **Payload keys are turn-scoped:**
+   `fw:payload:{channel_id}:{conv_id}:{turn_key}:{content_hash}`. Each payload is owned by
+   exactly one turn; sharing is impossible by construction. `PayloadStore.put` takes scope
+   parameters (channel, conversation, turn key) and returns the full scoped key as the opaque
+   handle. Content-addressing survives only as the leaf segment — within-turn retry
+   idempotency, which is the only idempotency that matters. Cross-turn dedup is deliberately
+   abandoned; tenant isolation becomes structural.
+2. **Co-GC is literal:** deleting a conversation prefix removes conversation metadata (A1),
+   turn records, and payloads in one stroke (disk: directory tree; Redis: prefix SCAN+DEL).
+   The "one lifecycle key" of decision 19 is the conversation prefix — implementable as
+   delegated. Readers still tolerate missing payloads as defense in depth.
+3. **Record-mediated access contract:** payload reads always authorize the referencing turn
+   record first, then resolve handles found inside it; bare-handle fetch endpoints are
+   forbidden. Closes the hash-oracle / cross-tenant-probe exposure.
