@@ -1303,3 +1303,12 @@ cross-conversation search UX demands it. Section 7.7's wording corrected in plac
 field: **`TurnResult.refined_user_message: Optional[str] = None`** — populated on agent turns
 where refinement runs, `None` elsewhere, serialized inline. Dedicated field (not metadata)
 because raw-vs-refined comparison is core refinement-debugging semantics.
+
+### A37 — Agent trajectory persisted (resolves R28; storage layer of the durable-trajectory roadmap) — 2026-06-11
+
+At every terminal write of an agent turn, the `TurnSerializer` offloads the ReAct trajectory
+to the turn-scoped `PayloadStore` and stamps **`TurnResult.trajectory_ref`**.
+Failed/cancelled/abandoned partials include the trajectory-so-far. Developer projection only
+(R30); standard retention/co-GC/record-mediated access (A8/A12); deterministic and action
+turns carry `None`. The durable-trajectory roadmap item is storage-complete; its remaining
+scope is consuming trajectories, not persisting them.

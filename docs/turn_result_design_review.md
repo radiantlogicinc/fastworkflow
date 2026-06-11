@@ -1327,6 +1327,16 @@ machinery this design already builds, and it directly serves the "externalize ag
 into durable memory" roadmap item. The R1 event-sequence shape gives trajectory entries a
 natural home. Recommend at minimum reserving the field now (`trajectory_ref: Optional[str]`).
 
+**RESOLVED 2026-06-11 (with Dhar) — persist now.** At every terminal write of an agent turn,
+the `TurnSerializer` (A21) offloads the ReAct trajectory to the turn-scoped `PayloadStore`
+(A8) and stamps **`TurnResult.trajectory_ref`**. Details: failed/cancelled/abandoned partials
+include the **trajectory-so-far** (the crash evidence a "why did it fail" investigation
+wants); developer projection only (R30); same retention, co-GC, and record-mediated access
+as every payload (A8/A12); deterministic and action turns carry `None`. The
+durable-trajectory roadmap item is thereby **storage-complete** — its remaining work is
+consuming trajectories (memory/learning), not plumbing. Recorded in
+`docs/turn_result_design.md`, Amendments A37.
+
 ### R29. No timestamps, durations, or cost anywhere in the model
 
 For observability, capture at the choke point (trivially cheap): per-`CommandOutput`
