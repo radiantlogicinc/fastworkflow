@@ -1335,3 +1335,14 @@ scope is consuming trajectories, not persisting them.
    **Developer view:** the full record — internal executions, raw parameters, tracebacks
    (A5), `trajectory_ref` (A37), `refined_user_message` (A36). Helper-tool consultations are
    trajectory-only.
+
+### A40 — OTel GenAI mapping discipline (resolves R31) — 2026-06-11
+
+1. **Documented mapping table** (documentation only; no `opentelemetry` dependency): turn →
+   root span (status/A3, error/A6, timing/A38); execution → child span (A38 timing,
+   `command_name`); ask_user entries → child spans (duration = human wait); `nested_turns` →
+   recursive sub-spans (A32); token metadata → `gen_ai.usage.*` (A38).
+2. **Reserved keys:** `metadata["otel"] = {trace_id, span_id}`, best-effort when the
+   embedding app runs under OTel — records join infrastructure traces.
+3. The exporter is out of scope; the future observability tool can begin as one
+   (Langfuse/Phoenix/Jaeger render the result).

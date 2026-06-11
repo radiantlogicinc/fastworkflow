@@ -1395,6 +1395,18 @@ means the future observability tool can start as an exporter to existing viewers
 (Langfuse/Phoenix/Jaeger) instead of a from-scratch UI. A schema-discipline decision to make
 now, cheaply, even with tooling out of scope.
 
+**RESOLVED 2026-06-11 (confirm-and-close; the amendments already made the record
+span-shaped).** Two stated conventions, zero runtime dependencies: (1) **a documented mapping
+table** ships in the design — turn → root span (status from `TurnStatus`/A3, error from
+`success`/A6, timing from A38), execution → child span (A38 timing, `command_name` as span
+name), ask_user entries → child spans (duration = the human-in-the-loop wait), `nested_turns`
+→ recursive sub-spans (A32), token metadata → `gen_ai.usage.*` (A38). Documentation only; no
+`opentelemetry` import. (2) **Reserved metadata keys:** `metadata["otel"] = {trace_id,
+span_id}`, populated best-effort when the embedding application already runs under OTel —
+records become joinable to infrastructure traces. The exporter remains out of scope; the
+future observability tool can start as one. Recorded in `docs/turn_result_design.md`,
+Amendments A40.
+
 ### R32. The read side has no API or access-control model
 
 Nothing serves review records to a UI. The bundled server's JWT binds a caller to a
