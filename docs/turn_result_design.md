@@ -848,8 +848,9 @@ Consequences:
    concern is dissolved for the cancel path. Sequence under the per-session lock: serialize
    partial `TurnResult` (status=cancelled) → write record → clear pending blob.
    (`cancel_pending()` today only resets in-memory state; it gains the record write.)
-2. **R7 interplay:** when review persistence is disabled by deployment config, cancel falls
-   back to shredding, and only that mode performs an explicit suspend-payload delete.
+2. ~~**R7 interplay:** when review persistence is disabled by deployment config, cancel falls
+   back to shredding, and only that mode performs an explicit suspend-payload delete.~~
+   **Superseded by A12:** there is no persistence switch; cancel always records.
 3. **Agent-memory projection rule (clarifies A1.2):** the rebuilt `dspy.History` projects from
    `status=completed` records **only**. Cancelled / failed / abandoned records are
    review-and-observability-only and never enter agent working memory — matching today's
@@ -876,8 +877,9 @@ Consequences:
    never-touched-again residue as optional future work. UX note: answers arriving after the
    TTL start a fresh turn rather than resuming the stale question.
 4. **R24 closure:** with A4 (cancel) and A5.3 (abandon), every suspend-offloaded payload ends
-   up owned by a terminal turn record; no orphan class remains except review-persistence-off
-   deployments, which delete payloads at the terminal transition instead.
+   up owned by a terminal turn record; no orphan class remains. ~~(except review-persistence-off
+   deployments, which delete payloads at the terminal transition instead)~~ **Superseded by
+   A12:** there is no persistence switch.
 
 ### A6 — Turn-level success semantics (resolves R40) — 2026-06-11
 
@@ -990,3 +992,20 @@ a `TurnResult` and writes a turn record like any other turn:
    shape across all endpoints.
 3. No record opt-out flag — the audit guarantee is unconditional. The internal
    `CommandExecutor.perform_action` helper (plumbing inside a turn) is unaffected.
+
+### A12 — No persistence switches; retention is the compliance story (resolves R7) — 2026-06-11
+
+1. **Records and payloads always persist — no opt-out configuration exists.** Post-A1 the
+   turn records are load-bearing (conversation system of record, agent-memory source);
+   payload durability is the product. The "review persistence disabled" fallback clauses in
+   A4.2 and A5.4 are superseded (struck through above): cancel and abandon always record,
+   payloads always transfer to their terminal record.
+2. **Compliance = age-based retention, infra-executed (decision 19 affirmed).** Deployments
+   remove conversations older than their chosen age via conversation-prefix deletes — A8
+   makes this a single-operation co-GC (disk: directory-tree removal; Redis: prefix
+   SCAN+DEL). The framework ships no retention code or schedule; the documented contract is
+   the deliverable.
+3. **Security contract (extends section 7.8):** both stores are declared to hold
+   PII/entitlement-grade data. Deployment obligations: encryption at rest, TLS to Redis,
+   least-privilege access for the service identity. Framework obligations: record-mediated
+   payload access only (A8); record contents never written to logs.

@@ -25,7 +25,7 @@ refinements. "Open questions: none remaining" (section 13 of the design doc) is 
 | R4 | Build-time generators and internal `_workflows` commands missing from change list | Blocking | 11 |
 | R5 | Artifact serialization/offload contract unspecified | **RESOLVED 2026-06-11** — size-threshold offload; reserved-key envelope; strict rejection; honest `command_parameters` | 8.2, 8.3, decision 16 |
 | R6 | Failed executions and failed turns invisible to review | **RESOLVED 2026-06-10** — capture-with-detail; record+re-raise; TTL+lazy abandon | 3.1, 5.5, 7.6 |
-| R7 | Sensitive data flips from ephemeral to durably-persisted-by-default | Blocking (compliance) | 7, 7.8 |
+| R7 | Sensitive data flips from ephemeral to durably-persisted-by-default | **RESOLVED 2026-06-11** — no switches; infra-executed age-based retention; security contract documented | 7, 7.8 |
 | R8 | `process_action` / MCP paths not covered | **RESOLVED 2026-06-11** — full turns: TurnResult + record, empty user_message | 5.5, 5.6, 10 |
 | R40 | `TurnResult` has no turn-level success semantics | **RESOLVED 2026-06-11** — success=answer.success; max-iters → success=False; serialized | 5.4, 5.5, 11 |
 | R41 | Live response path ambiguous: in-memory payloads vs put-then-get round trip | High | 10.3, 8.2 |
@@ -494,6 +494,27 @@ equivalent; decide the default deliberately); (b) extend the section 7.8 contrac
 to name encryption-at-rest and access-control expectations for both stores; (c) consider a
 per-workflow or per-command opt-out for payload persistence (record persists, payload marked
 "not retained") for classified data.
+
+**RESOLVED 2026-06-11 (with Dhar) — no switches; retention is the compliance story.**
+
+1. **No persistence switches at all.** Turn records *and* payloads always persist. The
+   reviewer's opt-out recommendation was rejected: post-A1 the records are load-bearing
+   (conversation system of record, agent-memory source), and the deliberate posture is that
+   payload durability is the product, governed by retention rather than opt-out.
+   Consequently the "review persistence disabled" fallback clauses in A4.2 and A5.4 are
+   **dead and superseded** — cancel and abandon always record, payloads always transfer.
+2. **Compliance = age-based retention, infra-executed (decision 19 affirmed).** Conversations
+   older than a deployment-chosen age are removed by conversation-prefix deletes — the A8
+   co-GC mechanism makes this a single-operation contract (disk: directory tree removal;
+   Redis: prefix SCAN+DEL). The framework ships no retention code and no schedule; the
+   documented contract is the deliverable. (The review's original concern — "the contract
+   nobody implements" — is accepted as a deployment responsibility with eyes open.)
+3. **Security expectations documented in the 7.8 contract (stated):** both stores are
+   declared to hold PII/entitlement-grade data; deployments must provide encryption at rest
+   and TLS to Redis with least-privilege access for the service identity; the framework's
+   side is record-mediated payload access (A8) and never logging record contents.
+
+Recorded in `docs/turn_result_design.md`, Amendments A12.
 
 ### R8. The `process_action` and MCP paths are not covered by the design
 
