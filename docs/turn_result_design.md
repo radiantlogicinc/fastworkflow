@@ -1070,3 +1070,14 @@ Verified sites missing from section 11, with migration releases per A14:
 3. **R45 consequence:** payloads remain in RAM until the response is built, so eager offload
    provides no memory relief; R45 resolves to boundary-offload with a documented memory
    profile (finalized in its own pass).
+
+### A17 — Boundary offload; memory profile; rehydration fetch fallback (resolves R45) — 2026-06-11
+
+1. **Boundary offload** (eager offload rejected as moot — A16 pins the live path to RAM).
+2. **Memory profile, documented and accepted:** peak RAM per turn ≈ sum of the turn's
+   payloads, held from capture until the response is built. Tables are producer-capped;
+   chart payloads are full-frame (xray-side); multiply by concurrent in-flight turns.
+3. **Rehydration exception:** after a pod restart mid-suspension, restored partial turns hold
+   envelopes only; the live mapping treats envelope entries as **fetch-by-handle** — the one
+   legitimate live-path store read (server-side; A8 record-mediation holds). This is the
+   correct scope of 10.3's "lazily by handle" wording.

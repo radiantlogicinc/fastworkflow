@@ -38,7 +38,7 @@ refinements. "Open questions: none remaining" (section 13 of the design doc) is 
 | R46 | Big-bang release sequencing; no staged migration path | **RESOLVED 2026-06-11** — quick-fix minor (process_turn + shim) then one major; graceful expiry on upgrade | 11, decisions 4, 8, 22 |
 | R12 | `nested_turn`: speculative, singular, suspension semantics undefined | Medium | 5.2, 5.3, 7.9, 8.3 |
 | R13 | Assistant-mode clarification spans N unlinked records | Medium | 5.5, 7.6 |
-| R45 | Payload accumulation changes the per-turn memory profile | Medium | 3.1, 7.3 |
+| R45 | Payload accumulation changes the per-turn memory profile | **RESOLVED 2026-06-11** — boundary offload (per A16); profile documented; envelope-entry fetch fallback | 3.1, 7.3 |
 | R44 | Raw vs refined user message — capture both | Medium | 5.4 |
 | R47 | Conversation summary stored in three places | Low | 5.5, 7.7, 9 |
 | R14–R27 | Store/durability refinements | Medium/Low | 7, 8 |
@@ -1016,6 +1016,24 @@ sessions in one server process. Options:
   looks because it moves bytes off the critical suspend path too. Worth an explicit decision
   either way; interacts with R41 (an eagerly-offloaded payload must still be servable inline on
   the live path, so keep the bytes until the response is built or fetch once).
+
+**RESOLVED 2026-06-11 (confirm-and-close; determined by A16).** Decisions:
+
+1. **Boundary offload.** A16 pinned the live response to RAM, so payloads must stay in memory
+   until the response is built regardless — eager offload buys no relief and is rejected as
+   moot.
+2. **Memory profile documented and accepted:** peak RAM per turn ≈ the sum of the turn's
+   payloads, held from capture until the response is built (a real new cost vs today's
+   agent mode, which discards each payload after text extraction). Tables are producer-capped
+   (`MAXROWS_TABLEPAYLOAD`); chart payloads are full-frame with no cap (xray-side
+   characteristic, noted); multiply by concurrent in-flight turns per process.
+3. **Rehydration exception (new, stated):** after a pod restart mid-suspension, the restored
+   partial turn holds envelopes only — its pre-suspension payloads exist solely in the store.
+   The live mapping therefore treats **envelope entries as fetch-by-handle**: the single case
+   where the live path touches the `PayloadStore`, and the legitimate referent of 10.3's
+   "lazily by handle" language. Server-side fetch; A8 record-mediation holds.
+
+Recorded in `docs/turn_result_design.md`, Amendments A17.
 
 ---
 
