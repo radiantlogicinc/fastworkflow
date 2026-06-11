@@ -1152,3 +1152,13 @@ Verified sites missing from section 11, with migration releases per A14:
    retry = idempotent success (debug log); collision otherwise = loud error (key-minting bug).
 3. **Mid-flight referenceability** is a deliberate benefit: the turn id exists from turn
    start for logs, traces, and observability metadata (R28/R29/R31).
+
+### A23 — Turn listing: summary cards, pagination, no sharding (resolves R17) — 2026-06-11
+
+1. **Listing returns (key, summary-card) pairs:** ordinal, started/completed timestamps,
+   status, success, truncated `user_message`, summary-if-present, command count (extensible
+   via R19 metadata). Redis: `SCAN` + pipelined `MGET` — no write-time secondary index
+   (reserved as future optimization). Disk: directory read.
+2. **Pagination:** `limit` + `before`/`after` time-range params; newest-first default.
+3. **No date sharding:** A1's `{channel}/{conv_id}/` layout bounds per-directory file counts
+   by conversation length; the original concern predates the keyspace.

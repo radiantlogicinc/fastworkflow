@@ -968,6 +968,21 @@ parameters. Cheap to do now, breaking to retrofit. On disk, shard channel direct
 (`{channel}/{YYYY-MM-DD}/{turn_key}.json`) so long-lived channels don't accumulate thousands of
 files per directory.
 
+**RESOLVED 2026-06-11 (confirm-and-close; post-A1 each sub-question has one sane answer).**
+
+1. **Listing returns (key, summary-card) pairs.** Card fields: ordinal, started/completed
+   timestamps, status, success, truncated `user_message`, summary-if-present, command count —
+   extensible via R19's metadata. Implementation note: Redis = `SCAN` + one pipelined `MGET`
+   (N+1 dissolves in a single round trip, **no write-time secondary index** — reserved as a
+   future optimization); disk = directory read.
+2. **Pagination/ordering convention:** `limit` + `before`/`after` time-range parameters
+   (keys embed sortable timestamps); newest-first default.
+3. **Disk sharding: dissolved by A1.** Turns live under `{channel}/{conv_id}/` — one
+   conversation's turns per directory, naturally bounded by conversation length. The
+   thousands-of-files concern predates the A1 keyspace; date sharding is unnecessary.
+
+Recorded in `docs/turn_result_design.md`, Amendments A23.
+
 ### R18. Ordinal: store it, don't derive it
 
 Per-channel review writes are serialized under the session lock, so a per-channel monotonic
