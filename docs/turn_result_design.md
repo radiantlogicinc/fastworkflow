@@ -1023,3 +1023,20 @@ a `TurnResult` and writes a turn record like any other turn:
    the framework behind its own API.
 3. **Deliverable: a schema-migration guide** covering HTTP bodies, the SSE final event, the
    MCP result (`isError = not success`, A6), and the author-side constructor migration.
+
+### A14 — Release train and upgrade-day behavior (resolves R46) — 2026-06-11
+
+1. **Quick-fix minor + one major** (the three-stage sketch was retired: A1's accept-loss
+   store consolidation is user-visible data loss and must not hide in a minor):
+   - **~v2.21 (minor, non-breaking):** `TurnResult`, the capture machinery (A5, A7), a new
+     `process_turn()` returning `TurnResult`, and the A13 shim with deprecation warnings.
+     `process_message` unchanged. xray switches to `process_turn()` — the original payload
+     bug is fixed in this release.
+   - **v3.0 (major):** `process_message` returns `TurnResult` (A3's artifact removal lands
+     with it), wire hard-break (A13), `ConversationTurnStore` consolidation with announced
+     data loss (A1), `action_log` retired. The shim continues accepting the legacy keyword.
+   - **v4.0:** shim removed. (A13's window pinned: introduced 2.21, removed 4.0.)
+2. **Upgrade day — graceful expiry:** a pending blob with an old `SCHEMA_VERSION` is cleared
+   on first touch and the user is told "your previous question expired, please re-ask." No
+   record is synthesized. The migration guide documents this and recommends a pre-upgrade
+   drain (answer or cancel pending turns).

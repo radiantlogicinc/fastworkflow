@@ -35,7 +35,7 @@ refinements. "Open questions: none remaining" (section 13 of the design doc) is 
 | R9 | `channel_id` vs conversation boundary | **RESOLVED 2026-06-10** — structural via A1; eager id reservation; auto-cancel on switch | 7.7, 8.1 |
 | R10 | Answer aliasing: copy-on-serialize hazard + headline/gallery duplication | High | 5.5, 8.3, 10.3 |
 | R11 | `awaiting_user` artifact-sniffing → first-class turn status | **RESOLVED 2026-06-10** — 5-value `TurnStatus`; artifact removed immediately; no further cleanup | 5.5, 7.6, 10.1 |
-| R46 | Big-bang release sequencing; no staged migration path | High (process) | 11, decisions 4, 8, 22 |
+| R46 | Big-bang release sequencing; no staged migration path | **RESOLVED 2026-06-11** — quick-fix minor (process_turn + shim) then one major; graceful expiry on upgrade | 11, decisions 4, 8, 22 |
 | R12 | `nested_turn`: speculative, singular, suspension semantics undefined | Medium | 5.2, 5.3, 7.9, 8.3 |
 | R13 | Assistant-mode clarification spans N unlinked records | Medium | 5.5, 7.6 |
 | R45 | Payload accumulation changes the per-turn memory profile | Medium | 3.1, 7.3 |
@@ -1093,6 +1093,31 @@ nothing about runtime behavior when `apply_serialized_state` meets an old blob. 
 graceful degradation — on `SCHEMA_VERSION` mismatch, treat pending state as expired, clear it,
 and surface "your previous question expired, please re-ask" — rather than an exception on the
 user's first post-upgrade message.
+
+**RESOLVED 2026-06-11 (with Dhar).** Decisions:
+
+1. **Train: quick-fix minor + one major.** The originally sketched three-stage train was
+   retired during review: A1's accept-loss consolidation means the store work deletes
+   user-visible conversation history, which must not hide inside a minor release.
+   - **~v2.21 (minor, non-breaking):** `TurnResult` type, the accumulator and capture
+     machinery (ask_user entries per A7, failure capture per A5), a new **`process_turn()`**
+     method returning `TurnResult`, and the A13 constructor shim introduced (deprecation
+     warnings start the clock early). `process_message` is unchanged in this release. xray
+     switches its runner to `process_turn()` — **the original payload bug is fixed here.**
+   - **v3.0 (major):** everything else together — `process_message` returns `TurnResult`
+     (and the A3 `awaiting_user`-artifact removal lands with it), the wire hard-break (A13),
+     `ConversationTurnStore` consolidation with its announced conversation-data loss (A1),
+     `action_log` retired, `command_responses` field removed from the model surface while the
+     shim continues accepting the legacy keyword.
+   - **v4.0:** the shim is removed (A13's window, now pinned concretely: introduced 2.21,
+     removed 4.0).
+2. **Upgrade day: graceful expiry.** On the first post-upgrade touch of a channel whose
+   pending blob carries an old `SCHEMA_VERSION`, the server clears it and responds "your
+   previous question expired, please re-ask." No record is synthesized (the old blob is
+   unreadable by definition). The migration guide documents this plus an optional
+   pre-upgrade drain recommendation (answer or cancel pending turns before upgrading).
+
+Recorded in `docs/turn_result_design.md`, Amendments A14.
 
 ### R48. Export the new types
 
