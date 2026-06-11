@@ -1,5 +1,10 @@
 # TurnResult, `CommandOutput` redesign, and durable turn-output persistence
 
+> **SUPERSEDED FOR IMPLEMENTATION (2026-06-11):** the authoritative implementation spec is
+> **`docs/turn_result_design_final.md`**, which consolidates this document, Amendments
+> A1–A47, and the architecture-review fixes X1–X12. This document and its amendments remain
+> the rationale archive.
+
 Design note for fastWorkflow (framework-owned) plus its xray integration. This document
 captures the **complete** investigation, the full design debate, and the **minutiae of every
 decision** that produced the design below. Nothing is omitted; minor and "obvious" decisions
