@@ -1183,6 +1183,24 @@ new accumulator must: clear at **logical**-turn start (first message), **not** c
 define behavior if `process_action` interleaves (R8). An off-by-one here double-counts a turn's
 outputs into the next turn's record — easy bug, worth a stated invariant and a test.
 
+**RESOLVED 2026-06-11 (confirm-and-close; one new micro-rule stated).** The invariant:
+
+1. **Initialization is atomic with turn start:** the accumulator reset, turn-key mint (A22),
+   ordinal assignment (A24), and `started_at` stamp happen as one "turn begins" event — a
+   `process_message` with no awaiting state, or a `process_action`.
+2. **Resume never touches the accumulator** — accumulation spans all suspensions of the
+   logical turn (one turn, one basket, one record).
+3. **New rule (surfaced writing this down): `process_action` requires no awaiting state.**
+   During a suspension it is rejected with a clear error ("channel awaiting clarification —
+   answer or cancel first"); the explicit escape hatch is `/cancel_pending`, consistent with
+   A2's explicit-cancellation stance.
+4. **Exactly one terminal transition finalizes and clears** (completed / failed / cancelled /
+   abandoned) — every turn-over path shares the finalize-and-clear.
+5. Both failure modes named for the R35 test plan: leak-forward double-counting and
+   reset-on-resume output loss.
+
+Recorded in `docs/turn_result_design.md`, Amendments A30.
+
 ### R27. Multi-pod / non-sticky routing caveat
 
 The per-session lock is in-process. Two pods serving the same channel concurrently produce

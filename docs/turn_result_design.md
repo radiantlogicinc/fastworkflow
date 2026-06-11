@@ -1228,3 +1228,14 @@ Verified sites missing from section 11, with migration releases per A14:
    `noeviction` (or deliberate `volatile-*` TTLs under A12 retention) on a dedicated logical
    DB, never shared with an LRU cache.
 3. **Per-channel quota** is named in the A12 infra contract alongside retention.
+
+### A30 — Accumulator reset invariant (resolves R26) — 2026-06-11
+
+1. **Atomic turn start:** accumulator reset + key mint (A22) + ordinal (A24) + `started_at`
+   happen as one event — on `process_message` with no awaiting state, or `process_action`.
+2. **Resume never resets** — accumulation spans all suspensions (one turn, one record).
+3. **`process_action` requires no awaiting state:** rejected during suspension with a clear
+   error; the explicit escape hatch is `/cancel_pending` (consistent with A2).
+4. **Exactly one terminal transition finalizes and clears** (completed/failed/cancelled/
+   abandoned).
+5. Failure modes for the R35 tests: leak-forward double-count; reset-on-resume loss.
