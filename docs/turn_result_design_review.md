@@ -31,7 +31,7 @@ refinements. "Open questions: none remaining" (section 13 of the design doc) is 
 | R41 | Live response path ambiguous: in-memory payloads vs put-then-get round trip | **RESOLVED 2026-06-11** — live path serves from RAM; configurable inline cap; handles are review-only | 10.3, 8.2 |
 | R38 | `/post_feedback` vs write-once review records | **RESOLVED 2026-06-11** — separate feedback records in the unified keyspace; turn records stay write-once | 7.5, 8.1 |
 | R39 | `/cancel_pending` (cancelled turns) unaccounted for | **RESOLVED 2026-06-10** — cancelled turns recorded; memory projects completed-only | 7.6, 10.1 |
-| R43 | CLI / `command_output_queue` contract undefined after redesign | High | 5.6, 11 |
+| R43 | CLI / `command_output_queue` contract undefined after redesign | **RESOLVED 2026-06-11** — status-stamped TurnResults only; trace queue untouched; ask_user sentinel pairing (bug `fix-5fv`) | 5.6, 11 |
 | R9 | `channel_id` vs conversation boundary | **RESOLVED 2026-06-10** — structural via A1; eager id reservation; auto-cancel on switch | 7.7, 8.1 |
 | R10 | Answer aliasing: copy-on-serialize hazard + headline/gallery duplication | High | 5.5, 8.3, 10.3 |
 | R11 | `awaiting_user` artifact-sniffing → first-class turn status | **RESOLVED 2026-06-10** — 5-value `TurnStatus`; artifact removed immediately; no further cleanup | 5.5, 7.6, 10.1 |
@@ -768,6 +768,31 @@ clarification `CommandOutput`s directly, and the CLI (`run/__main__.py`) consume
 iterates `command_responses`. Define: does the queue carry per-event `CommandOutput`s plus a
 terminal `TurnResult` (recommended — mirrors the live-then-final shape), or `TurnResult` only?
 `ChatSession.keep_alive` and the CLI renderer change either way; neither appears in section 11.
+
+**RESOLVED 2026-06-11 (with Dhar) — status-stamped `TurnResult`s only.** Decisions:
+
+1. **Every queue item is a `TurnResult`.** Mid-turn ask_user questions arrive as partial
+   `TurnResult`s with `status=awaiting_user` (answer = the question; `command_outputs` = the
+   story so far, synthesized cheaply from in-memory state); turn completion arrives as
+   `status=completed/failed`. The CLI branches on `status` — the exact branch Topology B
+   callers use on `process_message`'s return — extending section 5.5's
+   consumers-never-branch-on-mode promise to the queue transport.
+2. **The trace queue is untouched by construction** (decision 9 stands): same
+   `CommandTraceEvent` slips, same emission sites, same `None` sentinel protocol. The CLI's
+   dim live ticker is byte-identical before and after.
+3. **Rendering verified pixel-identical:** the renderer is rewritten at v3.0 anyway (A15);
+   both candidate contracts produce the same panels. Documented walkthrough of both options'
+   screens was reviewed before deciding.
+4. **Defect discovered and filed (`fix-5fv`):** today's Topology A ask_user enqueues the
+   clarification *without* a trace sentinel (`workflow_agent.py:279`), while the CLI reads
+   the output queue only *after* a sentinel (`run/__main__.py:236-262`) — apparent mid-turn
+   hang in agent mode (needs runtime verification). The contract therefore includes the
+   pairing rule: **every mid-turn awaiting_user enqueue is paired with a trace sentinel** so
+   the consumer wakes, renders the question, and returns to the prompt. This is a bug fix,
+   not a behavior change.
+5. **Timing:** the queue contract changes at v3.0 with the rest of the CLI surface (A14/A15).
+
+Recorded in `docs/turn_result_design.md`, Amendments A19.
 
 ### R44. Raw vs refined user message — capture both
 

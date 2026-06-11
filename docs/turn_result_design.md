@@ -1094,3 +1094,19 @@ Verified sites missing from section 11, with migration releases per A14:
    `/post_feedback` targets the latest completed turn of the active conversation
    (arbitrary-turn feedback = future R32 territory); feedback enters the agent-memory
    projection for completed turns, as the dspy.History `feedback` slot does today.
+
+### A19 — Queue contract: status-stamped `TurnResult`s (resolves R43) — 2026-06-11
+
+1. **`command_output_queue` carries `TurnResult`s only.** Mid-turn ask_user questions are
+   partial `TurnResult`s with `status=awaiting_user` (synthesized from in-memory state);
+   completion is `status=completed/failed`. Consumers branch on `status` — the same branch
+   Topology B callers use on `process_message`'s return, extending 5.5's no-mode-branching
+   promise to the queue transport.
+2. **The trace queue is untouched** (decision 9 stands): same events, same emission sites,
+   same `None` sentinel. The CLI's dim ticker is byte-identical before and after; panel
+   rendering verified pixel-identical under the new contract.
+3. **Sentinel pairing rule (fixes bug `fix-5fv`):** every mid-turn awaiting_user enqueue is
+   paired with a trace sentinel. Today's Topology A ask_user enqueues the clarification
+   without one, and the CLI reads the output queue only after a sentinel — an apparent
+   agent-mode mid-turn hang, filed for runtime verification and fixed by this rule.
+4. **Timing:** lands at v3.0 with the CLI surface (A14/A15).
