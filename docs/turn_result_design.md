@@ -975,3 +975,18 @@ consumers** in the framework, examples, and tests; xray's action buttons travel 
    `model_dump()` as a dict.
 4. Store-level details (hash algorithm, compression slot, atomic disk writes) remain with
    R21.
+
+### A11 — `process_action` invocations are full turns (resolves R8) — 2026-06-11
+
+`process_action` (the external `/perform_action` door; MCP rides the same endpoints) returns
+a `TurnResult` and writes a turn record like any other turn:
+
+1. `command_outputs = [the one execution]`; `answer = command_outputs[0].command_response`
+   (assistant-path aliasing; copy-on-serialize applies); `status` per A3; `success` per A6;
+   `user_message = ""` (no user words existed — provenance lives on the command entry).
+2. Rationale: the state-mutating path must never be the unrecorded one (audit); A1 rebuilds
+   agent memory from records, and `_process_action` writes a memory note today
+   (`workflow_execution_context.py:715`) that would otherwise vanish on restart; one wire
+   shape across all endpoints.
+3. No record opt-out flag — the audit guarantee is unconditional. The internal
+   `CommandExecutor.perform_action` helper (plumbing inside a turn) is unaffected.

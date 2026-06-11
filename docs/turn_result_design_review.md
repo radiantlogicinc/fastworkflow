@@ -26,7 +26,7 @@ refinements. "Open questions: none remaining" (section 13 of the design doc) is 
 | R5 | Artifact serialization/offload contract unspecified | **RESOLVED 2026-06-11** — size-threshold offload; reserved-key envelope; strict rejection; honest `command_parameters` | 8.2, 8.3, decision 16 |
 | R6 | Failed executions and failed turns invisible to review | **RESOLVED 2026-06-10** — capture-with-detail; record+re-raise; TTL+lazy abandon | 3.1, 5.5, 7.6 |
 | R7 | Sensitive data flips from ephemeral to durably-persisted-by-default | Blocking (compliance) | 7, 7.8 |
-| R8 | `process_action` / MCP paths not covered | Blocking | 5.5, 5.6, 10 |
+| R8 | `process_action` / MCP paths not covered | **RESOLVED 2026-06-11** — full turns: TurnResult + record, empty user_message | 5.5, 5.6, 10 |
 | R40 | `TurnResult` has no turn-level success semantics | **RESOLVED 2026-06-11** — success=answer.success; max-iters → success=False; serialized | 5.4, 5.5, 11 |
 | R41 | Live response path ambiguous: in-memory payloads vs put-then-get round trip | High | 10.3, 8.2 |
 | R38 | `/post_feedback` vs write-once review records | High | 7.5, 8.1 |
@@ -506,6 +506,25 @@ records? What is their `user_message`? If excluded, say so explicitly — otherw
 timeline has invisible state mutations interleaved between recorded turns, which corrupts the
 very audit trail the feature exists to provide. (MCP tool calls ride the same endpoints, so R3's
 wire-schema resolution covers MCP transport; this finding is about record coverage.)
+
+**RESOLVED 2026-06-11 (with Dhar) — full turns.** `process_action` returns a `TurnResult` and
+writes a turn record like any other turn:
+
+- `command_outputs = [the one execution]` (full provenance: command name, parameters,
+  workflow, context); `answer = command_outputs[0].command_response` (same aliasing as the
+  assistant path, R10's copy-on-serialize applies); `status` per A3; `success` = the command's
+  own success per A6; **`user_message = ""`** (stated convention — no user words existed; the
+  action is fully described by its command entry).
+- Rationale recorded: (a) closes the audit hole — the state-*mutating* path can never be the
+  unrecorded one; (b) preserves today's agent-memory behavior under A1's rebuild-from-records
+  (verified: `_process_action` appends to `conversation_history` today,
+  `workflow_execution_context.py:715` — without a record that note would vanish on restart);
+  (c) MCP and `/perform_action` clients get the same wire shape as the other endpoints (one
+  format, feeding R3).
+- The opt-out flag variant was rejected to keep the audit guarantee unconditional. The
+  *internal* `CommandExecutor.perform_action` (plumbing inside a turn) is unaffected.
+
+Recorded in `docs/turn_result_design.md`, Amendments A11.
 
 ### R40. `TurnResult` has no turn-level success semantics
 
