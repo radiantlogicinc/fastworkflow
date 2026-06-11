@@ -454,6 +454,11 @@ consumers never branch on mode:
   accumulated executions.
 - **Deterministic `/`-command** (`_process_message`): `command_outputs == [the one CommandOutput]`
   and `answer == command_outputs[-1].command_response`. No mode-branching for consumers.
+
+  > **[Corrected by Amendment A33]** "The one CommandOutput" holds only for the simple case.
+  > The actual invariant: `command_outputs` contains every execution funneled through
+  > `invoke_command` during the turn (the app command plus any CME-handled or clarification
+  > executions, in order); `answer` aliases the **last** entry's `command_response`.
 - **Suspend/resume** (`_resume_agent_message`): accumulation spans the **logical** turn (section 7).
 
 ### 5.6 `process_message` return contract
@@ -1261,3 +1266,13 @@ out of scope.
 3. **Conventions:** nested `user_message` = the parent's delegation instruction; a synthetic
    test producer ships with the seam (R35); revisit trigger — p95 record size over ~256 KB
    with real nested agents → promote nested turns to references.
+
+### A33 — `continuation_of` linkage; 5.5 invariant corrected (resolves R13) — 2026-06-11
+
+1. **`TurnResult.continuation_of: Optional[turn_key]`**, stamped when a turn begins in a
+   correction state (`NLU_Pipeline_Stage` tracks it; the predecessor's key is noted when the
+   error turn ends). Assistant-mode correction chains become an explicit linked list for
+   review and audit.
+2. **Section 5.5 corrected in place** (see the bracketed note there): the deterministic
+   path's `command_outputs` holds every `invoke_command` execution of the turn, in order;
+   `answer` aliases the last entry's response.

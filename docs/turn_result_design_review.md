@@ -942,6 +942,21 @@ state. Related: section 5.5's claim that the deterministic path yields
 parameter-extraction commands run within the turn (section 3.1 says those *do* funnel through
 `invoke_command` and are captured) — specify the actual invariant.
 
+**RESOLVED 2026-06-11 (with Dhar).** Decisions:
+
+1. **`continuation_of: Optional[turn_key]` is added** to `TurnResult`/the record, stamped when
+   a turn begins in a correction state (`NLU_Pipeline_Stage` already tracks it; the
+   predecessor's key is noted in the workflow context when the error turn ends). Corrections
+   chain as a linked list — explicit, audit-grade linkage instead of UI heuristics.
+2. **Section 5.5's invariant corrected (stated):** the deterministic path's `command_outputs`
+   contains *every* execution funneled through `invoke_command` during the turn — the app
+   command plus any CME-handled or clarification executions, in order — and `answer` aliases
+   the **last** entry's `command_response`. The "exactly one CommandOutput" claim holds only
+   for the simple no-clarification case.
+
+Recorded in `docs/turn_result_design.md`, Amendments A33 (with the 5.5 correction note in
+place).
+
 ### R14. Decision 9 (text-only streaming) deserves a revisit footnote, not reversal
 
 It was effectively decided before `PayloadStore` existed in the design. Once payloads are
