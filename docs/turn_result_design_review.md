@@ -1345,6 +1345,17 @@ and reserve slots (in R19's `metadata`) for token usage and model invocations
 (`LLM_PARAM_EXTRACTION`, `LLM_AGENT`, etc. are distinct cost centers worth attributing).
 Latency-per-command is the first question every developer asks of a trace.
 
+**RESOLVED 2026-06-11 (confirm-and-close).** (1) **Per execution:** `CommandOutput` gains
+dedicated `started_at` and `duration_ms` fields, captured at the `invoke_command` choke
+point. A7 bonus: ask_user entries are timed like any command — their duration is the user's
+think time, separating "agent slow" from "user away." (2) **Per turn:** `started_at` = the
+A22 mint moment; plus `completed_at` and a `suspended_ms` total, so wall time vs active time
+read separately (A23 cards already display these). (3) **Tokens/cost:** reserved naming
+convention in A25 metadata — `metadata["tokens"][<model-role>] = {prompt, completion}`,
+keyed by the env-var model roles (the distinct cost centers); population is **best-effort**
+where DSPy/LiteLLM usage data is cheaply available — the convention is fixed without making
+token accounting a launch blocker. Recorded in `docs/turn_result_design.md`, Amendments A38.
+
 ### R30. Two audiences, one record: define projections
 
 The user's observability need and the developer's differ. Review records will contain

@@ -1312,3 +1312,14 @@ Failed/cancelled/abandoned partials include the trajectory-so-far. Developer pro
 (R30); standard retention/co-GC/record-mediated access (A8/A12); deterministic and action
 turns carry `None`. The durable-trajectory roadmap item is storage-complete; its remaining
 scope is consuming trajectories, not persisting them.
+
+### A38 — Timing and cost slots (resolves R29) — 2026-06-11
+
+1. **Per execution:** `CommandOutput.started_at` + `duration_ms`, captured at the
+   `invoke_command` choke point; ask_user entries timed like any command (duration = user
+   think time).
+2. **Per turn:** `started_at` (= the A22 mint moment), `completed_at`, `suspended_ms` —
+   wall time vs active time read separately; A23 cards display them.
+3. **Tokens/cost:** reserved convention in A25 metadata —
+   `metadata["tokens"][<model-role>] = {prompt, completion}` keyed by the env-var model
+   roles; population best-effort where DSPy/LiteLLM usage data is cheaply available.
