@@ -1171,3 +1171,15 @@ Verified sites missing from section 11, with migration releases per A14:
    reading the conversation's records; no separate counter storage.
 3. **Key timestamp = logical-turn start** (implied by A22's mint-at-start); used for range
    scans (A23) and readability, not ordering.
+
+### A25 — Record format versioning; `TurnResult.metadata` (resolves R19) — 2026-06-11
+
+1. **Every durable record type embeds a format version** (turn records, conversation
+   metadata, feedback cards). The `TurnSerializer` stamps its format version on every
+   serialized `TurnResult` — in turn records and in the partial inside pending blobs alike;
+   the pending blob keeps its separate envelope `SCHEMA_VERSION` (A14 expiry dispatch).
+2. **Strict reader dispatch:** unknown future version → explicit error; missing version →
+   corrupt, error.
+3. **`TurnResult.metadata: dict[str, Any] = {}`** on the in-memory type, serialized as-is
+   under A10's contract — the home for R29 timing/token slots, R31 trace ids, and A23 card
+   extensions.

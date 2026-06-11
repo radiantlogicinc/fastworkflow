@@ -1010,6 +1010,19 @@ and the reader must dispatch on it. Add `metadata: dict[str, Any] = {}` to the s
 record (and arguably to `TurnResult`) as a forward-compat extension point — token counts, user
 ratings, trace ids will want a home (§4).
 
+**RESOLVED 2026-06-11 (confirm-and-close).** (1) **Every durable record type embeds a format
+version** — turn records, conversation metadata records, feedback cards; no exceptions.
+(2) **Two constants, clear ownership:** the `TurnSerializer` stamps its format version on
+every serialized `TurnResult` (traveling into both turn records and the partial inside
+pending blobs — one serializer, one format, one constant); the pending blob keeps its
+existing, separate `SCHEMA_VERSION` for the blob envelope (what A14's graceful expiry
+dispatches on). (3) **Strict reader dispatch:** unknown future version → explicit error
+(never guess); missing version → corrupt, error (no pre-v3.0 records exist). (4)
+**`TurnResult.metadata: dict[str, Any] = {}`** on the in-memory type, serialized as-is,
+contents subject to A10's serializability contract — the designated home for R29
+timestamps/token counts, R31 trace ids, and A23 card extensions. Recorded in
+`docs/turn_result_design.md`, Amendments A25.
+
 ### R20. The key format is not filesystem-safe — and keys are attacker-influenced path components
 
 ISO-8601 with colons (`2026-06-10T17:04:03.123456Z`) is an invalid NTFS filename; fastWorkflow
