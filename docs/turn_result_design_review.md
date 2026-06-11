@@ -17,7 +17,7 @@ refinements. "Open questions: none remaining" (section 13 of the design doc) is 
 
 | # | Finding | Severity | Design sections affected |
 |---|---------|----------|--------------------------|
-| R1 | ask_user exchanges lost; turn transcript not interleaved | **Blocking — design contradiction** | 3.1, 5.4, 7.6, 9, decision 18 |
+| R1 | ask_user exchanges lost; turn transcript not interleaved | **RESOLVED 2026-06-11** — ask_user modeled as a `CommandOutput` in the ordered list (Dhar's simplification) | 3.1, 5.4, 7.6, 9, decision 18 |
 | R2 | Content-addressing makes co-GC incoherent; cross-tenant handle sharing | **Blocking — design contradiction** | 7.8, 8.2, decisions 13, 19 |
 | R37 | Framework already persists per-turn records (`ConversationStore`); design premises false; third overlapping store | **RESOLVED 2026-06-10** — full absorption into unified `ConversationTurnStore` | 7.1, 7.2, 9.1, decisions 11, 18 |
 | R42 | `next_actions`/`recommendations` still die at the agent boundary — the original bug class survives the fix | **Blocking — design contradiction** | 2.4, 5.4, 10.3, decision 2 |
@@ -96,6 +96,36 @@ command outputs. Either:
 The event-sequence shape also gives a natural extension point for trajectory events later (R28).
 Capture point: `_post_ask_user_response` is the single choke point for completed exchanges (both
 topologies route through it), exactly parallel to the `invoke_command` choke point.
+
+**RESOLVED 2026-06-11 (with Dhar) — superseding the reviewer's recommendation with a simpler
+design from Dhar.** Decisions:
+
+1. **No `UserExchangeEvent`, no discriminated union: `ask_user` is modeled as a command
+   execution.** It is already a tool taking a single text parameter, so each exchange becomes a
+   `CommandOutput` with `command_name="ask_user"`, `command_parameters=` the clarification
+   question, `command_response.response=` the user's answer — appended **in order** into the
+   existing `command_outputs` list. The design doc's original `TurnResult` shape (answer +
+   `command_outputs`) survives intact; interleaving is solved with zero new types. Precedent:
+   `_ask_user_tool` (`workflow_agent.py:276`) already constructs exactly such a `CommandOutput`
+   for the output queue.
+2. **Unanswered-question convention (satisfies A4/A5):** the ask_user entry is appended at
+   ask/suspend time with `response=""` and `success=False`; when the answer arrives
+   (`_post_ask_user_response`, both topologies), the response is filled and `success` flips to
+   `True`. Cancelled/abandoned records therefore end with the unanswered question; a suspended
+   partial blob naturally shows what is pending.
+3. **`user_message` holds the original request only.** Clarification replies live solely in
+   their ask_user entries — each utterance stored once, in context, in order. (R44 separately
+   decides capturing the refined form of the message.)
+4. **Documented role inversion:** for ask_user entries, `command_parameters` is what the
+   *agent* said and `response` is what the *user* said — projections and readers must account
+   for this. The summary text projection maps cleanly (today's
+   `{"agent_query": q, "user_response": a}` becomes `parameters=q, response=a`).
+5. **Knock-on effects:** R29 timestamps attach uniformly per `CommandOutput`; R28's trajectory
+   remains an offloaded blob (no inline event type needed); R30's user-facing projection keeps
+   ask_user entries visible via `command_name` filter; the derived LLM-summary view includes
+   exchanges, so the decision-18 "zero regression" claim becomes true again.
+
+Recorded in `docs/turn_result_design.md`, Amendments A7.
 
 ### R2. Content-addressing and "co-GC under one lifecycle key" are jointly incoherent
 

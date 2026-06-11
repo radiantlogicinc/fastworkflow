@@ -889,3 +889,28 @@ Consequences:
 3. **Wire exposure:** `success` is a serialized `computed_field` on `TurnResult` (HTTP/SSE
    visible; today's property never serialized). MCP: `isError = not success`. This decides
    the `success` half of R33; the remaining predicates stay property-only pending R33.
+
+### A7 — ask_user exchanges captured as command executions (resolves R1) — 2026-06-11
+
+Supersedes the reviewer-proposed discriminated-union event sequence with a simpler design
+(Dhar): **`ask_user` is modeled as a command execution**, not a new event type.
+
+1. Each exchange is a `CommandOutput` with `command_name="ask_user"`,
+   `command_parameters=` the clarification question, `command_response.response=` the user's
+   answer — appended **in chronological order** into the same `command_outputs` list as real
+   command executions. `TurnResult` keeps its original shape (answer + `command_outputs`);
+   interleaving needs no union types. Precedent: `_ask_user_tool` already constructs such a
+   `CommandOutput` for the output queue.
+2. **Unanswered-question convention:** appended at ask/suspend time with `response=""` and
+   `success=False`; filled (and `success=True`) on answer via `_post_ask_user_response` (the
+   choke point in both topologies). Cancelled/abandoned records (A4/A5) therefore end with
+   the unanswered question; suspended partials show the pending question.
+3. **`user_message` holds the original request only**; clarification replies live solely in
+   their ask_user entries. (R44 will decide raw-vs-refined capture separately.)
+4. **Role inversion documented:** in ask_user entries, `command_parameters` is the agent's
+   utterance and `response` is the user's. The summary text projection maps today's
+   `{"agent_query", "user_response"}` to `parameters`/`response` directly, so the derived
+   LLM-summary view loses nothing and decision 18's zero-regression claim is restored.
+5. Knock-ons: per-`CommandOutput` timestamps (R29) cover exchanges uniformly; R28's
+   trajectory remains an offloaded blob; R30's user projection includes ask_user entries via
+   `command_name` filter.
