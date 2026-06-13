@@ -109,6 +109,9 @@ class fastWorkflowReAct(Module):
         self.inputs = {}
         self.current_trajectory = {}
         self._suspended: dict[str, Any] | None = None
+        # True when the most recent _run_loop ended because max_iters was
+        # reached without the agent selecting the `finish` tool.
+        self._exhausted_last_run = False
 
     def clear_suspension(self) -> None:
         """Drop any in-memory suspended ReAct state (used on abort/finalize)."""
@@ -161,7 +164,9 @@ class fastWorkflowReAct(Module):
         extract = self._call_with_potential_trajectory_truncation(
             self.extract, trajectory, **input_args
         )
-        return dspy.Prediction(trajectory=trajectory, **extract)
+        return dspy.Prediction(
+            trajectory=trajectory, exhausted=self._exhausted_last_run, **extract
+        )
 
     def resume(self, observation: str):
         """Resume a suspended run after the user answered an ask_user clarification."""
@@ -186,7 +191,9 @@ class fastWorkflowReAct(Module):
         extract = self._call_with_potential_trajectory_truncation(
             self.extract, trajectory, **input_args
         )
-        return dspy.Prediction(trajectory=trajectory, **extract)
+        return dspy.Prediction(
+            trajectory=trajectory, exhausted=self._exhausted_last_run, **extract
+        )
 
     def _run_loop(
         self,
@@ -200,7 +207,10 @@ class fastWorkflowReAct(Module):
         Run the ReAct tool loop until finish, max_iters, or AskUserSuspend.
 
         Returns a suspended Prediction, or None when the loop completed normally.
+        Sets ``self._exhausted_last_run`` when the loop ends because max_iters
+        was reached without the agent selecting the `finish` tool.
         """
+        self._exhausted_last_run = False
         while True:
             try:
                 pred = self._call_with_potential_trajectory_truncation(
@@ -248,6 +258,7 @@ class fastWorkflowReAct(Module):
                 return dspy.Prediction(
                     suspended=True,
                     clarification=err.clarification_request,
+                    exhausted=False,
                 )
             except Exception as err:
                 trajectory[f"observation_{idx}"] = (
@@ -261,6 +272,7 @@ class fastWorkflowReAct(Module):
             self.iteration_counter += 1
             if self.iteration_counter >= max_iters:
                 logger.warning("Max iterations reached")
+                self._exhausted_last_run = True
                 break
 
         return None

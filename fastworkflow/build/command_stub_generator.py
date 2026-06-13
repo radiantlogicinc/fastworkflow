@@ -282,12 +282,10 @@ class ResponseGenerator:
         result = "Executed {command_name} command"
         
         return CommandOutput(
-            command_responses=[
-                CommandResponse(
-                    response=result,
-                    artifacts={{"result": result}}
-                )
-            ]
+            command_response=CommandResponse(
+                response=result,
+                artifacts={{"result": result}}
+            )
         )
 """.format(
             display_command_lower=display_command.lower(),

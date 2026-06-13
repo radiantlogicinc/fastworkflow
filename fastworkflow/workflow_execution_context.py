@@ -21,14 +21,18 @@ import json
 import os
 import time
 import uuid
+import warnings
+from datetime import datetime, timezone
 from queue import Queue
 from typing import Any, Optional
 
 import dspy
 
 import fastworkflow
+import fastworkflow.turn
 from fastworkflow import active_workflow
 from fastworkflow.session_state_store import SCHEMA_VERSION
+from fastworkflow.turn import TurnResult, TurnStatus, mint_turn_key
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_utils
 
@@ -86,6 +90,18 @@ class WorkflowExecutionContext:
         self._suspended_user_message: Optional[str] = None
         self._pending_clarification_request: Optional[str] = None
 
+        # Turn accumulator state (one logical turn = one key, across suspensions)
+        self._turn_outputs: list = []
+        self._turn_key: Optional[str] = None
+        self._turn_started_at: Optional[datetime] = None
+        self._turn_user_message: str = ""
+        self._turn_refined_message: Optional[str] = None
+        self._turn_suspended_ms: int = 0
+        self._suspend_began_at: Optional[datetime] = None
+        self._turn_entry_workflow_name: str = ""
+        self._turn_entry_context: str = ""
+        self._turn_agent_result: Any = None
+
         cme_id = (
             f"cme_{session_key}"
             if session_key
@@ -119,6 +135,109 @@ class WorkflowExecutionContext:
     @property
     def action_log(self) -> list[dict[str, Any]]:
         return self._action_log
+
+    # ------------------------------------------------------------------
+    # Turn accumulator (v2.21: capture + TurnResult return type only)
+    # ------------------------------------------------------------------
+
+    def _begin_turn(self, user_message: str) -> None:
+        """Atomic turn start [A30]: reset accumulator, mint key, stamp started_at.
+
+        Never called while awaiting_user — a message during suspension is the
+        resume answer and continues the same logical turn [A30.2].
+        """
+        self._turn_outputs = []
+        self._turn_key = mint_turn_key()
+        self._turn_started_at = datetime.now(timezone.utc)
+        self._turn_user_message = user_message
+        self._turn_refined_message = None
+        self._turn_suspended_ms = 0
+        self._suspend_began_at = None
+        self._turn_agent_result = None
+
+        self._turn_entry_workflow_name = ""
+        self._turn_entry_context = ""
+        try:
+            if self._app_workflow is not None:
+                self._turn_entry_workflow_name = (
+                    self._app_workflow.folderpath.split("/")[-1]
+                )
+                self._turn_entry_context = (
+                    self._app_workflow.current_command_context_name or ""
+                )
+        except Exception:  # best-effort capture only
+            pass
+
+    def append_turn_output(self, command_output: fastworkflow.CommandOutput) -> None:
+        """Append one command execution to the current turn's accumulator."""
+        self._turn_outputs.append(command_output)
+        fastworkflow.turn.warn_on_unserializable_artifacts(command_output)
+
+    def append_ask_user_entry(self, question: str) -> fastworkflow.CommandOutput:
+        """Append an unanswered ask_user exchange entry [A7] and return it.
+
+        Role inversion: command_parameters holds the agent's question; the
+        response holds the user's answer ("" + success=False while unanswered).
+        """
+        entry = fastworkflow.CommandOutput(
+            command_name="ask_user",
+            command_parameters=question,
+            command_responses=[
+                fastworkflow.CommandResponse(response="", success=False)
+            ],
+            started_at=datetime.now(timezone.utc),
+        )
+        self.append_turn_output(entry)
+        return entry
+
+    def complete_ask_user_entry(self, answer: str) -> None:
+        """Fill the last unanswered ask_user entry with the user's answer.
+
+        duration_ms is the user's think time [A38]. No-op when there is no
+        unanswered ask_user entry.
+        """
+        for entry in reversed(self._turn_outputs):
+            if (
+                entry.command_name == "ask_user"
+                and entry.command_responses
+                and entry.command_responses[0].success is False
+            ):
+                entry.command_responses[0].response = answer
+                entry.command_responses[0].success = True
+                if entry.started_at is not None:
+                    entry.duration_ms = int(
+                        (datetime.now(timezone.utc) - entry.started_at).total_seconds()
+                        * 1000
+                    )
+                return
+
+    def _note_agent_suspension(self, clarification: str) -> None:
+        """Bookkeeping when the agent suspends on ask_user (Topology B).
+
+        Appends the unanswered ask_user entry unless the last entry is already
+        the same unanswered question (Topology-A's blocking path appends via
+        workflow_agent), and stamps the suspension start for suspended_ms.
+        """
+        last = self._turn_outputs[-1] if self._turn_outputs else None
+        already_appended = (
+            last is not None
+            and last.command_name == "ask_user"
+            and last.command_responses
+            and last.command_responses[0].success is False
+            and last.command_parameters == clarification
+        )
+        if not already_appended:
+            self.append_ask_user_entry(clarification)
+        self._suspend_began_at = datetime.now(timezone.utc)
+
+    def _note_agent_resume(self) -> None:
+        """Fold the elapsed suspension into suspended_ms on resume entry."""
+        if self._suspend_began_at is not None:
+            self._turn_suspended_ms += int(
+                (datetime.now(timezone.utc) - self._suspend_began_at).total_seconds()
+                * 1000
+            )
+            self._suspend_began_at = None
 
     # ------------------------------------------------------------------
     # Queue injection (CLI driver only)
@@ -300,6 +419,8 @@ class WorkflowExecutionContext:
         if not self._awaiting_user:
             return False
         self._reset_agent_suspension()
+        self._suspend_began_at = None
+        self._turn_suspended_ms = 0
         return True
 
     def clear_conversation_history(self) -> None:
@@ -348,15 +469,39 @@ class WorkflowExecutionContext:
 
     def process_message(self, message: str) -> fastworkflow.CommandOutput:
         """
-        Execute one user message synchronously.
+        Execute one user message synchronously (deprecated; use process_turn()).
 
         Pushes app_workflow onto the contextvar stack for the duration of the
         call so CommandExecutor and agent tools resolve the correct workflow.
         """
+        warnings.warn(
+            "WorkflowExecutionContext.process_message() is deprecated; "
+            "use process_turn() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self._execute_message(message)
+
+    def process_turn(self, message: str) -> TurnResult:
+        """
+        Execute one user message synchronously and return the full TurnResult.
+
+        Same dispatch as process_message(); additionally captures every command
+        execution of the logical turn (including ask_user exchanges) [A22].
+        """
+        command_output = self._execute_message(message)
+        return self._build_turn_result(command_output)
+
+    def _execute_message(self, message: str) -> fastworkflow.CommandOutput:
+        """Shared message dispatch for process_message()/process_turn()."""
         if self._app_workflow is None:
             raise RuntimeError(
                 "No app workflow bound; call bind_app_workflow() before process_message()"
             )
+
+        if not self._awaiting_user:
+            # A message during suspension is the resume answer — never a reset.
+            self._begin_turn(message)
 
         self.push_active_workflow(self._app_workflow)
         try:
@@ -374,11 +519,54 @@ class WorkflowExecutionContext:
             if self._app_workflow:
                 self._app_workflow.flush()
 
+    def _build_turn_result(
+        self, command_output: fastworkflow.CommandOutput
+    ) -> TurnResult:
+        """Assemble the TurnResult for the just-dispatched message."""
+        if command_output.command_responses:
+            answer = command_output.command_responses[0]
+        else:  # defensive; CommandOutput always carries at least one response
+            answer = fastworkflow.CommandResponse(response="", success=False)
+
+        failure_reason: Optional[str] = None
+        if self._awaiting_user:
+            status = TurnStatus.AWAITING_USER
+            completed_at: Optional[datetime] = None
+        else:
+            status = TurnStatus.COMPLETED
+            completed_at = datetime.now(timezone.utc)
+            if self._turn_agent_result is not None:
+                if getattr(self._turn_agent_result, "exhausted", False):
+                    answer.success = False
+                    failure_reason = "max_iters_exhausted"
+            elif self._turn_outputs:
+                # Deterministic/assistant path: answer aliases the last
+                # captured output's first response (same object) [A33].
+                answer = self._turn_outputs[-1].command_responses[0]
+
+        return TurnResult(
+            turn_key=self._turn_key or mint_turn_key(),
+            status=status,
+            failure_reason=failure_reason,
+            user_message=self._turn_user_message,
+            refined_user_message=self._turn_refined_message,
+            entry_workflow_name=self._turn_entry_workflow_name,
+            entry_context=self._turn_entry_context,
+            answer=answer,
+            command_outputs=list(self._turn_outputs),
+            started_at=self._turn_started_at,
+            completed_at=completed_at,
+            suspended_ms=self._turn_suspended_ms,
+        )
+
     def process_action(self, action: fastworkflow.Action) -> fastworkflow.CommandOutput:
         if self._app_workflow is None:
             raise RuntimeError(
                 "No app workflow bound; call bind_app_workflow() before process_action()"
             )
+
+        # Each direct action is its own logical turn [A30].
+        self._begin_turn(action.command_name or "")
 
         self.push_active_workflow(self._app_workflow)
         try:
@@ -494,6 +682,7 @@ class WorkflowExecutionContext:
             self._app_workflow.context["raw_user_message"] = message
 
         refined_user_query = self._refine_user_query(message, self.conversation_history)
+        self._turn_refined_message = refined_user_query
 
         from fastworkflow.workflow_agent import build_query_with_next_steps, _what_can_i_do
 
@@ -560,6 +749,16 @@ class WorkflowExecutionContext:
         if self._app_workflow:
             command_output.workflow_name = self._app_workflow.folderpath.split("/")[-1]
 
+        # Topic 5: the synthesized agent answer carries only its own artifacts, so
+        # the structured outputs produced by each tool call during the turn would
+        # be dropped on the user-facing path. Preserve them by appending the turn's
+        # artifact-bearing responses (answer text stays at index 0). The framework
+        # does not interpret the artifacts — the client reads whatever keys it wants.
+        if artifact_responses := fastworkflow.turn.collect_artifact_responses(
+            self._turn_outputs
+        ):
+            command_output.command_responses.extend(artifact_responses)
+
         self._maybe_enqueue_output(command_output)
         self._maybe_enqueue_trace_sentinel()
 
@@ -568,16 +767,19 @@ class WorkflowExecutionContext:
     def _process_agent_message(self, message: str) -> fastworkflow.CommandOutput:
         self._ensure_agent_initialized()
         agent_result = self._run_agent(message)
+        self._turn_agent_result = agent_result
         if getattr(agent_result, "suspended", None) is True:
             self._awaiting_user = True
             self._suspended_user_message = message
             self._pending_clarification_request = agent_result.clarification
+            self._note_agent_suspension(agent_result.clarification)
             return self._awaiting_user_output(agent_result.clarification)
         self._reset_agent_suspension()
         return self._finalize_agent_output(message, agent_result)
 
     def _resume_agent_message(self, user_answer: str) -> fastworkflow.CommandOutput:
         self._ensure_agent_initialized()
+        self._note_agent_resume()
 
         from fastworkflow.workflow_agent import _post_ask_user_response
 
@@ -588,8 +790,10 @@ class WorkflowExecutionContext:
             self,
         )
         agent_result = self._call_agent_resume(observation)
+        self._turn_agent_result = agent_result
         if getattr(agent_result, "suspended", None) is True:
             self._pending_clarification_request = agent_result.clarification
+            self._note_agent_suspension(agent_result.clarification)
             return self._awaiting_user_output(agent_result.clarification)
 
         original_message = self._suspended_user_message
@@ -614,7 +818,13 @@ class WorkflowExecutionContext:
                 )
             )
 
+        invoke_started_at = datetime.now(timezone.utc)
         command_output = self._CommandExecutor.invoke_command(self, message)
+        command_output.started_at = invoke_started_at
+        command_output.duration_ms = int(
+            (datetime.now(timezone.utc) - invoke_started_at).total_seconds() * 1000
+        )
+        self.append_turn_output(command_output)
 
         response_text = ""
         if command_output.command_responses:
@@ -686,7 +896,13 @@ class WorkflowExecutionContext:
                 )
             )
 
+        action_started_at = datetime.now(timezone.utc)
         command_output = self._CommandExecutor.perform_action(workflow, action)
+        command_output.started_at = action_started_at
+        command_output.duration_ms = int(
+            (datetime.now(timezone.utc) - action_started_at).total_seconds() * 1000
+        )
+        self.append_turn_output(command_output)
 
         response_text = ""
         if command_output.command_responses:

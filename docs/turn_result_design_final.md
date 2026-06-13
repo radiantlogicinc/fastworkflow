@@ -16,9 +16,10 @@ Every user interaction with a workflow is a **logical turn**. A turn is captured
 caller as a `TurnResult`, and persisted as an immutable **turn record** in a unified
 conversation store. Records are the system of record for conversations, the source the
 agent's cross-turn memory is rebuilt from, and the substrate for review/observability.
-Large values (payloads, trajectories) are offloaded to a turn-scoped payload store and
-referenced by envelope. One durable record write per turn; the live response is served from
-RAM.
+Large artifact values and trajectories are offloaded to a turn-scoped blob store and
+referenced by envelope (size-driven and key-agnostic — the framework never interprets which
+artifact a value belongs to). One durable record write per turn; the live response is served
+from RAM.
 
 ---
 
@@ -79,13 +80,15 @@ class TurnResult(BaseModel):                                # one logical turn
     def success(self) -> bool: ...         # = answer.success; the ONLY wire predicate [A6][A42]
 
     # convenience (properties, not serialized) [X10c]
-    gallery -> list[CommandOutput]         # payload-bearing outputs, turn order [A9/A20]
+    command_outputs_with_artifacts -> list[CommandOutput]
+                                           # outputs carrying artifacts, turn order [A9/A20];
+                                           # predicate is "has artifacts", key-agnostic
 ```
 
 ```python
-FW_PAYLOAD_REF_KEY = "__fw_payload_ref__"                   # [A10][A47]
-# Envelope (replaces an offloaded value in place):
-# {FW_PAYLOAD_REF_KEY: <scoped handle>, "size": int, "content_type": str,
+FW_ARTIFACT_REF_KEY = "__fw_artifact_ref__"                 # [A10][A47]
+# Envelope (replaces an offloaded large artifact value in place):
+# {FW_ARTIFACT_REF_KEY: <scoped handle>, "size": int, "content_type": str,
 #  "content_encoding": str|None,          # reserved [A27]
 #  "error": str|None}                     # set for placeholder envelopes [X3b]
 ```
@@ -102,7 +105,17 @@ time `[A38]`.
 the alias `[X11]`.
 
 **Exports** from `fastworkflow/__init__` (re-exported from `fastworkflow.turn`): `TurnResult`,
-`TurnStatus`, `CommandOutput`, `CommandResponse`, `FW_PAYLOAD_REF_KEY` `[A47]`.
+`TurnStatus`, `CommandOutput`, `CommandResponse`, `FW_ARTIFACT_REF_KEY` `[A47]`.
+
+**Artifact-agnostic boundary.** The framework treats `CommandResponse.artifacts` as an opaque
+serializable dict: it preserves entries verbatim and never inspects keys or values to decide
+meaning. Concepts like "payload", "payload_hint", "request_id", "chart vs table", or "which
+artifact is featured" are **client-specific** and live entirely in the consuming client (e.g.
+xray) — the framework neither names nor branches on them. Selecting "outputs worth rendering
+richly" reduces, at the framework level, to the key-agnostic predicate *"this response carries
+artifacts"* (`turn.collect_artifact_responses`, `TurnResult.command_outputs_with_artifacts`).
+The only `__fw_`-prefixed reserved key, `FW_ARTIFACT_REF_KEY`, is the framework's *own* offload
+envelope marker (size-driven, key-agnostic), not a client artifact key.
 
 ---
 
@@ -135,7 +148,7 @@ Rules:
   question expired — please re-ask"; the new message is then processed fresh `[A5.3][X9e]`.
   The pending blob stamps `suspended_at` for this comparison.
 - Every terminal transition runs the same finalize-and-clear; terminal records own all
-  suspend-offloaded payloads (no orphan class) `[A4/A5/R24]`.
+  suspend-offloaded artifact blobs (no orphan class) `[A4/A5/R24]`.
 - Nested suspension always **escalates** to the top-level turn; nested `TurnResult`s attach
   only when complete — partial-inside-partial pending blobs never exist `[A32]`.
 - Conversation switches (`/new_conversation`, `/activate_conversation`) auto-cancel a
@@ -172,7 +185,7 @@ colocates them `[X1]`; `UNLINK` is used for deletes.
 ```
 fw:conv:{ch/cv}                  conversation metadata record
 fw:turn:{ch/cv}:<turn_key>       turn record
-fw:payload:{ch/cv}:<turn_key>:<sha256-hex32>   payload blob          [A8][A27]
+fw:artifact:{ch/cv}:<turn_key>:<sha256-hex32>  artifact blob         [A8][A27]
 fw:feedback:{ch/cv}:<turn_key>   feedback card                        [A18]
 fw:turnidx:{ch/cv}               ZSET ordinal → turn_key  (write-time index) [X1]
 fw:convidx:{<channel>}           ZSET created_ts → conv_id            [X1]
@@ -201,7 +214,7 @@ names all record types `[X11]`. Listing returns `(turn_key, summary-card)` pages
 (ordinal, timestamps, status, success, truncated user_message, summary, command count) with
 `limit`/`before`/`after`, newest-first `[A23]`.
 
-**`PayloadStore`** (disk/redis): `put(channel, conv, turn_key, data) -> handle`,
+**`ArtifactBlobStore`** (disk/redis): `put(channel, conv, turn_key, data) -> handle`,
 `get(handle) -> bytes|None`. UTF-8 encode strings; SHA-256 hex-32 algorithm-prefixed leaf;
 raw bytes only (metadata lives in the envelope); atomic disk writes (temp +
 `os.replace`) `[A8][A27]`. **Atomic temp+replace applies to ALL disk writes in every
@@ -212,8 +225,8 @@ store** `[X9a]`.
 `[A21]`:
 
 - Selective copy — never mutates live objects, never blind-deepcopies `[A20]`.
-- Offload rule: any `str`/`bytes` artifact value > `FW_PAYLOAD_OFFLOAD_THRESHOLD_BYTES`
-  → `PayloadStore` + envelope `[A10]`.
+- Offload rule: any `str`/`bytes` artifact value > `FW_ARTIFACT_OFFLOAD_THRESHOLD_BYTES`
+  → `ArtifactBlobStore` + envelope `[A10]`.
 - **Error classification `[X3]`:** non-serializable values found at a persistence boundary
   do **not** abort the write — the offending value is replaced by a **placeholder envelope**
   (`error` field set, key+command named) and the record is always written; the event
@@ -223,9 +236,10 @@ store** `[X9a]`.
 - Stamps the record format version; strict reader dispatch (unknown/missing version =
   explicit error) — but the **memory-rebuild reader skips-and-counts** corrupt records
   (alarm metric) instead of failing the session `[A25][X9/Reliability-3]`.
-- Per-turn payload budget: `FW_MAX_TURN_PAYLOADS` / `FW_MAX_TURN_PAYLOAD_BYTES`; beyond it,
-  payloads become not-retained placeholder envelopes (warning, never turn failure) `[X12]`.
-- Owns the reader: envelope detection, lazy resolution, tolerate-missing-payload.
+- Per-turn artifact-blob budget: `FW_MAX_TURN_ARTIFACT_BLOBS` / `FW_MAX_TURN_ARTIFACT_BYTES`;
+  beyond it, artifact blobs become not-retained placeholder envelopes (warning, never turn
+  failure) `[X12]`.
+- Owns the reader: envelope detection, lazy resolution, tolerate-missing-blob.
 
 **Write-once:** records and index entries are written once per key (`SET NX`/`O_EXCL`).
 A collision during retry **verifies content** (parseable, version present) before claiming
@@ -261,12 +275,14 @@ alarmed `[A22][X9a]`.
 - Served **from RAM**; offload happens on the serialized copy only; zero store reads —
   except envelope entries in a rehydrated (post-restart) partial, which fetch by handle
   server-side `[A16][A17]`.
-- The **headline never carries payloads**; the gallery is all payload-bearing outputs in
-  turn order; the UI picks the featured payload `[A20]`. Gallery provenance: full in
-  `TurnResult`; xray embeds provenance in response text initially (ResponseTuple change is
-  xray-repo scope) `[A9]`.
-- Bundled-server bodies inline payloads up to `FW_MAX_INLINE_PAYLOAD_BYTES` (default 10 MB);
-  beyond it, the envelope rides instead `[A16]`.
+- The **headline carries only the answer**; `command_outputs_with_artifacts` is every
+  artifact-bearing output in turn order; the **client** decides which to feature and how to
+  render it `[A20]`. The framework never inspects artifact keys/values — what an artifact
+  *means* (a gallery item, chart, download, …) is entirely the consumer's concern. Provenance:
+  full in `TurnResult`; xray embeds provenance in response text initially (ResponseTuple change
+  is xray-repo scope) `[A9]`.
+- Bundled-server bodies inline artifact blobs up to `FW_MAX_INLINE_ARTIFACT_BYTES` (default
+  10 MB); beyond it, the envelope rides instead `[A16]`.
 - **Queue contract (v3.0):** `command_output_queue` carries status-stamped `TurnResult`s
   only; every mid-turn awaiting enqueue is paired with a trace sentinel (fixes `fix-5fv`);
   the trace queue and dim CLI ticker are unchanged `[A19][A34]`.
@@ -291,7 +307,8 @@ alarmed `[A22][X9a]`.
 ## 10. Projections and read side
 
 - **One record, two read-time views** via a projection function beside the reader: *user*
-  (non-internal executions + exchanges + answer + gallery; error messages, no tracebacks) and
+  (non-internal executions + exchanges + answer + artifact-bearing outputs; error messages,
+  no tracebacks) and
   *developer* (everything: internal CME executions, parameters, tracebacks, trajectory,
   refined message). Internal detection derives from `workflow_name`, predicate centralized
   in exactly one place `[A39]`.
@@ -308,7 +325,7 @@ alarmed `[A22][X9a]`.
 - **`MetricsSink` protocol** (counter/histogram; no-op default, log-emitting fallback)
   `[X7]`. Core metrics: `fw_turn_duration_seconds{status}`, `fw_turns_total{status}`,
   `fw_record_write_failures_total`, `fw_serialization_rejections_total`,
-  `fw_execution_failures_total`, `fw_payload_fetch_misses_total`,
+  `fw_execution_failures_total`, `fw_artifact_fetch_misses_total`,
   `fw_memory_rebuild_failures_total`, `fw_writer_conflicts_total`,
   `fw_tokens_total{role,kind}` (best-effort).
 - **Log correlation:** `channel_id`/`conv_id`/`turn_key` bound via logging contextvar;
@@ -333,11 +350,11 @@ Store-selection vars mirror the existing unprefixed convention; new feature knob
 |---|---|---|
 | `SESSION_STATE_STORE` | `disk` | pending store backend (existing) |
 | `CONVERSATION_TURN_STORE` | `disk` | unified store backend (v3.0) |
-| `PAYLOAD_STORE` | = `CONVERSATION_TURN_STORE` | payload backend |
+| `ARTIFACT_BLOB_STORE` | = `CONVERSATION_TURN_STORE` | artifact-blob backend |
 | `FW_ALLOW_DISK_STORES` | unset | bundled server refuses `disk` stores in prod unless `1` `[X12]` |
-| `FW_PAYLOAD_OFFLOAD_THRESHOLD_BYTES` | `4096` | inline vs offload `[A10]` |
-| `FW_MAX_INLINE_PAYLOAD_BYTES` | `10485760` | response inline cap `[A16]` |
-| `FW_MAX_TURN_PAYLOADS` / `FW_MAX_TURN_PAYLOAD_BYTES` | `64` / `52428800` | per-turn budget `[X12]` |
+| `FW_ARTIFACT_OFFLOAD_THRESHOLD_BYTES` | `4096` | inline vs offload `[A10]` |
+| `FW_MAX_INLINE_ARTIFACT_BYTES` | `10485760` | response inline cap `[A16]` |
+| `FW_MAX_TURN_ARTIFACT_BLOBS` / `FW_MAX_TURN_ARTIFACT_BYTES` | `64` / `52428800` | per-turn budget `[X12]` |
 | `FW_MAX_TRAJECTORY_BYTES` | `262144` | trajectory truncation (when writer ships) `[X12]` |
 | `FW_PENDING_TURN_TTL_SECONDS` | `604800` (7 d) | abandonment TTL `[A5.3]` |
 | `FW_MEMORY_PROJECTION_TURNS` | `10` | restore projection cap `[X2]` |
@@ -370,14 +387,23 @@ of the above (including the previously undocumented `SESSION_STATE_STORE`).
 
 ## 14. Release train `[A14][X4][X6]`
 
-**v2.21 (minor, non-breaking — the xray payload fix; ~6 files):**
+**v2.21 (minor, non-breaking — the xray artifact-surfacing fix; ~6 files):**
 `fastworkflow/turn.py` types + exports; WEC accumulator with the A30 lifecycle;
 `process_turn()` returning `TurnResult` (built from the *existing* `command_responses[0]` —
 no model collapse); A5.1 failure capture; A7 ask_user entries; eager artifact validation;
 generators emit new-style `command_response=`; `process_message` gains a
-`DeprecationWarning` pointing at `process_turn` `[X10a]`. Standalone bugfix PRs off the
-train: conversation-switch lock acquisition `[A2.3]` and the ask_user trace-sentinel pairing
-(`fix-5fv`).
+`DeprecationWarning` pointing at `process_turn` `[X10a]`. **Artifact projection (Topic 5 —
+delivers the headline fix):** the agent finalize step (`_finalize_agent_output`) otherwise
+synthesizes an answer-only `CommandOutput` and drops every tool call's artifacts; it now
+appends the turn's artifact-bearing responses (`turn.collect_artifact_responses`, selected by
+the key-agnostic "has artifacts" predicate) onto the returned `CommandOutput.command_responses`
+(answer stays at index 0). Because both transports (CLI `ChatSession` and FastAPI) call through
+`process_message`/`_execute_message`, this surfaces artifacts everywhere in v2.21 without
+switching the transport to `process_turn` (the transport-edge projection from
+`TurnResult.command_outputs_with_artifacts` is the deferred v3.0 shape). The deterministic/
+assistant path already surfaces its own command's artifacts, so it is unchanged. Standalone
+bugfix PRs off the train: conversation-switch lock acquisition `[A2.3]` and the ask_user
+trace-sentinel pairing (`fix-5fv`).
 
 **v2.21.x (patch, rollback enabler):** pending blobs with *future* schema versions expire
 gracefully, symmetric to A14 `[X4]`.
@@ -410,7 +436,8 @@ clients roll back in lockstep `[X4]`.
 ```
 fastworkflow/
   turn.py                # TurnResult, TurnStatus, CommandOutput, CommandResponse,
-                         # FW_PAYLOAD_REF_KEY (one module: solves the circular ref)
+                         # FW_ARTIFACT_REF_KEY, collect_artifact_responses
+                         # (one module: solves the circular ref)
   turn_accumulator.py    # A30 lifecycle: start/append/suspend/resume/finalize;
                          # key mint, ordinal, timing. WEC delegates to it.
   turn_serializer.py     # serializer + envelope + reader + A39 projections
@@ -419,7 +446,7 @@ fastworkflow/
     sanitize.py          # A26 shared sanitizer
     pending.py           # SessionStateStore (retrofitted onto base + sanitizer)
     conversation_turn.py # ConversationTurnStore + indexes
-    payload.py           # PayloadStore
+    artifact_blob.py     # ArtifactBlobStore
   metrics.py             # MetricsSink protocol + default sinks
 ```
 
@@ -450,8 +477,9 @@ fastworkflow/
 
 Migration guide (schema mapping old→new for HTTP/SSE/MCP + constructor migration `[A13]`;
 upgrade runbook + rollback `[X4]`; ops runbook `[X5]`; zero-config 2.21 guarantee);
-status×success matrix; "reading a turn record" cookbook (gallery iteration, ask_user
-inversion, envelopes, projections) `[X10e]`; updated example workflows at v2.21.
+status×success matrix; "reading a turn record" cookbook (iterating
+`command_outputs_with_artifacts`, ask_user inversion, envelopes, projections) `[X10e]`;
+updated example workflows at v2.21.
 
 ---
 

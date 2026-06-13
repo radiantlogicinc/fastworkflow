@@ -5,6 +5,9 @@ Provides workflow tool agent functionality for intelligent tool selection.
 
 import json
 import time
+import traceback
+from datetime import datetime, timezone
+
 import dspy
 
 import fastworkflow
@@ -34,6 +37,49 @@ def _append_action_record(chat_session_obj, record: dict) -> None:
         return
     with open("action.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _append_turn_output(chat_session_obj, command_output) -> None:
+    """Append a CommandOutput to the turn accumulator (WEC or ChatSession delegating to core).
+
+    Duck-typed like _append_action_record; no-ops gracefully if the accumulator
+    methods are not available yet.
+    """
+    if hasattr(chat_session_obj, "append_turn_output"):
+        chat_session_obj.append_turn_output(command_output)
+        return
+    core = getattr(chat_session_obj, "_core", None)
+    if core is not None and hasattr(core, "append_turn_output"):
+        core.append_turn_output(command_output)
+
+
+def _append_ask_user_entry(chat_session_obj, question: str):
+    """Append an unanswered ask_user entry to the turn accumulator (duck-typed).
+
+    Only called on the Topology-A blocking path (_ask_user_tool). Topology-B
+    suspension (AskUserSuspend) does NOT call this — the WEC core appends the
+    unanswered entry itself at suspend time, so this split avoids double-appends.
+    No-ops gracefully if the accumulator methods are not available yet.
+    """
+    if hasattr(chat_session_obj, "append_ask_user_entry"):
+        return chat_session_obj.append_ask_user_entry(question)
+    core = getattr(chat_session_obj, "_core", None)
+    if core is not None and hasattr(core, "append_ask_user_entry"):
+        return core.append_ask_user_entry(question)
+    return None
+
+
+def _complete_ask_user_entry(chat_session_obj, answer: str) -> None:
+    """Record the user's answer on the pending ask_user entry (duck-typed).
+
+    No-ops gracefully if the accumulator methods are not available yet.
+    """
+    if hasattr(chat_session_obj, "complete_ask_user_entry"):
+        chat_session_obj.complete_ask_user_entry(answer)
+        return
+    core = getattr(chat_session_obj, "_core", None)
+    if core is not None and hasattr(core, "complete_ask_user_entry"):
+        core.complete_ask_user_entry(answer)
 
 
 def _what_can_i_do(chat_session_obj: fastworkflow.ChatSession) -> str:
@@ -95,7 +141,50 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     # Directly invoke the command without going through queues
     # This allows the agent to synchronously call workflow tools
     from fastworkflow.command_executor import CommandExecutor
-    command_output = CommandExecutor.invoke_command(chat_session_obj, command)
+    started = datetime.now(timezone.utc)
+    try:
+        command_output = CommandExecutor.invoke_command(chat_session_obj, command)
+    except CommandCancelledError:
+        # Suspension/cancellation signal — pass through untouched.
+        # (AskUserSuspend subclasses BaseException, so `except Exception` below
+        # never catches it either.)
+        raise
+    except Exception as e:
+        # Capture the failed tool call as a CommandOutput(success=False).
+        # This block must never mask the original exception.
+        try:
+            try:
+                error_message = str(e)[:1000]
+            except Exception:
+                error_message = repr(e)[:1000]
+            failure_output = fastworkflow.CommandOutput(
+                command_name="",  # unknown at this point (failure pre-empted routing)
+                command_responses=[
+                    fastworkflow.CommandResponse(
+                        response=f"Execution error: {e!r}"[:500],
+                        success=False,
+                        artifacts={
+                            "error_type": type(e).__name__,
+                            "error_message": error_message,
+                            "traceback": traceback.format_exc()[:4000],
+                        },
+                    )
+                ],
+                started_at=started,
+                duration_ms=int(
+                    (datetime.now(timezone.utc) - started).total_seconds() * 1000
+                ),
+            )
+            _append_turn_output(chat_session_obj, failure_output)
+        except Exception:
+            pass  # capture failed — swallow, never mask the original exception
+        raise
+
+    command_output.started_at = started
+    command_output.duration_ms = int(
+        (datetime.now(timezone.utc) - started).total_seconds() * 1000
+    )
+    _append_turn_output(chat_session_obj, command_output)
 
     # Emit trace event after execution
     # Extract command name and parameters from command_output
@@ -247,6 +336,9 @@ def _post_ask_user_response(
             "user_response": user_response,
         },
     )
+    # Complete the pending unanswered ask_user entry with the user's answer.
+    # Both topologies route resumes through here.
+    _complete_ask_user_entry(chat_session_obj, user_response)
 
     workflow = chat_session_obj.get_active_workflow()
     if workflow:
@@ -278,6 +370,10 @@ def _ask_user_tool(clarification_request: str, chat_session_obj: fastworkflow.Ch
     )
     if output_queue is not None:
         output_queue.put(command_output)
+
+    # Topology A: append the unanswered ask_user entry before blocking.
+    # (Topology B appends it inside the WEC core at AskUserSuspend time.)
+    _append_ask_user_entry(chat_session_obj, clarification_request)
 
     # Topology A (blocking): a persistent worker thread runs the agent and a human
     # is expected to answer, so we block indefinitely. (Topology B has no queue and

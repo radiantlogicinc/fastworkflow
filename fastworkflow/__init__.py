@@ -1,11 +1,12 @@
 import contextlib
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 import os
 import time
 from typing import Any, Optional, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 import mmh3
 
 
@@ -64,15 +65,57 @@ class CommandTraceEvent:
     timestamp_ms: int
 
 class CommandOutput(BaseModel):
+    """The result of one command execution.
+
+    Note on ask_user entries (A7 role inversion): when ``command_name`` is
+    ``"ask_user"``, the usual roles are inverted — ``command_parameters``
+    holds the *agent's question* to the user, and the command response's
+    ``response`` holds the *user's answer*. ``success=False`` on an ask_user
+    entry means the question is still unanswered, not that anything failed.
+    """
+
     command_responses: list[CommandResponse]
     workflow_name: str = ""
     context: str = ""
     command_name: str = ""
     command_parameters: str = ""
+    started_at: Optional[datetime] = None
+    duration_ms: Optional[int] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _map_singular_command_response(cls, data: Any) -> Any:
+        """Forward-compat shim: accept ``command_response`` (singular).
+
+        v3.0-style code constructs ``CommandOutput(command_response=...)``;
+        in v2.21 we map it onto the existing ``command_responses`` list.
+        """
+        if isinstance(data, dict) and "command_response" in data:
+            value = data.pop("command_response")
+            if "command_responses" not in data:
+                data["command_responses"] = [value]
+        return data
 
     @property
     def success(self) -> bool:
         return all(response.success for response in self.command_responses)
+
+    @property
+    def is_ask_user(self) -> bool:
+        """True if this entry is an ask_user clarification exchange. [A7]"""
+        return self.command_name == "ask_user"
+
+    @property
+    def question(self) -> Optional[str]:
+        """The agent's question to the user (ask_user entries only). [A7]"""
+        return self.command_parameters if self.is_ask_user else None
+
+    @property
+    def user_reply(self) -> Optional[str]:
+        """The user's answer to an ask_user question, if any. [A7]"""
+        if self.is_ask_user and self.command_responses:
+            return self.command_responses[0].response
+        return None
 
     @property
     def command_aborted(self) -> bool:
@@ -233,4 +276,21 @@ from .active_workflow import (
 from .workflow_execution_context import (
     WorkflowExecutionContext,
     CommandCancelledError,
+)
+
+# Turn-level result types (fastworkflow.turn). Imported here — after
+# CommandResponse and CommandOutput are defined — so the forward references
+# inside TurnResult can be resolved against this module's types.
+from fastworkflow.turn import (
+    TurnResult,
+    TurnStatus,
+    FW_ARTIFACT_REF_KEY,
+    mint_turn_key,
+)
+
+TurnResult.model_rebuild(
+    _types_namespace={
+        "CommandResponse": CommandResponse,
+        "CommandOutput": CommandOutput,
+    }
 )

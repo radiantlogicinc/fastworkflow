@@ -303,6 +303,18 @@ class ChatSession:
     def clear_action_log(self) -> None:
         self._core.clear_action_log()
 
+    def append_turn_output(self, command_output: fastworkflow.CommandOutput) -> None:
+        """Delegate turn-accumulator capture to the core (duck-typed by workflow_agent)."""
+        self._core.append_turn_output(command_output)
+
+    def append_ask_user_entry(self, question: str) -> fastworkflow.CommandOutput:
+        """Delegate ask_user entry creation to the core (duck-typed by workflow_agent)."""
+        return self._core.append_ask_user_entry(question)
+
+    def complete_ask_user_entry(self, answer: str) -> None:
+        """Delegate ask_user answer fill to the core (duck-typed by workflow_agent)."""
+        self._core.complete_ask_user_entry(answer)
+
     @property
     def conversation_history(self) -> dspy.History:
         """Return the conversation history."""
