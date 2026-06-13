@@ -220,9 +220,28 @@ Shape (artifact-agnostic projection, no recursion):
   turn's `CommandResponse`s whose `artifacts` dict is non-empty, in turn order, returning
   the **original** response objects. No nested TurnResult/object serialization.
 - `_finalize_agent_output` keeps the synthesized agent answer at `command_responses[0]`
-  and **appends** the artifact-bearing responses after it. A client that reads artifacts
-  off each `command_response` (e.g. xray's `command_output_to_response_tuples`) therefore
-  receives every tool-call's structured output in the legacy CommandOutput shape.
+  and **merges** every artifact-bearing response's `artifacts` into that single response's
+  `artifacts` dict (see the v2.21.1 refinement below). A client that reads artifacts off
+  `command_responses[0]` (e.g. xray's `command_output_to_response_tuples`) therefore receives
+  every tool-call's structured output in the legacy CommandOutput shape.
+
+### REFINEMENT (2026-06-13, shipped as v2.21.1) — merge into one response instead of appending
+
+The initial v2.21 cut **appended** the artifact-bearing `CommandResponse`s after the answer at
+`command_responses[0]`, growing the `command_responses` list. v2.21.1 changes this to **merge**
+their `artifacts` into the single answer response's `artifacts` dict, so the agent finalize path
+keeps emitting a one-element `command_responses` list — identical in shape to the v2.20 baseline.
+The goal is to keep the v2.21 wire/return shape as close to v2.20 as possible while still
+surfacing the previously-dropped structured outputs.
+
+- New helper `fastworkflow.turn.merge_artifact_responses_into(target, artifact_responses)` copies
+  each key from every collected response into `target.artifacts`.
+- **Key-collision rule (minimal divergence from baseline):** a key is written **unchanged** when
+  it is not already present on the target; only on collision is the incoming key suffixed with
+  `_<increment>` (`_1`, `_2`, ...) until unused. This preserves the original artifact keys in the
+  common (no-collision) case so existing clients see exactly the keys the tool produced.
+- `_finalize_agent_output` calls `merge_artifact_responses_into(command_response, artifact_responses)`
+  instead of `command_output.command_responses.extend(artifact_responses)`.
 - `TurnResult.answer` is unaffected: `_build_turn_result` still aliases
   `command_responses[0]` (the textual answer), and `TurnResult.command_outputs` / the
   `command_outputs_with_artifacts` property still read from `self._turn_outputs`, so there

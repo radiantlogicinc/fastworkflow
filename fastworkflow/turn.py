@@ -24,6 +24,8 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, computed_field
 
+from fastworkflow import CommandOutput, CommandResponse
+
 # Key marking an artifacts-dict envelope whose value was offloaded to a store
 # and replaced in place by a scoped reference. [A10][A47]
 FW_ARTIFACT_REF_KEY = "__fw_artifact_ref__"
@@ -32,6 +34,27 @@ FW_ARTIFACT_REF_KEY = "__fw_artifact_ref__"
 # containers of the same). Anything else is unserializable for turn records.
 _ALLOWED_SCALAR_TYPES = (str, int, float, bool)
 _ALLOWED_CONTAINER_TYPES = (dict, list, tuple)
+
+
+def merge_artifact_responses_into(
+    target: "CommandResponse",
+    artifact_responses: list["CommandResponse"],
+) -> None:
+    """Merge artifact dicts from turn tool responses into one user-facing response. [Topic 5]
+
+    Each key from every ``artifact_responses`` entry is copied into ``target.artifacts``.
+    When a key already exists on ``target``, the incoming key is suffixed with
+    ``_<increment>`` (1, 2, ...) until unused.
+    """
+    for artifact_response in artifact_responses:
+        for key, value in artifact_response.artifacts.items():
+            target_key = key
+            if target_key in target.artifacts:
+                increment = 1
+                while f"{key}_{increment}" in target.artifacts:
+                    increment += 1
+                target_key = f"{key}_{increment}"
+            target.artifacts[target_key] = value
 
 
 def collect_artifact_responses(

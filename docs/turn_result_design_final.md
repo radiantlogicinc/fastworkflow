@@ -395,15 +395,24 @@ generators emit new-style `command_response=`; `process_message` gains a
 `DeprecationWarning` pointing at `process_turn` `[X10a]`. **Artifact projection (Topic 5 —
 delivers the headline fix):** the agent finalize step (`_finalize_agent_output`) otherwise
 synthesizes an answer-only `CommandOutput` and drops every tool call's artifacts; it now
-appends the turn's artifact-bearing responses (`turn.collect_artifact_responses`, selected by
-the key-agnostic "has artifacts" predicate) onto the returned `CommandOutput.command_responses`
-(answer stays at index 0). Because both transports (CLI `ChatSession` and FastAPI) call through
+surfaces the turn's artifact-bearing responses (`turn.collect_artifact_responses`, selected by
+the key-agnostic "has artifacts" predicate) on the returned `CommandOutput` (see the v2.21.1
+shape below). Because both transports (CLI `ChatSession` and FastAPI) call through
 `process_message`/`_execute_message`, this surfaces artifacts everywhere in v2.21 without
 switching the transport to `process_turn` (the transport-edge projection from
 `TurnResult.command_outputs_with_artifacts` is the deferred v3.0 shape). The deterministic/
 assistant path already surfaces its own command's artifacts, so it is unchanged. Standalone
 bugfix PRs off the train: conversation-switch lock acquisition `[A2.3]` and the ask_user
 trace-sentinel pairing (`fix-5fv`).
+
+**v2.21.1 (patch — Topic 5 shape refinement, baseline-minimizing):** instead of **appending**
+the artifact-bearing responses onto `CommandOutput.command_responses` (growing the list),
+`_finalize_agent_output` now **merges** their `artifacts` into the single answer response's
+`artifacts` dict via `turn.merge_artifact_responses_into`, so the agent finalize path keeps
+returning a one-element `command_responses` list identical in shape to the v2.20 baseline. A key
+is written unchanged when absent on the target; only on collision is the incoming key suffixed
+with `_<increment>` (`_1`, `_2`, ...). This keeps the v2.21 return shape as close to v2.20 as
+possible while still surfacing the previously-dropped structured outputs.
 
 **v2.21.x (patch, rollback enabler):** pending blobs with *future* schema versions expire
 gracefully, symmetric to A14 `[X4]`.
@@ -436,7 +445,8 @@ clients roll back in lockstep `[X4]`.
 ```
 fastworkflow/
   turn.py                # TurnResult, TurnStatus, CommandOutput, CommandResponse,
-                         # FW_ARTIFACT_REF_KEY, collect_artifact_responses
+                         # FW_ARTIFACT_REF_KEY, collect_artifact_responses,
+                         # merge_artifact_responses_into
                          # (one module: solves the circular ref)
   turn_accumulator.py    # A30 lifecycle: start/append/suspend/resume/finalize;
                          # key mint, ordinal, timing. WEC delegates to it.

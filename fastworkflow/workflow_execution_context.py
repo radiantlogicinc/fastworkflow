@@ -743,21 +743,24 @@ class WorkflowExecutionContext:
             }
         )
 
+        # Topic 5: the synthesized agent answer carries only its own artifacts (e.g.
+        # conversation_summary), so structured outputs from tool calls during the turn
+        # would be dropped on the user-facing path. Merge every artifact-bearing turn
+        # response into this single CommandResponse.artifacts dict; on key collision,
+        # suffix the incoming key with "_<increment>" (1, 2, ...). The framework does
+        # not interpret artifact keys — clients read whatever they need.
+        if artifact_responses := fastworkflow.turn.collect_artifact_responses(
+            self._turn_outputs
+        ):
+            fastworkflow.turn.merge_artifact_responses_into(
+                command_response, artifact_responses
+            )
+
         command_output = fastworkflow.CommandOutput(
             command_responses=[command_response]
         )
         if self._app_workflow:
             command_output.workflow_name = self._app_workflow.folderpath.split("/")[-1]
-
-        # Topic 5: the synthesized agent answer carries only its own artifacts, so
-        # the structured outputs produced by each tool call during the turn would
-        # be dropped on the user-facing path. Preserve them by appending the turn's
-        # artifact-bearing responses (answer text stays at index 0). The framework
-        # does not interpret the artifacts — the client reads whatever keys it wants.
-        if artifact_responses := fastworkflow.turn.collect_artifact_responses(
-            self._turn_outputs
-        ):
-            command_output.command_responses.extend(artifact_responses)
 
         self._maybe_enqueue_output(command_output)
         self._maybe_enqueue_trace_sentinel()

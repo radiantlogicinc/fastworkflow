@@ -30,6 +30,7 @@ from fastworkflow import (
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.turn import (
     collect_artifact_responses,
+    merge_artifact_responses_into,
     validate_artifacts_serializable,
     warn_on_unserializable_artifacts,
 )
@@ -463,8 +464,8 @@ class TestCommandOutputsWithArtifacts:
 
 
 # ----------------------------------------------------------------------
-# 11b: Artifact projection (Topic 5 — surface per-command artifacts on the
-#      user-facing CommandOutput from the agent finalize path)
+# 11b: Artifact projection (Topic 5 — merge per-command artifacts into the
+#      single user-facing CommandResponse from the agent finalize path)
 # ----------------------------------------------------------------------
 
 
@@ -490,6 +491,26 @@ class TestArtifactProjection:
         # original objects returned (no copy), artifact-bearing only, in order
         assert projected == [artifact_out.command_responses[0]]
         assert projected[0] is artifact_out.command_responses[0]
+
+    def test_merge_artifact_responses_into_merges_and_suffixes_collisions(self):
+        target = CommandResponse(
+            response="answer",
+            artifacts={"conversation_summary": "summary", "shared": "existing"},
+        )
+        merge_artifact_responses_into(
+            target,
+            [
+                CommandResponse(
+                    response="tool",
+                    artifacts={"client_blob": "data", "shared": "incoming"},
+                )
+            ],
+        )
+
+        assert target.artifacts["conversation_summary"] == "summary"
+        assert target.artifacts["client_blob"] == "data"
+        assert target.artifacts["shared"] == "existing"
+        assert target.artifacts["shared_1"] == "incoming"
 
     def test_agent_finalize_surfaces_command_artifacts(
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch
@@ -525,17 +546,12 @@ class TestArtifactProjection:
         with pytest.warns(DeprecationWarning, match="process_turn"):
             output = ctx.process_message("export my todos")
 
-        # textual agent answer stays first and carries no command artifacts
-        assert "Exported your data" in output.command_responses[0].response
-        assert "client_blob" not in output.command_responses[0].artifacts
-
-        # the per-command artifacts are surfaced verbatim onto the CommandOutput
-        artifact_responses = [
-            r for r in output.command_responses if r.artifacts.get("client_blob")
-        ]
-        assert len(artifact_responses) == 1
-        assert artifact_responses[0].artifacts["client_blob"] == "a,b\n1,2"
-        assert artifact_responses[0].artifacts["client_kind"] == "text/csv"
+        # single user-facing response: agent text plus merged tool artifacts
+        assert len(output.command_responses) == 1
+        answer = output.command_responses[0]
+        assert "Exported your data" in answer.response
+        assert answer.artifacts["client_blob"] == "a,b\n1,2"
+        assert answer.artifacts["client_kind"] == "text/csv"
 
     def test_process_turn_answer_unaffected_by_projection(
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch
@@ -566,11 +582,12 @@ class TestArtifactProjection:
 
         result = ctx.process_turn("export my todos")
 
-        # answer is the synthesized textual answer; it carries its own summary
-        # artifact but never the tool command's artifacts
+        # answer keeps the synthesized textual response; v2.21.1 merges the tool
+        # command's artifacts into this single response's artifacts dict
         assert "Done" in result.answer.response
-        assert "client_blob" not in result.answer.artifacts
-        # derived from per-command outputs (no double-count)
+        assert result.answer.artifacts["client_blob"] == "x,y\n3,4"
+        # command_outputs_with_artifacts is derived from the per-command outputs
+        # (self._turn_outputs), so the merge does not double-count
         assert len(result.command_outputs_with_artifacts) == 1
         assert result.command_outputs_with_artifacts[0].command_name == "export_csv"
 
