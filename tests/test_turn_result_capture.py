@@ -23,6 +23,7 @@ from fastworkflow import (
     FW_ARTIFACT_REF_KEY,
     CommandOutput,
     CommandResponse,
+    TurnOutput,
     TurnResult,
     TurnStatus,
     mint_turn_key,
@@ -228,22 +229,20 @@ class TestDeterministicTurn:
 
         result = ctx.process_turn("list my todo lists")
 
-        assert isinstance(result, TurnResult)
+        assert isinstance(result, TurnOutput)
         assert result.status == TurnStatus.COMPLETED
         assert result.success is True
-        assert result.user_message == "list my todo lists"
         assert TURN_KEY_RE.match(result.turn_key), result.turn_key
         assert result.command_outputs
 
         captured = result.command_outputs[-1]
-        # answer aliases the last captured output's first response (same object)
-        assert result.answer is captured.command_responses[0]
-        # timing stamped on the captured output by the deterministic path
+        # answer is plain text: the last captured output's first response text
+        assert isinstance(result.answer, str)
+        assert result.answer == captured.command_responses[0].response
+        # per-command timing is retained on command_outputs (nested provenance)
         assert captured.started_at is not None
         assert captured.duration_ms is not None
         assert captured.duration_ms >= 0
-        assert result.started_at is not None
-        assert result.completed_at is not None
 
     def test_process_message_still_returns_command_output_and_warns(
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch
@@ -255,8 +254,36 @@ class TestDeterministicTurn:
 
         assert isinstance(output, fastworkflow.CommandOutput)
         assert not isinstance(output, TurnResult)
+        assert not isinstance(output, TurnOutput)
         assert output.success
         assert "list my todo lists" in output.command_responses[0].response
+
+    def test_failed_deterministic_command_marks_turn_failed(
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
+    ):
+        ctx, _wf = _make_assistant_ctx(todo_workflow_path, monkeypatch)
+
+        def failing_invoke(cls, session, command: str):
+            return fastworkflow.CommandOutput(
+                command_name=command.split()[0] if command else "",
+                command_responses=[
+                    fastworkflow.CommandResponse(
+                        response="could not do that", success=False
+                    )
+                ],
+            )
+
+        _patch_invoke_with(monkeypatch, failing_invoke)
+
+        result = ctx.process_turn("delete a missing list")
+
+        # the turn ran to completion; success is derived from the command's
+        # success code (no turn-level failure_reason for a command failure)
+        assert result.status == TurnStatus.COMPLETED
+        assert result.failure_reason is None
+        assert result.success is False
+        # the per-command failure is visible on command_outputs
+        assert result.command_outputs[-1].success is False
 
     def test_new_turn_resets_accumulator_a30(
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch
@@ -271,7 +298,6 @@ class TestDeterministicTurn:
         assert len(first.command_outputs) == 1
         assert len(second.command_outputs) == 1
         assert second.command_outputs[0] is not first.command_outputs[0]
-        assert second.user_message == "second message"
 
 
 # ----------------------------------------------------------------------
@@ -293,13 +319,57 @@ class TestAgentTurn:
 
         result = ctx.process_turn("list my tasks")
 
-        assert isinstance(result, TurnResult)
+        assert isinstance(result, TurnOutput)
         assert result.status == TurnStatus.COMPLETED
         assert result.success is True
         assert result.failure_reason is None
-        assert "Agent finished successfully" in result.answer.response
+        assert "Agent finished successfully" in result.answer
         assert TURN_KEY_RE.match(result.turn_key)
         mock_agent.assert_called_once()
+
+    def test_agent_turn_success_false_when_a_command_failed(
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
+    ):
+        # The agent always phrases its final answer as success; the turn must
+        # still report success=False because an underlying command failed.
+        ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch)
+
+        from fastworkflow.workflow_agent import _execute_workflow_query
+
+        def fake_invoke(cls, session, command: str):
+            return fastworkflow.CommandOutput(
+                command_name=command,
+                command_responses=[
+                    fastworkflow.CommandResponse(
+                        response=f"ran {command}",
+                        success=command != "mark_completed",  # this one fails
+                    )
+                ],
+            )
+
+        _patch_invoke_with(monkeypatch, fake_invoke)
+
+        def fake_forward(**kwargs):
+            _execute_workflow_query("get_todo_list", ctx)  # succeeds
+            _execute_workflow_query("mark_completed", ctx)  # fails
+            return SimpleNamespace(final_answer="All set! I marked it complete.")
+
+        mock_agent = MagicMock(side_effect=fake_forward)
+        _set_agents(ctx, mock_agent)
+
+        result = ctx.process_turn("mark my task done")
+
+        assert result.status == TurnStatus.COMPLETED
+        assert result.failure_reason is None  # not a turn-level failure reason
+        # ...but the agent masked a command failure in its prose; success catches it
+        assert "All set" in result.answer
+        assert result.success is False
+        assert [o.command_name for o in result.command_outputs] == [
+            "get_todo_list",
+            "mark_completed",
+        ]
+        assert result.command_outputs[0].success is True
+        assert result.command_outputs[1].success is False
 
     def test_agent_turn_exhausted_marks_failure(
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch
@@ -314,13 +384,17 @@ class TestAgentTurn:
 
         result = ctx.process_turn("do an impossible thing")
 
-        assert result.status == TurnStatus.COMPLETED
-        assert result.answer.success is False
+        # the turn failed to complete: status carries the failure, failure_reason
+        # elaborates it (orthogonal to success)
+        assert result.status == TurnStatus.FAILED
+        assert isinstance(result.answer, str)
         assert result.failure_reason == "max_iters_exhausted"
-        assert result.success is False
+        # success is purely command-based: this mock ran no commands, so no
+        # command failed -> success is True even though the turn FAILED to complete
+        assert result.success is True
         dumped = result.model_dump()
         assert "success" in dumped  # computed field is serialized
-        assert dumped["success"] is False
+        assert dumped["success"] is True
 
 
 # ----------------------------------------------------------------------
@@ -362,9 +436,10 @@ class TestSuspendResumeTurnCapture:
         first = ctx.process_turn("list my tasks")
 
         assert first.status == TurnStatus.AWAITING_USER
+        assert first.success is False  # awaiting_user is not a success
         assert ctx.awaiting_user
-        assert first.completed_at is None
-        assert first.answer.artifacts.get("awaiting_user") is True
+        # the awaiting-user signal is the status; answer is the clarification text
+        assert isinstance(first.answer, str)
         assert len(first.command_outputs) == 2
         ask_entry = first.command_outputs[1]
         assert ask_entry.is_ask_user
@@ -378,7 +453,7 @@ class TestSuspendResumeTurnCapture:
         assert second.turn_key == first.turn_key
         assert second.status == TurnStatus.COMPLETED
         assert not ctx.awaiting_user
-        assert "All done" in second.answer.response
+        assert "All done" in second.answer
 
         # ordering preserved: pre-suspension tool call, ask_user, post-suspension
         assert [o.command_name for o in second.command_outputs] == [
@@ -391,9 +466,10 @@ class TestSuspendResumeTurnCapture:
         assert filled.is_ask_user
         assert filled.user_reply == "the urgent one"
         assert filled.success is True
+        # per-command timing (incl. ask_user think-time) is retained on the
+        # command output, visible via command_outputs.
         assert filled.duration_ms is not None
         assert filled.duration_ms >= 0
-        assert second.suspended_ms >= 0
         mock_agent.assert_called_once()
         mock_agent.resume.assert_called_once()
 
@@ -452,15 +528,14 @@ class TestCommandOutputsWithArtifacts:
             command_responses=[CommandResponse(response="3 lists")],
         )
 
-        result = TurnResult(
+        turn_output = TurnOutput(
             turn_key=mint_turn_key(),
             status=TurnStatus.COMPLETED,
-            user_message="export",
-            answer=chart_output.command_responses[0],
+            answer="exported your data",
             command_outputs=[text_output, chart_output],
         )
 
-        assert result.command_outputs_with_artifacts == [chart_output]
+        assert turn_output.command_outputs_with_artifacts == [chart_output]
 
 
 # ----------------------------------------------------------------------
@@ -582,14 +657,15 @@ class TestArtifactProjection:
 
         result = ctx.process_turn("export my todos")
 
-        # answer keeps the synthesized textual response; v2.21.1 merges the tool
-        # command's artifacts into this single response's artifacts dict
-        assert "Done" in result.answer.response
-        assert result.answer.artifacts["client_blob"] == "x,y\n3,4"
+        # answer is the synthesized agent text; structured artifacts are NOT on the
+        # answer (it is plain text) — they live on the per-command outputs.
+        assert isinstance(result.answer, str)
+        assert "Done" in result.answer
         # command_outputs_with_artifacts is derived from the per-command outputs
-        # (self._turn_outputs), so the merge does not double-count
         assert len(result.command_outputs_with_artifacts) == 1
-        assert result.command_outputs_with_artifacts[0].command_name == "export_csv"
+        artifact_output = result.command_outputs_with_artifacts[0]
+        assert artifact_output.command_name == "export_csv"
+        assert artifact_output.command_responses[0].artifacts["client_blob"] == "x,y\n3,4"
 
 
 # ----------------------------------------------------------------------
@@ -657,3 +733,119 @@ class TestArtifactValidation:
             ],
         )
         assert validate_artifacts_serializable(good) == []
+
+
+# ----------------------------------------------------------------------
+# 14: Internal TurnResult (full capture, retained behind the public projection)
+# ----------------------------------------------------------------------
+
+
+class TestInternalTurnResult:
+    def test_build_turn_result_composes_turn_output_and_internal_fields(
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
+    ):
+        ctx, _wf = _make_assistant_ctx(todo_workflow_path, monkeypatch)
+
+        # Reproduce process_turn()'s internals to inspect the full TurnResult
+        # (which process_turn no longer returns — it returns turn_result.turn_output).
+        command_output = ctx._execute_message("list my todo lists")
+        turn_result = ctx._build_turn_result(command_output)
+
+        assert isinstance(turn_result, TurnResult)
+        # internal-only observability/persistence fields live on TurnResult
+        assert turn_result.user_message == "list my todo lists"
+        assert turn_result.started_at is not None
+        assert turn_result.completed_at is not None
+        assert turn_result.suspended_ms == 0
+        # the public slice is composed as turn_output
+        assert isinstance(turn_result.turn_output, TurnOutput)
+        assert turn_result.turn_output.status == TurnStatus.COMPLETED
+        assert isinstance(turn_result.turn_output.answer, str)
+        # command outputs (with per-command timing) live on the turn_output
+        captured = turn_result.turn_output.command_outputs[-1]
+        assert captured.started_at is not None
+        assert captured.duration_ms is not None
+        assert captured.duration_ms >= 0
+
+
+# ----------------------------------------------------------------------
+# 15: TurnOutput (public) — shape and calculated success
+# ----------------------------------------------------------------------
+
+
+class TestTurnOutput:
+    def _turn_output(self, **overrides) -> TurnOutput:
+        export_output = CommandOutput(
+            command_name="export_csv",
+            command_responses=[
+                CommandResponse(
+                    response="exported", artifacts={"payload": "a,b\n1,2"}
+                )
+            ],
+            started_at=datetime.now(timezone.utc),
+            duration_ms=12,
+        )
+        kwargs = dict(
+            turn_key=mint_turn_key(),
+            status=TurnStatus.COMPLETED,
+            failure_reason=None,
+            answer="exported your data",
+            command_outputs=[export_output],
+        )
+        kwargs.update(overrides)
+        return TurnOutput(**kwargs)
+
+    def test_answer_is_text_and_contract_fields_present(self):
+        out = self._turn_output()
+        assert isinstance(out.answer, str)
+        assert out.success is True
+        assert len(out.command_outputs_with_artifacts) == 1
+        assert out.command_outputs_with_artifacts[0].command_name == "export_csv"
+        # per-command structured results live on the command outputs, not on answer
+        assert out.command_outputs[0].command_responses[0].artifacts["payload"]
+
+    def test_success_is_only_all_command_outputs_succeeded(self):
+        # success is purely all(command_outputs succeeded) — orthogonal to
+        # status and failure_reason.
+        assert self._turn_output(status=TurnStatus.COMPLETED).success is True
+        # orthogonal: a FAILED turn whose commands all succeeded still has
+        # success=True (consumer combines status + failure_reason + success)
+        assert (
+            self._turn_output(
+                status=TurnStatus.FAILED, failure_reason="max_iters_exhausted"
+            ).success
+            is True
+        )
+        # a command failure → success False regardless of status
+        failed_command = CommandOutput(
+            command_name="mark_completed",
+            command_responses=[CommandResponse(response="nope", success=False)],
+        )
+        assert (
+            self._turn_output(
+                status=TurnStatus.COMPLETED, command_outputs=[failed_command]
+            ).success
+            is False
+        )
+        # empty command outputs → vacuously True (nothing failed)
+        assert (
+            self._turn_output(
+                status=TurnStatus.COMPLETED, command_outputs=[]
+            ).success
+            is True
+        )
+
+    def test_public_shape_has_only_consumer_fields(self):
+        dumped = self._turn_output().model_dump()
+        assert set(dumped) == {
+            "turn_key",
+            "status",
+            "failure_reason",
+            "answer",
+            "command_outputs",
+            "success",  # computed field
+        }
+        # internal-only fields live on TurnResult, never on the public TurnOutput
+        assert "user_message" not in dumped
+        assert "started_at" not in dumped
+        assert "suspended_ms" not in dumped

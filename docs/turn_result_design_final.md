@@ -23,6 +23,112 @@ from RAM.
 
 ---
 
+## 1a. Public return type — `TurnOutput` (amendment, 2026-06-13, target v2.21.2)
+
+`TurnResult` is **framework-internal** — the full capture used for persistence,
+observability, and agent memory. It is NOT the type handed to embedders/consumers. Exposing
+all of its ~17 fields (conversation_id, ordinal, refined_user_message, entry_*,
+trajectory_ref, timing, suspended_ms, metadata) puts observability noise on consumers who
+only need the response.
+
+Instead, `process_turn()` returns a **public `TurnOutput`**, carrying only the fields
+externally meaningful to a consumer; the internal `TurnResult` **composes** it:
+
+```python
+class TurnOutput(BaseModel):           # the public result of one turn
+    turn_key: str                      # developer handle: look up the full turn record in
+                                       # the observability UI (sole external purpose)
+    status: TurnStatus                 # completed / awaiting_user / failed / ...
+    failure_reason: Optional[str] = None
+    answer: str = ""                   # the agent's final-answer TEXT (no success/artifacts)
+    command_outputs: list[CommandOutput] = []  # per-command provenance: each carries its
+                                               # own success / artifacts / timing
+
+    @computed_field
+    @property
+    def success(self) -> bool:         # calculated, not stored
+        return self.status == TurnStatus.COMPLETED and self.failure_reason is None
+
+    @property
+    def command_outputs_with_artifacts(self) -> list[CommandOutput]:  # in turn order
+        ...
+
+class TurnResult(BaseModel):           # framework-internal system-of-record
+    turn_output: TurnOutput            # the public slice (composition)
+    conversation_id: Optional[int] = None
+    ordinal: Optional[int] = None
+    user_message: str
+    refined_user_message: Optional[str] = None
+    entry_workflow_name: str = ""
+    entry_context: str = ""
+    continuation_of: Optional[str] = None
+    trajectory_ref: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    suspended_ms: int = 0
+    metadata: dict[str, Any] = {}
+```
+
+Rationale and decisions:
+- **`answer` is plain `str`, not a `CommandResponse`.** The agent's contribution to a turn is
+  only the final-answer *text*; it never reports success, artifacts, next actions, or
+  recommendations itself. Those structured, per-command results live on each entry of
+  `command_outputs` (`CommandOutput.command_responses[*]`).
+- **`status`, `failure_reason`, and `success` are three orthogonal signals** the consumer
+  combines:
+  - `status` — lifecycle outcome (`completed` / `awaiting_user` / `failed` / `cancelled` /
+    `abandoned`).
+  - `failure_reason` — elaboration of a *failure status* (e.g. `max_iters_exhausted` on a
+    `FAILED` turn). NOT derived from command success codes.
+  - `success` — **purely** `all(co.success for co in command_outputs)`. The agent always
+    phrases its final answer as if it succeeded (v2.20 hard-coded the synthesized agent answer
+    to `success=True`, masking every tool failure — the bug this fixes), so `success` is the
+    framework's signal that *some command returned a failure code*, independent of status. The
+    offending command is visible in `command_outputs`.
+
+  ```python
+  success = all(co.success for co in command_outputs)   # computed; no status/failure_reason gating
+  ```
+
+  Consequences: an exhausted agent turn is `status=FAILED, failure_reason="max_iters_exhausted"`
+  with `success` reflecting only whether its commands failed (so a clean-but-cut-off turn is
+  `FAILED` + `success=True`). During `AWAITING_USER`, the pending unanswered ask_user entry
+  (`success=False`) makes `success=False` until the turn resumes; the consumer reads `status`
+  to see it is pending, not failed.
+- **`TurnResult` composes `turn_output`** (rather than duplicating turn_key/status/answer/
+  command_outputs) — simplifies `TurnResult` to the public slice + internal-only fields.
+- **Why not just a fuller `CommandOutput`:** keeping `command_outputs: list[CommandOutput]`
+  preserves *provenance* (which command produced which payload). Flattening N command
+  responses into one `CommandOutput.command_responses` list loses that grouping, and forces
+  turn-level signals (`status`, `failure_reason`) to be smuggled through `artifacts` — the
+  same anti-pattern that caused the original payload-loss bug.
+- **`turn_key` is exposed solely as a developer reference token** to open the complete turn
+  record in the observability UI once integrated — not for end users.
+- **`command_outputs_with_artifacts`** is the artifact-bearing subset (the consumer decides
+  what to render richly; the framework never interprets artifact keys).
+- **Per-command `started_at`/`duration_ms` are RETAINED on `command_outputs`** (nested
+  provenance; useful to consumers). This reverses an earlier "null the per-command timing"
+  decision — under composition `command_outputs` are shared with the internal record, so
+  nulling would force duplicate copies and contradict the simplification goal.
+- **`process_turn()` returns `turn_result.turn_output`.** Implemented in v2.21.2.
+- **Legacy `process_message()` bridge (v2.21.1):** `_finalize_agent_output` merges every
+  artifact-bearing turn response into the single final `CommandResponse.artifacts`
+  (key-collision suffixing `_<n>`), so existing `process_message` consumers recover payloads
+  with **no signature change**. `process_message` stays as a non-breaking bridge.
+- **Backward compatibility is not a requirement** for these shapes; they may change freely
+  before v3.0.
+
+Three shapes, three jobs: `TurnResult` (internal, full; composes `turn_output`) →
+`TurnOutput` (public, via `process_turn`) → `CommandOutput` (legacy bridge, via
+`process_message`).
+
+> Note: sections 2, 8, 10, and 14 below describe the earlier plan where `process_turn`
+> returns `TurnResult` directly with an `answer: CommandResponse`; this amendment supersedes
+> them on the public return type, the `str` answer, the calculated `success`, and the
+> `TurnResult`-composes-`TurnOutput` structure.
+
+---
+
 ## 2. Final types
 
 ```python
@@ -283,9 +389,10 @@ alarmed `[A22][X9a]`.
   is xray-repo scope) `[A9]`.
 - Bundled-server bodies inline artifact blobs up to `FW_MAX_INLINE_ARTIFACT_BYTES` (default
   10 MB); beyond it, the envelope rides instead `[A16]`.
-- **Queue contract (v3.0):** `command_output_queue` carries status-stamped `TurnResult`s
-  only; every mid-turn awaiting enqueue is paired with a trace sentinel (fixes `fix-5fv`);
-  the trace queue and dim CLI ticker are unchanged `[A19][A34]`.
+- **Queue contract (v3.0):** `command_output_queue` carries status-stamped `TurnOutput`s
+  only — the slim public projection consumed by the CLI `keep_alive` loop, NOT the internal
+  `TurnResult` (per §1a); every mid-turn awaiting enqueue is paired with a trace sentinel
+  (fixes `fix-5fv`); the trace queue and dim CLI ticker are unchanged `[A19][A34]`.
 
 ---
 
@@ -419,7 +526,8 @@ gracefully, symmetric to A14 `[X4]`.
 
 **v3.0 (major — big-bang cutover, mixed fleets forbidden):** `command_responses` collapse
 with the constructor shim introduced here (removed v4.0); wire hard-break (endpoints +
-SSE return `TurnResult.model_dump()`; MCP `isError = not success`); `ConversationTurnStore`
+SSE return `TurnOutput.model_dump()` — the slim public projection, NOT the internal
+`TurnResult`, per §1a; MCP `isError = not success`); `ConversationTurnStore`
 consolidation (lift `generate_topic_and_summary`, `_ensure_unique_topic`,
 `restore_history_from_turns` verbatim; Rdict data loss announced via a one-time synthesized
 per-channel notice on first touch `[X12]`; Rdict files left in place with a tombstone marker

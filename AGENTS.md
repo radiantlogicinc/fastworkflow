@@ -1,5 +1,7 @@
 # Agent Instructions
 
+Activate the local .venv python environment before running tests or scripts
+
 <!-- BEGIN BEADS INTEGRATION -->
 ## Issue Tracking with bd (beads)
 

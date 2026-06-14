@@ -795,7 +795,7 @@ async def invoke_agent(
 
             traces = collect_trace_events(runtime, user_id=user_id)
             # Build response with traces
-            response_data = command_output.model_dump()
+            response_data = command_output.model_dump(mode="json")
             if traces:
                 response_data["traces"] = traces
 
@@ -901,7 +901,7 @@ async def invoke_agent_stream(
                 save_conversation_incremental(
                     runtime, extract_turns_from_history, logger
                 )
-                await emit_output(command_output.model_dump())
+                await emit_output(command_output.model_dump(mode="json"))
 
         except Exception as e:
             logger.error(f"Error in invoke_agent_stream for user {channel_id}: {e}")
@@ -1038,7 +1038,7 @@ async def invoke_assistant(
             save_conversation_incremental(runtime, extract_turns_from_history, logger)
 
             traces = collect_trace_events(runtime, user_id=user_id)
-            response_data = command_output.model_dump()
+            response_data = command_output.model_dump(mode="json")
             if traces:
                 response_data["traces"] = traces
 
@@ -1112,7 +1112,7 @@ async def perform_action(
             )
 
             traces = collect_trace_events(runtime, user_id=user_id)
-            response_data = command_output.model_dump()
+            response_data = command_output.model_dump(mode="json")
             if traces:
                 response_data["traces"] = traces
 

@@ -165,40 +165,55 @@ def warn_on_unserializable_artifacts(command_output: "CommandOutput") -> None:
         )
 
 
-class TurnResult(BaseModel):
-    """The complete capture of one logical turn. [A22]
+class TurnOutput(BaseModel):
+    """The public result of one logical turn, returned by ``process_turn()``.
 
-    ``answer`` is the user-facing response; ``command_outputs`` is the
-    chronological list of every command execution in the turn (including
-    ask_user clarification exchanges). One logical turn = one key = one
-    record, across any number of suspensions.
+    The agent's contribution to a turn is only the final-answer **text**
+    (``answer``); it never reports success, artifacts, next actions, or
+    recommendations itself. Those structured, per-command results live on each
+    entry of ``command_outputs`` (each ``CommandOutput.command_responses[*]``).
+
+    ``TurnOutput`` is the consumer-facing slice of the internal ``TurnResult``
+    (which additionally carries observability/persistence fields). See
+    ``docs/turn_result_design_final.md`` section 1a.
+
+    - ``turn_key`` is exposed as a developer handle to look up the full turn
+      record in the observability UI once integrated.
+    - ``command_outputs`` preserves per-command provenance, including each
+      command's own ``success``/``artifacts``/timing.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     turn_key: str
-    conversation_id: Optional[int] = None
-    ordinal: Optional[int] = None
     status: TurnStatus
     failure_reason: Optional[str] = None
-    user_message: str
-    refined_user_message: Optional[str] = None
-    entry_workflow_name: str = ""
-    entry_context: str = ""
-    answer: "CommandResponse"
+    answer: str = ""
     command_outputs: list["CommandOutput"] = []
-    continuation_of: Optional[str] = None
-    trajectory_ref: Optional[str] = None
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    suspended_ms: int = 0
-    metadata: dict[str, Any] = {}
 
     @computed_field
     @property
     def success(self) -> bool:
-        """The single wire predicate for the turn: ``answer.success``. [A6][A42]"""
-        return self.answer.success
+        """Whether every command in the turn reported success. [A6][A42]
+
+        ``success`` is purely ``all(command_outputs succeeded)`` — **orthogonal**
+        to ``status`` and ``failure_reason``. The agent always phrases its final
+        answer as if it succeeded (v2.20 hard-coded the synthesized answer to
+        ``success=True``), so this is the framework's signal that some command
+        returned a failure code, even when the agent masked it in prose or
+        recovered from it. The offending command is visible in ``command_outputs``.
+
+        The three turn-level signals are independent; a consumer combines them:
+          - ``status``         — lifecycle outcome (completed/awaiting_user/failed/…)
+          - ``failure_reason`` — elaboration of a *failure* status (e.g. max_iters)
+          - ``success``        — did every command succeed
+
+        (During ``AWAITING_USER`` the pending, unanswered ask_user entry counts
+        as not-yet-successful, so ``success`` is ``False`` until the turn resumes.)
+        """
+        return all(
+            command_output.success for command_output in self.command_outputs
+        )
 
     @property
     def command_outputs_with_artifacts(self) -> list:
@@ -220,3 +235,30 @@ class TurnResult(BaseModel):
                 for response in command_output.command_responses
             )
         ]
+
+
+class TurnResult(BaseModel):
+    """The complete internal capture of one logical turn. [A22]
+
+    Composes the consumer-facing ``turn_output`` plus internal-only
+    observability/persistence fields. ``process_turn()`` returns the
+    ``turn_output``; the surrounding ``TurnResult`` is the framework's
+    system-of-record for the turn (one logical turn = one key = one record,
+    across any number of suspensions).
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    turn_output: "TurnOutput"
+    conversation_id: Optional[int] = None
+    ordinal: Optional[int] = None
+    user_message: str
+    refined_user_message: Optional[str] = None
+    entry_workflow_name: str = ""
+    entry_context: str = ""
+    continuation_of: Optional[str] = None
+    trajectory_ref: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    suspended_ms: int = 0
+    metadata: dict[str, Any] = {}

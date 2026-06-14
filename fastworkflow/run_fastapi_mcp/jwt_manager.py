@@ -196,9 +196,11 @@ def create_access_token(channel_id: str, user_id: Optional[str] = None, expires_
         token = jwt.encode(payload, private_key, algorithm=JWT_ALGORITHM)
         logger.debug(f"Created signed access token for channel_id: {channel_id}, user_id: {user_id}, expires: {expire.isoformat()}")
     else:
-        # Trusted network mode: create unsigned token using HS256 with empty key
-        # This creates a JWT that can be decoded without verification
-        token = jwt.encode(payload, "", algorithm="HS256")
+        # Trusted network mode: create an unsigned token using the JWT "none"
+        # algorithm. This creates a JWT that can be decoded without verification.
+        # (HS256 with an empty key is rejected by PyJWT >= 2.x: "HMAC key must
+        # not be empty.")
+        token = jwt.encode(payload, None, algorithm="none")
         logger.debug(f"Created unsigned access token for channel_id: {channel_id}, user_id: {user_id}, expires: {expire.isoformat()}")
     
     return token
@@ -243,9 +245,11 @@ def create_refresh_token(channel_id: str, user_id: Optional[str] = None) -> str:
         token = jwt.encode(payload, private_key, algorithm=JWT_ALGORITHM)
         logger.debug(f"Created signed refresh token for channel_id: {channel_id}, user_id: {user_id}, expires: {expire.isoformat()}")
     else:
-        # Trusted network mode: create unsigned token using HS256 with empty key
-        # This creates a JWT that can be decoded without verification
-        token = jwt.encode(payload, "", algorithm="HS256")
+        # Trusted network mode: create an unsigned token using the JWT "none"
+        # algorithm. This creates a JWT that can be decoded without verification.
+        # (HS256 with an empty key is rejected by PyJWT >= 2.x: "HMAC key must
+        # not be empty.")
+        token = jwt.encode(payload, None, algorithm="none")
         logger.debug(f"Created unsigned refresh token for channel_id: {channel_id}, user_id: {user_id}, expires: {expire.isoformat()}")
     
     return token

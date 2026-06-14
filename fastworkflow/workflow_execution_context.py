@@ -482,15 +482,18 @@ class WorkflowExecutionContext:
         )
         return self._execute_message(message)
 
-    def process_turn(self, message: str) -> TurnResult:
+    def process_turn(self, message: str) -> "fastworkflow.TurnOutput":
         """
-        Execute one user message synchronously and return the full TurnResult.
+        Execute one user message synchronously and return the public TurnOutput.
 
         Same dispatch as process_message(); additionally captures every command
-        execution of the logical turn (including ask_user exchanges) [A22].
+        execution of the logical turn (including ask_user exchanges) [A22]. The
+        full internal TurnResult is built and projected onto the slim public
+        TurnOutput (see docs/turn_result_design_final.md section 1a).
         """
         command_output = self._execute_message(message)
-        return self._build_turn_result(command_output)
+        turn_result = self._build_turn_result(command_output)
+        return turn_result.turn_output
 
     def _execute_message(self, message: str) -> fastworkflow.CommandOutput:
         """Shared message dispatch for process_message()/process_turn()."""
@@ -522,11 +525,16 @@ class WorkflowExecutionContext:
     def _build_turn_result(
         self, command_output: fastworkflow.CommandOutput
     ) -> TurnResult:
-        """Assemble the TurnResult for the just-dispatched message."""
+        """Assemble the TurnResult (and its public turn_output) for the message.
+
+        The turn's ``answer`` is plain text — the agent's final answer (or the
+        deterministic command's response text). Per-command structured results
+        (success/artifacts) live on ``command_outputs``.
+        """
         if command_output.command_responses:
-            answer = command_output.command_responses[0]
+            answer = command_output.command_responses[0].response
         else:  # defensive; CommandOutput always carries at least one response
-            answer = fastworkflow.CommandResponse(response="", success=False)
+            answer = ""
 
         failure_reason: Optional[str] = None
         if self._awaiting_user:
@@ -537,23 +545,32 @@ class WorkflowExecutionContext:
             completed_at = datetime.now(timezone.utc)
             if self._turn_agent_result is not None:
                 if getattr(self._turn_agent_result, "exhausted", False):
-                    answer.success = False
+                    # The turn failed to complete (agent ran out of iterations).
+                    # status carries the failure; failure_reason elaborates it.
+                    # Orthogonal to TurnOutput.success (command success codes).
+                    status = TurnStatus.FAILED
                     failure_reason = "max_iters_exhausted"
             elif self._turn_outputs:
-                # Deterministic/assistant path: answer aliases the last
-                # captured output's first response (same object) [A33].
-                answer = self._turn_outputs[-1].command_responses[0]
+                # Deterministic/assistant path: answer text is the last captured
+                # output's first response text [A33]. A command-level failure is
+                # surfaced by TurnOutput.success (all command_outputs succeeded),
+                # not by status/failure_reason.
+                answer = self._turn_outputs[-1].command_responses[0].response
 
-        return TurnResult(
+        turn_output = fastworkflow.TurnOutput(
             turn_key=self._turn_key or mint_turn_key(),
             status=status,
             failure_reason=failure_reason,
+            answer=answer,
+            command_outputs=list(self._turn_outputs),
+        )
+
+        return TurnResult(
+            turn_output=turn_output,
             user_message=self._turn_user_message,
             refined_user_message=self._turn_refined_message,
             entry_workflow_name=self._turn_entry_workflow_name,
             entry_context=self._turn_entry_context,
-            answer=answer,
-            command_outputs=list(self._turn_outputs),
             started_at=self._turn_started_at,
             completed_at=completed_at,
             suspended_ms=self._turn_suspended_ms,

@@ -125,6 +125,25 @@ constructs the TurnResult in memory and returns it; nothing is keyed by `turn_ke
 the code that exists today, `turn_key`'s justification is entirely forward-looking (v3.0).
 For v2.21 in isolation, "redundant" is essentially unanswerable.
 
+### Refinement from the xray embedder (fastworkflow_runner.run_turn)
+- xray enforces **per-session single-writer at the application layer**: `run_turn` runs
+  under `with runtime.lock:` and eviction uses `runtime.lock.acquire(blocking=False)`.
+- BUT `runtime.lock` and the `_runtimes` map are **in-memory per pod**. So:
+  - **Single xray pod:** single-writer is effectively guaranteed → in-process ordinal
+    counter would be safe → `turn_key` UUID is redundant.
+  - **Multiple xray pods:** two pods can each hold a live runtime for the same session
+    (each with its own lock) → concurrent writers possible → UUID is the backstop.
+- `run_turn` is also the **original bug site** (line ~204): `ctx.process_message(nl_query)`
+  → `command_output_to_response_tuples(command_output)` yields payload-less tuples in agent
+  mode. The intended fix: `ctx.process_turn(...)` → project `TurnResult.command_outputs/
+  gallery` into ResponseTuples.
+
+### Audience clarification (TurnResult is NOT framework-internal)
+Three layers: Framework produces `TurnResult` → Embedder (xray runner) CONSUMES it and
+projects to its API shape → End user gets `List[ResponseTuple]` (a projection, never the
+full record). The `process_message` deprecation deliberately pushes embedders to
+`process_turn`/`TurnResult`.
+
 ### The decision reduces to a fork
 1. **Enforce single-writer** (Redis `SET NX EX` lease per channel at restore, or formalize
    the Topology-A worker as THE writer) → assign `ordinal` at `_begin_turn` from a persisted
@@ -254,6 +273,79 @@ suspended on `ask_user` returns the clarification without its partial pre-suspen
 those surface together when the resumed turn finalizes (the whole turn's `_turn_outputs` are
 projected then). The deterministic/assistant path already surfaces its own command's artifacts
 (its `command_responses[0].artifacts`), so no change was needed there.
+
+---
+
+## Topic 2 — Public return type: introduce `TurnOutput` (RESOLVED, 2026-06-13)
+
+**Decision.** Do not expose the full `TurnResult` to consumers. Add a slim public projection
+`TurnOutput` and have `process_turn()` return it. `TurnResult` stays framework-internal
+(persistence, observability, agent memory).
+
+`TurnOutput` fields (only what is externally meaningful):
+- `turn_key: str` — exposed **solely** as a developer handle to open the complete turn record
+  in the observability UI once integrated (not for end users).
+- `status: TurnStatus`
+- `failure_reason: Optional[str] = None`
+- `answer: str` — the agent's final-answer **text** only. The agent never reports success,
+  artifacts, next actions, or recommendations; those per-command structured results live on
+  `command_outputs`.
+- `command_outputs: list[CommandOutput] = []` — per-command provenance; each carries its own
+  `success`/`artifacts`/timing.
+- `success` — **calculated** computed field: purely
+  `all(co.success for co in command_outputs)`. It is the signal that *some command returned a
+  failure code* (the agent always phrases its final answer as success — v2.20 hard-coded the
+  synthesized answer to `success=True`, masking every tool failure). It is **orthogonal** to
+  `status` and `failure_reason`; the consumer combines all three.
+- `command_outputs_with_artifacts` — property (artifact-bearing outputs, in order).
+
+Three orthogonal turn-level signals:
+- `status` — lifecycle outcome.
+- `failure_reason` — elaboration of a *failure status* (e.g. `max_iters_exhausted` ⇒ status
+  `FAILED`); NOT derived from command success codes.
+- `success` — `all(co.success ...)`; command-level only.
+
+Refinements adopted during implementation (v2.21.2):
+- `answer` is `str` (was `CommandResponse`).
+- `TurnResult` **composes** `turn_output` (a `TurnResult.turn_output` attribute) plus
+  internal-only fields — simplifies `TurnResult`. `process_turn()` returns
+  `turn_result.turn_output`.
+- Per-command `started_at`/`duration_ms` are **retained** on `command_outputs` (reverses the
+  earlier "null the timing" decision: under composition the outputs are shared with the
+  internal record, so nulling would force duplicate copies).
+- Backward compatibility is **not** a requirement for these shapes pre-v3.0.
+- RESOLVED (success semantics, v2.21.2): `success` is the signal that some command returned a
+  failure code. v2.20 hard-coded the synthesized agent answer to `success=True`, so the agent
+  path always reported success even when a tool failed. Final fix: `success` is **purely**
+  `all(co.success for co in command_outputs)` — orthogonal to `status`/`failure_reason`.
+  `max_iters_exhausted` now sets `status=FAILED` with that `failure_reason` (failure_reason
+  elaborates a failure status). Two earlier interim approaches were rejected:
+  (1) `failure_reason="command_failed"` on the deterministic path only (agent exempt) — WRONG,
+  agent must surface command failures; (2) gating success on
+  `status == COMPLETED and failure_reason is None` — replaced by the orthogonal model so the
+  consumer can distinguish exactly why a turn failed (status vs failure_reason vs success).
+
+**Why this beats the two earlier alternatives:**
+- vs "expose full `TurnResult`": drops ~17 fields of observability noise; consumers see only
+  meaningful fields.
+- vs "keep `CommandOutput`, build it from `TurnResult`": `TurnOutput` keeps `status` and
+  `failure_reason` first-class instead of smuggling them in `artifacts`, and preserves
+  provenance via `command_outputs` (the flatten-into-one-`CommandOutput` approach loses which
+  command produced which payload).
+
+**Migration / breakingness:**
+- `process_turn()` → `TurnOutput`. **Implement ASAP in v2.21.2.**
+- Legacy `process_message()` → `CommandOutput` is the **non-breaking bridge, already
+  implemented in v2.21.1**: `_finalize_agent_output` merges all artifact-bearing turn
+  responses into the final `CommandResponse.artifacts` (collision keys suffixed `_<n>`), so
+  existing consumers recover payloads with no signature change.
+- Three shapes, three jobs: `TurnResult` (internal) → `TurnOutput` (public via `process_turn`)
+  → `CommandOutput` (legacy bridge via `process_message`).
+
+**Connection back to Topic 1 (identity):** exposing `turn_key` on `TurnOutput` as the
+observability-UI reference token gives `turn_key` a concrete *external* justification, which
+partially answers the "is `turn_key` redundant?" question — a composite
+`(conversation_id, ordinal)` would force consumers to carry a two-part handle instead.
 
 ## Notes
 - Reviewer demonstrated mastery of the `answer` vs `command_outputs` split, the

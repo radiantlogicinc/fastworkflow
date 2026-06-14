@@ -283,14 +283,16 @@ from .workflow_execution_context import (
 # inside TurnResult can be resolved against this module's types.
 from fastworkflow.turn import (
     TurnResult,
+    TurnOutput,
     TurnStatus,
     FW_ARTIFACT_REF_KEY,
     mint_turn_key,
 )
 
-TurnResult.model_rebuild(
-    _types_namespace={
-        "CommandResponse": CommandResponse,
-        "CommandOutput": CommandOutput,
-    }
-)
+_turn_types_namespace = {
+    "CommandResponse": CommandResponse,
+    "CommandOutput": CommandOutput,
+    "TurnOutput": TurnOutput,
+}
+TurnOutput.model_rebuild(_types_namespace=_turn_types_namespace)
+TurnResult.model_rebuild(_types_namespace=_turn_types_namespace)
