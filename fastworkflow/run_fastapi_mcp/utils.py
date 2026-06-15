@@ -623,9 +623,17 @@ class ChannelSessionManager:
         self._sessions: OrderedDict[str, ChannelRuntime] = OrderedDict()
         self._lock = asyncio.Lock()
         self._max_live_sessions = max_live_sessions
-        self.session_state_store = session_state_store or get_session_state_store(
-            base_folder=get_channel_session_state_dir()
-        )
+        # Built lazily on first access so the SPEEDDICT_FOLDERNAME read happens
+        # after fastworkflow.init() loads the env file, not at module-import time.
+        self._session_state_store = session_state_store
+
+    @property
+    def session_state_store(self) -> SessionStateStore:
+        if self._session_state_store is None:
+            self._session_state_store = get_session_state_store(
+                base_folder=get_channel_session_state_dir()
+            )
+        return self._session_state_store
 
     def _touch(self, channel_id: str) -> None:
         if channel_id in self._sessions:
