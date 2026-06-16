@@ -32,6 +32,8 @@ While [DSPy](https://dspy.ai) ([Why DSPy](https://x.com/lateinteraction/status/1
   </table>
 </p>
 
+Reference: [fastWorkflow: Closing the Performance Gap Between Small and Frontier Language Models for Conversational Agents](https://dl.acm.org/doi/epdf/10.1145/3786335.3813158)
+
 - ✅ **Unlimited Tool Scaling**: fastworkflow organizes tools into context hierarchies so use any number of tools without sacrificing performance or efficiency
 - ✅ **Reliable Tool Execution**: fastworkflow validation pipeline virtually eliminates incorrect tool calling or parameter extraction, ensuring a reliable tool response
 - ✅ **Adaptive Learning**: 1-shot learning from intent detection mistakes. It learns your conversational vocabulary as you interact with it
@@ -56,9 +58,9 @@ While [DSPy](https://dspy.ai) ([Why DSPy](https://x.com/lateinteraction/status/1
 
 **Signatures**: Signatures (ALA [Pydantic](https://docs.pydantic.dev/latest/) and [DSPy](https://dspy.ai)) are the most efficient way of mapping natural language commands to tool implementations, whether programmatic or GenAI. We use signatures as a backbone for implementing commands, enabling seamless integration with DSPy for producing LLM-content within a deterministic programming framework.
 
-**Code Generation**: AI-enabling large-scale, complex applications is non-trivial. Build tools that can quickly map natural language commands to application classes and methods are critical if we are to build more than prototypes and demos.
-
 **Context Navigation at Runtime**: Classes maintain state, not just methods. Method behaviors can change based on state. These capabilities are the building blocks for creating complex finite-state-machines on which non-trivial workflows are built. We need to support dynamically enabling/disabling methods along with the ability to navigate object instance hierarchies at run-time, if we want to build complex workflows.
+
+**Code Generation**: AI-enabling large-scale, complex applications is non-trivial. We provide a simple skill that you can use with a coding agent (Cursor or Claude Code) to automatically generate a full-featured chat agent in your application. See [integrate-chat-agent](./fastworkflow/docs/integrate-chat-agent) for more details.
 
 ---
 
@@ -91,7 +93,7 @@ While [DSPy](https://dspy.ai) ([Why DSPy](https://x.com/lateinteraction/status/1
     - [Running FastWorkflow as a FastAPI Service](#running-fastworkflow-as-a-fastapi-service)
         - [Kubernetes Liveness and Readiness Probes](#kubernetes-liveness-and-readiness-probes)
         - [Using LiteLLM Proxy](#using-litellm-proxy)
-- [Rapidly Building Workflows with the Build Tool](#rapidly-building-workflows-with-the-build-tool)
+- [AI-Enabling Your App with a Coding Agent](#ai-enabling-your-app-with-a-coding-agent)
 - [Environment Variables Reference](#environment-variables-reference)
     - [Environment Variables](#environment-variables)
     - [Password/API Key Variables](#passwordapi-key-variables)
@@ -103,15 +105,15 @@ While [DSPy](https://dspy.ai) ([Why DSPy](https://x.com/lateinteraction/status/1
 
 ## Architecture Overview
 
-`fastWorkflow` separates the build-time, train-time, and run-time concerns. The `build` tool creates a command interface from your code, the `train` tool builds NLP models to understand commands, and the `run` scripts execute the workflow.
+`fastWorkflow` separates the build-time, train-time, and run-time concerns. At build-time you create a command interface from your code — the recommended way is to use the [integrate-chat-agent](./fastworkflow/docs/integrate-chat-agent) skill with a coding agent (Cursor or Claude Code), which authors the command files and context model for you. The `train` tool then builds NLP models to understand commands, and the `run` scripts execute the workflow.
 
 ```mermaid
 graph LR
     subgraph A[Build-Time]
-        A1(Your Python App Source) --> A2{fastworkflow.build};
+        A1(Your Python App Source) --> A2{Coding Agent + integrate-chat-agent skill};
         A2 --> A3(Generated _commands);
         A3 --> A4(context_inheritance_model.json);
-        A4 --> A5(Manual cleanup of generated code)
+        A4 --> A5(Review and refine the generated code)
     end
 
     subgraph B[Train-Time]
@@ -265,9 +267,6 @@ fastworkflow examples fetch <example_name>
 ### Workflow Operations
 
 ```sh
-# Build a workflow from your Python application
-fastworkflow build --app-dir <app_dir> --workflow-folderpath <workflow_dir>
-
 # Train a workflow's intent detection models
 fastworkflow train <workflow_dir> <env_file> <passwords_file>
 
@@ -285,7 +284,6 @@ Each command has additional options that can be viewed with the `--help` flag:
 
 ```sh
 fastworkflow examples --help
-fastworkflow build --help
 fastworkflow train --help
 fastworkflow run --help
 ```
@@ -315,8 +313,8 @@ fastworkflow.passwords.env          # <-- Passwords (copy from hello_world examp
 ```
 - Your application code (`application/`) remains untouched.
 - The `___command_info/` folder contains all the generated files and trained models. 
-- The build tool parameter `--app-dir` points to your app code (`application/`)
-- The build tool parameter `--workflow-folderpath` points to the workflow folderpath (`messaging_app_1`).
+- The `application/` directory holds your app code, untouched by fastWorkflow.
+- The workflow folderpath (`messaging_app_1`) is the directory you pass to `fastworkflow train` and `fastworkflow run`.
 
 ---
 
@@ -333,7 +331,7 @@ fastworkflow.passwords.env          # <-- Passwords (copy from hello_world examp
 
 ## Building Your First Workflow: The Manual Approach
 
-Before we automate everything with the build tool, let’s *hand-craft* the smallest possible workflow. Walking through each file once will make the generated output much easier to understand.
+Before we automate everything with a coding agent, let’s *hand-craft* the smallest possible workflow. Walking through each file once will make the generated output much easier to understand.
 
 > [!tip]
 > You can fetch messaging_app_1 code using `fastworkflow examples fetch messaging_app_1` if you want to skip writing the code 
@@ -386,7 +384,7 @@ class Signature:
         )
 
     plain_utterances = [
-        "Tell john@fastworkflow.ai that the build tool needs improvement",
+        "Tell john@fastworkflow.ai that the demo is ready for review",
     ]
 
     @staticmethod
@@ -681,21 +679,28 @@ The model name after `litellm_proxy/` (e.g., `bedrock_mistral_large_2407`) is pa
 
 ---
 
-## Rapidly Building Workflows with the Build Tool
+## AI-Enabling Your App with a Coding Agent
 
-After understanding the manual process, you can use the `fastworkflow build` command to automate everything. It introspects your code and generates all the necessary files.
+After understanding the manual process, you don't have to write every command file by hand. The recommended way to AI-enable a non-trivial application is to use the **[integrate-chat-agent](./fastworkflow/docs/integrate-chat-agent) skill** with a coding agent such as Cursor or Claude Code.
 
-Delete your manually created `_commands` directory and run:
-```sh
-fastworkflow build \
-  --app-dir my_app/ \
-  --workflow-folderpath my_workflow_ui/ \
-  --overwrite
-```
-This single command will generate the `greet.py` command, `get_properties` and `set_properties` for any properties, the `context_inheritance_model.json`, and more, accomplishing in seconds what we did manually.
+The skill walks your coding agent through the full integration end-to-end:
 
-> [!tip]
-> The build tool is a work in progress and is currently a one-shot tool. It also requires manually correcting the generated code. The plan is to morph it into a Copilot for building workflows. We can use fastWorkflow itself to implement this Copilot. Reach out if building this interests you.
+1. **Discover** the business logic your app exposes and map each capability to a class + method or function.
+2. **Scaffold** the workflow directory (`application/`, `_commands/`, env files) next to your app code.
+3. **Author the command files** and `context_inheritance_model.json` for every capability, using strong Pydantic `Field` descriptions and `default="NOT_FOUND"` so missing parameters are detected rather than hallucinated.
+4. **Set up the env files** and pause for you to add your LLM API keys.
+5. **Train** the intent-detection models and **smoke-test** the agent from the CLI.
+6. Optionally **host the FastAPI streaming service** and **build a popup chat UI** so your app's users can drive the business logic in natural language.
+
+To get started, point your coding agent at the skill:
+
+- In **Cursor / Claude Code**, open the skill at [`fastworkflow/docs/integrate-chat-agent/SKILL.md`](./fastworkflow/docs/integrate-chat-agent/SKILL.md) and ask the agent to "integrate a fastWorkflow chat agent into this app."
+- The agent generates the command files (e.g. a `greet.py` command, `get_properties`/`set_properties` for properties, the `context_inheritance_model.json`, and more) by introspecting your code, then reviews and refines them with you — accomplishing in minutes what we did manually above.
+
+See [reference.md](./fastworkflow/docs/integrate-chat-agent/reference.md) for the command-file structure, context-model format, and the FastAPI HTTP/streaming contracts the chat UI consumes.
+
+> [!note]
+> The legacy `fastworkflow build` CLI command (a one-shot introspection tool that required manually correcting the generated code) is deprecated in favor of the skill-driven workflow above, which produces higher-quality commands and guides you through training, hosting, and UI integration.
 
 ---
 
