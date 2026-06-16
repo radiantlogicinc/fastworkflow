@@ -32,7 +32,7 @@ While [DSPy](https://dspy.ai) ([Why DSPy](https://x.com/lateinteraction/status/1
   </table>
 </p>
 
-Reference: [fastWorkflow: Closing the Performance Gap Between Small and Frontier Language Models for Conversational Agents](https://dl.acm.org/doi/epdf/10.1145/3786335.3813158)
+> **Citation:** Sanchit Satija, Aditya Bhatt, Priyanshu Jani, and Dhar Rawal. 2026. *fastWorkflow: Closing the Performance Gap Between Small and Frontier Language Models for Conversational Agents.* In *Proceedings of the ACM Conference on AI Systems (CAIS '26)*. ACM, San Jose, CA, USA, 161–180. https://doi.org/10.1145/3786335.3813158
 
 - ✅ **Unlimited Tool Scaling**: fastworkflow organizes tools into context hierarchies so use any number of tools without sacrificing performance or efficiency
 - ✅ **Reliable Tool Execution**: fastworkflow validation pipeline virtually eliminates incorrect tool calling or parameter extraction, ensuring a reliable tool response
