@@ -1,6 +1,7 @@
 import os
 import sys
 import threading
+import weakref
 from functools import wraps
 from typing import Optional
 
@@ -11,7 +12,7 @@ from fastworkflow.utils.logging import logger
 
 
 # ----------------------------------------------------------------------
-# Process-global, in-memory session-state store.
+# Process-global, in-memory session-state registry.
 #
 # This replaces the two per-session speedict (RocksDB) backends that used to
 # live on the hot path: the per-workflow snapshot DB and the global
@@ -20,20 +21,28 @@ from fastworkflow.utils.logging import logger
 # app workflows) even though the payload is trivial and all heavy definitions
 # are already cached per folderpath (RoutingRegistry / command_directory).
 #
-# Session state is mutable but cheap and inherently per-process, so it is held
-# in memory here.  Durable cross-process state for the FastAPI service is owned
-# separately by SessionStateStore + ConversationStore; the CLI no longer
-# resumes workflow context across process restarts (accepted trade-off).
+# Session state is mutable but cheap and inherently per-process, so the live
+# Workflow object *is* the store entry.  The registry holds only **weak**
+# references: once the owning embedder (e.g. a WorkflowExecutionContext /
+# ChannelRuntime) drops its reference and the Workflow is garbage-collected,
+# its registry entry is reclaimed automatically.  This means abandoned sessions
+# (e.g. a unique channel_id per request) do not accumulate — no manual cleanup
+# or close() is required to avoid a leak.  Parent/child topology is stored on
+# the live objects themselves (``_children``) so it is reclaimed with them.
+#
+# Durable cross-process state for the FastAPI service is owned separately by
+# SessionStateStore + ConversationStore; the CLI no longer resumes workflow
+# context across process restarts (accepted trade-off).
 #
 # speedict is still used elsewhere (the enablecache decorator below,
 # ConversationStore, and the NLU clarification cache) and is intentionally
 # left in place there.
 # ----------------------------------------------------------------------
 _STATE_LOCK = threading.RLock()
-# workflow_id -> snapshot dict (the former per-session snapshot DB)
-_WORKFLOW_SNAPSHOTS: dict[int, dict] = {}
-# workflow_id -> {"children": list[int]} (the former workflowid_2_sessiondata map)
-_WORKFLOW_SESSIONDATA: dict[int, dict] = {}
+# workflow_id -> live Workflow (weak, so abandoned sessions auto-evict)
+_WORKFLOW_REGISTRY: "weakref.WeakValueDictionary[int, Workflow]" = (
+    weakref.WeakValueDictionary()
+)
 
 
 # implements the enablecache decorator
@@ -108,31 +117,18 @@ class Workflow:
         workflow = Workflow(cls.__create_key, workflow_snapshot)
 
         with _STATE_LOCK:
-            _WORKFLOW_SESSIONDATA[workflow.id] = {"children": []}
             if workflow.parent_id:
-                parent_session_data = _WORKFLOW_SESSIONDATA.get(workflow.parent_id)
-                if parent_session_data is not None:
-                    sibling_list = parent_session_data["children"]
-                    if workflow.id not in sibling_list:
-                        sibling_list.append(workflow.id)
+                parent = _WORKFLOW_REGISTRY.get(workflow.parent_id)
+                if parent is not None and workflow.id not in parent._children:
+                    parent._children.append(workflow.id)
 
         return workflow
 
     @classmethod
     def get_workflow(cls, workflow_id: int) -> Optional["Workflow"]:
-        """load the workflow from the in-memory session-state store"""
+        """return the live workflow from the in-memory registry (or None)"""
         with _STATE_LOCK:
-            snapshot = _WORKFLOW_SNAPSHOTS.get(workflow_id)
-            if snapshot is None:
-                return None
-            # Shallow-copy the snapshot wrapper so the reconstructed Workflow
-            # does not mutate the stored dict structure as it re-saves.
-            workflow_snapshot = dict(snapshot)
-
-        return Workflow(
-            cls.__create_key,
-            workflow_snapshot,
-        )
+            return _WORKFLOW_REGISTRY.get(workflow_id)
 
     @classmethod
     def generate_child_workflow_id(cls, workflow_folderpath: str, parent_workflow_id: Optional[int] = None) -> int:
@@ -165,12 +161,16 @@ class Workflow:
         self._current_command_context = None
         self._command_context_for_response_generation = None
 
+        # Child workflow ids (parent/child topology lives on the live object so
+        # it is reclaimed when the object is garbage-collected).
+        self._children: list[int] = []
+
         # ------------------------------------------------------------------
-        # Persistence control
+        # Registration control
         # ------------------------------------------------------------------
         # ``_dirty`` tracks whether state has changed since the last flush.
-        # We persist the freshly-constructed workflow immediately so that it
-        # exists on disk, then mark it clean.
+        # We register the freshly-constructed workflow immediately so that
+        # get_workflow() can find it, then mark it clean.
         self._dirty: bool = False
         self._save()
         self._dirty = False
@@ -303,36 +303,39 @@ class Workflow:
         self._mark_dirty()
 
     def close(self) -> bool:
-        """close the session and drop its (and its descendants') in-memory state"""
+        """close the session: explicitly evict it (and its descendants) from the registry.
+
+        Eviction is also automatic once all strong references to a Workflow are
+        dropped (the registry holds only weak references); close() is the
+        explicit, immediate path and additionally tidies sys.path.
+        """
         if self.parent_id:
             raise ValueError("close should only be called on the root session")
 
         with _STATE_LOCK:
-            root_session_data = _WORKFLOW_SESSIONDATA.get(self.id)
-            children = list(root_session_data["children"]) if root_session_data else []
-
-            # collect all descendants
+            # collect all (still-live) descendants
             descendant_list = []
-            to_process = children
+            to_process = list(self._children)
             while to_process:
                 current_id = to_process.pop()
-                child_session_data = Workflow._get_session_data(current_id)
                 descendant_list.append(current_id)
-                if child_session_data[3] in sys.path:
-                    sys.path.remove(child_session_data[3])  # remove the workflow folderpath from sys.path
+                child = _WORKFLOW_REGISTRY.get(current_id)
+                if child is None:
+                    # Already garbage-collected (and thus auto-evicted).
+                    continue
+                if child._folderpath in sys.path:
+                    sys.path.remove(child._folderpath)  # remove the workflow folderpath from sys.path
                 # Add any children to the processing queue
-                to_process.extend(child_session_data[2])
+                to_process.extend(child._children)
 
             # process all descendants
             for descendant_workflow_id in descendant_list:
-                _WORKFLOW_SESSIONDATA.pop(descendant_workflow_id, None)
-                _WORKFLOW_SNAPSHOTS.pop(descendant_workflow_id, None)
+                _WORKFLOW_REGISTRY.pop(descendant_workflow_id, None)
 
             if self._folderpath in sys.path:
                 sys.path.remove(self._folderpath)
-            # remove ourselves from the in-memory session-state store
-            _WORKFLOW_SESSIONDATA.pop(self.id, None)
-            _WORKFLOW_SNAPSHOTS.pop(self.id, None)
+            # remove ourselves from the registry
+            _WORKFLOW_REGISTRY.pop(self.id, None)
 
         return True
 
@@ -340,24 +343,16 @@ class Workflow:
     def _get_session_data(cls, workflow_id: int) -> tuple[int, Optional[str], list, str]:
         """get the parent id, (legacy, now None) session db folder path, the children list, and the workflow folderpath"""
         with _STATE_LOCK:
-            sessiondata_dict = _WORKFLOW_SESSIONDATA.get(workflow_id)
-            snapshot = _WORKFLOW_SNAPSHOTS.get(workflow_id)
+            workflow = _WORKFLOW_REGISTRY.get(workflow_id)
 
-        if not sessiondata_dict:
+        if workflow is None:
             raise ValueError(f"Workflow {workflow_id} not found")
 
-        children_list = sessiondata_dict["children"]
-        if children_list is None:
-            raise ValueError(f"Workflow {workflow_id} must have a children list even if it is empty")
-
-        if snapshot is None:
-            raise ValueError(f"Workflow {workflow_id} snapshot not found")
-
         return (
-            snapshot["parent_workflow_id"],
+            workflow._parent_id,
             None,
-            children_list,
-            snapshot["workflow_folderpath"]
+            workflow._children,
+            workflow._folderpath
         )
 
     def get_cachedb_folderpath(self, function_name: str) -> str:
@@ -371,19 +366,19 @@ class Workflow:
 
     @classmethod
     def _load(cls, workflow_id: int) -> dict[str, str|int|bool]:
-        """load the workflow snapshot from the in-memory session-state store"""
+        """load the workflow snapshot from the in-memory registry"""
         with _STATE_LOCK:
-            snapshot = _WORKFLOW_SNAPSHOTS.get(workflow_id)
-            if snapshot is None:
+            workflow = _WORKFLOW_REGISTRY.get(workflow_id)
+            if workflow is None:
                 raise ValueError(
-                    f"Workflow {workflow_id} not found in session-state store"
+                    f"Workflow {workflow_id} not found in session-state registry"
                 )
-            return dict(snapshot)
+            return workflow._to_dict()
 
     def _save(self) -> None:
-        """save the workflow snapshot into the in-memory session-state store"""
+        """register the live workflow in the in-memory registry (idempotent)"""
         with _STATE_LOCK:
-            _WORKFLOW_SNAPSHOTS[self._id] = self._to_dict()
+            _WORKFLOW_REGISTRY[self._id] = self
 
     def _to_dict(self) -> dict[str, str|int|bool]:
         """Return a JSON-serialisable representation of the workflow."""
@@ -400,11 +395,16 @@ class Workflow:
     # ------------------------------------------------------------------
 
     def _mark_dirty(self) -> None:
-        """Flag that the workflow state has changed and needs persistence."""
+        """Flag that the workflow state has changed since the last flush."""
         self._dirty = True
 
     def flush(self) -> None:
-        """Write pending state changes to disk if necessary."""
+        """Re-affirm registration if state changed.
+
+        Mutable state lives on the live object itself, so this is effectively a
+        no-op (besides re-registering); it is retained for API compatibility and
+        so the registry entry survives even if a key was evicted mid-lifetime.
+        """
         if self._dirty:
             self._save()
             self._dirty = False
