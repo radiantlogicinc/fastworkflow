@@ -109,7 +109,7 @@ def _find_model_dirs(command_info_path: str) -> list[str]:
 
 
 @pytest.fixture(scope="module")
-def trained_hello_world():
+def trained_hello_world(tmp_path_factory):
     if not _datasets_available():
         pytest.skip("datasets package not installed; intent-detection training is skipped.")
 
@@ -120,7 +120,23 @@ def trained_hello_world():
             "utterance generation required for model training."
         )
 
-    workflow_path = HELLO_WORLD_PATH
+    # Train into an isolated COPY of the example rather than the real
+    # fastworkflow/examples/hello_world. _cleanup() rmtree's ___command_info at
+    # both setup and teardown, which would otherwise destroy the real example's
+    # trained model that other tests (e.g. test_fastapi_service.py) rely on being
+    # pre-trained — a hidden inter-test dependency (see bd fix-0hb). The copy
+    # excludes generated/runtime dirs so training starts clean.
+    workflow_path = str(tmp_path_factory.mktemp("train_hello_world") / "hello_world")
+    shutil.copytree(
+        HELLO_WORLD_PATH,
+        workflow_path,
+        ignore=shutil.ignore_patterns(
+            "___command_info",
+            "___workflow_contexts",
+            "___convo_info",
+            "__pycache__",
+        ),
+    )
     _cleanup(workflow_path, env_vars)
 
     fastworkflow.init(env_vars=env_vars)
