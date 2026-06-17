@@ -1,48 +1,106 @@
 <!-- Logo and Title -->
 <img src="logo.png" height="64" alt="fastWorkflow Logo and Title">
 
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE) [![CI](https://img.shields.io/badge/ci-passing-brightgreen)](<LINK_TO_CI>)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE) [![PyPI](https://img.shields.io/pypi/v/fastworkflow)](https://pypi.org/project/fastworkflow/) [![CI](https://img.shields.io/badge/ci-passing-brightgreen)](https://github.com/radiantlogicinc/fastworkflow/actions) [![Discord](https://img.shields.io/badge/Discord-Join-5865F2)](https://discord.gg/k2g58dDjYR)
 
-Build agents and assistants for complex workflows and large-scale Python applications, with deterministic or AI-powered business logic.
+**Build AI agents your application can actually trust in production — with small models cheaply, or frontier models more reliably.**
 
-If you have tried AI enabling non-trivial applications, you have struggled with the following:
-- AI assistants misunderstanding your intent and not adapting to your vocabulary and commands
-- AI agents calling the wrong tools, or getting lost amid complex call chains and workflows
-- Hallucinations in parameter extraction for tool calls
-- Challenges supporting humans, agents, and client code at the same time
+Most agent frameworks help you *build* an agent in an afternoon. fastWorkflow is for the moment after the demo, when you need the agent to stop calling the wrong tool, stop hallucinating parameters, and stop confidently doing the wrong thing on real, messy user input.
 
-While [DSPy](https://dspy.ai) ([Why DSPy](https://x.com/lateinteraction/status/1921565300690149759)) is an amazing framework for optimizing LLM generation, we need an application framework that understands the concepts of DSPy (signatures, modules, optimization) and layers functionality on top to address the above challenges.
+> **fastWorkflow improves agent reliability two ways:**
+> 1. It lets **small, free models** (e.g. Mistral Small) perform far above their weight on structured workflows — matching frontier models on agentic benchmarks.
+> 2. It makes **frontier models more reliable** by shrinking the active toolset, validating every parameter, and forcing clarification instead of silent wrong actions.
 
 ---
 
-### Why fastWorkflow?
+## The failure fastWorkflow exists to fix
 
-- ✅ **Cost-Effective Performance**: fastWorkFlow with small, free models can match the quality of large expensive models
+You wire up a dozen tools to a capable frontier model. In dev, against clean prompts, it works great. Then real users show up:
+
+```text
+User: "cancel that blue jacket order from last week and give me credit, not a refund"
+
+[ Generic tool-calling stack + frontier model ]
+search_orders(query="blue jacket")                              ✓
+cancel_order(order_id="44821")                                  ✓
+process_refund(order_id="44821", method="original_payment")     ✗  ← user asked for store credit
+```
+
+Nothing crashed. The logs look fine. But the customer asked for **store credit** and got a refund to their card. This is the dangerous failure class: **plausible-looking, semantically wrong execution.** No amount of prompt engineering reliably prevents it at scale, because the problem is structural — ambiguous language, missing parameters, and a crowded toolset — not a weak model.
+
+Here's the same request through fastWorkflow:
+
+```text
+User: "cancel that blue jacket order from last week and give me credit, not a refund"
+
+[ fastWorkflow ]
+Intent detected:      cancel_order
+Parameter validation: order_id unresolved        → ask, don't guess
+
+Agent: "I found two recent orders — #44821 (Blue Jacket, $89) and
+        #44798 (Blue Scarf, $34). Which should I cancel?"
+User:  "the jacket"
+
+Parameter validation: refund_method = store_credit   ✓ (from "credit, not a refund")
+cancel_order(order_id="44821", refund_method="store_credit")   ✓
+notify_customer(order_id="44821")                              ✓
+```
+
+Same model. Same application code. Different execution discipline. **The framework makes the system harder to use incorrectly.**
+
+---
+
+## What fastWorkflow does differently
+
+Instead of dumping your whole tool catalog into a prompt and hoping the model navigates it, fastWorkflow puts a structured execution layer between natural language and your application's side effects:
+
+1. **Intent detection is trained locally** — a tiny BERT/DistilBERT classifier (runs on CPU, ~milliseconds) maps utterances to commands instead of relying entirely on the LLM to infer what the user "probably meant."
+2. **Every parameter is validated** against your Pydantic `Field` definitions *before* your code runs — malformed or missing values are caught, not executed.
+3. **Clarification is a first-class behavior** — when a required parameter is missing or ambiguous, the agent asks instead of guessing.
+4. **Tools are organized into context hierarchies** — the model only ever sees the handful of tools relevant to the current state, never all 40 at once.
+5. **Your application code stays the source of truth** — fastWorkflow *wraps* it; it never replaces or rewrites it.
+
+---
+
+## Why this helps frontier models too
+
+A common reaction is: *"Nice for cheap small models, but I already use GPT-4o / Claude / Bedrock."* That's exactly where fastWorkflow still earns its place. Frontier models are better at language — but they still fail on the parts of agent systems that are **architectural, not linguistic**:
+
+| Failure mode | What goes wrong | fastWorkflow's structural fix |
+|---|---|---|
+| **Tool overload** | Picks a valid-but-wrong tool from a crowded prompt | Context hierarchies keep the active toolset small |
+| **Parameter overconfidence** | Extracts one slot wrong and executes anyway | Pydantic validation gate before execution |
+| **State blindness** | Acts as if every tool is always available | Tools enabled/disabled by runtime context |
+| **Ambiguity collapse** | Resolves uncertainty internally instead of asking | Clarification is built in, not prompted for |
+
+With small models, fastWorkflow is mostly about **cost**. With large models, it's about **reliability and reducing expensive mistakes**. Either way, you get one consistent command layer for UI chat, backend automation, tests, and internal agents.
+
+---
+
+## Benchmark: small models, frontier-level reliability
+
+fastWorkflow was benchmarked on [Tau Bench](https://github.com/sierra-research/tau-bench) — an industry-standard benchmark for conversational agents that complete realistic, multi-step, tool-using customer-service workflows (order management, flight rebooking, policy enforcement). This measures exactly what breaks in production: **reliable tool execution under ambiguity**, not generic chat quality.
 
 <p align="center">
   <table>
     <tr>
       <td align="center" width="50%">
-        <img src="fastWorkflow - Tau Bench Retail.jpg" alt="fastWorkflow - Tau Bench Retail" style="max-width: 100%; height: auto;"/>
+        <img src="fastWorkflow - Tau Bench Retail.jpg" alt="fastWorkflow Tau Bench Retail results" style="max-width: 100%; height: auto;"/>
+        <br/><em>Retail: orders, returns, account operations</em>
       </td>
       <td align="center" width="50%">
-        <img src="fastWorkflow - TauBench Airline.jpg" alt="fastWorkflow - TauBench Airline" style="max-width: 100%; height: auto;"/>
+        <img src="fastWorkflow - TauBench Airline.jpg" alt="fastWorkflow Tau Bench Airline results" style="max-width: 100%; height: auto;"/>
+        <br/><em>Airline: rebooking, baggage, loyalty workflows</em>
       </td>
     </tr>
   </table>
 </p>
 
+**fastWorkflow with Mistral Small (free tier) matches frontier models on these structured workflows** — because the validation pipeline outweighs raw model capability where it counts.
+
 > **Citation:** Sanchit Satija, Aditya Bhatt, Priyanshu Jani, and Dhar Rawal. 2026. *fastWorkflow: Closing the Performance Gap Between Small and Frontier Language Models for Conversational Agents.* In *Proceedings of the ACM Conference on AI Systems (CAIS '26)*. ACM, San Jose, CA, USA, 161–180. https://doi.org/10.1145/3786335.3813158
 
-- ✅ **Unlimited Tool Scaling**: fastworkflow organizes tools into context hierarchies so use any number of tools without sacrificing performance or efficiency
-- ✅ **Reliable Tool Execution**: fastworkflow validation pipeline virtually eliminates incorrect tool calling or parameter extraction, ensuring a reliable tool response
-- ✅ **Adaptive Learning**: 1-shot learning from intent detection mistakes. It learns your conversational vocabulary as you interact with it
-- ✅ **Interface Flexibility**: Support programmatic, assistant-driven and agent-driven interfaces with the same codebase
-- ✅ **Deep Code Understanding**: fastworkflow understands classes, methods, inheritance and aggregation so you can quickly 'AI-enable' large-scale Python applications
-
----
-
-##### Mistral Small agent tackling a complex command from Tau Bench Retail
+##### Mistral Small handling a complex Tau Bench Retail command
 
 <p align="center">
   <img src="fastWorkflow-with-Agent.gif" alt="fastWorkflow with Agent Demo" style="max-width: 100%; height: auto;"/>
@@ -50,752 +108,496 @@ While [DSPy](https://dspy.ai) ([Why DSPy](https://x.com/lateinteraction/status/1
 
 ---
 
-### Key Concepts
-
-**Adaptive Intent Understanding**: Misunderstandings are a given in any conversation, no matter how intelligent the participants. Natural language applications should have intent clarification and parameter validation built-in. We have the ability to 1-shot adapt our semantic understanding of words and sentences based on the context of the conversation and clarifications of intent. Applications should also be able to do the same.
-
-**Contextual Hierarchies**: Communication is always within a context. And not just one concept but layers of contexts. Interpretation starts with the narrowest context and expands to larger contexts if the narrow context does not 'fit' the interpretation. In programming languages, we express contexts as classes, tools as methods and context hierarchies using inheritance and aggregation. Natural language applications should understand classes, methods, inheritance and aggregation out-of-the-box.
-
-**Signatures**: Signatures (ALA [Pydantic](https://docs.pydantic.dev/latest/) and [DSPy](https://dspy.ai)) are the most efficient way of mapping natural language commands to tool implementations, whether programmatic or GenAI. We use signatures as a backbone for implementing commands, enabling seamless integration with DSPy for producing LLM-content within a deterministic programming framework.
-
-**Context Navigation at Runtime**: Classes maintain state, not just methods. Method behaviors can change based on state. These capabilities are the building blocks for creating complex finite-state-machines on which non-trivial workflows are built. We need to support dynamically enabling/disabling methods along with the ability to navigate object instance hierarchies at run-time, if we want to build complex workflows.
-
-**Code Generation**: AI-enabling large-scale, complex applications is non-trivial. We provide a simple skill that you can use with a coding agent (Cursor or Claude Code) to automatically generate a full-featured chat agent in your application. See [integrate-chat-agent](./fastworkflow/docs/integrate-chat-agent) for more details.
-
----
-
 ## Table of Contents
 
-- [Architecture Overview](#architecture-overview)
+- [Quick Start: run an example in 5 minutes](#quick-start-run-an-example-in-5-minutes)
+- [AI-enable your own app (without restructuring it)](#ai-enable-your-own-app-without-restructuring-it)
+- [How complex workflows scale: context hierarchies](#how-complex-workflows-scale-context-hierarchies)
+- [Production deployment](#production-deployment)
+- [Developer FAQ](#developer-faq)
+- [Key concepts (going deeper)](#key-concepts-going-deeper)
+- [Architecture overview](#architecture-overview)
 - [Installation](#installation)
-- [Quick Start: Running an Example in 5 Minutes](#quick-start-running-an-example-in-5-minutes)
-    - [Step 1: Fetch the `hello_world` Example](#step-1-fetch-the_hello_world-example)
-    - [Step 2: Add Your API Keys](#step-2-add-your-api-keys)
-    - [Step 3: Train the Example](#step-3-train-the-example)
-    - [Step 4: Run the Example](#step-4-run-the-example)
-- [CLI Command Reference](#cli-command-reference)
-    - [Examples Management](#examples-management)
-    - [Workflow Operations](#workflow-operations)
-- [Understanding the Directory Structure](#understanding-the-directory-structure)
-- [Building Your First Workflow: The Manual Approach](#building-your-first-workflow-the-manual-approach)
-    - [Step 1: Create a new project directory](#step-1-create-a-new-project-directory)
-    - [Step 2: Create a new application directory](#step-2-create-a-new-application-directory)
-    - [Step 3: Design Your Application](#step-3-design-your-application)
-    - [Step 4: Write the Command File](#step-4-write-the-command-file)
-    - [Step 5: Setup the env and password files](#step-5-setup-the-env-and-password-files)
-    - [Step 6: Train and Run](#step-6-train-and-run)
-- [Refining Your Workflow](#refining-your-workflow)
-    - [Calling class methods and initializing the class instance to set the context](#calling-class-methods-and-initializing-the-class-instance-to-set-the-context)
-    - [Adding class inheritance with command_context_model.json](#adding-class-inheritance-with-command_context_modeljson)
-    - [Adding context hierarchies with context_inheritance_model.json](#adding-context-hierarchies-with-context_inheritance_modeljson)
-    - [Using DSPy for Response Generation](#using-dspy-for-response-generation)
-    - [Using Startup Commands and Actions](#using-startup-commands-and-actions)
-    - [Running FastWorkflow as a FastAPI Service](#running-fastworkflow-as-a-fastapi-service)
-        - [Kubernetes Liveness and Readiness Probes](#kubernetes-liveness-and-readiness-probes)
-        - [Using LiteLLM Proxy](#using-litellm-proxy)
-- [AI-Enabling Your App with a Coding Agent](#ai-enabling-your-app-with-a-coding-agent)
-- [Environment Variables Reference](#environment-variables-reference)
-    - [Environment Variables](#environment-variables)
-    - [Password/API Key Variables](#passwordapi-key-variables)
+- [CLI reference](#cli-reference)
+- [Environment variables reference](#environment-variables-reference)
 - [Troubleshooting / FAQ](#troubleshooting--faq)
-- [For Contributors](#for-contributors)
+- [For contributors](#for-contributors)
+- [Our work & references](#our-work--references)
 - [License](#license)
 
 ---
 
-## Architecture Overview
+## Quick Start: run an example in 5 minutes
 
-`fastWorkflow` separates the build-time, train-time, and run-time concerns. At build-time you create a command interface from your code — the recommended way is to use the [integrate-chat-agent](./fastworkflow/docs/integrate-chat-agent) skill with a coding agent (Cursor or Claude Code), which authors the command files and context model for you. The `train` tool then builds NLP models to understand commands, and the `run` scripts execute the workflow.
+This is the fastest way to see fastWorkflow in action.
 
-```mermaid
-graph LR
-    subgraph A[Build-Time]
-        A1(Your Python App Source) --> A2{Coding Agent + integrate-chat-agent skill};
-        A2 --> A3(Generated _commands);
-        A3 --> A4(context_inheritance_model.json);
-        A4 --> A5(Review and refine the generated code)
-    end
-
-    subgraph B[Train-Time]
-        B1(Generated _commands) --> B2{fastworkflow.train};
-        B2 --> B3(Trained Models in ___command_info);
-    end
-
-    subgraph C[Run-Time]
-        C1(User/Agent Input) --> C2{Intent Detection and validation};
-        C2 --> C3{Parameter Extraction and validation};
-        C3 --> C4(CommandExecutor);
-        C4 --> C5(Your Application Logic - DSPy or deterministic); 
-        C5 --> C6(Response);
-    end
-
-    A --> B;
-    B --> C;
-```
-
----
-
-## Installation
-
-To get started, install `fastWorkflow` from PyPI using pip:
-
-```sh
-pip install fastworkflow
-# Or with uv
-uv pip install fastworkflow
-```
-
-**Notes:**
-- `fastWorkflow` currently works on Linux and MacOS only. On windows, use WSL.
-- `fastWorkflow` installs PyTorch as a dependency. If you don't already have PyTorch installed, this could take a few minutes depending on your internet speed.
-- `fastWorkflow` requires Python 3.11+ or higher.
-- Training (`fastworkflow train`) also expects the optional Hugging Face `datasets` package. Install it by including the dev group when using Poetry.
-
-### Optional extras
-
-The core install depends on **plain** `litellm` (used only as a client via `dspy.LM`) and pulls **no** proxy-server packages, so it stays lean and co-installs cleanly with downstream apps that pin a plain `litellm` (e.g. `litellm>=1.83.11,<1.84.0`). Server- and training-only dependencies are gated behind extras:
-
-| Extra | Install | Provides |
-| --- | --- | --- |
-| `server` | `pip install "fastworkflow[server]"` | The FastAPI-MCP HTTP service (`fastworkflow run_fastapi_mcp`): `fastapi`, `uvicorn`, `fastapi-mcp`, `pyjwt[crypto]`, `python-multipart`, `starlette` (with security-patched floors). |
-| `training` | `pip install "fastworkflow[training]"` | The Hugging Face `datasets` package required by `fastworkflow train` for synthetic-utterance / parameter-example generation. |
-
-The `server` extra is only needed to *host* the FastAPI-MCP service.
-
-### Dependency compatibility
-
-`fastWorkflow` is designed to co-install with modern ML/LLM stacks. The key supported ranges are:
-
-| Package | Supported range | Notes |
-| --- | --- | --- |
-| `transformers` | `>=4.48.2,<6.0.0` | Works on transformers 5.x. The intent-detection base models are BERT/DistilBERT checkpoints that load natively on 5.x (no slow→fast tokenizer conversion required). |
-| `dspy` | `>=3.0.1,<4.0.0` | Migrated off the dspy 2.x API. |
-| `openai` | `>=2.8.0` | Compatible with openai 2.x. |
-| `litellm` | `>=1.83.7,<2.0.0` | Core depends on **plain** `litellm` (client only, no `[proxy]` extra), so downstreams can pin e.g. `litellm>=1.83.11,<1.84.0` without pulling the proxy server stack. The FastAPI-MCP server deps live in the optional `fastworkflow[server]` extra. |
-| `sentence-transformers` | not a dependency | `fastWorkflow` does not depend on `sentence-transformers`, so it imposes no constraint (use any 5.x version downstream). |
-
-`sentencepiece` is bundled as a dependency because transformers 5.x can require it to instantiate certain tokenizers.
-
-The intent-detection base models are configurable via environment variables (`INTENT_DETECTION_TINY_MODEL`, `INTENT_DETECTION_LARGE_MODEL`); see `fastworkflow.env`.
-
----
-
-## Quick Start: Running an Example in 5 Minutes
-
-This is the fastest way to see `fastWorkflow` in action.
 <p align="center">
-  <img src="fastWorkflow-with-Assistant-for-hello_world-app.gif" alt="fastWorkflow with Assistant for Hello World App Demo" style="max-width: 100%; height: auto;"/>
+  <img src="fastWorkflow-with-Assistant-for-hello_world-app.gif" alt="fastWorkflow Assistant for the Hello World app" style="max-width: 100%; height: auto;"/>
 </p>
 
-### Step 1: Fetch the `hello_world` Example
-
-The `fastworkflow` command-line tool can fetch bundled examples:
-
 ```sh
+# 1. Install (Linux/macOS; on Windows use WSL. Python 3.11+)
+pip install fastworkflow
+
+# 2. Fetch the hello_world example + env file templates
 fastworkflow examples fetch hello_world
-```
-This command will:
-1. Copy the `hello_world` example into a new `./examples/hello_world/` directory.
-2. Copy the environment files to `./examples/fastworkflow.env` and `./examples/fastworkflow.passwords.env`.
 
-### Step 2: Add Your API Keys
-
-The example workflows require API keys for the LLM models. Edit the `./examples/fastworkflow.passwords.env` file:
-
-```sh
-# Edit the passwords file to add your API keys
+# 3. Add your API key (a free Mistral key works for every role)
 nano ./examples/fastworkflow.passwords.env
+
+# 4. Build the intent models for this command set (one-time, ~5 min on CPU)
+fastworkflow train ./examples/hello_world ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env
+
+# 5. Run it
+fastworkflow run ./examples/hello_world ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env
 ```
 
-You'll need to add at least:
-```
-LITELLM_API_KEY_SYNDATA_GEN=your-mistral-api-key
-LITELLM_API_KEY_PARAM_EXTRACTION=your-mistral-api-key
-LITELLM_API_KEY_RESPONSE_GEN=your-mistral-api-key
-LITELLM_API_KEY_PLANNER=your-mistral-api-key
-LITELLM_API_KEY_AGENT=your-mistral-api-key
-```
-
-You can get a free API key from [Mistral AI](https://mistral.ai) for the mistral small model. Or a free API key from [OpenRouter](https://openrouter.ai/openai/gpt-oss-20b:free) for the GPT-OSS-20B:free model. You can use different models for different LLM roles in the same workflow if you wish.
-
-### Step 3: Train the Example
+You'll get a `User >` prompt. Try **"what can you do?"** or **"add 49 + 51"**. Run `fastworkflow examples list` to see the rest.
 
 > [!note]
-> The training CLI depends on the optional Hugging Face `datasets` package.  
-> Install it explicitly (`pip install datasets`) or, if you're working from this repo, run `poetry install --with dev` before training.
-
-Train the intent-detection models for the workflow:
-
-```sh
-fastworkflow train ./examples/hello_world ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env
-```
-
-This step builds the NLP models that help the workflow understand user commands.
-
-### Step 4: Run the Example
-
-Once training is complete, run the interactive assistant:
-
-```sh
-# Run in agentic mode (default)
-fastworkflow run ./examples/hello_world ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env
-
-# Or run in assistant (non-agentic) mode
-fastworkflow run ./examples/hello_world ./examples/fastworkflow.env ./examples/fastworkflow.passwords.env --assistant
-```
-
-You will be greeted with a `User >` prompt. Try it out by asking "what can you do?" or "add 49 + 51"!
-
-To see other available examples, run `fastworkflow examples list`.
-
----
-
-## CLI Command Reference
-
-The `fastworkflow` CLI provides several commands to help you work with workflows:
-
-### Examples Management
-
-```sh
-# List available examples
-fastworkflow examples list
-
-# Fetch an example to your local directory
-fastworkflow examples fetch <example_name>
-```
-
-### Workflow Operations
-
-```sh
-# Train a workflow's intent detection models
-fastworkflow train <workflow_dir> <env_file> <passwords_file>
-
-# Run a workflow (agentic mode, default)
-fastworkflow run <workflow_dir> <env_file> <passwords_file>
-
-# Run a workflow in assistant (non-agentic) mode
-fastworkflow run <workflow_dir> <env_file> <passwords_file> --assistant
-```
+> **"Train" doesn't mean GPUs or fine-tuning a foundation model.** `fastworkflow train` is closer to *compiling a conversational interface*: it generates synthetic utterances and fits small BERT-class intent classifiers for your commands. You run it once per command set, re-run it only when commands change, ship the resulting artifacts with your app, and need **no GPU at runtime**.
 
 > [!tip]
-> **Deterministic execution:** Prefix a natural language command with `/` to execute it deterministically (non‑agentic) during an interactive run.
-
-Each command has additional options that can be viewed with the `--help` flag:
-
-```sh
-fastworkflow examples --help
-fastworkflow train --help
-fastworkflow run --help
-```
+> Get a free API key from [Mistral AI](https://mistral.ai) (works with `mistral-small-latest`) or [OpenRouter](https://openrouter.ai/openai/gpt-oss-20b:free). You can assign different models to different roles in the same workflow.
 
 ---
 
-## Understanding the Directory Structure
+## AI-enable your own app (without restructuring it)
 
-A key concept in `fastWorkflow` is the separation of your application's logic from the workflow commands definition.
-
-```
-messaging_app_1/                    # <-- The workflow_folderpath
-├── application/                    # <-- Your application directory (not generated)
-│   └── send_message.py             # <-- Your application code
-│
-├── _commands/                      # <-- Commands folder
-│   └── send_message.py
-|
-├── context_inheritance_model.json  # <-- Inheritance model
-|
-├── ___command_info/                # <-- Metadata folder. Generated by the train tool
-├── ___convo_info/                  # <-- Converation log. Generated at run-time
-├── ___workflow_contexts/           # <-- Session data. Generated at run-time
-
-fastworkflow.env                    # <-- Env file (copy from hello_world example)
-fastworkflow.passwords.env          # <-- Passwords (copy from hello_world example)
-```
-- Your application code (`application/`) remains untouched.
-- The `___command_info/` folder contains all the generated files and trained models. 
-- The `application/` directory holds your app code, untouched by fastWorkflow.
-- The workflow folderpath (`messaging_app_1`) is the directory you pass to `fastworkflow train` and `fastworkflow run`.
-
----
-
-> [!tip]
-> **Add to your `.gitignore`:**  
-> Add the following folders to your `.gitignore` to avoid committing generated files or sensitive data:
-> ```
-> ___workflow_contexts
-> ___command_info
-> ___convo_info
-> ```
-
----
-
-## Building Your First Workflow: The Manual Approach
-
-Before we automate everything with a coding agent, let’s *hand-craft* the smallest possible workflow. Walking through each file once will make the generated output much easier to understand.
-
-> [!tip]
-> You can fetch messaging_app_1 code using `fastworkflow examples fetch messaging_app_1` if you want to skip writing the code 
-
-### Step 1: Create a new project directory
-
-```sh
-mkdir -p messaging_app_1
-```
-
-### Step 2: Create a new application directory
-
-```sh
-mkdir -p messaging_app_1/application
-```
-
-### Step 3: Design Your Application
-
-Create a simple function in `messaging_app_1/application/send_message.py`.
+You do **not** rewrite your application around fastWorkflow. You wrap your existing code with thin command files. Say you already have this service:
 
 ```python
-def send_message(to: str, message: str) -> str:
-    print(f"Sending '{message}' to {to}")
+# your_app/orders.py  ← your existing code, untouched
+class OrderService:
+    def cancel_order(self, order_id: str, refund_method: str) -> dict: ...
+    def get_order_status(self, order_id: str) -> dict: ...
+    def update_shipping_address(self, order_id: str, address: str) -> dict: ...
 ```
 
-### Step 4: Write the Command File
+### Recommended: let a coding agent wrap it for you
 
-Create a file named `messaging_app_1/_commands/send_message.py`. This file tells `fastWorkflow` how to handle the `send_message` command.
+The fastest path for a non-trivial app is the **[integrate-chat-agent](./fastworkflow/docs/integrate-chat-agent) skill** with Cursor or Claude Code:
+
+```text
+Open fastworkflow/docs/integrate-chat-agent/SKILL.md
+Prompt: "Integrate a fastWorkflow chat agent for OrderService in orders.py"
+```
+
+The agent introspects your code and generates `_commands/cancel_order.py`, `_commands/get_order_status.py`, the `context_inheritance_model.json`, and env scaffolding — then trains and smoke-tests it with you. **Your `orders.py` is never modified.**
+
+### Or write a command wrapper by hand (~5 minutes per command)
 
 ```python
+# _commands/cancel_order.py  ← new file; wraps your existing code
 import fastworkflow
 from fastworkflow.train.generate_synthetic import generate_diverse_utterances
 from pydantic import BaseModel, Field
 
-from ..application.send_message import send_message
+from your_app.orders import OrderService
 
-# the signature class defines our intent
+
 class Signature:
     class Input(BaseModel):
-        to: str = Field(
-            description="Who are you sending the message to",
-            examples=['jsmith@abc.com', 'jane.doe@xyz.edu'],
-            pattern=r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
+        order_id: str = Field(
+            description="The order ID to cancel",
+            examples=["44821", "ORD-2024-001"],
+            default="NOT_FOUND",          # missing → fastWorkflow asks instead of guessing
         )
-        message: str = Field(
-            description="The message you want to send",
-            examples=['Hello, how are you?', 'Hi, reaching out to discuss fastWorkflow'],
-            min_length=3,
-            max_length=500
+        refund_method: str = Field(
+            description="How to refund the customer",
+            examples=["store_credit", "original_payment"],
+            default="original_payment",
         )
 
     plain_utterances = [
-        "Tell john@fastworkflow.ai that the demo is ready for review",
+        "Cancel order #44821 and give store credit",
+        "cancel that blue jacket order, I want credit not a refund",
     ]
 
     @staticmethod
     def generate_utterances(workflow: fastworkflow.Workflow, command_name: str) -> list[str]:
-        """This function will be called by the framework to generate utterances for training"""
-        return [
-            command_name.split('/')[-1].lower().replace('_', ' ')
-        ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
+        return [command_name.split("/")[-1].lower().replace("_", " ")] + \
+            generate_diverse_utterances(Signature.plain_utterances, command_name)
 
-# the response generator class processes the command
-class ResponseGenerator:
-    def _process_command(self, workflow: fastworkflow.Workflow, input: Signature.Input) -> None:
-        """Helper function that actually executes the send_message function.
-           It is not required by fastworkflow. You can do everything in __call__().
-        """
-        # Call the application function
-        send_message(to=input.to, message=input.message)
-
-    def __call__(self, workflow: 
-                 fastworkflow.Workflow, 
-                 command: str, 
-                 command_parameters: Signature.Input) -> fastworkflow.CommandOutput:
-        """The framework will call this function to process the command"""
-        self._process_command(workflow, command_parameters)
-        
-        response = (
-            f'Response: The message was printed to the screen'
-        )
-
-        return fastworkflow.CommandOutput(
-            command_responses=[
-                fastworkflow.CommandResponse(response=response)
-            ]
-        )
-```
-
-### Step 5: Setup the env and password files
-
-- Make sure you have the examples folder from fetching the 'hello_world' workflow
-- Copy fastworkflow.env from examples folder to ./messaging_app_1
-- Copy fastworkflow.passwords.env from examples folder to ./messaging_app_1
-    - Update the API keys for the LLM you are using in fastworkflow.passwords.env 
-
----
-
-### Step 6: Train and Run
-
-Your manual workflow is ready!
-```sh
-# Train the workflow
-fastworkflow train ./messaging_app_1 ./messaging_app_1/fastworkflow.env ./messaging_app_1/fastworkflow.passwords.env
-
-# Run the workflow
-fastworkflow run ./messaging_app_1 ./messaging_app_1/fastworkflow.env ./messaging_app_1/fastworkflow.passwords.env
-```
-
----
-
-## Refining Your Workflow
-
-### Calling class methods and initializing the class instance to set the context
-This will allow you to move beyond a flat set of tools (global functions) and organize your tools into logical contexts that maintain state
-
-- [Building stateful AI agents with fastworkflow - from functions to classes](fastworkflow-article-2.md)
-
-### Adding class inheritance with command_context_model.json
-If you have a non-trivial application, your AI agent will have to understand the inheritance relationships between different types of objects in your application
-
-- [Leveraging class inheritance in fastWorkflow - building advanced AI agents](fastworkflow-article-3.md)
-
-### Adding context hierarchies with context_inheritance_model.json
-Contexts are layered! Command handling should start with the current context, but move up the context hierarchy when the current context cannot handle the command. Learn how to build sophisticated agentic applications that support context hierarchies and expose aggregation relationships in object models. 
-- [Building complex context hierarchies in fastWorkflow - Advanced AI agents](fastworkflow-article-4.md)
-
----
-
-### Using DSPy for Response Generation
-
-fastWorkflow integrates seamlessly with DSPy to leverage LLM capabilities for response generation. The `dspy_utils.py` module provides a convenient bridge between Pydantic models and DSPy signatures:
-
-```python
-# In your command file
-from fastworkflow.utils.dspy_utils import dspySignature
-import dspy
 
 class ResponseGenerator:
-    def __call__(self, workflow, command_parameters: Signature.Input) -> fastworkflow.CommandOutput:
-        # 1. Define your signature and dspy function
-        dspy_signature_class = dspySignature(Signature.Input, Signature.Output)
-        dspy_predict_func = dspy.Predict(dspy_signature_class)
-        
-        # 2. Get prediction from DSPy module
-        prediction = dspy_predict_func(command_parameters)
-        
-        # 3. Create output directly using ** unpacking
-        output = Signature.Output(**prediction)
-        
+    def __call__(
+        self,
+        workflow: fastworkflow.Workflow,
+        command: str,
+        command_parameters: Signature.Input,
+    ) -> fastworkflow.CommandOutput:
+        result = OrderService().cancel_order(
+            order_id=command_parameters.order_id,
+            refund_method=command_parameters.refund_method,
+        )
         return fastworkflow.CommandOutput(
-            command_responses=[
-                fastworkflow.CommandResponse(response=output.model_dump_json())
-            ]
+            command_responses=[fastworkflow.CommandResponse(response=str(result))]
         )
 ```
 
-The `dspySignature` function automatically:
+Then `fastworkflow train` and `fastworkflow run` against your workflow directory. That's the entire integration pattern: a thin command layer over code you already have.
 
-- Maps your Pydantic model fields to DSPy input/output fields
-- Preserves field types (or converts to strings if `preserve_types=False`)
-- Transfers field descriptions to DSPy for better prompting
-- Generates instructions based on field metadata (defaults, examples)
-- Handles optional fields correctly
+> [!tip]
+> Prefer to learn by building the smallest possible workflow by hand first? `fastworkflow examples fetch messaging_app_1` is a minimal, fully-worked single-command workflow you can read end-to-end.
 
-This approach maintains type safety while benefiting from DSPy's optimization capabilities, allowing you to easily switch between deterministic logic and AI-powered responses without changing your command interface.
+---
 
-### Using Startup Commands and Actions
+## How complex workflows scale: context hierarchies
 
-fastWorkflow supports initializing your workflow with a startup command or action when launching the application. This is useful for setting up the initial context, loading data, or performing any necessary initialization before user interaction begins.
+At 5 tools, a frontier model is reliable. At 40 — a realistic enterprise workflow — accuracy drops: the model sees every tool in the prompt and starts choosing valid-but-wrong ones.
 
-#### Startup Commands
+fastWorkflow keeps the active toolset small by modeling your application's object model as **contexts**. The agent only sees tools relevant to the *current* context:
 
-A startup command is a simple string that gets executed as if the user had typed it:
-
-```sh
-# Run with a startup command
-fastworkflow run my_workflow/ .env passwords.env --startup_command "initialize project"
+```text
+User                                ← always visible
+├── search_orders()
+├── get_customer_info()
+│
+└── Order        (active once an order is selected)
+    ├── cancel_order()
+    ├── update_address()
+    │
+    └── Refund   (active during a refund flow)
+        ├── issue_store_credit()
+        ├── issue_original_payment()
+        └── escalate_to_human()
 ```
 
-The startup command will be processed before any user input, and its output will be displayed to the user. This is ideal for simple initialization tasks like:
-- Setting the initial context
-- Loading default data
-- Displaying welcome messages or available commands
-
-#### Startup Actions
-
-For more complex initialization needs, you can use a startup action defined in a JSON file:
-
-```sh
-# Run with a startup action defined in a JSON file
-fastworkflow run my_workflow/ .env passwords.env --startup_action startup_action.json
-```
-
-The action JSON file should define a valid fastWorkflow Action object:
+Context relationships live in **one file**, `context_inheritance_model.json` — not code. Each entry uses `base` (parent contexts whose commands are inherited) and optionally `/` (commands declared directly on the context):
 
 ```json
 {
-  "command_context": "YourContextClass",
-  "command_name": "initialize",
-  "command_parameters": {
-    "param1": "value1",
-    "param2": "value2"
+  "Order": {
+    "base": ["User"]
+  },
+  "Refund": {
+    "base": ["Order"]
   }
 }
 ```
 
-Startup actions provide more control than startup commands because:
-- They bypass the intent detection phase
-- They can specify exact parameter values
-- They target a specific command context directly
-
-#### Important Notes
-
-- You cannot use both `--startup_command` and `--startup_action` simultaneously
-- Startup commands and actions are executed before the first user prompt appears
-- If a startup command or action fails, an error will be displayed, but the application will continue running
-- The `--keep_alive` flag (default: true) ensures the workflow continues running after the startup command completes
-
-For workflows with complex initialization requirements, creating a dedicated startup or initialize command in your `_commands` directory is recommended.
-
-> [!tip]
-> **Running in Headless Mode:**  
-> To run a workflow non-interactively (headless mode), provide a startup command or action and set `--keep_alive` to `False`:
-> ```sh
-> # Run a workflow that executes a command and exits
-> fastworkflow run my_workflow/ .env passwords.env --startup_command "process data" --keep_alive False
-> 
-> # Or with a startup action file
-> fastworkflow run my_workflow/ .env passwords.env --startup_action process_action.json --keep_alive False
-> ```
-> This is useful for scheduled tasks, CI/CD pipelines, or batch processing where you want the workflow to perform specific actions and terminate automatically when complete.
-
-> [!tip]
-> **Implementing a UI Chatbot using fastWorkflow:**  
-> Refer to the fastworkflow.run.__main__.py file in fastworkflow's repo for a reference implementation of a the command loop. You can use this as a starting point to build your own UI chatbot.
+This is what lets small models stay accurate as your app grows — and what keeps frontier models from drowning in tool definitions.
 
 ---
 
-### Running FastWorkflow as a FastAPI Service
+## Production deployment
 
-For production deployments and integrations, fastWorkflow provides a FastAPI-based HTTP service via the `run_fastapi_mcp` module. This exposes your workflow as REST endpoints with JWT authentication, SSE streaming, and MCP (Model Context Protocol) support.
+### Pattern 1 — host it as a FastAPI service (recommended)
 
-> [!note]
-> The FastAPI-MCP service requires the optional `server` extra: `pip install "fastworkflow[server]"` (or `poetry install --extras server`). Running `fastworkflow run_fastapi_mcp` without it fails fast with a clear install hint.
+Expose your workflow over HTTP with JWT auth, SSE/NDJSON streaming, and MCP support:
 
 ```sh
-# Run the FastAPI service
+pip install "fastworkflow[server]"
+
 python -m fastworkflow.run_fastapi_mcp \
-  --workflow_path ./my_workflow \
+  --workflow_path ./order_agent \
   --env_file_path ./fastworkflow.env \
   --passwords_file_path ./fastworkflow.passwords.env \
   --port 8000
 ```
 
-The service provides endpoints for:
-- `/initialize` - Create a new session and obtain JWT tokens
-- `/invoke_agent` - Submit natural language queries to the agent
-- `/invoke_agent_stream` - Stream responses via SSE or NDJSON
-- `/perform_action` - Execute workflow actions directly
-- `/conversations` - Manage conversation history
+Key endpoints: `/initialize` (create session + JWT), `/invoke_agent`, `/invoke_agent_stream` (SSE/NDJSON), `/invoke_assistant` (deterministic, non-agentic), `/perform_action` (direct programmatic calls), `/new_conversation`, `/conversations`, `/probes/healthz`, `/probes/readyz`.
 
-#### Kubernetes Liveness and Readiness Probes
+### Pattern 2 — embed the core in an existing app
 
-When deploying fastWorkflow in Kubernetes, the service provides dedicated probe endpoints for health monitoring:
+The execution core is synchronous and transport-free. Create one `WorkflowExecutionContext` per session and call `process_message` per turn:
 
-**Liveness Probe (`/probes/healthz`)**
+```python
+import fastworkflow
+from dotenv import dotenv_values
+from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
-Determines whether the container is still running. If this probe fails, Kubernetes will restart the container.
+# Load env + secrets once at startup
+env_vars = {
+    **dotenv_values("fastworkflow.env"),
+    **dotenv_values("fastworkflow.passwords.env"),
+}
+fastworkflow.init(env_vars=env_vars)
 
-```sh
-curl http://localhost:8000/probes/healthz
-# Response: {"status": "alive"}
+# One context + bound workflow per session
+ctx = WorkflowExecutionContext(run_as_agent=True, session_key="user-123")
+app_workflow = fastworkflow.Workflow.create("./order_agent", workflow_id_str="user-123")
+ctx.bind_app_workflow(app_workflow)
+
+@app.post("/chat")
+def chat(message: str):
+    output = ctx.process_message(message)        # synchronous; run in a worker thread under async
+    return {"response": output.command_responses[0].response}
 ```
 
-**Readiness Probe (`/probes/readyz`)**
+### Pattern 3 — Kubernetes
 
-Checks whether the container is ready to accept traffic. Kubernetes only routes traffic to containers that pass this check.
-
-```sh
-curl http://localhost:8000/probes/readyz
-# Response (ready): {"status": "ready", "checks": {"ready": true, "fastworkflow_initialized": true, "workflow_path_valid": true}}
-# Response (not ready): {"status": "not_ready", "checks": {"ready": false, ...}}
-```
-
-The readiness probe returns:
-- `200 OK` when the application is ready to serve traffic
-- `503 Service Unavailable` when not ready (e.g., during startup)
-
-**Example Kubernetes Configuration**
+The service ships liveness/readiness probes out of the box. `/probes/readyz` returns `503` until the intent models are loaded, so traffic isn't routed before the agent is actually ready:
 
 ```yaml
-apiVersion: apps/v1
-kind: Deployment
-spec:
-  template:
-    spec:
-      containers:
-        - name: fastworkflow
-          livenessProbe:
-            httpGet:
-              path: /probes/healthz
-              port: 8000
-            initialDelaySeconds: 10
-            periodSeconds: 10
-            failureThreshold: 5
-            timeoutSeconds: 3
-          readinessProbe:
-            httpGet:
-              path: /probes/readyz
-              port: 8000
-            initialDelaySeconds: 5
-            periodSeconds: 5
-            failureThreshold: 3
-            timeoutSeconds: 3
+livenessProbe:
+  httpGet: { path: /probes/healthz, port: 8000 }
+  initialDelaySeconds: 10
+  periodSeconds: 10
+readinessProbe:
+  httpGet: { path: /probes/readyz, port: 8000 }
+  initialDelaySeconds: 5
+  periodSeconds: 5
 ```
 
-> [!note]
-> Probe endpoints do not require authentication and are excluded from request logging when returning 200 status to avoid excessive log noise from frequent Kubernetes health checks.
+---
 
-#### Using LiteLLM Proxy
+## Developer FAQ
 
-FastWorkflow supports routing LLM calls through a [LiteLLM Proxy](https://docs.litellm.ai/docs/simple_proxy) server. This is useful when you want to:
-- Centralize API key management
-- Use a unified endpoint for multiple LLM providers
-- Route requests through a corporate proxy with custom configurations
+**Do I need a GPU?**
+No. Intent detection (BERT/DistilBERT) runs on CPU in milliseconds. LLM calls go to whatever API you configure.
 
-To use LiteLLM Proxy, set your model strings to use the `litellm_proxy/` prefix and configure the proxy URL:
+**Does training re-run on every deploy?**
+No. `fastworkflow train` runs once per command set and writes artifacts to `___command_info/`. Bake those into your Docker image or CI artifact store; re-train only when you add or change commands.
+
+**What actually ships to production?**
+Your application code + your `_commands/` wrappers + the trained `___command_info/` artifacts (small BERT checkpoints). No GPU at runtime.
+
+**Can I use Claude / GPT-4o / Bedrock instead of Mistral?**
+Yes. fastWorkflow uses LiteLLM, so any provider works — set e.g. `LLM_AGENT=openai/gpt-4o` in `fastworkflow.env`. You can use different models for different roles (intent vs. extraction vs. response vs. planning).
+
+**Can I route through a corporate LiteLLM proxy?**
+Yes — prefix models with `litellm_proxy/` and set `LITELLM_PROXY_API_BASE`. See [Using LiteLLM Proxy](#using-litellm-proxy).
+
+**What if a user asks something out of scope?**
+Intent detection returns low confidence and fastWorkflow surfaces a clarification — it does not hallucinate a tool call. That's the core reliability guarantee.
+
+**Can commands call REST APIs or databases, not just Python functions?**
+Yes. `ResponseGenerator.__call__` is plain Python — call `requests`, `httpx`, an ORM, gRPC stubs, anything. fastWorkflow owns the NLP layer; your business logic is unrestricted.
+
+---
+
+## Key concepts (going deeper)
+
+**Adaptive intent understanding** — Misunderstandings happen in every conversation. fastWorkflow does 1-shot adaptation from intent-detection mistakes, learning your conversational vocabulary as you interact; corrections can be persisted to improve the model across sessions.
+
+**Signatures** — Pydantic `BaseModel` + `Field` (à la [DSPy](https://dspy.ai)) is the contract between natural language and your code. Strong descriptions and `examples` directly improve extraction accuracy, and the same schema feeds DSPy integration.
+
+**Context navigation at runtime** — Classes hold state; method availability can change with state. fastWorkflow enables/disables commands and navigates object hierarchies at run-time, which is what makes complex, finite-state workflows possible.
+
+**Deep code understanding** — fastWorkflow understands classes, methods, inheritance, and aggregation, so you can AI-enable large-scale Python applications by mapping them onto contexts and commands.
+
+**DSPy for response generation** — use `dspy.Predict` inside `ResponseGenerator` when deterministic logic isn't enough; `dspySignature` bridges your Pydantic models to DSPy signatures while preserving types, descriptions, and examples:
+
+```python
+from fastworkflow.utils.dspy_utils import dspySignature
+import dspy
+
+dspy_sig = dspySignature(Signature.Input, Signature.Output)
+prediction = dspy.Predict(dspy_sig)(command_parameters)
+```
+
+**Startup commands & headless mode** — initialize context or run non-interactively (batch/CI) by combining a startup command/action with `--keep_alive False`:
+
+```sh
+fastworkflow run my_workflow/ .env passwords.env \
+  --startup_command "process daily report" --keep_alive False
+```
+
+Deep-dive articles:
+- [From functions to classes: building stateful AI agents](fastworkflow-article-2.md)
+- [Leveraging class inheritance in fastWorkflow](fastworkflow-article-3.md)
+- [Building complex context hierarchies](fastworkflow-article-4.md)
+
+---
+
+## Architecture overview
+
+fastWorkflow separates **build-time**, **train-time**, and **run-time**. At build-time you create a command interface from your code (recommended via the [integrate-chat-agent](./fastworkflow/docs/integrate-chat-agent) skill). `train` builds the NLP models; `run` executes the workflow. Your existing code is never modified — fastWorkflow sits as a layer on top.
+
+```mermaid
+graph LR
+    subgraph A[Build-Time]
+        A1(Your Python App) --> A2{Coding Agent + integrate-chat-agent skill};
+        A2 --> A3(Generated _commands);
+        A3 --> A4(context_inheritance_model.json);
+        A4 --> A5(Review & refine);
+    end
+
+    subgraph B[Train-Time — runs once per command set]
+        B1(_commands) --> B2{fastworkflow train};
+        B2 --> B3(Trained models in ___command_info);
+    end
+
+    subgraph C[Run-Time — per request]
+        C1(User/Agent input) --> C2{Intent detection + validation\nBERT, CPU};
+        C2 --> C3{Parameter extraction + Pydantic validation};
+        C3 -->|missing/ambiguous| C4(Clarification prompt);
+        C3 -->|valid| C5(CommandExecutor);
+        C5 --> C6(Your app logic — DSPy or deterministic);
+        C6 --> C7(Response);
+    end
+
+    A --> B --> C
+```
+
+### Directory structure
 
 ```
-# In fastworkflow.env - use the litellm_proxy/ prefix for model names
+order_agent/                         # <-- The workflow_folderpath
+├── application/                     # <-- Your app code (untouched)
+│   └── orders.py
+├── _commands/                       # <-- Command wrappers (generated + edited)
+│   ├── cancel_order.py
+│   └── context_inheritance_model.json
+├── ___command_info/                 # <-- Trained models (generated by `train`)
+├── ___convo_info/                   # <-- Conversation logs (run-time)
+└── ___workflow_contexts/            # <-- Session state (run-time)
+
+fastworkflow.env                     # model strings, logging, intent model ids
+fastworkflow.passwords.env           # API keys
+```
+
+> [!tip]
+> Add `___workflow_contexts`, `___command_info`, and `___convo_info` to your `.gitignore`.
+
+---
+
+## Installation
+
+```sh
+pip install fastworkflow              # core (CPU inference, plain litellm client)
+pip install "fastworkflow[server]"    # adds the FastAPI/MCP HTTP service
+pip install "fastworkflow[training]"  # adds HuggingFace datasets for the train step
+# Or with uv: uv pip install fastworkflow
+```
+
+**Notes**
+- Linux/macOS only — on Windows use WSL. Python 3.11+.
+- Installs PyTorch; the first install may take a few minutes.
+- `fastworkflow train` needs the optional HuggingFace `datasets` package (`pip install datasets`, or `poetry install --with dev` from this repo).
+
+The core depends on **plain** `litellm` (client only — no proxy server stack), so it co-installs cleanly with downstream apps that pin a plain `litellm`. Server-only deps live behind the `server` extra.
+
+### Dependency compatibility
+
+| Package | Supported range | Notes |
+|---|---|---|
+| `transformers` | `>=4.48.2,<6.0.0` | Works on transformers 5.x (BERT/DistilBERT load natively) |
+| `dspy` | `>=3.0.1,<4.0.0` | DSPy 3.x API |
+| `openai` | `>=2.8.0` | Compatible with openai 2.x |
+| `litellm` | `>=1.83.7,<2.0.0` | Client only; FastAPI server deps are in the `server` extra |
+| `sentence-transformers` | not a dependency | imposes no constraint downstream |
+
+The intent-detection base models are configurable via `INTENT_DETECTION_TINY_MODEL` / `INTENT_DETECTION_LARGE_MODEL`.
+
+---
+
+## CLI reference
+
+```sh
+# Examples
+fastworkflow examples list
+fastworkflow examples fetch hello_world
+
+# Train intent-detection models (once per command set)
+fastworkflow train <workflow_dir> <env_file> <passwords_file>
+
+# Run — agentic mode is the default
+fastworkflow run <workflow_dir> <env_file> <passwords_file>
+fastworkflow run <workflow_dir> <env_file> <passwords_file> --assistant   # deterministic, non-agentic
+
+# Headless (batch/CI)
+fastworkflow run <workflow_dir> <env_file> <passwords_file> \
+  --startup_command "your command" --keep_alive False
+
+# Host as a FastAPI/MCP service
+python -m fastworkflow.run_fastapi_mcp --workflow_path ./wf --port 8000
+```
+
+> [!tip]
+> Prefix a natural-language command with `/` during an interactive run to force deterministic (non-agentic) execution. Add `--help` to any command for its full options.
+
+---
+
+## Environment variables reference
+
+Two files per workflow (templates ship with `fastworkflow examples fetch`).
+
+### `fastworkflow.env`
+
+| Variable | Purpose | When needed | Default |
+|:---|:---|:---|:---|
+| `SPEEDDICT_FOLDERNAME` | Directory name for workflow contexts | Always | `___workflow_contexts` |
+| `LOG_LEVEL` | Log level (`DEBUG`…`CRITICAL`) | Optional | `INFO` |
+| `LLM_SYNDATA_GEN` | Model for synthetic utterance generation | `train` | `mistral/mistral-small-latest` |
+| `LLM_PARAM_EXTRACTION` | Model for parameter extraction | `train`, `run` | `mistral/mistral-small-latest` |
+| `LLM_RESPONSE_GEN` | Model for response generation | `run` | `mistral/mistral-small-latest` |
+| `LLM_PLANNER` | Model for the agent's task planner | `run` (agent) | `mistral/mistral-small-latest` |
+| `LLM_AGENT` | Model for the DSPy agent | `run` (agent) | `mistral/mistral-small-latest` |
+| `LLM_CONVERSATION_STORE` | Model for conversation topic/summary | FastAPI service | `mistral/mistral-small-latest` |
+| `LITELLM_PROXY_API_BASE` | LiteLLM Proxy URL | with `litellm_proxy/` models | *not set* |
+| `INTENT_DETECTION_TINY_MODEL` | HF id for the small intent model | `train` (optional) | `google/bert_uncased_L-4_H-128_A-2` |
+| `INTENT_DETECTION_LARGE_MODEL` | HF id for the large intent model | `train` (optional) | `distilbert-base-uncased` |
+
+### `fastworkflow.passwords.env`
+
+| Variable | For | When needed |
+|:---|:---|:---|
+| `LITELLM_API_KEY_SYNDATA_GEN` | `LLM_SYNDATA_GEN` | `train` |
+| `LITELLM_API_KEY_PARAM_EXTRACTION` | `LLM_PARAM_EXTRACTION` | `train`, `run` |
+| `LITELLM_API_KEY_RESPONSE_GEN` | `LLM_RESPONSE_GEN` | `run` |
+| `LITELLM_API_KEY_PLANNER` | `LLM_PLANNER` | `run` (agent) |
+| `LITELLM_API_KEY_AGENT` | `LLM_AGENT` | `run` (agent) |
+| `LITELLM_API_KEY_CONVERSATION_STORE` | `LLM_CONVERSATION_STORE` | FastAPI service |
+| `LITELLM_PROXY_API_KEY` | shared LiteLLM Proxy key | with `litellm_proxy/` models |
+
+### Using LiteLLM Proxy
+
+Route LLM calls through a [LiteLLM Proxy](https://docs.litellm.ai/docs/simple_proxy) to centralize keys or unify providers — prefix model strings with `litellm_proxy/`:
+
+```sh
+# fastworkflow.env
 LLM_AGENT=litellm_proxy/bedrock_mistral_large_2407
-LLM_PARAM_EXTRACTION=litellm_proxy/bedrock_mistral_large_2407
 LITELLM_PROXY_API_BASE=http://127.0.0.1:4000
-
-# In fastworkflow.passwords.env - shared key for proxy authentication
+# fastworkflow.passwords.env
 LITELLM_PROXY_API_KEY=your-proxy-api-key
 ```
 
-The model name after `litellm_proxy/` (e.g., `bedrock_mistral_large_2407`) is passed to your proxy server, which routes it to the actual provider based on its configuration.
-
-> [!note]
-> When using `litellm_proxy/` models, the per-role API keys (`LITELLM_API_KEY_*`) are ignored. All proxied calls use the shared `LITELLM_PROXY_API_KEY` instead. You can mix proxied and direct models - only models with the `litellm_proxy/` prefix are routed through the proxy.
-
----
-
-## AI-Enabling Your App with a Coding Agent
-
-After understanding the manual process, you don't have to write every command file by hand. The recommended way to AI-enable a non-trivial application is to use the **[integrate-chat-agent](./fastworkflow/docs/integrate-chat-agent) skill** with a coding agent such as Cursor or Claude Code.
-
-The skill walks your coding agent through the full integration end-to-end:
-
-1. **Discover** the business logic your app exposes and map each capability to a class + method or function.
-2. **Scaffold** the workflow directory (`application/`, `_commands/`, env files) next to your app code.
-3. **Author the command files** and `context_inheritance_model.json` for every capability, using strong Pydantic `Field` descriptions and `default="NOT_FOUND"` so missing parameters are detected rather than hallucinated.
-4. **Set up the env files** and pause for you to add your LLM API keys.
-5. **Train** the intent-detection models and **smoke-test** the agent from the CLI.
-6. Optionally **host the FastAPI streaming service** and **build a popup chat UI** so your app's users can drive the business logic in natural language.
-
-To get started, point your coding agent at the skill:
-
-- In **Cursor / Claude Code**, open the skill at [`fastworkflow/docs/integrate-chat-agent/SKILL.md`](./fastworkflow/docs/integrate-chat-agent/SKILL.md) and ask the agent to "integrate a fastWorkflow chat agent into this app."
-- The agent generates the command files (e.g. a `greet.py` command, `get_properties`/`set_properties` for properties, the `context_inheritance_model.json`, and more) by introspecting your code, then reviews and refines them with you — accomplishing in minutes what we did manually above.
-
-See [reference.md](./fastworkflow/docs/integrate-chat-agent/reference.md) for the command-file structure, context-model format, and the FastAPI HTTP/streaming contracts the chat UI consumes.
-
-> [!note]
-> The legacy `fastworkflow build` CLI command (a one-shot introspection tool that required manually correcting the generated code) is deprecated in favor of the skill-driven workflow above, which produces higher-quality commands and guides you through training, hosting, and UI integration.
-
----
-
-## Environment Variables Reference
-
-### Environment Variables
-
-| Variable | Purpose | When Needed | Default |
-|:---|:---|:---|:---|
-| `SPEEDDICT_FOLDERNAME` | Directory name for workflow contexts | Always | `___workflow_contexts` |
-| `LOG_LEVEL` | Logging level for fastWorkflow and uvicorn (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`) | Optional | `INFO` |
-| `LLM_SYNDATA_GEN` | LiteLLM model string for synthetic utterance generation | `train` | `mistral/mistral-small-latest` |
-| `LLM_PARAM_EXTRACTION` | LiteLLM model string for parameter extraction | `train`, `run` | `mistral/mistral-small-latest` |
-| `LLM_RESPONSE_GEN` | LiteLLM model string for response generation | `run` | `mistral/mistral-small-latest` |
-| `LLM_PLANNER` | LiteLLM model string for the agent's task planner | `run` (agent mode) | `mistral/mistral-small-latest` |
-| `LLM_AGENT` | LiteLLM model string for the DSPy agent | `run` (agent mode) | `mistral/mistral-small-latest` |
-| `LLM_CONVERSATION_STORE` | LiteLLM model string for conversation topic/summary generation | FastAPI service | `mistral/mistral-small-latest` |
-| `LITELLM_PROXY_API_BASE` | URL of your LiteLLM Proxy server | When using `litellm_proxy/` models | *not set* |
-| `INTENT_DETECTION_TINY_MODEL` | HuggingFace model id for the small intent-detection model | `train` (optional) | `google/bert_uncased_L-4_H-128_A-2` |
-| `INTENT_DETECTION_LARGE_MODEL` | HuggingFace model id for the large intent-detection model | `train` (optional) | `distilbert-base-uncased` |
-| `NOT_FOUND` | Placeholder value for missing parameters during extraction | Always | `"NOT_FOUND"` |
-| `MISSING_INFORMATION_ERRMSG` | Error message prefix for missing parameters | Always | `"Missing required..."` |
-| `INVALID_INFORMATION_ERRMSG` | Error message prefix for invalid parameters | Always | `"Invalid information..."` |
-
-### Password/API Key Variables
-
-| Variable | Purpose | When Needed | Default |
-|:---|:---|:---|:---|
-| `LITELLM_API_KEY_SYNDATA_GEN`| API key for the `LLM_SYNDATA_GEN` model | `train` | *required* |
-| `LITELLM_API_KEY_PARAM_EXTRACTION`| API key for the `LLM_PARAM_EXTRACTION` model | `train`, `run` | *required* |
-| `LITELLM_API_KEY_RESPONSE_GEN`| API key for the `LLM_RESPONSE_GEN` model | `run` | *required* |
-| `LITELLM_API_KEY_PLANNER`| API key for the `LLM_PLANNER` model | `run` (agent mode) | *required* |
-| `LITELLM_API_KEY_AGENT`| API key for the `LLM_AGENT` model | `run` (agent mode) | *required* |
-| `LITELLM_API_KEY_CONVERSATION_STORE`| API key for the `LLM_CONVERSATION_STORE` model | FastAPI service | *required* |
-| `LITELLM_PROXY_API_KEY`| Shared API key for authenticating with LiteLLM Proxy | When using `litellm_proxy/` models | *optional* |
-
-> [!tip]
-> The example workflows are configured to use Mistral's models by default. You can get a free API key from [Mistral AI](https://mistral.ai) that works with the `mistral-small-latest` model.
+When a model uses the `litellm_proxy/` prefix, the per-role keys are ignored and the shared proxy key is used. You can mix proxied and direct models.
 
 ---
 
 ## Troubleshooting / FAQ
 
-> **`PARAMETER EXTRACTION ERROR`**
-> This means the LLM failed to extract the required parameters from your command. The error message will list the missing or invalid fields. Rephrase your command to be more specific.
+> **`PARAMETER EXTRACTION ERROR`** — the LLM couldn't extract a required parameter. Rephrase more specifically, or strengthen the `Field(description=…, examples=[…])` in your Signature.
 
-> **`CRASH RUNNING FASTWORKFLOW`**
-> This happens when the ___workflow_contexts folder gets corrupted. Delete it and run again.
+> **`CRASH RUNNING FASTWORKFLOW`** — the `___workflow_contexts` folder is corrupted. Delete it and re-run.
 
-> **Slow Training**
-> Training involves generating synthetic utterances, which requires multiple LLM calls, making it inherently time-consuming. The first run may also be slow due to model downloads from Hugging Face. Subsequent runs will be faster. Set `export HF_HOME=/path/to/cache` to control where models are stored. Training a small workflow takes ~5-8 minutes on a modern CPU.
+> **Slow first training run** — the first run downloads BERT/DistilBERT from HuggingFace and makes LLM calls for synthetic-utterance generation. Set `HF_HOME=/path/to/cache` to control model storage; later runs skip the download. A small workflow trains in ~5–8 minutes on CPU.
 
-> **Missing API Keys**
-> If you see errors about missing environment variables or API keys, make sure you've added your API keys to the `fastworkflow.passwords.env` file as described in the Quick Start guide.
-
-> **Commands are not recognized**
-> Check the command implementation for import or syntax errors. If the command module cannot be loaded, it will not show up
+> **Commands not recognized** — a command module with an import/syntax error won't load and won't appear as an intent. Check your `_commands/*.py` files.
 
 > [!tip]
-> To debug command files and fastWorkflow code, set up vscode launch.json, set `justmycode` to False, add breakpoints, and run in debug mode
+> To debug command files, set up a VSCode `launch.json` with `justMyCode: false`, add breakpoints, and run in debug mode.
 
 ---
 
-## For Contributors
+## For contributors
 
-Interested in contributing to `fastWorkflow` itself? Great!
+```sh
+git clone https://github.com/radiantlogicinc/fastworkflow.git
+cd fastworkflow
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+```
 
-1.  **Clone the repository:** `git clone https://github.com/your-repo/fastworkflow.git`
-2.  **Set up the environment:** Create a virtual environment using your preferred tool (venv, uv, conda, poetry, etc.) with Python 3.11+
-3.  **Install in editable mode with dev dependencies:** `pip install -e .` or `uv pip install -e ".[dev]"`
-4.  **[Join our Discord](https://discord.gg/k2g58dDjYR):** Ask questions, discuss functionality, showcase your fastWorkflows
+[Join our Discord](https://discord.gg/k2g58dDjYR) — ask questions, discuss functionality, and showcase your fastWorkflows.
 
 ---
 
-## Our work
+## Our work & references
 
-- [Optimizing intent classifiction with a sentence transformer pipeline architecture - 1/2](https://medium.com/@adihbhatt04/optimizing-intent-classification-with-a-sentence-transformer-pipeline-architecture-part-2-pca-f353e68696ab)
-
-- [Optimizing intent classifiction with a sentence transformer pipeline architecture - 2/2](https://medium.com/@adihbhatt04/optimizing-intent-classification-with-a-sentence-transformer-pipeline-architecture-part-1-586192b25d42)
-
-- [Structured understanding - A comparative study of parameter extraction across leading llms](https://medium.com/@sanchitsatija55/structured-understanding-a-comparative-study-of-parameter-extraction-across-leading-llms-8e65b0333ddf)
-
+- [Optimizing intent classification with a sentence-transformer pipeline — Part 1](https://medium.com/@adihbhatt04/optimizing-intent-classification-with-a-sentence-transformer-pipeline-architecture-part-2-pca-f353e68696ab)
+- [Optimizing intent classification with a sentence-transformer pipeline — Part 2](https://medium.com/@adihbhatt04/optimizing-intent-classification-with-a-sentence-transformer-pipeline-architecture-part-1-586192b25d42)
+- [Structured understanding: parameter extraction across leading LLMs](https://medium.com/@sanchitsatija55/structured-understanding-a-comparative-study-of-parameter-extraction-across-leading-llms-8e65b0333ddf)
 - [A generalized parameter extraction framework](https://medium.com/@sanchitsatija55/a-generalized-parameter-extraction-framework-dab9adfd1eef)
-
----
-
-## References
-
-- [DSPy - Compiling Declarative Language Model Calls into Self-Improving Pipelines](https://arxiv.org/abs/2310.03714)
-
-- [Position: LLMs Can’t Plan, But Can Help Planning in LLM-Modulo Frameworks](https://openreview.net/forum?id=Th8JPEmH4z)
-
-- [Coherence statistics, self-generated experience and why young humans are much smarter than current AI](https://neurips.cc/virtual/2023/invited-talk/73992)
+- [DSPy — Compiling Declarative Language Model Calls into Self-Improving Pipelines](https://arxiv.org/abs/2310.03714)
+- [LLMs Can't Plan, But Can Help Planning in LLM-Modulo Frameworks](https://openreview.net/forum?id=Th8JPEmH4z)
 
 ---
 
 ## License
 
-`fastWorkflow` is released under the Apache License 2.0
+`fastWorkflow` is released under the Apache License 2.0 — see [LICENSE](LICENSE).
