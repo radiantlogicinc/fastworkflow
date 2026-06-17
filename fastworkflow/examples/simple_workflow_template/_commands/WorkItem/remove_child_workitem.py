@@ -88,7 +88,6 @@ class ResponseGenerator:
             response = f"Removed child work item under '{workitem.get_absolute_path()}'."
         
         return CommandOutput(
-            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(response=response)
             ]

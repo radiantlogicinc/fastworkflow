@@ -59,7 +59,6 @@ class ResponseGenerator:
     ) -> CommandOutput:
         output = self._process_command(workflow)
         return CommandOutput(
-            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(response=f"list of product types: {output.status}")
             ],

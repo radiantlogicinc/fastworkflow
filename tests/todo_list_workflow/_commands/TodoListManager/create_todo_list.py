@@ -69,7 +69,6 @@ class ResponseGenerator:
             f'Response: {output.model_dump_json(include={"new_context"})}'
         )
         return CommandOutput(
-            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(response=response)
             ]

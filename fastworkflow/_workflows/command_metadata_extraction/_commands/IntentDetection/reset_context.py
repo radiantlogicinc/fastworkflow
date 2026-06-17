@@ -25,7 +25,6 @@ class ResponseGenerator:  # noqa: D101
         app_workflow = workflow.context["app_workflow"]
         app_workflow.current_command_context = app_workflow.root_command_context
         return CommandOutput(
-            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(
                     response=f"Context is now '{app_workflow.current_command_context_name}'",

@@ -98,7 +98,6 @@ class ResponseGenerator:
         response = f'Enhanced Response: {response_data}'
         
         return CommandOutput(
-            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(response=response)
             ]

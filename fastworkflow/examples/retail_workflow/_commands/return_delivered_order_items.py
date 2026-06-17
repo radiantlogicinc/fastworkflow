@@ -90,7 +90,6 @@ class ResponseGenerator:
             f'Response: return status is: {output.status}'
         )
         return CommandOutput(
-            workflow_id=workflow.id,
             command_responses=[CommandResponse(response=response)],
         )
 

@@ -61,7 +61,6 @@ class ResponseGenerator:
             f'Response: {output.product_details}'
         )
         return CommandOutput(
-            workflow_id=workflow.id,
             command_responses=[CommandResponse(response=response)],
         )
 

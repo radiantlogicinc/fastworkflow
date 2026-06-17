@@ -77,7 +77,6 @@ class ResponseGenerator:
         )
         
         return CommandOutput(
-            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(response=response)
             ]

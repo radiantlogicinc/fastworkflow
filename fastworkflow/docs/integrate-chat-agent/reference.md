@@ -163,7 +163,6 @@ class ResponseGenerator:
         # call the app's real business logic here
         result = <callable_or_class>(...)
         return fastworkflow.CommandOutput(
-            workflow_id=workflow.id,
             command_responses=[fastworkflow.CommandResponse(response=str(result))],
         )
 ```

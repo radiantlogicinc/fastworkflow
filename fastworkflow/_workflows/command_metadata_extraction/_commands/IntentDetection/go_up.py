@@ -33,7 +33,6 @@ class ResponseGenerator:  # noqa: D101
 
         if app_workflow.is_current_command_context_root:
             return CommandOutput(
-                workflow_id=workflow.id,
                 command_responses=[
                     CommandResponse(
                         response="Already at the top-level 'global' context.",
@@ -45,7 +44,6 @@ class ResponseGenerator:  # noqa: D101
         app_workflow.current_command_context = parent_context
 
         return CommandOutput(
-            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(
                     response=f"Context is now '{app_workflow.current_command_context_displayname}'",

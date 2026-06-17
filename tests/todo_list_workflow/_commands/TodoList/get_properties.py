@@ -60,7 +60,6 @@ class ResponseGenerator:
             f'Response: {output.model_dump_json()}'
         )
         return CommandOutput(
-            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(response=response)
             ]

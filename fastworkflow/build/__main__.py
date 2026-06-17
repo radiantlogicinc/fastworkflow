@@ -306,7 +306,6 @@ class ResponseGenerator:
         }}
 
         return CommandOutput(
-            workflow_id=workflow.id,
             command_response=CommandResponse(response=str(response))
         )
 '''

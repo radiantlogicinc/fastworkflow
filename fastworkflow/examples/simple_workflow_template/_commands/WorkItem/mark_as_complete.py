@@ -44,7 +44,6 @@ class ResponseGenerator:
         response = f"Work item '{workitem.get_absolute_path()}' has been marked as {status}."
         
         return CommandOutput(
-            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(response=response)
             ]

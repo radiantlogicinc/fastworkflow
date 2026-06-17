@@ -55,7 +55,6 @@ class ResponseGenerator:
     def __call__(self, workflow: Workflow, command: str, command_parameters: Signature.Input) -> CommandOutput:
         output = self._process_command(workflow, command_parameters)
         return CommandOutput(
-            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(response=output.model_dump_json())
             ]

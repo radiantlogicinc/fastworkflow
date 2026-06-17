@@ -72,7 +72,6 @@ class ResponseGenerator:
             f'Response: Modified details: {output.status}'
         )
         return CommandOutput(
-            workflow_id=workflow.id,
             command_responses=[CommandResponse(response=response)],
         )
 

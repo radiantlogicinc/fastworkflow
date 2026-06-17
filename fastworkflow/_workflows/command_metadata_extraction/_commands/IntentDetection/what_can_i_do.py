@@ -162,7 +162,6 @@ class ResponseGenerator:
             fastworkflow.NLUPipelineStage.INTENT_DETECTION)
         success = nlu_pipeline_stage == fastworkflow.NLUPipelineStage.INTENT_DETECTION
         return fastworkflow.CommandOutput(
-            workflow_id=workflow.id,
             command_responses=[
                 fastworkflow.CommandResponse(
                     response=response,

@@ -130,7 +130,6 @@ def create_function_command_file(function_info: FunctionInfo, output_dir: str, f
     command_file_content += f"    def __call__(self, workflow: Workflow, command: str{call_param}) -> CommandOutput:\n"
     command_file_content += f"        output = self._process_command(workflow{call_arg})\n"
     command_file_content += """        return CommandOutput(
-            workflow_id=workflow.id,
             command_response=CommandResponse(response=output.model_dump_json())
         )
 """
@@ -358,7 +357,6 @@ def create_command_file(class_info, method_info, output_dir, file_name=None, is_
     command_file_content += f"    def __call__(self, workflow: Workflow, command: str{call_param}) -> CommandOutput:\n"
     command_file_content += f"        output = self._process_command(workflow{call_arg})\n"
     command_file_content += """        return CommandOutput(
-            workflow_id=workflow.id,
             command_response=CommandResponse(response=output.model_dump_json())
         )
 """

@@ -55,7 +55,6 @@ class ResponseGenerator:
         output = self._process_command(workflow, command_parameters)
         response = f"Result: {output.result}"
         return CommandOutput(
-            workflow_id=workflow.id,
             command_responses=[CommandResponse(response=response)],
         )
 

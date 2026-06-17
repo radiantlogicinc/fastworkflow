@@ -19,7 +19,6 @@ from fastworkflow import CommandOutput, CommandResponse
 class ResponseGenerator:
     def __call__(self, workflow: fastworkflow.Workflow, command: str) -> CommandOutput:
         return CommandOutput(
-            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(response="Startup executed")
             ]
@@ -64,7 +63,6 @@ class ResponseGenerator:
     def __call__(self, workflow: Workflow, command: str) -> CommandOutput:
         output = self._process_command(workflow)
         return CommandOutput(
-            workflow_id=workflow.id,
             command_responses=[
                 CommandResponse(response=output.model_dump_json())
             ]

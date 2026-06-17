@@ -52,7 +52,6 @@ class ResponseGenerator:
             f'Response: transfer status: {output.status}'
         )
         return CommandOutput(
-            workflow_id=workflow.id,
             command_responses=[CommandResponse(response=response)],
         )
 

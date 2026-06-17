@@ -146,7 +146,6 @@ class ResponseGenerator:
         )
 
         return fastworkflow.CommandOutput(
-            workflow_id=workflow.id,
             command_responses=[
                 fastworkflow.CommandResponse(response=response)
             ]
@@ -218,7 +217,6 @@ class ResponseGenerator:
         )
 
         return fastworkflow.CommandOutput(
-            workflow_id=workflow.id,
             command_responses=[
                 fastworkflow.CommandResponse(response=response)
             ]
