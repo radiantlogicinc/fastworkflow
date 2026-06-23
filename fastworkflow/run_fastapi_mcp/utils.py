@@ -32,6 +32,9 @@ class InitializationRequest(BaseModel):
     stream_format: Optional[str] = None  # "ndjson" | "sse" (default ndjson)
     startup_command: Optional[str] = None  # Mutually exclusive with startup_action
     startup_action: Optional[dict[str, Any]] = None  # Mutually exclusive with startup_command
+    # How long the request blocks for the startup turn before deferring (202).
+    # Same shape/default as InvokeRequest/PerformActionRequest.timeout_seconds.
+    timeout_seconds: int = 60
 
 
 class TokenResponse(BaseModel):
@@ -43,12 +46,22 @@ class TokenResponse(BaseModel):
 
 
 class InitializeResponse(BaseModel):
-    """Response from initialization including tokens and optional startup output"""
+    """Response from initialization including tokens and optional startup output.
+
+    Startup runs as a turn (wait-or-defer). If it finishes within the wait
+    window, ``startup_output`` is present (200). Otherwise it is still running
+    and the caller polls via ``startup_turn_key`` (202). The "already exists"
+    branch returns the SAME startup execution's three-state status, never a
+    silently-empty result (§3.3).
+    """
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
     expires_in: int  # Access token expiration in seconds
-    startup_output: Optional[fastworkflow.CommandOutput] = None  # Present if startup was executed
+    startup_output: Optional[fastworkflow.CommandOutput] = None  # Present if startup finished in-window
+    startup_turn_key: Optional[str] = None  # Handle to poll the startup turn
+    startup_exec_state: Optional[str] = None  # queued | running | done | lost
+    startup_error: Optional[str] = None  # Present if the startup turn failed
 
 
 class SessionData(BaseModel):
@@ -251,7 +264,7 @@ def _run_startup_sync(
         return ctx.process_action(startup_action)
     if startup_command:
         assistant_command = f"/{startup_command.lstrip('/')}"
-        return ctx.process_message(assistant_command)
+        return ctx._execute_message(assistant_command)
     return None
 
 
@@ -277,6 +290,45 @@ async def ensure_user_runtime_exists(
             _update_http_bearer_token(existing_runtime, http_bearer_token)
         return
 
+    # Single-flight session creation (§3.5): serialize per-channel so two
+    # concurrent cold requests don't both build a ctx (and double-run startup).
+    async with session_manager.get_creation_lock(channel_id):
+        # Re-check under the creation lock — another request may have created
+        # the session while we waited.
+        existing_runtime = await session_manager.get_session(channel_id)
+        if existing_runtime:
+            logger.debug(
+                f"Session for channel_id {channel_id} created concurrently, skipping creation"
+            )
+            if http_bearer_token:
+                _update_http_bearer_token(existing_runtime, http_bearer_token)
+            return
+
+        await _create_user_runtime(
+            channel_id=channel_id,
+            session_manager=session_manager,
+            workflow_path=workflow_path,
+            context=context,
+            startup_command=startup_command,
+            startup_action=startup_action,
+            stream_format=stream_format,
+            http_bearer_token=http_bearer_token,
+            run_startup=run_startup,
+        )
+
+
+async def _create_user_runtime(
+    channel_id: str,
+    session_manager: "ChannelSessionManager",
+    workflow_path: str,
+    context: Optional[dict],
+    startup_command: Optional[str],
+    startup_action: Optional["fastworkflow.Action"],
+    stream_format: str,
+    http_bearer_token: Optional[str],
+    run_startup: bool,
+) -> None:
+    """Build and register a fresh Topology-B runtime (caller holds creation lock)."""
     context = _merge_workflow_context(context, http_bearer_token)
     logger.info(f"Creating new Topology-B session for channel_id: {channel_id}")
 
@@ -315,8 +367,7 @@ async def ensure_user_runtime_exists(
         )
         startup_ran = True
 
-    pending = session_manager.session_state_store.load(channel_id)
-    if pending:
+    if pending := session_manager.session_state_store.load(channel_id):
         ctx.apply_serialized_state(pending)
         logger.info(f"Restored pending suspended session for channel_id {channel_id}")
 
@@ -384,7 +435,9 @@ async def run_process_message(
     ctx = runtime.execution_context
 
     def _run() -> fastworkflow.CommandOutput:
-        return ctx.process_message(message)
+        # Use the shared, non-deprecated dispatch (process_message() only adds a
+        # DeprecationWarning on top of this).
+        return ctx._execute_message(message)
 
     try:
         output = await asyncio.wait_for(
@@ -477,7 +530,7 @@ async def run_process_message_with_trace_stream(
         )
 
     exec_future = loop.run_in_executor(
-        None, lambda: ctx.process_message(message)
+        None, lambda: ctx._execute_message(message)
     )
     start = time.time()
 
@@ -600,6 +653,9 @@ class ChannelRuntime:
     stream_format: str = "ndjson"
     workflow_path: str = ""
     startup_ran: bool = False
+    # turn_key of the startup turn (if any), so the /initialize "already exists"
+    # branch can return its three-state status (§3.3).
+    startup_turn_key: Optional[str] = None
 
     @property
     def chat_session(self) -> WorkflowExecutionContext:
@@ -626,6 +682,23 @@ class ChannelSessionManager:
         # Built lazily on first access so the SPEEDDICT_FOLDERNAME read happens
         # after fastworkflow.init() loads the env file, not at module-import time.
         self._session_state_store = session_state_store
+        # Per-channel creation guard for single-flight session creation: two
+        # concurrent cold requests for the same channel must not both build a
+        # ctx (wasted work / double startup). Keyed by channel_id; dict access
+        # is atomic in the single event loop.
+        self._creation_locks: dict[str, asyncio.Lock] = {}
+        # Optional predicate (channel_id -> bool) wired by the server to the
+        # turn registry's active-execution pointer. Eviction must never close a
+        # live turn's ctx, so a busy channel is skipped. See §3.6 of the design.
+        self.is_channel_busy: Optional[Callable[[str], bool]] = None
+
+    def get_creation_lock(self, channel_id: str) -> asyncio.Lock:
+        """Return the per-channel creation lock, creating it on first use."""
+        lock = self._creation_locks.get(channel_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._creation_locks[channel_id] = lock
+        return lock
 
     @property
     def session_state_store(self) -> SessionStateStore:
@@ -641,14 +714,33 @@ class ChannelSessionManager:
 
     async def _evict_oldest_if_needed(self) -> None:
         while len(self._sessions) > self._max_live_sessions:
-            channel_id, runtime = self._sessions.popitem(last=False)
+            # Pick the oldest channel that is NOT running a turn. Never close a
+            # live turn's ctx mid-mutation (§3.6) — eviction would race the
+            # executor thread. OrderedDict iterates oldest-first.
+            victim_id: Optional[str] = None
+            for channel_id in self._sessions:
+                if self.is_channel_busy and self.is_channel_busy(channel_id):
+                    continue
+                victim_id = channel_id
+                break
+
+            if victim_id is None:
+                # Every over-capacity channel is busy; stay over capacity until
+                # a turn finishes rather than evict a live execution.
+                logger.warning(
+                    "Session cache over capacity but all eviction candidates "
+                    "have active turns; deferring eviction"
+                )
+                break
+
+            runtime = self._sessions.pop(victim_id)
             if runtime.execution_context.awaiting_user:
                 self.session_state_store.save(
-                    channel_id,
-                    runtime.execution_context.serialize_state(channel_id=channel_id),
+                    victim_id,
+                    runtime.execution_context.serialize_state(channel_id=victim_id),
                 )
             runtime.execution_context.close()
-            logger.debug(f"Evicted live session cache for channel_id {channel_id}")
+            logger.debug(f"Evicted live session cache for channel_id {victim_id}")
 
     async def get_session(self, channel_id: str) -> Optional[ChannelRuntime]:
         async with self._lock:
@@ -685,8 +777,7 @@ class ChannelSessionManager:
 
     async def remove_session(self, channel_id: str) -> None:
         async with self._lock:
-            runtime = self._sessions.pop(channel_id, None)
-            if runtime:
+            if runtime := self._sessions.pop(channel_id, None):
                 runtime.execution_context.close()
 
     async def evict_live_session(self, channel_id: str) -> None:

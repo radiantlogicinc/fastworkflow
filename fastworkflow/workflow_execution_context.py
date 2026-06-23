@@ -15,8 +15,10 @@ clarification with cancel_pending() per their own session lifecycle.
 ChatSession composes this core for CLI/REPL (queues, ChatWorker, keep_alive).
 """
 
+
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import time
@@ -157,7 +159,7 @@ class WorkflowExecutionContext:
 
         self._turn_entry_workflow_name = ""
         self._turn_entry_context = ""
-        try:
+        with contextlib.suppress(Exception):
             if self._app_workflow is not None:
                 self._turn_entry_workflow_name = (
                     self._app_workflow.folderpath.split("/")[-1]
@@ -165,8 +167,6 @@ class WorkflowExecutionContext:
                 self._turn_entry_context = (
                     self._app_workflow.current_command_context_name or ""
                 )
-        except Exception:  # best-effort capture only
-            pass
 
     def append_turn_output(self, command_output: fastworkflow.CommandOutput) -> None:
         """Append one command execution to the current turn's accumulator."""
@@ -370,8 +370,7 @@ class WorkflowExecutionContext:
 
         self._action_log = list(state.get("action_log") or [])
 
-        turns = state.get("conversation_history_turns") or []
-        if turns:
+        if turns := state.get("conversation_history_turns") or []:
             from fastworkflow.conversation_history_io import restore_history_from_turns
 
             self._conversation_history = restore_history_from_turns(turns)
@@ -593,6 +592,23 @@ class WorkflowExecutionContext:
             if self._app_workflow:
                 self._app_workflow.flush()
 
+    def process_action_turn(
+        self, action: fastworkflow.Action
+    ) -> "fastworkflow.TurnOutput":
+        """
+        Execute one direct action synchronously and return the public TurnOutput.
+
+        Mirror of process_turn() for the direct-action path: same dispatch as
+        process_action() (each direct action is its own logical turn [A30]),
+        additionally building the full internal TurnResult and projecting it onto
+        the slim public TurnOutput. This lets callers (e.g. the run_fastapi_mcp
+        turn registry) store exactly one result type across both the message and
+        action paths.
+        """
+        command_output = self.process_action(action)
+        turn_result = self._build_turn_result(command_output)
+        return turn_result.turn_output
+
     # ------------------------------------------------------------------
     # Routing helpers
     # ------------------------------------------------------------------
@@ -616,6 +632,7 @@ class WorkflowExecutionContext:
         )
 
     def _command_cancelled_output(self, reason: str) -> fastworkflow.CommandOutput:
+        # sourcery skip: class-extract-method
         command_response = fastworkflow.CommandResponse(
             response=f"Command cancelled: {reason}",
             success=False,
