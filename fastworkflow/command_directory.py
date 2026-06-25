@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import os
 from typing import Optional
 from pathlib import Path
@@ -121,6 +122,9 @@ class CommandDirectory(BaseModel):
     core_command_names: list[str] = Field(default_factory=list)
     # Mapping of context name to its metadata containing callback class module information
     map_context_2_metadata: dict[str, "ContextMetadata"] = Field(default_factory=dict)
+    # Fingerprint of the command sources this snapshot was built from. Used to
+    # invalidate the persisted cache when commands are added/removed/renamed/edited.
+    source_fingerprint: Optional[str] = None
 
     def register_command_metadata(self, command_name: str, metadata: CommandMetadata):
         if not (command_name and metadata):
@@ -165,6 +169,9 @@ class CommandDirectory(BaseModel):
 
     def save(self):
         commandroutinginfo_folderpath = CommandDirectory.get_commandinfo_folderpath(self.workflow_folderpath)
+        # Stamp the current source fingerprint so the persisted snapshot can be
+        # validated (and invalidated) against the live _commands tree on reload.
+        self.source_fingerprint = compute_commands_source_fingerprint(self.workflow_folderpath)
         with open(Path(commandroutinginfo_folderpath) / "command_directory.json", "w") as f:
             f.write(self.model_dump_json(indent=4))
 
@@ -593,16 +600,71 @@ def _lazy_hydrate_metadata(module_path: str, metadata: CommandMetadata, director
             module,
         )
 
+# Files (beyond *.py) that the command/routing snapshots derive from. Changes
+# to these must also invalidate the persisted caches.
+_CONTEXT_MODEL_BASENAMES = ("context_inheritance_model.json",)
+
+
+def _command_source_roots(workflow_folderpath: str) -> list[Path]:
+    """Return every `_commands` root that contributes to this workflow.
+
+    This includes the workflow's own `_commands` plus any base-workflow
+    `_commands` declared via `workflow_inheritance_model.json`. Base resolution
+    is best-effort: if it fails we still fingerprint the local sources so the
+    cache never silently goes stale.
+    """
+    roots: list[Path] = []
+    with contextlib.suppress(Exception):
+        inheritance_model = WorkflowInheritanceModel.load(workflow_folderpath)
+        roots.extend(
+            Path(base_path) / "_commands"
+            for base_path in inheritance_model.resolve_base_paths(workflow_folderpath)
+        )
+    roots.append(Path(workflow_folderpath) / "_commands")
+    return roots
+
+
+def compute_commands_source_fingerprint(workflow_folderpath: str) -> str:
+    """Fingerprint the command sources a snapshot is derived from.
+
+    The fingerprint is a hash over the *set* of source files and their
+    `(size, mtime_ns)`. Unlike a "newest mtime" comparison, this detects
+    additions, deletions, renames, and edits uniformly, which is required to
+    safely invalidate `command_directory.json` and `routing_definition.json`.
+    """
+    workflow_folderpath = str(Path(workflow_folderpath).resolve())
+    entries: list[tuple[str, int, int]] = []
+
+    for root in _command_source_roots(workflow_folderpath):
+        if not root.is_dir():
+            continue
+        for p in root.rglob("*"):
+            if not p.is_file():
+                continue
+            if p.suffix == ".py" or p.name in _CONTEXT_MODEL_BASENAMES:
+                st = p.stat()
+                entries.append((str(p), st.st_size, st.st_mtime_ns))
+
+    # Routing also depends on the hierarchy model at the workflow root.
+    hierarchy = Path(workflow_folderpath) / "context_hierarchy_model.json"
+    if hierarchy.is_file():
+        st = hierarchy.stat()
+        entries.append((str(hierarchy), st.st_size, st.st_mtime_ns))
+
+    return hashlib.sha256(repr(sorted(entries)).encode("utf-8")).hexdigest()
+
+
 @lru_cache(maxsize=32)
 def get_cached_command_directory(workflow_folderpath: str) -> CommandDirectory:
     """Return a cached CommandDirectory, rebuilding only when sources change.
 
     The cache key is the *resolved* workflow path so that duplicate relative
-    paths share the same entry.  We compare the modification time of the
-    persisted `command_directory.json` file against the most recent `.py`
-    timestamp in the `_commands` tree.  When the cache is fresh we deserialize
-    the JSON directly; otherwise we rebuild via `CommandDirectory.load()` and
-    persist the new snapshot.
+    paths share the same entry. We validate the persisted `command_directory.json`
+    against a fingerprint of the live `_commands` tree (see
+    `compute_commands_source_fingerprint`). When the fingerprint matches we
+    deserialize the JSON directly; otherwise we rebuild via
+    `CommandDirectory.load()` and persist the new snapshot. The fingerprint is
+    deletion- and rename-aware, unlike a plain mtime comparison.
     """
 
     workflow_folderpath = str(Path(workflow_folderpath).resolve())
@@ -610,18 +672,16 @@ def get_cached_command_directory(workflow_folderpath: str) -> CommandDirectory:
     cache_folder = Path(CommandDirectory.get_commandinfo_folderpath(workflow_folderpath))
     cache_file = cache_folder / "command_directory.json"
 
-    commands_root = Path(workflow_folderpath) / "_commands"
-    if commands_root.exists():
-        # Use a generator expression with a default to handle empty directories
-        latest_src_mtime = max((p.stat().st_mtime for p in commands_root.rglob("*.py")), default=0.0)
-    else:
-        latest_src_mtime = 0.0
+    current_fingerprint = compute_commands_source_fingerprint(workflow_folderpath)
 
-    # Fast-path: load JSON if it is newer than any source file
-    if cache_file.exists() and cache_file.stat().st_mtime > latest_src_mtime:
-        return CommandDirectory.model_validate_json(cache_file.read_text())
-            
-    # (Re)build and persist
+    # Fast-path: load JSON if its stamped fingerprint matches the live sources
+    if cache_file.exists():
+        with contextlib.suppress(Exception):
+            cached = CommandDirectory.model_validate_json(cache_file.read_text())
+            if cached.source_fingerprint == current_fingerprint:
+                return cached
+
+    # (Re)build and persist (save() re-stamps the fingerprint)
     directory = CommandDirectory.load(workflow_folderpath)
     directory.save()
     return directory

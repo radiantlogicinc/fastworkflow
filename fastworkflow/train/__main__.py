@@ -1,4 +1,5 @@
 import argparse
+import contextlib
 import os
 import json
 import shutil
@@ -11,7 +12,7 @@ import fastworkflow
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import python_utils
 from fastworkflow import ModuleType
-from fastworkflow.model_pipeline_training import train, get_route_layer_filepath_model
+from fastworkflow.model_pipeline_training import train, get_route_layer_filepath_model, GLOBAL_CONTEXT_FOLDER
 from fastworkflow.utils.generate_param_examples import generate_dspy_examples
 from fastworkflow.command_directory import CommandDirectory, get_cached_command_directory
 from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
@@ -81,6 +82,12 @@ def train_workflow(workflow_path: str):
     train(workflow)
     workflow.close()
 
+    # Only after training has successfully (re)generated artifacts do we prune
+    # leftovers from commands/contexts that no longer exist. Running this *after*
+    # the writes (rather than wiping up-front) means a failed train leaves the
+    # previous, complete ___command_info intact and runnable.
+    _prune_stale_artifacts(workflow_path)
+
 def _generate_dspy_examples_helper(workflow):
     json_path=get_route_layer_filepath_model(workflow.folderpath,"command_directory.json")
     # json_path = "./examples/sample_workflow/___command_info/command_directory.json"
@@ -122,6 +129,56 @@ def _generate_dspy_examples_helper(workflow):
                 json.dump(examples_data, f, indent=2)
         else:
             None
+
+def _prune_stale_artifacts(workflow_path: str):
+    """Remove orphaned per-command and per-context training artifacts.
+
+    An artifact is "orphaned" only when the command or context it belongs to no
+    longer exists in the freshly built routing definition / command directory.
+    This is intentionally conservative: it never touches the JSON snapshots
+    themselves, and it never removes a model folder whose context is still known
+    (so checked-in / still-valid models such as ErrorCorrection are preserved).
+
+    Because orphans are looked up by name/context at run time, they are harmless;
+    this is purely a cleanliness pass and is safe to run after a successful train.
+    """
+    info_dir = os.path.join(workflow_path, "___command_info")
+    if not os.path.isdir(info_dir):
+        return
+
+    # Expected per-command DSPy artifacts: one per command that has parameters.
+    cmd_dir_json = os.path.join(info_dir, "command_directory.json")
+    expected_param_files: set[str] = set()
+    if os.path.isfile(cmd_dir_json):
+        commands = _get_commands_with_parameters(cmd_dir_json)
+        expected_param_files = {f"{name}_param_labeled.json" for name in commands}
+
+    # Expected per-context model folders: every context known to routing, with
+    # "*" mapped to the global folder. Folders for unknown contexts are orphans.
+    crd = RoutingRegistry.get_definition(workflow_path)
+    expected_ctx_folders = {GLOBAL_CONTEXT_FOLDER}
+    for ctx_name in crd.contexts.keys():
+        expected_ctx_folders.add(GLOBAL_CONTEXT_FOLDER if ctx_name == "*" else ctx_name)
+
+    for entry in os.listdir(info_dir):
+        full_path = os.path.join(info_dir, entry)
+        if (
+            entry.endswith("_param_labeled.json")
+            and os.path.isfile(full_path)
+            and entry not in expected_param_files
+        ):
+            with contextlib.suppress(OSError):
+                os.remove(full_path)
+                logger.info(f"Pruned orphaned param artifact: {full_path}")
+        elif (
+            os.path.isdir(full_path)
+            and os.path.isfile(os.path.join(full_path, "threshold.json"))
+            and entry not in expected_ctx_folders
+        ):
+            with contextlib.suppress(OSError):
+                shutil.rmtree(full_path)
+                logger.info(f"Pruned orphaned context model folder: {full_path}")
+
 
 def _get_commands_with_parameters(json_path):
     """

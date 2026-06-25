@@ -23,7 +23,12 @@ from typing import Any, Dict, Optional, Set, Type, ClassVar
 from pydantic import BaseModel, ConfigDict
 
 from fastworkflow import ModuleType
-from fastworkflow.command_directory import CommandDirectory, UtteranceMetadata, get_cached_command_directory
+from fastworkflow.command_directory import (
+    CommandDirectory,
+    UtteranceMetadata,
+    compute_commands_source_fingerprint,
+    get_cached_command_directory,
+)
 from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.utils import python_utils
 from fastworkflow.utils.logging import logger
@@ -192,7 +197,12 @@ class RoutingDefinition(BaseModel):
             save_dict['command_directory_map'] = {k: list(v) for k, v in save_dict['command_directory_map'].items()}
         if 'routing_definition_map' in save_dict:
             save_dict['routing_definition_map'] = {k: list(v) for k, v in save_dict['routing_definition_map'].items()}
-        
+
+        # Stamp the source fingerprint so the persisted routing definition can be
+        # invalidated when commands/contexts change. Unlike command_directory.json,
+        # this file previously had no staleness check at all.
+        save_dict['source_fingerprint'] = compute_commands_source_fingerprint(self.workflow_folderpath)
+
         with open(save_path, "w", encoding="utf-8") as f:
             json.dump(save_dict, f, indent=4)
 
@@ -348,10 +358,20 @@ class RoutingRegistry:
             if workflow_folderpath in cls._definitions:
                 return cls._definitions[workflow_folderpath]
 
-            # Attempt to load; if missing, build and save
-            try:
-                definition = RoutingDefinition.load(workflow_folderpath)
-            except Exception:
+            # Attempt to load the persisted definition, but only trust it when its
+            # stamped source fingerprint still matches the live _commands tree.
+            # This is the staleness check the persisted routing definition
+            # previously lacked: without it, adding/removing/renaming a command
+            # left routing_definition.json pointing at the old command set until
+            # it was manually deleted.
+            definition = None
+            if cls._persisted_definition_is_fresh(workflow_folderpath):
+                try:
+                    definition = RoutingDefinition.load(workflow_folderpath)
+                except Exception:
+                    definition = None
+
+            if definition is None:
                 definition = RoutingDefinition.build(workflow_folderpath)
                 definition.save()
             cls._definitions[workflow_folderpath] = definition
@@ -360,6 +380,31 @@ class RoutingRegistry:
         # build fresh definition and persist via .save()
         cls._definitions[workflow_folderpath] = RoutingDefinition.build(workflow_folderpath)
         return cls._definitions[workflow_folderpath]
+
+    @staticmethod
+    def _persisted_definition_is_fresh(workflow_folderpath: str) -> bool:
+        """Return True if routing_definition.json exists and its stamped
+        source fingerprint matches the current _commands tree.
+
+        A missing file, unreadable JSON, missing/legacy fingerprint, or a
+        fingerprint mismatch all count as *not fresh*, forcing a rebuild.
+        """
+        load_path = (
+            f"{CommandDirectory.get_commandinfo_folderpath(workflow_folderpath)}"
+            f"/routing_definition.json"
+        )
+        if not os.path.isfile(load_path):
+            return False
+        try:
+            with open(load_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return False
+
+        if stored_fingerprint := data.get("source_fingerprint"):
+            return stored_fingerprint == compute_commands_source_fingerprint(workflow_folderpath)
+        else:
+            return False
 
     @classmethod
     def clear_registry(cls):
