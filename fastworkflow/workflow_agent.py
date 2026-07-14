@@ -246,9 +246,15 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     # Handle parameter extraction errors with abort
     if nlu_stage == fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION:
         abort_confirmation = _execute_workflow_query('abort', chat_session_obj=chat_session_obj)
+        # Thread the active planning context so replanning uses the same planner LM
+        # and insights as the current turn (critical for distillation: otherwise
+        # replans silently fall back to LLM_PLANNER instead of the teacher/student LM).
+        planning_insights = getattr(chat_session_obj, '_planning_insights', None)
+        planner_lm = getattr(chat_session_obj, '_current_planner_lm', None)
         return build_query_with_next_steps(
-            f'{response_text}\n{abort_confirmation}', 
-            chat_session_obj, with_agent_inputs_and_trajectory = True
+            f'{response_text}\n{abort_confirmation}',
+            chat_session_obj, with_agent_inputs_and_trajectory=True,
+            planning_insights=planning_insights, planner_lm=planner_lm,
         )
 
     # Clean up the context flag after command execution
@@ -267,14 +273,14 @@ def _resolve_intent_misunderstanding(chat_session_obj, command, response_text):
     agent_inputs = workflow_tool_agent.inputs if workflow_tool_agent else {}
     agent_trajectory = workflow_tool_agent.current_trajectory if workflow_tool_agent else {}
 
-    lm = dspy_utils.get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")
-    with dspy.context(lm=lm):
-        result = intent_agent(
-            original_command=command,
-            error_message=response_text,
-            agent_inputs=agent_inputs,
-            agent_trajectory=agent_trajectory,
-        )
+    # Inherit the ambient agent LM (set by the caller's dspy.context) rather than
+    # hardcoding LLM_AGENT.
+    result = intent_agent(
+        original_command=command,
+        error_message=response_text,
+        agent_inputs=agent_inputs,
+        agent_trajectory=agent_trajectory,
+    )
 
     return _resolve_or_escalate(result, chat_session_obj, response_text)
 
@@ -306,8 +312,7 @@ def _resolve_intent_ambiguity(chat_session_obj, cme_workflow, command, response_
     agent_inputs = workflow_tool_agent.inputs if workflow_tool_agent else {}
     agent_trajectory = workflow_tool_agent.current_trajectory if workflow_tool_agent else {}
 
-    lm = dspy_utils.get_lm("LLM_AGENT", "LITELLM_API_KEY_AGENT")
-    with dspy.context(lm=lm, adapter=agent_adapter):
+    with dspy.context(adapter=agent_adapter):
         result = intent_agent(
             original_command=command,
             error_message=response_text,
@@ -344,10 +349,14 @@ def _post_ask_user_response(
     if workflow:
         workflow.context["raw_user_message"] = user_response
 
+    planning_insights = getattr(chat_session_obj, '_planning_insights', None)
+    planner_lm = getattr(chat_session_obj, '_current_planner_lm', None)
     return build_query_with_next_steps(
         user_response,
         chat_session_obj,
         with_agent_inputs_and_trajectory=True,
+        planning_insights=planning_insights,
+        planner_lm=planner_lm,
     )
 
 
@@ -390,21 +399,42 @@ def _ask_user_tool(clarification_request: str, chat_session_obj: fastworkflow.Ch
         clarification_request, user_query, chat_session_obj
     )
 
-def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_iters: int = 25):
+def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_iters: int = 25,
+                                   execution_insights: str | None = None,
+                                   on_step_complete=None):
     """
     Initialize and return a DSPy ReAct agent that exposes individual MCP tools.
     Each tool expects a single query string for its specific tool.
-    
+
     Args:
         chat_session: fastworkflow.ChatSession instance
         max_iters: Maximum iterations for the ReAct agent
-        
+        execution_insights: Optional workflow-specific execution anti-patterns to
+            append to the agent signature docstring (knowledge distillation).
+        on_step_complete: Optional callback(step_idx, trajectory) -> bool for
+            step-by-step interception (distillation). Return False to stop early.
+
     Returns:
         DSPy ReAct agent configured with workflow tools
     """
     chat_session_obj = chat_session
     if not chat_session_obj:
         raise ValueError("chat session cannot be null")
+
+    # Build the agent signature. When execution insights are supplied, append them
+    # to WorkflowAgentSignature's instructions as anti-patterns to avoid; otherwise
+    # use the module-level WorkflowAgentSignature unchanged.
+    if execution_insights:
+        enhanced_docstring = (
+            f"{WorkflowAgentSignature.__doc__}\n\nCRITICAL ANTI-PATTERNS TO AVOID:\n{execution_insights}"
+        )
+
+        class AgentSignature(dspy.Signature):
+            __doc__ = enhanced_docstring
+            user_query = dspy.InputField(desc="The natural language user query.")
+            final_answer = dspy.OutputField(desc="Comprehensive final answer with supporting evidence to demonstrate that every user intent has been fully addressed.")
+    else:
+        AgentSignature = WorkflowAgentSignature
 
     def what_can_i_do() -> str:
         """
@@ -471,33 +501,48 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
     ]
 
     return fastWorkflowReAct(
-        WorkflowAgentSignature,
+        AgentSignature,
         tools=tools,
         max_iters=max_iters,
+        on_step_complete=on_step_complete,
     )
 
 
-def build_query_with_next_steps(user_query: str, 
-    chat_session_obj: fastworkflow.ChatSession, with_agent_inputs_and_trajectory: bool = False) -> str:
+def build_query_with_next_steps(user_query: str,
+    chat_session_obj: fastworkflow.ChatSession, with_agent_inputs_and_trajectory: bool = False,
+    planning_insights: str | None = None, planner_lm = None) -> str:
     """
     Generate a todo list.
     Return a string that combine the user query and todo list
+
+    Args:
+        user_query: The user's natural language query
+        chat_session_obj: The active chat session
+        with_agent_inputs_and_trajectory: Whether to include agent trajectory for replanning
+        planning_insights: Optional workflow-specific planning insights to append to
+            the planner signature docstring (knowledge distillation)
+        planner_lm: Optional planner LM to use (if None, uses LLM_PLANNER from env)
     """
+    base_docstring = """
+    Carefully review the user_query and generate a next steps sequence based only on available commands.
+    Walk the graph of commands based on the 'available_from' hints to build the most appropriate command sequence.
+
+    IMPORTANT: 9 times out of 10 information can be found via available commands. However, when generating the plan:
+    - If required information is missing and cannot be found via commands, explicitly specify in the plan that the user needs to be consulted
+    - If confirmation is needed before proceeding, explicitly specify in the plan that user confirmation is required
+    """
+    if planning_insights:
+        enhanced_docstring = f"{base_docstring}\n\nCRITICAL PATTERNS FOR THIS WORKFLOW:\n{planning_insights}"
+    else:
+        enhanced_docstring = base_docstring
+
     class TaskPlannerSignature(dspy.Signature):
-        """
-        Carefully review the user_query and generate a next steps sequence based only on available commands.
-        Walk the graph of commands based on the 'available_from' hints to build the most appropriate command sequence
-        Avoid specifying 'ask user' because 9 times out of 10, you can find the information via available commands. 
-        """
+        __doc__ = enhanced_docstring
         user_query: str = dspy.InputField()
         next_steps: str = dspy.OutputField(desc="task descriptions as a numbered list of short sentences separated by line breaks")
 
     class TaskPlannerWithTrajectoryAndAgentInputsSignature(dspy.Signature):
-        """
-        Carefully review agent inputs, agent trajectory and user response and generate a next steps sequence based only on available commands.
-        Walk the graph of commands based on the 'available_from' hints to build the most appropriate command sequence
-        Avoid specifying 'ask user' because 9 times out of 10, you can find the information via available commands. 
-        """
+        __doc__ = enhanced_docstring
         agent_inputs: dict = dspy.InputField()
         agent_trajectory: dict = dspy.InputField()
         user_response: str = dspy.InputField()
@@ -510,7 +555,9 @@ def build_query_with_next_steps(user_query: str,
         active_context_name=current_workflow.current_command_context_name,
     )
 
-    planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
+    # Use provided planner_lm if available (distillation mode), else build from env
+    if planner_lm is None:
+        planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
     agent_adapter = CommandsSystemPreludeAdapter()
     with dspy.context(lm=planner_lm, adapter=agent_adapter):
         if with_agent_inputs_and_trajectory:
@@ -532,6 +579,19 @@ def build_query_with_next_steps(user_query: str,
             return user_query
 
         steps_formatted = " ".join(prediction.next_steps.split())
+
+        # Capture the generated plan for distillation when a capture list is present
+        # on the session (set only during a DistillationSession planning pass).
+        planning_capture = getattr(chat_session_obj, '_planning_steps_capture', None)
+        if planning_capture is not None:
+            from fastworkflow.distillation import PlanningStep
+            planning_capture.append(PlanningStep(
+                step_number=len(planning_capture),
+                user_query=user_query,
+                generated_plan=steps_formatted,
+                reasoning=getattr(prediction, 'reasoning', ''),
+            ))
+
         user_query_and_next_steps = f"{user_query}\n\nExecute these next steps:\n{steps_formatted}"
         return (
             f'User Query:\n{user_query_and_next_steps}'

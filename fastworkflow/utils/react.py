@@ -29,7 +29,8 @@ class AskUserSuspend(BaseException):
 
 
 class fastWorkflowReAct(Module):
-    def __init__(self, signature: type["Signature"], tools: list[Callable], max_iters: int = 10):
+    def __init__(self, signature: type["Signature"], tools: list[Callable], max_iters: int = 10,
+                 on_step_complete: Callable[[int, dict], bool] | None = None):
         """
         ReAct stands for "Reasoning and Acting," a popular paradigm for building tool-using agents.
         In this approach, the language model is iteratively provided with a list of tools and has
@@ -108,6 +109,7 @@ class fastWorkflowReAct(Module):
 
         self.inputs = {}
         self.current_trajectory = {}
+        self._on_step_complete = on_step_complete
         self._suspended: dict[str, Any] | None = None
         # True when the most recent _run_loop ended because max_iters was
         # reached without the agent selecting the `finish` tool.
@@ -235,6 +237,20 @@ class fastWorkflowReAct(Module):
                     break
                 continue
 
+            # Guard against an invalid/empty prediction (e.g. the LLM returned
+            # nothing parseable). Return a graceful fallback in the same shape as
+            # the normal return (a dspy.Prediction exposing .final_answer) instead
+            # of crashing.
+            if pred is None or not hasattr(pred, "next_thought"):
+                logger.warning(
+                    f"ReAct iteration {idx}: LLM returned None or invalid prediction. "
+                    "Returning fallback answer."
+                )
+                return dspy.Prediction(
+                    final_answer="I apologize, but I encountered an error processing your "
+                    "request. Could you please rephrase or provide more details?"
+                )
+
             trajectory[f"thought_{idx}"] = pred.next_thought
             trajectory[f"tool_name_{idx}"] = pred.next_tool_name
             trajectory[f"tool_args_{idx}"] = pred.next_tool_args
@@ -264,6 +280,16 @@ class fastWorkflowReAct(Module):
                 trajectory[f"observation_{idx}"] = (
                     f"Execution error in {pred.next_tool_name}: {_fmt_exc(err)}"
                 )
+
+            # Step-completion callback for distillation: lets external code inspect
+            # each completed step and stop execution early (e.g. on trajectory
+            # divergence). Placed AFTER the AskUserSuspend catch so it can never
+            # swallow a suspension, and it does not touch _suspended state.
+            # getattr guard: resume() may run on an instance built via __new__
+            # (test helpers) that never set this attribute.
+            on_step_complete = getattr(self, "_on_step_complete", None)
+            if on_step_complete and not on_step_complete(idx, trajectory):
+                break
 
             if pred.next_tool_name == "finish":
                 break

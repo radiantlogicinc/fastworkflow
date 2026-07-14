@@ -273,6 +273,10 @@ def add_run_parser(subparsers):
         "--assistant", action="store_true", default=False,
         help="Run in assistant (non-agentic) mode. Default is agentic mode.",
     )
+    parser_run.add_argument(
+        "--generate_insights", action="store_true", default=False,
+        help="Enable insights-distillation mode: compare teacher and student agents, extract planning and execution insights on divergence.",
+    )
     parser_run.set_defaults(func=lambda args: run_with_defaults(args))
 
 def add_run_fastapi_mcp_parser(subparsers):

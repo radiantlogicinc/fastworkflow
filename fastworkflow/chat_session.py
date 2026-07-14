@@ -101,14 +101,17 @@ class ChatSession:
     def __init__(
         self,
         run_as_agent: bool = False,
+        generate_insights: bool = False,
     ):
         """
         Initialize a chat session.
-        
+
         Args:
             run_as_agent: If True, use agent mode (DSPy-based tool selection).
                          If False (default), use traditional command execution.
-        
+            generate_insights: If True, enable teacher/student insights distillation
+                         on each agent turn (Topology A / CLI only).
+
         A chat session can run multiple workflows that share the same message queues.
         Use start_workflow() to start a specific workflow within this session.
         ChatSession is Topology A: ask_user blocks on the queue until the human answers.
@@ -116,6 +119,7 @@ class ChatSession:
         self._core = WorkflowExecutionContext(
             run_as_agent=run_as_agent,
             mirror_action_log_to_file=True,
+            generate_insights=generate_insights,
         )
 
         # Create queues for user messages and command outputs (CLI transport)
@@ -274,6 +278,11 @@ class ChatSession:
     def run_as_agent(self) -> bool:
         """Check if running in agent mode."""
         return self._core.run_as_agent
+
+    @property
+    def _distillation_insights_count(self) -> int:
+        """Number of insights extracted so far in insights-distillation mode."""
+        return self._core._distillation_insights_count
 
     @property
     def user_message_queue(self) -> Queue:

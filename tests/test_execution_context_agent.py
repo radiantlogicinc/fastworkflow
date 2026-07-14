@@ -73,7 +73,7 @@ def test_process_message_agent_mode_mocked_agent(
 
     monkeypatch.setattr(
         "fastworkflow.workflow_agent.build_query_with_next_steps",
-        lambda user_query, session: user_query,
+        lambda user_query, session, **kwargs: user_query,
     )
     monkeypatch.setattr(
         "fastworkflow.workflow_agent._what_can_i_do",
@@ -138,7 +138,7 @@ def test_process_message_converts_ask_user_cancel_to_output(
 
     monkeypatch.setattr(
         "fastworkflow.workflow_agent.build_query_with_next_steps",
-        lambda user_query, session: user_query,
+        lambda user_query, session, **kwargs: user_query,
     )
     monkeypatch.setattr(
         "fastworkflow.workflow_agent._what_can_i_do",
@@ -163,7 +163,7 @@ def _make_agent_ctx(initialized_fastworkflow, todo_workflow_path, monkeypatch):
 
     monkeypatch.setattr(
         "fastworkflow.workflow_agent.build_query_with_next_steps",
-        lambda user_query, session, with_agent_inputs_and_trajectory=False: user_query,
+        lambda user_query, session, with_agent_inputs_and_trajectory=False, **kwargs: user_query,
     )
     monkeypatch.setattr(
         "fastworkflow.workflow_agent._what_can_i_do",
@@ -396,7 +396,7 @@ def test_topology_a_cli_ask_user_blocks_with_queue(
 
     monkeypatch.setattr(
         "fastworkflow.workflow_agent.build_query_with_next_steps",
-        lambda user_query, session, with_agent_inputs_and_trajectory=False: (
+        lambda user_query, session, with_agent_inputs_and_trajectory=False, **kwargs: (
             f"replanned:{user_query}"
         ),
     )
@@ -441,7 +441,7 @@ def test_topology_a_cli_ask_user_pairs_output_with_trace_sentinel(
 
     monkeypatch.setattr(
         "fastworkflow.workflow_agent.build_query_with_next_steps",
-        lambda user_query, session, with_agent_inputs_and_trajectory=False: (
+        lambda user_query, session, with_agent_inputs_and_trajectory=False, **kwargs: (
             f"replanned:{user_query}"
         ),
     )

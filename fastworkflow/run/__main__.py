@@ -183,7 +183,10 @@ def run_main(args):
             context_dict = json.load(file)
 
     run_as_agent = not args.assistant
-    fastworkflow.chat_session = fastworkflow.ChatSession(run_as_agent=run_as_agent)
+    fastworkflow.chat_session = fastworkflow.ChatSession(
+        run_as_agent=run_as_agent,
+        generate_insights=getattr(args, "generate_insights", False),
+    )
     
     # Start the workflow within the chat session
     fastworkflow.chat_session.start_workflow(
@@ -220,6 +223,11 @@ def run_main(args):
         with patch_stdout():
             user_command = prompt_session.prompt()
         if user_command.startswith("//exit"):
+            if getattr(args, "generate_insights", False):
+                count = getattr(fastworkflow.chat_session, "_distillation_insights_count", 0)
+                console.print(
+                    f"\n[bold cyan]Insights generation complete. New insights extracted: {count}[/bold cyan]"
+                )
             break
         if user_command.startswith("//new"):
             fastworkflow.chat_session.clear_conversation_history()
@@ -291,6 +299,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--assistant", action="store_true", default=False,
         help="Run in assistant (non-agentic) mode. Default is agentic mode.",
+    )
+    parser.add_argument(
+        "--generate_insights", action="store_true", default=False,
+        help="Enable insights-distillation mode: compare teacher and student agents, extract planning and execution insights on divergence.",
     )
     args = parser.parse_args()
     run_main(args)

@@ -62,12 +62,15 @@ class WorkflowExecutionContext:
         run_as_agent: bool = False,
         session_key: Optional[str] = None,
         mirror_action_log_to_file: bool = False,
+        generate_insights: bool = False,
     ):
         """
         Args:
             session_key: Stable id (e.g. channel_id) for cme/app workflow persistence.
                          When omitted, cme uses an ephemeral uuid (CLI one-off sessions).
             mirror_action_log_to_file: If True, also append to cwd action.jsonl (debug).
+            generate_insights: If True, enable teacher/student distillation on each
+                         agent turn (Topology A / CLI only).
         """
         self._session_key = session_key
         self._run_as_agent = run_as_agent
@@ -91,6 +94,12 @@ class WorkflowExecutionContext:
         self._awaiting_user = False
         self._suspended_user_message: Optional[str] = None
         self._pending_clarification_request: Optional[str] = None
+
+        # Insights-distillation (teacher/student) state — CLI/Topology-A only.
+        self._generate_insights = generate_insights
+        self._distillation_insights_count = 0
+        self._planning_insights: Optional[str] = None
+        self._execution_insights: Optional[str] = None
 
         # Turn accumulator state (one logical turn = one key, across suspensions)
         self._turn_outputs: list = []
@@ -666,8 +675,21 @@ class WorkflowExecutionContext:
         if self._app_workflow:
             self._app_workflow.context["run_as_agent"] = True
 
+        # Load workflow-specific insights for insights distillation (if present).
+        # These enhance the agent + planner signatures; absent files -> None (no-op).
+        from fastworkflow.utils.insights_loader import load_workflow_insights
+        if self._app_workflow:
+            self._planning_insights = load_workflow_insights(
+                self._app_workflow.folderpath, "planning_agent"
+            )
+            self._execution_insights = load_workflow_insights(
+                self._app_workflow.folderpath, "execution_agent"
+            )
+
         from fastworkflow.workflow_agent import initialize_workflow_tool_agent
-        self._workflow_tool_agent = initialize_workflow_tool_agent(self)
+        self._workflow_tool_agent = initialize_workflow_tool_agent(
+            self, execution_insights=self._execution_insights
+        )
 
         from fastworkflow.intent_clarification_agent import initialize_intent_clarification_agent
         self._intent_clarification_agent = initialize_intent_clarification_agent(self)
@@ -723,6 +745,8 @@ class WorkflowExecutionContext:
         command_info_and_refined_message_with_todolist = build_query_with_next_steps(
             refined_user_query,
             self,
+            planning_insights=self._planning_insights,
+            planner_lm=getattr(self, "_current_planner_lm", None),
         )
         available_commands = _what_can_i_do(self)
 
@@ -803,6 +827,19 @@ class WorkflowExecutionContext:
 
     def _process_agent_message(self, message: str) -> fastworkflow.CommandOutput:
         self._ensure_agent_initialized()
+
+        # Insights-distillation mode (CLI / Topology A only): run the teacher/student
+        # comparison, which drives its own agent passes and returns the student's
+        # CommandOutput. Guarded on user_message_queue so it can never run over a
+        # Topology-B suspended trajectory.
+        if self._generate_insights and self.user_message_queue is not None:
+            from fastworkflow.distillation import distill_message
+            result = distill_message(self, message)
+            self._distillation_insights_count += result.insights_extracted
+            self._maybe_enqueue_output(result.command_output)
+            self._maybe_enqueue_trace_sentinel()
+            return result.command_output
+
         agent_result = self._run_agent(message)
         self._turn_agent_result = agent_result
         if getattr(agent_result, "suspended", None) is True:

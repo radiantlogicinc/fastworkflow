@@ -1,7 +1,9 @@
 import contextlib
 import sys
 import re
-from typing import Dict, List, Optional
+import json
+import ast
+from typing import Dict, List, Optional, Union, get_origin, get_args
 
 from pydantic import BaseModel
 from pydantic_core import PydanticUndefined
@@ -22,6 +24,23 @@ INVALID_INFORMATION_ERRMSG = fastworkflow.get_env_var("INVALID_INFORMATION_ERRMS
 NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
 INVALID = fastworkflow.get_env_var("INVALID")
 PARAMETER_EXTRACTION_ERROR_MSG = None
+
+
+def _unwrap_optional(field_type):
+    """
+    Unwrap ``Optional[X]`` / ``Union[X, None]`` to its underlying type.
+
+    Returns ``(inner_type, origin)`` where ``origin`` is ``get_origin`` of the
+    unwrapped type (e.g. ``list`` for ``Optional[List[str]]``). Non-optional
+    types are returned unchanged.
+    """
+    origin = get_origin(field_type)
+    if origin is Union:
+        non_none_types = [t for t in get_args(field_type) if t is not type(None)]
+        if non_none_types:
+            field_type = non_none_types[0]
+            origin = get_origin(field_type)
+    return field_type, origin
 
 
 class ParameterExtraction:
@@ -90,14 +109,22 @@ class ParameterExtraction:
             self.app_workflow, self.command_name, new_params
         )
 
-        # Set all the missing and invalid fields to None before storing
+        # Set all the missing and invalid fields to appropriate sentinel values before storing
         current_values = {
             field_name: getattr(new_params, field_name, None)
             for field_name in list(type(new_params).model_fields.keys())
         }
         for field_name in missing_invalid_fields:
             if field_name in current_values:
-                current_values[field_name] = NOT_FOUND
+                # Determine appropriate sentinel value based on field type
+                field_info = type(new_params).model_fields[field_name]
+                _, origin = _unwrap_optional(field_info.annotation)
+
+                # Use empty list for list fields, NOT_FOUND for others
+                if origin in (list, List):
+                    current_values[field_name] = []
+                else:
+                    current_values[field_name] = NOT_FOUND
         # Reconstruct the model instance without validation
         new_params = new_params.__class__.model_construct(**current_values)
 
@@ -233,11 +260,15 @@ class ParameterExtraction:
             value = getattr(params, field_name, None)
 
             if value in [
-                NOT_FOUND, 
+                NOT_FOUND,
                 None,
                 INVALID_INT_VALUE,
                 INVALID_FLOAT_VALUE
             ]:
+                continue
+
+            # Skip empty lists (sentinel for missing list fields)
+            if isinstance(value, list) and len(value) == 0:
                 continue
 
             display_name = " ".join(word.capitalize() for word in field_name.split('_'))
@@ -320,7 +351,22 @@ class ParameterExtraction:
             for field_name in field_names:
                 # Look for <field_name>value</field_name> pattern
                 pattern = rf'<{re.escape(field_name)}>(.+?)</{re.escape(field_name)}>'
-                if match := re.search(pattern, command, re.DOTALL):
+                # For list-typed fields, an agent may repeat the tag once per item
+                # (e.g. <item_ids>a</item_ids> <item_ids>b</item_ids>). re.search
+                # would keep only the first, silently dropping the rest, so collect
+                # ALL occurrences with findall and hand the list parser every value.
+                _, forigin = _unwrap_optional(
+                    command_parameters_class.model_fields[field_name].annotation
+                )
+                if forigin in (list, List):
+                    matches = re.findall(pattern, command, re.DOTALL)
+                    if len(matches) > 1:
+                        # Multiple repeated tags -> JSON array so the list parser
+                        # below collects every value (not just the first).
+                        extracted_data[field_name] = json.dumps([m.strip() for m in matches])
+                    elif len(matches) == 1:
+                        extracted_data[field_name] = matches[0].strip()
+                elif match := re.search(pattern, command, re.DOTALL):
                     parameter_value = match[1].strip()
                     extracted_data[field_name] = parameter_value
 
@@ -348,8 +394,66 @@ class ParameterExtraction:
                 else:
                     params_data[field_name] = None
 
-            # Update with extracted values
-            params_data |= extracted_data
+            # Parse and type-correct extracted values
+            for field_name, raw_value in extracted_data.items():
+                field_info = command_parameters_class.model_fields[field_name]
+                field_type, origin = _unwrap_optional(field_info.annotation)
+
+                # Handle list types with robust parsing
+                if origin in (list, List):
+                    inner_type = get_args(field_type)[0] if get_args(field_type) else str
+                    parsed_list = None
+
+                    # Try JSON array format
+                    if raw_value.startswith('[') and raw_value.endswith(']'):
+                        with contextlib.suppress(Exception):
+                            parsed = json.loads(raw_value)
+                            if isinstance(parsed, list):
+                                parsed_list = parsed
+
+                    # Try Python literal format
+                    if parsed_list is None:
+                        with contextlib.suppress(Exception):
+                            parsed = ast.literal_eval(raw_value)
+                            if isinstance(parsed, list):
+                                parsed_list = parsed
+
+                    # Try comma-separated format
+                    if parsed_list is None and ',' in raw_value:
+                        parsed_list = [item.strip().strip('"').strip("'") for item in raw_value.split(',')]
+
+                    # Try space-separated format
+                    if parsed_list is None and ' ' in raw_value and not any(c in raw_value for c in ['[', ']', '{', '}', '"', "'"]):
+                        parsed_list = [item.strip() for item in raw_value.split() if item.strip()]
+
+                    # Single value treated as single-item list
+                    if parsed_list is None:
+                        cleaned = raw_value.strip().strip('"').strip("'")
+                        parsed_list = [cleaned] if cleaned else []
+
+                    # Type-convert list items to match the inner type
+                    if parsed_list:
+                        typed_list = []
+                        for item in parsed_list:
+                            if inner_type is str:
+                                typed_list.append(str(item))
+                            elif inner_type is int:
+                                with contextlib.suppress(ValueError, TypeError):
+                                    typed_list.append(int(item))
+                            elif inner_type is float:
+                                with contextlib.suppress(ValueError, TypeError):
+                                    typed_list.append(float(item))
+                            elif isinstance(inner_type, type) and issubclass(inner_type, BaseModel) and isinstance(item, dict):
+                                with contextlib.suppress(Exception):
+                                    typed_list.append(inner_type(**item))
+                            else:
+                                typed_list.append(item)
+                        params_data[field_name] = typed_list
+                    else:
+                        params_data[field_name] = []
+                else:
+                    # Non-list types: use raw value as-is
+                    params_data[field_name] = raw_value
 
             # Construct model without validation
             return command_parameters_class.model_construct(**params_data)
@@ -380,7 +484,7 @@ class ParameterExtraction:
                 None,
                 INVALID_INT_VALUE,
                 INVALID_FLOAT_VALUE,
-            ]:
+            ] or (isinstance(value, list) and len(value) == 0):
                 fields_to_fill.append(field_name)
 
         if not fields_to_fill:

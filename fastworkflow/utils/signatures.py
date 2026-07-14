@@ -3,7 +3,7 @@ import ast
 import dspy
 import os
 from contextlib import suppress
-from typing import Optional, Tuple, Union, Dict, Any, Type, List, get_args
+from typing import Optional, Tuple, Union, Dict, Any, Type, List, get_args, get_origin
 from enum import Enum
 from datetime import date
 import re
@@ -18,6 +18,7 @@ from fastworkflow import ModuleType
 from fastworkflow.utils.logging import logger
 from fastworkflow.model_pipeline_training import get_route_layer_filepath_model
 from fastworkflow.utils.fuzzy_match import find_best_matches
+from fastworkflow.utils import dspy_utils
 from fastworkflow.command_directory import CommandDirectory
 
 MISSING_INFORMATION_ERRMSG = None
@@ -217,7 +218,8 @@ Today's date is {today}.
             info_text += f". This field is {requirement_status}."
 
             if is_optional:
-                info_text += f" If not mentioned in the query, use: '{default_value or 'None'}'."
+                default_display = default_value if default_value is not None else 'None'
+                info_text += f" If not mentioned in the query, use: '{default_display}'."
             elif default_value is not None:
                 info_text += f" Default value: '{default_value}'."
 
@@ -252,7 +254,7 @@ Today's date is {today}.
             LLM_PARAM_EXTRACTION = fastworkflow.get_env_var("LLM_PARAM_EXTRACTION")
             LITELLM_API_KEY_PARAM_EXTRACTION = fastworkflow.get_env_var("LITELLM_API_KEY_PARAM_EXTRACTION")
 
-        lm = dspy.LM(LLM_PARAM_EXTRACTION, api_key=LITELLM_API_KEY_PARAM_EXTRACTION)
+        lm = dspy_utils.get_lm("LLM_PARAM_EXTRACTION", "LITELLM_API_KEY_PARAM_EXTRACTION")
         
         model_class = CommandParameters 
         if model_class is None:
@@ -462,7 +464,15 @@ Today's date is {today}.
                                 if isinstance(expected_type, type) and issubclass(expected_type, Enum):
                                     ok, enum_val = _try_coerce_enum(expected_type, val)
                                     return (ok, enum_val if ok else None)
-                                                            # Unknown: accept if already instance
+                                # Pydantic BaseModel: construct from dict
+                                if isinstance(expected_type, type) and issubclass(expected_type, BaseModel):
+                                    if isinstance(val, expected_type):
+                                        return True, val
+                                    if isinstance(val, dict):
+                                        with suppress(Exception):
+                                            return True, expected_type(**val)
+                                    return False, None
+                                # Unknown: accept if already instance
                                 return (True, val) if isinstance(val, expected_type) else (False, None)
 
                         def _try_coerce_list(list_type: Any, value: Any) -> Tuple[bool, Optional[list]]:
@@ -574,16 +584,35 @@ Today's date is {today}.
                 if is_optional:
                         is_required=False
 
+                # Check if this is a list field
+                is_list_field = False
+                check_type = field_info.annotation
+                check_origin = get_origin(check_type)
+                if check_origin is Union:
+                    check_args = get_args(check_type)
+                    non_none = [t for t in check_args if t is not type(None)]
+                    if non_none:
+                        check_type = non_none[0]
+                        check_origin = get_origin(check_type)
+                if check_origin in (list, List):
+                    is_list_field = True
+
                 # Only add to missing fields if it's required AND has no value
-                if is_required and \
-                                field_value in [
-                        NOT_FOUND, 
-                        None,
-                        INVALID_INT_VALUE,
-                        INVALID_FLOAT_VALUE
-                    ]:
-                    missing_fields.append(field_name)
-                    is_valid = False
+                # For list fields, empty list [] is considered missing
+                if is_required:
+                    is_missing = False
+                    if is_list_field:
+                        # For list fields, treat empty list as missing
+                        if field_value in [NOT_FOUND, None] or (isinstance(field_value, list) and len(field_value) == 0):
+                            is_missing = True
+                    else:
+                        # For non-list fields, use standard sentinel values
+                        if field_value in [NOT_FOUND, None, INVALID_INT_VALUE, INVALID_FLOAT_VALUE]:
+                            is_missing = True
+
+                    if is_missing:
+                        missing_fields.append(field_name)
+                        is_valid = False
 
         for field_name, field_info in type(cmd_parameters).model_fields.items():
             field_value = getattr(cmd_parameters, field_name, None)
