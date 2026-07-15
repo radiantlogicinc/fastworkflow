@@ -75,6 +75,61 @@ def test_resume_continues_after_observation():
     assert agent._suspended is None
 
 
+def test_run_loop_mirrors_full_step_into_current_trajectory():
+    """A completed tool step must populate current_trajectory with thought,
+    tool_name, tool_args, and observation (not just an action summary), because
+    the planner and distillation read current_trajectory as the agent trajectory."""
+    agent = _bare_react_agent(
+        do_it=lambda: "did it",
+        finish=lambda: "done",
+    )
+
+    preds = iter([
+        SimpleNamespace(next_thought="act", next_tool_name="do_it", next_tool_args={}),
+        SimpleNamespace(next_thought="stop", next_tool_name="finish", next_tool_args={}),
+    ])
+    agent.react = lambda trajectory, **input_args: next(preds)  # type: ignore[method-assign]
+    agent.extract = lambda trajectory, **input_args: {"final_answer": "ok"}  # type: ignore[method-assign]
+
+    result = agent._run_loop({}, 0, {"query": "hello"}, max_iters=5, exception_count=0)
+
+    assert result is None  # completed normally
+    ct = agent.current_trajectory
+    assert ct["thought_0"] == "act"
+    assert ct["tool_name_0"] == "do_it"
+    assert ct["observation_0"] == "did it"
+    assert ct["tool_args_0"] == {}
+
+
+def test_resume_mirrors_user_answer_into_current_trajectory():
+    """The resumed observation (the user's ask_user answer) must land in
+    current_trajectory, not only in the local working trajectory."""
+    agent = _bare_react_agent(finish=lambda: "done")
+    # Pre-suspend, current_trajectory already holds the pre-ask_user step.
+    agent.current_trajectory = {
+        "thought_0": "ask",
+        "tool_name_0": "ask_user",
+        "tool_args_0": {},
+    }
+    trajectory = {"thought_0": "ask", "tool_name_0": "ask_user", "tool_args_0": {}}
+    agent._suspended = {
+        "trajectory": trajectory,
+        "idx": 0,
+        "input_args": {"query": "hello"},
+        "max_iters": 5,
+        "clarification": "Which one?",
+    }
+    agent.extract = lambda trajectory, **input_args: {"final_answer": "finished"}  # type: ignore[method-assign]
+    agent.react = lambda trajectory, **input_args: SimpleNamespace(  # type: ignore[method-assign]
+        next_thought="got answer", next_tool_name="finish", next_tool_args={}
+    )
+
+    agent.resume("user said B")
+
+    # The user's answer is recorded as observation_0 in current_trajectory.
+    assert agent.current_trajectory["observation_0"] == "user said B"
+
+
 def test_clear_suspension_drops_stash():
     agent = _bare_react_agent()
     agent._suspended = {"trajectory": {}, "idx": 0, "input_args": {}, "max_iters": 5}

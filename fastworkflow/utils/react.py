@@ -152,6 +152,13 @@ class fastWorkflowReAct(Module):
         self.inputs = input_args
         self.clear_suspension()
 
+        # Reset the full-trajectory mirror at the start of each logical turn.
+        # resume() must NOT reset it, so a suspended->resumed turn accumulates one
+        # coherent trajectory. current_trajectory is a SEPARATE object from the
+        # working `trajectory` below (which is what gets stashed in _suspended),
+        # so mirroring into it never corrupts suspend/resume bookkeeping.
+        self.current_trajectory = {}
+
         trajectory: dict[str, Any] = {}
         max_iters = input_args.pop("max_iters", self.max_iters)
         idx = 0
@@ -182,6 +189,11 @@ class fastWorkflowReAct(Module):
         max_iters = stash["max_iters"]
 
         trajectory[f"observation_{idx}"] = observation
+        # Mirror the resumed observation (the user's ask_user answer) into
+        # current_trajectory. Without this the highest-value context — what the
+        # user said in response to the clarification — would be missing from the
+        # trajectory the planner and distillation see.
+        self.current_trajectory[f"observation_{idx}"] = observation
         idx += 1
         self.iteration_counter += 1
         self._suspended = None
@@ -219,18 +231,24 @@ class fastWorkflowReAct(Module):
                     self.react, trajectory, **input_args
                 )
             except ValueError as err:
-                trajectory[f"observation_{idx}"] = (
+                invalid_tool_obs = (
                     f"Agent failed to select a valid tool: {_fmt_exc(err)}"
                 )
+                trajectory[f"observation_{idx}"] = invalid_tool_obs
+                self.current_trajectory[f"observation_{idx}"] = invalid_tool_obs
                 idx += 1
-                trajectory[f"thought_{idx}"] = (
+                recovery_thought = (
                     "To execute a command, I should use the execute_workflow_query tool"
                 )
-                trajectory[f"observation_{idx}"] = (
+                recovery_obs = (
                     "Use the execute_workflow_query tool with a single argument called "
                     "'command' formatted as plain text using the command name and "
                     "parameter values"
                 )
+                trajectory[f"thought_{idx}"] = recovery_thought
+                trajectory[f"observation_{idx}"] = recovery_obs
+                self.current_trajectory[f"thought_{idx}"] = recovery_thought
+                self.current_trajectory[f"observation_{idx}"] = recovery_obs
                 idx += 1
                 exception_count += 1
                 if exception_count > 2:
@@ -255,14 +273,20 @@ class fastWorkflowReAct(Module):
             trajectory[f"tool_name_{idx}"] = pred.next_tool_name
             trajectory[f"tool_args_{idx}"] = pred.next_tool_args
 
+            # Mirror the full step into current_trajectory (consumed by the planner
+            # for replanning and by distillation as the agent trajectory). Keep the
+            # legacy action_{idx} entry too for any consumer that still reads it.
+            self.current_trajectory[f"thought_{idx}"] = pred.next_thought
+            self.current_trajectory[f"tool_name_{idx}"] = pred.next_tool_name
+            self.current_trajectory[f"tool_args_{idx}"] = pred.next_tool_args
             self.current_trajectory[f"action_{idx}"] = (
                 f"{pred.next_tool_name}: {pred.next_tool_args}"
             )
 
             try:
-                trajectory[f"observation_{idx}"] = self.tools[pred.next_tool_name](
-                    **pred.next_tool_args
-                )
+                observation = self.tools[pred.next_tool_name](**pred.next_tool_args)
+                trajectory[f"observation_{idx}"] = observation
+                self.current_trajectory[f"observation_{idx}"] = observation
             except AskUserSuspend as err:
                 self._suspended = {
                     "trajectory": trajectory,
@@ -277,9 +301,11 @@ class fastWorkflowReAct(Module):
                     exhausted=False,
                 )
             except Exception as err:
-                trajectory[f"observation_{idx}"] = (
+                error_observation = (
                     f"Execution error in {pred.next_tool_name}: {_fmt_exc(err)}"
                 )
+                trajectory[f"observation_{idx}"] = error_observation
+                self.current_trajectory[f"observation_{idx}"] = error_observation
 
             # Step-completion callback for distillation: lets external code inspect
             # each completed step and stop execution early (e.g. on trajectory
