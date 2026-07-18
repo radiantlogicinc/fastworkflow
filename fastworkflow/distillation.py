@@ -21,14 +21,12 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import dspy
 
 import fastworkflow
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_utils
-from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
 
 # Per-turn log of executed actions, written by the workflow agent and read back
 # here to compare teacher vs. student trajectories.
@@ -537,25 +535,16 @@ class DistillationSession:
             # Get available commands for current context
             available_commands = _what_can_i_do(self.chat_session)
 
-            # Run the agent with the specified AGENT LLM
+            # Run the agent with the specified AGENT LLM, reusing the WEC's shared
+            # agent-invocation contract (dspy.context + AdapterParseError retry).
             agent_lm = dspy_utils.get_lm(agent_lm_role, agent_api_key_role)
-            agent_adapter = CommandsSystemPreludeAdapter()
-
-            from dspy.utils.exceptions import AdapterParseError
-
-            max_retries = 2
-            agent_result = None
-            for attempt in range(max_retries):
-                try:
-                    with dspy.context(lm=agent_lm, adapter=agent_adapter):
-                        agent_result = agent(
-                            user_query=command_info,
-                            available_commands=available_commands,
-                        )
-                    break
-                except AdapterParseError:
-                    if attempt == max_retries - 1:
-                        raise
+            agent_result = self.chat_session._call_agent_with_retry(
+                lambda: agent(
+                    user_query=command_info,
+                    available_commands=available_commands,
+                ),
+                lm=agent_lm,
+            )
 
             # Extract result text
             result_text = (
@@ -587,23 +576,7 @@ class DistillationSession:
             # Capture the full ReAct trajectory
             trajectory = dict(agent.current_trajectory)
 
-            # Add conversation summary to history (mirrors _process_agent_message)
-            conversation_summary = message
-            conversation_traces = None
-            if actions:
-                conversation_summary, conversation_traces = (
-                    self.chat_session._extract_conversation_summary(
-                        message, actions, result_text
-                    )
-                )
-
-            self.chat_session.conversation_history.messages.append(
-                {
-                    "conversation summary": conversation_summary,
-                    "conversation_traces": conversation_traces,
-                    "feedback": None,
-                }
-            )
+            self.chat_session.summarize_and_record_turn(message, actions, result_text)
 
             # Flush workflow state
             if workflow := self.chat_session.get_active_workflow():
@@ -933,7 +906,6 @@ def distill_message(
         ds.restore_workflow_state(teacher_final_state)
     # else: keep student's state (equivalent to teacher's)
 
-    total_insights = ds.planning_insights_extracted + ds.execution_insights_extracted
     if any_divergence:
         _announce(
             "DISTILLATION: divergence found",

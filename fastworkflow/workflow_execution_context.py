@@ -434,6 +434,40 @@ class WorkflowExecutionContext:
     def clear_conversation_history(self) -> None:
         self._conversation_history = dspy.History(messages=[])
 
+    def append_conversation_turn(
+        self,
+        conversation_summary: str,
+        conversation_traces: Optional[str] = None,
+        feedback: Optional[str] = None,
+    ) -> None:
+        """Append one turn to conversation history in the canonical 3-key shape."""
+
+        self._conversation_history.messages.append(
+            {
+                "conversation summary": conversation_summary,
+                "conversation_traces": conversation_traces,
+                "feedback": feedback,
+            }
+        )
+
+    def summarize_and_record_turn(
+        self, message: str, actions: list, result_text: str
+    ) -> tuple[str, Optional[str]]:
+        """Summarize a completed agent turn and append it to conversation history.
+
+        When there are executed actions, run LLM summarization; otherwise fall back
+        to the raw message. Appends the turn via append_conversation_turn and returns
+        (summary, traces) so callers can reuse them (e.g. to set an artifact).
+        """
+        conversation_summary = message
+        conversation_traces = None
+        if actions:
+            conversation_summary, conversation_traces = self._extract_conversation_summary(
+                message, actions, result_text
+            )
+        self.append_conversation_turn(conversation_summary, conversation_traces)
+        return conversation_summary, conversation_traces
+
     def bind_app_workflow(self, workflow: fastworkflow.Workflow) -> None:
         """Bind the app workflow for NLU (Path 1) and execution (Path 2)."""
         self._app_workflow = workflow
@@ -715,10 +749,17 @@ class WorkflowExecutionContext:
 
         return lm, CommandsSystemPreludeAdapter()
 
-    def _call_agent_with_retry(self, agent_call):
+    def _call_agent_with_retry(self, agent_call, lm=None):
+        """Run agent_call under an agent dspy.context, retrying on AdapterParseError.
+
+        lm: optional LM override (e.g. distillation's teacher/student model). When
+        omitted, the default agent context (LLM_AGENT) is used.
+        """
         from dspy.utils.exceptions import AdapterParseError
 
-        lm, agent_adapter = self._agent_dspy_context()
+        default_lm, agent_adapter = self._agent_dspy_context()
+        if lm is None:
+            lm = default_lm
         max_retries = 2
         for attempt in range(max_retries):
             try:
@@ -790,21 +831,11 @@ class WorkflowExecutionContext:
 
         command_response = fastworkflow.CommandResponse(response=result_text)
 
-        conversation_traces = None
-        conversation_summary = original_message
-        if self._action_log:
-            conversation_summary, conversation_traces = self._extract_conversation_summary(
-                original_message, self._action_log, result_text
-            )
-            command_response.artifacts["conversation_summary"] = conversation_summary
-
-        self.conversation_history.messages.append(
-            {
-                "conversation summary": conversation_summary,
-                "conversation_traces": conversation_traces,
-                "feedback": None,
-            }
+        conversation_summary, _ = self.summarize_and_record_turn(
+            original_message, self._action_log, result_text
         )
+        if self._action_log:
+            command_response.artifacts["conversation_summary"] = conversation_summary
 
         # Topic 5: the synthesized agent answer carries only its own artifacts (e.g.
         # conversation_summary), so structured outputs from tool calls during the turn
@@ -937,12 +968,8 @@ class WorkflowExecutionContext:
             "response": response_text,
         }
 
-        self.conversation_history.messages.append(
-            {
-                "conversation summary": "assistant_mode_command",
-                "conversation_traces": json.dumps(record),
-                "feedback": None,
-            }
+        self.append_conversation_turn(
+            "assistant_mode_command", json.dumps(record)
         )
 
         self._maybe_enqueue_output(command_output)
@@ -1007,12 +1034,8 @@ class WorkflowExecutionContext:
             "response": response_text,
         }
 
-        self.conversation_history.messages.append(
-            {
-                "conversation summary": "process_action command",
-                "conversation_traces": json.dumps(record),
-                "feedback": None,
-            }
+        self.append_conversation_turn(
+            "process_action command", json.dumps(record)
         )
 
         self._maybe_enqueue_output(command_output)
@@ -1023,14 +1046,17 @@ class WorkflowExecutionContext:
     def _refine_user_query(
         self, user_query: str, conversation_history: dspy.History
     ) -> str:
-        if conversation_history.messages:
-            messages = []
-            for conv_dict in conversation_history.messages[-5:]:
-                messages.extend([f"{k}: {v}" for k, v in conv_dict.items()])
-            messages.append(f"new_user_query: {user_query}")
-            return "\n".join(messages)
-
-        return user_query
+        if not conversation_history.messages:
+            return user_query
+        messages = []
+        for conv_dict in conversation_history.messages[-5:]:
+            messages.extend(
+                f"{k}: {v}"
+                for k, v in conv_dict.items()
+                if k != "conversation_traces"
+            )
+        messages.append(f"new_user_query: {user_query}")
+        return "\n".join(messages)
 
     def _extract_conversation_summary(
         self,

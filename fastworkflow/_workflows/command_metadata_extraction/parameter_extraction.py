@@ -36,8 +36,9 @@ def _unwrap_optional(field_type):
     """
     origin = get_origin(field_type)
     if origin is Union:
-        non_none_types = [t for t in get_args(field_type) if t is not type(None)]
-        if non_none_types:
+        if non_none_types := [
+            t for t in get_args(field_type) if t is not type(None)
+        ]:
             field_type = non_none_types[0]
             origin = get_origin(field_type)
     return field_type, origin

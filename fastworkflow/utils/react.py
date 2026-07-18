@@ -230,6 +230,8 @@ class fastWorkflowReAct(Module):
                 pred = self._call_with_potential_trajectory_truncation(
                     self.react, trajectory, **input_args
                 )
+                if pred is None:
+                    raise ValueError("Tool returned is None")
             except ValueError as err:
                 invalid_tool_obs = (
                     f"Agent failed to select a valid tool: {_fmt_exc(err)}"
@@ -238,12 +240,10 @@ class fastWorkflowReAct(Module):
                 self.current_trajectory[f"observation_{idx}"] = invalid_tool_obs
                 idx += 1
                 recovery_thought = (
-                    "To execute a command, I should use the execute_workflow_query tool"
+                    "To execute a command, I should use one of the available tools"
                 )
                 recovery_obs = (
-                    "Use the execute_workflow_query tool with a single argument called "
-                    "'command' formatted as plain text using the command name and "
-                    "parameter values"
+                    "Use the appropriate tool with proper arguments (correctly formatted)"
                 )
                 trajectory[f"thought_{idx}"] = recovery_thought
                 trajectory[f"observation_{idx}"] = recovery_obs
@@ -254,20 +254,6 @@ class fastWorkflowReAct(Module):
                 if exception_count > 2:
                     break
                 continue
-
-            # Guard against an invalid/empty prediction (e.g. the LLM returned
-            # nothing parseable). Return a graceful fallback in the same shape as
-            # the normal return (a dspy.Prediction exposing .final_answer) instead
-            # of crashing.
-            if pred is None or not hasattr(pred, "next_thought"):
-                logger.warning(
-                    f"ReAct iteration {idx}: LLM returned None or invalid prediction. "
-                    "Returning fallback answer."
-                )
-                return dspy.Prediction(
-                    final_answer="I apologize, but I encountered an error processing your "
-                    "request. Could you please rephrase or provide more details?"
-                )
 
             trajectory[f"thought_{idx}"] = pred.next_thought
             trajectory[f"tool_name_{idx}"] = pred.next_tool_name

@@ -578,8 +578,7 @@ def build_query_with_next_steps(user_query: str,
         if not prediction.next_steps:
             return user_query
 
-        steps_formatted = " ".join(prediction.next_steps.split())
-
+        generated_plan = prediction.next_steps.split()
         # Capture the generated plan for distillation when a capture list is present
         # on the session (set only during a DistillationSession planning pass).
         planning_capture = getattr(chat_session_obj, '_planning_steps_capture', None)
@@ -588,10 +587,11 @@ def build_query_with_next_steps(user_query: str,
             planning_capture.append(PlanningStep(
                 step_number=len(planning_capture),
                 user_query=user_query,
-                generated_plan=steps_formatted,
+                generated_plan=generated_plan,
                 reasoning=getattr(prediction, 'reasoning', ''),
             ))
 
+        steps_formatted = " ".join(generated_plan)
         user_query_and_next_steps = f"{user_query}\n\nExecute these next steps:\n{steps_formatted}"
         return (
             f'User Query:\n{user_query_and_next_steps}'
