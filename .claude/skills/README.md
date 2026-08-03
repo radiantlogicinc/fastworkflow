@@ -46,6 +46,7 @@ volatile facts (line numbers, issue statuses, flags).
 | `fastworkflow-proof-and-analysis-toolkit` | First-principles recipes with worked examples from this repo: pass^k/variance arithmetic, simulator-ceiling derivation, blind dual-rater attribution, adversarial design review, root-cause discipline, calibration analysis, pre-registration. |
 | `fastworkflow-research-frontier` | The four ranked frontiers (pass^k reliability discipline; RSI-for-reliability; Forge self-hosting; small-model parity extended): why SOTA fails, our specific assets, first three concrete steps in this repo, falsifiable milestones. |
 | `fastworkflow-research-methodology` | The constitution: the evidence bar (one mechanism explains ALL observations; survives assigned refutation; pre-registered numbers), the idea lifecycle from hunch to adopted change or documented retirement, where good ideas historically came from. |
+| `fastworkflow-intent-training-convergence` | The loop for growing intent-detection quality: why the reported training F1 measures memorisation, why seeding did **not** make two runs comparable, how to measure your own run-to-run noise floor before believing anything, the minimum-detectable-effect table, growing seeds/personas one axis at a time, paired McNemar scoring on both routing and escalation (`scripts/score_benchmark.py`), and the stop rule. Added 2026-08-01; re-pointed 2026-08-02 at the in-package held-out evaluation and artifact versioning. |
 
 ## Suggested onboarding order
 
