@@ -156,6 +156,14 @@ You'll get a `User >` prompt. Try **"what can you do?"** or **"add 49 + 51"**. R
 
 > [!note]
 > **"Train" doesn't mean GPUs or fine-tuning a foundation model.** `fastworkflow train` is closer to *compiling a conversational interface*: it generates synthetic utterances and fits small BERT-class intent classifiers for your commands. You run it once per command set, re-run it only when commands change, ship the resulting artifacts with your app, and need **no GPU at runtime**.
+>
+> Training manages its own safety and incremental work. It checks command seeds for
+> duplicate capabilities before making LLM calls, warns when commands have thin seed
+> coverage, reuses cached utterances, and retrains only affected contexts when that is
+> provably safe. Global changes or an incomplete baseline automatically trigger a full
+> retrain. Models are published atomically; fastWorkflow retains only the current model
+> set and one previous recovery point. Use `--regenerate-utterances` only when you
+> intentionally want to discard the generated-data caches.
 
 > [!tip]
 > Get a free API key from [Mistral AI](https://mistral.ai) (works with `mistral-small-latest`) or [OpenRouter](https://openrouter.ai/openai/gpt-oss-20b:free). You can assign different models to different roles in the same workflow.
@@ -237,6 +245,15 @@ class ResponseGenerator:
 ```
 
 Then `fastworkflow train` and `fastworkflow run` against your workflow directory. That's the entire integration pattern: a thin command layer over code you already have.
+
+> [!TIP]
+> `plain_utterances` is the highest-leverage thing you write. Training expands your seeds
+> into the synthetic corpus the intent classifier learns from, so seed count and phrasing
+> variety matter more to routing accuracy than any other dial. The two above are enough to
+> get started; before you ship, grow each command to roughly eight varied phrasings —
+> imperative, question, colloquial, terse — rather than paraphrases of one sentence. (The
+> "roughly eight" figure is where returns flattened on one large internal workflow, not a
+> universal constant.)
 
 > [!tip]
 > Prefer to learn by building the smallest possible workflow by hand first? `fastworkflow examples fetch messaging_app_1` is a minimal, fully-worked single-command workflow you can read end-to-end.

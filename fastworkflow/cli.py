@@ -244,7 +244,16 @@ def add_train_parser(subparsers):
         default=None,
         help="Path to the passwords file (default: passwords.env in current directory, or bundled env file for examples)",
     )
+    parser_train.add_argument(
+        "--regenerate-utterances",
+        action="store_true",
+        help="Ignore the generated-utterance and DSPy parameter-example caches and call "
+             "the LLM again. Costs money "
+             "and breaks reproducibility against previous runs; use after editing seed "
+             "utterances or when you suspect the cache is wrong.",
+    )
     parser_train.set_defaults(func=lambda args: train_with_defaults(args))
+
 
 def add_run_parser(subparsers):
     """Add subparser for the 'run' command."""

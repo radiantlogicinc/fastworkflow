@@ -13,6 +13,7 @@ package AND a real synthetic-data-generation key, so the test skips cleanly
 when those are unavailable (e.g. CI without secrets configured).
 """
 
+import json
 import os
 import shutil
 import importlib.util
@@ -22,10 +23,20 @@ from dotenv import dotenv_values
 
 import fastworkflow
 from fastworkflow.train.__main__ import train_workflow
+from fastworkflow.train import heldout_evaluation
+from fastworkflow.command_directory import CommandDirectory
 from fastworkflow.model_pipeline_training import CommandRouter
+from fastworkflow.train.determinism import get_training_seed
+from fastworkflow.train.generate_synthetic import (
+    utterance_fingerprint,
+)
+from fastworkflow.train.utterance_cache import MODE_REUSE, UtteranceCache
 
 
 HELLO_WORLD_PATH = os.path.join("fastworkflow", "examples", "hello_world")
+ADD_TWO_NUMBERS_COMMAND = "add_two_numbers"
+ROUTING_UTTERANCE = "add 2 and 3"
+_FIXTURE_PERSONA_IDS = [f"fixture:{index}" for index in range(4)]
 
 # Artifacts written by the intent-detection trainer for each context.
 _MODEL_ARTIFACTS = [
@@ -108,6 +119,127 @@ def _find_model_dirs(command_info_path: str) -> list[str]:
     ]
 
 
+def _fixed_generated_corpus(command_name: str) -> list[str]:
+    """Return 20 deterministic generated rows for one hello-world intent."""
+    if command_name == ADD_TWO_NUMBERS_COMMAND:
+        return [
+            "sum the values 8 and 5",
+            "calculate 12 plus 4",
+            "what is 9 added to 6",
+            "total the numbers 11 and 7",
+            "combine 3 with 14 mathematically",
+            ROUTING_UTTERANCE,
+            "please add 17 and 2",
+            "find the sum of 21 and 9",
+            "compute 4 plus 13",
+            "give me the total of 6 and 18",
+            "add together 5 and 16",
+            "what do 7 and 19 sum to",
+            "calculate the addition of 23 and 1",
+            "sum up 10 with 15",
+            "please total 22 and 8",
+            "combine the two numbers 13 and 3",
+            "work out 18 plus 12",
+            "add the values 20 and 6",
+            "tell me the sum of 14 and 9",
+            "compute the total when adding 16 and 7",
+        ]
+
+    intent = command_name.split("/")[-1].replace("_", " ")
+    return [
+        f"{prefix} {intent}{suffix}"
+        for prefix, suffix in (
+            ("please", ""),
+            ("can you", " for me"),
+            ("I need to", ""),
+            ("help me", ""),
+            ("go ahead and", ""),
+            ("would you", " now"),
+            ("kindly", ""),
+            ("let me", ""),
+            ("I want to", ""),
+            ("could you", " please"),
+            ("please now", ""),
+            ("when ready", ""),
+            ("for me", ""),
+            ("quickly", ""),
+            ("today", ""),
+            ("at once", ""),
+            ("right away", ""),
+            ("in this session", ""),
+            ("show me how to", ""),
+            ("perform", ""),
+        )
+    ]
+
+
+def _preseed_fixed_utterance_cache(workflow_path: str) -> dict[str, list[str]]:
+    """Populate the fresh workflow's real R6 cache before its first train."""
+    cmd_dir = CommandDirectory.load(workflow_path)
+    cache = UtteranceCache(workflow_path, mode=MODE_REUSE)
+    seed = get_training_seed()
+    model = fastworkflow.get_env_var("LLM_SYNDATA_GEN")
+    num_personas = fastworkflow.get_env_var(
+        "SYNTHETIC_UTTERANCE_GEN_NUMOF_PERSONAS", int)
+    utterances_per_persona = fastworkflow.get_env_var(
+        "SYNTHETIC_UTTERANCE_GEN_UTTERANCES_PER_PERSONA", int)
+    personas_per_batch = fastworkflow.get_env_var(
+        "SYNTHETIC_UTTERANCE_GEN_PERSONAS_PER_BATCH", int)
+    expected_corpora = {}
+    commands = set(cmd_dir.get_utterance_keys()) | set(cmd_dir.core_command_names)
+
+    for command_name in sorted(commands):
+        if command_name.split("/")[-1] == "wildcard":
+            continue
+        cmd_dir.ensure_command_hydrated(command_name)
+        metadata = cmd_dir.get_utterance_metadata(command_name)
+        corpus = _fixed_generated_corpus(command_name)
+        fingerprint = utterance_fingerprint(
+            metadata.plain_utterances,
+            command_name,
+            num_personas,
+            utterances_per_persona,
+            personas_per_batch,
+            model,
+        )
+        attribution = {
+            utterance: _FIXTURE_PERSONA_IDS[index // 5]
+            for index, utterance in enumerate(corpus)
+        }
+        assert cache.store(
+            fingerprint,
+            seed,
+            corpus,
+            utterance_personas=attribution,
+            persona_ids=_FIXTURE_PERSONA_IDS,
+            persona_dataset_size=len(_FIXTURE_PERSONA_IDS),
+        )
+        expected_corpora[command_name] = corpus
+
+    return expected_corpora
+
+
+def _assert_fixed_corpus_was_used(
+    workflow_path: str,
+    expected_corpora: dict[str, list[str]],
+) -> None:
+    """Prove every intent hit the preseed instead of making a first LLM draw."""
+    provenance_path = os.path.join(
+        _command_info_path(workflow_path), "training_provenance.json")
+    with open(provenance_path) as f:
+        payload = json.load(f)
+    provenance = payload.get("commands", payload)
+
+    for command_name, corpus in expected_corpora.items():
+        record = provenance[command_name]
+        assert record["generated_count"] == len(corpus)
+        assert record["fell_back"] is False
+        assert set(record["persona_ids"]) == set(_FIXTURE_PERSONA_IDS)
+        assert set(corpus) <= set(record["utterance_personas"]), (
+            f"{command_name} regenerated utterances instead of using the R6 preseed"
+        )
+
+
 @pytest.fixture(scope="module")
 def trained_hello_world(tmp_path_factory):
     if not _datasets_available():
@@ -140,7 +272,9 @@ def trained_hello_world(tmp_path_factory):
     _cleanup(workflow_path, env_vars)
 
     fastworkflow.init(env_vars=env_vars)
+    expected_corpora = _preseed_fixed_utterance_cache(workflow_path)
     train_workflow(workflow_path)
+    _assert_fixed_corpus_was_used(workflow_path, expected_corpora)
 
     yield workflow_path, env_vars
 
@@ -172,6 +306,190 @@ def test_train_produces_model_artifacts(trained_hello_world):
             assert os.path.exists(os.path.join(model_dir, artifact)), (
                 f"{artifact} missing from trained model dir {model_dir}"
             )
+
+
+def test_benchmark_that_leaks_a_seed_utterance_fails_fast(tmp_path_factory):
+    """A benchmark sharing a phrasing with the training seeds must abort the run (R1b).
+
+    The check runs BEFORE training rather than alongside the scoring, and that ordering is
+    the whole point: a leak discovered afterwards means every number the run produced has
+    to be thrown away, having already spent the LLM calls and GPU time. It compares
+    normalised text, so the realistic version of the mistake -- pasting a failing benchmark
+    case into a seed list with the capitalisation changed -- is caught too.
+    """
+    if not _datasets_available():
+        pytest.skip("datasets package not installed; training entry point is skipped.")
+
+    env_vars = _resolve_env_vars()
+    if not _looks_like_real_key(env_vars.get("LITELLM_API_KEY_SYNDATA_GEN")):
+        pytest.skip("No real LITELLM_API_KEY_SYNDATA_GEN available; training is skipped.")
+
+    workflow_path = str(tmp_path_factory.mktemp("leak_hello_world") / "hello_world")
+    shutil.copytree(
+        HELLO_WORLD_PATH,
+        workflow_path,
+        ignore=shutil.ignore_patterns(
+            "___command_info", "___workflow_contexts", "___convo_info", "__pycache__"
+        ),
+    )
+    _cleanup(workflow_path, env_vars)
+    fastworkflow.init(env_vars=env_vars)
+
+    cmd_dir = CommandDirectory.load(workflow_path)
+    leaked = None
+    for command_key in cmd_dir.get_utterance_keys():
+        metadata = cmd_dir.get_utterance_metadata(command_key)
+        if metadata and metadata.plain_utterances:
+            leaked = metadata.plain_utterances[0]
+            break
+    assert leaked, "hello_world has no seed utterances to leak; test cannot run."
+
+    benchmark_path = heldout_evaluation.default_benchmark_path(workflow_path)
+    os.makedirs(os.path.dirname(benchmark_path), exist_ok=True)
+    with open(benchmark_path, "w") as f:
+        json.dump(
+            {
+                "schema_version": heldout_evaluation.BENCHMARK_SCHEMA_VERSION,
+                "cases": [
+                    {
+                        "utterance": leaked,
+                        "kind": "routing",
+                        "expected_label": "add_two_numbers",
+                        "context": "*",
+                    }
+                ],
+            },
+            f,
+        )
+
+    with pytest.raises(heldout_evaluation.BenchmarkLeakError) as excinfo:
+        train_workflow(workflow_path)
+    assert leaked in str(excinfo.value)
+
+    _cleanup(workflow_path, env_vars)
+
+
+def test_benchmark_routing_cases_are_scored(tmp_path_factory):
+    """A valid benchmark must actually be scored, not silently skipped (R1b).
+
+    Regression test for bd fix-588. The trainer called `benchmark_cases_for_context`
+    without its required `kind` argument; the resulting TypeError was caught by the guard
+    that exists to stop a scoring failure from destroying a completed training run, and
+    became a note on the report. Routing from the persona holdout kept working, so the
+    symptom was indistinguishable from "this workflow declares no benchmark cases".
+
+    Every other test here either trains without a benchmark file or expects the leak
+    guard to abort before scoring, which is exactly why nothing caught it. This one
+    trains with a clean benchmark and asserts a score came back.
+    """
+    if not _datasets_available():
+        pytest.skip("datasets package not installed; intent-detection training is skipped.")
+
+    env_vars = _resolve_env_vars()
+    if not _looks_like_real_key(env_vars.get("LITELLM_API_KEY_SYNDATA_GEN")):
+        pytest.skip("No real LITELLM_API_KEY_SYNDATA_GEN available; training is skipped.")
+
+    workflow_path = str(tmp_path_factory.mktemp("bench_hello_world") / "hello_world")
+    shutil.copytree(
+        HELLO_WORLD_PATH,
+        workflow_path,
+        ignore=shutil.ignore_patterns(
+            "___command_info", "___workflow_contexts", "___convo_info", "__pycache__"
+        ),
+    )
+    _cleanup(workflow_path, env_vars)
+    fastworkflow.init(env_vars=env_vars)
+
+    # Phrasings deliberately unlike hello_world's seeds, so the disjointness guard passes.
+    benchmark_path = heldout_evaluation.default_benchmark_path(workflow_path)
+    os.makedirs(os.path.dirname(benchmark_path), exist_ok=True)
+    with open(benchmark_path, "w") as f:
+        json.dump(
+            {
+                "schema_version": heldout_evaluation.BENCHMARK_SCHEMA_VERSION,
+                "cases": [
+                    {"utterance": "what is 41 plus 1", "kind": "routing",
+                     "expected_label": "add_two_numbers", "context": "*"},
+                    {"utterance": "please total 19 with 23", "kind": "routing",
+                     "expected_label": "add_two_numbers", "context": "*"},
+                ],
+            },
+            f,
+        )
+
+    train_workflow(workflow_path)
+
+    report_path = os.path.join(
+        _command_info_path(workflow_path), heldout_evaluation.REPORT_FILENAME
+    )
+    with open(report_path) as f:
+        payload = json.load(f)
+
+    scored = [
+        entry for entry in payload["contexts"]
+        if (entry.get("benchmark_routing") or {}).get("total", 0) > 0
+    ]
+    assert scored, (
+        "The benchmark's routing cases were never scored. Check the report notes for a "
+        f"swallowed scoring failure: {payload}"
+    )
+    for entry in scored:
+        benchmark_routing = entry["benchmark_routing"]
+        assert benchmark_routing["total"] == 2
+        assert benchmark_routing["top1_correct"] <= 2
+
+    # The guard must not have fired: a note here means scoring raised and was swallowed.
+    for entry in payload["contexts"]:
+        assert not any(
+            "evaluation failed" in note for note in entry.get("notes", [])
+        ), f"Held-out evaluation raised and was swallowed: {entry['notes']}"
+
+    _cleanup(workflow_path, env_vars)
+
+
+def test_training_produces_heldout_evaluation_report(trained_hello_world):
+    """Training must emit a whole-persona held-out score, not just in-distribution F1.
+
+    This is the epic's headline requirement (R1a). The module implementing it shipped
+    before it was called by anything, so the trainer went on reporting only the
+    same-distribution F1 -- a number computed on utterances from the personas it trained
+    on. A report file whose routing score is populated is what proves the evaluation
+    actually ran against the real CommandRouter path rather than being silently skipped.
+    """
+    workflow_path, _env_vars = trained_hello_world
+    report_path = os.path.join(
+        _command_info_path(workflow_path), heldout_evaluation.REPORT_FILENAME
+    )
+    assert os.path.isfile(report_path), (
+        f"No held-out evaluation report at {report_path}; R1a is not wired into training."
+    )
+
+    with open(report_path) as f:
+        payload = json.load(f)
+
+    contexts = payload.get("contexts")
+    assert contexts, f"Held-out evaluation report has no contexts: {payload}"
+
+    # At least one context must have produced a real routing score. Held-out evaluation
+    # degrades to notes-only when a workflow has too few personas to reserve any, so an
+    # empty holdout is legitimate -- but hello_world generates enough that a total of
+    # zero everywhere means the split or the scoring silently no-opped. Scoring failures
+    # are deliberately swallowed during training so a completed run is never destroyed by
+    # them, which is exactly why they need asserting on here.
+    scored = [
+        entry for entry in contexts
+        if (entry.get("routing") or {}).get("total", 0) > 0
+    ]
+    assert scored, (
+        "No context produced a held-out routing score. Either every persona split was "
+        f"empty or scoring failed and was swallowed. Report: {payload}"
+    )
+    for entry in scored:
+        routing = entry["routing"]
+        assert routing["top1_correct"] <= routing["total"]
+        assert 0.0 <= routing["top1"] <= 1.0
+
+    assert payload["totals"]["routing_total"] > 0
 
 
 def test_trained_model_routes_utterance(trained_hello_world):

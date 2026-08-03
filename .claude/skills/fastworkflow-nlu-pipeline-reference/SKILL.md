@@ -8,18 +8,34 @@ description: >
   you hear: "wrong command predicted", "ambiguous intent", "intent detection", "parameter
   extraction returned NOT_FOUND", "threshold.json", "confidence threshold", "utterance
   generation", "DSPy signature/cache", "LabeledFewShot", "litellm_proxy", "why did the
-  classifier pick X", or when modifying anything under model_pipeline_training.py,
-  intent_detection.py, signatures.py, generate_synthetic.py, or cache_matching.py.
+  classifier pick X", "what does wildcard mean", "wildcard vs parameter_value", "reserved
+  label", "escalation label", "why is there no wildcard class in this context",
+  "in_distribution_f1", "___command_info/versions", or when modifying anything under
+  model_pipeline_training.py, intent_detection.py, nlu_labels.py, signatures.py,
+  generate_synthetic.py, heldout_evaluation.py, or cache_matching.py.
   Do NOT load for step-by-step failure triage (use fastworkflow-debugging-playbook),
-  the full env-var catalog (fastworkflow-config-and-flags), or tau-bench benchmark
-  mechanics (fastworkflow-taubench-reference).
+  for deciding whether one training run beat another or how many seeds to add (use
+  fastworkflow-intent-training-convergence), the full env-var catalog
+  (fastworkflow-config-and-flags), or tau-bench benchmark mechanics
+  (fastworkflow-taubench-reference).
 ---
 
 # fastWorkflow NLU Pipeline Reference
 
-Everything below is verified against source at v2.22.2 (commit c33b9a5), 2026-07-09.
-File paths are repo-relative. **Trust this document over CLAUDE.md and README where they
-disagree** — known doc rot is listed at the end.
+Everything below is verified against source at v2.22.2 (commit c33b9a5), 2026-07-09,
+**except** the passages marked "2026-08-02", which were re-verified against the working
+tree after wave 1 of epic `fix-551` (held-out evaluation, determinism, artifact
+versioning, and the reserved-label split) landed. File paths are repo-relative. **Trust
+this document over CLAUDE.md and README where they disagree** — known doc rot is listed at
+the end.
+
+> **2026-08-02 — the biggest change since this skill was written.** `wildcard` is no
+> longer a catch-all. `fastworkflow/nlu_labels.py` splits it into two reserved labels with
+> different meanings and different training rules; §2 has the detail. Anything you
+> remember about "the wildcard class" is at best half right now.
+>
+> `fastworkflow/model_pipeline_training.py` is under active edit as R1 is wired in, so the
+> line numbers below drift. Prefer the symbol names; `grep -n` for them.
 
 ## When to use / when NOT to use
 
@@ -32,6 +48,7 @@ disagree** — known doc rot is listed at the end.
 | Why the architecture is shaped this way; invariants | `fastworkflow-architecture-contract` |
 | Running train/build/CLI commands operationally | `fastworkflow-run-and-operate` |
 | Measuring model quality instead of eyeballing | `fastworkflow-diagnostics-and-tooling` |
+| Growing seeds/personas and judging whether run B beat run A | `fastworkflow-intent-training-convergence` |
 | Variance/pass^k math, calibration analysis recipes | `fastworkflow-proof-and-analysis-toolkit` |
 
 ## Glossary (one line each, used throughout)
@@ -101,9 +118,15 @@ Sharp edges, all verified:
 - Special commands bypass the classifier entirely: `ErrorCorrection/abort` and
   `ErrorCorrection/you_misunderstood` (and `what_can_i_do` during ambiguity clarification) are
   matched only via layers 1-2 against their `plain_utterances` (:69-97).
-- `majority_vote_predictions` (:304-360) is **dead code** — the call is commented out at :122
-  and its own TODOs (:302-303) admit predictions are deterministic, so voting is pointless
-  without a temperature mechanism. Status: stalled reliability idea, relevant to tau2 work.
+- `majority_vote_predictions` is **dead code** — the call is commented out (`:180`) and its
+  own TODOs admit predictions are deterministic, so voting is pointless without a
+  temperature mechanism. Status: stalled reliability idea, relevant to tau2 work.
+- **2026-08-02:** layer 4's outcome now goes through the reserved-label helpers, not a
+  string compare. A single prediction routes (`:182-183`); a top-k list containing an
+  escalation label follows fixed conservative behaviour: the signal is **discarded** and
+  the user is prompted with the local candidates only (finding F7), while a warning names
+  the suppressed labels. A top-k `parameter_value`
+  deliberately never escalates.
 
 ## 2. Two-tier intent models (TinyBERT + DistilBERT)
 
@@ -121,16 +144,43 @@ Sharp edges, all verified:
 | Epochs | 12 (:957) | 5 (:1020) |
 | Batch size | 10 (:936) | 10 |
 | Max token length | 128 (train and inference) | 128 |
-| Split | `train_test_split(test_size=0.25, random_state=42)` (:914) | same data |
+| Split | `train_test_split(test_size=0.25, random_state=42)` (:914, now :1053 — see note below) | same data |
 
-One model **pair per command context**, trained by `train()` (:803). Contexts trained =
-workflow's contexts minus the internal CME contexts, plus `'*'` (mapped to folder `global`,
-:604, :820-823). Labels per context = that context's commands + core commands, PLUS a
-`wildcard` out-of-scope class built from ancestor-context utterances (minus the context's
-own) plus the `wildcard` command's deliberately-junky seed utterances (:869-877).
-Commands without `Signature.Input` are excluded from training entirely (:741-757) — they
-are `perform_action`-only. Labels are fully-qualified (`Context/command`); the runtime
-takes `.split('/')[-1]` (`intent_detection.py:125`).
+One model **pair per command context**, trained by `train()`. Contexts trained =
+workflow's contexts minus the internal CME contexts, plus `'*'` (mapped to folder `global`
+— `GLOBAL_CONTEXT_FOLDER`, `context_set_for_training`). Commands without `Signature.Input`
+are excluded from training entirely — they are `perform_action`-only. Labels are
+fully-qualified (`Context/command`); the runtime reduces them with
+`nlu_labels.label_of` (`prediction.split("/")[-1]`).
+
+**Reserved labels — updated 2026-08-02, this changed.** A context's label space is its own
+commands + core commands + up to two *reserved* labels that name no command. Until wave 1
+of `fix-551` there was one, `wildcard`, doing two unrelated jobs in two different NLU
+stages, which meant the escalation classifier was trained on the literal `"france"`.
+`fastworkflow/nlu_labels.py` (standard-library only, so the trainer and the runtime can
+both import it) now owns the vocabulary:
+
+| Label | Stage | Meaning | Trained in which contexts | Members |
+|---|---|---|---|---|
+| `WILDCARD_LABEL` = `wildcard` | INTENT_DETECTION | **escalation signal** — "an ancestor context can serve this" | only where `ancestor_utterances - context_utterances` is non-empty; **a context with no ancestors gets no escalation class at all** | ancestor-context utterances not also valid locally, plus the CME `wildcard` command's humanised name |
+| `PARAMETER_VALUE_LABEL` = `parameter_value` | PARAMETER_EXTRACTION | **bare-value catcher** — "this is a value, not a local command" | every context | the seven contentless literals `PARAMETER_VALUE_PLACEHOLDERS` (`"3"`, `"france"`, `"id=3636"`, …) |
+
+Both are in `NON_ROUTABLE_LABELS`: a prediction of either resolves to
+`command_name=None` (`intent_detection.py:368-380`,
+`resolve_fully_qualified_command_name`) and neither is ever displayed to the user as a
+choosable command (`:410-418`). Only `wildcard` is in `ESCALATION_LABELS` — a bare value
+carries no evidence that an ancestor can help. Use `is_escalation` / `is_non_routable`
+rather than string-comparing to `"wildcard"`.
+
+Why the root-context drop is safe rather than a lost out-of-scope sink: in a root context
+the escalation class would collapse to a single row, the split is not stratified, and the
+ambiguous thresholds are the *mean confidence of misclassified test samples* — so that one
+row would move a live runtime threshold. And a root context's parent walk terminates
+immediately at `you_misunderstood`, which an unconfident classifier already reaches. See
+the "no out-of-scope rejection" note in §5.
+
+Assembly lives in `train()` — `grep -n "WILDCARD_LABEL\|PARAMETER_VALUE_LABEL"
+fastworkflow/model_pipeline_training.py`.
 
 **Runtime tiering** (`ModelPipeline.predict_batch` :416-508, `CommandRouter.predict` :321-334):
 
@@ -161,18 +211,34 @@ takes `.split('/')[-1]` (`intent_detection.py:125`).
   (:298-311) reads only `threshold.json` + the `tiny_`/`large_` variants.
 
 **What F1 / NDCG@3 mean here**: F1 (weighted) scores hard top-1 classification on the
-25% held-out utterances. NDCG@3 credits partially-correct ranking — it is the quality
+25% split-off utterances. NDCG@3 credits partially-correct ranking — it is the quality
 measure for the *top-k clarification list* the user sees when the model is unsure
 (implementation :393-414 and :719-730). High F1 + low NDCG@3 would mean confident answers
 are fine but clarification lists are bad.
 
-Artifacts land in `<workflow>/___command_info/<context>/`: `tinymodel.pth/`,
-`largemodel.pth/` (HF `save_pretrained` dirs), `label_encoder.pkl`, `threshold.json`,
-`tiny_ambiguous_threshold.json`, `large_ambiguous_threshold.json`. Missing
-`threshold.json` = untrained context; `is_workflow_trained` (:624-674) fail-fast checks
-exactly this before chat starts. **NEVER let tests/experiments write into
-`fastworkflow/examples/*/___command_info` — train into temp copies (fix-0hb incident,
-commit fa97b48).**
+**That split is over the SAME synthetic set the model trained on** (finding F1 of
+`docs/intent_training_improvements_spec.md`), and every utterance for a command comes from
+a handful of personas expanding one seed list, so the "test" rows are near duplicates of
+the train rows. The number measures memorisation: ~0.94 reported F1 against 46.2%
+real held-out top-1 on a 160-command workflow. It is **retained** because it is what
+calibrates the ambiguity thresholds; it is only its use as a *quality* metric that is
+unsound. As of 2026-08-02 it is reported under the name `in_distribution_f1` alongside
+real held-out metrics (`fastworkflow/train/heldout_evaluation.py`, whole-persona holdout
+plus an optional `<workflow>/intent_benchmark.json`, written to
+`___command_info/heldout_evaluation.json`). For how to act on those numbers see
+`fastworkflow-intent-training-convergence`; for the file schema, `docs/intent_benchmark_format.md`.
+
+Artifacts land in `<workflow>/___command_info/versions/<version_id>/<context>/`, with a
+`current` pointer file (plus a convenience `current` symlink) selecting the live set —
+`fastworkflow/train/artifact_versioning.py`. This is an internal atomic-publication layout:
+training retains only current and one previous recovery point. The pre-2026-08 flat layout
+`___command_info/<context>/` is still read and is migrated on the next train. Per context:
+`tinymodel.pth/`, `largemodel.pth/` (HF `save_pretrained` dirs), `label_encoder.pkl`,
+`threshold.json`, `tiny_ambiguous_threshold.json`, `large_ambiguous_threshold.json` —
+roughly 275 MB. Missing `threshold.json` = untrained context; `is_workflow_trained`
+(:624-674, now :672) fail-fast checks exactly this before chat starts. **NEVER let
+tests/experiments write into `fastworkflow/examples/*/___command_info` — train into temp
+copies (fix-0hb incident, commit fa97b48).**
 
 Full training walkthrough + metrics math: [references/intent-model-training.md](references/intent-model-training.md).
 
@@ -183,20 +249,44 @@ command file's generated `generate_utterances` staticmethod (template:
 `build/command_file_template.py:112-115`). Per command:
 
 - Samples `SYNTHETIC_UTTERANCE_GEN_NUMOF_PERSONAS` (template default 4) personas from
-  HuggingFace `proj-persona/PersonaHub` `persona.jsonl` (:40), batches
+  HuggingFace `proj-persona/PersonaHub` `persona.jsonl`, batches
   `PERSONAS_PER_BATCH` (1) × `UTTERANCES_PER_PERSONA` (5) through `litellm.completion` on
-  `LLM_SYNDATA_GEN` (max_tokens=1000, temperature=1.0, top_p=0.9; :112-119).
+  `LLM_SYNDATA_GEN` (max_tokens=1000, temperature=1.0, top_p=0.9).
 - Returns `[command_name] + seeds + generated` → default economics ≈ name + seeds + 4×5=20
   synthetic utterances per command. These env dials are your cost/quality knobs.
+- **2026-08-02:** persona choice is no longer an unseeded `random.sample`. It is
+  `select_persona_indices(n, num_personas, seed, command_name)`, derived from
+  the trainer's fixed seed (`fastworkflow/train/determinism.py`), and each utterance's producing
+  persona is recorded in `___command_info/training_provenance.json` — which is what makes
+  the whole-persona held-out split possible. Provenance schema v2 separates the one
+  generation record per fully-qualified command from each `(context, command)` labelled-row
+  use, including explicit no-input/no-utterance skips and fallback use. The training report
+  shows aggregate and per-context counts and applies row floors per context. Legacy flat
+  provenance remains read-only compatible. Seeding alone still does **not** make a run
+  reproducible: the LLM regenerates different text every time (spec §11 M4 — 0 of 5
+  commands matched across two runs at the same seed); R6 reuse is what pins the draw.
 
 **Traps (verified):**
 
 | Trap | Location | Consequence |
 |---|---|---|
-| `RateLimitError` → returns `[]` — silently dropping even the SEED utterances | :120-122 | That command is underrepresented/absent in the intent model; training "succeeds" |
-| LLM reply parsed by splitting on `[` / `]` persona headers | :128-143 | Format drift in the model's reply silently loses utterances |
-| The 3 `SYNTHETIC_UTTERANCE_GEN_*` env vars are read at **module import** with `int` coercion, no defaults | :14-16 | Importing before `fastworkflow.init()` or with a sparse env file yields `None` constants, failing later and obscurely |
-| No `datasets` package → seeds-only, warning logged | :26-32 | Deliberate slim-image degradation (`pip install fastworkflow[training]` to fix) |
+| ~~`RateLimitError` → returns `[]`, dropping even the SEED utterances~~ **FIXED 2026-08-02** | `_with_retries`, `generate_diverse_utterances_with_provenance` | Now retries with a fixed five-attempt exponential-backoff policy and on terminal failure returns `[command_name] + seeds`, recording `fell_back` / `fallback_reason` per command in `training_provenance.json`. A starved command is visible now, but it is still seeds-only |
+| LLM reply parsed by splitting on `[` / `]` persona headers | :368-377 | Format drift in the model's reply silently loses utterances |
+| The 3 `SYNTHETIC_UTTERANCE_GEN_*` env vars are read at **module import** with `int` coercion, no defaults | :37-39 | Importing before `fastworkflow.init()` or with a sparse env file yields `None` constants, failing later and obscurely |
+| No `datasets` package → seeds-only, warning logged | :446-454 | Deliberate slim-image degradation (`pip install fastworkflow[training]` to fix); also recorded as `fell_back` |
+
+**How many seed utterances per command (`Signature.plain_utterances`)?**
+Seed count is the largest lever measured anywhere in this pipeline — larger than the
+persona dials above, larger than anything in the training loop. One workflow's curve, all
+else held constant: 3.2 seeds/command → 46.2% held-out routing top-1, 8.0 → 70.4%, 9.3 →
+73.8%, with returns flattening past roughly eight. **That is an observation from a single
+160-command workflow, not a universal constant** — the shape (steep early, flattening) is
+the transferable part; re-derive the number on your own workflow. Nothing in the training
+output tells a developer this yet; the per-command report that would (R3b, `fix-551.4`) is
+not implemented. Count what you have with `seed_utterance_count` in
+`___command_info/training_provenance.json`. Vary the phrasing *family* — imperative,
+question, colloquial, terse, synonym-heavy, value-bearing — rather than adding paraphrases
+of the seed you already wrote.
 
 ## 4. DSPy — three distinct uses, don't conflate them
 
@@ -231,14 +321,31 @@ Run-time parameter extraction detail (`utils/signatures.py`):
 - The intent-clarification agent is a tool-free `ChainOfThought` over
   `IntentClarificationAgentSignature` (`intent_clarification_agent.py:11-54`).
 
-**Verified defect you must know**: `generate_dspy_examples` computes fuzzy validation
-(normalized-Levenshtein vs the utterance) and logs/saves rejections, **but returns ALL
-parsed examples anyway** — `utils/generate_param_examples.py:608` transforms `examples`,
-not `validated_examples`; the filtered return at :612 is commented out. So
-`valid_examples` in `<cmd>_param_labeled.json` may contain hallucinated parameter values,
-and a `rejected_examples.json` is dropped into the **current working directory** (:606).
-Also note `eval()` on LLM-derived text at :179 (examples-list parsing). Treat this whole
-file as a known-weak point.
+**Parameter-example validation — fixed 2026-08-02, with narrower limitations remaining.**
+Previously `generate_dspy_examples` accumulated `validated_examples` and then transformed
+and returned **all** parsed examples anyway. Worse, Pydantic v2 rendered a string annotation
+as `"<class 'str'>"` while the regex parser recognized only `"str"`, so validation saw no
+string values and the observed zero-rejection rate was an instrumentation failure. It now
+normalizes primitive/optional types and transforms only validated source examples.
+
+A real-LLM audit over five `messaging_app_4` commands parsed all 75 requested examples and
+found no obvious hallucination among 103 accepted string values. It also exposed two false
+rejections of valid long broadcast messages: the fuzzy matcher considered at most five
+words. The matcher now retains its 1–5-word windows for short identifiers and additionally
+compares windows within two words of a long value's own length. Revalidating all 105 strings
+from the audit yielded zero invalid values without relaxing threshold 0.3 for short IDs.
+
+`fix-hru` subsequently replaced the regex field parser with an AST + `literal_eval` parser;
+no model-provided code is executed. It validates primitives, lists, dictionaries,
+unions/optionals, literals and enums against the Pydantic annotation, rejects malformed
+values and missing required fields, and preserves omitted fields that have defaults.
+Tuples, sets and arbitrary custom objects remain deliberately unsupported because they do
+not round-trip through the runtime JSON-shaped example schema. Numeric grounding remains
+unchanged (numbers are type-checked but accepted without proving they occur in the command).
+Rejected details are returned, written with the command's accepted examples and cached; the
+old process-global `rejected_examples.json` debug side effect was removed because each command
+overwrote the previous file and left debris in the launch directory. Treat this file as
+substantially hardened, not a general serializer for arbitrary Python objects.
 
 **DSPy caching**: DSPy memoizes LLM calls on disk+memory. If refine/agent outputs seem
 frozen after a prompt change, clear it:
@@ -264,7 +371,19 @@ INTENT_DETECTION ──out-of-scope*──────> INTENT_MISUNDERSTANDING_
 ```
 
 \* out-of-scope: `wildcard.py:99-124` first walks PARENT contexts re-running prediction
-before declaring misunderstanding.
+before declaring misunderstanding. The walk is triggered by `command_name=None`, which
+**either** reserved label produces — but only `wildcard` carries evidence that an ancestor
+can help.
+
+**There is no out-of-scope rejection anywhere in this pipeline (measured 2026-08-02).**
+Probing the committed `examples/retail_workflow` `global` context directly through
+`CommandRouter.predict`: out-of-scope prose predicted `wildcard` in **0 of 6** cases, and
+two of the six routed *confidently* to a real command (`'book me a flight to Tokyo'` →
+`IntentDetection/what_can_i_do`). `wildcard` was predicted for 3 of 4 bare values, which is
+the `parameter_value` job, not rejection. Nothing is trained to recognise "this belongs to
+no command at all". The only brake is the ambiguity threshold, and for retail it sits at
+0.2395 / 0.3392 — anything clearing ~24–34% confidence executes. Filed as `fix-d28`; full
+probe write-up in `docs/intent_training_improvements_spec.md` §11 (M1/M2).
 
 - Suggested commands for the constrained re-selection are persisted in the app workflow's
   `___convo_info/cache.db` Rdict (`intent_detection.py:189-217`).
@@ -298,7 +417,8 @@ One LLM role = one model env var + one key env var, resolved through
 - **Env precedence quirk** (`fastworkflow/__init__.py:211-219`): `get_env_var` returns a
   supplied code default WITHOUT consulting `os.environ`. So `INTENT_DETECTION_TINY_MODEL`
   and `INTENT_DETECTION_LARGE_MODEL` can only be overridden via the workflow's **env
-  file**, never the shell.
+  file**, never the shell. Training seed, retry policy, report floors, and mixed top-k
+  escalation behaviour are fixed trainer policy and have no environment override.
 - New LLM call sites MUST use `get_lm(model_var, key_var)`, never bare `dspy.LM`.
 
 ## 7. Magic numbers: provenance is UNDOCUMENTED
@@ -340,9 +460,28 @@ Top offenders (full table with all ~25 entries:
 
 ## Provenance and maintenance
 
-Facts verified 2026-07-09 against v2.22.2 (commit c33b9a5). Re-verify volatile facts:
+Facts verified 2026-07-09 against v2.22.2 (commit c33b9a5); passages marked 2026-08-02
+re-verified against the working tree after wave 1 of epic `fix-551`. Re-verify volatile
+facts:
 
 ```bash
+# 2026-08-02: the two reserved labels and which one escalates
+sed -n '46,77p' fastworkflow/nlu_labels.py
+grep -rn "WILDCARD_LABEL\|PARAMETER_VALUE_LABEL" fastworkflow/ --include=*.py
+
+# 2026-08-02: the escalation class is dropped where there are no ancestors
+grep -n "if net_ancestor_utterances" -B 12 fastworkflow/model_pipeline_training.py
+
+# 2026-08-02: fixed mixed top-k escalation behaviour
+grep -n "Top-k escalation signal discarded" fastworkflow/_workflows/command_metadata_extraction/intent_detection.py
+
+# 2026-08-02: held-out evaluation and internal artifact publication
+grep -n "heldout_evaluation\." fastworkflow/model_pipeline_training.py
+fastworkflow train --help
+
+# 2026-08-02: rate limiting falls back to seeds rather than returning []
+grep -n "fell_back\|_with_retries" fastworkflow/train/generate_synthetic.py
+
 # Training hyperparameters (epochs/lr/batch/split) and threshold logic
 grep -n "num_epochs\|lr=\|batch_size=10\|test_size" fastworkflow/model_pipeline_training.py
 # Dead 0.5129 function still dead? (should only show the def, no call sites)

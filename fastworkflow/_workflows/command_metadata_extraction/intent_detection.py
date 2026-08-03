@@ -13,8 +13,14 @@ from fastworkflow.cache_matching import cache_match, store_utterance_cache
 from fastworkflow.model_pipeline_training import (
     CommandRouter
 )
+from fastworkflow.nlu_labels import is_escalation, is_non_routable
 
 from fastworkflow.utils.fuzzy_match import find_best_matches
+
+
+# A low-confidence top-k prediction containing an escalation label remains an
+# ambiguity: prompt with the local command candidates and log that the parent signal
+# was discarded. This is product behaviour, not workflow configuration.
 
 
 class CommandNamePrediction:
@@ -125,6 +131,17 @@ class CommandNamePrediction:
                         command_name = predictions[0].split('/')[-1]
                     else:
                         # If confidence is low, treat as ambiguous command (type 1)
+                        if escalation_signals := self.escalation_signals_in(predictions):
+                            logger.warning(
+                                f"Top-k escalation signal discarded in "
+                                f"context '{command_context_name}' for utterance "
+                                f"'{command}'. predictions={predictions}, "
+                                f"suppressed={escalation_signals}. The classifier ranked "
+                                "an escalation label alongside local candidates; the user "
+                                "will be prompted with the local candidates only and the "
+                                "'this belongs to an ancestor context' signal is dropped."
+                            )
+
                         error_msg = self._formulate_ambiguous_command_error_message(
                             predictions, "run_as_agent" in self.app_workflow.context)
 
@@ -138,11 +155,11 @@ class CommandNamePrediction:
         ) and not command_name:
             command_name = "what can i do?"
 
-        if not command_name or command_name == "wildcard":
-            fully_qualified_command_name=None
+        fully_qualified_command_name = self.resolve_fully_qualified_command_name(
+            command_name, command_name_dict)
+        if fully_qualified_command_name is None:
             is_cme_command=False
         else:
-            fully_qualified_command_name = command_name_dict[command_name]
             is_cme_command=(
                 fully_qualified_command_name in cme_command_names or 
                 fully_qualified_command_name in crd.get_command_names('ErrorCorrection')
@@ -154,6 +171,9 @@ class CommandNamePrediction:
                 NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
                 NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION,
             )
+            # A reserved label resolves to None; the clarification cache keys on a
+            # real command name, so there is nothing to store for it.
+            and fully_qualified_command_name is not None
             and not fully_qualified_command_name.endswith('abort')
             and not fully_qualified_command_name.endswith('what_can_i_do')
             and not fully_qualified_command_name.endswith('you_misunderstood')
@@ -278,12 +298,34 @@ class CommandNamePrediction:
             db.close()
 
     @staticmethod
+    def resolve_fully_qualified_command_name(
+        command_name: Optional[str], command_name_dict: dict[str, str]) -> Optional[str]:
+        """Map a predicted label to a fully qualified command name, or None.
+
+        Reserved labels (`wildcard`, `parameter_value`) name no command, so they
+        must resolve to None rather than be looked up in `command_name_dict` —
+        which would raise KeyError. None is what drives the parent-chain walk in
+        the CME wildcard command.
+        """
+        if not command_name or is_non_routable(command_name):
+            return None
+        return command_name_dict[command_name]
+
+    @staticmethod
+    def escalation_signals_in(route_choice_list: list[str]) -> list[str]:
+        """Return the escalation labels present in a prediction list."""
+        return [
+            route_choice for route_choice in route_choice_list
+            if is_escalation(route_choice)
+        ]
+
+    @staticmethod
     def _formulate_ambiguous_command_error_message(
         route_choice_list: list[str], run_as_agent: bool) -> str:
         command_list = (
             "\n".join([
                 f"{route_choice.split('/')[-1].lower()}"
-                for route_choice in route_choice_list if route_choice != 'wildcard'
+                for route_choice in route_choice_list if not is_non_routable(route_choice)
             ])
         )
 

@@ -2,8 +2,8 @@
 
 **Status:** Final, ready to implement
 **Scope:** `fastworkflow/run_fastapi_mcp/` (FastAPI + MCP server). The motivating
-workload lives in `talk_to_ido`, but **all code changes here are in the fastWorkflow repo**.
-**Verified against:** `fastworkflow==2.21.6` (pinned by `talk_to_ido`, installed under `.venv`).
+workload lives in a downstream consumer application, but **all code changes here are in the fastWorkflow repo**.
+**Verified against:** `fastworkflow==2.21.6` (pinned by that consumer application, installed under `.venv`).
 All line references below are from that release and were checked against the `.venv` source.
 **Date:** 2026-06-23
 
@@ -450,7 +450,7 @@ give MCP callers a **longer default `wait_seconds`** (they may not poll graceful
 - `DeprecationWarning` for `process_message` no longer emitted by the server.
 - The §3.3 trace is fixed: a retry that arrives before startup completes receives
   `exec_state:"running"` + `startup_turn_key`, never an empty `startup_output`.
-- `tests/load/load_test_talk_to_ido.py --mode initialize --unique-payload` still passes (fast path
+- `tests/load/load_test_consumer_initialize.py --mode initialize --unique-payload` still passes (fast path
   returns `startup_output` inline within `wait_seconds` when the LLM is fast).
 
 ### Step 2 — Async surface (additive)
@@ -529,9 +529,9 @@ so a deadline cancels the in-flight HTTP request instead of orphaning a thread. 
 - `fastworkflow/run_fastapi_mcp/mcp_specific.py` — MCP mount excludes `rest_initialize`,
   `perform_action`, `rest_invoke_agent`, `refresh_token` (48–56).
 
-## Appendix B — `talk_to_ido` trigger (workload, not the fix site)
+## Appendix B — Consumer-app trigger (workload, not the fix site)
 
-`talk_to_ido/_commands/initialize_defect_info.py::_process_command` runs
+`<consumer_app>/_commands/initialize_defect_info.py::_process_command` runs
 `dspy.Predict(SummaryGenerationSignature)` against `LLM_RESPONSE_GEN` (`litellm_proxy/large-model-name`),
 sets `workflow.context["defect_summary"]` (line 187), and returns it. Observed durations:
 619.9s / 614.8s / 34.2s. The summary is recoverable server-side, but the fix belongs in

@@ -234,3 +234,21 @@ docs/tau2_retail_reliability_implementation_plan.md
 docs/turn_result_design_review.md
 .claude/skills/fastworkflow-research-frontier/SKILL.md
 .claude/skills/fastworkflow-research-frontier/references/plan-crosswalk.md
+
+# Raw measurement output from the R7.2/R7.3 class-balance sweeps. These are local,
+# reproducible outputs; compact conclusions live in the experiment documentation.
+.class_balance_cache/
+.class_balance_results*/
+
+# Raw measurement output from E-PV1 (docs/experiments/E-PV1_parameter_value_tradeoff_retail.md).
+# Per-run posteriors and caches are recreated by scripts/measure_parameter_value_tradeoff.py;
+# compact analyses live under docs/experiments/results/.
+.pv_tradeoff_cache/
+.pv_tradeoff_results*/
+.pv_*_cache/
+.pv_*_results/
+
+# Other disposable intent-training experiment/debug output.
+.param_validator_quality_results/
+.fix-*-results/
+rejected_examples.json

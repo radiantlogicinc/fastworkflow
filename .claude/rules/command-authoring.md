@@ -58,6 +58,38 @@ class ResponseGenerator:
         ...
 ```
 
+## `plain_utterances` — the seed list is the highest-leverage thing you write
+
+`plain_utterances` is not decoration. Training expands it with an LLM into the synthetic
+corpus that the intent classifier learns from, so seed count and seed variety are the
+single largest measured input to whether the right command gets picked at run time —
+larger than the persona/utterance-count dials, larger than anything in the training loop.
+
+Guidance, with its provenance stated honestly:
+
+- **Aim for roughly eight seed utterances per command.** On one 160-command workflow
+  scored against a 446-case hand-written benchmark, everything else held constant,
+  held-out routing top-1 went 46.2% at 3.2 seeds/command → 70.4% at 8.0 → 73.8% at 9.3:
+  steep, then flat. **That is an observation from a single workflow, not a universal
+  constant** — the shape (steep early, flattening) is what transfers; the exact knee will
+  differ for you. Two or three seeds is the starved case worth fixing first.
+- **Vary the phrasing family, not the wording.** Imperative, question, colloquial, terse,
+  synonym-heavy, and value-bearing phrasings each buy something. Six paraphrases of one
+  sentence buy almost nothing.
+- **Never paste a failing benchmark case into `plain_utterances` to "fix" it.** That turns
+  your benchmark into a memorisation test. Keep the seeds disjoint from
+  `<workflow>/intent_benchmark.json` (see `docs/intent_benchmark_format.md`); the package
+  ships `heldout_evaluation.assert_benchmark_disjoint_from_seeds` for the check, but as of
+  2026-08-02 nothing calls it during training (`fix-eia`), so run it yourself.
+- **Count what you actually have** after a run: `seed_utterance_count` per command in
+  `<workflow>/___command_info/training_provenance.json`. The same file's `fell_back` flag
+  tells you whether a command's utterances degraded to seeds-only because generation was
+  rate-limited.
+
+Judging whether adding seeds actually helped is a measurement problem with its own
+pitfalls (two training runs are not reproducible): see the
+`fastworkflow-intent-training-convergence` skill before comparing two runs.
+
 ## Context Model (`context_inheritance_model.json`)
 
 Each context entry has exactly two possible keys:
