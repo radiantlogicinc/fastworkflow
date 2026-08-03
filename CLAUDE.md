@@ -18,6 +18,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Run `fastworkflow --help` for the full command list (`examples`, `train`, `run`, `build`, `refine`, `run_fastapi_mcp`). Non-obvious behavior:
 - `run` defaults to agent mode; `--assistant` runs deterministic mode.
 - Prefix a command with `/` at the interactive prompt to force deterministic (non-agentic) execution.
+- `train` validates seed coverage and duplicate capabilities, reuses generated-data caches,
+  and automatically chooses selective or full retraining. `--regenerate-utterances` is the
+  only training-policy override.
 
 ## Architecture: Three Phases
 
@@ -27,10 +30,10 @@ Build-Time → Train-Time → Run-Time
 
 **Build-time** (`fastworkflow/build/`): AST-introspects your Python application and generates `_commands/*.py` files plus `context_inheritance_model.json`.
 
-**Train-time** (`fastworkflow/train/`): Generates synthetic utterances (via LLM + HuggingFace `datasets`) and trains intent-detection models (DistilBERT/BERT via scikit-learn). Outputs go to `___command_info/` inside the workflow directory.
+**Train-time** (`fastworkflow/train/`): Generates synthetic utterances (via LLM + HuggingFace `datasets`) and fine-tunes BERT-family intent classifiers with PyTorch/Transformers. Outputs go to `___command_info/` inside the workflow directory; publication is atomic and retains only current plus one previous recovery point.
 
 **Run-time**: A three-stage pipeline for every user turn:
-1. **Intent Detection** – sklearn classifier identifies the target command
+1. **Intent Detection** – fine-tuned BERT-family classifier identifies the target command
 2. **Parameter Extraction** – DSPy + Pydantic validates and extracts inputs
 3. **Command Execution** – runs your business logic and generates a response
 

@@ -74,6 +74,14 @@ class Signature(BaseSig):
 ResponseGenerator = BaseRG  # simple alias
 ```
 
+> **How many to add.** Seed count is the largest measured input to intent-detection
+> accuracy — bigger than the persona/utterance generation dials. On one 160-command
+> workflow, held-out routing accuracy climbed steeply from ~3 seeds per command to ~8 and
+> then flattened; treat that as one workflow's observation rather than a constant, and aim
+> for roughly eight varied phrasings (imperative, question, colloquial, terse,
+> synonym-heavy, value-bearing) instead of paraphrases of one sentence. Full guidance in
+> `.claude/rules/command-authoring.md`.
+
 ### 4.2  Example – override only the input schema
 
 ```python

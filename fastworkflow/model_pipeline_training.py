@@ -1,3 +1,4 @@
+import contextlib
 import os
 from typing import ClassVar
 from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification
@@ -15,11 +16,25 @@ from torch.utils.data import random_split
 import fastworkflow
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-from typing import List, Dict, Tuple,Union
+from typing import List, Dict, Optional, Tuple,Union
 import pickle
 from pathlib import Path
+from collections import Counter
 
 from fastworkflow.command_routing import RoutingDefinition
+from fastworkflow.train import heldout_evaluation
+from fastworkflow.train.determinism import (
+    ContextTrainingStatus,
+    get_provenance_recorder,
+)
+from fastworkflow.train.selective_training import contexts_for_training
+from fastworkflow.train import class_balance
+from fastworkflow.utils.logging import logger
+from fastworkflow.nlu_labels import (
+    PARAMETER_VALUE_LABEL,
+    PARAMETER_VALUE_PLACEHOLDERS,
+    WILDCARD_LABEL,
+)
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -34,6 +49,44 @@ except Exception:  # noqa: BLE001 - older transformers may not expose this
 
 dataset=None
 label_encoder=LabelEncoder()
+
+
+class TrainingDataError(ValueError):
+    """Raised before model fitting when a label cannot be trained and evaluated."""
+
+
+def split_training_data(
+    dataset: list[tuple[str, int]],
+) -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
+    """Create a deterministic, class-aware train/evaluation split.
+
+    Every label must contribute at least one row to both sets. This replaces the
+    unstratified 25% split that could randomly put every row for a small class in the
+    evaluation set, leaving the classifier unable to learn that command.
+    """
+    label_counts = Counter(label for _, label in dataset)
+    starved = sorted(label for label, count in label_counts.items() if count < 2)
+    if starved:
+        raise TrainingDataError(
+            "Each intent label needs at least two rows (one for training and one for "
+            f"evaluation); labels with fewer rows: {starved}"
+        )
+
+    label_count = len(label_counts)
+    test_size = max((len(dataset) + 3) // 4, label_count)
+    if len(dataset) - test_size < label_count:
+        raise TrainingDataError(
+            f"Cannot split {len(dataset)} rows across {label_count} labels while keeping "
+            "at least one row per label in both training and evaluation sets."
+        )
+
+    train_data, test_data = train_test_split(
+        dataset,
+        test_size=test_size,
+        random_state=42,
+        stratify=[label for _, label in dataset],
+    )
+    return list(train_data), list(test_data)
 
 
 def save_label_encoder(filepath):
@@ -603,22 +656,61 @@ def predict_single_sentence(
 # ---------------------------------------------------------------------
 GLOBAL_CONTEXT_FOLDER = "global"
 
+# Workflow folderpath (resolved) -> artifact version currently being written.
+# Installed by the trainer for the duration of a run; empty at every other time.
+_active_artifact_version: dict[str, str] = {}
+
+
+def set_active_artifact_version(workflow_folderpath: str, version_id: Optional[str]) -> None:
+    """Route `get_artifact_path` writes for *workflow_folderpath* into *version_id*.
+
+    Pass ``None`` to clear. The trainer installs this for the duration of a run so a
+    retrain assembles a NEW version instead of overwriting the live one in place (R4 /
+    finding F5). Keeping it here rather than threading a parameter through means the six
+    existing `get_artifact_path` call sites need no changes.
+    """
+    key = str(Path(workflow_folderpath).resolve())
+    if version_id is None:
+        _active_artifact_version.pop(key, None)
+    else:
+        _active_artifact_version[key] = version_id
+
+
 def get_artifact_path(workflow_folderpath: str, context_name: str, filename: str) -> str:
     """Return the absolute path for a model/artefact for *context_name*.
 
-    The file lives under:
-        <workflow>/___command_info/<context_name>/<filename>
+    Under versioning the file lives at:
+        <workflow>/___command_info/versions/<version>/<context_name>/<filename>
+    which every legacy reader still reaches through the per-context compatibility entry
+    at ``<workflow>/___command_info/<context_name>/``.
 
-    The directory is created if it does not yet exist.  The special
-    context name "*" is mapped to a folder named "_global".
+    When no version is active and none has been published (a workflow that has never been
+    trained under R4) this falls back to the historical unversioned path, so a partially
+    migrated tree keeps working.
+
+    The directory is created if it does not yet exist. The special context name "*" is
+    mapped to GLOBAL_CONTEXT_FOLDER.
     """
     from fastworkflow import RoutingRegistry
+    from fastworkflow.train import artifact_versioning as av
 
     ctx_folder = context_name if context_name != "*" else GLOBAL_CONTEXT_FOLDER
     crd = RoutingRegistry.get_definition(workflow_folderpath)
-    base_dir = Path(crd.command_directory.get_commandinfo_folderpath(workflow_folderpath)) / ctx_folder
-    base_dir.mkdir(parents=True, exist_ok=True)
-    return str(base_dir / filename)
+    # Preserve the ___command_info mkdir side effect that callers have always relied on.
+    info_root = Path(crd.command_directory.get_commandinfo_folderpath(workflow_folderpath))
+
+    key = str(Path(workflow_folderpath).resolve())
+    version_id = _active_artifact_version.get(key) or av.resolve_current_version(
+        workflow_folderpath
+    )
+    if version_id is None:
+        base_dir = info_root / ctx_folder
+        base_dir.mkdir(parents=True, exist_ok=True)
+        return str(base_dir / filename)
+
+    return str(
+        av.context_artifact_dir(workflow_folderpath, version_id, context_name) / filename
+    )
 
 
 def is_workflow_trained(workflow_folderpath: str) -> Tuple[bool, List[str]]:
@@ -729,6 +821,21 @@ def calculate_ndcg_at_k(logits, true_labels, k=3):
     ndcg = dcg / idcg
     return ndcg.mean().item()
 
+def _requires_utterances(cmd_dir: object, cmd_name: str) -> bool:
+    """Return True if *cmd_name* defines `Signature.Input` and therefore
+    needs utterance-based intent classification.
+
+    This is determined after lazy-hydrating the command so the metadata is
+    accurate.  A command with *no* `Signature.Input` is expected to be
+    dispatched exclusively via `perform_action` and should be excluded from
+    model training.
+    """
+    # Ensure metadata is fully populated before inspection
+    cmd_dir.ensure_command_hydrated(cmd_name)
+    metadata = cmd_dir.get_command_metadata(cmd_name)
+    return bool(metadata.input_for_param_extraction_class)
+
+
 def _get_utterances(workflow: fastworkflow.Workflow,
                     workflow_folderpath: str, 
                     cmd_dir: object, cmd: str) -> list[str]:
@@ -737,21 +844,6 @@ def _get_utterances(workflow: fastworkflow.Workflow,
     If the command does not have `Signature.Input`, we return an empty list
     (no utterances needed) **without** calling `get_utterance_metadata`.
     """
-    
-    def _requires_utterances(cmd_dir: object, cmd_name: str) -> bool:
-        """Return True if *cmd_name* defines `Signature.Input` and therefore
-        needs utterance-based intent classification.
-
-        This is determined after lazy-hydrating the command so the metadata is
-        accurate.  A command with *no* `Signature.Input` is expected to be
-        dispatched exclusively via `perform_action` and should be excluded from
-        model training.
-        """
-        # Ensure metadata is fully populated before inspection
-        cmd_dir.ensure_command_hydrated(cmd_name)
-        metadata = cmd_dir.get_command_metadata(cmd_name)
-        return bool(metadata.input_for_param_extraction_class)
-
     if not _requires_utterances(cmd_dir, cmd):
         return []
 
@@ -765,11 +857,78 @@ def _get_utterances(workflow: fastworkflow.Workflow,
     func = um.get_generated_utterances_func(workflow_folderpath)
     return func(workflow, cmd) if func else []
 
+
+def _get_cached_command_utterances(
+    workflow: fastworkflow.Workflow,
+    workflow_folderpath: str,
+    cmd_dir: object,
+    cmd: str,
+    command_cache: dict[str, list[str]],
+) -> list[str]:
+    """Generate once per fully-qualified command, then reuse across contexts.
+
+    A generated command function receives `(workflow, command_name)` and no context.
+    Context inheritance changes where its rows are used, not how its rows are generated.
+    Keying this cache by context used to redraw the same command for every context and
+    made its last generation overwrite all earlier provenance.
+    """
+    if cmd not in command_cache:
+        command_cache[cmd] = _get_utterances(
+            workflow, workflow_folderpath, cmd_dir, cmd
+        )
+    return command_cache[cmd]
+
+
+def _record_context_training(
+    context_name: str,
+    command_name: str,
+    cmd_dir: object,
+    utterances: list[str],
+) -> None:
+    """Record context row use or the trainer's exact skip reason."""
+    recorder = get_provenance_recorder()
+    if recorder is None:
+        return
+
+    if not _requires_utterances(cmd_dir, command_name):
+        recorder.record_context(
+            context_name=context_name,
+            command_name=command_name,
+            status=ContextTrainingStatus.SKIPPED_NO_INPUT,
+            reason="command has no Signature.Input",
+        )
+        return
+
+    if not utterances:
+        recorder.record_context(
+            context_name=context_name,
+            command_name=command_name,
+            status=ContextTrainingStatus.SKIPPED_NO_UTTERANCES,
+            reason="utterance generator returned no rows",
+        )
+        return
+
+    generation = recorder.records.get(command_name)
+    fell_back = bool(generation and generation.fell_back)
+    recorder.record_context(
+        context_name=context_name,
+        command_name=command_name,
+        status=(
+            ContextTrainingStatus.INCLUDED_FALLBACK
+            if fell_back
+            else ContextTrainingStatus.INCLUDED
+        ),
+        row_count=len(utterances),
+        reason=generation.fallback_reason if fell_back and generation else None,
+    )
+
+
 def cache_ancestor_utterances(
     context_name: str, 
     crd: RoutingDefinition, 
     workflow: fastworkflow.Workflow,
-    cache: dict
+    cache: dict,
+    command_cache: Optional[dict[str, list[str]]] = None,
 ) -> list[str]:
     """
     Collects utterances for the 'wildcard' context.
@@ -780,6 +939,8 @@ def cache_ancestor_utterances(
     """
     workflow_folderpath = workflow.folderpath
     cmd_dir = crd.command_directory
+    if command_cache is None:
+        command_cache = {}
 
     ancestor_utterances = set()
     ancestor_contexts = crd.context_model.get_ancestor_contexts(context_name)
@@ -793,40 +954,169 @@ def cache_ancestor_utterances(
         for cmd in ancestor_commands:
             if cmd.split('/')[-1] == 'wildcard':
                 continue            
-            utterances = _get_utterances(workflow, workflow_folderpath, 
-                                         cmd_dir, cmd)    
+            utterances = _get_cached_command_utterances(
+                workflow, workflow_folderpath, cmd_dir, cmd, command_cache
+            )
             cache[ancestor_ctx][cmd] = utterances   
             ancestor_utterances |= set(utterances)    
 
     return ancestor_utterances
 
-def train(workflow: fastworkflow.Workflow):
-    """Train intent-classification models **per command context**."""
+
+def _score_heldout_context(
+    report: heldout_evaluation.HeldoutReport,
+    heldout_records: list[heldout_evaluation.LabeledUtterance],
+    benchmark_cases: list[heldout_evaluation.BenchmarkCase],
+    predict_labels: Optional[heldout_evaluation.PredictFn],
+) -> None:
+    """Score independent persona-holdout and fixed-benchmark populations."""
+    if heldout_records:
+        if predict_labels is None:
+            raise ValueError("persona holdout scoring requires a predictor")
+        report.routing = heldout_evaluation.score_routing(
+            heldout_records, predict_labels)
+    else:
+        report.notes.append(
+            "Persona holdout unavailable; persona-held-out routing was not scored. "
+            "Fixed benchmark routing and escalation remain independently measurable."
+        )
+
+    # `kind` is required. Omitting it raised a TypeError that the guard
+    # below turned into a note on the report, so escalation silently
+    # never scored while routing kept working -- the failure looked like
+    # "this workflow has no escalation cases" (bd fix-588).
+    escalation_cases = heldout_evaluation.benchmark_cases_for_context(
+        benchmark_cases, report.context, "escalation")
+    routing_cases = heldout_evaluation.benchmark_cases_for_context(
+        benchmark_cases, report.context, "routing")
+    if (escalation_cases or routing_cases) and predict_labels is None:
+        raise ValueError("benchmark scoring requires a predictor")
+
+    if escalation_cases:
+        report.escalation = heldout_evaluation.score_escalation(
+            escalation_cases, predict_labels)
+    if routing_cases:
+        report.benchmark_routing = heldout_evaluation.score_routing(
+            routing_cases, predict_labels)
+        print(
+            f"Benchmark routing [{report.context}]: "
+            f"{report.benchmark_routing.top1_correct}"
+            f"/{report.benchmark_routing.total} top-1"
+        )
+
+
+def train(workflow: fastworkflow.Workflow,
+          contexts_to_train: Optional[set[str]] = None):
+    """Train intent-classification models **per command context**.
+
+    ``contexts_to_train`` is R5's selective-retraining hook. ``None`` trains every
+    context. Automatic planning passes a set when unchanged contexts can safely be
+    carried forward. A set restricts the run
+    to those contexts, and the CALLER then becomes responsible for carrying every other
+    context's artifacts forward into the version being assembled
+    (``train.selective_training.carry_forward_contexts``). Skipping a context here and
+    forgetting that is not a slow workflow, it is an un-trained one: `publish_version`
+    removes the compatibility entry of any context its version does not contain.
+    """
 
     import time
+
+    from fastworkflow.train.determinism import get_training_seed, seed_everything
+
+    # Seed before anything samples: utterance generation picks personas, torch initialises
+    # classifier heads, and the train/test split shuffles. Seeding is necessary but NOT
+    # sufficient for reproducibility -- the iteration order of the sets feeding the split
+    # matters just as much, which is why the loops below sort (fix-9mo).
+    seed = seed_everything(get_training_seed())
+    print(f"Training seed: {seed}")
+
+    heldout_reports: list[heldout_evaluation.HeldoutReport] = []
 
     workflow_folderpath = workflow.folderpath
     crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath, load_cached=False)
     cmd_dir = crd.command_directory
 
+    # ------------------------------------------------------------------
+    # R1b: a benchmark that shares phrasings with the training seeds measures
+    # memorisation, so it is checked BEFORE any training happens. Failing fast is the
+    # point: discovering the leak after the run would mean every number it produced has
+    # to be thrown away, and the run costs LLM calls and GPU minutes.
+    # ------------------------------------------------------------------
+    benchmark_cases: list[heldout_evaluation.BenchmarkCase] = []
+    benchmark_path = heldout_evaluation.default_benchmark_path(workflow_folderpath)
+    if os.path.isfile(benchmark_path):
+        benchmark_cases = heldout_evaluation.load_benchmark_file(benchmark_path)
+        seed_utterances_by_command: dict[str, list[str]] = {}
+        for command_key in cmd_dir.get_utterance_keys():
+            if metadata := cmd_dir.get_utterance_metadata(command_key):
+                seed_utterances_by_command[command_key] = list(metadata.plain_utterances)
+        # Deliberately NOT caught: an unnoticed leak silently turns the whole evaluation
+        # into a memorisation score, which is the failure R1 exists to remove.
+        heldout_evaluation.assert_benchmark_disjoint_from_seeds(
+            benchmark_cases, seed_utterances_by_command)
+        # A close-but-not-equal match is a judgement call, so it is reported, not enforced.
+        for warning in heldout_evaluation.find_near_duplicate_benchmark_cases(
+            benchmark_cases, seed_utterances_by_command
+        ):
+            logger.warning(warning)
+
+        # A benchmark case can also be defective in a way that has nothing to do with
+        # leakage: a routing case naming a label the context does not have can never
+        # pass, and an "escalation" case whose command is not actually absent here and
+        # present in an ancestor is not testing escalation at all. Either one drags the
+        # reported score down for a reason that is not the model's fault, so both are
+        # reported before the run rather than discovered as a mysteriously low number.
+        core_command_names = set(cmd_dir.core_command_names)
+        context_label_space = {
+            context_name: set(command_list) | core_command_names
+            for context_name, command_list in crd.contexts.items()
+        }
+        ancestor_map = {
+            context_name: list(crd.context_model.get_ancestor_contexts(context_name))
+            for context_name in crd.contexts
+        }
+        for problem in (
+            heldout_evaluation.validate_routing_cases(
+                benchmark_cases, context_label_space)
+            + heldout_evaluation.validate_escalation_cases(
+                benchmark_cases, context_label_space, ancestor_map)
+        ):
+            logger.warning(f"Benchmark defect: {problem}")
+
+        print(f"Benchmark: {len(benchmark_cases)} case(s) from {benchmark_path}")
+
     context_utterance_cache = {}
+    # Generation identity is the fully-qualified command. Context identity belongs to
+    # the labelled-row use recorded below, not to the LLM draw or utterance cache key.
+    command_utterance_cache: dict[str, list[str]] = {}
 
     core_cmds = set(cmd_dir.core_command_names)
 
     # Get contexts specific to this workflow (not from command_metadata_extraction)
-    internal_wf_path = fastworkflow.get_internal_workflow_path("command_metadata_extraction")
-    internal_contexts = set(fastworkflow.CommandContextModel.load(internal_wf_path)._command_contexts.keys())
+    # The set itself is computed by `selective_training.contexts_for_training` so that the
+    # R5 planner and this loop cannot disagree about which contexts exist. A context the
+    # planner never considered would be neither retrained nor carried forward, and that
+    # presents as part of a workflow silently becoming untrained.
+    context_set_for_training = contexts_for_training(workflow_folderpath)
 
-    if "command_metadata_extraction" in workflow_folderpath:
-        context_set_for_training = (set(internal_contexts) - {'ErrorCorrection', 'ErrorCorrection'})
-    else:
-        context_set_for_training = (set(crd.contexts.keys()) - internal_contexts) | {'*'}
+    if contexts_to_train is not None:
+        requested = set(contexts_to_train)
+        skipped = sorted(context_set_for_training - requested)
+        context_set_for_training = context_set_for_training & requested
+        if skipped:
+            print(f"Selective training: skipping {len(skipped)} context(s) whose "
+                  f"artifacts the caller will carry forward: {', '.join(skipped)}")
 
     wildcard_utterances = set(_get_utterances(
         workflow, workflow.folderpath, crd.command_directory, 'wildcard'))
 
-    # Only iterate through contexts defined in this specific workflow
-    for ctx_name in context_set_for_training:
+    # Only iterate through contexts defined in this specific workflow.
+    # sorted(): context_set_for_training is a set, and a context visited first as an
+    # ANCESTOR gets its cache populated from context_model.commands(), which excludes the
+    # core commands. Iterating in hash order therefore decided, per interpreter start,
+    # which contexts lost their core-command labels (AR5). Sorting makes the order stable;
+    # the cache-fill below makes the outcome order-independent as well.
+    for ctx_name in sorted(context_set_for_training):
         ctx_cmd_list = crd.contexts[ctx_name]
         print(f"\n=== Training model for workflow_folderpath: {workflow_folderpath.split('/')[-1]} and context: {ctx_name} ===\n")
         
@@ -838,44 +1128,163 @@ def train(workflow: fastworkflow.Workflow):
 
         context_utterances = set()
         utterance_command_tuples: list[tuple[str, str]] = []
-        if ctx_name in context_utterance_cache:
-            map_cmd_2_uttlist = context_utterance_cache[ctx_name]
-            for cmd_name in train_cmds:
+        # One loop over every label this context trains, using the cache when it already
+        # holds the command and GENERATING when it does not. The previous shape had two
+        # branches: a cached branch that silently skipped commands absent from the cache,
+        # and a generate-everything branch that only ran when the cached branch produced
+        # nothing at all. A context previously visited as an ancestor has a cache holding
+        # only context_model.commands(), so the cached branch dropped every core command
+        # for it -- making those commands unroutable in that context (AR5 / fix-9mo).
+        map_cmd_2_uttlist = context_utterance_cache.setdefault(ctx_name, {})
+        for cmd_name in sorted(train_cmds):
+            # Split form matches cache_ancestor_utterances, so both paths agree on what
+            # the reserved label is regardless of qualification.
+            if cmd_name.split('/')[-1] == WILDCARD_LABEL:
+                continue
+            if cmd_name in map_cmd_2_uttlist:
                 print(f"Getting cached utterances for context: {ctx_name}, command: {cmd_name}\n")
-                if cmd_name in map_cmd_2_uttlist:
-                    utterance_command_tuples.extend(
-                        list(zip(map_cmd_2_uttlist[cmd_name], [cmd_name] * len(map_cmd_2_uttlist[cmd_name])))
-                    )
-                    context_utterances |= set(map_cmd_2_uttlist[cmd_name])
-        
-        if not context_utterances:
-            context_utterance_cache[ctx_name] = {}
-            for cmd_name in train_cmds:
-                if cmd_name == 'wildcard':
-                    continue
+            else:
                 print(f"Generating utterances for context: {ctx_name}, command: {cmd_name} ...\n")
-                context_utterance_list = _get_utterances(
-                    workflow, workflow_folderpath, cmd_dir, cmd_name)            
-                utterance_command_tuples.extend(
-                    list(zip(context_utterance_list, [cmd_name] * len(context_utterance_list)))
+                map_cmd_2_uttlist[cmd_name] = _get_cached_command_utterances(
+                    workflow,
+                    workflow_folderpath,
+                    cmd_dir,
+                    cmd_name,
+                    command_utterance_cache,
                 )
-                context_utterance_cache[ctx_name][cmd_name] = context_utterance_list           
-                context_utterances |= set(context_utterance_list)
+            cmd_utterances = map_cmd_2_uttlist[cmd_name]
+            _record_context_training(
+                ctx_name, cmd_name, cmd_dir, cmd_utterances
+            )
+            utterance_command_tuples.extend(
+                list(zip(cmd_utterances, [cmd_name] * len(cmd_utterances)))
+            )
+            context_utterances |= set(cmd_utterances)
 
         if not context_utterances:
             print(f"Skipping context {ctx_name} - no utterances available")
             continue  # skip empty
 
         ancestor_utterances = cache_ancestor_utterances(
-            ctx_name, crd, workflow, context_utterance_cache
-        )         
-        net_ancestor_plus_wildcard_utterances = (
-            (ancestor_utterances - context_utterances) | wildcard_utterances
+            ctx_name,
+            crd,
+            workflow,
+            context_utterance_cache,
+            command_utterance_cache,
         )
-        utterance_command_tuples.extend(
-            list(zip(net_ancestor_plus_wildcard_utterances, ['wildcard'] * len(net_ancestor_plus_wildcard_utterances)))
-        )
-            
+        net_ancestor_utterances = ancestor_utterances - context_utterances
+
+        # WILDCARD_LABEL is the ESCALATION signal: "an ancestor context can serve this".
+        # It is emitted only where that can be true. In a context with no ancestors the
+        # class would collapse to the single humanised command name, and a one-row class
+        # cannot satisfy the class-aware split below: it needs one training row and one
+        # evaluation row. Escalation is meaningless
+        # there anyway: the runtime parent walk terminates immediately at the response
+        # generation root, so the turn can only ever reach you_misunderstood, which an
+        # unconfident classifier already reaches.
+        if net_ancestor_utterances:
+            # R7.2: bound the escalation class against this context's own row count, so
+            # training time stays linear in workflow size, but never below one row per
+            # ancestor command -- an ancestor that contributes no row cannot be escalated
+            # to at all. Round-robin over (ancestor context, command) is what stops one
+            # verbose ancestor from spending the budget the others need.
+            #
+            # `exclude` carries the `net_` semantics the flat set expression used to carry:
+            # an utterance that means something HERE must not also train the "ask my
+            # parent" class, or the same string would be trained under two labels.
+            # `own_rows` is counted BEFORE the escalation rows are appended, which is what
+            # makes the ratio mean "multiplier on this context's own training cost".
+            grouped = class_balance.group_ancestor_utterances(
+                crd.context_model.get_ancestor_contexts(ctx_name),
+                context_utterance_cache,
+                skip_labels=(WILDCARD_LABEL,),
+            )
+            own_rows = len(utterance_command_tuples)
+            # 1.0 is the fixed cost invariant: escalation may add at most as many rows
+            # as the context's real commands, so reserved rows can at most double cost.
+            # It is not an accuracy-tuned value; R7.3 weighting measured null and is
+            # intentionally not shipped.
+            budget = class_balance.reserved_class_budget(
+                own_rows,
+                class_balance.coverage_floor_of(grouped),
+                ratio=1.0,
+            )
+            escalation_rows = sorted(
+                class_balance.select_reserved_rows(
+                    grouped,
+                    budget,
+                    always_include=sorted(wildcard_utterances),
+                    exclude=context_utterances,
+                )
+            )
+            utterance_command_tuples.extend(
+                list(zip(escalation_rows, [WILDCARD_LABEL] * len(escalation_rows)))
+            )
+
+        # PARAMETER_VALUE_LABEL is the PARAMETER_EXTRACTION stage's bare-value catcher and
+        # is emitted in EVERY context: a user can type a bare value anywhere. These are the
+        # seven literals that used to be trained into the wildcard class, which is what
+        # taught the escalation classifier that "france" means "escalate to my parent".
+        parameter_value_rows = sorted(set(PARAMETER_VALUE_PLACEHOLDERS) - context_utterances)
+        if parameter_value_rows:
+            utterance_command_tuples.extend(
+                list(zip(parameter_value_rows,
+                         [PARAMETER_VALUE_LABEL] * len(parameter_value_rows)))
+            )
+
+
+        # ------------------------------------------------------------------
+        # R1a: reserve WHOLE PERSONAS before training, for a real generalisation
+        # measure. The class-aware split below still divides rows from the same
+        # generated corpus, so utterances written by the same persona, from the same
+        # seed utterance, can land on both sides of it. Scoring that is close to scoring
+        # memorisation, which is why the F1 it produces has never been a safe basis
+        # for "did this change help?". It is still computed and still used to
+        # calibrate the ambiguity thresholds -- it is only its use as a QUALITY
+        # metric that is unsound -- so it is reported under a name that says what it is.
+        # ------------------------------------------------------------------
+        heldout_records: list[heldout_evaluation.LabeledUtterance] = []
+        heldout_personas: list[str] = []
+        split_notes: list[str] = []
+        if (recorder := get_provenance_recorder()) is not None:
+            # utterance text -> persona id, across every command generated this run.
+            # Anything absent is a hand-written seed utterance, which split_by_persona
+            # always keeps in training: a developer's declared input is not
+            # generalisation data.
+            persona_by_utterance: dict[str, str] = {}
+            for provenance in recorder.records.values():
+                persona_by_utterance.update(provenance.utterance_personas)
+
+            labeled = [
+                heldout_evaluation.LabeledUtterance(
+                    utterance=utterance,
+                    label=label,
+                    persona=persona_by_utterance.get(
+                        utterance, heldout_evaluation.SEED_PERSONA_ID),
+                )
+                for utterance, label in utterance_command_tuples
+            ]
+            split = heldout_evaluation.split_by_persona(labeled, seed=seed)
+            if split.heldout:
+                # Held-out personas are removed from training entirely. Without this
+                # the score below would be measuring the training set.
+                utterance_command_tuples = [
+                    (record.utterance, record.label) for record in split.train
+                ]
+                heldout_records = list(split.heldout)
+                heldout_personas = list(split.heldout_personas)
+                split_notes = list(split.notes)
+                print(
+                    f"Held out {len(heldout_records)} utterances from "
+                    f"{len(heldout_personas)} personas for evaluation"
+                )
+            else:
+                split_notes = list(split.notes)
+                print(
+                    "No held-out personas available for this context; "
+                    "only the in-distribution score will be reported"
+                )
+
         print("Utterances generation complete! Beginning model pipeline training\n")
 
         # ==================================================================================
@@ -911,7 +1320,7 @@ def train(workflow: fastworkflow.Workflow):
 
         # Now create the dataset with encoded labels
         dataset = list(zip(X, y_encoded))
-        train_data, test_data = train_test_split(dataset, test_size=0.25, random_state=42)
+        train_data, test_data = split_training_data(dataset)
 
         # ---------------------------------------------------------------
         # Collate fn that keeps raw *texts* so we can avoid decode→encode
@@ -1195,6 +1604,62 @@ def train(workflow: fastworkflow.Workflow):
         print(f"Predicted label: {result['label']}")
         print(f"Confidence: {result['confidence']:.4f}")
         print(f"Used DistilBERT: {'Yes' if result['used_distil'] else 'No'}")
-            
+
+        # ------------------------------------------------------------------
+        # R1a/R1b: score the reserved personas through the REAL runtime path.
+        # CommandRouter.predict is what intent detection actually calls, thresholds
+        # and all, so this measures what a user would experience rather than what the
+        # raw classifier head emits. Every artifact it needs was written above; the
+        # model directory is taken from the threshold path so this keeps working
+        # whether or not artifacts are being routed into a version.
+        # ------------------------------------------------------------------
+        report = heldout_evaluation.HeldoutReport(
+            context=ctx_name,
+            in_distribution_f1=f1,
+            seed=seed,
+            heldout_personas=heldout_personas,
+            notes=split_notes,
+        )
+        try:
+            has_context_benchmark = any(
+                case.context == ctx_name
+                and case.kind in {"routing", "escalation"}
+                for case in benchmark_cases
+            )
+            predict_labels = None
+            if heldout_records or has_context_benchmark:
+                router = CommandRouter(os.path.dirname(threshold_path))
+
+                def predict_labels(utterance: str, _router=router) -> list[str]:
+                    """Adapt `CommandRouter.predict` to the scorer's contract.
+
+                    `predict` returns either a one-element list holding a numpy string or
+                    the raw numpy top-k array. The scorer needs a plain `list[str]`: a
+                    numpy array raises "truth value of an array is ambiguous" the moment
+                    anything tests it for emptiness.
+                    """
+                    return [str(label) for label in _router.predict(utterance)]
+
+            # `kind` is required. Omitting it raised a TypeError that the guard
+            # below turned into a note on the report, so escalation silently
+            # never scored while routing kept working -- the failure looked like
+            # "this workflow has no escalation cases" (bd fix-588).
+            _score_heldout_context(
+                report, heldout_records, benchmark_cases, predict_labels)
+        except Exception as exc:
+            # A scoring failure must never destroy a completed training run: the
+            # models are already on disk and usable. Record it and move on.
+            report.notes.append(f"held-out evaluation failed: {exc}")
+            logger.error(
+                f"Held-out evaluation failed for context '{ctx_name}': {exc}")
+        heldout_reports.append(report)
+
     # End of context loop
+
+    if heldout_reports:
+        print(heldout_evaluation.format_report(heldout_reports))
+        with contextlib.suppress(OSError):
+            report_path = heldout_evaluation.write_report(
+                workflow_folderpath, heldout_reports)
+            print(f"Held-out evaluation report: {report_path}")
     return None

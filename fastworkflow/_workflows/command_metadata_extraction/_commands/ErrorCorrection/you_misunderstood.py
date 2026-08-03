@@ -60,8 +60,10 @@ class ResponseGenerator:
             ])
         )
         response = (
-            "Please select the correct command name from the list below:\n"
-            f"{response}\n\nor type 'abort' to cancel"
+            "I couldn't determine which available command matches your request.\n"
+            "If one of these options applies, enter its command name:\n"
+            f"{response}\n\n"
+            "Otherwise, type 'abort' to cancel, then rephrase your request."
         )
 
         return CommandOutput(

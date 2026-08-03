@@ -1,27 +1,27 @@
 import fastworkflow
 from fastworkflow import Action, CommandOutput, CommandResponse, NLUPipelineStage
 from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.nlu_labels import PARAMETER_VALUE_PLACEHOLDERS
 
 from ..intent_detection import CommandNamePrediction
 from ..parameter_extraction import ParameterExtraction
 
 
 class Signature:
-    plain_utterances = [
-        "3",
-        "france",
-        "16.7,.002",
-        "John Doe, 56, 281-995-6423",
-        "/path/to/my/object",
-        "id=3636",
-        "25.73 and Howard St",
-    ]
+    # These are the PARAMETER_EXTRACTION stage's bare-value literals. They belong
+    # to nlu_labels.PARAMETER_VALUE_LABEL, not to this command's INTENT_DETECTION
+    # escalation class; see fastworkflow/nlu_labels.py for the stage split.
+    plain_utterances = list(PARAMETER_VALUE_PLACEHOLDERS)
 
     @staticmethod
     def generate_utterances(workflow: fastworkflow.Workflow, command_name: str) -> list[str]:
+        # Only the humanised command name. The placeholders above are excluded on
+        # purpose: training them into the 'wildcard' label taught the escalation
+        # classifier that a bare value like "france" means "escalate to my
+        # parent". The trainer labels them under PARAMETER_VALUE_LABEL instead.
         return [
             command_name.split('/')[-1].lower().replace('_', ' ')
-        ] + Signature.plain_utterances
+        ]
 
 
 class ResponseGenerator:
