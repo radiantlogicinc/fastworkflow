@@ -35,7 +35,7 @@ from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.command_directory import CommandDirectory
 from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
 from fastworkflow.model_pipeline_training import CommandRouter
-from fastworkflow.train import artifact_versioning, training_report
+from fastworkflow.train import artifact_versioning, heldout_evaluation, training_report
 from fastworkflow.train import selective_training as st
 from fastworkflow.train.determinism import (
     ContextTrainingStatus,
@@ -746,7 +746,7 @@ def test_the_heldout_report_keeps_the_contexts_that_were_not_retrained(baseline)
     report_path = (st._heldout_path(workflow_path))
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps({
-        "schema_version": 1,
+        "schema_version": heldout_evaluation.REPORT_SCHEMA_VERSION,
         "totals": {},
         "contexts": [
             {"context": "ChatRoom", "in_distribution_f1": 0.8,
@@ -759,7 +759,7 @@ def test_the_heldout_report_keeps_the_contexts_that_were_not_retrained(baseline)
 
     # What train() would leave behind having retrained only PremiumUser.
     report_path.write_text(json.dumps({
-        "schema_version": 1,
+        "schema_version": heldout_evaluation.REPORT_SCHEMA_VERSION,
         "totals": {"contexts": 1},
         "contexts": [
             {"context": "PremiumUser", "in_distribution_f1": 0.7,
@@ -786,6 +786,50 @@ def test_the_heldout_report_keeps_the_contexts_that_were_not_retrained(baseline)
     assert merged["totals"]["routing_top1_correct"] == 15
 
 
+def test_heldout_merge_rejects_legacy_top1_semantics(baseline):
+    """A selective run must not mix inflated v1 top-1 counts into a v2 report."""
+    workflow_path, version_id = baseline
+    report_path = st._heldout_path(workflow_path)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    previous = {
+        "schema_version": heldout_evaluation.REPORT_SCHEMA_VERSION - 1,
+        "totals": {},
+        "contexts": [
+            {
+                "context": "ChatRoom",
+                "routing": {
+                    "total": 10,
+                    "top1_correct": 9,
+                    "in_list_correct": 9,
+                },
+            }
+        ],
+    }
+    current = {
+        "schema_version": heldout_evaluation.REPORT_SCHEMA_VERSION,
+        "totals": {"contexts": 1},
+        "contexts": [
+            {
+                "context": "PremiumUser",
+                "routing": {
+                    "total": 10,
+                    "top1_correct": 7,
+                    "in_list_correct": 8,
+                },
+            }
+        ],
+    }
+    report_path.write_text(json.dumps(current))
+    plan = st.TrainingPlan(
+        contexts_to_train=["PremiumUser"],
+        contexts_carried_forward=["ChatRoom"],
+        carry_forward_from=version_id,
+    )
+
+    assert not st.merge_heldout_evaluation(workflow_path, plan, previous)
+    assert json.loads(report_path.read_text()) == current
+
+
 def test_the_heldout_merge_does_not_duplicate_an_untouched_report(baseline):
     """A run that retrained nothing leaves the report intact; merging must be a no-op.
 
@@ -797,7 +841,7 @@ def test_the_heldout_merge_does_not_duplicate_an_untouched_report(baseline):
     report_path = st._heldout_path(workflow_path)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "schema_version": 1,
+        "schema_version": heldout_evaluation.REPORT_SCHEMA_VERSION,
         "totals": {},
         "contexts": [
             {"context": "ChatRoom", "in_distribution_f1": 0.8,

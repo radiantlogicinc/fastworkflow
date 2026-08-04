@@ -1213,6 +1213,15 @@ def merge_heldout_evaluation(
     path = _heldout_path(workflow_folderpath)
     try:
         current = json.loads(path.read_text())
+        previous_schema = previous["schema_version"]
+        current_schema = current["schema_version"]
+        if previous_schema != current_schema:
+            logger.warning(
+                f"Could not merge carried-forward contexts into {path}: held-out "
+                f"report schema changed from {previous_schema} to {current_schema}. "
+                "The report describes only the contexts this run retrained."
+            )
+            return False
         previous_entries = {
             entry["context"]: entry for entry in previous["contexts"]}
         merged = list(current["contexts"])
