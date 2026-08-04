@@ -10,8 +10,9 @@ a wolf. This workflow supplies the wolf.
 
 It reproduces the case F14 was written from. On a large multi-context workflow,
 `ControlsMonitor/list_findings` and `Directory/search_control_findings` answer the same
-question, and no amount of utterance engineering separates them — they present as permanent
-benchmark failures and send developers chasing a defect that is not in the model.
+question. Their current seeds do not separate them, and because they expose the same
+capability, inventing a lexical distinction would conceal rather than resolve the ambiguity.
+They present as permanent benchmark failures until the workflow merges or aliases the pair.
 
 | Command | Role |
 |---|---|

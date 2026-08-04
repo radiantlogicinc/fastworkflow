@@ -79,7 +79,9 @@ COMMAND_INFO_DIRNAME = "___command_info"
 REPORT_FILENAME = "heldout_evaluation.json"
 DEFAULT_BENCHMARK_FILENAME = "intent_benchmark.json"
 BENCHMARK_SCHEMA_VERSION = 1
-REPORT_SCHEMA_VERSION = 1
+# v2 makes routing top-1 mean a lone, confident route rather than merely the
+# first-ranked label in an ambiguity list.
+REPORT_SCHEMA_VERSION = 2
 
 DEFAULT_HOLDOUT_FRACTION = 0.25
 DEFAULT_SEED = 42
@@ -475,11 +477,11 @@ def score_routing(
     ``predict_fn(utterance)`` returns the ranked candidate labels, top-1 first — exactly
     ``CommandRouter.predict``'s contract (one label when confident, top-k when not).
 
-    * **top-1** — the first returned candidate is the expected label.
+    * **top-1** — the lone, confident returned label is the expected label.
     * **in-list** — the expected label appears anywhere among the returned candidates.
 
-    The two are reported separately because a correct label in second place is a
-    clarification prompt, not a correct route.
+    The two are reported separately because any multi-candidate result is a clarification
+    prompt, not a route, even when the expected label is ranked first.
     """
     score = RoutingScore()
     per_command: dict[str, dict] = {}
@@ -499,7 +501,7 @@ def score_routing(
         bucket["total"] += 1
         score.total += 1
 
-        if predictions and predictions[0] == expected:
+        if len(predictions) == 1 and predictions[0] == expected:
             bucket["top1_correct"] += 1
             score.top1_correct += 1
         if expected in predictions:
@@ -946,7 +948,10 @@ def write_report(workflow_folderpath: str, reports: Sequence[HeldoutReport]) -> 
                 "Legacy same-distribution split score; measures memorisation. Reported for "
                 "continuity, not for judging generalisation."
             ),
-            "routing": "Held-out top-1 and in-list accuracy.",
+            "routing": (
+                "Held-out accuracy: top-1 requires one lone, confident correct label; "
+                "in-list credits the expected label anywhere in an ambiguity list."
+            ),
             "escalation": (
                 "Recall of a lone, confident escalation label; reported separately from "
                 "routing accuracy because the two trade against each other."
