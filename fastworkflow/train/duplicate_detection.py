@@ -594,10 +594,10 @@ def utterances_from_workflow(workflow_folderpath: str) -> dict[str, list[str]]:
     """Collect each command's hand-written seed utterances from a workflow folder.
 
     Seeds, not generated utterances, so this runs before training, without an LLM key and
-    without a network call. Two commands whose *seeds* do not separate cannot be rescued
-    by generation: every generated utterance is conditioned on the seed list and on a
-    keyword bag built from it (`generate_synthetic.py:249-257`), so generation amplifies
-    the seeds' vocabulary rather than adding to it.
+    without a network call. Generated utterances are conditioned on the seed list and on
+    a keyword bag built from it (`generate_synthetic.py:249-257`), so this is an early
+    warning about the vocabulary generation will usually amplify. Distinctive seed edits
+    can change the result and should be tried when the commands have different semantics.
     """
     crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
     command_directory = crd.command_directory

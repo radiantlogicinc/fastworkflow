@@ -545,6 +545,8 @@ def test_training_preflight_finds_the_control_workflow_duplicate_pair(
             f"to catch"
         )
     assert rendered.count("DUPLICATE CAPABILITIES") == 1
+    assert "distinctive seed utterances" in rendered
+    assert "No amount of utterance engineering" not in rendered
 
 
 def test_training_preflight_writes_the_duplicate_report(control_workflow):
