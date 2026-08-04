@@ -340,6 +340,7 @@ def test_labeled_utterances_from_provenance_accepts_key_aliases():
 def test_score_routing_separates_top1_from_in_list():
     cases = [
         LabeledUtterance(utterance="u_top1", label="Ctx/a", persona="p1"),
+        LabeledUtterance(utterance="u_first_ranked", label="Ctx/a", persona="p1"),
         LabeledUtterance(utterance="u_second", label="Ctx/a", persona="p1"),
         LabeledUtterance(utterance="u_third", label="Ctx/b", persona="p1"),
         LabeledUtterance(utterance="u_miss", label="Ctx/b", persona="p1"),
@@ -347,6 +348,9 @@ def test_score_routing_separates_top1_from_in_list():
     predict = _lookup_predictor(
         {
             "u_top1": ["Ctx/a"],
+            # A correct first-ranked label in a multi-candidate result is still an
+            # ambiguity prompt at runtime, so it is in-list but not a routed top-1.
+            "u_first_ranked": ["Ctx/a", "Ctx/b", "wildcard"],
             # Correct label in 2nd place: in-list but NOT top-1. This is a clarification
             # prompt at runtime, not a correct route, and the two must not be conflated.
             "u_second": ["Ctx/b", "Ctx/a", "wildcard"],
@@ -357,15 +361,15 @@ def test_score_routing_separates_top1_from_in_list():
 
     score = score_routing(cases, predict)
 
-    assert score.total == 4
+    assert score.total == 5
     assert score.top1_correct == 1
-    assert score.in_list_correct == 3
-    assert score.top1 == pytest.approx(0.25)
-    assert score.in_list == pytest.approx(0.75)
+    assert score.in_list_correct == 4
+    assert score.top1 == pytest.approx(0.2)
+    assert score.in_list == pytest.approx(0.8)
     assert score.per_command["Ctx/a"] == {
-        "total": 2,
+        "total": 3,
         "top1_correct": 1,
-        "in_list_correct": 2,
+        "in_list_correct": 3,
     }
     assert score.per_command["Ctx/b"] == {
         "total": 2,
@@ -843,6 +847,7 @@ def test_write_report_writes_json_under_command_info(tmp_path):
     assert payload["contexts"][0]["heldout_personas"] == ["persona_03", "persona_06"]
     assert payload["contexts"][1]["escalation"] is None
     assert "memorisation" in payload["metric_notes"]["in_distribution_f1"]
+    assert "lone, confident" in payload["metric_notes"]["routing"]
 
 
 def test_write_report_creates_the_command_info_directory(tmp_path):
