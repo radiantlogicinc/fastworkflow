@@ -9,15 +9,24 @@ import ast
 import inspect
 import json
 import os
+import shutil
+import threading
 import textwrap
 from pathlib import Path
 
 import pytest
 
+import fastworkflow
+from fastworkflow.command_directory import CommandDirectory
+from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
 from fastworkflow.model_pipeline_training import TrainingDataError
 from fastworkflow.train import __main__ as train_orchestration
 from fastworkflow.train import artifact_versioning as av
 from fastworkflow.train import selective_training
+from fastworkflow.train import training_report
+
+
+_FASTWORKFLOW_GLOBAL_STATE_LOCK = threading.RLock()
 
 
 def _make_version(
@@ -66,6 +75,41 @@ def _call_name(call: ast.Call) -> str:
             parts.append(value.id)
         return ".".join(reversed(parts))
     return ""
+
+
+@pytest.fixture
+def cme_copy(tmp_path: Path, setup_test_environment):
+    """A real CME copy guarded while it uses process-global routing caches.
+
+    pytest-xdist workers are separate processes, so each has independent fastworkflow
+    globals. The lock prevents in-process threaded callers from interleaving with the
+    registry reset, while the session fixture initializes fastworkflow once per worker.
+    """
+    with _FASTWORKFLOW_GLOBAL_STATE_LOCK:
+        package_root = Path(fastworkflow.__file__).parent
+        source = package_root / "_workflows" / "command_metadata_extraction"
+        copied_package_root = tmp_path / "fastworkflow"
+        destination = (
+            copied_package_root / "_workflows" / "command_metadata_extraction"
+        )
+        destination.parent.mkdir(parents=True)
+        shutil.copytree(
+            source,
+            destination,
+            ignore=shutil.ignore_patterns(
+                "___command_info",
+                "___workflow_contexts",
+                "___convo_info",
+                "__pycache__",
+            ),
+        )
+        RoutingRegistry.clear_registry()
+        RoutingDefinition.build(str(destination))
+        CommandDirectory.load(str(destination)).save()
+        try:
+            yield copied_package_root, destination
+        finally:
+            RoutingRegistry.clear_registry()
 
 
 def test_noop_plan_republishes_current_version_before_retention(tmp_path: Path):
@@ -129,6 +173,76 @@ def test_missing_training_report_refuses_publication_with_training_data_error():
         match="safety report could not be produced; refusing to publish models",
     ):
         train_orchestration._require_publishable_training_report(None)
+
+
+def test_cme_readiness_checks_only_contexts_the_trainer_produces(cme_copy):
+    package_root, cme_workflow = cme_copy
+    trainable_contexts = selective_training.contexts_for_training(str(cme_workflow))
+    assert trainable_contexts == {"*", "IntentDetection"}
+
+    command_info = cme_workflow / "___command_info"
+    for context_name in trainable_contexts:
+        context_folder = (
+            train_orchestration.GLOBAL_CONTEXT_FOLDER
+            if context_name == "*"
+            else context_name
+        )
+        context_dir = command_info / context_folder
+        context_dir.mkdir(parents=True, exist_ok=True)
+        for artifact_name in selective_training.REQUIRED_CONTEXT_ARTIFACTS:
+            artifact_path = context_dir / artifact_name
+            if artifact_name.endswith(".pth"):
+                artifact_path.mkdir()
+            else:
+                artifact_path.write_text("{}", encoding="utf-8")
+
+    assert train_orchestration.is_fast_workflow_trained(str(package_root))
+    assert not (command_info / "ErrorCorrection").exists()
+
+    missing_artifact = command_info / "IntentDetection" / "largemodel.pth"
+    shutil.rmtree(missing_artifact)
+    assert not train_orchestration.is_fast_workflow_trained(str(package_root))
+
+    missing_artifact.mkdir()
+    newest_artifact_mtime = max(
+        path.stat().st_mtime
+        for context_name in trainable_contexts
+        for path in (
+            command_info
+            / (
+                train_orchestration.GLOBAL_CONTEXT_FOLDER
+                if context_name == "*"
+                else context_name
+            )
+        ).iterdir()
+    )
+    command_source = next((cme_workflow / "_commands").rglob("*.py"))
+    os.utime(
+        command_source,
+        (newest_artifact_mtime + 10, newest_artifact_mtime + 10),
+    )
+    assert not train_orchestration.is_fast_workflow_trained(str(package_root))
+
+
+def test_cme_report_exempts_commands_in_an_untrained_declared_context(cme_copy):
+    _package_root, cme_workflow = cme_copy
+
+    report = training_report.build_report(str(cme_workflow))
+    error_correction_rows = [
+        row for row in report.rows if row.command_name.startswith("ErrorCorrection/")
+    ]
+
+    assert {row.command_name for row in error_correction_rows} == {
+        "ErrorCorrection/abort",
+        "ErrorCorrection/you_misunderstood",
+    }
+    assert all(
+        row.status is training_report.RowStatus.EXCLUDED
+        for row in error_correction_rows
+    )
+    assert not {
+        row.command_name for row in error_correction_rows
+    } & {row.command_name for row in report.blocking_rows}
 
 
 def test_training_report_gate_runs_before_publication():
