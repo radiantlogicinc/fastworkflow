@@ -69,6 +69,7 @@ from fastworkflow.train.determinism import (
     ContextTrainingStatus,
     UtteranceProvenance,
 )
+from fastworkflow.train.selective_training import contexts_for_training
 from fastworkflow.utils.logging import logger
 
 REPORT_FILENAME: str = "training_report.txt"
@@ -642,6 +643,22 @@ def build_report(
     )
     command_contexts = _load_command_contexts(workflow_folderpath, problems)
     heldout = _load_heldout_per_command(workflow_folderpath, problems)
+    declared_contexts = {
+        context_name
+        for contexts in command_contexts.values()
+        for context_name in contexts
+    }
+    try:
+        trainable_contexts = contexts_for_training(workflow_folderpath)
+    except Exception as exc:  # noqa: BLE001
+        # Failing closed matters here: if the report cannot prove that a context is
+        # intentionally excluded, its commands must remain subject to the publication
+        # gate rather than being silently exempted.
+        trainable_contexts = declared_contexts
+        problems.append(
+            "Could not determine the contexts produced by training; all declared "
+            f"contexts remain subject to the publication gate: {exc}"
+        )
 
     # Union so that a command present in only one source still gets a line: a command
     # that generated utterances but vanished from routing is as interesting as the
@@ -655,6 +672,15 @@ def build_report(
     for command_name in sorted(all_commands):
         record = records.get(command_name)
         trains_as_label = requires_utterances.get(command_name)
+        declared_command_contexts = command_contexts.get(command_name, [])
+        if (
+            trains_as_label is not False
+            and declared_command_contexts
+            and not set(declared_command_contexts) & trainable_contexts
+        ):
+            # Some workflows declare command-only contexts that deliberately have no
+            # classifier. Their commands are real commands, not missing training data.
+            trains_as_label = False
         heldout_counts = heldout.get(command_name) or {}
         kind = _classify_kind(command_name, core_commands)
         command_context_records = sorted(

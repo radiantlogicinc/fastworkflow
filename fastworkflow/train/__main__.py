@@ -507,25 +507,41 @@ def _get_commands_with_parameters(json_path):
     return commands_with_parameters
 
 def is_fast_workflow_trained(fastworkflow_folderpath: str):
-    # Check if fastworkflow has been trained
-    cme_commandinfo_folderpath = os.path.join(
+    # Check the artifacts for exactly the contexts that the CME trainer produces.
+    cme_workflow_folderpath = os.path.join(
         fastworkflow_folderpath,
         '_workflows',
-        'command_metadata_extraction', 
-        '___command_info',
-        'ErrorCorrection'
+        'command_metadata_extraction',
     )
-
-    model_path = os.path.join(cme_commandinfo_folderpath, "largemodel.pth")
-    if not os.path.exists(model_path):
+    try:
+        trained_contexts = selective_training.contexts_for_training(
+            cme_workflow_folderpath
+        )
+    except Exception:
         return False
 
-    model_mtime = os.path.getmtime(model_path)
+    threshold_paths = []
+    for context_name in trained_contexts:
+        context_folder = (
+            GLOBAL_CONTEXT_FOLDER if context_name == "*" else context_name
+        )
+        threshold_path = os.path.join(
+            cme_workflow_folderpath,
+            "___command_info",
+            context_folder,
+            "threshold.json",
+        )
+        if not os.path.isfile(threshold_path):
+            return False
+        threshold_paths.append(threshold_path)
+
+    if not threshold_paths:
+        return False
+
+    oldest_model_mtime = min(os.path.getmtime(path) for path in threshold_paths)
 
     commands_path = os.path.join(
-        fastworkflow_folderpath,
-        "_workflows",
-        "command_metadata_extraction",
+        cme_workflow_folderpath,
         "_commands",
     )
 
@@ -534,7 +550,7 @@ def is_fast_workflow_trained(fastworkflow_folderpath: str):
             if file.endswith(".pyc"):
                 continue
             file_path = os.path.join(root, file)
-            if os.path.getmtime(file_path) > model_mtime:
+            if os.path.getmtime(file_path) > oldest_model_mtime:
                 return False
 
     return True
