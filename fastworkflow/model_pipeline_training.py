@@ -923,6 +923,76 @@ def _record_context_training(
     )
 
 
+def _record_wildcard_context_training(
+    context_name: str,
+    escalation_rows: Optional[list[str]],
+    *,
+    own_row_count: int,
+    raw_candidate_count: int,
+    deduplicated_candidate_count: int,
+    always_include_rows: list[str],
+    selected_budget: Optional[int],
+    coverage_floor: int,
+) -> None:
+    """Record escalation-class rows and every denominator used to select them."""
+    recorder = get_provenance_recorder()
+    if recorder is None:
+        return
+
+    included = escalation_rows is not None
+    recorder.record_context(
+        context_name=context_name,
+        command_name=WILDCARD_LABEL,
+        status=(
+            ContextTrainingStatus.INCLUDED
+            if included
+            else ContextTrainingStatus.SKIPPED_NO_UTTERANCES
+        ),
+        row_count=len(escalation_rows or []),
+        reason=(
+            "reserved escalation class"
+            if included
+            else "context has no non-local ancestor utterances"
+        ),
+        own_row_count=own_row_count,
+        raw_candidate_count=raw_candidate_count,
+        deduplicated_candidate_count=deduplicated_candidate_count,
+        always_include_count=len(always_include_rows),
+        selected_budget=selected_budget,
+        coverage_floor=coverage_floor,
+        coverage_floor_applied=(
+            coverage_floor > own_row_count if included else False
+        ),
+    )
+
+
+def _record_parameter_value_context_training(
+    context_name: str,
+    parameter_value_rows: list[str],
+    own_row_count: int,
+) -> None:
+    """Record bare-value reserved rows without wildcard-only budget fields."""
+    recorder = get_provenance_recorder()
+    if recorder is None:
+        return
+
+    recorder.record_context(
+        context_name=context_name,
+        command_name=PARAMETER_VALUE_LABEL,
+        status=(
+            ContextTrainingStatus.INCLUDED
+            if parameter_value_rows
+            else ContextTrainingStatus.SKIPPED_NO_UTTERANCES
+        ),
+        row_count=len(parameter_value_rows),
+        reason="reserved bare-value class",
+        own_row_count=own_row_count,
+        raw_candidate_count=len(PARAMETER_VALUE_PLACEHOLDERS),
+        deduplicated_candidate_count=len(parameter_value_rows),
+        always_include_count=0,
+    )
+
+
 def cache_ancestor_utterances(
     context_name: str, 
     crd: RoutingDefinition, 
@@ -1195,6 +1265,9 @@ def train(workflow: fastworkflow.Workflow,
         # there anyway: the runtime parent walk terminates immediately at the response
         # generation root, so the turn can only ever reach you_misunderstood, which an
         # unconfident classifier already reaches.
+        escalation_rows: Optional[list[str]] = None
+        always_include_rows: list[str] = []
+        budget: Optional[int] = None
         if net_ancestor_utterances:
             # R7.2: bound the escalation class against this context's own row count, so
             # training time stays linear in workflow size, but never below one row per
@@ -1230,34 +1303,16 @@ def train(workflow: fastworkflow.Workflow,
             utterance_command_tuples.extend(
                 list(zip(escalation_rows, [WILDCARD_LABEL] * len(escalation_rows)))
             )
-            if (recorder := get_provenance_recorder()) is not None:
-                recorder.record_context(
-                    context_name=ctx_name,
-                    command_name=WILDCARD_LABEL,
-                    status=ContextTrainingStatus.INCLUDED,
-                    row_count=len(escalation_rows),
-                    reason="reserved escalation class",
-                    own_row_count=own_rows,
-                    raw_candidate_count=raw_candidate_count,
-                    deduplicated_candidate_count=deduplicated_candidate_count,
-                    always_include_count=len(always_include_rows),
-                    selected_budget=budget,
-                    coverage_floor=coverage_floor,
-                    coverage_floor_applied=coverage_floor > own_rows,
-                )
-        elif (recorder := get_provenance_recorder()) is not None:
-            recorder.record_context(
-                context_name=ctx_name,
-                command_name=WILDCARD_LABEL,
-                status=ContextTrainingStatus.SKIPPED_NO_UTTERANCES,
-                reason="context has no non-local ancestor utterances",
-                own_row_count=own_rows,
-                raw_candidate_count=raw_candidate_count,
-                deduplicated_candidate_count=deduplicated_candidate_count,
-                always_include_count=0,
-                coverage_floor=coverage_floor,
-                coverage_floor_applied=False,
-            )
+        _record_wildcard_context_training(
+            ctx_name,
+            escalation_rows,
+            own_row_count=own_rows,
+            raw_candidate_count=raw_candidate_count,
+            deduplicated_candidate_count=deduplicated_candidate_count,
+            always_include_rows=always_include_rows,
+            selected_budget=budget,
+            coverage_floor=coverage_floor,
+        )
 
         # PARAMETER_VALUE_LABEL is the PARAMETER_EXTRACTION stage's bare-value catcher and
         # is emitted in EVERY context: a user can type a bare value anywhere. These are the
@@ -1269,22 +1324,9 @@ def train(workflow: fastworkflow.Workflow,
                 list(zip(parameter_value_rows,
                          [PARAMETER_VALUE_LABEL] * len(parameter_value_rows)))
             )
-        if (recorder := get_provenance_recorder()) is not None:
-            recorder.record_context(
-                context_name=ctx_name,
-                command_name=PARAMETER_VALUE_LABEL,
-                status=(
-                    ContextTrainingStatus.INCLUDED
-                    if parameter_value_rows
-                    else ContextTrainingStatus.SKIPPED_NO_UTTERANCES
-                ),
-                row_count=len(parameter_value_rows),
-                reason="reserved bare-value class",
-                own_row_count=own_rows,
-                raw_candidate_count=len(PARAMETER_VALUE_PLACEHOLDERS),
-                deduplicated_candidate_count=len(parameter_value_rows),
-                always_include_count=0,
-            )
+        _record_parameter_value_context_training(
+            ctx_name, parameter_value_rows, own_rows
+        )
 
 
         # ------------------------------------------------------------------

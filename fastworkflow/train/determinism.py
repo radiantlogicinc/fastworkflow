@@ -153,6 +153,16 @@ class ContextTrainingStatus(str, Enum):
     SKIPPED_NO_UTTERANCES = "skipped_no_utterances"
 
 
+def _normalize_count(value: int | float) -> int:
+    """Convert a count to a non-negative integer."""
+    return max(0, int(value))
+
+
+def _normalize_optional_count(value: Optional[int | float]) -> Optional[int]:
+    """Normalize a supplied count while preserving omission."""
+    return None if value is None else _normalize_count(value)
+
+
 class ContextTrainingProvenance(BaseModel):
     """Context-specific labelled-row use.
 
@@ -230,14 +240,14 @@ class ProvenanceRecorder:
         context_name: str,
         command_name: str,
         status: ContextTrainingStatus,
-        row_count: int = 0,
+        row_count: int | float = 0,
         reason: Optional[str] = None,
-        own_row_count: Optional[int] = None,
-        raw_candidate_count: Optional[int] = None,
-        deduplicated_candidate_count: Optional[int] = None,
-        always_include_count: Optional[int] = None,
-        selected_budget: Optional[int] = None,
-        coverage_floor: Optional[int] = None,
+        own_row_count: Optional[int | float] = None,
+        raw_candidate_count: Optional[int | float] = None,
+        deduplicated_candidate_count: Optional[int | float] = None,
+        always_include_count: Optional[int | float] = None,
+        selected_budget: Optional[int | float] = None,
+        coverage_floor: Optional[int | float] = None,
         coverage_floor_applied: Optional[bool] = None,
     ) -> None:
         """Record one command's inclusion or explicit skip in one context."""
@@ -245,38 +255,16 @@ class ProvenanceRecorder:
             context_name=str(context_name),
             command_name=str(command_name),
             status=status,
-            row_count=max(0, int(row_count)),
+            row_count=_normalize_count(row_count),
             reason=reason,
-            own_row_count=(
-                max(0, int(own_row_count))
-                if own_row_count is not None
-                else None
+            own_row_count=_normalize_optional_count(own_row_count),
+            raw_candidate_count=_normalize_optional_count(raw_candidate_count),
+            deduplicated_candidate_count=_normalize_optional_count(
+                deduplicated_candidate_count
             ),
-            raw_candidate_count=(
-                max(0, int(raw_candidate_count))
-                if raw_candidate_count is not None
-                else None
-            ),
-            deduplicated_candidate_count=(
-                max(0, int(deduplicated_candidate_count))
-                if deduplicated_candidate_count is not None
-                else None
-            ),
-            always_include_count=(
-                max(0, int(always_include_count))
-                if always_include_count is not None
-                else None
-            ),
-            selected_budget=(
-                max(0, int(selected_budget))
-                if selected_budget is not None
-                else None
-            ),
-            coverage_floor=(
-                max(0, int(coverage_floor))
-                if coverage_floor is not None
-                else None
-            ),
+            always_include_count=_normalize_optional_count(always_include_count),
+            selected_budget=_normalize_optional_count(selected_budget),
+            coverage_floor=_normalize_optional_count(coverage_floor),
             coverage_floor_applied=coverage_floor_applied,
         )
         with self._lock:

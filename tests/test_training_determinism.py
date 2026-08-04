@@ -737,6 +737,24 @@ def test_reserved_class_budget_metadata_round_trips_in_context_provenance(tmp_pa
         coverage_floor=8,
         coverage_floor_applied=False,
     )
+    recorder.record_context(
+        context_name="TodoItemNormalized",
+        command_name=WILDCARD_LABEL,
+        status=ContextTrainingStatus.INCLUDED,
+        row_count=-1.9,
+        own_row_count=-5.7,
+        raw_candidate_count=3.9,
+        deduplicated_candidate_count=-2.2,
+        always_include_count=1.9,
+        selected_budget=-4.1,
+        coverage_floor=4.8,
+    )
+    recorder.record_context(
+        context_name="TodoItemOmitted",
+        command_name=WILDCARD_LABEL,
+        status=ContextTrainingStatus.INCLUDED,
+        row_count=5,
+    )
     path = recorder.save()
 
     raw = json.loads(open(path, encoding="utf-8").read())
@@ -749,6 +767,39 @@ def test_reserved_class_budget_metadata_round_trips_in_context_provenance(tmp_pa
     assert payload["selected_budget"] == 20
     assert payload["coverage_floor"] == 8
     assert payload["coverage_floor_applied"] is False
+
+    normalized = raw["context_training"]["TodoItemNormalized"][WILDCARD_LABEL]
+    assert normalized["row_count"] == 0
+    assert normalized["own_row_count"] == 0
+    assert normalized["raw_candidate_count"] == 3
+    assert normalized["deduplicated_candidate_count"] == 0
+    assert normalized["always_include_count"] == 1
+    assert normalized["selected_budget"] == 0
+    assert normalized["coverage_floor"] == 4
+    assert all(
+        isinstance(normalized[field], int)
+        for field in (
+            "row_count",
+            "own_row_count",
+            "raw_candidate_count",
+            "deduplicated_candidate_count",
+            "always_include_count",
+            "selected_budget",
+            "coverage_floor",
+        )
+    )
+
+    omitted = raw["context_training"]["TodoItemOmitted"][WILDCARD_LABEL]
+    optional_fields = {
+        "own_row_count",
+        "raw_candidate_count",
+        "deduplicated_candidate_count",
+        "always_include_count",
+        "selected_budget",
+        "coverage_floor",
+        "coverage_floor_applied",
+    }
+    assert optional_fields.isdisjoint(omitted)
 
     loaded = ProvenanceRecorder.load_context_records(str(tmp_path))
     assert loaded[("TodoItem", WILDCARD_LABEL)].model_dump(

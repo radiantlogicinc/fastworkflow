@@ -196,13 +196,13 @@ def reserved_candidate_counts(
     are not ancestor candidates and historically used a different denominator.
     """
     excluded = set(exclude)
-    rows = [
-        row
-        for sources in rows_by_group.values()
-        for source_rows in sources.values()
-        for row in source_rows
-    ]
-    return len(rows), len(set(rows) - excluded)
+    raw_count = 0
+    unique_rows: set[str] = set()
+    for sources in rows_by_group.values():
+        for source_rows in sources.values():
+            raw_count += len(source_rows)
+            unique_rows.update(source_rows)
+    return raw_count, len(unique_rows - excluded)
 
 
 def group_ancestor_utterances(

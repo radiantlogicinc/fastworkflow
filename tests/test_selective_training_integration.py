@@ -685,6 +685,9 @@ def test_provenance_merge_restores_only_carried_context_records(baseline):
     assert carried_wildcard.row_count == 7
     assert carried_wildcard.raw_candidate_count == 21
     assert carried_wildcard.selected_budget == 11
+    assert carried_wildcard.always_include_count == 1
+    assert carried_wildcard.coverage_floor == 4
+    assert carried_wildcard.coverage_floor_applied is False
     assert contexts[("User", USER_MESSAGE_COMMAND)].row_count == 12
     assert contexts[("PremiumUser", USER_MESSAGE_COMMAND)].row_count == 21
     assert ("PremiumUser", "PremiumUser/deleted_command") not in contexts
