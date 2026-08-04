@@ -514,7 +514,6 @@ def test_confusion_tolerates_a_router_returning_nothing(control_seeds):
 import subprocess
 import sys as _sys
 
-from fastworkflow.model_pipeline_training import TrainingDataError
 from fastworkflow.train.__main__ import _validate_command_inputs
 
 
@@ -538,19 +537,18 @@ def test_training_preflight_finds_the_control_workflow_duplicate_pair(
 ):
     """The positive control's deliberate duplicate must survive the whole path: env
     resolution, init, seed collection, the scan, and rendering."""
-    with pytest.raises(TrainingDataError):
-        _validate_command_inputs(control_workflow)
+    _validate_command_inputs(control_workflow)
     rendered = capsys.readouterr().out
     for command in CONTROL_DUPLICATE_PAIR:
         assert command in rendered, (
             f"{command} missing from the report; the control pair is what this scan exists "
             f"to catch"
         )
+    assert rendered.count("DUPLICATE CAPABILITIES") == 1
 
 
 def test_training_preflight_writes_the_duplicate_report(control_workflow):
-    with pytest.raises(TrainingDataError):
-        _validate_command_inputs(control_workflow)
+    _validate_command_inputs(control_workflow)
     assert os.path.isfile(
         os.path.join(
             control_workflow, "___command_info", "duplicate_capabilities.json"
@@ -558,13 +556,11 @@ def test_training_preflight_writes_the_duplicate_report(control_workflow):
     )
 
 
-def test_training_preflight_fails_only_when_a_duplicate_exists(
+def test_training_preflight_is_advisory_for_duplicate_and_clean_workflows(
     control_workflow, retail_workflow
 ):
-    """The gate must discriminate. A flag that fails on every workflow, or on none, is
-    worse than no flag: it teaches developers to ignore it."""
-    with pytest.raises(TrainingDataError):
-        _validate_command_inputs(control_workflow)
+    """The scan must preserve both its diagnostic and its reports-only contract."""
+    _validate_command_inputs(control_workflow)
     _validate_command_inputs(retail_workflow)
 
 

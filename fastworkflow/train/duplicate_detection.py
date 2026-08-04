@@ -4,11 +4,10 @@ The problem
 -----------
 Some workflows expose the same capability twice. On a large multi-context workflow,
 ``ControlsMonitor/list_findings`` and ``Directory/search_control_findings`` answer the same
-question. No amount of utterance engineering separates them: they present as permanent
-benchmark failures, and a developer reading the benchmark spends days chasing a defect that
-is not in the model. The value of this module is diagnostic honesty — turning an
-unfixable-looking accuracy failure into a design observation the developer can act on by
-merging, aliasing, or knowingly accepting the pair.
+question. Other pairs are legitimate neighbours or opposites whose current seed lists do not
+express the distinction strongly enough. Both shapes present as benchmark failures. The value
+of this module is diagnostic honesty — showing what the classifier can and cannot separate so
+the developer can merge, alias, knowingly accept, or improve the seeds for the pair.
 
 This module only reports. It never changes what is trained, which labels exist, or what any
 model predicts.
@@ -686,9 +685,9 @@ def format_report(report: DuplicateReport) -> str:
             lines.append("")
             lines.append(
                 f"DUPLICATE CAPABILITIES ({len(report.duplicates)}): the training data does "
-                f"not separate these pairs. No amount of utterance engineering will; merge "
-                f"them, alias one to the other, or accept that routing between them is a "
-                f"coin flip."
+                f"not separate these pairs. Merge, alias, or knowingly accept true "
+                f"duplicates. For legitimate neighbours or opposites, write more distinctive "
+                f"seed utterances and re-run the scan."
             )
             for finding in report.duplicates:
                 lines.extend(_format_finding(finding))
