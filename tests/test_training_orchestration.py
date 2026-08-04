@@ -10,6 +10,7 @@ import inspect
 import json
 import os
 import shutil
+import threading
 import textwrap
 from pathlib import Path
 
@@ -23,6 +24,9 @@ from fastworkflow.train import __main__ as train_orchestration
 from fastworkflow.train import artifact_versioning as av
 from fastworkflow.train import selective_training
 from fastworkflow.train import training_report
+
+
+_FASTWORKFLOW_GLOBAL_STATE_LOCK = threading.RLock()
 
 
 def _make_version(
@@ -74,33 +78,38 @@ def _call_name(call: ast.Call) -> str:
 
 
 @pytest.fixture
-def cme_copy(tmp_path: Path):
-    """A real CME workflow copy whose generated artifacts are safe to modify."""
-    previous_env = dict(fastworkflow._env_vars)
-    fastworkflow.init(env_vars={})
-    package_root = Path(fastworkflow.__file__).parent
-    source = package_root / "_workflows" / "command_metadata_extraction"
-    copied_package_root = tmp_path / "fastworkflow"
-    destination = (
-        copied_package_root / "_workflows" / "command_metadata_extraction"
-    )
-    destination.parent.mkdir(parents=True)
-    shutil.copytree(
-        source,
-        destination,
-        ignore=shutil.ignore_patterns(
-            "___command_info",
-            "___workflow_contexts",
-            "___convo_info",
-            "__pycache__",
-        ),
-    )
-    RoutingRegistry.clear_registry()
-    RoutingDefinition.build(str(destination))
-    CommandDirectory.load(str(destination)).save()
-    yield copied_package_root, destination
-    RoutingRegistry.clear_registry()
-    fastworkflow.init(env_vars=previous_env)
+def cme_copy(tmp_path: Path, setup_test_environment):
+    """A real CME copy guarded while it uses process-global routing caches.
+
+    pytest-xdist workers are separate processes, so each has independent fastworkflow
+    globals. The lock prevents in-process threaded callers from interleaving with the
+    registry reset, while the session fixture initializes fastworkflow once per worker.
+    """
+    with _FASTWORKFLOW_GLOBAL_STATE_LOCK:
+        package_root = Path(fastworkflow.__file__).parent
+        source = package_root / "_workflows" / "command_metadata_extraction"
+        copied_package_root = tmp_path / "fastworkflow"
+        destination = (
+            copied_package_root / "_workflows" / "command_metadata_extraction"
+        )
+        destination.parent.mkdir(parents=True)
+        shutil.copytree(
+            source,
+            destination,
+            ignore=shutil.ignore_patterns(
+                "___command_info",
+                "___workflow_contexts",
+                "___convo_info",
+                "__pycache__",
+            ),
+        )
+        RoutingRegistry.clear_registry()
+        RoutingDefinition.build(str(destination))
+        CommandDirectory.load(str(destination)).save()
+        try:
+            yield copied_package_root, destination
+        finally:
+            RoutingRegistry.clear_registry()
 
 
 def test_noop_plan_republishes_current_version_before_retention(tmp_path: Path):

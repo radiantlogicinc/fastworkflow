@@ -514,10 +514,14 @@ def is_fast_workflow_trained(fastworkflow_folderpath: str):
         'command_metadata_extraction',
     )
     try:
-        trained_contexts = selective_training.contexts_for_training(
-            cme_workflow_folderpath
+        trained_contexts = set(
+            selective_training.contexts_for_training(cme_workflow_folderpath)
         )
-    except Exception:
+    except (AttributeError, KeyError, OSError, TypeError, ValueError) as exc:
+        logger.warning(
+            "Could not discover trainable CME contexts for "
+            f"{cme_workflow_folderpath}: {exc}"
+        )
         return False
 
     required_artifact_paths = []

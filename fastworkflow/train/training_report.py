@@ -649,7 +649,7 @@ def build_report(
         for context_name in contexts
     }
     try:
-        trainable_contexts = contexts_for_training(workflow_folderpath)
+        trainable_contexts = set(contexts_for_training(workflow_folderpath))
     except Exception as exc:  # noqa: BLE001
         # Failing closed matters here: if the report cannot prove that a context is
         # intentionally excluded, its commands must remain subject to the publication
