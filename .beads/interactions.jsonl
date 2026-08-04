@@ -370,3 +370,5 @@
 {"id":"int-792e2280","kind":"field_change","created_at":"2026-08-03T21:25:34.549655371Z","actor":"Dhar Rawal","issue_id":"fix-k0i.25","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-c7db32d6","kind":"field_change","created_at":"2026-08-03T21:25:54.074593942Z","actor":"Dhar Rawal","issue_id":"fix-k0i.39","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-f7dcd1ef","kind":"field_change","created_at":"2026-08-03T21:26:11.231331767Z","actor":"Dhar Rawal","issue_id":"fix-k0i.40","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
+{"id":"int-1edd0bf1","kind":"field_change","created_at":"2026-08-04T14:22:22.03903543Z","actor":"Dhar Rawal","issue_id":"fix-cvk","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
+{"id":"int-db022e3a","kind":"field_change","created_at":"2026-08-04T14:28:23.237457538Z","actor":"Dhar Rawal","issue_id":"fix-cvk","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}

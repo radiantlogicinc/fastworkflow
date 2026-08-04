@@ -21,6 +21,7 @@ from fastworkflow.nlu_labels import WILDCARD_LABEL
 from fastworkflow.train.class_balance import (
     coverage_floor_of,
     group_ancestor_utterances,
+    reserved_candidate_counts,
     reserved_class_budget,
     select_reserved_rows,
 )
@@ -195,6 +196,20 @@ def test_selection_deduplicates_across_sources():
     selected = select_reserved_rows(groups, budget=10)
     assert selected.count("shared") == 1
     assert set(selected) == {"shared", "a-1", "b-1"}
+
+
+def test_candidate_counts_keep_raw_and_deduplicated_denominators_distinct():
+    groups = {
+        "A": {"A/one": ["shared", "a-1"], "A/two": ["shared", "b-1"]},
+        "B": {"B/one": ["local", "b-2"]},
+    }
+
+    raw_count, deduplicated_count = reserved_candidate_counts(
+        groups, exclude={"local"}
+    )
+
+    assert raw_count == 6
+    assert deduplicated_count == 4
 
 
 # ---------------------------------------------------------------------------

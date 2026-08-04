@@ -35,6 +35,7 @@ from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.command_directory import CommandDirectory
 from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
 from fastworkflow.model_pipeline_training import CommandRouter
+from fastworkflow.nlu_labels import WILDCARD_LABEL
 from fastworkflow.train import artifact_versioning, training_report
 from fastworkflow.train import selective_training as st
 from fastworkflow.train.determinism import (
@@ -611,6 +612,19 @@ def test_provenance_merge_restores_only_carried_context_records(baseline):
         row_count=11,
     )
     previous_recorder.record_context(
+        context_name="ChatRoom",
+        command_name=WILDCARD_LABEL,
+        status=ContextTrainingStatus.INCLUDED,
+        row_count=7,
+        own_row_count=11,
+        raw_candidate_count=21,
+        deduplicated_candidate_count=13,
+        always_include_count=1,
+        selected_budget=11,
+        coverage_floor=4,
+        coverage_floor_applied=False,
+    )
+    previous_recorder.record_context(
         context_name="User",
         command_name=USER_MESSAGE_COMMAND,
         status=ContextTrainingStatus.INCLUDED,
@@ -667,6 +681,10 @@ def test_provenance_merge_restores_only_carried_context_records(baseline):
     assert commands[USER_MESSAGE_COMMAND].generated_count == 21
     assert commands[USER_MESSAGE_COMMAND].persona_ids == ["fresh-shared"]
     assert contexts[("ChatRoom", "ChatRoom/add_user")].row_count == 11
+    carried_wildcard = contexts[("ChatRoom", WILDCARD_LABEL)]
+    assert carried_wildcard.row_count == 7
+    assert carried_wildcard.raw_candidate_count == 21
+    assert carried_wildcard.selected_budget == 11
     assert contexts[("User", USER_MESSAGE_COMMAND)].row_count == 12
     assert contexts[("PremiumUser", USER_MESSAGE_COMMAND)].row_count == 21
     assert ("PremiumUser", "PremiumUser/deleted_command") not in contexts

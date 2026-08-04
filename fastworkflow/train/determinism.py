@@ -154,13 +154,25 @@ class ContextTrainingStatus(str, Enum):
 
 
 class ContextTrainingProvenance(BaseModel):
-    """Context-specific use of a command's shared generated utterance set."""
+    """Context-specific labelled-row use.
+
+    Application and framework commands use the common fields. Reserved labels also
+    populate the optional denominator and budget fields so their class share can be
+    reconstructed without a retained console log.
+    """
 
     context_name: str
     command_name: str
     status: ContextTrainingStatus
     row_count: int = 0
     reason: Optional[str] = None
+    own_row_count: Optional[int] = None
+    raw_candidate_count: Optional[int] = None
+    deduplicated_candidate_count: Optional[int] = None
+    always_include_count: Optional[int] = None
+    selected_budget: Optional[int] = None
+    coverage_floor: Optional[int] = None
+    coverage_floor_applied: Optional[bool] = None
 
 
 class ProvenanceRecorder:
@@ -220,6 +232,13 @@ class ProvenanceRecorder:
         status: ContextTrainingStatus,
         row_count: int = 0,
         reason: Optional[str] = None,
+        own_row_count: Optional[int] = None,
+        raw_candidate_count: Optional[int] = None,
+        deduplicated_candidate_count: Optional[int] = None,
+        always_include_count: Optional[int] = None,
+        selected_budget: Optional[int] = None,
+        coverage_floor: Optional[int] = None,
+        coverage_floor_applied: Optional[bool] = None,
     ) -> None:
         """Record one command's inclusion or explicit skip in one context."""
         record = ContextTrainingProvenance(
@@ -228,6 +247,37 @@ class ProvenanceRecorder:
             status=status,
             row_count=max(0, int(row_count)),
             reason=reason,
+            own_row_count=(
+                max(0, int(own_row_count))
+                if own_row_count is not None
+                else None
+            ),
+            raw_candidate_count=(
+                max(0, int(raw_candidate_count))
+                if raw_candidate_count is not None
+                else None
+            ),
+            deduplicated_candidate_count=(
+                max(0, int(deduplicated_candidate_count))
+                if deduplicated_candidate_count is not None
+                else None
+            ),
+            always_include_count=(
+                max(0, int(always_include_count))
+                if always_include_count is not None
+                else None
+            ),
+            selected_budget=(
+                max(0, int(selected_budget))
+                if selected_budget is not None
+                else None
+            ),
+            coverage_floor=(
+                max(0, int(coverage_floor))
+                if coverage_floor is not None
+                else None
+            ),
+            coverage_floor_applied=coverage_floor_applied,
         )
         with self._lock:
             self._context_records[(record.context_name, record.command_name)] = record
@@ -253,7 +303,7 @@ class ProvenanceRecorder:
                     context_name: {
                         command_name: self._context_records[
                             (context_name, command_name)
-                        ].model_dump()
+                        ].model_dump(exclude_none=True)
                         for recorded_context, command_name in sorted(
                             self._context_records
                         )

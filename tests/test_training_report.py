@@ -781,6 +781,19 @@ def test_report_describes_a_real_training_run(tmp_path_factory):
         recorded = ProvenanceRecorder.load(workflow_path)
         context_records = ProvenanceRecorder.load_context_records(workflow_path)
         assert recorded, "a completed training run must leave provenance behind"
+        wildcard_record = context_records[("*", WILDCARD_LABEL)]
+        parameter_value_record = context_records[("*", PARAMETER_VALUE_LABEL)]
+        assert wildcard_record.status is ContextTrainingStatus.SKIPPED_NO_UTTERANCES
+        assert wildcard_record.own_row_count
+        assert wildcard_record.raw_candidate_count == 0
+        assert wildcard_record.deduplicated_candidate_count == 0
+        assert wildcard_record.selected_budget is None
+        assert parameter_value_record.status is ContextTrainingStatus.INCLUDED
+        assert parameter_value_record.row_count > 0
+        assert parameter_value_record.raw_candidate_count == 7
+        assert parameter_value_record.deduplicated_candidate_count == (
+            parameter_value_record.row_count
+        )
         for command_name, record in recorded.items():
             row = _row(report, command_name)
             expected_rows = sum(
@@ -802,6 +815,10 @@ def test_report_describes_a_real_training_run(tmp_path_factory):
         assert _row(report, APP_COMMAND).kind is tr.CommandKind.APPLICATION
         assert _row(report, FRAMEWORK_COMMAND).kind is tr.CommandKind.FRAMEWORK
         assert _row(report, WILDCARD_LABEL).kind is tr.CommandKind.RESERVED
+        assert _row(report, WILDCARD_LABEL).row_count == 0
+        assert _row(report, PARAMETER_VALUE_LABEL).row_count == (
+            parameter_value_record.row_count
+        )
 
         # A successful run produces rows well above the structural floor.
         assert _row(report, APP_COMMAND).row_count >= tr.DEFAULT_MIN_TRAINING_ROWS

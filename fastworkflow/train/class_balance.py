@@ -183,6 +183,28 @@ def select_reserved_rows(
     return selected
 
 
+def reserved_candidate_counts(
+    rows_by_group: Mapping[str, Mapping[str, Sequence[str]]],
+    exclude: Iterable[str] = (),
+) -> tuple[int, int]:
+    """Return raw and de-duplicated candidate counts for one reserved class.
+
+    The raw count is the number of ancestor-list entries before local rows are removed
+    or duplicate utterance text is collapsed. The de-duplicated count applies both
+    operations, matching the candidate population from which `select_reserved_rows`
+    selects. Always-included rows are reported separately by the trainer because they
+    are not ancestor candidates and historically used a different denominator.
+    """
+    excluded = set(exclude)
+    rows = [
+        row
+        for sources in rows_by_group.values()
+        for source_rows in sources.values()
+        for row in source_rows
+    ]
+    return len(rows), len(set(rows) - excluded)
+
+
 def group_ancestor_utterances(
     ancestor_contexts: Iterable[str],
     cache: Mapping[str, Mapping[str, Sequence[str]]],
