@@ -52,21 +52,13 @@ def _datasets_available() -> bool:
     return _DATASETS_AVAILABLE
 
 
-def _validate_command_inputs(workflow_path: str) -> None:
-    """Fail before LLM generation when command seeds describe duplicate capabilities."""
+def _validate_command_inputs(
+    workflow_path: str,
+) -> duplicate_detection.DuplicateReport:
+    """Report suspiciously similar command seeds and return the scan result."""
     duplicate_report = duplicate_detection.scan_workflow(workflow_path)
     duplicate_detection.write_report(workflow_path, duplicate_report)
-    if duplicate_report.duplicates:
-        print(duplicate_detection.format_report(duplicate_report))
-        pairs = ", ".join(
-            f"{finding.command_a} / {finding.command_b}"
-            for finding in duplicate_report.duplicates
-        )
-        raise TrainingDataError(
-            "Duplicate command capabilities must be resolved before training: "
-            f"{pairs}"
-        )
-    if duplicate_report.overlapping:
+    if duplicate_report.duplicates or duplicate_report.overlapping:
         print(duplicate_detection.format_report(duplicate_report))
 
     crd = RoutingRegistry.get_definition(workflow_path)
@@ -94,6 +86,7 @@ def _validate_command_inputs(workflow_path: str) -> None:
             f"{details}. Eight is advisory, based on one workflow; training will "
             f"continue.{Style.RESET_ALL}"
         )
+    return duplicate_report
 
 
 def _repair_noop_publication(
