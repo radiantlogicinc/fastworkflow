@@ -79,7 +79,9 @@ COMMAND_INFO_DIRNAME = "___command_info"
 REPORT_FILENAME = "heldout_evaluation.json"
 DEFAULT_BENCHMARK_FILENAME = "intent_benchmark.json"
 BENCHMARK_SCHEMA_VERSION = 1
-REPORT_SCHEMA_VERSION = 1
+# v2 makes routing top-1 mean a lone, confident route rather than merely the
+# first-ranked label in an ambiguity list.
+REPORT_SCHEMA_VERSION = 2
 
 DEFAULT_HOLDOUT_FRACTION = 0.25
 DEFAULT_SEED = 42

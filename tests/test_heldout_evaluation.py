@@ -14,6 +14,7 @@ import pytest
 
 from fastworkflow.model_pipeline_training import _score_heldout_context
 from fastworkflow.train.heldout_evaluation import (
+    REPORT_SCHEMA_VERSION,
     SEED_PERSONA_ID,
     UNRESOLVED_PERSONA_PREFIX,
     BenchmarkCase,
@@ -840,7 +841,7 @@ def test_write_report_writes_json_under_command_info(tmp_path):
     assert path == str(workflow / "___command_info" / "heldout_evaluation.json")
     payload = json.loads((workflow / "___command_info" / "heldout_evaluation.json").read_text())
 
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == REPORT_SCHEMA_VERSION
     assert payload["totals"]["routing_total"] == 10
     assert [c["context"] for c in payload["contexts"]] == ["Account", "ReviewTicket"]
     assert payload["contexts"][0]["in_distribution_f1"] == pytest.approx(0.94)
