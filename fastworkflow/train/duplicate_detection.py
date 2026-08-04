@@ -4,11 +4,10 @@ The problem
 -----------
 Some workflows expose the same capability twice. On a large multi-context workflow,
 ``ControlsMonitor/list_findings`` and ``Directory/search_control_findings`` answer the same
-question. No amount of utterance engineering separates them: they present as permanent
-benchmark failures, and a developer reading the benchmark spends days chasing a defect that
-is not in the model. The value of this module is diagnostic honesty — turning an
-unfixable-looking accuracy failure into a design observation the developer can act on by
-merging, aliasing, or knowingly accepting the pair.
+question. Other pairs are legitimate neighbours or opposites whose current seed lists do not
+express the distinction strongly enough. Both shapes present as benchmark failures. The value
+of this module is diagnostic honesty — showing what the classifier can and cannot separate so
+the developer can merge, alias, knowingly accept, or improve the seeds for the pair.
 
 This module only reports. It never changes what is trained, which labels exist, or what any
 model predicts.
@@ -595,10 +594,10 @@ def utterances_from_workflow(workflow_folderpath: str) -> dict[str, list[str]]:
     """Collect each command's hand-written seed utterances from a workflow folder.
 
     Seeds, not generated utterances, so this runs before training, without an LLM key and
-    without a network call. Two commands whose *seeds* do not separate cannot be rescued
-    by generation: every generated utterance is conditioned on the seed list and on a
-    keyword bag built from it (`generate_synthetic.py:249-257`), so generation amplifies
-    the seeds' vocabulary rather than adding to it.
+    without a network call. Generated utterances are conditioned on the seed list and on
+    a keyword bag built from it (`generate_synthetic.py:249-257`), so this is an early
+    warning about the vocabulary generation will usually amplify. Distinctive seed edits
+    can change the result and should be tried when the commands have different semantics.
     """
     crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
     command_directory = crd.command_directory
@@ -686,17 +685,17 @@ def format_report(report: DuplicateReport) -> str:
             lines.append("")
             lines.append(
                 f"DUPLICATE CAPABILITIES ({len(report.duplicates)}): the training data does "
-                f"not separate these pairs. No amount of utterance engineering will; merge "
-                f"them, alias one to the other, or accept that routing between them is a "
-                f"coin flip."
+                f"not reliably distinguish these pairs; they appear truly indistinguishable. "
+                f"Merge, alias, or knowingly accept them as duplicates in the capability set."
             )
             for finding in report.duplicates:
                 lines.extend(_format_finding(finding))
         if report.overlapping:
             lines.append("")
             lines.append(
-                f"OVERLAPPING ({len(report.overlapping)}): separable, but only just. Usually "
-                f"a seed list that describes its neighbour in passing. Not a defect."
+                f"OVERLAPPING ({len(report.overlapping)}): legitimate neighbours or opposites "
+                f"that are separable, but only just. Write more distinctive seed utterances "
+                f"and re-run the scan. Usually not a capability defect."
             )
             for finding in report.overlapping:
                 lines.extend(_format_finding(finding))

@@ -52,21 +52,13 @@ def _datasets_available() -> bool:
     return _DATASETS_AVAILABLE
 
 
-def _validate_command_inputs(workflow_path: str) -> None:
-    """Fail before LLM generation when command seeds describe duplicate capabilities."""
+def _validate_command_inputs(
+    workflow_path: str,
+) -> duplicate_detection.DuplicateReport:
+    """Report suspiciously similar command seeds and return the scan result."""
     duplicate_report = duplicate_detection.scan_workflow(workflow_path)
     duplicate_detection.write_report(workflow_path, duplicate_report)
-    if duplicate_report.duplicates:
-        print(duplicate_detection.format_report(duplicate_report))
-        pairs = ", ".join(
-            f"{finding.command_a} / {finding.command_b}"
-            for finding in duplicate_report.duplicates
-        )
-        raise TrainingDataError(
-            "Duplicate command capabilities must be resolved before training: "
-            f"{pairs}"
-        )
-    if duplicate_report.overlapping:
+    if duplicate_report.duplicates or duplicate_report.overlapping:
         print(duplicate_detection.format_report(duplicate_report))
 
     crd = RoutingRegistry.get_definition(workflow_path)
@@ -94,6 +86,7 @@ def _validate_command_inputs(workflow_path: str) -> None:
             f"{details}. Eight is advisory, based on one workflow; training will "
             f"continue.{Style.RESET_ALL}"
         )
+    return duplicate_report
 
 
 def _repair_noop_publication(
@@ -507,25 +500,46 @@ def _get_commands_with_parameters(json_path):
     return commands_with_parameters
 
 def is_fast_workflow_trained(fastworkflow_folderpath: str):
-    # Check if fastworkflow has been trained
-    cme_commandinfo_folderpath = os.path.join(
+    # Check the artifacts for exactly the contexts that the CME trainer produces.
+    cme_workflow_folderpath = os.path.join(
         fastworkflow_folderpath,
         '_workflows',
-        'command_metadata_extraction', 
-        '___command_info',
-        'ErrorCorrection'
+        'command_metadata_extraction',
     )
-
-    model_path = os.path.join(cme_commandinfo_folderpath, "largemodel.pth")
-    if not os.path.exists(model_path):
+    try:
+        trained_contexts = set(
+            selective_training.contexts_for_training(cme_workflow_folderpath)
+        )
+    except (AttributeError, KeyError, OSError, TypeError, ValueError) as exc:
+        logger.warning(
+            "Could not discover trainable CME contexts for "
+            f"{cme_workflow_folderpath}: {exc}"
+        )
         return False
 
-    model_mtime = os.path.getmtime(model_path)
+    required_artifact_paths = []
+    for context_name in trained_contexts:
+        context_folder = (
+            GLOBAL_CONTEXT_FOLDER if context_name == "*" else context_name
+        )
+        context_artifact_dir = os.path.join(
+            cme_workflow_folderpath, "___command_info", context_folder
+        )
+        for artifact_name in selective_training.REQUIRED_CONTEXT_ARTIFACTS:
+            artifact_path = os.path.join(context_artifact_dir, artifact_name)
+            if not os.path.exists(artifact_path):
+                return False
+            required_artifact_paths.append(artifact_path)
+
+    if not required_artifact_paths:
+        return False
+
+    oldest_model_mtime = min(
+        os.path.getmtime(path) for path in required_artifact_paths
+    )
 
     commands_path = os.path.join(
-        fastworkflow_folderpath,
-        "_workflows",
-        "command_metadata_extraction",
+        cme_workflow_folderpath,
         "_commands",
     )
 
@@ -534,7 +548,7 @@ def is_fast_workflow_trained(fastworkflow_folderpath: str):
             if file.endswith(".pyc"):
                 continue
             file_path = os.path.join(root, file)
-            if os.path.getmtime(file_path) > model_mtime:
+            if os.path.getmtime(file_path) > oldest_model_mtime:
                 return False
 
     return True
