@@ -52,8 +52,10 @@ def _datasets_available() -> bool:
     return _DATASETS_AVAILABLE
 
 
-def _validate_command_inputs(workflow_path: str) -> None:
-    """Report suspiciously similar command seeds before LLM generation."""
+def _validate_command_inputs(
+    workflow_path: str,
+) -> duplicate_detection.DuplicateReport:
+    """Report suspiciously similar command seeds and return the scan result."""
     duplicate_report = duplicate_detection.scan_workflow(workflow_path)
     duplicate_detection.write_report(workflow_path, duplicate_report)
     if duplicate_report.duplicates or duplicate_report.overlapping:
@@ -84,6 +86,7 @@ def _validate_command_inputs(workflow_path: str) -> None:
             f"{details}. Eight is advisory, based on one workflow; training will "
             f"continue.{Style.RESET_ALL}"
         )
+    return duplicate_report
 
 
 def _repair_noop_publication(

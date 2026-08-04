@@ -685,17 +685,17 @@ def format_report(report: DuplicateReport) -> str:
             lines.append("")
             lines.append(
                 f"DUPLICATE CAPABILITIES ({len(report.duplicates)}): the training data does "
-                f"not separate these pairs. Merge, alias, or knowingly accept true "
-                f"duplicates. For legitimate neighbours or opposites, write more distinctive "
-                f"seed utterances and re-run the scan."
+                f"not reliably distinguish these pairs; they appear truly indistinguishable. "
+                f"Merge, alias, or knowingly accept them as duplicates in the capability set."
             )
             for finding in report.duplicates:
                 lines.extend(_format_finding(finding))
         if report.overlapping:
             lines.append("")
             lines.append(
-                f"OVERLAPPING ({len(report.overlapping)}): separable, but only just. Usually "
-                f"a seed list that describes its neighbour in passing. Not a defect."
+                f"OVERLAPPING ({len(report.overlapping)}): legitimate neighbours or opposites "
+                f"that are separable, but only just. Write more distinctive seed utterances "
+                f"and re-run the scan. Usually not a capability defect."
             )
             for finding in report.overlapping:
                 lines.extend(_format_finding(finding))

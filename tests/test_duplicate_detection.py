@@ -17,6 +17,7 @@ No mocks and no fabricated utterances: the seed lists come from the shipped comm
 No API key is required — the lexical detector reads seeds, never generated utterances.
 """
 
+import json
 import os
 import shutil
 import warnings
@@ -235,6 +236,23 @@ def test_control_report_renders_the_pair(control_report):
     assert "search_control_findings" in rendered
 
 
+def test_report_keeps_duplicate_and_overlap_guidance_separate(control_report):
+    duplicate_text = format_report(control_report)
+    assert "knowingly accept them as duplicates" in duplicate_text
+    assert "legitimate neighbours or opposites" not in duplicate_text
+
+    overlapping_report = control_report.model_copy(
+        update={
+            "duplicates": [],
+            "overlapping": list(control_report.duplicates),
+        }
+    )
+    overlapping_text = format_report(overlapping_report)
+    assert "OVERLAPPING (1)" in overlapping_text
+    assert "legitimate neighbours or opposites" in overlapping_text
+    assert "distinctive seed utterances" in overlapping_text
+
+
 # ---------------------------------------------------------------------------
 # False-positive stress test: the retail workflow
 # ---------------------------------------------------------------------------
@@ -390,8 +408,6 @@ def test_command_order_does_not_change_the_findings(control_seeds):
 
 
 def test_report_round_trips_to_disk(tmp_path, control_report):
-    import json
-
     path = write_report(str(tmp_path), control_report)
     with open(path, "r", encoding="utf-8") as f:
         payload = json.load(f)
@@ -537,25 +553,40 @@ def test_training_preflight_finds_the_control_workflow_duplicate_pair(
 ):
     """The positive control's deliberate duplicate must survive the whole path: env
     resolution, init, seed collection, the scan, and rendering."""
-    _validate_command_inputs(control_workflow)
+    report = _validate_command_inputs(control_workflow)
     rendered = capsys.readouterr().out
+    reported_pairs = {
+        tuple(sorted((finding.command_a, finding.command_b)))
+        for finding in report.duplicates
+    }
+    assert reported_pairs == {CONTROL_DUPLICATE_PAIR}
     for command in CONTROL_DUPLICATE_PAIR:
         assert command in rendered, (
             f"{command} missing from the report; the control pair is what this scan exists "
             f"to catch"
         )
     assert rendered.count("DUPLICATE CAPABILITIES") == 1
-    assert "distinctive seed utterances" in rendered
+    assert "knowingly accept them as duplicates" in rendered
+    assert "legitimate neighbours or opposites" not in rendered
     assert "No amount of utterance engineering" not in rendered
 
 
 def test_training_preflight_writes_the_duplicate_report(control_workflow):
     _validate_command_inputs(control_workflow)
-    assert os.path.isfile(
-        os.path.join(
-            control_workflow, "___command_info", "duplicate_capabilities.json"
-        )
+    report_path = os.path.join(
+        control_workflow, "___command_info", "duplicate_capabilities.json"
     )
+    assert os.path.isfile(report_path)
+
+    with open(report_path, "r", encoding="utf-8") as file:
+        payload = json.load(file)
+
+    assert payload["schema_version"] == 1
+    duplicate_pairs = {
+        tuple(sorted((finding["command_a"], finding["command_b"])))
+        for finding in payload["report"]["duplicates"]
+    }
+    assert duplicate_pairs == {CONTROL_DUPLICATE_PAIR}
 
 
 def test_training_preflight_is_advisory_for_duplicate_and_clean_workflows(
