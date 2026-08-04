@@ -180,12 +180,38 @@ def test_cme_readiness_checks_only_contexts_the_trainer_produces(cme_copy):
         )
         context_dir = command_info / context_folder
         context_dir.mkdir(parents=True, exist_ok=True)
-        (context_dir / "threshold.json").write_text("{}", encoding="utf-8")
+        for artifact_name in selective_training.REQUIRED_CONTEXT_ARTIFACTS:
+            artifact_path = context_dir / artifact_name
+            if artifact_name.endswith(".pth"):
+                artifact_path.mkdir()
+            else:
+                artifact_path.write_text("{}", encoding="utf-8")
 
     assert train_orchestration.is_fast_workflow_trained(str(package_root))
     assert not (command_info / "ErrorCorrection").exists()
 
-    (command_info / "IntentDetection" / "threshold.json").unlink()
+    missing_artifact = command_info / "IntentDetection" / "largemodel.pth"
+    shutil.rmtree(missing_artifact)
+    assert not train_orchestration.is_fast_workflow_trained(str(package_root))
+
+    missing_artifact.mkdir()
+    newest_artifact_mtime = max(
+        path.stat().st_mtime
+        for context_name in trainable_contexts
+        for path in (
+            command_info
+            / (
+                train_orchestration.GLOBAL_CONTEXT_FOLDER
+                if context_name == "*"
+                else context_name
+            )
+        ).iterdir()
+    )
+    command_source = next((cme_workflow / "_commands").rglob("*.py"))
+    os.utime(
+        command_source,
+        (newest_artifact_mtime + 10, newest_artifact_mtime + 10),
+    )
     assert not train_orchestration.is_fast_workflow_trained(str(package_root))
 
 

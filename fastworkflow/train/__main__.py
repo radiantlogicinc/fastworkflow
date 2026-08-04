@@ -520,25 +520,26 @@ def is_fast_workflow_trained(fastworkflow_folderpath: str):
     except Exception:
         return False
 
-    threshold_paths = []
+    required_artifact_paths = []
     for context_name in trained_contexts:
         context_folder = (
             GLOBAL_CONTEXT_FOLDER if context_name == "*" else context_name
         )
-        threshold_path = os.path.join(
-            cme_workflow_folderpath,
-            "___command_info",
-            context_folder,
-            "threshold.json",
+        context_artifact_dir = os.path.join(
+            cme_workflow_folderpath, "___command_info", context_folder
         )
-        if not os.path.isfile(threshold_path):
-            return False
-        threshold_paths.append(threshold_path)
+        for artifact_name in selective_training.REQUIRED_CONTEXT_ARTIFACTS:
+            artifact_path = os.path.join(context_artifact_dir, artifact_name)
+            if not os.path.exists(artifact_path):
+                return False
+            required_artifact_paths.append(artifact_path)
 
-    if not threshold_paths:
+    if not required_artifact_paths:
         return False
 
-    oldest_model_mtime = min(os.path.getmtime(path) for path in threshold_paths)
+    oldest_model_mtime = min(
+        os.path.getmtime(path) for path in required_artifact_paths
+    )
 
     commands_path = os.path.join(
         cme_workflow_folderpath,
