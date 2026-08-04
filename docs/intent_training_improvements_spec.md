@@ -833,6 +833,49 @@ guessed correction. R7.2 and F8 now mark the `Exception` figures non-citable. Th
 round-robin coverage property remains established by code, but the workflow-specific count of 33 is
 also not independently reproducible and is not cited.
 
+#### AR6 follow-up — the primary `Exception` artifact was recovered (2026-08-04)
+
+The external run log that produced R7.2's figures is now available. Its `Exception`
+line is:
+
+```
+wildcard cap [Exception]: 2352 ancestor utterances -> 170 (own: 454 rows over 8 commands)
+```
+
+The missing denominator was therefore **454 generated own-command training rows**.
+Against that denominator, the raw pre-de-duplication ancestor-list entries give
+`2352 / (454 + 2352) = 83.8%`, while the selected model rows give
+`170 / (454 + 170) = 27.2%`. This confirms AR6's arithmetic diagnosis and resolves
+the transcription error, but it does **not** reinstate the retracted `88% -> 27%`
+pair or create a new `83.8% -> 27.2%` class-share pair: 2,352 is raw candidate-list
+input, while 170 is post-de-duplication and post-selection model input. The 88.1%
+value came from a third basis, F8's seed utterances (`312 / (42 + 312)`). Each
+calculation is reproducible on its stated basis; none of the cross-basis arrows is a
+valid before/after class-share comparison.
+
+The same run makes the basis mismatch visible in four representative contexts:
+
+| Context | F8 seed rows | generated own rows | commands |
+|---|---:|---:|---:|
+| Exception | 42 | 454 | 8 |
+| ControlFinding | 37 | 391 | 7 |
+| Subscription | 28 | 374 | 7 |
+| Account | 138 | 942 | 16 |
+
+Two caveats remain binding. The 83.8% raw-candidate and 27.2% selected-row figures
+came from a local ratio-3.0 cap patch on 2.23.0, not the shipped 2.24.0 cost invariant
+(ratio 1.0 plus the coverage floor), so neither describes current behaviour. And the
+cap's measured effect remains cost, not accuracy.
+
+To prevent another denominator reconstruction from depending on retained console output,
+`training_provenance.json` now records reserved labels in each context's existing
+`context_training` map. Each record carries its actual `row_count` and `own_row_count`;
+the escalation record additionally carries `raw_candidate_count`,
+`deduplicated_candidate_count`, `always_include_count`, `selected_budget`,
+`coverage_floor`, and `coverage_floor_applied`. These are additive optional fields in
+the schema-v2 envelope, so old provenance remains readable and selective merges retain
+the metadata for carried contexts.
+
 ### AR7 — provenance drift and one upgrade
 
 `cache_ancestor_utterances` begins at line **768**, not 769; the §9 `sed` range and the F6

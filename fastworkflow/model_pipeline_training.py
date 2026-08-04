@@ -923,6 +923,76 @@ def _record_context_training(
     )
 
 
+def _record_wildcard_context_training(
+    context_name: str,
+    escalation_rows: Optional[list[str]],
+    *,
+    own_row_count: int,
+    raw_candidate_count: int,
+    deduplicated_candidate_count: int,
+    always_include_rows: list[str],
+    selected_budget: Optional[int],
+    coverage_floor: int,
+) -> None:
+    """Record escalation-class rows and every denominator used to select them."""
+    recorder = get_provenance_recorder()
+    if recorder is None:
+        return
+
+    included = escalation_rows is not None
+    recorder.record_context(
+        context_name=context_name,
+        command_name=WILDCARD_LABEL,
+        status=(
+            ContextTrainingStatus.INCLUDED
+            if included
+            else ContextTrainingStatus.SKIPPED_NO_UTTERANCES
+        ),
+        row_count=len(escalation_rows or []),
+        reason=(
+            "reserved escalation class"
+            if included
+            else "context has no non-local ancestor utterances"
+        ),
+        own_row_count=own_row_count,
+        raw_candidate_count=raw_candidate_count,
+        deduplicated_candidate_count=deduplicated_candidate_count,
+        always_include_count=len(always_include_rows),
+        selected_budget=selected_budget,
+        coverage_floor=coverage_floor,
+        coverage_floor_applied=(
+            coverage_floor > own_row_count if included else False
+        ),
+    )
+
+
+def _record_parameter_value_context_training(
+    context_name: str,
+    parameter_value_rows: list[str],
+    own_row_count: int,
+) -> None:
+    """Record bare-value reserved rows without wildcard-only budget fields."""
+    recorder = get_provenance_recorder()
+    if recorder is None:
+        return
+
+    recorder.record_context(
+        context_name=context_name,
+        command_name=PARAMETER_VALUE_LABEL,
+        status=(
+            ContextTrainingStatus.INCLUDED
+            if parameter_value_rows
+            else ContextTrainingStatus.SKIPPED_NO_UTTERANCES
+        ),
+        row_count=len(parameter_value_rows),
+        reason="reserved bare-value class",
+        own_row_count=own_row_count,
+        raw_candidate_count=len(PARAMETER_VALUE_PLACEHOLDERS),
+        deduplicated_candidate_count=len(parameter_value_rows),
+        always_include_count=0,
+    )
+
+
 def cache_ancestor_utterances(
     context_name: str, 
     crd: RoutingDefinition, 
@@ -1173,6 +1243,19 @@ def train(workflow: fastworkflow.Workflow,
             command_utterance_cache,
         )
         net_ancestor_utterances = ancestor_utterances - context_utterances
+        own_rows = len(utterance_command_tuples)
+        grouped_ancestor_rows = class_balance.group_ancestor_utterances(
+            crd.context_model.get_ancestor_contexts(ctx_name),
+            context_utterance_cache,
+            skip_labels=(WILDCARD_LABEL,),
+        )
+        raw_candidate_count, deduplicated_candidate_count = (
+            class_balance.reserved_candidate_counts(
+                grouped_ancestor_rows,
+                exclude=context_utterances,
+            )
+        )
+        coverage_floor = class_balance.coverage_floor_of(grouped_ancestor_rows)
 
         # WILDCARD_LABEL is the ESCALATION signal: "an ancestor context can serve this".
         # It is emitted only where that can be true. In a context with no ancestors the
@@ -1182,6 +1265,9 @@ def train(workflow: fastworkflow.Workflow,
         # there anyway: the runtime parent walk terminates immediately at the response
         # generation root, so the turn can only ever reach you_misunderstood, which an
         # unconfident classifier already reaches.
+        escalation_rows: Optional[list[str]] = None
+        always_include_rows: list[str] = []
+        budget: Optional[int] = None
         if net_ancestor_utterances:
             # R7.2: bound the escalation class against this context's own row count, so
             # training time stays linear in workflow size, but never below one row per
@@ -1194,32 +1280,39 @@ def train(workflow: fastworkflow.Workflow,
             # parent" class, or the same string would be trained under two labels.
             # `own_rows` is counted BEFORE the escalation rows are appended, which is what
             # makes the ratio mean "multiplier on this context's own training cost".
-            grouped = class_balance.group_ancestor_utterances(
-                crd.context_model.get_ancestor_contexts(ctx_name),
-                context_utterance_cache,
-                skip_labels=(WILDCARD_LABEL,),
-            )
-            own_rows = len(utterance_command_tuples)
             # 1.0 is the fixed cost invariant: escalation may add at most as many rows
             # as the context's real commands, so reserved rows can at most double cost.
             # It is not an accuracy-tuned value; R7.3 weighting measured null and is
             # intentionally not shipped.
             budget = class_balance.reserved_class_budget(
                 own_rows,
-                class_balance.coverage_floor_of(grouped),
+                coverage_floor,
                 ratio=1.0,
+            )
+            always_include_rows = sorted(
+                wildcard_utterances - context_utterances
             )
             escalation_rows = sorted(
                 class_balance.select_reserved_rows(
-                    grouped,
+                    grouped_ancestor_rows,
                     budget,
-                    always_include=sorted(wildcard_utterances),
+                    always_include=always_include_rows,
                     exclude=context_utterances,
                 )
             )
             utterance_command_tuples.extend(
                 list(zip(escalation_rows, [WILDCARD_LABEL] * len(escalation_rows)))
             )
+        _record_wildcard_context_training(
+            ctx_name,
+            escalation_rows,
+            own_row_count=own_rows,
+            raw_candidate_count=raw_candidate_count,
+            deduplicated_candidate_count=deduplicated_candidate_count,
+            always_include_rows=always_include_rows,
+            selected_budget=budget,
+            coverage_floor=coverage_floor,
+        )
 
         # PARAMETER_VALUE_LABEL is the PARAMETER_EXTRACTION stage's bare-value catcher and
         # is emitted in EVERY context: a user can type a bare value anywhere. These are the
@@ -1231,6 +1324,9 @@ def train(workflow: fastworkflow.Workflow,
                 list(zip(parameter_value_rows,
                          [PARAMETER_VALUE_LABEL] * len(parameter_value_rows)))
             )
+        _record_parameter_value_context_training(
+            ctx_name, parameter_value_rows, own_rows
+        )
 
 
         # ------------------------------------------------------------------
