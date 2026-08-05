@@ -140,11 +140,15 @@ produced a two-option prompt, when the correct behaviour was to escalate to
 
 The reference workflow used 446 routing cases (two per command, 160 commands plus core
 commands) and 37 escalation cases. Two independent phrasings per command is a reasonable
-floor. Note the measured noise floor: on a benchmark of a few hundred cases, **20.6% of
-routing verdicts changed between two identical training runs**. Differences smaller than
-that are not interpretable from a single run. Reliability claims require at least five
-paired builds with all runs reported — see
-`.claude/skills/fastworkflow-proof-and-analysis-toolkit` for the paired-comparison recipe.
+floor. Note the measured noise floor, which depends on whether generation is cached. With
+the utterance and parameter-example caches warm, two independent full retrains of a
+32-context workflow produced zero verdict changes across 446 routing and 37 escalation
+cases, with byte-identical models — so a single paired build is interpretable and a
+one-case difference is real. When generation is not cached, because seeds changed,
+`--regenerate-utterances` was passed, or the cache was evicted, the LLM re-draws the
+training data and the historical floor applies: 20.6% of routing verdicts (92 of 446)
+changed between two otherwise-identical pre-cache runs. Reliability claims under
+regeneration still require at least five paired builds with all runs reported.
 
 ## Output
 

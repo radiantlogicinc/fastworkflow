@@ -188,8 +188,11 @@ The historical warning still matters: before the caches landed, two back-to-back
 the same seed produced identical utterance sets for **0 of 5 commands**. The fixed seed
 cannot control an LLM response. That is why deleting or bypassing either cache invalidates
 a paired comparison. The often-quoted **20.6% verdict churn (92 of 446 routing cases)** was
-measured before this machinery existed; treat it as historical evidence for persistence,
-not the current noise floor.
+measured before this machinery existed; treat it as historical evidence for persistence
+when generation is uncached, not the warm-cache floor. That prediction is now measured:
+with both caches warm, two independent full retrains of a 32-context workflow produced
+zero verdict changes across 446 routing and 37 escalation cases, with byte-identical
+models (recorded in `docs/intent_benchmark_format.md` "How many cases").
 
 The floor determines what you are able to detect at all. With `n` discordant pairs, an
 exact two-sided McNemar test at α = 0.05 needs the split to be at least:
@@ -417,9 +420,16 @@ external 160-command workflow and are recorded in
 are in that document's §11, and the adversarial review that withdrew several previously
 quoted figures is §10.
 
+**Closed (warm-cache noise floor):** with utterance and parameter-example caches warm,
+two independent full retrains produced zero verdict changes (446 routing + 37 escalation)
+and byte-identical models — see `docs/intent_benchmark_format.md` "How many cases". The
+historical 20.6% figure remains the floor when generation is regenerated or the cache is
+cold.
+
 **Explicitly not verified here**, and therefore not claimed above: whether the historical
-20.6% verdict-churn figure persists on a different machine or model stack, and whether the
-whole-persona holdout's residual leak is small. Use the hand-written benchmark for claims.
+20.6% verdict-churn figure under regeneration persists on a different machine or model
+stack, and whether the whole-persona holdout's residual leak is small. Use the
+hand-written benchmark for claims.
 
 Re-verify volatile claims:
 
