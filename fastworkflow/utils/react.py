@@ -188,6 +188,11 @@ class fastWorkflowReAct(Module):
         input_args = stash["input_args"]
         max_iters = stash["max_iters"]
 
+        # Keep self.inputs pointing at the active run's arg dict so any mid-run refresh
+        # (e.g. available_commands re-scoping after a context switch) mutates the same
+        # dict this loop unpacks on each step.
+        self.inputs = input_args
+
         trajectory[f"observation_{idx}"] = observation
         # Mirror the resumed observation (the user's ask_user answer) into
         # current_trajectory. Without this the highest-value context — what the

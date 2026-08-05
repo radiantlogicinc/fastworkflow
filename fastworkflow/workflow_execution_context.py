@@ -725,6 +725,16 @@ class WorkflowExecutionContext:
             self, execution_insights=self._execution_insights
         )
 
+        # Re-scope the active ReAct agent's available_commands whenever the context changes,
+        # driven by the workflow's context-change observer (the single switch chokepoint)
+        # Registered once per WEC (agent init runs once). The listener reads the *active* agent
+        # dynamically. No-ops when no agent is running.
+        if self._app_workflow is not None:
+            from fastworkflow.workflow_agent import _refresh_agent_available_commands
+            self._app_workflow.add_context_change_listener(
+                lambda: _refresh_agent_available_commands(self)
+            )
+
         from fastworkflow.intent_clarification_agent import initialize_intent_clarification_agent
         self._intent_clarification_agent = initialize_intent_clarification_agent(self)
 
