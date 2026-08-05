@@ -614,6 +614,73 @@ class CommandMetadataAPI:
         return "\n".join(combined_lines)
 
     @staticmethod
+    def get_all_contexts_command_display_text(
+        subject_workflow_path: str,
+        cme_workflow_path: str,
+        active_context_name: str,
+        for_agents: bool = False,
+    ) -> str:
+        """Return a display text covering EVERY context, not just the active one.
+
+        Commands are grouped by the context that introduces them: the active context
+        first, then each remaining context with only the commands it *adds*. That keeps
+        the map complete without repeating inherited commands in every section. Falls
+        back to the scoped view if the routing definition cannot be read.
+        """
+        base_text = CommandMetadataAPI.get_command_display_text(
+            subject_workflow_path=subject_workflow_path,
+            cme_workflow_path=cme_workflow_path,
+            active_context_name=active_context_name,
+            for_agents=for_agents,
+        )
+
+        try:
+            crd = fastworkflow.RoutingRegistry.get_definition(subject_workflow_path)
+            already_listed = set(crd.contexts.get(active_context_name, ()))
+
+            # Order sections shallowest-first so the command
+            # that ENTERS a context is introduced before the context that requires it.
+            def _depth(context_name: str) -> int:
+                try:
+                    return len(crd.context_model.get_ancestor_contexts(context_name))
+                except Exception:
+                    return 0
+
+            sections: List[str] = [base_text]
+            for context_name in sorted(crd.contexts, key=lambda c: (_depth(c), c)):
+                if context_name == active_context_name:
+                    continue
+                new_commands = [
+                    qualified_name
+                    for qualified_name in sorted(crd.contexts.get(context_name, ()))
+                    if qualified_name not in already_listed
+                    and qualified_name.split("/")[-1] != "wildcard"
+                ]
+                if not new_commands:
+                    continue
+
+                parts = [
+                    f"Commands available after entering the {context_name} context "
+                    f"(not callable until then):"
+                ]
+                for qualified_name in new_commands:
+                    if part := CommandMetadataAPI.get_command_display_text_for_command(
+                        subject_workflow_path=subject_workflow_path,
+                        cme_workflow_path=cme_workflow_path,
+                        active_context_name=context_name,
+                        qualified_command_name=qualified_name,
+                        for_agents=for_agents,
+                    ):
+                        parts.append(part)
+                # Do not re-list these under a later context that also inherits them.
+                already_listed.update(new_commands)
+                sections.append("\n".join(parts))
+
+            return "\n\n".join(sections)
+        except Exception as e:  # callers must never break on metadata assembly
+            return base_text
+
+    @staticmethod
     def get_suggested_commands_metadata(
         subject_workflow_path: str,
         cme_workflow_path: str,

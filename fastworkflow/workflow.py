@@ -161,6 +161,11 @@ class Workflow:
         self._current_command_context = None
         self._command_context_for_response_generation = None
 
+        # Observers invoked when current_command_context changes. Kept on
+        # the workflow because the setter is the single chokepoint every context switch
+        # (set_current_*, go_up, reset_context) passes through.
+        self._context_change_listeners: list = []
+
         # Child workflow ids (parent/child topology lives on the live object so
         # it is reclaimed when the object is garbage-collected).
         self._children: list[int] = []
@@ -202,7 +207,21 @@ class Workflow:
 
     @current_command_context.setter
     def current_command_context(self, value: Optional[object]) -> None:
+        changed = value is not self._current_command_context
         self._current_command_context = value
+        if changed:
+            self._notify_context_change()
+
+    def add_context_change_listener(self, listener) -> None:
+        """Register a zero-arg callable invoked whenever the current context changes."""
+        self._context_change_listeners.append(listener)
+
+    def _notify_context_change(self) -> None:
+        for listener in list(self._context_change_listeners):
+            try:
+                listener()
+            except Exception as exc:  # a listener must never break context switching
+                logger.warning(f"context-change listener failed: {exc}")
 
     @property
     def root_command_context(self) -> object:
