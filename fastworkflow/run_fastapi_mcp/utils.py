@@ -25,10 +25,53 @@ from fastworkflow.checkpoint_store import (
     CheckpointIdentity,
     CheckpointStoreError,
     QuarantineReason,
+    RetentionPolicy,
 )
 from . import checkpoint
 from .conversation_store import ConversationStore, restore_history_from_turns
 from .jwt_manager import verify_token
+
+
+# Live sessions kept in the process cache. Lowered from 2000 now that eviction
+# writes a checkpoint instead of discarding state.
+DEFAULT_MAX_LIVE_SESSIONS = 50
+
+# How often the server reclaims abandoned checkpoints. A private constant, not a
+# knob: the store deliberately has no timer of its own, so somebody has to drive
+# it, but an operator does not need a second dial to turn.
+CHECKPOINT_REAP_INTERVAL_SECONDS = 300.0
+
+
+def resolve_max_live_sessions() -> tuple[int, str]:
+    """Resolve MAX_LIVE_SESSIONS with the process environment taking precedence.
+
+    OS first, deliberately. ``get_env_var`` returns a supplied default *before*
+    consulting ``os.environ``, so passing a default here would make the container
+    variable unreachable — and an operator control whose documented default
+    outranks the container override is not an operator control.
+
+    Returns the value and where it came from, because an operator has to be able
+    to see whether their override actually took effect.
+    """
+    raw = os.environ.get("MAX_LIVE_SESSIONS")
+    source = "process environment"
+    if raw is None or raw == "":
+        raw = fastworkflow.get_env_var("MAX_LIVE_SESSIONS", default=None)
+        source = "workflow env file"
+    if raw is None or raw == "":
+        return DEFAULT_MAX_LIVE_SESSIONS, "default"
+
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"MAX_LIVE_SESSIONS={raw!r} (from {source}) is not an integer"
+        ) from exc
+    if value <= 0:
+        raise ValueError(
+            f"MAX_LIVE_SESSIONS={value} (from {source}) must be greater than zero"
+        )
+    return value, source
 
 
 # Newest conversation turns kept in memory per channel. Turns are request-sized
@@ -846,11 +889,12 @@ class ChannelSessionManager:
     def __init__(
         self,
         session_state_store: Optional[SessionStateStore] = None,
-        max_live_sessions: int = 2000,
+        max_live_sessions: int = DEFAULT_MAX_LIVE_SESSIONS,
     ):
         self._sessions: OrderedDict[str, ChannelRuntime] = OrderedDict()
         self._lock = asyncio.Lock()
         self._max_live_sessions = max_live_sessions
+        self._max_live_sessions_source = "constructor"
         # Built lazily on first access so the SPEEDDICT_FOLDERNAME read happens
         # after fastworkflow.init() loads the env file, not at module-import time.
         self._session_state_store = session_state_store
@@ -1001,6 +1045,29 @@ class ChannelSessionManager:
         return self._max_live_sessions
 
     @property
+    def max_live_sessions_source(self) -> str:
+        return self._max_live_sessions_source
+
+    def configure_max_live_sessions(self) -> tuple[int, str]:
+        """Apply the resolver. Must run after fastworkflow.init() loads env files."""
+        value, source = resolve_max_live_sessions()
+        self._max_live_sessions = value
+        self._max_live_sessions_source = source
+        return value, source
+
+    def reap_checkpoints(self, policy: Optional[RetentionPolicy] = None) -> Any:
+        """Reclaim abandoned checkpoints, protecting every channel we hold live.
+
+        The store has no timer of its own — a background sweeper inside it would
+        be a second writer per channel — so the server drives retention and names
+        what it must not touch.
+        """
+        return self.checkpoint_store.reap(
+            policy or RetentionPolicy(),
+            protected_channel_ids=set(self._sessions) | set(self._leases),
+        )
+
+    @property
     def session_state_store(self) -> SessionStateStore:
         if self._session_state_store is None:
             self._session_state_store = get_session_state_store(
@@ -1072,6 +1139,16 @@ class ChannelSessionManager:
     def _touch(self, channel_id: str) -> None:
         if channel_id in self._sessions:
             self._sessions.move_to_end(channel_id)
+
+    async def trim_live_sessions(self) -> None:
+        """Bring the cache back to target after a turn frees a channel up.
+
+        Creation is not the only moment the cache can be over target: a channel
+        that was skipped because it was busy becomes retirable the moment its
+        turn ends, and nothing else would revisit it.
+        """
+        async with self._lock:
+            await self._evict_oldest_if_needed()
 
     async def _evict_oldest_if_needed(self) -> None:
         while len(self._sessions) > self._max_live_sessions:

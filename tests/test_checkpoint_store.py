@@ -22,19 +22,23 @@ import stat
 import subprocess
 import sys
 import textwrap
+import time
 from datetime import datetime
 
 import pytest
 
 from fastworkflow.checkpoint_store import (
     COMMIT_RECORD_TYPE,
+    DEFAULT_RETENTION,
     PART_SECTIONS,
     PROTOCOL_VERSION,
+    REPRESENTATIVE_RECORD_BYTES,
     ChannelCheckpointStore,
     CheckpointIdentity,
     CheckpointRecord,
     CheckpointStoreError,
     QuarantineReason,
+    RetentionPolicy,
     encode_path_component,
 )
 from fastworkflow.session_state_store import DiskSessionStateStore
@@ -104,6 +108,28 @@ def snapshot_tree(root: str) -> dict:
                     handle.read(),
                 )
     return seen
+
+
+def snapshot_records(root: str) -> dict:
+    """`snapshot_tree` without the liveness marker.
+
+    The marker is retention metadata that is refreshed on every publish by
+    design, so a snapshot including it cannot express "the record was not
+    rewritten" — which is the property §11.4 actually cares about, because the
+    record is the several-hundred-kilobyte write and the marker is ~100 bytes.
+    """
+    return {
+        path: value
+        for path, value in snapshot_tree(root).items()
+        if os.path.basename(path) != "ACCESS"
+    }
+
+
+def access_marker(store, identity) -> dict:
+    with open(
+        os.path.join(store.channel_directory(identity), "ACCESS"), encoding="utf-8"
+    ) as handle:
+        return json.load(handle)
 
 
 def generation_dir(store, identity, generation: int) -> str:
@@ -905,15 +931,31 @@ def test_the_committed_generation_is_reconstructible_in_a_fresh_process(store):
 # ---------------------------------------------------------------------------
 
 
-def test_an_unchanged_republish_writes_nothing(store):
+def test_an_unchanged_republish_rewrites_no_record(store):
     identity = identity_for("channel-stable")
     first = publish(store, identity, marker="same")
-    before = snapshot_tree(store.base_folder)
+    before = snapshot_records(store.base_folder)
 
     second = publish(store, identity, marker="same")
 
     assert second == first
-    assert snapshot_tree(store.base_folder) == before
+    assert snapshot_records(store.base_folder) == before
+
+
+def test_an_unchanged_republish_still_counts_as_activity(store):
+    """Otherwise retention would reap the channel that is being used most."""
+    identity = identity_for("channel-stable-age")
+    publish(store, identity, marker="same")
+    first_seen = access_marker(store, identity)["last_publish_at"]
+
+    publish(store, identity, marker="same")
+
+    second_seen = access_marker(store, identity)["last_publish_at"]
+    assert second_seen > first_seen
+    # The timestamp that would have cost a full rewrite did not move with it.
+    commit_path = os.path.join(store.channel_directory(identity), "COMMIT")
+    with open(commit_path, encoding="utf-8") as handle:
+        assert json.load(handle)["published_at"] < second_seen
 
 
 def test_key_order_does_not_count_as_a_change(store):
@@ -927,7 +969,7 @@ def test_key_order_does_not_count_as_a_change(store):
         launch_context={},
         state_version=1,
     )
-    before = snapshot_tree(store.base_folder)
+    before = snapshot_records(store.base_folder)
 
     generation = store.publish(
         identity,
@@ -939,7 +981,7 @@ def test_key_order_does_not_count_as_a_change(store):
     )
 
     assert generation == 1
-    assert snapshot_tree(store.base_folder) == before
+    assert snapshot_records(store.base_folder) == before
 
 
 def test_a_changed_section_does_produce_a_write(store):
@@ -1675,3 +1717,1048 @@ def test_reuse_is_refused_before_anything_is_created(tmp_path):
         publish(store, intruder)
 
     assert snapshot_tree(base) == before
+
+
+# ---------------------------------------------------------------------------
+# 13. Namespace lifecycle: retention, reaping, operator verbs, measurement
+# ---------------------------------------------------------------------------
+
+DAY = 86_400.0
+
+# Every knob off. Lets one test exercise one rule instead of discovering which
+# of three defaults happened to fire first.
+NO_RETENTION = RetentionPolicy(
+    max_age_seconds=None,
+    max_channels=None,
+    max_bytes=None,
+    quarantine_max_age_seconds=None,
+    quarantine_max_entries=None,
+)
+
+
+def reclaim_root(store, identity) -> str:
+    return os.path.join(
+        store.base_folder,
+        "__reclaim__",
+        encode_path_component(identity.deployment_id),
+        encode_path_component(identity.workflow_fingerprint),
+    )
+
+
+def interrupt_flip(store, source: str, identity) -> str:
+    """Do the rename half of a destructive operation and stop, as a crash would.
+
+    This is the state the store is in between "no longer visible" and "actually
+    gone" — the only intermediate state any of its destructive operations has.
+    Reproducing it by hand rather than by patching keeps the fault injection at
+    the filesystem, where the atomicity being relied on actually lives.
+    """
+    root = reclaim_root(store, identity)
+    os.makedirs(root, mode=0o700, exist_ok=True)
+    destination = os.path.join(
+        root, f"{os.path.basename(source)}.tmp-interrupted"
+    )
+    os.replace(source, destination)
+    return destination
+
+
+def write_floor(store, identity, floor: int) -> None:
+    """The first step of `reset`, on its own, so a crash after it can be tested."""
+    path = os.path.join(store.channel_directory(identity), "GENERATION_FLOOR")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "protocol_version": PROTOCOL_VERSION,
+                "record_type": "channel_checkpoint_generation_floor",
+                "channel_key": identity.channel_key,
+                "floor": floor,
+            },
+            handle,
+        )
+
+
+def walk_files(root: str) -> tuple[int, int]:
+    """(file count, total apparent bytes) straight off the filesystem."""
+    count = 0
+    total = 0
+    for directory, _subdirs, names in os.walk(root):
+        for name in names:
+            count += 1
+            total += os.lstat(os.path.join(directory, name)).st_size
+    return (count, total)
+
+
+# -- the stated policy -------------------------------------------------------
+
+
+def test_the_policy_states_its_byte_ceiling():
+    """A count cap without its byte cost is unauditable."""
+    policy = RetentionPolicy(max_channels=1_000, max_bytes=None)
+    described = policy.describe()
+
+    assert "max_channels=1000" in described
+    assert "max_age=86400s" in described
+    assert policy.worst_case_bytes(REPRESENTATIVE_RECORD_BYTES) == 1_000 * 450 * 1024 * 2
+    # The ceiling is stated in bytes rather than left for the reader to multiply.
+    assert "878.9 MB" in described
+
+
+def test_a_policy_with_no_capacity_cap_says_it_is_unbounded():
+    """Age alone plateaus at a rate nobody in the system controls."""
+    policy = RetentionPolicy(max_age_seconds=DAY, max_channels=None, max_bytes=None)
+
+    assert policy.worst_case_bytes() is None
+    assert "UNBOUNDED" in policy.describe()
+
+
+def test_the_default_policy_is_bounded():
+    assert DEFAULT_RETENTION.worst_case_bytes() is not None
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"max_age_seconds": 0},
+        {"max_age_seconds": -1},
+        {"max_age_seconds": float("nan")},
+        {"max_channels": -1},
+        {"max_bytes": -1},
+        {"quarantine_max_entries": -1},
+        {"max_channels": 1.5},
+        {"max_channels": True},
+    ],
+)
+def test_a_nonsensical_policy_is_refused_at_construction(kwargs):
+    with pytest.raises(ValueError):
+        RetentionPolicy(**kwargs)
+
+
+# -- reaping an abandoned channel -------------------------------------------
+
+
+def test_reaping_an_abandoned_channel_reclaims_its_bytes(store):
+    identity = identity_for("abandoned")
+    publish(store, identity, marker="forgotten")
+    before = store.stats()
+    assert before.total_bytes_apparent > 0
+
+    report = store.reap(
+        RetentionPolicy(max_age_seconds=DAY, max_channels=None),
+        now=time.time() + 2 * DAY,
+    )
+
+    assert report.reclaimed_channels == 1
+    assert report.aged_out == 1
+    assert report.reclaimed_bytes_apparent == before.bytes_apparent
+    assert store.load(identity) is None
+    assert store.exists(identity) is False
+    assert store.stats().total_bytes_apparent == 0
+    # Reclaimed, not merely hidden: nothing is left waiting in the holding area.
+    assert store.stats().reclaimable_entries == 0
+    assert walk_files(store.base_folder)[1] == 0
+
+
+def test_reaping_does_not_quarantine_what_it_reclaims(store):
+    """Quarantine is for evidence of a fault; retention is not a fault."""
+    identity = identity_for("abandoned-quiet")
+    publish(store, identity)
+
+    store.reap(now=time.time() + 400 * DAY)
+
+    assert store.list_quarantined(identity) == []
+    assert store.list_quarantine_entries() == []
+
+
+def test_a_channel_inside_the_window_is_never_reaped(store):
+    identity = identity_for("recent")
+    publish(store, identity, marker="fresh")
+
+    report = store.reap(RetentionPolicy(max_age_seconds=DAY, max_channels=None))
+
+    assert report.reclaimed_channels == 0
+    assert report.retained_channels == 1
+    assert store.load(identity).context["marker"] == "fresh"
+
+
+def test_a_channel_that_is_still_adoptable_is_never_reaped(store):
+    """The live process holds it, so the store must be told and must comply."""
+    live = identity_for("live-channel")
+    dead = identity_for("dead-channel")
+    publish(store, live, marker="in-use")
+    publish(store, dead, marker="gone")
+
+    report = store.reap(
+        RetentionPolicy(max_age_seconds=DAY, max_channels=None),
+        protected_channel_ids=[live.channel_id],
+        now=time.time() + 90 * DAY,
+    )
+
+    assert report.protected_channels == 1
+    assert report.reclaimed_channels == 1
+    adopted = store.load_for_adoption(**live.scope())
+    assert adopted is not None
+    assert adopted.context["marker"] == "in-use"
+    assert store.load_for_adoption(**dead.scope()) is None
+
+
+def test_protection_survives_an_oversized_channel_id(store):
+    """The protected set is raw ids; the reaper walks encoded names."""
+    live = identity_for("z" * 400)
+    publish(store, live)
+
+    report = store.reap(
+        protected_channel_ids=[live.channel_id], now=time.time() + 90 * DAY
+    )
+
+    assert report.protected_channels == 1
+    assert report.reclaimed_channels == 0
+    assert store.load(live) is not None
+
+
+def test_capacity_reclaims_the_oldest_first_regardless_of_age(store):
+    """The only bound that holds whatever the arrival rate does."""
+    identities = [identity_for(f"cap-{index}") for index in range(5)]
+    for identity in identities:
+        publish(store, identity, marker=f"m-{identity.channel_id}")
+
+    report = store.reap(
+        RetentionPolicy(max_age_seconds=None, max_channels=2), now=time.time()
+    )
+
+    assert report.over_capacity == 3
+    assert report.aged_out == 0
+    survivors = {
+        info.channel_id for info in store.list_channels() if info.committed
+    }
+    assert survivors == {"cap-3", "cap-4"}
+
+
+def test_a_byte_cap_reclaims_until_the_namespace_fits(store):
+    identities = [identity_for(f"bytes-{index}") for index in range(4)]
+    for identity in identities:
+        publish(store, identity)
+    # Sized off the largest channel so the cap admits exactly two whichever two
+    # survive; channels differ by a few bytes because a timestamp's decimal
+    # expansion does.
+    largest = max(info.bytes_apparent for info in store.list_channels())
+    cap = 2 * largest + 1
+
+    store.reap(
+        RetentionPolicy(max_age_seconds=None, max_channels=None, max_bytes=cap)
+    )
+
+    assert store.stats().channels == 2
+    assert store.stats().bytes_apparent <= cap
+
+
+def test_a_byte_cap_of_zero_empties_the_namespace(store):
+    for index in range(3):
+        publish(store, identity_for(f"zero-{index}"))
+
+    store.reap(
+        RetentionPolicy(max_age_seconds=None, max_channels=None, max_bytes=0)
+    )
+
+    assert store.stats().total_bytes_apparent == 0
+
+
+def test_the_capacity_bound_holds_across_repeated_unique_channels(store):
+    """The motivating workload: a unique channel per request, none read again."""
+    policy = RetentionPolicy(max_age_seconds=None, max_channels=3)
+    sizes = []
+    for index in range(30):
+        publish(store, identity_for(f"unique-{index:03d}"))
+        store.reap(policy)
+        sizes.append(store.stats().total_bytes_apparent)
+
+    assert store.stats().channels == 3
+    one_channel = max(info.bytes_apparent for info in store.list_channels())
+
+    # A plateau, not a slope. The samples are not bit-identical because a
+    # timestamp's decimal expansion varies by a byte or two, so the claim is that
+    # 20 further requests add nothing of record size — not that they add nothing.
+    plateau = sizes[9:]
+    assert max(plateau) - min(plateau) < one_channel
+    assert max(plateau) < 4 * one_channel
+    assert sizes[-1] <= sizes[9] + one_channel
+
+
+def test_a_dry_run_reports_what_it_would_do_and_touches_nothing(store):
+    identity = identity_for("dry")
+    publish(store, identity)
+    before = snapshot_tree(store.base_folder)
+
+    report = store.reap(now=time.time() + 400 * DAY, dry_run=True)
+
+    assert report.dry_run is True
+    assert report.reclaimed_channels == 1
+    assert report.reclaimed_bytes_apparent > 0
+    assert snapshot_tree(store.base_folder) == before
+    assert store.load(identity) is not None
+
+
+def test_reaping_an_empty_store_is_a_no_op(store):
+    report = store.reap()
+
+    assert report.reclaimed_channels == 0
+    assert report.scanned_channels == 0
+    assert store.stats().total_bytes_apparent == 0
+
+
+def test_reaping_is_scoped_to_one_namespace_when_asked(store):
+    mine = identity_for("scoped", deployment_id="deploy-green")
+    theirs = identity_for("scoped", deployment_id="deploy-blue")
+    publish(store, mine)
+    publish(store, theirs)
+
+    store.reap(
+        deployment_id="deploy-green",
+        workflow_fingerprint="wf-abc123",
+        now=time.time() + 400 * DAY,
+    )
+
+    assert store.load(mine) is None
+    assert store.load(theirs) is not None
+
+
+def test_an_uncommitted_channel_is_reclaimed_like_any_other(store):
+    """A crashed first publish leaves bytes no reader can ever use."""
+    identity = identity_for("half-born")
+    publish(store, identity)
+    os.remove(os.path.join(store.channel_directory(identity), "COMMIT"))
+    assert store.stats().committed_channels == 0
+    assert store.stats().bytes_apparent > 0
+
+    store.reap(now=time.time() + 400 * DAY)
+
+    assert store.stats().total_bytes_apparent == 0
+
+
+# -- crash safety of reclamation --------------------------------------------
+
+
+def test_a_reap_interrupted_before_the_flip_leaves_the_channel_whole(store):
+    identity = identity_for("crash-before")
+    publish(store, identity, marker="intact")
+
+    store.reap(NO_RETENTION, now=time.time() + 400 * DAY)
+
+    assert store.load(identity).context["marker"] == "intact"
+    assert store.list_quarantined(identity) == []
+
+
+def test_a_reap_interrupted_after_the_flip_reads_as_absent_not_damaged(store):
+    identity = identity_for("crash-after-flip")
+    publish(store, identity, marker="gone")
+    debris = interrupt_flip(store, store.channel_directory(identity), identity)
+
+    assert os.path.isdir(debris)
+    assert store.load(identity) is None
+    assert store.load_for_adoption(**identity.scope()) is None
+    # Absent, not quarantined: nothing partial was ever visible to a reader.
+    assert store.list_quarantined(identity) == []
+    # And the bytes are still counted, so an interrupted pass cannot look like
+    # reclaimed space that is in fact still occupied.
+    assert store.stats().reclaimable_entries == 1
+    assert store.stats().total_bytes_apparent > 0
+
+
+def test_the_next_pass_finishes_an_interrupted_reap(store):
+    identity = identity_for("crash-resume")
+    publish(store, identity)
+    interrupt_flip(store, store.channel_directory(identity), identity)
+
+    report = store.reap(NO_RETENTION)
+
+    assert report.swept_debris_entries == 1
+    assert report.swept_debris_bytes > 0
+    assert store.stats().total_bytes_apparent == 0
+    assert walk_files(store.base_folder)[0] == 0
+
+
+def test_partially_deleted_debris_is_still_swept(store):
+    """A crash during the bulk delete, not just during the rename."""
+    identity = identity_for("crash-mid-delete")
+    publish(store, identity)
+    debris = interrupt_flip(store, store.channel_directory(identity), identity)
+    for directory, _subdirs, names in os.walk(debris):
+        for name in names:
+            if name.endswith("context.json"):
+                os.remove(os.path.join(directory, name))
+
+    store.reap(NO_RETENTION)
+
+    assert store.stats().total_bytes_apparent == 0
+
+
+def test_a_channel_republishes_cleanly_after_an_interrupted_reap(store):
+    """Reclamation must not leave the channel id unusable."""
+    identity = identity_for("crash-republish")
+    publish(store, identity, marker="old")
+    interrupt_flip(store, store.channel_directory(identity), identity)
+
+    assert publish(store, identity, marker="new") == 1
+    assert store.load(identity).context["marker"] == "new"
+
+
+def test_reaping_survives_a_channel_it_cannot_reclaim(store, tmp_path):
+    """One stuck channel must not abort the pass."""
+    stuck = identity_for("stuck")
+    ordinary = identity_for("ordinary")
+    publish(store, stuck)
+    publish(store, ordinary)
+
+    # A directory replaced by a symlink is not a channel and cannot be renamed
+    # away as one; the pass must report it and carry on.
+    shutil.rmtree(store.channel_directory(stuck))
+    elsewhere = tmp_path / "not-a-channel"
+    elsewhere.mkdir()
+    os.symlink(str(elsewhere), store.channel_directory(stuck))
+
+    report = store.reap(now=time.time() + 400 * DAY)
+
+    assert report.reclaimed_channels >= 1
+    assert store.load(ordinary) is None
+
+
+# -- quarantine reclamation -------------------------------------------------
+
+
+def test_quarantined_records_are_reclaimable(store):
+    identity = identity_for("q-reclaim")
+    publish(store, identity)
+    store.quarantine(identity, QuarantineReason.OPERATOR_REQUEST)
+    assert store.stats().quarantined_entries == 1
+    assert store.stats().quarantined_bytes_apparent > 0
+
+    report = store.reap(
+        RetentionPolicy(quarantine_max_age_seconds=DAY, quarantine_max_entries=None),
+        now=time.time() + 2 * DAY,
+    )
+
+    assert report.reclaimed_quarantine_entries == 1
+    assert report.reclaimed_quarantine_bytes > 0
+    assert store.list_quarantined(identity) == []
+    assert store.stats().total_bytes_apparent == 0
+
+
+def test_recent_evidence_is_kept_longer_than_live_state(store):
+    identity = identity_for("q-recent")
+    publish(store, identity)
+    store.quarantine(identity, QuarantineReason.DIGEST_MISMATCH)
+
+    report = store.reap(
+        RetentionPolicy(
+            max_age_seconds=DAY, quarantine_max_age_seconds=7 * DAY
+        ),
+        now=time.time() + 2 * DAY,
+    )
+
+    assert report.reclaimed_quarantine_entries == 0
+    assert len(store.list_quarantined(identity)) == 1
+
+
+def test_a_quarantine_count_cap_keeps_the_newest(store):
+    """Preserving forever is the same leak under a different directory name."""
+    for index in range(6):
+        identity = identity_for(f"q-many-{index}")
+        publish(store, identity)
+        store.quarantine(identity, QuarantineReason.OPERATOR_REQUEST)
+    assert store.stats().quarantined_entries == 6
+
+    store.reap(
+        RetentionPolicy(
+            max_age_seconds=None,
+            max_channels=None,
+            quarantine_max_age_seconds=None,
+            quarantine_max_entries=2,
+        )
+    )
+
+    assert store.stats().quarantined_entries == 2
+
+
+def test_reclaiming_evidence_does_not_leave_an_empty_directory_per_channel(store):
+    """One inode per channel that ever failed is unbounded growth in inodes."""
+    identity = identity_for("q-inode")
+    publish(store, identity)
+    store.quarantine(identity, QuarantineReason.OPERATOR_REQUEST)
+
+    store.reap(now=time.time() + 400 * DAY)
+
+    assert not os.path.isdir(store.quarantine_directory(identity))
+
+
+def test_a_quarantine_entry_reports_its_reason_and_age(store):
+    identity = identity_for("q-inspect")
+    publish(store, identity)
+    store.quarantine(identity, QuarantineReason.CHANNEL_ID_MISMATCH)
+
+    entries = store.list_quarantine_entries()
+
+    assert len(entries) == 1
+    assert entries[0].reason == "channel_id_mismatch"
+    assert entries[0].channel_key == identity.channel_key
+    assert entries[0].bytes_apparent > 0
+    assert entries[0].age_seconds() < 60
+
+
+# -- delete, reset, and generation-safe channel reuse -----------------------
+
+
+def test_delete_removes_the_channel_whole(store):
+    identity = identity_for("del")
+    publish(store, identity)
+
+    assert store.delete(identity) is True
+    assert store.load(identity) is None
+    assert store.exists(identity) is False
+    assert store.list_quarantined(identity) == []
+    assert store.stats().total_bytes_apparent == 0
+
+
+def test_deleting_a_channel_that_is_not_there_says_so(store):
+    assert store.delete(identity_for("never-existed")) is False
+
+
+def test_delete_never_passes_through_a_damaged_state(store):
+    """Removing files in place would quarantine what was asked to be deleted."""
+    identity = identity_for("del-atomic")
+    publish(store, identity)
+    publish(store, identity, marker="two")
+
+    store.delete(identity)
+
+    assert store.load(identity) is None
+    assert store.load_for_adoption(**identity.scope()) is None
+    assert store.list_quarantined(identity) == []
+
+
+def test_a_reused_channel_id_after_delete_cannot_adopt_the_old_lineage(store):
+    old = identity_for("recycled", session_incarnation="inc-old")
+    publish(store, old, marker="old-secret")
+    store.delete(old)
+
+    assert store.load_for_adoption(**old.scope()) is None
+
+    new = identity_for("recycled", session_incarnation="inc-new")
+    assert publish(store, new, marker="new-state") == 1
+    adopted = store.load_for_adoption(**new.scope())
+    assert adopted.identity.session_incarnation == "inc-new"
+    assert adopted.context["marker"] == "new-state"
+    # And the refusal that protects a live owner does not fire against a
+    # channel id whose previous owner was deleted.
+    assert store.load(new) is not None
+
+
+def test_a_reused_channel_id_after_delete_cannot_collide_with_old_generations(store):
+    old = identity_for("recycled-gen", session_incarnation="inc-old")
+    for index in range(4):
+        publish(store, old, marker=f"old-{index}")
+    store.delete(old)
+
+    new = identity_for("recycled-gen", session_incarnation="inc-new")
+    assert publish(store, new, marker="new-1") == 1
+    assert publish(store, new, marker="new-2") == 2
+    # Nothing from the retired lineage is left for the new numbering to land on.
+    generations = sorted(
+        name
+        for name in os.listdir(
+            os.path.join(store.channel_directory(new), "gen")
+        )
+        if name.isdigit()
+    )
+    assert generations == ["1", "2"]
+    assert store.load(new).context["marker"] == "new-2"
+
+
+def test_reset_forgets_the_state_but_keeps_the_numbering(store):
+    identity = identity_for("reset-me")
+    for index in range(3):
+        publish(store, identity, marker=f"m-{index}")
+
+    assert store.reset(identity) == 3
+    assert store.load(identity) is None
+    assert store.exists(identity) is False
+    assert store.list_quarantined(identity) == []
+
+    fresh = identity_for("reset-me", session_incarnation="inc-after-reset")
+    # Strictly greater than every generation the retired lineage ever used, so a
+    # generation number identifies a lineage rather than a position.
+    assert publish(store, fresh, marker="after") == 4
+    assert store.load(fresh).generation == 4
+
+
+def test_reset_reclaims_the_bytes_it_forgets(store):
+    identity = identity_for("reset-bytes")
+    publish(store, identity)
+    before = store.stats().bytes_apparent
+
+    store.reset(identity)
+
+    after = store.stats()
+    assert after.total_bytes_apparent < before
+    assert after.generations == 0
+    assert after.committed_channels == 0
+
+
+def test_a_reset_channel_cannot_adopt_its_old_lineage(store):
+    identity = identity_for("reset-adopt", session_incarnation="inc-before")
+    publish(store, identity, marker="secret")
+
+    store.reset(identity)
+
+    assert store.load_for_adoption(**identity.scope()) is None
+
+
+def test_repeated_resets_keep_raising_the_floor(store):
+    identity = identity_for("reset-twice")
+    publish(store, identity, marker="one")
+    assert store.reset(identity) == 1
+
+    assert publish(store, identity, marker="two") == 2
+    assert store.reset(identity) == 2
+    assert publish(store, identity, marker="three") == 3
+
+
+def test_resetting_a_channel_that_is_not_there_says_so(store):
+    assert store.reset(identity_for("reset-absent")) == 0
+
+
+def test_delete_after_reset_takes_the_floor_with_it(store):
+    """Delete means "as though it never existed", floor included."""
+    identity = identity_for("reset-then-delete")
+    publish(store, identity)
+    publish(store, identity, marker="two")
+    store.reset(identity)
+
+    store.delete(identity)
+
+    assert publish(store, identity, marker="brand-new") == 1
+    assert store.stats().channels == 1
+
+
+def test_a_reset_interrupted_after_the_floor_leaves_the_record_readable(store):
+    identity = identity_for("reset-crash-floor")
+    publish(store, identity, marker="still-here")
+    publish(store, identity, marker="still-here-2")
+
+    write_floor(store, identity, 2)
+
+    assert store.load(identity).context["marker"] == "still-here-2"
+    assert store.list_quarantined(identity) == []
+    # And the floor cannot lower a number, only raise it.
+    assert publish(store, identity, marker="next") == 3
+
+
+def test_a_reset_interrupted_after_the_commit_unlink_reads_as_absent(store):
+    identity = identity_for("reset-crash-commit")
+    publish(store, identity)
+    publish(store, identity, marker="two")
+
+    write_floor(store, identity, 2)
+    os.remove(os.path.join(store.channel_directory(identity), "COMMIT"))
+
+    assert store.load(identity) is None
+    assert store.load_for_adoption(**identity.scope()) is None
+    assert store.list_quarantined(identity) == []
+    # Generation directories are still on disk, and the next lineage must clear
+    # both them and the floor.
+    assert publish(store, identity, marker="after-crash") == 3
+
+
+def test_a_reset_interrupted_before_the_bulk_delete_leaves_a_readable_store(store):
+    identity = identity_for("reset-crash-flip")
+    publish(store, identity)
+    publish(store, identity, marker="two")
+    write_floor(store, identity, 2)
+    os.remove(os.path.join(store.channel_directory(identity), "COMMIT"))
+    interrupt_flip(
+        store,
+        os.path.join(store.channel_directory(identity), "gen"),
+        identity,
+    )
+
+    assert store.load(identity) is None
+    assert publish(store, identity, marker="after") == 3
+    assert store.load(identity).context["marker"] == "after"
+
+    report = store.reap(NO_RETENTION)
+    assert report.swept_debris_entries == 1
+    assert store.load(identity).context["marker"] == "after"
+
+
+def test_reset_leaves_other_channels_and_evidence_alone(store):
+    victim = identity_for("reset-blast-radius")
+    neighbour = identity_for("reset-neighbour")
+    publish(store, victim)
+    publish(store, neighbour, marker="untouched")
+    store.quarantine(victim, QuarantineReason.OPERATOR_REQUEST)
+    preserved = store.list_quarantined(victim)
+    publish(store, victim)
+
+    store.reset(victim)
+
+    assert store.load(neighbour).context["marker"] == "untouched"
+    assert store.list_quarantined(victim) == preserved
+    assert os.path.isdir(preserved[0])
+
+
+# -- inspect ----------------------------------------------------------------
+
+
+def test_inspect_reports_the_record_it_finds(store):
+    identity = identity_for("inspected")
+    publish(store, identity, marker="visible")
+    publish(store, identity, marker="visible-2")
+
+    info = store.inspect(identity)
+
+    assert info.channel_id == identity.channel_id
+    assert info.deployment_id == identity.deployment_id
+    assert info.workflow_fingerprint == identity.workflow_fingerprint
+    assert info.session_incarnation == identity.session_incarnation
+    assert info.generation == 2
+    assert info.committed is True
+    assert info.generations_on_disk == 2
+    assert info.bytes_apparent > 0
+    assert info.age_seconds() < 60
+    assert info.identity() == identity
+
+
+def test_inspect_is_none_for_a_channel_that_was_never_written(store):
+    assert store.inspect(identity_for("unwritten")) is None
+
+
+def test_inspect_never_quarantines_what_it_looks_at(store):
+    """An operator asking what is wrong must not change it."""
+    identity = identity_for("inspect-broken")
+    publish(store, identity)
+    commit_path = os.path.join(store.channel_directory(identity), "COMMIT")
+    with open(commit_path, "w", encoding="utf-8") as handle:
+        handle.write("{not json")
+
+    info = store.inspect(identity)
+
+    assert info is not None
+    assert info.channel_id is None
+    assert info.identity() is None
+    assert info.bytes_apparent > 0
+    assert store.list_quarantined(identity) == []
+    assert store.exists(identity) is True
+
+
+def test_inspect_still_measures_a_channel_whose_id_is_not_in_its_path(store):
+    """An oversized id is a hash tail on disk; only the record has the raw form."""
+    identity = identity_for("y" * 400)
+    publish(store, identity)
+
+    info = store.inspect(identity)
+
+    assert info.channel_key != identity.channel_id
+    assert info.channel_id == identity.channel_id
+
+
+def test_listing_channels_orders_oldest_activity_first(store):
+    for index in range(4):
+        publish(store, identity_for(f"order-{index}"))
+
+    listed = store.list_channels()
+
+    assert [info.channel_id for info in listed] == [
+        "order-0",
+        "order-1",
+        "order-2",
+        "order-3",
+    ]
+
+
+def test_listing_channels_can_be_scoped_to_one_namespace(store):
+    publish(store, identity_for("ns", deployment_id="deploy-green"))
+    publish(store, identity_for("ns", deployment_id="deploy-blue"))
+
+    scoped = store.list_channels(
+        deployment_id="deploy-green", workflow_fingerprint="wf-abc123"
+    )
+
+    assert [info.deployment_id for info in scoped] == ["deploy-green"]
+    assert len(store.list_channels()) == 2
+
+
+# -- measurement ------------------------------------------------------------
+
+
+def test_the_measurement_matches_the_files_on_disk(store):
+    for index in range(3):
+        publish(store, identity_for(f"measure-{index}"))
+
+    stats = store.stats()
+    files, total = walk_files(store.base_folder)
+
+    assert stats.channels == 3
+    assert stats.committed_channels == 3
+    assert stats.generations == 3
+    assert stats.total_files == files
+    assert stats.total_bytes_apparent == total
+    assert stats.bytes_physical > 0
+    assert stats.bytes_physical % 512 == 0
+
+
+def test_the_measurement_accounts_for_every_bucket(store):
+    live = identity_for("bucket-live")
+    quarantined = identity_for("bucket-q")
+    debris = identity_for("bucket-debris")
+    publish(store, live)
+    publish(store, quarantined)
+    store.quarantine(quarantined, QuarantineReason.OPERATOR_REQUEST)
+    publish(store, debris)
+    interrupt_flip(store, store.channel_directory(debris), debris)
+
+    stats = store.stats()
+
+    assert stats.channels == 1
+    assert stats.quarantined_entries == 1
+    assert stats.reclaimable_entries == 1
+    assert stats.bytes_apparent > 0
+    assert stats.quarantined_bytes_apparent > 0
+    assert stats.reclaimable_bytes_apparent > 0
+    assert stats.total_bytes_apparent == walk_files(store.base_folder)[1]
+    assert stats.describe().startswith("checkpoint namespace")
+
+
+def test_the_measurement_can_be_scoped_to_one_namespace(store):
+    green = identity_for("m-scope", deployment_id="deploy-green")
+    blue = identity_for("m-scope", deployment_id="deploy-blue")
+    publish(store, green)
+    publish(store, blue)
+
+    scoped = store.stats(
+        deployment_id="deploy-green", workflow_fingerprint="wf-abc123"
+    )
+
+    assert scoped.namespaces == 1
+    assert scoped.channels == 1
+    assert scoped.total_bytes_apparent < store.stats().total_bytes_apparent
+    assert store.stats().namespaces == 2
+
+
+def test_the_measurement_tracks_a_growing_and_then_reaped_namespace(store):
+    """What the soak harness reads: a number that must stop going up."""
+    assert store.stats().total_bytes_apparent == 0
+    growing = []
+    for index in range(4):
+        publish(store, identity_for(f"soak-{index}"))
+        growing.append(store.stats().total_bytes_apparent)
+
+    assert growing == sorted(growing)
+    assert growing[0] < growing[-1]
+
+    store.reap(now=time.time() + 400 * DAY)
+
+    assert store.stats().total_bytes_apparent == 0
+
+
+def test_a_measurement_of_an_empty_store_is_zero(store):
+    stats = store.stats()
+
+    assert stats.channels == 0
+    assert stats.total_files == 0
+    assert stats.total_bytes_apparent == 0
+    assert stats.total_bytes_physical == 0
+
+
+def test_lifecycle_files_are_as_private_as_records(store):
+    identity = identity_for("lifecycle-modes")
+    publish(store, identity)
+    publish(store, identity, marker="two")
+    store.reset(identity)
+    publish(store, identity, marker="three")
+    store.quarantine(identity, QuarantineReason.OPERATOR_REQUEST)
+    publish(store, identity, marker="four")
+    store.reap(NO_RETENTION)
+
+    for directory, _subdirs, files in os.walk(store.base_folder):
+        assert stat.S_IMODE(os.lstat(directory).st_mode) == 0o700, directory
+        for name in files:
+            path = os.path.join(directory, name)
+            assert stat.S_IMODE(os.lstat(path).st_mode) == 0o600, path
+
+
+# -- ordering, pinned by stopping mid-operation -----------------------------
+
+
+class InterruptedStore(ChannelCheckpointStore):
+    """A store that stops dead at a named boundary, the way a killed process does.
+
+    The crash-schedule tests above reproduce *states* on disk; these reproduce
+    the *sequence*. Both are needed, because a store could respond correctly to
+    every hand-built partial state while still writing them in an order that
+    produces a different one. `KeyboardInterrupt` is used deliberately: nothing
+    in the module catches a `BaseException`, so the stop is a stop.
+    """
+
+    def __init__(self, base_folder: str, *, stop_after: str):
+        super().__init__(base_folder)
+        self._stop_after = stop_after
+
+    def _write_floor(self, identity, floor):
+        super()._write_floor(identity, floor)
+        if self._stop_after == "floor":
+            raise KeyboardInterrupt("interrupted after recording the floor")
+
+    def _retire_directory(self, path, reclaim_root):
+        if self._stop_after == "unlink":
+            raise KeyboardInterrupt("interrupted before the flip")
+        return super()._retire_directory(path, reclaim_root)
+
+
+def test_a_reset_stopped_at_the_floor_leaves_the_record_loadable(base):
+    """The floor must be written before anything becomes invisible."""
+    identity = identity_for("stop-at-floor")
+    writer = ChannelCheckpointStore(base)
+    publish(writer, identity, marker="one")
+    publish(writer, identity, marker="two")
+
+    with pytest.raises(KeyboardInterrupt):
+        InterruptedStore(base, stop_after="floor").reset(identity)
+
+    reader = ChannelCheckpointStore(base)
+    assert reader.load(identity).context["marker"] == "two"
+    assert reader.list_quarantined(identity) == []
+    assert publish(reader, identity, marker="three") == 3
+
+
+def test_a_reset_stopped_before_the_flip_reads_as_absent(base):
+    """COMMIT must be gone before the generations are, or a reader sees damage."""
+    identity = identity_for("stop-before-flip")
+    writer = ChannelCheckpointStore(base)
+    publish(writer, identity, marker="one")
+    publish(writer, identity, marker="two")
+
+    with pytest.raises(KeyboardInterrupt):
+        InterruptedStore(base, stop_after="unlink").reset(identity)
+
+    reader = ChannelCheckpointStore(base)
+    assert reader.load(identity) is None
+    assert reader.load_for_adoption(**identity.scope()) is None
+    assert reader.list_quarantined(identity) == []
+    assert publish(reader, identity, marker="three") == 3
+
+
+def test_a_delete_stopped_before_the_flip_changes_nothing(base):
+    """Delete is one rename, so an interruption before it is a no-op."""
+    identity = identity_for("stop-delete")
+    writer = ChannelCheckpointStore(base)
+    publish(writer, identity, marker="intact")
+    before = snapshot_records(base)
+
+    with pytest.raises(KeyboardInterrupt):
+        InterruptedStore(base, stop_after="unlink").delete(identity)
+
+    reader = ChannelCheckpointStore(base)
+    assert reader.load(identity).context["marker"] == "intact"
+    assert snapshot_records(base) == before
+
+
+# -- the liveness marker, isolated from every other age signal --------------
+
+
+def backdate(store, identity, seconds_ago: float, *, keep_marker: bool) -> None:
+    """Make a channel look old in every way the store can tell.
+
+    `published_at` lives in COMMIT and in no digest, which is why it can be
+    rewritten here without the record failing closed — and is exactly why it is
+    kept there rather than inside a part.
+    """
+    directory = store.channel_directory(identity)
+    old = time.time() - seconds_ago
+
+    rewrite_part(os.path.join(directory, "COMMIT"), published_at=old)
+
+    marker_path = os.path.join(directory, "ACCESS")
+    if keep_marker:
+        rewrite_part(marker_path, last_publish_at=old)
+    else:
+        os.remove(marker_path)
+
+    for path in (directory, os.path.join(directory, "gen")):
+        os.utime(path, (old, old))
+
+
+def test_a_channel_old_by_every_signal_is_reaped(store):
+    identity = identity_for("aged-all")
+    publish(store, identity)
+    backdate(store, identity, 10 * DAY, keep_marker=True)
+
+    report = store.reap(RetentionPolicy(max_age_seconds=DAY, max_channels=None))
+
+    assert report.aged_out == 1
+    assert store.load(identity) is None
+
+
+def test_a_fresh_liveness_marker_alone_keeps_a_channel(store):
+    """The whole reason the marker exists: content age is not use age."""
+    identity = identity_for("aged-but-used")
+    publish(store, identity)
+    backdate(store, identity, 10 * DAY, keep_marker=True)
+    # A digest-stable republish: the several-hundred-kilobyte record is correctly
+    # not rewritten, so only the marker records that the channel is in use.
+    publish(store, identity)
+
+    directory = store.channel_directory(identity)
+    with open(os.path.join(directory, "COMMIT"), encoding="utf-8") as handle:
+        assert json.load(handle)["published_at"] < time.time() - 5 * DAY
+    # Directory mtime is stripped too, so the marker is the only fresh signal left.
+    os.utime(directory, (time.time() - 10 * DAY,) * 2)
+
+    report = store.reap(RetentionPolicy(max_age_seconds=DAY, max_channels=None))
+
+    assert report.aged_out == 0
+    assert store.load(identity) is not None
+
+
+def test_a_channel_with_no_marker_still_has_a_measurable_age(store):
+    """A missing marker must not make a channel immortal."""
+    identity = identity_for("aged-no-marker")
+    publish(store, identity)
+    backdate(store, identity, 10 * DAY, keep_marker=False)
+
+    report = store.reap(RetentionPolicy(max_age_seconds=DAY, max_channels=None))
+
+    assert report.aged_out == 1
+    assert store.load(identity) is None
+
+
+@pytest.mark.parametrize("planted", ["not-a-number", None, float("inf")])
+def test_a_nonsense_timestamp_does_not_make_a_channel_immortal(store, planted):
+    """NaN and infinity compare false against every threshold."""
+    identity = identity_for(f"aged-nonsense-{planted}")
+    publish(store, identity)
+    backdate(store, identity, 10 * DAY, keep_marker=False)
+
+    marker_path = os.path.join(store.channel_directory(identity), "ACCESS")
+    with open(marker_path, "w", encoding="utf-8") as handle:
+        json.dump({"last_publish_at": planted}, handle)
+    os.utime(
+        store.channel_directory(identity), (time.time() - 10 * DAY,) * 2
+    )
+
+    report = store.reap(RetentionPolicy(max_age_seconds=DAY, max_channels=None))
+
+    assert report.aged_out == 1
+
+
+def test_a_corrupt_marker_never_makes_a_record_unreadable(store):
+    """It is retention metadata, not state, and no digest covers it."""
+    identity = identity_for("marker-corrupt")
+    publish(store, identity, marker="fine")
+    with open(
+        os.path.join(store.channel_directory(identity), "ACCESS"), "w",
+        encoding="utf-8",
+    ) as handle:
+        handle.write("{not json at all")
+
+    assert store.load(identity).context["marker"] == "fine"
+    assert store.load_for_adoption(**identity.scope()) is not None
+    assert store.list_quarantined(identity) == []
+    assert store.inspect(identity).last_seen_at is None

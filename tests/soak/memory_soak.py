@@ -53,13 +53,17 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from http.client import HTTPConnection, HTTPException
 from typing import Any, Optional
 
@@ -84,6 +88,75 @@ SLOPE_TARGET_MB_PER_REQUEST = 0.05
 # instead of being enforced — a smoke run must not be able to manufacture a
 # green (or red) verdict.
 MIN_REQUESTS_FOR_BINDING_GATE = 200
+
+# ---------------------------------------------------------------------------
+# Release C: checkpoint retention, and why the plateau gate needs a long run.
+#
+# Both constants are private to the server (utils.CHECKPOINT_REAP_INTERVAL_SECONDS
+# and checkpoint_store.RetentionPolicy's defaults) with no env override, so they
+# are duplicated here for the same reason the caps above are: the harness has to
+# be able to notice if one changes underneath it. They are re-derived from the
+# server's behaviour where possible and reported either way.
+# ---------------------------------------------------------------------------
+REAP_INTERVAL_SECONDS = 300.0     # utils.CHECKPOINT_REAP_INTERVAL_SECONDS
+RETENTION_MAX_CHANNELS = 1000     # RetentionPolicy.max_channels default
+RETENTION_MAX_AGE_SECONDS = 86_400.0   # RetentionPolicy.max_age_seconds default
+# §16.5 wants the plateau to be shown repeating, not glimpsed once, so a plateau
+# claim needs the run to span at least two reap passes.
+REAP_PASSES_FOR_PLATEAU = 2
+
+# Loss-adjacent lines the Release C code actually emits. §16.5 gates arm C on
+# "zero context-loss sentinels" but never states the string, so the harness
+# enumerates the real ones and reports each separately: collapsing them into one
+# boolean would make a quarantine indistinguishable from a retry.
+SENTINEL_PATTERNS = {
+    "checkpoint_unreadable": (
+        r"Checkpoint for channel_id \S+ could not be read"),
+    "checkpoint_quarantined": (
+        r"Checkpoint for channel_id \S+ could not be applied"),
+    "checkpoint_write_failed": r"checkpoint write failed",
+    "conversation_high_water_exceeded": r"Conversation high-water mark",
+    # The precondition for a write from an executor whose caller has moved on.
+    "streaming_delivery_deadline": r"passed its \d+s delivery deadline",
+    # A unique channel is never revisited, so a restore means an id collided.
+    "unexpected_checkpoint_restore": r"Restored checkpoint for channel_id",
+    "launch_context_conflict": r"conflicts_resolved_to_launch=\[\S",
+}
+
+#: A retirement line plus the timestamp ``fastworkflow.utils.logging.LOG_FORMAT``
+#: appends after the message. Arm C needs the timestamp, not just the channel id.
+RETIRED_LINE = re.compile(
+    r"Retired channel_id (\S+) at generation \d+ - "
+    r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)Z"
+)
+
+
+#: Resolution of a parsed log timestamp, in seconds. See _parse_log_timestamp:
+#: only the whole-second field is usable, so any ordering closer than this is
+#: reported as ambiguous rather than decided.
+LOG_TIMESTAMP_RESOLUTION_S = 1.0
+
+
+def _parse_log_timestamp(text: str) -> Optional[float]:
+    """The server's log stamp as an epoch comparable to ``time.time()``.
+
+    Whole seconds only, and deliberately so. ``fastworkflow.utils.logging.format_ns``
+    formats the seconds with ``tz=timezone.utc`` — so the trailing ``Z`` is
+    accurate — but it builds the sub-second field as
+    ``f"{(time_in_ns // 10**9) * 10**9}"[:9]``, which is the leading digits of the
+    epoch nanosecond count rather than a fraction of a second: it is very nearly
+    constant for the whole run. Parsing it would add a fixed ~0.18s bias dressed up
+    as precision, so it is dropped and the caller treats the result as ±1s.
+
+    Returns None rather than guessing if the format ever changes, so the caller can
+    report the gap instead of silently mis-ordering.
+    """
+    head, _, _fraction_is_not_a_fraction = text.partition(".")
+    try:
+        stamp = datetime.strptime(head, "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return None
+    return stamp.replace(tzinfo=timezone.utc).timestamp()
 
 # One-sided 95% t quantiles by degrees of freedom, for the slope upper bound.
 _T95 = {1: 6.314, 2: 2.920, 3: 2.353, 4: 2.132, 5: 2.015, 6: 1.943, 7: 1.895,
@@ -145,6 +218,146 @@ def resolve_paths() -> Paths:
     raise SoakError(
         "No hello_world workflow with an add_two_numbers command found. Looked in:\n  "
         + "\n  ".join(candidates)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Arm fixtures
+# ---------------------------------------------------------------------------
+
+# Renaming rather than deleting: the rename is reversible, greppable, and leaves
+# the docstring in place, so anyone reading the temp fixture can see what was
+# done to it and why.
+DISABLED_HOOK_NAME = "get_state__disabled_by_soak_arm_b"
+
+
+@dataclass
+class Fixture:
+    """The workflow an arm drives, and the direct action that exercises it.
+
+    Split from ``Paths`` because arms A0/A1/A/C share one workflow while arm B
+    needs a different one: the shape a soak measures is a property of the arm,
+    not of the checkout.
+    """
+
+    name: str
+    workflow_path: str
+    command_name: str
+    base_parameters: dict[str, Any]
+    expect_pinned: bool
+    note: str
+    tempdir: Optional[str] = None
+
+    def cleanup(self) -> None:
+        if self.tempdir:
+            shutil.rmtree(self.tempdir, ignore_errors=True)
+
+
+def resolve_fixture(paths: Paths, arm: str) -> Fixture:
+    """Pick the fixture the arm's pre-registered expectation is about.
+
+    Arms A0, A1, A and C all want §16.5's "function-style workflow, no
+    command-context object", which is exactly the hello_world shape: its
+    ``_commands/`` tree has no context directory, so
+    ``project_command_contexts`` returns NO_CONTEXT and the session is
+    checkpointable — hence evictable. Arm A and arm A0 therefore differ only in
+    the code under test, which is what makes their slopes comparable.
+    """
+    if arm != "b":
+        return Fixture(
+            name=paths.workflow_name,
+            workflow_path=paths.workflow_path,
+            command_name="add_two_numbers",
+            base_parameters={"first_num": 2.0, "second_num": 3.0},
+            expect_pinned=False,
+            note="function-style workflow, no command-context object (§16.5 arms A0/A1/A/C)",
+        )
+    return build_pinned_fixture(paths)
+
+
+def build_pinned_fixture(paths: Paths) -> Fixture:
+    """Construct arm B's pinned fixture in a temp directory.
+
+    §16.5 names ``simple_workflow_template`` as the pinned shape, but that
+    premise has expired: it now ships serialization hooks, as do messaging_app_2/3/4
+    and tests/todo_list_workflow, so all of them are evictable. Re-reading §16.5's
+    intent — arm B exists to quantify §1.4, the *undeclared* workflow — the
+    genuinely pinned shape today is a context class with no ``get_state``, which is
+    what a workflow looks like before its author writes one.
+
+    So: copy ``tests/todo_list_workflow`` and rename ``get_state`` in the COPY.
+    Nothing under the repo's committed fixtures is touched. That workflow is
+    chosen because it satisfies the other half of §16.5's arm B requirement that
+    the bundled examples do not — ``_commands/startup.py`` assigns
+    ``root_command_context``, so the session pins from turn 1 (§1.4, and the
+    §16.5 note that arm B "must pin from turn 1 to be the adversarial case").
+    Its ``___command_info`` is copied too, so no training step is needed.
+    """
+    source = os.path.join(paths.repo_root, "tests", "todo_list_workflow")
+    hook_relpath = os.path.join("_commands", "TodoListManager", "_TodoListManager.py")
+    startup_relpath = os.path.join("_commands", "startup.py")
+    for relpath in (hook_relpath, startup_relpath,
+                    os.path.join("___command_info", "routing_definition.json")):
+        if not os.path.isfile(os.path.join(source, relpath)):
+            raise SoakError(
+                f"Arm B needs {source}/{relpath}, which is missing. That workflow is "
+                f"the harness's pinned fixture donor; pick another workflow whose "
+                f"_commands/startup.py assigns root_command_context and adjust "
+                f"build_pinned_fixture()."
+            )
+
+    with open(os.path.join(source, startup_relpath), encoding="utf-8") as handle:
+        if "root_command_context" not in handle.read():
+            raise SoakError(
+                f"{source}/{startup_relpath} no longer assigns root_command_context, so "
+                f"the fixture would not pin from turn 1 and arm B would measure the "
+                f"wrong thing (§16.5 arm B, §1.4)."
+            )
+
+    tempdir = tempfile.mkdtemp(prefix="fw_soak_pinned_")
+    dest = os.path.join(tempdir, "todo_list_workflow_undeclared")
+    # Runtime artifacts are excluded: they are another server's RocksDB state and
+    # copying them would seed the arm with someone else's channels.
+    shutil.copytree(
+        source, dest,
+        ignore=shutil.ignore_patterns("__pycache__", "___workflow_contexts",
+                                      "___convo_info"),
+    )
+
+    hook_path = os.path.join(dest, hook_relpath)
+    with open(hook_path, encoding="utf-8") as handle:
+        original = handle.read()
+    patched = original.replace("def get_state(", f"def {DISABLED_HOOK_NAME}(", 1)
+    if patched == original:
+        raise SoakError(
+            f"Could not find 'def get_state(' in {source}/{hook_relpath}. Arm B "
+            f"depends on removing that hook to make the context unprojectable; the "
+            f"donor workflow's hook must have been renamed."
+        )
+    with open(hook_path, "w", encoding="utf-8") as handle:
+        handle.write(patched)
+    # Belt and braces: `hasattr(hooks, "get_state")` is what decides pinning, and a
+    # second definition further down the file would defeat the rename above.
+    if "def get_state(" in patched:
+        raise SoakError(
+            f"{hook_path} still defines get_state after patching, so the fixture "
+            f"would remain evictable and arm B would silently measure arm A."
+        )
+
+    return Fixture(
+        name="todo_list_workflow_undeclared",
+        workflow_path=dest,
+        command_name="startup",
+        # startup has no Signature/Input class, so CommandExecutor.perform_action
+        # calls the response generator without parameters — the payload still lands
+        # in the conversation record via _process_action, which is the retention
+        # path this measures.
+        base_parameters={},
+        expect_pinned=True,
+        note=(f"copy of tests/todo_list_workflow with get_state renamed to "
+              f"{DISABLED_HOOK_NAME}; root_command_context is assigned in startup, "
+              f"so every channel pins from turn 1 (§16.5 arm B, §1.4)"),
+        tempdir=tempdir,
     )
 
 
@@ -245,6 +458,49 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
+def _entries(root: str, depth: int) -> list[str]:
+    """Paths exactly ``depth`` levels below ``root``, directories or not."""
+    level = [root] if os.path.isdir(root) else []
+    for _ in range(depth):
+        nxt = []
+        for path in level:
+            with contextlib.suppress(OSError):
+                nxt += [entry.path for entry in os.scandir(path)]
+        level = nxt
+    return level
+
+
+def _subdirectories(root: str, depth: int) -> list[str]:
+    return [path for path in _entries(root, depth) if os.path.isdir(path)]
+
+
+def _dir_usage(path: str) -> tuple[int, int, int]:
+    """(files, apparent bytes, physical bytes) for one subtree.
+
+    A faithful reimplementation of ``checkpoint_store._dir_usage``, including the
+    two things that are easy to get wrong and that the cross-check caught: the
+    blocks of *descendant directories* count toward physical bytes (a directory
+    occupies space), and the subtree root's own blocks do not. Reimplemented rather
+    than imported so the harness stays independent of the tree it measures; the
+    cross-check is what keeps the copy honest.
+    """
+    files = apparent = physical = 0
+    for directory, subdirs, names in os.walk(path, followlinks=False):
+        for name in list(subdirs) + names:
+            try:
+                info = os.lstat(os.path.join(directory, name))
+            except OSError:
+                continue
+            blocks = getattr(info, "st_blocks", None)
+            if stat.S_ISDIR(info.st_mode):
+                physical += int(blocks) * 512 if blocks else 0
+                continue
+            files += 1
+            apparent += info.st_size
+            physical += int(blocks) * 512 if blocks is not None else info.st_size
+    return (files, apparent, physical)
+
+
 class ServerProcess:
     """A fresh ``python -m fastworkflow.run_fastapi_mcp`` on a private port and store.
 
@@ -256,13 +512,25 @@ class ServerProcess:
 
     def __init__(self, paths: Paths, *, startup_timeout: float, graceful: bool,
                  grace_seconds: float, baseline: bool = False,
-                 server_tree: Optional[str] = None):
+                 server_tree: Optional[str] = None,
+                 workflow_path: Optional[str] = None,
+                 log_level: Optional[str] = None):
         self.paths = paths
         self.startup_timeout = startup_timeout
         self.graceful = graceful
         self.grace_seconds = grace_seconds
         self.baseline = baseline
         self.server_tree = server_tree or paths.repo_root
+        # Arm B drives a different workflow than the rest, so the fixture — not the
+        # checkout — decides what the server serves.
+        self.workflow_path = workflow_path or paths.workflow_path
+        self.log_level = log_level
+        # Release C's own record of the resolved cap, read back from the server's
+        # startup line rather than assumed: resolve_max_live_sessions() takes the OS
+        # environment first, so what the harness set and what the server used can
+        # differ, and only the server can say which won.
+        self.max_live_sessions: Optional[int] = None
+        self.max_live_sessions_source: Optional[str] = None
         self.port = _free_port()
         self.tmpdir = tempfile.mkdtemp(prefix="fw_memory_soak_")
         self.speeddict_dir = os.path.join(self.tmpdir, "speeddict")
@@ -298,7 +566,7 @@ class ServerProcess:
         self._write_env_override()
         cmd = [
             self.paths.python, "-m", "fastworkflow.run_fastapi_mcp",
-            "--workflow_path", self.paths.workflow_path,
+            "--workflow_path", self.workflow_path,
             "--env_file_path", self.env_file,
             "--passwords_file_path", self.paths.passwords_file,
             "--port", str(self.port),
@@ -315,6 +583,10 @@ class ServerProcess:
         env["PYTHONPATH"] = os.pathsep.join(
             [self.server_tree] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
         )
+        if self.log_level:
+            # fastworkflow.utils.logging reads LOG_LEVEL from the OS environment at
+            # import, not from the env file.
+            env["LOG_LEVEL"] = self.log_level
 
         self._log_handle = open(self.log_path, "wb")
         self.proc = subprocess.Popen(
@@ -399,6 +671,23 @@ class ServerProcess:
                     f"record but got '{self.policy_line}'."
                 )
         self.policy_check = "asserted from the server's own startup record"
+        self._read_live_session_cap()
+
+    def _read_live_session_cap(self) -> None:
+        """The live-session cap the server actually resolved, from its own record.
+
+        Release C's gate is ``live_sessions <= MAX_LIVE_SESSIONS``, and the resolver
+        takes the OS environment ahead of the env file, so the only authority on the
+        effective value is the server. A tree that does not log it is a
+        pre-Release-C tree, which is recorded rather than guessed at.
+        """
+        match = re.search(
+            r"max_live_sessions=(\d+)\s*\(source=([^)]*)\)", self.policy_line or ""
+        )
+        if not match:
+            return
+        self.max_live_sessions = int(match.group(1))
+        self.max_live_sessions_source = match.group(2)
 
     def _verify_tree_identity(self) -> None:
         """Prove from the RUNNING server which tree's code it is executing.
@@ -436,6 +725,134 @@ class ServerProcess:
 
     def log_tail(self, lines: int = 25) -> str:
         return "\n".join(self._read_log().splitlines()[-lines:])
+
+    def eviction_diagnostics(self) -> dict[str, Any]:
+        """Eviction and loss facts that only the server's own log carries.
+
+        §16.5 gates arm C on "zero context-loss sentinels" and arm B on a pinned
+        count, but the readiness probe exposes neither: it reports
+        ``live_sessions`` and nothing about why a session is still there. The
+        eviction path does state both, in the log — the over-target warning carries
+        the server's own pinned count, and each pin reason is logged once per
+        (workflow, reason).
+
+        The design names a "context-loss sentinel" without giving a string, so
+        SENTINEL_PATTERNS below enumerates the loss-adjacent lines the Release C
+        code actually emits, and each is reported with its count rather than
+        collapsed into one boolean.
+        """
+        log = self._read_log()
+        pinned = [int(n) for n in re.findall(
+            r"no candidate could be retired \((\d+) pinned\)", log)]
+        return {
+            "retired_channels": len(re.findall(r"Retired channel_id \S+ at generation", log)),
+            "over_target_warnings": len(pinned),
+            "pinned_reported_max": max(pinned) if pinned else 0,
+            "pinned_reported_last": pinned[-1] if pinned else 0,
+            # Non-greedy and anchored on the log formatter's " - " separator, which
+            # otherwise lands the timestamp and module inside the reason.
+            "pinned_reported_series": pinned,
+            "pin_reasons": sorted(set(re.findall(
+                r"cannot be checkpointed and will not be evicted: (.+?)(?: - |$)",
+                log, re.MULTILINE))),
+            "reap_passes_reclaiming": [
+                int(n) for n in re.findall(r"Reclaimed (\d+) abandoned checkpoint", log)
+            ],
+            "reap_pass_failures": len(re.findall(r"Checkpoint reap pass failed", log)),
+            "sentinels": {
+                name: len(re.findall(pattern, log))
+                for name, pattern in SENTINEL_PATTERNS.items()
+            },
+        }
+
+    def retired_channel_ids(self) -> set[str]:
+        """Channels the server says it evicted. Requires --server-log-level DEBUG.
+
+        This is the only direct evidence for arm C's "no streaming turn's context
+        closed": the pop-and-close is logged at DEBUG with the channel id, so at
+        INFO the assertion would silently have nothing to look at.
+        """
+        return set(re.findall(
+            r"Retired channel_id (\S+) at generation", self._read_log()))
+
+    def retired_channel_events(self) -> list[dict[str, Any]]:
+        """Every retirement as (channel, when), so arm C can order it against a turn.
+
+        Arm C's assertion is temporal — "not evicted *while* its turn is
+        registered" — and a set of channel ids cannot answer it. Retiring a
+        streaming channel a moment after its turn ends is not a violation but the
+        designed behaviour (``trim_live_sessions`` exists to do exactly that), so
+        without the timestamp the two cases are indistinguishable and the arm
+        reports a violation for correct behaviour.
+        """
+        return [
+            {"channel_id": channel_id, "at": _parse_log_timestamp(stamp)}
+            for channel_id, stamp in RETIRED_LINE.findall(self._read_log())
+        ]
+
+    def checkpoint_metrics(self) -> dict[str, Any]:
+        """The checkpoint namespace, in the units §16.5's plateau gate reads.
+
+        Measured by walking the store's documented layout rather than by importing
+        ``ChannelCheckpointStore`` into the harness. Three reasons: importing
+        fastworkflow here costs ~7 s and would configure DSPy in the *measuring*
+        process; the harness must keep working against trees that predate the
+        module (``--baseline``); and a walk cannot be fooled by a drifting
+        counter, which is the failure mode the store's own docstring warns about.
+        ``verify_checkpoint_accounting()`` cross-checks this against the store's
+        own ``stats()`` once per run, so the walk is corroborated rather than
+        trusted.
+
+        physical uses st_blocks (the gated number, since it is what the filesystem
+        actually occupies); apparent uses st_size (exactly reproducible, hence
+        assertable).
+        """
+        base = os.path.join(self.speeddict_dir, "channel_checkpoints")
+        files = apparent = physical = channels = generations = 0
+
+        # The unit of measurement is one directory per record, matching
+        # ChannelCheckpointStore._scan_* : a channel directory, a quarantine entry,
+        # or a reclaim tree. The namespace scaffolding above those (channels/,
+        # <deployment>/, <fingerprint>/) is deliberately not counted, because the
+        # store does not count it either and the cross-check has to be exact.
+        # Quarantine and reclaim debris ARE inside the totals: excluding them would
+        # let an interrupted reap look like space that came back.
+        for record_dir in self._checkpoint_record_dirs(base):
+            record_files, record_apparent, record_physical = _dir_usage(record_dir)
+            files += record_files
+            apparent += record_apparent
+            physical += record_physical
+        for channel_dir in _subdirectories(
+            os.path.join(base, "channels"), depth=3
+        ):
+            channels += 1
+            generations += len(_subdirectories(os.path.join(channel_dir, "gen"),
+                                               depth=1))
+        return {
+            "total_files": files,
+            "total_bytes_apparent": apparent,
+            "total_bytes_physical": physical,
+            "channels": channels,
+            "generations": generations,
+        }
+
+    @staticmethod
+    def _checkpoint_record_dirs(base: str) -> list[str]:
+        """Every directory the store measures as one record.
+
+        Layout, from ChannelCheckpointStore's own docstring::
+
+            <base>/channels/<dep>/<fp>/<channel_key>/
+            <base>/__quarantine__/<dep>/<fp>/<channel_key>/<entry>/
+            <base>/__reclaim__/<dep>/<fp>/<name>
+        """
+        return (
+            _subdirectories(os.path.join(base, "channels"), depth=3)
+            + _subdirectories(os.path.join(base, "__quarantine__"), depth=4)
+            # Reclaim debris can be a file as well as a tree, so entries are taken
+            # whole rather than filtered to directories.
+            + _entries(os.path.join(base, "__reclaim__"), depth=3)
+        )
 
     def durable_store_metrics(self) -> dict[str, Any]:
         """Record count and physical bytes of the durable conversation store."""
@@ -649,19 +1066,21 @@ def make_payload(kilobytes: int, fill: str = "random") -> str:
     return prefix + base64.b64encode(body).decode("ascii")
 
 
-def make_action(payload: str) -> dict:
-    """A direct add_two_numbers action carrying the payload.
+def make_action(fixture: Fixture, payload: str) -> dict:
+    """A direct action on the arm's fixture, carrying the payload.
 
     InitializationRequest has no free-form ``context`` field, so the payload
     travels as an extra action parameter. That is the field that actually reaches
     the retention path under test: WorkflowExecutionContext._process_action puts
     ``action.parameters`` verbatim into the record it appends to conversation
-    history, which is also what the ConversationStore persists. The command's
-    pydantic Input model ignores the extra key, so the command still executes.
+    history, which is also what the ConversationStore persists. The command
+    itself ignores the extra key — hello_world's pydantic Input model drops it,
+    and startup has no Input class at all — so the command still executes.
     """
     return {
-        "command_name": "add_two_numbers",
-        "parameters": {"first_num": 2.0, "second_num": 3.0, "soak_payload": payload},
+        "command_name": fixture.command_name,
+        "command": "",
+        "parameters": fixture.base_parameters | {"soak_payload": payload},
     }
 
 
@@ -694,6 +1113,14 @@ class Probe:
     durable_records: int
     durable_conversation_bytes: int
     durable_speeddict_bytes: int
+    # §16.5's durable-storage plateau gate reads these. Physical is the gated
+    # number; apparent is carried alongside because it is exactly reproducible.
+    checkpoint_bytes_physical: int
+    checkpoint_bytes_apparent: int
+    checkpoint_channels: int
+    checkpoint_generations: int
+    checkpoint_files: int
+    elapsed_s: float
     metrics_available: bool = True
 
 
@@ -710,10 +1137,18 @@ class Replicate:
     baseline: bool = False
     policy_check: str = ""
     memory_metrics_available: bool = True
+    fixture: str = ""
+    fixture_note: str = ""
+    max_live_sessions: Optional[int] = None
+    max_live_sessions_source: Optional[str] = None
+    wall_clock_s: float = 0.0
     samples: list[Sample] = field(default_factory=list)
     probes: list[Probe] = field(default_factory=list)
     cap_violations: list[str] = field(default_factory=list)
     forced_gc: Optional[dict[str, Any]] = None
+    eviction: Optional[dict[str, Any]] = None
+    streaming: Optional[dict[str, Any]] = None
+    checkpoint_accounting: Optional[dict[str, Any]] = None
 
 
 def least_squares_slope(xs: list[float], ys: list[float]) -> float:
@@ -793,7 +1228,8 @@ def summarize_slopes(slopes: list[float]) -> dict[str, Any]:
 # Probing the server's own retention metrics
 # ---------------------------------------------------------------------------
 
-def read_probe(client: Client, server: ServerProcess, index: int) -> Probe:
+def read_probe(client: Client, server: ServerProcess, index: int,
+               started_at: float) -> Probe:
     status, body, _ = client.get("/probes/readyz?memory=true")
     if status != 200:
         raise SoakError(
@@ -810,6 +1246,7 @@ def read_probe(client: Client, server: ServerProcess, index: int) -> Probe:
             "server, which should always expose one. Body: " + str(body)[:400]
         )
     durable = server.durable_store_metrics()
+    checkpoints = server.checkpoint_metrics()
     return Probe(
         index=index,
         live_sessions=memory["live_sessions"] if memory else None,
@@ -821,19 +1258,50 @@ def read_probe(client: Client, server: ServerProcess, index: int) -> Probe:
         durable_records=durable["records"],
         durable_conversation_bytes=durable["conversation_bytes"],
         durable_speeddict_bytes=durable["speeddict_bytes"],
+        checkpoint_bytes_physical=checkpoints["total_bytes_physical"],
+        checkpoint_bytes_apparent=checkpoints["total_bytes_apparent"],
+        checkpoint_channels=checkpoints["channels"],
+        checkpoint_generations=checkpoints["generations"],
+        checkpoint_files=checkpoints["total_files"],
+        elapsed_s=time.time() - started_at,
         metrics_available=memory is not None,
     )
 
 
-def check_caps(probe: Probe, arm: str) -> list[str]:
+def retained_turn_allowance(args) -> int:
+    """The ceiling ``retained_turns`` may legitimately reach for this arm.
+
+    ``retained_turns`` is ``len(turn_registry._by_key)``, which holds retained
+    *terminal* executions AND every currently active one. MAX_RETAINED_STARTUP_TURNS
+    bounds only the first group (``_evict_overflow`` sorts terminal executions and
+    drops the excess), and the probe reports no breakdown. Every arm but C has
+    exactly one turn in flight at a time, so for them the total and the cap coincide.
+    Arm C deliberately holds ``--streams`` more, so its ceiling is that much higher —
+    calling those a violation would fail the gate for doing what the arm asks.
+    """
+    return CAP_RETAINED_TURNS + (args.streams if args.arm == "c" else 0)
+
+
+def check_caps(probe: Probe, arm: str, max_live_sessions: Optional[int] = None,
+               retained_cap: int = CAP_RETAINED_TURNS) -> list[str]:
     if not probe.metrics_available:
         # Nothing to check: the baseline exposes no retention metrics, and it has
         # no caps to hold in the first place.
         return []
     violations = []
-    if probe.retained_turns > CAP_RETAINED_TURNS:
+    if arm in ("a", "c") and max_live_sessions is not None:
+        # Release C's own cap, and the one it gates on. Not checked for arm A0
+        # (whose pre-registered expectation is that the cache retains everything),
+        # for arm A1 (one channel), or for arm B (pinned by construction — its
+        # unbounded growth is the recorded result, not a violation).
+        if probe.live_sessions > max_live_sessions:
+            violations.append(
+                f"request {probe.index}: live_sessions={probe.live_sessions} > "
+                f"max_live_sessions={max_live_sessions}"
+            )
+    if probe.retained_turns > retained_cap:
         violations.append(
-            f"request {probe.index}: retained_turns={probe.retained_turns} > {CAP_RETAINED_TURNS}"
+            f"request {probe.index}: retained_turns={probe.retained_turns} > {retained_cap}"
         )
     if probe.dspy_cache_entries > CAP_DSPY_CACHE_ENTRIES:
         violations.append(
@@ -857,6 +1325,45 @@ def check_caps(probe: Probe, arm: str) -> list[str]:
                 f"> {CAP_CONVERSATION_TURNS}"
             )
     return violations
+
+
+def verify_checkpoint_accounting(paths: Paths, server_tree: str,
+                                 checkpoint_dir: str) -> dict[str, Any]:
+    """Cross-check the harness's directory walk against the store's own ``stats()``.
+
+    The plateau gate rests entirely on one number, so that number should not rest
+    entirely on the harness's reading of an undocumented layout. Run in a
+    subprocess against the SERVER's tree, so the accounting being compared is the
+    accounting the server itself would report — and so a tree without the module
+    degrades to "unavailable" instead of breaking the run.
+    """
+    script = (
+        "import json, sys\n"
+        "from fastworkflow.checkpoint_store import ChannelCheckpointStore\n"
+        "s = ChannelCheckpointStore(sys.argv[1]).stats()\n"
+        "print(json.dumps({'total_bytes_physical': s.total_bytes_physical,\n"
+        "                  'total_bytes_apparent': s.total_bytes_apparent,\n"
+        "                  'total_files': s.total_files,\n"
+        "                  'channels': s.channels,\n"
+        "                  'generations': s.generations,\n"
+        "                  'describe': s.describe()}))\n"
+    )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [server_tree] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+    completed = subprocess.run(
+        [paths.python, "-c", script, checkpoint_dir],
+        cwd=server_tree, env=env, capture_output=True, text=True, timeout=300,
+    )
+    if completed.returncode != 0:
+        return {"available": False,
+                "reason": f"ChannelCheckpointStore.stats() could not be read from "
+                          f"{server_tree}: {completed.stderr.strip()[-300:]}"}
+    try:
+        return {"available": True, "store": json.loads(completed.stdout.splitlines()[-1])}
+    except (ValueError, IndexError):
+        return {"available": False,
+                "reason": f"unparsable stats() output: {completed.stdout[-300:]}"}
 
 
 def forced_gc_availability(client: Client) -> dict[str, Any]:
@@ -892,13 +1399,389 @@ def forced_gc_availability(client: Client) -> dict[str, Any]:
 # Arms
 # ---------------------------------------------------------------------------
 
-def run_replicate(paths: Paths, args, replicate_index: int) -> Replicate:
+#: Arms whose workload is "a unique channel per request", i.e. the motivating
+#: production shape. A0 is Release A's recorded arm and A/C are Release C's; they
+#: differ in the code under test and in what is asserted, not in the requests sent.
+UNIQUE_CHANNEL_ARMS = ("a0", "a", "b", "c")
+
+#: Concurrency for arm C's pressure burst. Enough to finish inside one agent turn,
+#: small enough that the server is not the thing being stress-tested.
+PRESSURE_WORKERS = 8
+
+
+class StreamingCohort:
+    """Arm C: a few long-lived ``/invoke_agent_stream`` turns held across eviction.
+
+    §16.5 arm C is "arm A plus concurrent ``/invoke_agent_stream`` turns spanning
+    more than ``MAX_LIVE_SESSIONS`` subsequent creations". Two consequences shape
+    this class:
+
+    * It is the only arm that is not strictly sequential, because "concurrent" is
+      the hypothesis. The sequential creation loop stays on the main thread and
+      keeps producing the RSS series; each stream gets its own thread and its own
+      socket, so the measured series is still one request at a time on the main
+      connection.
+    * ``/invoke_agent_stream`` strips the leading ``/`` from ``user_query`` before
+      dispatch, so there is no deterministic route through it: the turn runs the
+      agent and therefore makes real LLM calls. That is what makes it slow enough
+      to still be registered 50+ creations later, and it is also why the cohort is
+      small by default.
+
+    The "more than MAX_LIVE_SESSIONS subsequent creations" span cannot be left to
+    the measured loop. A 450 KB measured request costs ~200 ms, so covering 51 of
+    them takes ~10s — about how long one agent turn lasts, which makes the arm's
+    own premise a coin flip that was observed landing at 40 and 49 creations
+    against a cap of 50. So the cohort issues its own burst of cheap unique
+    channel creations immediately after opening the streams. They are real
+    creations that force real retirements, they are excluded from the measured
+    series, and the burst stops as soon as the span clears the cap, so the
+    perturbation is bounded and lands between two measured requests.
+
+    The assertion is ordering, not just outcome: a streaming channel must not be
+    retired *before its own turn finished*. It is compared per stream against that
+    stream's own completion time, because a retirement after the turn ends is the
+    designed behaviour rather than a violation — ``trim_live_sessions`` exists to
+    retire exactly those channels — and with 60 unique channels against a cap of
+    50 it is the expected outcome for every stream.
+    """
+
+    def __init__(self, client: Client, args, fixture: Fixture):
+        self.args = args
+        self.fixture = fixture
+        self.port = client.port
+        self.streams: list[dict[str, Any]] = []
+        self.threads: list[threading.Thread] = []
+        self.open_at = max(1, args.stream_after)
+        self.opened = False
+        # Plain ints, written by the main thread and read by the stream threads. The
+        # only thing they must be is monotone, so an int assignment under CPython is
+        # the whole synchronisation story; a lock here would serialise the
+        # measurement loop against the streams for no benefit.
+        self.creations = 0
+        self.pressure_creations = 0
+        self.creations_at_open = 0
+
+    def note_creation(self) -> None:
+        """One measured request created one channel. Called by the measured loop."""
+        self.creations += 1
+
+    def maybe_open(self, index: int, server: ServerProcess) -> None:
+        """Open the cohort once, early enough that the rest of the run outlasts it."""
+        if self.opened or index != self.open_at:
+            return
+        self.opened = True
+        self.creations_at_open = self.creations
+        cap = server.max_live_sessions
+        remaining = self.args.requests - index
+        if cap is not None and remaining <= cap and self.args.stream_pressure_kb <= 0:
+            raise SoakError(
+                f"Arm C needs more than MAX_LIVE_SESSIONS ({cap}) channel creations "
+                f"after the streams open, but only {remaining} requests remain after "
+                f"request {index} and --stream-pressure-kb 0 disabled the burst that "
+                f"would otherwise supply them. Use --requests {index + cap + 1} or "
+                f"more, or lower --stream-after."
+            )
+        client = Client(self.port)
+        try:
+            for slot in range(self.args.streams):
+                channel = f"soak-c-stream-{slot}-{uuid.uuid4().hex}"
+                status, response, _ = client.post("/initialize", {
+                    "channel_id": channel,
+                    "user_id": "soak",
+                    "startup_action": make_action(
+                        self.fixture, make_payload(self.args.payload_kb,
+                                                   self.args.payload_fill)),
+                    "timeout_seconds": self.args.request_timeout,
+                })
+                _require_200(status, response, f"/initialize (stream {slot})")
+                record: dict[str, Any] = {
+                    "slot": slot,
+                    "channel_id": channel,
+                    "opened_at_request": index,
+                    "events": {},
+                    "error": None,
+                    "http_status": None,
+                    "completed": False,
+                    "duration_s": None,
+                    "completed_at": None,
+                    "requests_at_completion": None,
+                }
+                self.streams.append(record)
+                thread = threading.Thread(
+                    target=self._run_stream,
+                    args=(record, response["access_token"]),
+                    daemon=True,
+                    name=f"soak-stream-{slot}",
+                )
+                self.threads.append(thread)
+                thread.start()
+        finally:
+            client.close()
+        self._apply_pressure(cap)
+
+    def _apply_pressure(self, cap: Optional[int]) -> None:
+        """Create cheap unique channels until the span clears the cap.
+
+        These are the "subsequent channel creations" the arm is about, and they are
+        issued concurrently rather than one at a time. Sequentially they are not
+        fast enough to be useful: a channel creation costs ~180 ms almost
+        independently of payload size, so 51 of them take ~9s — the same order as
+        the agent turn they are supposed to outlast, which is what left the observed
+        span one creation short of the cap at 49/50. A small pool collapses the
+        burst to a second or two, comfortably inside one turn.
+
+        Kept out of ``samples``, so the RSS and latency series stay a function of
+        the measured requests alone.
+        """
+        if cap is None or self.args.stream_pressure_kb <= 0:
+            return
+        payload = make_payload(self.args.stream_pressure_kb, self.args.payload_fill)
+        # One more than the cap: the premise is "more than MAX_LIVE_SESSIONS", and
+        # every one of these evicts something, so the streaming channels are offered
+        # for retirement cap+1 times over.
+        wanted = cap + 1 - (self.creations - self.creations_at_open)
+        if wanted <= 0:
+            return
+        with ThreadPoolExecutor(max_workers=PRESSURE_WORKERS) as pool:
+            for created in pool.map(lambda _: self._create_pressure_channel(payload),
+                                    range(wanted)):
+                self.creations += created
+                self.pressure_creations += created
+
+    def _create_pressure_channel(self, payload: str) -> int:
+        """One throwaway channel on its own connection. Returns 1 so callers can sum."""
+        client = Client(self.port)
+        try:
+            status, response, _ = client.post("/initialize", {
+                "channel_id": f"soak-c-pressure-{uuid.uuid4().hex}",
+                "user_id": "soak",
+                "startup_action": make_action(self.fixture, payload),
+                "timeout_seconds": self.args.request_timeout,
+            })
+            _require_200(status, response, "/initialize (arm C pressure channel)")
+            return 1
+        finally:
+            client.close()
+
+    def _run_stream(self, record: dict[str, Any], token: str) -> None:
+        started = time.time()
+        try:
+            record["http_status"], record["events"] = stream_ndjson(
+                self.port, token, self.args.stream_query, self.args.stream_timeout
+            )
+            record["completed"] = True
+        except Exception as exc:  # recorded, never raised into the main thread
+            record["error"] = f"{type(exc).__name__}: {exc}"
+        finally:
+            record["completed_at"] = time.time()
+            record["duration_s"] = record["completed_at"] - started
+            # How many channels were created while this turn was still registered.
+            # This — not the total request count — is what "spanning more than
+            # MAX_LIVE_SESSIONS subsequent creations" means.
+            record["creations_at_completion"] = self.creations
+
+    def finish(self, server: ServerProcess) -> dict[str, Any]:
+        """Join the cohort, then assert nothing evicted a stream while it ran."""
+        deadline = time.time() + self.args.stream_timeout + 60
+        for thread in self.threads:
+            thread.join(timeout=max(1.0, deadline - time.time()))
+        still_running = [t.name for t in self.threads if t.is_alive()]
+
+        events = server.retired_channel_events()
+        retired = {event["channel_id"] for event in events}
+        evicted_while_streaming, evicted_after_completion, unordered = (
+            self._classify_retirements(events))
+
+        spans = [
+            (record["creations_at_completion"] or 0) - self.creations_at_open
+            for record in self.streams
+        ]
+        creations_during = min(spans) if spans else 0
+        cap = server.max_live_sessions
+        violations: list[str] = []
+        if cap is not None and creations_during <= cap:
+            # Not a defect in the server — a defect in the run. Without the overlap
+            # the arm never put a streaming channel at risk, so "nothing was evicted"
+            # would be evidence of nothing.
+            shortest = min((r["duration_s"] or 0.0) for r in self.streams)
+            rate = creations_during / shortest if shortest else 0.0
+            violations.append(
+                f"the shortest-lived stream saw only {creations_during} channel "
+                f"creations while it was registered, which does not exceed "
+                f"MAX_LIVE_SESSIONS ({cap}); the arm's premise was not met, so "
+                f"'nothing was evicted' is evidence of nothing. The span is bounded "
+                f"by throughput, not by --requests: this server created "
+                f"{rate:.1f} channels/s and the shortest agent turn lasted "
+                f"{shortest:.1f}s, so ~{creations_during} is the most this workflow "
+                f"can span. Rerun with --max-live-sessions well below that (e.g. "
+                f"--max-live-sessions 10), which both satisfies the premise and "
+                f"raises the eviction pressure on the streaming channels."
+            )
+        if evicted_while_streaming:
+            violations.append(
+                "streaming channels were retired BEFORE their own turn completed: "
+                + ", ".join(evicted_while_streaming)
+            )
+        if unordered:
+            violations.append(
+                f"{len(unordered)} retirement(s) of a streaming channel could not be "
+                f"ordered against its turn, so the assertion is indeterminate rather "
+                f"than met: {', '.join(unordered)}"
+            )
+        for record in self.streams:
+            if record["error"]:
+                violations.append(
+                    f"stream {record['slot']} failed: {record['error']}")
+            elif record["http_status"] != 200:
+                violations.append(
+                    f"stream {record['slot']} returned HTTP {record['http_status']}")
+            elif not record["events"].get("output"):
+                violations.append(
+                    f"stream {record['slot']} produced no output event, so its turn "
+                    f"did not complete; events seen: {record['events']}")
+            if record["events"].get("error"):
+                violations.append(
+                    f"stream {record['slot']} emitted {record['events']['error']} "
+                    f"error event(s)")
+        if still_running:
+            violations.append(
+                f"streams still running after the join deadline: {still_running}")
+        if not server.log_level or server.log_level.upper() != "DEBUG":
+            violations.append(
+                "server log level is not DEBUG, so 'Retired channel_id' is not "
+                "logged and the no-eviction assertion had nothing to read; rerun "
+                "with --server-log-level DEBUG"
+            )
+
+        return {
+            "streams_requested": self.args.streams,
+            "streams_opened": len(self.streams),
+            "opened_at_request": self.open_at,
+            "creations_after_open": self.creations - self.creations_at_open,
+            "pressure_creations": self.pressure_creations,
+            "pressure_payload_kb": self.args.stream_pressure_kb,
+            "creations_while_registered_min": creations_during,
+            "creations_while_registered_per_stream": spans,
+            "max_live_sessions": cap,
+            "spans_more_than_cap": (
+                None if cap is None else creations_during > cap
+            ),
+            "eviction_assertion_readable": (
+                bool(server.log_level) and server.log_level.upper() == "DEBUG"),
+            "channels_retired_total": len(retired),
+            "streaming_channels_retired_during_turn": evicted_while_streaming,
+            "streaming_channels_retired_after_turn": evicted_after_completion,
+            "streaming_retirements_unordered": unordered,
+            "streams": self.streams,
+            "violations": violations,
+        }
+
+    def _classify_retirements(
+        self, events: list[dict[str, Any]]
+    ) -> tuple[list[str], list[str], list[str]]:
+        """Split streaming-channel retirements by when they happened.
+
+        Three buckets: mid-turn (the violation), at-or-after completion (expected —
+        ``trim_live_sessions`` retires a channel the moment its turn frees it, so
+        this is the designed outcome and with 60 unique channels against a cap of 50
+        it is the one to expect), and unorderable because no timestamp parsed
+        (indeterminate, and never silently treated as a pass).
+
+        The mid-turn threshold is one second rather than zero because the log
+        carries whole seconds only. The cost is stated rather than hidden: an
+        eviction in the final second of a turn is not distinguished from one just
+        after it. It does not weaken the arm, because the pressure burst spans the
+        whole ~10s turn, so a guard that failed to skip a busy channel would evict
+        it seconds before completion and land in the mid-turn bucket — and would
+        additionally show up as a missing output event or a context-loss sentinel.
+        """
+        during: list[str] = []
+        after: list[str] = []
+        unordered: list[str] = []
+        for record in self.streams:
+            completed_at = record["completed_at"]
+            for event in events:
+                if event["channel_id"] != record["channel_id"]:
+                    continue
+                if event["at"] is None or completed_at is None:
+                    unordered.append(f"{event['channel_id']} (no usable timestamp)")
+                    continue
+                delta = event["at"] - completed_at
+                if delta < -LOG_TIMESTAMP_RESOLUTION_S:
+                    during.append(
+                        f"{event['channel_id']} ({-delta:.0f}s before it completed)")
+                elif delta < LOG_TIMESTAMP_RESOLUTION_S:
+                    after.append(
+                        f"{event['channel_id']} (at completion, within the log's "
+                        f"{LOG_TIMESTAMP_RESOLUTION_S:.0f}s resolution)")
+                else:
+                    after.append(
+                        f"{event['channel_id']} (+{delta:.0f}s after it completed)")
+        return sorted(during), sorted(after), sorted(unordered)
+
+    def abandon(self) -> None:
+        """Threads are daemons and hold only their own sockets, so nothing to undo.
+
+        Present so the caller's ``finally`` has something honest to call on the
+        error path, where ``finish`` never ran.
+        """
+        return None
+
+
+def stream_ndjson(port: int, token: str, query: str,
+                  timeout: float) -> tuple[int, dict[str, int]]:
+    """Drive one ``/invoke_agent_stream`` turn and tally its NDJSON event types.
+
+    Read incrementally rather than with ``Client``: the whole point is to hold the
+    turn open, and a response fully buffered before the first assertion would
+    collapse the window the arm exists to create.
+    """
+    conn = HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        conn.request(
+            "POST", "/invoke_agent_stream",
+            body=json.dumps({"user_query": query,
+                             "timeout_seconds": int(timeout)}).encode(),
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {token}"},
+        )
+        response = conn.getresponse()
+        counts: dict[str, int] = {}
+        if response.status != 200:
+            response.read()
+            return response.status, counts
+        buffer = b""
+        while chunk := response.read(4096):
+            buffer += chunk
+            *lines, buffer = buffer.split(b"\n")
+            for line in lines:
+                _tally_ndjson_line(line, counts)
+        _tally_ndjson_line(buffer, counts)
+        return response.status, counts
+    finally:
+        conn.close()
+
+
+def _tally_ndjson_line(line: bytes, counts: dict[str, int]) -> None:
+    if not line.strip():
+        return
+    try:
+        kind = json.loads(line).get("type", "unparsed")
+    except ValueError:
+        kind = "unparsed"
+    counts[kind] = counts.get(kind, 0) + 1
+
+
+def run_replicate(paths: Paths, fixture: Fixture, args, replicate_index: int) -> Replicate:
     with ServerProcess(paths, startup_timeout=args.startup_timeout,
                        graceful=args.graceful_shutdown,
                        grace_seconds=args.grace_seconds,
                        baseline=args.baseline,
-                       server_tree=args.server_tree) as server:
+                       server_tree=args.server_tree,
+                       workflow_path=fixture.workflow_path,
+                       log_level=args.server_log_level) as server:
         client = Client(server.port)
+        streams: Optional[StreamingCohort] = None
         try:
             result = Replicate(
                 replicate=replicate_index,
@@ -912,34 +1795,61 @@ def run_replicate(paths: Paths, args, replicate_index: int) -> Replicate:
                 baseline=server.baseline,
                 policy_check=server.policy_check,
                 memory_metrics_available=bool(server.memory_metrics_available),
+                fixture=fixture.name,
+                fixture_note=fixture.note,
+                max_live_sessions=server.max_live_sessions,
+                max_live_sessions_source=server.max_live_sessions_source,
             )
             if replicate_index == 0:
                 result.forced_gc = forced_gc_availability(client)
 
-            token = _warmup(client, args)
-            first_probe = read_probe(client, server, 0)
+            streams = StreamingCohort(client, args, fixture) if args.arm == "c" else None
+            token = _warmup(client, fixture, args)
+            started_at = time.time()
+            first_probe = read_probe(client, server, 0, started_at)
             result.probes.append(first_probe)
-            result.cap_violations += check_caps(first_probe, args.arm)
+            retained_cap = retained_turn_allowance(args)
+            result.cap_violations += check_caps(first_probe, args.arm,
+                                                server.max_live_sessions, retained_cap)
 
             for index in range(1, args.requests + 1):
-                sample = _measured_request(client, server, args, index, token)
+                if streams is not None:
+                    streams.maybe_open(index, server)
+                sample = _measured_request(client, server, fixture, args, index, token)
                 result.samples.append(sample)
+                if streams is not None:
+                    streams.note_creation()
                 if index % args.probe_every == 0 or index == args.requests:
-                    probe = read_probe(client, server, index)
+                    probe = read_probe(client, server, index, started_at)
                     result.probes.append(probe)
-                    result.cap_violations += check_caps(probe, args.arm)
+                    result.cap_violations += check_caps(
+                        probe, args.arm, server.max_live_sessions, retained_cap)
+            if streams is not None:
+                result.streaming = streams.finish(server)
+            result.wall_clock_s = time.time() - started_at
+            result.eviction = server.eviction_diagnostics()
+            if replicate_index == 0:
+                # While the server is still up, so the directory being compared is
+                # the one the samples above were read from.
+                result.checkpoint_accounting = verify_checkpoint_accounting(
+                    paths, server.server_tree,
+                    os.path.join(server.speeddict_dir, "channel_checkpoints"),
+                )
+                result.checkpoint_accounting["walk"] = server.checkpoint_metrics()
             return result
         finally:
+            if streams is not None:
+                streams.abandon()
             client.close()
 
 
-def _warmup(client: Client, args) -> Optional[str]:
+def _warmup(client: Client, fixture: Fixture, args) -> Optional[str]:
     """One excluded warm-up request; for arm A1 it also mints the channel's token."""
     channel = f"soak-{args.arm}-{uuid.uuid4().hex}"
     body = {
         "channel_id": channel,
         "user_id": "soak",
-        "startup_action": make_action(make_payload(args.payload_kb, args.payload_fill)),
+        "startup_action": make_action(fixture, make_payload(args.payload_kb, args.payload_fill)),
         # Generous, so the startup turn never defers into a 202 that would turn a
         # latency sample into a poll loop.
         "timeout_seconds": args.request_timeout,
@@ -957,15 +1867,14 @@ def _warmup(client: Client, args) -> Optional[str]:
     return token
 
 
-def _measured_request(client: Client, server: ServerProcess, args, index: int,
-                      token: Optional[str]) -> Sample:
+def _measured_request(client: Client, server: ServerProcess, fixture: Fixture,
+                      args, index: int, token: Optional[str]) -> Sample:
     payload = make_payload(args.payload_kb, args.payload_fill)
-    if args.arm == "a0":
-        # Unique channel per request: the motivating production shape.
+    if args.arm in UNIQUE_CHANNEL_ARMS:
         body = {
-            "channel_id": f"soak-a0-{index}-{uuid.uuid4().hex}",
+            "channel_id": f"soak-{args.arm}-{index}-{uuid.uuid4().hex}",
             "user_id": "soak",
-            "startup_action": make_action(payload),
+            "startup_action": make_action(fixture, payload),
             "timeout_seconds": args.request_timeout,
         }
         status, response, latency = client.post("/initialize", body)
@@ -973,7 +1882,7 @@ def _measured_request(client: Client, server: ServerProcess, args, index: int,
     else:
         status, response, latency = client.post(
             "/perform_action",
-            {"action": make_action(payload), "timeout_seconds": args.request_timeout},
+            {"action": make_action(fixture, payload), "timeout_seconds": args.request_timeout},
             {"Authorization": f"Bearer {token}"},
         )
         _require_200(status, response, f"/perform_action (request {index})")
@@ -999,7 +1908,7 @@ def _require_200(status: int, body: dict, what: str) -> None:
 # Latency matrix (§16.6, Release A scope)
 # ---------------------------------------------------------------------------
 
-def run_latency(paths: Paths, args) -> dict[str, Any]:
+def run_latency(paths: Paths, fixture: Fixture, args) -> dict[str, Any]:
     with ServerProcess(paths, startup_timeout=args.startup_timeout,
                        graceful=args.graceful_shutdown,
                        grace_seconds=args.grace_seconds,
@@ -1007,8 +1916,10 @@ def run_latency(paths: Paths, args) -> dict[str, Any]:
                        server_tree=args.server_tree) as server:
         client = Client(server.port)
         try:
+            latency_started_at = time.time()
             results: dict[str, Any] = {"server_tree": server.server_tree,
-                                       "baseline": server.baseline}
+                                       "baseline": server.baseline,
+                                       "fixture": fixture.name}
 
             # First, on a still-empty registry: below MAX_RETAINED_STARTUP_TURNS
             # no retention sweep has run, which is the "without overflow" case.
@@ -1017,12 +1928,13 @@ def run_latency(paths: Paths, args) -> dict[str, Any]:
                 status, response, latency = client.post("/initialize", {
                     "channel_id": f"lat-turn-{index}-{uuid.uuid4().hex}",
                     "user_id": "soak",
-                    "startup_action": make_action(make_payload(args.payload_kb, args.payload_fill)),
+                    "startup_action": make_action(fixture, make_payload(args.payload_kb, args.payload_fill)),
                     "timeout_seconds": args.request_timeout,
                 })
                 _require_200(status, response, f"/initialize (turn completion {index})")
                 turn_latencies.append(latency)
-            overflow_probe = read_probe(client, server, CAP_RETAINED_TURNS - 1)
+            overflow_probe = read_probe(client, server, CAP_RETAINED_TURNS - 1,
+                                        latency_started_at)
             results["turn_completion_without_overflow"] = _latency_block(
                 turn_latencies,
                 "startup turn on a fresh channel while retained turns stay below the cap",
@@ -1040,7 +1952,7 @@ def run_latency(paths: Paths, args) -> dict[str, Any]:
             status, response, _ = client.post("/initialize", {
                 "channel_id": f"lat-hit-{uuid.uuid4().hex}",
                 "user_id": "soak",
-                "startup_action": make_action(make_payload(args.payload_kb, args.payload_fill)),
+                "startup_action": make_action(fixture, make_payload(args.payload_kb, args.payload_fill)),
                 "timeout_seconds": args.request_timeout,
             })
             _require_200(status, response, "/initialize (no-eviction warm-up)")
@@ -1049,7 +1961,7 @@ def run_latency(paths: Paths, args) -> dict[str, Any]:
             for index in range(args.latency_samples):
                 status, response, latency = client.post(
                     "/perform_action",
-                    {"action": make_action(make_payload(args.payload_kb, args.payload_fill)),
+                    {"action": make_action(fixture, make_payload(args.payload_kb, args.payload_fill)),
                      "timeout_seconds": args.request_timeout},
                     headers,
                 )
@@ -1064,7 +1976,7 @@ def run_latency(paths: Paths, args) -> dict[str, Any]:
             status, response, _ = client.post("/initialize", {
                 "channel_id": f"lat-depth-{uuid.uuid4().hex}",
                 "user_id": "soak",
-                "startup_action": make_action(make_payload(args.payload_kb, args.payload_fill)),
+                "startup_action": make_action(fixture, make_payload(args.payload_kb, args.payload_fill)),
                 "timeout_seconds": args.request_timeout,
             })
             _require_200(status, response, "/initialize (depth warm-up)")
@@ -1073,7 +1985,7 @@ def run_latency(paths: Paths, args) -> dict[str, Any]:
             for index in range(args.latency_depth):
                 status, response, latency = client.post(
                     "/perform_action",
-                    {"action": make_action(make_payload(args.payload_kb, args.payload_fill)),
+                    {"action": make_action(fixture, make_payload(args.payload_kb, args.payload_fill)),
                      "timeout_seconds": args.request_timeout},
                     headers,
                 )
@@ -1090,7 +2002,8 @@ def run_latency(paths: Paths, args) -> dict[str, Any]:
             )
             # Both figures are process-wide, not per-channel: this run left the 19
             # overflow-free channels and the no-eviction channel resident too.
-            depth_probe = read_probe(client, server, args.latency_depth)
+            depth_probe = read_probe(client, server, args.latency_depth,
+                                     latency_started_at)
             results["conversation_append_at_depth"].update(
                 process_wide_conversation_turns=depth_probe.conversation_turns,
                 process_wide_live_sessions=depth_probe.live_sessions,
@@ -1154,7 +2067,8 @@ def print_soak_report(args, paths: Paths, replicates: list[Replicate]) -> dict[s
     print(f"MEASURED TREE     : {tree_label}")
     print(f"                    {first.server_tree}")
     print("=" * 78)
-    print(f"workflow          : {paths.workflow_name} ({paths.workflow_path})")
+    print(f"workflow          : {first.fixture} ({args.fixture_path})")
+    print(f"fixture rationale : {first.fixture_note}")
     print(f"interpreter       : {paths.python}")
     print(f"requests/replicate: {args.requests} measured (+1 warm-up, excluded)")
     print(f"replicates        : {args.replicates} fresh server processes")
@@ -1194,7 +2108,7 @@ def print_soak_report(args, paths: Paths, replicates: list[Replicate]) -> dict[s
         print("-" * 78)
         print(f"  {'req':>6} {'RSS MB':>9} {'USS MB':>9} {'cgroup MB':>10} "
               f"{'live':>6} {'ret':>5} {'dspy':>5} {'convN':>6} {'convMB':>9} "
-              f"{'durRec':>7} {'durMB':>9}")
+              f"{'durRec':>7} {'durMB':>9} {'ckPhyMB':>9} {'ckAppMB':>9} {'ckCh':>6}")
         by_index = {s.index: s for s in rep.samples}
         for probe in rep.probes:
             sample = by_index.get(probe.index)
@@ -1206,7 +2120,10 @@ def print_soak_report(args, paths: Paths, replicates: list[Replicate]) -> dict[s
                   f"{_num(probe.dspy_cache_entries):>5} "
                   f"{_num(probe.conversation_turns):>6} "
                   f"{_mb(probe.conversation_bytes):>9} "
-                  f"{probe.durable_records:>7} {_mb(probe.durable_conversation_bytes):>9}")
+                  f"{probe.durable_records:>7} {_mb(probe.durable_conversation_bytes):>9} "
+                  f"{_mb(probe.checkpoint_bytes_physical):>9} "
+                  f"{_mb(probe.checkpoint_bytes_apparent):>9} "
+                  f"{probe.checkpoint_channels:>6}")
         rss_slope = second_half_slope_mb(rep.samples, "rss_bytes")
         uss_slope = second_half_slope_mb(rep.samples, "uss_bytes")
         latencies = [s.latency_s for s in rep.samples]
@@ -1250,8 +2167,13 @@ def print_soak_report(args, paths: Paths, replicates: list[Replicate]) -> dict[s
     max_dspy = max((p.dspy_cache_entries for r in replicates for p in r.probes), default=0)
     max_conv = max((p.conversation_turns for r in replicates for p in r.probes), default=0)
     max_live = max((p.live_sessions for r in replicates for p in r.probes), default=0)
-    print(f"  retained_turns      max {max_retained:>6}  cap {CAP_RETAINED_TURNS:>6}  "
-          f"{'OK' if max_retained <= CAP_RETAINED_TURNS else 'VIOLATED'}")
+    retained_cap = retained_turn_allowance(args)
+    print(f"  retained_turns      max {max_retained:>6}  cap {retained_cap:>6}  "
+          f"{'OK' if max_retained <= retained_cap else 'VIOLATED'}")
+    if retained_cap != CAP_RETAINED_TURNS:
+        print(f"    cap is MAX_RETAINED_STARTUP_TURNS ({CAP_RETAINED_TURNS}) + "
+              f"{args.streams} concurrent stream(s): retained_turns counts active "
+              f"executions too, and only the terminal ones are what the cap bounds.")
     print(f"  dspy_cache.entries  max {max_dspy:>6}  cap {CAP_DSPY_CACHE_ENTRIES:>6}  "
           f"{'OK' if max_dspy <= CAP_DSPY_CACHE_ENTRIES else 'VIOLATED'}")
     if args.arm == "a1":
@@ -1259,9 +2181,40 @@ def print_soak_report(args, paths: Paths, replicates: list[Replicate]) -> dict[s
               f"{'OK' if max_conv <= CAP_CONVERSATION_TURNS else 'VIOLATED'}   "
               f"(process-wide total; arm A1 keeps exactly {max_live} live channel)")
     else:
-        print(f"  conversations.turns max {max_conv:>6}  (process-wide total: arm A0 "
-              f"holds one turn per live channel, so this tracks live_sessions)")
-    print(f"  live_sessions       max {max_live:>6}  cap   2000  (unchanged in Release A)")
+        print(f"  conversations.turns max {max_conv:>6}  (process-wide total: the "
+              f"unique-channel arms hold one turn per live channel, so this tracks "
+              f"live_sessions)")
+    if args.arm in ("a", "c") and first.max_live_sessions is not None:
+        print(f"  live_sessions       max {max_live:>6}  cap {first.max_live_sessions:>6}  "
+              f"{'OK' if max_live <= first.max_live_sessions else 'VIOLATED'}   "
+              f"(Release C, source={first.max_live_sessions_source})")
+    elif args.arm == "b":
+        print(f"  live_sessions       max {max_live:>6}  cap "
+              f"{_num(first.max_live_sessions):>6}  RECORDED, NOT GATED   "
+              f"(arm B pins by construction; unbounded growth IS the result)")
+    elif first.max_live_sessions in (None, 2000):
+        print(f"  live_sessions       max {max_live:>6}  cap   2000  "
+              f"(unchanged in Release A)")
+    elif args.arm not in UNIQUE_CHANNEL_ARMS:
+        # A1 drives one channel, so it is never near any cap and a changed default
+        # cannot have touched its numbers. Flagging a broken premise here would be
+        # a false alarm on the one arm the cap is irrelevant to.
+        print(f"  live_sessions       max {max_live:>6}  cap "
+              f"{first.max_live_sessions:>6}  OK   (immaterial to arm "
+              f"{args.arm.upper()}, which reuses a single channel)")
+    else:
+        # A0's pre-registered expectation is "the session cache still retains every
+        # unique channel at the unchanged 2,000 default". On a Release C tree the
+        # default is 50, so the arm no longer measures what §16.5.1 recorded, and
+        # saying "cap 2000" here would misattribute the resulting number.
+        print(f"  live_sessions       max {max_live:>6}  cap "
+              f"{first.max_live_sessions:>6}  PREMISE BROKEN")
+        print(f"    Arm {args.arm.upper()} assumes the Release A default of 2,000, but "
+              f"this server resolved {first.max_live_sessions} "
+              f"(source={first.max_live_sessions_source}). Eviction is therefore active "
+              f"and this run is NOT comparable to §16.5.1. To reproduce that number, "
+              f"point --server-tree at a Release A checkout, or pass "
+              f"--max-live-sessions 2000.")
     violations = [v for r in replicates for v in r.cap_violations]
     for violation in violations:
         print(f"  VIOLATION: {violation}")
@@ -1269,8 +2222,21 @@ def print_soak_report(args, paths: Paths, replicates: list[Replicate]) -> dict[s
     return _finish_verdict(args, replicates, rss_summary, violations, first)
 
 
+#: Which arms the design's shipping targets actually gate the slope on.
+#: Release A gates arm A1; Release C gates arms A and C. A0 and B are recorded and
+#: quoted verbatim (§1.2 and §1.4 respectively), so a failing slope there is the
+#: pre-registered expectation rather than a build break.
+SLOPE_GATED_ARMS = ("a1", "a", "c")
+
+
 def _finish_verdict(args, replicates: list[Replicate], rss_summary: dict,
                     violations: list[str], first: Replicate) -> dict[str, Any]:
+    plateau = analyze_durable_plateau(args, replicates)
+    eviction = print_eviction_section(args, replicates)
+    print_durable_plateau(plateau)
+    print()
+    streaming = _print_streaming_section(replicates) if args.arm == "c" else None
+
     print("-" * 78)
     print("VERDICT")
     print("-" * 78)
@@ -1280,14 +2246,17 @@ def _finish_verdict(args, replicates: list[Replicate], rss_summary: dict,
         "arm": args.arm,
         "baseline": first.baseline,
         "server_tree": first.server_tree,
+        "fixture": first.fixture,
+        "fixture_note": first.fixture_note,
         "caps_held": None if first.baseline else not violations,
         "cap_violations": violations,
         "rss_slope_upper_bound_mb_per_request": upper,
         "slope_target_mb_per_request": SLOPE_TARGET_MB_PER_REQUEST,
-        # The gate is a Release A acceptance criterion. Measuring the baseline is
-        # how the slope gets attributed, not a pass/fail event for the old code.
-        "slope_gate_applies": args.arm == "a1" and not first.baseline,
+        "slope_gate_applies": args.arm in SLOPE_GATED_ARMS and not first.baseline,
         "slope_gate_binding": binding,
+        "durable_plateau": plateau,
+        "eviction": eviction,
+        "streaming": streaming,
     }
 
     if first.baseline:
@@ -1306,38 +2275,78 @@ def _finish_verdict(args, replicates: list[Replicate], rss_summary: dict,
         print()
         return verdict
 
+    observed = "above" if upper > SLOPE_TARGET_MB_PER_REQUEST else "at or below"
     if args.arm == "a1":
         conv_note = _plateau_note(replicates)
         print(f"  in-memory conversation bytes: {conv_note}")
+        verdict["conversation_bytes"] = conv_note
+
+    if args.arm in SLOPE_GATED_ARMS:
+        release = "A" if args.arm == "a1" else "C"
         meets = not math.isnan(upper) and upper <= SLOPE_TARGET_MB_PER_REQUEST
         label = "PASS" if meets else "FAIL"
-        verdict |= {"conversation_bytes": conv_note, "slope_gate_met": meets}
-        if binding:
-            print(f"  GATE (Release A, arm A1): RSS slope upper bound {upper:+.5f} "
-                  f"<= {SLOPE_TARGET_MB_PER_REQUEST} MB/request ... {label}")
-        else:
-            print(f"  GATE (Release A, arm A1): RSS slope upper bound {upper:+.5f} vs "
-                  f"{SLOPE_TARGET_MB_PER_REQUEST} MB/request ... {label} (ADVISORY)")
+        verdict["slope_gate_met"] = meets
+        suffix = "" if binding else " (ADVISORY)"
+        print(f"  GATE (Release {release}, arm {args.arm.upper()}): RSS slope upper "
+              f"bound {upper:+.5f} <= {SLOPE_TARGET_MB_PER_REQUEST} MB/request "
+              f"... {label}{suffix}")
+        if not binding:
             print(f"    ADVISORY because {args.requests} measured requests is below the "
                   f"§16.5 minimum of {MIN_REQUESTS_FOR_BINDING_GATE}; at this sample "
                   f"count the slope is dominated by allocator warm-up.")
-    else:
+        # Unlike the slope, a cap breach is a single observed sample above a fixed
+        # ceiling, so it is binding at any request count.
+        print(f"  GATE (Release {release}, arm {args.arm.upper()}): structural caps held "
+              + ("... PASS" if not violations else "... FAIL — see VIOLATION above"))
+        if args.arm == "c":
+            print("  GATE (Release C, arm C): streaming invariants ... "
+                  + ("PASS" if not (streaming or {}).get("violations")
+                     else "FAIL — see STREAMING above"))
+    elif args.arm == "a0":
         print(f"  Arm A0 is RECORDED, NOT GATED (§16.5). RSS slope upper bound "
               f"{upper:+.5f} MB/request.")
         print(f"    Pre-registered expectation: materially below the unpatched baseline "
               f"but ABOVE {SLOPE_TARGET_MB_PER_REQUEST} MB/request, because the "
               f"live-session cache still retains every unique channel at the unchanged "
               f"2000 default.")
-        observed = ("above" if upper > SLOPE_TARGET_MB_PER_REQUEST else "at or below")
         print(f"    Observed: {observed} the {SLOPE_TARGET_MB_PER_REQUEST} MB/request "
               f"target. Quote this number verbatim in §1.2 and the release notes.")
         print("    Structural caps above ARE gated for this arm.")
         verdict["slope_vs_target"] = observed
+    else:
+        max_live = max((p.live_sessions or 0 for r in replicates for p in r.probes),
+                       default=0)
+        pinned = max((e.get("pinned_reported_max", 0)
+                      for e in eviction["per_replicate"]), default=0)
+        pinned_monotone = _monotone_non_decreasing(
+            e.get("pinned_reported_series") or [] for e in eviction["per_replicate"])
+        monotone = _live_sessions_monotone(replicates)
+        print("  Arm B is RECORDED, NOT GATED (§16.5); quote it verbatim in §1.4.")
+        print("    Pre-registered expectation: slope materially above target, live "
+              "sessions grow without bound, pinned count rises monotonically.")
+        print(f"    RSS slope upper bound {upper:+.5f} MB/request — {observed} the "
+              f"{SLOPE_TARGET_MB_PER_REQUEST} target.")
+        print(f"    live_sessions reached {max_live} over {args.requests} requests "
+              f"(cap {_num(first.max_live_sessions)}), monotone non-decreasing: "
+              f"{monotone}.")
+        print(f"    Server-reported pinned count peaked at {pinned}, monotone "
+              f"non-decreasing: {pinned_monotone}.")
+        verdict |= {
+            "slope_vs_target": observed,
+            "max_live_sessions_observed": max_live,
+            "live_sessions_monotone": monotone,
+            "pinned_reported_max": pinned,
+            "pinned_monotone": pinned_monotone,
+        }
 
-    # A cap breach always fails the run; the slope only does so once the sample
-    # count makes the gate binding.
-    verdict["run_failed"] = bool(violations) or (
-        args.arm == "a1" and binding and not verdict.get("slope_gate_met", False)
+    # A cap breach always fails the run; the slope only does so once the sample count
+    # makes the gate binding. Arm C's streaming invariants are not sample-size
+    # dependent — a closed context is a defect at any run length — so they always bind.
+    verdict["run_failed"] = bool(violations) or bool(
+        (streaming or {}).get("violations")
+    ) or (
+        args.arm in SLOPE_GATED_ARMS and binding
+        and not verdict.get("slope_gate_met", False)
     )
 
     print()
@@ -1346,6 +2355,342 @@ def _finish_verdict(args, replicates: list[Replicate], rss_summary: dict,
     print("  and do not sum ablation deltas as independent shares (§16.5).")
     print()
     return verdict
+
+
+def _monotone_non_decreasing(serieses) -> bool:
+    return all(
+        all(after >= before for before, after in zip(series, series[1:]))
+        for series in serieses
+    )
+
+
+def _live_sessions_monotone(replicates: list[Replicate]) -> bool:
+    """Arm B's "live sessions grow without bound", checked rather than asserted."""
+    return _monotone_non_decreasing(
+        [p.live_sessions for p in rep.probes if p.live_sessions is not None]
+        for rep in replicates
+    )
+
+
+def _print_streaming_section(replicates: list[Replicate]) -> dict[str, Any]:
+    print("-" * 78)
+    print("STREAMING (§16.5 arm C)")
+    print("-" * 78)
+    merged: dict[str, Any] = {"violations": [], "per_replicate": []}
+    for rep in replicates:
+        block = rep.streaming or {}
+        merged["per_replicate"].append(block)
+        merged["violations"] += block.get("violations", [])
+        print(f"  replicate {rep.replicate + 1}: {block.get('streams_opened')} stream(s) "
+              f"opened at request {block.get('opened_at_request')}; while registered "
+              f"they spanned {block.get('creations_while_registered_min')} channel "
+              f"creations (per stream "
+              f"{block.get('creations_while_registered_per_stream')}), "
+              f"cap {_num(block.get('max_live_sessions'))}, "
+              f"spans more than cap: {block.get('spans_more_than_cap')}")
+        print(f"    of {block.get('creations_after_open')} creations after the open, "
+              f"{block.get('pressure_creations')} were the "
+              f"{block.get('pressure_payload_kb')} KB pressure burst (excluded from "
+              f"the measured series)")
+        print(f"    channels retired during the run: "
+              f"{block.get('channels_retired_total')}")
+        print(f"    streaming channels retired MID-TURN (violation): "
+              f"{block.get('streaming_channels_retired_during_turn') or 'none'}")
+        print(f"    streaming channels retired at/after their turn (expected): "
+              f"{block.get('streaming_channels_retired_after_turn') or 'none'}")
+        for stream in block.get("streams", []):
+            print(f"    stream {stream['slot']}: HTTP {stream['http_status']}, "
+                  f"{stream['duration_s']:.1f}s, events {stream['events']}"
+                  + (f", ERROR {stream['error']}" if stream["error"] else ""))
+    print("  Assertion: a streaming turn's channel is never retired while its turn is "
+          "registered.")
+    print("  Evidence: each 'Retired channel_id' line's own log timestamp is compared "
+          "against")
+    print("  the completion time of that stream, so a retirement after the turn ended — "
+          "which")
+    print("  is what trim_live_sessions is for, and is expected here — is not counted "
+          "against")
+    print("  the assertion. The log carries whole seconds only, so an eviction inside "
+          "the")
+    print("  final second of a turn is not distinguished from one just after it; the "
+          "burst")
+    print("  spans the whole turn, so a broken busy-channel guard would evict seconds "
+          "early.")
+    print("  'No detached executor writes' is observed as the ABSENCE of the delivery-"
+          "deadline")
+    print("  warning plus a completed output event for every stream: the streaming path "
+          "awaits")
+    print("  its executor future to completion by construction, so a detached write has "
+          "no")
+    print("  code path to occur on — only the deadline warning would precede one.")
+    for violation in merged["violations"]:
+        print(f"  VIOLATION: {violation}")
+    print()
+    return merged
+
+
+def analyze_durable_plateau(args, replicates: list[Replicate]) -> dict[str, Any]:
+    """Did total physical checkpoint bytes stop growing, and if not, why not.
+
+    §16.5 gates Release C on total physical bytes per namespace reaching a plateau
+    and explicitly refuses a bytes-per-1,000-requests rate as a substitute. So this
+    reports the plateau or reports that it was not observed — it never converts a
+    growth rate into a pass.
+
+    Reclamation needs BOTH of two things, and a short soak has neither:
+
+    1. **A reap pass must fire.** The server's lifespan task sleeps
+       ``CHECKPOINT_REAP_INTERVAL_SECONDS`` (300 s) *before* its first pass, so the
+       first is at t=300 s and the second at t=600 s. A 300-request arm-A soak
+       finishes in well under a minute.
+    2. **Something must be reclaimable.** ``RetentionPolicy``'s defaults are
+       ``max_age_seconds=86400`` and ``max_channels=1000``. Nothing in a soak is 24 h
+       old, so the age window never fires; the count cap is the only live mechanism,
+       and below 1,000 channels on disk it reclaims nothing. A reap pass that fires
+       at 300 channels is a no-op.
+
+    Neither constant has an environment override and the harness will not reach into
+    the store to reap on the server's behalf — a second writer per channel is
+    precisely what ``ChannelCheckpointStore`` is documented not to have. So the
+    required run length is stated instead: get past the count cap, then span two
+    passes.
+    """
+    per_request_s = statistics.fmean(
+        [statistics.fmean([s.latency_s for s in r.samples])
+         for r in replicates if r.samples]
+    ) if any(r.samples for r in replicates) else float("nan")
+
+    series = []
+    for rep in replicates:
+        points = [(p.elapsed_s, p.checkpoint_bytes_physical, p.checkpoint_bytes_apparent,
+                   p.checkpoint_channels, p.index) for p in rep.probes]
+        decreases = sum(
+            1 for before, after in zip(points, points[1:]) if after[1] < before[1]
+        )
+        series.append({
+            "replicate": rep.replicate,
+            "wall_clock_s": rep.wall_clock_s,
+            "reap_passes_elapsed": int(rep.wall_clock_s // REAP_INTERVAL_SECONDS),
+            "reap_passes_reclaiming": (rep.eviction or {}).get(
+                "reap_passes_reclaiming", []),
+            "final_bytes_physical": points[-1][1] if points else 0,
+            "final_bytes_apparent": points[-1][2] if points else 0,
+            "final_channels_on_disk": points[-1][3] if points else 0,
+            "bytes_physical_decreases": decreases,
+            "second_half_slope_bytes_per_request": (
+                least_squares_slope(
+                    [float(p[4]) for p in points[len(points) // 2:]],
+                    [float(p[1]) for p in points[len(points) // 2:]],
+                ) if len(points) >= 4 else float("nan")
+            ),
+        })
+
+    passes = min((s["reap_passes_elapsed"] for s in series), default=0)
+    max_channels_seen = max((s["final_channels_on_disk"] for s in series), default=0)
+    reclaimed = any(s["bytes_physical_decreases"] for s in series) or any(
+        s["reap_passes_reclaiming"] for s in series)
+
+    blockers = []
+    if args.arm not in UNIQUE_CHANNEL_ARMS:
+        # Arm A1 drives one channel forever. Its namespace holds a single record, so
+        # the count cap can never bind and no run length would make a plateau
+        # observable. Saying so beats printing a required-request count that is a
+        # projection from a workload the arm does not run.
+        return {
+            "gate": "total physical bytes per namespace reach a plateau (§16.5)",
+            "accounting_cross_check": replicates[0].checkpoint_accounting,
+            "observed": "not applicable",
+            "plateau_observable_at_this_run_length": None,
+            "blockers": [
+                f"arm {args.arm.upper()} drives a single channel, so the checkpoint "
+                f"namespace holds one record and cannot reach "
+                f"RetentionPolicy.max_channels={RETENTION_MAX_CHANNELS} at any run "
+                f"length. The plateau gate is a property of the unique-channel "
+                f"workload; measure it on arm A or C."
+            ],
+            "reclamation_observed": reclaimed,
+            "mean_request_seconds": per_request_s,
+            "required_requests_for_plateau_measurement": None,
+            "required_wall_clock_seconds": None,
+            "projected_durable_gib_at_required_length": None,
+            "per_replicate": series,
+        }
+    if max_channels_seen == 0 and not any(
+            s["final_bytes_physical"] for s in series):
+        # Arm B pins every session, so nothing is ever evicted and nothing is ever
+        # checkpointed. Durable bytes are flat at zero, which satisfies the letter
+        # of a plateau and tests none of its substance; the growth that arm records
+        # is in memory. Reporting the required-run-length projection here would
+        # invite reading a vacuous zero as a pass.
+        return {
+            "gate": "total physical bytes per namespace reach a plateau (§16.5)",
+            "accounting_cross_check": replicates[0].checkpoint_accounting,
+            "observed": "flat at zero — vacuous",
+            "plateau_observable_at_this_run_length": None,
+            "blockers": [
+                f"arm {args.arm.upper()} wrote no checkpoints at all: every session "
+                f"pinned, so nothing was evicted and the namespace stayed empty. "
+                f"Bytes are constant at zero, which is not the bounded-after-growth "
+                f"plateau the gate is about. Measure the plateau on arm A or C."
+            ],
+            "reclamation_observed": reclaimed,
+            "mean_request_seconds": per_request_s,
+            "required_requests_for_plateau_measurement": None,
+            "required_wall_clock_seconds": None,
+            "projected_durable_gib_at_required_length": None,
+            "per_replicate": series,
+        }
+    if passes < REAP_PASSES_FOR_PLATEAU:
+        blockers.append(
+            f"the run spanned {passes} reap interval(s) of "
+            f"{REAP_INTERVAL_SECONDS:.0f}s; a plateau claim needs at least "
+            f"{REAP_PASSES_FOR_PLATEAU}"
+        )
+    if max_channels_seen <= RETENTION_MAX_CHANNELS:
+        blockers.append(
+            f"only {max_channels_seen} channels reached disk, at or below "
+            f"RetentionPolicy.max_channels={RETENTION_MAX_CHANNELS}, so a reap pass "
+            f"would have had nothing to reclaim even if one had fired "
+            f"(max_age_seconds={RETENTION_MAX_AGE_SECONDS:.0f}s cannot fire in a soak)"
+        )
+
+    if math.isnan(per_request_s) or per_request_s <= 0:
+        required_requests = None
+        required_wall_s = None
+    else:
+        # Both conditions at once, not one after the other: the count cap is passed
+        # at request 1,001 whatever the clock says, so the two requirements overlap
+        # and the larger one governs. At any rate faster than
+        # 2 x 300 s / 1,000 = 600 ms/request the clock is what binds.
+        required_requests = max(
+            RETENTION_MAX_CHANNELS + 1,
+            math.ceil(REAP_PASSES_FOR_PLATEAU * REAP_INTERVAL_SECONDS / per_request_s),
+        )
+        required_wall_s = required_requests * per_request_s
+
+    # Disk, not memory, is what actually stops a plateau run: the conversation store
+    # is append-only and is not what retention reaps, so it keeps every payload.
+    observed_durable = max(
+        (p.durable_speeddict_bytes for r in replicates for p in r.probes), default=0)
+    observed_requests = max((len(r.samples) for r in replicates), default=0)
+    projected_gib = (
+        observed_durable / observed_requests * required_requests / (1024 ** 3)
+        if observed_requests and required_requests else None
+    )
+
+    return {
+        "gate": "total physical bytes per namespace reach a plateau (§16.5)",
+        "accounting_cross_check": replicates[0].checkpoint_accounting,
+        "observed": "plateau" if (reclaimed and not blockers) else "no plateau",
+        "plateau_observable_at_this_run_length": not blockers,
+        "blockers": blockers,
+        "reclamation_observed": reclaimed,
+        "reap_interval_seconds": REAP_INTERVAL_SECONDS,
+        "reap_passes_required_for_claim": REAP_PASSES_FOR_PLATEAU,
+        "retention_max_channels": RETENTION_MAX_CHANNELS,
+        "retention_max_age_seconds": RETENTION_MAX_AGE_SECONDS,
+        "mean_request_seconds": per_request_s,
+        "required_requests_for_plateau_measurement": required_requests,
+        "required_wall_clock_seconds": required_wall_s,
+        "projected_durable_gib_at_required_length": projected_gib,
+        "per_replicate": series,
+    }
+
+
+def print_durable_plateau(analysis: dict[str, Any]) -> None:
+    print("-" * 78)
+    print("DURABLE STORAGE PLATEAU (§16.5: total physical bytes per namespace)")
+    print("-" * 78)
+    for rep in analysis["per_replicate"]:
+        print(f"  replicate {rep['replicate'] + 1}: "
+              f"final physical {rep['final_bytes_physical'] / (1024 * 1024):.1f} MB, "
+              f"apparent {rep['final_bytes_apparent'] / (1024 * 1024):.1f} MB, "
+              f"{rep['final_channels_on_disk']} channels, "
+              f"{rep['wall_clock_s']:.1f}s wall, "
+              f"{rep['reap_passes_elapsed']} reap interval(s) spanned, "
+              f"{rep['bytes_physical_decreases']} byte decrease(s)")
+    check = analysis.get("accounting_cross_check") or {}
+    if check.get("available"):
+        store, walk = check["store"], check["walk"]
+        agree = all(store[key] == walk[key] for key in
+                    ("total_bytes_physical", "total_bytes_apparent", "total_files",
+                     "channels", "generations"))
+        print(f"  accounting cross-check vs ChannelCheckpointStore.stats(): "
+              f"{'AGREES' if agree else 'DISAGREES'}")
+        print(f"    store: {store['describe']}")
+        if not agree:
+            print(f"    walk : {walk}")
+            print("    The gated number is the store's, not the walk's; treat the walk's "
+                  "per-sample series as indicative until they agree.")
+    else:
+        print(f"  accounting cross-check: UNAVAILABLE — {check.get('reason')}")
+    if analysis["observed"] == "plateau":
+        print("  PLATEAU OBSERVED — physical bytes stopped growing under the stated "
+              "retention policy.")
+        return
+    if analysis["observed"] in ("not applicable", "flat at zero — vacuous"):
+        print(f"  PLATEAU NOT MEASURABLE ON THIS ARM ({analysis['observed']}).")
+        for blocker in analysis["blockers"]:
+            print(f"    - {blocker}")
+        return
+    print("  PLATEAU NOT OBSERVED. This is a measurement-window result, not a "
+          "finding about")
+    print("  the retention policy: the run was too short for reclamation to be "
+          "possible at all.")
+    for blocker in analysis["blockers"]:
+        print(f"    - {blocker}")
+    required = analysis["required_requests_for_plateau_measurement"]
+    if required is not None:
+        print(f"  A real plateau measurement needs about {required} requests "
+              f"(~{analysis['required_wall_clock_seconds'] / 60:.0f} min at the "
+              f"observed {analysis['mean_request_seconds'] * 1000:.0f} ms/request):")
+        print(f"    whichever is larger of {RETENTION_MAX_CHANNELS + 1} requests (to "
+              f"pass RetentionPolicy.max_channels) and "
+              f"{math.ceil(REAP_PASSES_FOR_PLATEAU * REAP_INTERVAL_SECONDS / analysis['mean_request_seconds'])} "
+              f"requests (to span {REAP_PASSES_FOR_PLATEAU} reap intervals).")
+        if projected := analysis.get("projected_durable_gib_at_required_length"):
+            print(f"    Budget ~{projected:.1f} GiB of free space under "
+                  f"SPEEDDICT_FOLDERNAME for that run: the conversation store keeps "
+                  f"every payload and only the checkpoint namespace is reaped.")
+    print("  The observed byte growth is deliberately NOT reported as a "
+          "bytes-per-1,000-requests")
+    print("  rate: §16.5 rejects any positive rate as a bound, because a rate grows "
+          "forever.")
+
+
+def print_eviction_section(args, replicates: list[Replicate]) -> dict[str, Any]:
+    """Eviction, pinning and loss-sentinel counts from the servers' own logs."""
+    print("-" * 78)
+    print("EVICTION AND PINNING (from the server's own log)")
+    print("-" * 78)
+    merged: dict[str, Any] = {"per_replicate": []}
+    sentinels: dict[str, int] = {}
+    for rep in replicates:
+        diag = rep.eviction or {}
+        merged["per_replicate"].append(diag)
+        for name, count in (diag.get("sentinels") or {}).items():
+            sentinels[name] = sentinels.get(name, 0) + count
+        print(f"  replicate {rep.replicate + 1}: "
+              f"max_live_sessions={_num(rep.max_live_sessions)} "
+              f"(source={rep.max_live_sessions_source or 'not reported by this tree'}), "
+              f"retired={diag.get('retired_channels', 0)}, "
+              f"over-target warnings={diag.get('over_target_warnings', 0)}, "
+              f"pinned reported max={diag.get('pinned_reported_max', 0)}")
+        for reason in diag.get("pin_reasons") or []:
+            print(f"    pin reason: {reason}")
+    merged["sentinels"] = sentinels
+    merged["sentinels_total"] = sum(sentinels.values())
+    print(f"  context-loss sentinels: {merged['sentinels_total']} total"
+          + (f" -> {[k for k, v in sentinels.items() if v]}"
+             if merged["sentinels_total"] else " (none)"))
+    if args.arm in ("a", "c") and not any(
+        (rep.eviction or {}).get("retired_channels") for rep in replicates
+    ):
+        print("  NOTE: zero retirements were logged. Retirement is logged at DEBUG, so "
+              "either")
+        print("  the cap was never exceeded or --server-log-level is not DEBUG.")
+    print()
+    return merged
 
 
 def _plateau_note(replicates: list[Replicate]) -> str:
@@ -1426,9 +2771,12 @@ def build_parser() -> argparse.ArgumentParser:
         description="Memory/latency soak for the run_fastapi_mcp server (§16.5, §16.6).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--arm", choices=["a0", "a1"], default="a1",
-                        help="a0 = unique channel per request (recorded); "
-                             "a1 = one hot channel (gated)")
+    parser.add_argument("--arm", choices=["a0", "a1", "a", "b", "c"], default="a1",
+                        help="Release A: a0 = unique channel per request (recorded), "
+                             "a1 = one hot channel (gated). Release C: a = evictable "
+                             "unique-channel (gated), b = pinned/undeclared workflow "
+                             "(recorded, quoted in §1.4), c = arm A plus concurrent "
+                             "/invoke_agent_stream turns (gated)")
     parser.add_argument("--requests", type=int, default=300,
                         help="measured requests per replicate, excluding the warm-up")
     parser.add_argument("--replicates", type=int, default=3,
@@ -1472,6 +2820,38 @@ def build_parser() -> argparse.ArgumentParser:
                         help="checkout the SERVER subprocess imports fastworkflow from "
                              "(cwd + PYTHONPATH). The harness always runs from the "
                              "working tree. Defaults to the working tree.")
+    parser.add_argument("--max-live-sessions", type=int, default=None,
+                        help="override MAX_LIVE_SESSIONS in the server's process "
+                             "environment. resolve_max_live_sessions() reads the OS "
+                             "environment first, so this wins over the env file. Left "
+                             "unset the server's own default (50) applies; the effective "
+                             "value is always read back from its startup record.")
+    parser.add_argument("--server-log-level", default=None,
+                        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+                        help="LOG_LEVEL for the server process. Arm C defaults this to "
+                             "DEBUG because 'Retired channel_id' is logged at DEBUG and "
+                             "is the only direct evidence for its no-eviction assertion")
+    parser.add_argument("--streams", type=int, default=3,
+                        help="arm C only: concurrent /invoke_agent_stream turns. Each "
+                             "runs the agent, so each is a real LLM call")
+    parser.add_argument("--stream-after", type=int, default=5,
+                        help="arm C only: the request index at which the streams open. "
+                             "Everything after it is the creation burst they must "
+                             "survive, so --requests must exceed it by more than "
+                             "MAX_LIVE_SESSIONS")
+    parser.add_argument("--stream-pressure-kb", type=int, default=1,
+                        help="arm C only: payload for the burst of cheap channel "
+                             "creations issued right after the streams open, which is "
+                             "what supplies the required span of more than "
+                             "MAX_LIVE_SESSIONS creations. Excluded from the measured "
+                             "series. 0 disables the burst and leaves the span to the "
+                             "measured loop, where it is not reliably reached")
+    parser.add_argument("--stream-timeout", type=float, default=180.0,
+                        help="arm C only: per-stream deadline, seconds")
+    parser.add_argument("--stream-query", default="add 2 and 3",
+                        help="arm C only: the natural-language query each stream sends. "
+                             "/invoke_agent_stream strips a leading '/', so there is no "
+                             "deterministic route through it")
     return parser
 
 
@@ -1484,6 +2864,14 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     paths = resolve_paths()
     args.server_tree = os.path.realpath(args.server_tree or paths.repo_root)
+    if args.arm == "c" and args.server_log_level is None:
+        # Not silently: the alternative is an assertion with nothing to read, which
+        # would look like a pass.
+        args.server_log_level = "DEBUG"
+        print("[soak] arm C: defaulting --server-log-level to DEBUG so the "
+              "no-eviction assertion has evidence to read", flush=True)
+    if args.max_live_sessions is not None:
+        os.environ["MAX_LIVE_SESSIONS"] = str(args.max_live_sessions)
     started_at = time.time()
 
     # Resolve the server's import before spending minutes measuring it. The whole
@@ -1499,18 +2887,27 @@ def main(argv: Optional[list[str]] = None) -> int:
           f"{'BASELINE (pre-Release-A)' if args.baseline else 'TREATMENT (Release A)'}",
           flush=True)
 
-    replicates: list[Replicate] = []
-    for index in range(args.replicates):
-        print(f"[soak] replicate {index + 1}/{args.replicates}: starting a fresh server "
-              f"(cold import can take ~60s)...", flush=True)
-        replicates.append(run_replicate(paths, args, index))
-        print(f"[soak] replicate {index + 1}/{args.replicates}: done", flush=True)
+    fixture = resolve_fixture(paths, args.arm)
+    args.fixture_path = fixture.workflow_path
+    print(f"[soak] arm {args.arm.upper()} fixture: {fixture.name} at "
+          f"{fixture.workflow_path}")
+    print(f"[soak]   {fixture.note}", flush=True)
 
-    latency_results: Optional[dict[str, Any]] = None
-    if args.latency:
-        print("[soak] latency matrix: starting a fresh server...", flush=True)
-        latency_results = run_latency(paths, args)
-        print("[soak] latency matrix: done", flush=True)
+    try:
+        replicates: list[Replicate] = []
+        for index in range(args.replicates):
+            print(f"[soak] replicate {index + 1}/{args.replicates}: starting a fresh "
+                  f"server (cold import can take ~60s)...", flush=True)
+            replicates.append(run_replicate(paths, fixture, args, index))
+            print(f"[soak] replicate {index + 1}/{args.replicates}: done", flush=True)
+
+        latency_results: Optional[dict[str, Any]] = None
+        if args.latency:
+            print("[soak] latency matrix: starting a fresh server...", flush=True)
+            latency_results = run_latency(paths, fixture, args)
+            print("[soak] latency matrix: done", flush=True)
+    finally:
+        fixture.cleanup()
 
     print()
     verdict = print_soak_report(args, paths, replicates)
@@ -1528,7 +2925,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                 "has_server_memory": import_check["has_server_memory"],
                 "harness_tree": paths.repo_root,
             },
-            "workflow_path": paths.workflow_path,
+            "workflow_path": fixture.workflow_path,
+            "fixture": {"name": fixture.name, "note": fixture.note,
+                        "expect_pinned": fixture.expect_pinned},
+            "retention": {
+                "reap_interval_seconds": REAP_INTERVAL_SECONDS,
+                "max_channels": RETENTION_MAX_CHANNELS,
+                "max_age_seconds": RETENTION_MAX_AGE_SECONDS,
+            },
             "started_at": started_at,
             "duration_s": time.time() - started_at,
             "gc_series": {
@@ -1554,6 +2958,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                     "cgroup_path": rep.cgroup_path,
                     "cgroup_reason": rep.cgroup_reason,
                     "cap_violations": rep.cap_violations,
+                    "fixture": rep.fixture,
+                    "max_live_sessions": rep.max_live_sessions,
+                    "max_live_sessions_source": rep.max_live_sessions_source,
+                    "wall_clock_s": rep.wall_clock_s,
+                    "eviction": rep.eviction,
+                    "streaming": rep.streaming,
+                    "checkpoint_accounting": rep.checkpoint_accounting,
                     "samples": [asdict(s) for s in rep.samples],
                     "probes": [asdict(p) for p in rep.probes],
                     "second_half_slope_mb_per_request": {

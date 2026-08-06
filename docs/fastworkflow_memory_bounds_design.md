@@ -1,6 +1,6 @@
 # Bounded memory for `run_fastapi_mcp`
 
-**Status:** Release A implemented and verified in v2.25.0 (`fix-g03`); Releases B and C not implemented  
+**Status:** All three releases implemented and verified — A in v2.25.0, B in v2.26.0, C in v2.27.0 (`fix-g03`)  
 **Revision:** 3 — absorbs the round-2 adversarial review (findings R2-1–R2-22)  
 **Scope:** `fastworkflow/run_fastapi_mcp/` and its session-state storage interface  
 **Source study:** `docs/fastworkflow_memory_fixes.md` (the production problem report and measurement
@@ -13,8 +13,14 @@ record; held privately, not in this repository)
 **Tracking:** `fix-9uk` (design), `fix-p3l` (round-2 review), `fix-uy3` (this revision),
 `fix-g03` (implementation)
 
-> Release A shipped in v2.25.0. Measured results are in §16.5.1 and §16.6.1; §1.2 carries arm A0's
-> slope. Release B is held behind the decision gate in §15.1, and Release C behind Release B.
+> All three releases have shipped: A in v2.25.0, B (the checkpoint protocol) in v2.26.0, C (the
+> lowered live-session cap) in v2.27.0. Measured results are in §16.5.1, §16.5.2 and §16.6.1.
+>
+> Two sections are **superseded by the serialization-hooks design** and are retained for provenance
+> rather than as instructions: §11.1's "nothing is durable by default" and §11.2's declaration-based
+> eligibility. Decision 25 was reversed on 2026-08-05 — JSON-native workflow context persists by
+> default, and a workflow becomes evictable by implementing `get_state`/`from_state` on its context
+> class. See `docs/fastworkflow_serialization_hooks_design.md`, which governs projection semantics.
 
 This is the design of record for the memory-bounds change. The source study remains the problem
 report and production measurement record. Where its illustrative patch snippets differ from this
@@ -107,6 +113,11 @@ same payload objects. Release A's slope is therefore a **measurement**, not a de
 A0 measures it, and the pre-registered prediction is that it exceeds the 0.05 MB/request target by
 roughly an order of magnitude. If arm A0 falsifies that prediction, Release C's urgency drops and
 this design should be re-scoped rather than continued out of momentum.
+
+**Release C closed it.** With the cap at 50 and eviction writing a durable checkpoint, the same
+unique-channel workload measures **+0.011 MB/request** (§16.5.2) — bounded, where Release A left it at
++0.495. The rest of this section is the Release A measurement that established why Release C was
+needed, retained because §1.2 exists to stop the release train overstating itself.
 
 **Measured. The prediction is confirmed, so Release C's urgency stands.** Arm A0 as shipped, at 300
 requests × 3 replicates and a 450 KB payload against a real Uvicorn server in its own process:
@@ -1821,6 +1832,59 @@ Shipping targets:
 Report raw samples and slopes. Do not replace them with "survived N requests," and do not sum ablation
 deltas as independent shares: the source study's own arms sum to ≈2.70 MB/request against a
 1.76 MB/request baseline.
+
+#### 16.5.2 Measured results — Release C
+
+Same harness and method as §16.5.1. `MAX_LIVE_SESSIONS` default 50.
+
+| Arm | Requests × replicates | Slope (upper 95% bound) | Verdict |
+|---|---|---|---|
+| A — evictable, unique channel | 300 × 3 | **+0.01127** | **PASS** (gate ≤ 0.05) |
+| C — streaming | 700 × 3 | **+0.01808** | **PASS** |
+| C — streaming | 300 × 3 | +0.05746 | measurement artifact, see below |
+| B — pinned (no `get_state` hook) | 300 × 3 | +0.49769 | recorded, not gated |
+
+**Arm A passes, and this is the release's headline.** The unique-channel workload
+that motivated the whole design measured +1.339 MB/request unpatched and +0.495
+after Release A; with the cap at 50 and eviction writing a checkpoint it is
+**+0.011**. 251 of 301 channels were retired per replicate, zero over-target
+warnings, zero context-loss sentinels, and every structural cap held.
+
+**Arm C passes on all three of its criteria** — streaming invariants, structural
+caps, and slope. No streaming channel was retired mid-turn across 705 retirements
+per replicate.
+
+**Arm C's 300-request "failure" was the §16.5.1 estimator artifact, reproduced.**
++0.05746 at 300 requests became +0.01808 at 700 on the same code. This is the
+second independent confirmation that 300 requests is below this estimator's
+resolution; **size gated arms at 500 requests minimum**, as §16.5.1 already
+concluded from arm A1.
+
+**The durable-storage plateau gate is met.** §16.5 gates Release C on total
+physical bytes per namespace reaching a plateau, and rejects any positive rate as
+a bound. At 3,500 requests — long enough to span two 300 s reap intervals and to
+exceed `RetentionPolicy.max_channels`, which shorter runs are not — the namespace
+settled at **56.0 MB physical / 5.3 MB apparent across 1,592 channels**, with
+three observed byte *decreases* as reclamation fired: **plateau observed**, not a
+slower rate of growth. The store's own `stats()` agreed with the harness's
+independent walk of the files. Slope on that run was +0.00865 with 3,451 of 3,501
+channels retired and zero context-loss sentinels.
+
+Shorter runs cannot show this and should not be read as showing its absence: at
+300 requests the run spans zero reap intervals and puts fewer channels on disk
+than the count cap, so no pass could reclaim anything even if one fired. The
+harness reports that as a measurement-window result rather than a finding.
+
+**Arm B quantifies §1.4, and its meaning has changed.** A workflow whose context
+class has no `get_state` hook grows to 301 live sessions against a cap of 50 with
+zero retirements, 251 over-target warnings, a monotonically rising pinned count,
+and a slope of +0.498 — i.e. the cap does nothing for it, exactly as predicted.
+What changed is the census: `simple_workflow_template` and the other four bundled
+workflows now implement the hooks and are evictable, so "pinned" no longer means
+"this workflow shape cannot be bounded". It means **its author has not written
+`get_state` yet**, which is a state the author controls and the server warns
+about. Arm B's fixture is therefore a deliberately un-hooked copy of
+`tests/todo_list_workflow`, not `simple_workflow_template`.
 
 #### 16.5.1 Measured results — Release A
 

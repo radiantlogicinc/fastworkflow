@@ -539,6 +539,10 @@ async def run_owned_turn(
         execn.exec_state = ExecState.DONE
         await registry.clear_active(execn.channel_id, execn.turn_key)
         execn.done_event.set()
+        # After the registry lock is released, never inside it: trimming does
+        # store I/O, and holding that lock across a write would block turn
+        # submission on every channel, not just this one.
+        await session_manager.trim_live_sessions()
 
 
 def _commit_startup_outcome(

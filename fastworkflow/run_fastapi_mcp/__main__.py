@@ -19,6 +19,7 @@ See docs/fastworkflow_fastapi_spec.md for complete specification.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -44,6 +45,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from .mcp_specific import setup_mcp
 from .utils import (
     get_channelconversations_dir,
+    CHECKPOINT_REAP_INTERVAL_SECONDS,
     ChannelSessionManager,
     MAX_CONVERSATION_TURNS_IN_MEMORY,
     save_conversation_incremental,
@@ -281,7 +283,8 @@ def _log_memory_bounds() -> None:
 
     logger.info(
         "memory bounds active: "
-        f"max_live_sessions={session_manager.max_live_sessions} (source=default), "
+        f"max_live_sessions={session_manager.max_live_sessions} "
+        f"(source={session_manager.max_live_sessions_source}), "
         f"max_retained_startup_turns={MAX_RETAINED_STARTUP_TURNS} "
         "(~17 MB at 450 KB payload), "
         f"turn_retention_seconds={TURN_RETENTION_SECONDS:.0f}, "
@@ -330,6 +333,12 @@ async def lifespan(_app: FastAPI):
         # Configure JWT verification mode based on CLI parameter
         set_jwt_verification_mode(ARGS.expect_encrypted_jwt)
         
+        # Resolved here, after init() has loaded the workflow env files, and
+        # validated before readiness — a cap that is going to reject traffic
+        # should reject startup instead.
+        resolved, source = session_manager.configure_max_live_sessions()
+        logger.info(f"max_live_sessions={resolved} (source={source})")
+
         # Mark FastWorkflow as initialized for readiness probe
         readiness_state.set_initialized(True)
         
@@ -398,6 +407,29 @@ async def lifespan(_app: FastAPI):
                 except Exception as e:
                     logger.error(f"Failed to finalize conversation for user {channel_id} during shutdown: {e}")
 
+    async def reap_checkpoints_periodically() -> None:
+        """Drive checkpoint retention. The store deliberately has no timer.
+
+        A unique-channel workload writes a checkpoint per request that is never
+        read again, so without this the namespace grows forever — which is what
+        gates lowering the live-session cap in the first place.
+        """
+        while True:
+            await asyncio.sleep(CHECKPOINT_REAP_INTERVAL_SECONDS)
+            try:
+                outcome = await asyncio.get_running_loop().run_in_executor(
+                    None, session_manager.reap_checkpoints
+                )
+                reclaimed = getattr(outcome, "channels_reclaimed", None)
+                if reclaimed:
+                    logger.info(f"Reclaimed {reclaimed} abandoned checkpoint(s)")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    f"Checkpoint reap pass failed ({type(exc).__name__}: {exc})"
+                )
+
     async def stop_all_chat_sessions(skip_channel_ids: list[str]) -> None:
         # Write before closing: a context closed without a checkpoint loses
         # whatever it accumulated since its last retirement.
@@ -431,9 +463,13 @@ async def lifespan(_app: FastAPI):
         # Mark application as ready to accept traffic
         readiness_state.set_ready(True)
         logger.info("Application ready to accept traffic")
+        reaper = asyncio.create_task(reap_checkpoints_periodically())
         yield
     finally:
         logger.info("FastWorkflow FastAPI service shutting down...")
+        reaper.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await reaper
         still_busy = await wait_for_active_turns_to_complete(max_wait_seconds=30)
         await finalize_conversations_on_shutdown(still_busy)
         await stop_all_chat_sessions(still_busy)
