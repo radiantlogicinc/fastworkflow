@@ -45,7 +45,9 @@ from .mcp_specific import setup_mcp
 from .utils import (
     get_channelconversations_dir,
     ChannelSessionManager,
+    MAX_CONVERSATION_TURNS_IN_MEMORY,
     save_conversation_incremental,
+    save_last_turn_feedback,
     InitializationRequest,
     TokenResponse,
     InitializeResponse,
@@ -64,10 +66,13 @@ from .turns import (
     TurnRegistry,
     ExecState,
     ChannelBusyError,
+    MAX_RETAINED_STARTUP_TURNS,
+    TURN_RETENTION_SECONDS,
     submit_turn,
     render_turn_response,
     compute_idempotency_key,
 )
+from . import server_memory
 from .jwt_manager import (
     create_access_token,
     create_refresh_token,
@@ -248,6 +253,60 @@ async def get_session_and_ensure_runtime(
     return session
 
 
+def _log_memory_bounds() -> None:
+    """One INFO record naming every retention bound this process is running under.
+
+    Byte annotations because a count cap is unauditable without the payload size
+    it was sized against, and "(asserted)" because a previous revision of this
+    work would have logged "off" even on a DSPy release that ignored the setting.
+    """
+    dspy_policy = server_memory.policy_status()
+    if dspy_policy is None:
+        # The policy installs from the server entrypoint, before the event loop.
+        # Reaching here without one means the app was imported some other way.
+        dspy_bounds = "dspy_policy=not installed (no server entrypoint)"
+    else:
+        asserted = "asserted" if dspy_policy.asserted else "NOT ASSERTED"
+        owner = "claimed" if dspy_policy.async_owner_claimed else "unclaimed"
+        dspy_bounds = (
+            f"dspy_history=off ({asserted}), dspy_trace=off ({asserted}), "
+            f"dspy_memory_cache={dspy_policy.memory_cache_entries} entries ({asserted}), "
+            f"dspy_disk_cache={'off' if dspy_policy.disk_cache_off else 'ON'}, "
+            f"dspy_policy_owner={owner}"
+        )
+
+    logger.info(
+        "memory bounds active: "
+        f"max_live_sessions={session_manager.max_live_sessions} (source=default), "
+        f"max_retained_startup_turns={MAX_RETAINED_STARTUP_TURNS} "
+        "(~17 MB at 450 KB payload), "
+        f"turn_retention_seconds={TURN_RETENTION_SECONDS:.0f}, "
+        f"max_conversation_turns_in_memory={MAX_CONVERSATION_TURNS_IN_MEMORY} "
+        "(~9 MB per channel at 450 KB payload), "
+        f"{dspy_bounds}"
+    )
+
+
+def _conversation_turns_for_summary(runtime) -> list[dict[str, Any]]:
+    """Turns to summarize a conversation from.
+
+    In-memory history is a bounded window of the newest turns, so summarizing it
+    would silently produce "topic of the last N turns". The durable record is the
+    whole conversation, and only each turn's summary is read, so the store
+    projects to that field rather than handing back every turn's payload.
+
+    The fallback returns whole in-memory turns, which is what the caller that
+    also persists them (the no-active-conversation branch of /new_conversation)
+    needs; that branch is reachable only when nothing is recorded yet.
+    """
+    if runtime.active_conversation_id > 0:
+        if summaries := runtime.conversation_store.get_conversation_summaries(
+            runtime.active_conversation_id
+        ):
+            return summaries
+    return extract_turns_from_history(runtime.execution_context.conversation_history)
+
+
 # ============================================================================
 # FastAPI App Setup
 # ============================================================================
@@ -305,7 +364,7 @@ async def lifespan(_app: FastAPI):
             runtime = await session_manager.get_session(channel_id)
             if not runtime:
                 continue
-            if turns := extract_turns_from_history(runtime.execution_context.conversation_history):
+            if turns := _conversation_turns_for_summary(runtime):
                 try:
                     topic, summary = generate_topic_and_summary(turns)
                     if runtime.active_conversation_id > 0:
@@ -331,6 +390,10 @@ async def lifespan(_app: FastAPI):
         # Log startup info AFTER init() so log level from env file is respected
         logger.info("FastWorkflow FastAPI service starting...")
         logger.info(f"Startup with CLI params: workflow_path={ARGS.workflow_path}, env_file_path={ARGS.env_file_path}, passwords_file_path={ARGS.passwords_file_path}")
+        # Take DSPy's async config ownership before any request coroutine can,
+        # then report the bounds this process is actually running under.
+        server_memory.claim_async_owner()
+        _log_memory_bounds()
         # Mark application as ready to accept traffic
         readiness_state.set_ready(True)
         logger.info("Application ready to accept traffic")
@@ -488,7 +551,7 @@ async def liveness_probe() -> dict:
     },
     tags=["probes"]
 )
-async def readiness_probe() -> JSONResponse:
+async def readiness_probe(memory: bool = False) -> JSONResponse:
     """
     Readiness probe endpoint for Kubernetes.
     
@@ -498,6 +561,12 @@ async def readiness_probe() -> JSONResponse:
     This endpoint verifies:
     - FastWorkflow has been initialized
     - The configured workflow path is valid and accessible
+    - The DSPy memory policy is still in force (drift makes the pod unready
+      rather than leaving it to leak quietly)
+
+    Pass ``?memory=true`` for retention metrics (DSPy response-cache entries and
+    bytes, in-memory conversation turns and bytes). They are off by default
+    because computing them walks live objects, and probes are frequent.
     
     This endpoint is not logged unless it returns a non-200 status code
     to avoid excessive logging from frequent Kubernetes health checks.
@@ -507,23 +576,31 @@ async def readiness_probe() -> JSONResponse:
         503 Service Unavailable: {"status": "not_ready", "checks": {...}} - Not ready
     """
     status_info = readiness_state.get_status()
-    
-    if readiness_state.is_ready():
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content={
-                "status": "ready",
-                "checks": status_info
-            }
-        )
-    else:
-        return JSONResponse(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={
-                "status": "not_ready",
-                "checks": status_info
-            }
-        )
+
+    drift = server_memory.check_policy_in_force()
+    server_memory.log_policy_drift(drift)
+    if drift:
+        status_info["dspy_memory_policy"] = f"drifted: {drift}"
+
+    content: dict[str, Any] = {"status": "ready", "checks": status_info}
+    if memory:
+        content["memory"] = {
+            "live_sessions": len(session_manager._sessions),
+            "retained_turns": len(turn_registry._by_key),
+            "dspy_cache": server_memory.dspy_cache_metrics(),
+            "conversations": server_memory.conversation_memory_metrics(
+                list(session_manager._sessions.values())
+            ),
+        }
+
+    if readiness_state.is_ready() and "dspy_memory_policy" not in status_info:
+        return JSONResponse(status_code=status.HTTP_200_OK, content=content)
+
+    content["status"] = "not_ready"
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content=content
+    )
 
 
 def _build_startup_work_fn(ctx, startup_command_str, startup_action):
@@ -1276,8 +1353,8 @@ async def new_conversation(
         # Serialize ctx mutation with turns; reject if a turn is active (§3.4).
         _reject_if_busy(channel_id)
         async with runtime.lock:
-            # Extract turns from chat_session conversation history
-            if turns := extract_turns_from_history(runtime.execution_context.conversation_history):
+            # Summarize the whole conversation, not just the in-memory window
+            if turns := _conversation_turns_for_summary(runtime):
                 # Generate topic and summary synchronously (turns already saved incrementally)
                 topic, summary = generate_topic_and_summary(turns)
 
@@ -1298,12 +1375,14 @@ async def new_conversation(
                 next_id = runtime.conversation_store.reserve_next_conversation_id()
                 runtime.active_conversation_id = next_id
                 runtime.execution_context.clear_conversation_history()
+                runtime.durable_turn_count = 0
 
                 logger.info(f"Ready for new conversation {runtime.active_conversation_id} for session {channel_id}")
                 return {"status": "ok"}
             else:
                 # No turns to save, just clear history and start fresh
                 runtime.execution_context.clear_conversation_history()
+                runtime.durable_turn_count = 0
                 logger.info(f"No turns to save for session {channel_id}, cleared history")
                 return {"status": "ok", "message": "No turns to save"}
 
@@ -1409,8 +1488,8 @@ async def post_feedback(
                 "timestamp": int(time.time() * 1000)
             }
 
-            # Incrementally save the updated turns with feedback
-            save_conversation_incremental(runtime, extract_turns_from_history, logger)
+            # Persist the edit to the turn it belongs to
+            save_last_turn_feedback(runtime, extract_turns_from_history, logger)
 
             logger.info(f"Added feedback to latest turn for session {channel_id}")
             return {"status": "ok"}
@@ -1467,9 +1546,15 @@ async def activate_conversation(
         async with runtime.lock:
             runtime.active_conversation_id = request.conversation_id
 
-            # Restore conversation history to chat_session
-            restored_history = restore_history_from_turns(conv["turns"])
+            # Restore the newest window of the conversation; the rest stays in
+            # the durable record. Everything restored is already recorded, so
+            # the high-water mark moves with it and the next incremental save
+            # does not append the conversation a second time.
+            restored_history = restore_history_from_turns(
+                conv["turns"][-MAX_CONVERSATION_TURNS_IN_MEMORY:]
+            )
             runtime.execution_context._conversation_history = restored_history
+            runtime.durable_turn_count = len(restored_history.messages)
             logger.info(f"Activated conversation {request.conversation_id} for session {channel_id}")
 
             return {"status": "ok"}
@@ -1604,9 +1689,20 @@ setup_mcp(
 # ============================================================================
 
 def main():
-    """Entry point for the FastAPI MCP server."""
+    """Entry point for the FastAPI MCP server.
+
+    The DSPy memory policy is installed here, synchronously, before uvicorn
+    creates the event loop and before any LM exists — DSPy's global config is
+    owned by the thread that configures it first, and doing this from the async
+    lifespan instead would leave the async owner unset for a request coroutine
+    to claim. uvicorn.run() is given the app object, so multi-worker and
+    --reload (which re-import the app in processes that never ran this) are not
+    reachable from this entrypoint.
+    """
     host = ARGS.host if hasattr(ARGS, 'host') else "0.0.0.0"
     port = ARGS.port if hasattr(ARGS, 'port') else 8000
+
+    server_memory.install_policy()
     
     # Read LOG_LEVEL from env file to configure uvicorn's logger
     # (env file isn't loaded until lifespan, but uvicorn needs log_level at startup)

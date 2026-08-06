@@ -38,7 +38,7 @@ import hashlib
 import json
 import traceback
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import fastworkflow
@@ -75,6 +75,22 @@ class ExecState(str, enum.Enum):
 
 
 _TERMINAL_STATES = (ExecState.DONE, ExecState.LOST)
+
+
+# Kinds worth keeping after they finish. Only ``/initialize`` looks an execution
+# up by turn_key afterwards, and only while the runtime is still live (a client
+# re-polling its own startup turn) — every other endpoint consults the registry
+# only while its execution is active. There is no GET /turns/{turn_key}, so a
+# retained record is NOT recoverable once its runtime is gone.
+COLLECTABLE_TERMINAL_KINDS = frozenset({"initialize_startup"})
+
+# Retained terminal executions are request-sized: 20 records is ~17 MB at a
+# 450 KB payload. The only consumer needs ~6 to cover the age window at the
+# observed request rate, so this is roughly 3x margin. In a burst of 21 startup
+# completions the count binds before the age window and the oldest is dropped
+# seconds after finishing; that is accepted rather than sizing for peak bursts.
+MAX_RETAINED_STARTUP_TURNS = 20
+TURN_RETENTION_SECONDS = 300.0
 
 
 def _now() -> datetime:
@@ -137,13 +153,28 @@ class ChannelBusyError(Exception):
 
 
 class TurnRegistry:
-    """In-process registry of turn executions, single-flight per channel."""
+    """In-process registry of turn executions, single-flight per channel.
 
-    def __init__(self) -> None:
+    Live executions are kept until they finish. Finished ones are kept only if
+    something can still look them up, and then only within a bounded count and
+    age — otherwise every completed request would retain its payload for the
+    lifetime of the process.
+    """
+
+    def __init__(
+        self,
+        *,
+        collectable_kinds: frozenset[str] = COLLECTABLE_TERMINAL_KINDS,
+        max_retained_terminal: int = MAX_RETAINED_STARTUP_TURNS,
+        retention_seconds: float = TURN_RETENTION_SECONDS,
+    ) -> None:
         self._by_key: dict[str, TurnExecution] = {}
         # channel_id -> turn_key of the live (non-terminal) execution.
         self._active_by_channel: dict[str, str] = {}
         self._lock = asyncio.Lock()
+        self._collectable_kinds = collectable_kinds
+        self._max_retained_terminal = max_retained_terminal
+        self._retention_seconds = retention_seconds
 
     def _active_execution(self, channel_id: str) -> Optional[TurnExecution]:
         active_key = self._active_by_channel.get(channel_id)
@@ -210,26 +241,60 @@ class TurnRegistry:
             self._active_by_channel[channel_id] = execn.turn_key
             # Launch the task only after the execution is fully built and the
             # pointer is in place (construction-order contract).
-            execn.task = run_turn(execn)
+            try:
+                execn.task = run_turn(execn)
+            except BaseException:
+                # An execution that never launched will never reach a terminal
+                # state, and retention must never evict a non-terminal record —
+                # so it would be immortal. Undo the insertion instead.
+                self._by_key.pop(execn.turn_key, None)
+                if self._active_by_channel.get(channel_id) == execn.turn_key:
+                    self._active_by_channel.pop(channel_id, None)
+                raise
             return execn
 
     async def clear_active(self, channel_id: str, turn_key: str) -> None:
-        """Clear the active pointer if it still points at ``turn_key``.
+        """Retire a finished execution: clear its active pointer and bound retention.
 
-        Called when an execution reaches a terminal state. The execution remains
-        in ``_by_key`` for polling/recovery (TTL eviction is Step 2).
+        This is one step, not two: ``asyncio.Lock`` is not reentrant, so a
+        separate "now prune" call that re-entered ``_lock`` would deadlock inside
+        a turn's ``finally``. Under the single lock, drop the record unless its
+        kind is still collectable, give a retained record its TTL once, then
+        remove expired and overflow records.
+
+        Contains no ``await`` and does no store I/O: this lock gates turn
+        submission for every channel, not just this one.
         """
         async with self._lock:
             if self._active_by_channel.get(channel_id) == turn_key:
                 self._active_by_channel.pop(channel_id, None)
 
-    def evict_terminal(self, now: Optional[datetime] = None) -> int:
-        """TTL eviction of terminal (DONE/LOST) executions. Step 2 hook.
+            execn = self._by_key.get(turn_key)
+            if execn is None or not execn.is_terminal:
+                return
 
-        Returns the number of evicted entries. ``ttl_expires_at`` is unset in
-        Step 1, so this is a no-op until Step 2 wires TTLs; included so the API
-        surface is stable.
-        """
+            if execn.kind not in self._collectable_kinds:
+                # Nothing else to sweep for: this record is gone, and the count
+                # cap is enforced on every completion of a kind that is retained.
+                self._by_key.pop(turn_key, None)
+                logger.debug(
+                    f"Retired turn {turn_key} (kind={execn.kind}): nothing looks "
+                    f"up a finished {execn.kind}"
+                )
+                return
+
+            if execn.ttl_expires_at is None:
+                execn.ttl_expires_at = (execn.finished_at or _now()) + timedelta(
+                    seconds=self._retention_seconds
+                )
+
+            if evicted := self._evict_expired() + self._evict_overflow():
+                logger.debug(
+                    f"Evicted {evicted} retained terminal turn(s) after {turn_key}"
+                )
+
+    def _evict_expired(self, now: Optional[datetime] = None) -> int:
+        """Drop retained terminal executions whose age window has passed."""
         now = now or _now()
         evict_keys = [
             key
@@ -241,6 +306,32 @@ class TurnRegistry:
         for key in evict_keys:
             self._by_key.pop(key, None)
         return len(evict_keys)
+
+    def _evict_overflow(self) -> int:
+        """Drop the oldest retained terminal executions above the count cap.
+
+        Age cleanup is opportunistic — an expired record can sit in an idle
+        process — so the count is the hard bound on finished records.
+        """
+        retained = sorted(
+            (execn for execn in self._by_key.values() if execn.is_terminal),
+            key=lambda execn: (execn.finished_at or execn.created_at, execn.turn_key),
+        )
+        overflow = len(retained) - self._max_retained_terminal
+        if overflow <= 0:
+            return 0
+        for execn in retained[:overflow]:
+            self._by_key.pop(execn.turn_key, None)
+        return overflow
+
+    def evict_terminal(self, now: Optional[datetime] = None) -> int:
+        """TTL eviction of terminal (DONE/LOST) executions; returns how many went.
+
+        Retirement sweeps on every completion, so nothing in the server calls
+        this. It stays because the count cap — not the age window — is the hard
+        bound, and an operator or test may want to age records out on demand.
+        """
+        return self._evict_expired(now)
 
 
 def _persist_after_turn(

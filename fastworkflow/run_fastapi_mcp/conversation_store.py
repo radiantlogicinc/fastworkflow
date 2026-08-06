@@ -33,7 +33,15 @@ class ConversationSummary(BaseModel):
 
 
 class ConversationStore:
-    """Rdict-backed conversation persistence per user"""
+    """Rdict-backed conversation persistence per user.
+
+    Turns are stored one Rdict entry per turn (``conv:{id}:turn:{index}``) so an
+    incremental save writes only the new turns instead of rewriting the whole
+    conversation. The ``conv:{id}`` record keeps the metadata plus
+    ``appended_turn_count``; reads rehydrate ``turns`` so callers see the same
+    record shape as before. Records written by earlier versions keep their turns
+    inline under ``turns`` and are migrated to per-turn entries on first append.
+    """
     
     def __init__(self, channel_id: str, base_folder: str):
         self.channel_id = channel_id
@@ -43,6 +51,67 @@ class ConversationStore:
     def _get_db(self) -> Rdict:
         """Get Rdict instance"""
         return Rdict(self.db_path)
+
+    @staticmethod
+    def _turn_key(conversation_id: int, index: int) -> str:
+        return f"conv:{conversation_id}:turn:{index}"
+
+    def _iter_turn_records(
+        self, db: Rdict, conversation_id: int, conv: dict[str, Any]
+    ):
+        """Yield a conversation's turns in order, one at a time.
+
+        An inline ``turns`` list wins outright. Only a writer that rewrites the
+        whole list produces one, and every writer here empties it, so a record
+        that still has one was written by an older version of this store — which
+        makes it the authoritative list and any leftover per-turn entries stale.
+        Concatenating the two instead would duplicate and reorder turns after a
+        version rollback.
+        """
+        if inline_turns := conv.get("turns") or []:
+            yield from inline_turns
+            return
+        for index in range(int(conv.get("appended_turn_count") or 0)):
+            turn_key = self._turn_key(conversation_id, index)
+            if turn_key in db:
+                yield db[turn_key]
+
+    def _read_turns(
+        self, db: Rdict, conversation_id: int, conv: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Rehydrate a conversation's turns."""
+        return list(self._iter_turn_records(db, conversation_id, conv))
+
+    def _hydrated(
+        self, db: Rdict, conversation_id: int, conv: dict[str, Any]
+    ) -> dict[str, Any]:
+        """The stored record as callers expect it: turns rehydrated, bookkeeping hidden."""
+        hydrated = {k: v for k, v in conv.items() if k != "appended_turn_count"}
+        hydrated["turns"] = self._read_turns(db, conversation_id, conv)
+        return hydrated
+
+    def _replace_turns(
+        self,
+        db: Rdict,
+        conversation_id: int,
+        conv: dict[str, Any],
+        turns: list[dict[str, Any]],
+    ) -> None:
+        """Overwrite a conversation's turns, updating ``conv`` in place (caller stores it).
+
+        Writes the replacements before deleting the tail they displace, so a
+        crash part-way leaves a readable conversation rather than holes where the
+        count still points at deleted entries.
+        """
+        previous_count = int(conv.get("appended_turn_count") or 0)
+        for index, turn in enumerate(turns):
+            db[self._turn_key(conversation_id, index)] = turn
+        for index in range(len(turns), previous_count):
+            turn_key = self._turn_key(conversation_id, index)
+            if turn_key in db:
+                del db[turn_key]
+        conv["turns"] = []
+        conv["appended_turn_count"] = len(turns)
     
     def get_last_conversation_id(self) -> Optional[int]:
         """Get the last conversation ID for this user"""
@@ -127,8 +196,9 @@ class ConversationStore:
                 "summary": summary,
                 "created_at": int(time.time() * 1000),
                 "updated_at": int(time.time() * 1000),
-                "turns": turns
+                "turns": []
             }
+            self._replace_turns(db, conv_id, conversation, turns)
             db[f"conv:{conv_id}"] = conversation
             return conv_id
         finally:
@@ -138,7 +208,8 @@ class ConversationStore:
         """Get a conversation by ID"""
         db = self._get_db()
         try:
-            return db.get(f"conv:{conv_id}")
+            conv = db.get(f"conv:{conv_id}")
+            return None if conv is None else self._hydrated(db, conv_id, conv)
         finally:
             db.close()
     
@@ -154,7 +225,7 @@ class ConversationStore:
                 if conv_key in db:
                     conv = db[conv_key]
                     if conv.get("topic", "").lower().strip() == normalized_topic:
-                        return i, conv
+                        return i, self._hydrated(db, i, conv)
             return None
         finally:
             db.close()
@@ -207,7 +278,7 @@ class ConversationStore:
             conv["topic"] = unique_topic
             conv["summary"] = summary
             conv["updated_at"] = int(time.time() * 1000)
-            conv["turns"] = turns
+            self._replace_turns(db, conv_id, conv, turns)
             
             db[conv_key] = conv
         finally:
@@ -247,8 +318,11 @@ class ConversationStore:
         turns: list[dict[str, Any]]
     ) -> int:
         """
-        Create a new conversation with placeholder topic/summary, or update existing turns.
-        Used for incremental saves without generating topic/summary.
+        Create a new conversation with placeholder topic/summary, or replace its turns.
+
+        This rewrites the whole turn list. Incremental saves use
+        append_conversation_turns() instead, so that writing turn n does not
+        rewrite turns 1..n-1.
         
         Args:
             conversation_id: The conversation ID to use
@@ -265,25 +339,152 @@ class ConversationStore:
                 # Conversation exists, just update turns
                 conv = db[conv_key]
                 conv["updated_at"] = int(time.time() * 1000)
-                conv["turns"] = turns
-                db[conv_key] = conv
             else:
                 # Create new conversation with placeholder topic/summary
-                conversation = {
+                conv = {
                     "topic": "",  # Will be generated later
                     "summary": "",  # Will be generated later
                     "created_at": int(time.time() * 1000),
                     "updated_at": int(time.time() * 1000),
-                    "turns": turns
+                    "turns": []
                 }
-                db[conv_key] = conversation
+            self._replace_turns(db, conversation_id, conv, turns)
+            db[conv_key] = conv
             
             return conversation_id
         finally:
             db.close()
+
+    def append_conversation_turns(
+        self,
+        conversation_id: int,
+        new_turns: list[dict[str, Any]]
+    ) -> int:
+        """
+        Append turns to a conversation without rewriting the ones already stored.
+
+        This is the incremental-save path: the bytes written for a turn are the
+        bytes of that turn, so a conversation of N turns costs O(N) writes in
+        total rather than O(N^2). It is also what lets the in-memory history be
+        windowed safely - the durable record only ever grows.
+
+        Args:
+            conversation_id: The conversation ID to append to (created if absent)
+            new_turns: Turns to append, in order
+
+        Returns:
+            The conversation ID used
+        """
+        if not new_turns:
+            return conversation_id
+
+        db = self._get_db()
+        try:
+            conv_key = f"conv:{conversation_id}"
+            now = int(time.time() * 1000)
+
+            if conv_key in db:
+                conv = db[conv_key]
+            else:
+                conv = {
+                    "topic": "",  # Will be generated later
+                    "summary": "",  # Will be generated later
+                    "created_at": now,
+                    "turns": [],
+                    "appended_turn_count": 0,
+                }
+
+            next_index = int(conv.get("appended_turn_count") or 0)
+            # A record written by an earlier version keeps its turns inline.
+            # Move them out once, so this and every later append stays O(1) in
+            # bytes written instead of rewriting the inline list every turn.
+            # Inline is the authoritative list (see _iter_turn_records), so any
+            # per-turn entries it coexists with are stale and get replaced.
+            if inline_turns := list(conv.get("turns") or []):
+                self._replace_turns(db, conversation_id, conv, inline_turns)
+                next_index = len(inline_turns)
+
+            for offset, turn in enumerate(new_turns):
+                db[self._turn_key(conversation_id, next_index + offset)] = turn
+
+            conv["appended_turn_count"] = next_index + len(new_turns)
+            conv["updated_at"] = now
+            db[conv_key] = conv
+
+            return conversation_id
+        finally:
+            db.close()
+
+    def count_conversation_turns(self, conversation_id: int) -> int:
+        """Number of turns durably recorded for a conversation (0 if absent)."""
+        db = self._get_db()
+        try:
+            conv = db.get(f"conv:{conversation_id}")
+            if conv is None:
+                return 0
+            if inline_turns := conv.get("turns") or []:
+                return len(inline_turns)
+            return int(conv.get("appended_turn_count") or 0)
+        finally:
+            db.close()
+
+    def get_conversation_summaries(self, conversation_id: int) -> list[dict[str, Any]]:
+        """Each turn's summary, without holding whole turns in memory.
+
+        Topic and summary generation reads only this field. Loading every turn of
+        a long conversation to throw its payload away would spike memory by the
+        size of the whole conversation, which is the growth this store exists to
+        keep out of the process.
+        """
+        db = self._get_db()
+        try:
+            conv = db.get(f"conv:{conversation_id}")
+            if conv is None:
+                return []
+            return [
+                {"conversation summary": turn.get("conversation summary")}
+                for turn in self._iter_turn_records(db, conversation_id, conv)
+            ]
+        finally:
+            db.close()
     
-    # NOTE: update_turn_feedback() removed - feedback is now saved via save_conversation_turns()
-    # in the incremental save flow after modifying conversation_history in memory
+    # NOTE: update_turn_feedback() removed - feedback is saved from the incremental
+    # save flow after modifying conversation_history in memory, via the append path
+    # when the turn is not durable yet and via update_last_conversation_turn() when
+    # it already is.
+
+    def update_last_conversation_turn(
+        self,
+        conversation_id: int,
+        turn: dict[str, Any]
+    ) -> bool:
+        """
+        Rewrite the newest durable turn of a conversation in place.
+
+        Used when a turn that is already recorded is edited (feedback), which the
+        append path cannot express. Returns False if there is no turn to rewrite.
+        """
+        db = self._get_db()
+        try:
+            conv_key = f"conv:{conversation_id}"
+            if conv_key not in db:
+                return False
+
+            conv = db[conv_key]
+            appended = int(conv.get("appended_turn_count") or 0)
+            if appended:
+                db[self._turn_key(conversation_id, appended - 1)] = turn
+            elif inline_turns := list(conv.get("turns") or []):
+                inline_turns[-1] = turn
+                conv["turns"] = inline_turns
+            else:
+                return False
+
+            conv["updated_at"] = int(time.time() * 1000)
+            db[conv_key] = conv
+            return True
+        finally:
+            db.close()
     
     def get_all_conversations_for_dump(self) -> list[dict[str, Any]]:
         """Get all conversations for admin dump"""
@@ -295,11 +496,10 @@ class ConversationStore:
             for i in range(1, meta.get("last_conversation_id", 0) + 1):
                 conv_key = f"conv:{i}"
                 if conv_key in db:
-                    conv = db[conv_key]
                     conversations.append({
                         "channel_id": self.channel_id,
                         "conversation_id": i,
-                        **conv
+                        **self._hydrated(db, i, db[conv_key])
                     })
             
             return conversations

@@ -450,6 +450,21 @@ class WorkflowExecutionContext:
             }
         )
 
+    def trim_conversation_history(self, max_turns: int) -> int:
+        """Drop all but the newest ``max_turns`` turns; return how many were dropped.
+
+        Turns are request-sized, so an unbounded history grows with every request
+        on a hot channel. Only the newest few are ever read (see
+        _refine_user_query). Callers that persist history must record a turn
+        durably BEFORE trimming it out of memory.
+        """
+        messages = self._conversation_history.messages
+        excess = len(messages) - max_turns
+        if excess <= 0:
+            return 0
+        del messages[:excess]
+        return excess
+
     def summarize_and_record_turn(
         self, message: str, actions: list, result_text: str
     ) -> tuple[str, Optional[str]]:

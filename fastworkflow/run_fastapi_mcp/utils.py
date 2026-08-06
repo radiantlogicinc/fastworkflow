@@ -2,6 +2,7 @@ import asyncio
 import os
 import queue
 import time
+import weakref
 from collections import OrderedDict
 from dataclasses import dataclass
 from queue import Queue
@@ -19,6 +20,12 @@ from fastworkflow.utils.logging import logger
 
 from .conversation_store import ConversationStore, restore_history_from_turns
 from .jwt_manager import verify_token
+
+
+# Newest conversation turns kept in memory per channel. Turns are request-sized
+# (~450 KB in the workload this bound was sized against, so ~9 MB per channel),
+# only the newest few are ever read, and the durable record keeps the rest.
+MAX_CONVERSATION_TURNS_IN_MEMORY = 20
 
 
 # ============================================================================
@@ -292,7 +299,9 @@ async def ensure_user_runtime_exists(
 
     # Single-flight session creation (§3.5): serialize per-channel so two
     # concurrent cold requests don't both build a ctx (and double-run startup).
-    async with session_manager.get_creation_lock(channel_id):
+    # Bind the lock to a local: the manager's mapping is weak-valued.
+    creation_lock = session_manager.get_creation_lock(channel_id)
+    async with creation_lock:
         # Re-check under the creation lock — another request may have created
         # the session while we waited.
         existing_runtime = await session_manager.get_session(channel_id)
@@ -353,7 +362,11 @@ async def _create_user_runtime(
             conv_id_to_restore = conv_id_to_restore - 1
             conversation = conversation_store.get_conversation(conv_id_to_restore)
         if conversation:
-            ctx._conversation_history = restore_history_from_turns(conversation["turns"])
+            # Restore the same window the running session keeps, not the whole
+            # conversation: the rest stays in the durable record.
+            ctx._conversation_history = restore_history_from_turns(
+                conversation["turns"][-MAX_CONVERSATION_TURNS_IN_MEMORY:]
+            )
             logger.info(f"Restored conversation {conv_id_to_restore} for user {channel_id}")
         else:
             conv_id_to_restore = None
@@ -371,6 +384,12 @@ async def _create_user_runtime(
         ctx.apply_serialized_state(pending)
         logger.info(f"Restored pending suspended session for channel_id {channel_id}")
 
+    # Anything restored from a conversation is by definition already durable, so
+    # the next incremental save must not append it again.
+    durable_turn_count = (
+        len(ctx.conversation_history.messages) if conv_id_to_restore else 0
+    )
+
     await session_manager.create_session(
         channel_id=channel_id,
         execution_context=ctx,
@@ -379,6 +398,7 @@ async def _create_user_runtime(
         stream_format=stream_format,
         workflow_path=workflow_path,
         startup_ran=startup_ran,
+        durable_turn_count=durable_turn_count,
     )
     logger.info(f"Successfully created session for channel_id: {channel_id}")
 
@@ -653,6 +673,11 @@ class ChannelRuntime:
     stream_format: str = "ndjson"
     workflow_path: str = ""
     startup_ran: bool = False
+    # High-water mark: how many of the leading in-memory conversation turns are
+    # already durably recorded. Everything after it is what the next incremental
+    # save appends. Trimming the in-memory window lowers it by the number of
+    # turns dropped, so it stays an index into the live message list.
+    durable_turn_count: int = 0
     # turn_key of the startup turn (if any), so the /initialize "already exists"
     # branch can return its three-state status (§3.3).
     startup_turn_key: Optional[str] = None
@@ -686,19 +711,36 @@ class ChannelSessionManager:
         # concurrent cold requests for the same channel must not both build a
         # ctx (wasted work / double startup). Keyed by channel_id; dict access
         # is atomic in the single event loop.
-        self._creation_locks: dict[str, asyncio.Lock] = {}
+        #
+        # Weak values, because a channel_id seen once would otherwise keep its
+        # lock forever. The holder and every queued waiter keep a strong
+        # reference for as long as the lock matters, so the entry only
+        # disappears once nobody is using it. Never prune it by hand: a waiter
+        # can be awake but not yet resumed, and dropping the shared lock in that
+        # window lets the next caller create a second one and lose single-flight.
+        self._creation_locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = (
+            weakref.WeakValueDictionary()
+        )
         # Optional predicate (channel_id -> bool) wired by the server to the
         # turn registry's active-execution pointer. Eviction must never close a
         # live turn's ctx, so a busy channel is skipped. See §3.6 of the design.
         self.is_channel_busy: Optional[Callable[[str], bool]] = None
 
     def get_creation_lock(self, channel_id: str) -> asyncio.Lock:
-        """Return the per-channel creation lock, creating it on first use."""
+        """Return the per-channel creation lock, creating it on first use.
+
+        Callers must hold on to the returned lock for as long as they need it;
+        the mapping only keeps a weak reference.
+        """
         lock = self._creation_locks.get(channel_id)
         if lock is None:
             lock = asyncio.Lock()
             self._creation_locks[channel_id] = lock
         return lock
+
+    @property
+    def max_live_sessions(self) -> int:
+        return self._max_live_sessions
 
     @property
     def session_state_store(self) -> SessionStateStore:
@@ -758,6 +800,7 @@ class ChannelSessionManager:
         stream_format: str = "ndjson",
         workflow_path: str = "",
         startup_ran: bool = False,
+        durable_turn_count: int = 0,
     ) -> ChannelRuntime:
         async with self._lock:
             runtime = ChannelRuntime(
@@ -769,6 +812,7 @@ class ChannelSessionManager:
                 stream_format=stream_format,
                 workflow_path=workflow_path,
                 startup_ran=startup_ran,
+                durable_turn_count=durable_turn_count,
             )
             self._sessions[channel_id] = runtime
             self._touch(channel_id)
@@ -789,24 +833,99 @@ class ChannelSessionManager:
 # Helper Functions
 # ============================================================================
 
-def save_conversation_incremental(runtime: ChannelRuntime, extract_turns_func, logger) -> None:
+def save_conversation_incremental(runtime: ChannelRuntime, extract_turns_func, logger) -> int:
     """
     Save conversation turns incrementally after each turn (without generating topic/summary).
     This provides crash protection - all turns except the last will be preserved.
+
+    Only turns above the runtime's high-water mark are appended, then the
+    in-memory history is windowed. The order matters: a turn is durably recorded
+    before it can be dropped from memory, so trimming never shortens the durable
+    record. Returns the number of turns appended.
     """
-    # Extract turns from conversation history
-    if turns := extract_turns_func(runtime.execution_context.conversation_history):
+    turns = extract_turns_func(runtime.execution_context.conversation_history)
+    already_saved = runtime.durable_turn_count
+    if already_saved > len(turns):
+        # The mark outran the history, so it was established against some other
+        # history. Re-append everything: a duplicated turn is recoverable, a
+        # turn dropped from memory that was never recorded is not.
+        logger.warning(
+            f"Conversation high-water mark ({already_saved}) exceeds in-memory "
+            f"turns ({len(turns)}) for channel_id {runtime.channel_id}; "
+            "re-appending from the start rather than risking an unrecorded turn"
+        )
+        already_saved = 0
+
+    if new_turns := turns[already_saved:]:
         # Initialize conversation ID for first conversation if needed
         if runtime.active_conversation_id == 0:
             # This is the first conversation for this session
             # Reserve ID 1 and use it
             runtime.active_conversation_id = runtime.conversation_store.reserve_next_conversation_id()
             logger.debug(f"Initialized first conversation with ID {runtime.active_conversation_id} for user {runtime.channel_id}")
-        
-        # Save turns using the active conversation ID
-        runtime.conversation_store.save_conversation_turns(
-            runtime.active_conversation_id, turns
+
+        runtime.conversation_store.append_conversation_turns(
+            runtime.active_conversation_id, new_turns
         )
-        logger.debug(f"Incrementally saved {len(turns)} turn(s) to conversation {runtime.active_conversation_id}")
+        runtime.durable_turn_count = len(turns)
+        logger.debug(f"Incrementally saved {len(new_turns)} turn(s) to conversation {runtime.active_conversation_id}")
+
+    trim_conversation_window(runtime, logger)
+    return len(new_turns)
+
+
+def trim_conversation_window(runtime: ChannelRuntime, logger) -> int:
+    """Window the in-memory conversation history, keeping the high-water mark aligned.
+
+    Only safe to call once the turns being dropped are durably recorded.
+    """
+    trimmed = runtime.execution_context.trim_conversation_history(
+        MAX_CONVERSATION_TURNS_IN_MEMORY
+    )
+    if trimmed:
+        runtime.durable_turn_count = max(0, runtime.durable_turn_count - trimmed)
+        logger.debug(
+            f"Trimmed {trimmed} in-memory conversation turn(s) for channel_id "
+            f"{runtime.channel_id} (window={MAX_CONVERSATION_TURNS_IN_MEMORY})"
+        )
+    return trimmed
+
+
+def save_last_turn_feedback(runtime: ChannelRuntime, extract_turns_func, logger) -> None:
+    """Persist an edit to the newest conversation turn (feedback).
+
+    The append path cannot express a change to a turn that is already recorded,
+    so rewrite that one turn in place. If the turn is not durable yet, the normal
+    incremental save carries the edit with it.
+    """
+    if save_conversation_incremental(runtime, extract_turns_func, logger):
+        return
+
+    turns = extract_turns_func(runtime.execution_context.conversation_history)
+    if not turns or runtime.active_conversation_id == 0:
+        return
+
+    # Rewriting by position is only meaningful if this conversation is the one
+    # the mark was established against. A restored suspended session can leave
+    # the two disagreeing, and writing blind would overwrite an unrelated turn.
+    durable_turns = runtime.conversation_store.count_conversation_turns(
+        runtime.active_conversation_id
+    )
+    if not runtime.durable_turn_count or durable_turns < runtime.durable_turn_count:
+        logger.warning(
+            f"Skipping feedback write for channel_id {runtime.channel_id}: "
+            f"conversation {runtime.active_conversation_id} holds {durable_turns} "
+            f"turn(s), which does not match the {runtime.durable_turn_count} "
+            "recorded in memory"
+        )
+        return
+
+    runtime.conversation_store.update_last_conversation_turn(
+        runtime.active_conversation_id, turns[-1]
+    )
+    logger.debug(
+        f"Updated latest durable turn of conversation "
+        f"{runtime.active_conversation_id} for channel_id {runtime.channel_id}"
+    )
 
 
