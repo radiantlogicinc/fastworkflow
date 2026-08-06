@@ -1,26 +1,50 @@
 # Bounded memory for `run_fastapi_mcp`
 
-**Status:** All three releases implemented and verified — A in v2.25.0, B in v2.26.0, C in v2.27.0 (`fix-g03`)  
-**Revision:** 3 — absorbs the round-2 adversarial review (findings R2-1–R2-22)  
+**Status:** **Shipped.** All three releases implemented, verified and released — A in v2.25.0, B in
+v2.26.0, C in v2.27.0 (`fix-g03`)  
+**Revision:** 4 — reconciles the design with what was actually built and measured  
 **Scope:** `fastworkflow/run_fastapi_mcp/` and its session-state storage interface  
 **Source study:** `docs/fastworkflow_memory_fixes.md` (the production problem report and measurement
 record; held privately, not in this repository)  
 **Adversarial reviews:** `docs/fastworkflow_memory_bounds_design_review.md` (round 1, findings R1–R15);
 `docs/fastworkflow_memory_bounds_design_review_round_2.md` (round 2, findings R2-1–R2-22)  
-**Verified against:** fastWorkflow `2.24.1`, commit
-`c206a813af1f48e09b63f7972cfcb16ee2262d2a`; DSPy `3.2.1` **in `.venv`** (Python 3.12.2)  
-**Date:** 2026-08-05  
-**Tracking:** `fix-9uk` (design), `fix-p3l` (round-2 review), `fix-uy3` (this revision),
+**Companion design:** `docs/fastworkflow_serialization_hooks_design.md` — governs projection semantics
+and supersedes this document wherever the two disagree about what gets persisted  
+**Verified against:** fastWorkflow `2.27.0`, commit `1938215`; DSPy `3.2.1` **in `.venv`**
+(Python 3.12.2). Revisions 1–3 were verified against `2.24.1` @ `c206a813`.  
+**Date:** 2026-08-06  
+**Tracking:** `fix-9uk` (design), `fix-p3l` (round-2 review), `fix-uy3` (revision 3),
 `fix-g03` (implementation)
 
-> All three releases have shipped: A in v2.25.0, B (the checkpoint protocol) in v2.26.0, C (the
-> lowered live-session cap) in v2.27.0. Measured results are in §16.5.1, §16.5.2 and §16.6.1.
->
-> Two sections are **superseded by the serialization-hooks design** and are retained for provenance
-> rather than as instructions: §11.1's "nothing is durable by default" and §11.2's declaration-based
-> eligibility. Decision 25 was reversed on 2026-08-05 — JSON-native workflow context persists by
-> default, and a workflow becomes evictable by implementing `get_state`/`from_state` on its context
-> class. See `docs/fastworkflow_serialization_hooks_design.md`, which governs projection semantics.
+---
+
+## 0. What revision 4 changes, and why
+
+Revisions 1–3 were written before the code existed. This one is written after, and its job is to stop
+the document lying about the system in the four places where building it proved the design wrong.
+
+**The motivating OOM is closed.** §1.2's central warning — that Release A would not fix the workload
+that started this — was true and is now historical. Measured on the same harness: +1.339 MB/request
+unpatched, +0.495 after Release A, **+0.011 after Release C**, with the durable namespace reaching a
+plateau rather than a slower rate of growth (§16.5.1, §16.5.2).
+
+**Decision 25 was reversed, so §11.1 and §11.2 are rewritten rather than annotated.** "Nothing is
+durable by default" became "JSON-native workflow context persists by default, and a workflow becomes
+evictable by implementing serialization hooks on its context class". Revision 3's text described a
+system that was never built; leaving it in place with a warning label would have left the next reader
+implementing it.
+
+**§1.4's pinned census is obsolete in the way that matters.** All five bundled workflows now implement
+the hooks, so "pinned" no longer describes a workflow *shape* that cannot be bounded. It describes a
+workflow whose author has not written `get_state` yet — a state the author controls and the server
+warns about once per context class.
+
+**Nine defects were found by the verification matrices rather than by review**, and every one of them
+was in code that read correctly to two adversarial rounds. They are recorded in §16.8 because "the
+tests found what the design review did not" is the most transferable result here.
+
+What has *not* changed: every invariant except 11, the whole of §10, §11.3 and §11.5–§11.11, the §20
+prohibition list, and the §16.5 measurement discipline. Where revision 3 was right it is left alone.
 
 This is the design of record for the memory-bounds change. The source study remains the problem
 report and production measurement record. Where its illustrative patch snippets differ from this
@@ -173,39 +197,53 @@ assign a command-context object therefore retain the pre-change unbounded live-s
 Revision 2's census was wrong in one row and imprecise in another; the review caught the first
 (review §3, R1 audit) and the corrected measurement is:
 
-| Workflow | Assigns a command-context object? | Where | Pinned from |
+| Workflow | Assigns a command-context object? | Where | Status as shipped |
 |---|---|---|---|
-| `simple_workflow_template` | root | `_commands/startup.py:12` | its first turn |
-| `messaging_app_2` | root | `_commands/startup.py:42` | its first turn |
-| `tests/todo_list_workflow` | root | `_commands/startup.py:12` | its first turn |
-| `messaging_app_4` | root | `_commands/set_root_context.py:15` | when `set_root_context` runs |
-| `messaging_app_3` | current | `_commands/initialize_user.py:46` | when `initialize_user` runs |
-| `messaging_app_1`, `retail_workflow`, `hello_world` | none | — | never — evictable |
+| `simple_workflow_template` | root | `_commands/startup.py:12` | **hooks implemented — evictable** |
+| `messaging_app_2` | root | `_commands/startup.py:42` | **hooks implemented — evictable** |
+| `tests/todo_list_workflow` | root | `_commands/startup.py:12` | **hooks implemented — evictable** |
+| `messaging_app_4` | root | `_commands/set_root_context.py:15` | **hooks implemented — evictable** |
+| `messaging_app_3` | current | `_commands/initialize_user.py:46` | **hooks implemented — evictable** |
+| `messaging_app_1`, `retail_workflow`, `hello_world` | none | — | evictable; nothing to serialize |
 
-Two corrections to revision 2. `messaging_app_3` was listed as evictable; it is not — it assigns
-`workflow.current_command_context`, and §11.2's first eligibility clause fails on the current context
-just as it does on the root. `messaging_app_4` was listed as pinned from its first turn; it has no
-`startup.py` at all, so it is pinned only once an explicit `set_root_context` command runs. The
-distinction matters for §16.5 arm B, whose fixture must pin from turn 1 to be the adversarial case.
+**Revision 4: this census no longer describes a limitation, and that is the substantive change.**
+Revision 3 read it as "these five workflow shapes cannot be bounded". They now all round-trip through
+`get_state`/`from_state` (`fix-gbh`), verified by asserting that the restored current context is the
+*same object* as a node inside the restored root, not an equal copy.
 
-`Workflow.__init__` starts with `_root_command_context = None` (`fastworkflow/workflow.py:160`), so
-eligibility is entirely determined by whether the application assigns one, and the root setter also
-populates `_current_command_context` (`workflow.py:216-217`), so both clauses fail together.
+Two corrections to revision 2 that still stand, because they are facts about the code rather than about
+the bound. `messaging_app_3` assigns `workflow.current_command_context` and not a root, so a design
+that keys only off the root misses it — which is why §11.2 anchors on "root if set, else current".
+`messaging_app_4` has no `startup.py`, so it acquires its context only when an explicit
+`set_root_context` command runs, which is the "becomes pinned mid-session" path.
 
-Consequences accepted by this release train:
+`Workflow.__init__` starts with `_root_command_context = None` (`fastworkflow/workflow.py:160`), and the
+root setter also populates `_current_command_context` (`workflow.py:216-217`).
 
-- Release A applies to every workflow. Release C applies only to workflows that declare a durable
-  state projection under §11.2 and hold no live command-context object.
-- For pinned workflows the source study's session-cache share of growth — approximately
-  0.45 MB/request at a 450 KB payload for context alone — remains. A pinned workflow **cannot** meet
-  the §16.5 shipping gate and must not be described as bounded.
-- `simple_workflow_template` is the scaffold new workflows are copied from, so the pinned case is the
-  *default* for newly authored workflows, not an exotic one.
+**What the conditional scope actually is, now that it has been built.** Release C's bound applies to any
+workflow whose command-context class implements the hooks, and to any workflow that holds no context
+object at all. It does not apply to a workflow whose author has not written `get_state` yet — and that
+is a different kind of statement from revision 3's. It is a property of a particular workflow at a
+particular time, which its author can change, and which the server names in a warning:
 
-§16.5 therefore requires an object-context soak arm with its own pre-registered expectation, and
-§19.3's follow-up trigger (a workflow-owned serializer) is treated as **already fired**. The
-alternative considered and rejected for this release train — capping the pinned set and shedding load
-with 503 — is decision 18.
+```text
+workflow <path>: context class 'TodoListManager' has no get_state hook, so sessions holding it
+are pinned and will never be evicted. Add get_state/from_state to
+_commands/TodoListManager/_TodoListManager.py, or return fastworkflow.EPHEMERAL to declare this
+deliberate and silence this warning.
+```
+
+The cost of *being* pinned is unchanged and was measured rather than estimated (§16.5.2 arm B):
++0.498 MB/request, live sessions rising to 301 against a cap of 50, zero retirements. A pinned workflow
+still cannot meet the §16.5 gate and still must not be described as bounded.
+
+`simple_workflow_template` is the scaffold new workflows are copied from, which is why it was
+implemented first and why its hook is written to be read as the worked example. A workflow copied from
+it today is born bounded. A workflow written from scratch is born pinned until its author writes the
+hook, which is what the warning is for.
+
+Decision 18 — capping the pinned set and shedding load with 503 — remains rejected for this release
+train and remains the preferred long-term answer; it needs admission-control work this train did not do.
 
 ---
 
@@ -473,10 +511,13 @@ positions, so they are non-contiguous within each group.
 - **9.** Persisted state is strict, versioned JSON. No `default=str`, anywhere in the path.
 - **10.** Empty saved state is distinct from absent saved state; clearing context cannot resurrect old
   or launch-time values.
-- **11.** *Replaced* `[R2-12]`. No state is durable unless the workflow has declared it durable.
-  Credentials and unclassified values are never persisted; a session whose state is not fully declared
-  is pinned rather than partially written. This supersedes revision 2's "exclude one top-level key"
-  rule, which persisted everything else by default.
+- **11.** *Reversed in revision 4* `[decision 25, reversed 2026-08-05]`. JSON-native workflow context is
+  durable by default; an author extends or overrides that through hooks. A **command-context object**
+  is durable only when its `Context` class implements `get_state`/`from_state`, and a session holding
+  one without a hook is **pinned rather than partially written** — that half of the original invariant
+  is unchanged and is what keeps eviction from losing application state. Request-scoped credentials are
+  still never persisted (invariant 29). Redaction of other sensitive values an author chooses to store
+  is deferred to `fix-cj4`; until then the data-classification boundary is documentation.
 - **12.** Context encoding, hashing and writing occurs only during retirement or graceful shutdown, not
   after every turn — **except** the semantic-metadata commit required by invariant 25.
 - **16.** *Narrowed* `[R11]`, subsumed by invariant 26. No two record kinds share a key space on any
@@ -1103,32 +1144,53 @@ turns, in plaintext. That permits `api_key`, refresh tokens, cookies, signed URL
 credentials, a nested `http_bearer_token`, and secrets supplied as an `ask_user` answer and retained in
 the trajectory. Before this change, arbitrary application context could remain process-local.
 
-**Resolution — one principle replaces all three findings.** Durable state is **workflow-declared**:
+**Resolution as built `[revision 4]`.** Revision 3 answered all three findings with "nothing is durable
+unless the workflow declares it". That was reversed on 2026-08-05 after review, and the reversal is the
+one place where this document's earlier text described a system that was never built. The shipped model,
+specified in full in `docs/fastworkflow_serialization_hooks_design.md`:
 
-- A workflow declares a durable projection: which context keys are durable, which are ephemeral, and
-  which runtime fields participate. The declaration is versioned and part of the workflow's contract.
-- **Nothing is durable by default.** An undeclared workflow behaves exactly as it does today: its
-  sessions are pinned, nothing is written, and no data-classification boundary moves.
-- The framework enumerates the runtime and workflow fields it can restore — `is_complete`,
-  `active_conversation_id`, `stream_format`, current conversation selection, current context name — and
-  a field outside that enumeration pins the session rather than being silently dropped.
-- Identity-preserving structures (shared mutable containers) either round-trip with identity preserved
-  or pin.
+- **JSON-native `workflow.context` persists by default.** An author extends or overrides that through
+  an optional `_commands/_serialization.py`.
+- **A command-context object is serialized by an author-supplied hook**, and that hook is what makes a
+  session evictable at all — it is the larger of the hook's two jobs. `get_state`/`from_state` are
+  optional classmethods on the `Context` class the author already writes at
+  `_commands/<Name>/_<Name>.py`, next to `get_parent` and `get_displayname`.
+- **Presence of the hook is the consent signal**, which is how "declined deliberately" is distinguished
+  from "never considered": no hook pins *and warns*; `fastworkflow.EPHEMERAL` pins *silently*; a
+  returned dict makes the session evictable; returning `None` is reported as the bug it is.
+- The framework still enumerates the runtime fields it can restore — `active_conversation_id`,
+  `stream_format`, `is_complete`, the conversation high-water mark, `startup_ran` — and a field outside
+  that enumeration is a reason to pin, not something to drop silently.
+- Identity-preserving structures still either round-trip with identity preserved or pin. The framework
+  serializes **one anchor** (root if set, else current) and stores the other slots as *locators* into
+  it, then asserts `find_by_locator(anchor, get_locator(obj)) is obj` before trusting them. Two
+  independent snapshots of one node would restore as two objects, and `current_command_context` would
+  no longer be a node inside `root_command_context`.
 
-Release C's bound is therefore a property a workflow opts into, which is the honest form of §1.4's
-disclosure: instead of "most workflows happen to be pinned," the rule becomes "a workflow is bounded
-when its author has said what is safe to persist."
+The trade this reversal accepts, stated plainly: coverage by default instead of safety by default. An
+`api_key` an author puts in `workflow.context` now reaches disk. Redaction is deferred (`fix-cj4`);
+until it lands the boundary is documentation, plus one framework-owned exclusion —
+`http_bearer_token`, because fastWorkflow injects it itself and non-negotiable rule 2 forbids
+persisting a request-scoped credential.
+
+Release C's bound is therefore still a property a workflow opts into, but the opt-in is *writing a
+serializer for your own object*, not *classifying every key you own*.
 
 ### 11.2 Snapshot eligibility
 
 A session is evictable only when all hold:
 
-- the workflow declares a durable projection under §11.1;
-- no root, current, or response-generation command-context object is live;
+- the workflow's command-context projection is **serializable** — the hook returned a dict — or there is
+  no command-context object at all (`serialization_hooks.project_command_contexts`);
+- every context slot that differs from the anchor resolves through a locator that round-trips by
+  identity;
 - no live child workflow state exists;
-- the declared projection passes the strict encoding of §11.4;
+- the projection passes the strict encoding of §11.4;
 - the session is not `awaiting_user` and holds no CME continuation state (§11.6);
 - no lease is held and the union predicate is false (§10.1, §10.2).
+
+Otherwise the runtime is pinned. Pinning is a first-class outcome with a metric and a once-per-context
+warning, not an error.
 
 Otherwise the runtime is pinned. Pinning is a first-class outcome with a metric (§17), not an error.
 
@@ -1136,21 +1198,37 @@ Otherwise the runtime is pinned. Pinning is a first-class outcome with a metric 
 
 ```json
 {
-  "protocol_version": 3,
+  "protocol_version": 1,
   "record_type": "channel_checkpoint",
   "generation": 41,
   "deployment_id": "…",
   "workflow_fingerprint": "…",
   "channel_key": "…",
-  "channel_id_hash": "…",
+  "channel_id": "…",
   "session_incarnation": "…",
-  "declaration_version": 2,
-  "context": {},
+  "state_version": 2,
+  "context": {"workflow_context": {}, "command_contexts": {}},
   "runtime": {"active_conversation_id": 7, "stream_format": "ndjson", "is_complete": false},
   "startup": {"state": "succeeded", "idempotency_key": "…", "epoch": 3},
-  "launch_context": {"prior_projection": {}, "digest": "…"}
+  "launch_context": {"prior_projection": {}}
 }
 ```
+
+**Revision 4, as built.** `protocol_version` starts at 1, not the illustrative 3.
+`declaration_version` is `state_version`, matching the hooks design, and is the version the *author*
+declares on their `Context` class. `channel_id_hash` became the raw `channel_id`: the encoded
+`channel_key` is injective for ordinary ids but falls back to a hash tail for ids beyond the filesystem's
+name limit, and keeping the raw id in the record is what makes that fallback safe — a hash collision
+quarantines instead of cross-serving state. `context` has two halves because the workflow context and
+the command-context projection have different owners and different failure modes.
+
+**Cold restore cannot pre-bind the incarnation**, which the record shape hides. A fresh process has no
+way to know which incarnation the stored record names until it reads it, so validating a freshly minted
+one against it would quarantine every good record. The store therefore has two reads: `load` (strict,
+"I am session X, is this still mine?") and `load_for_adoption` (discovers the incarnation from the
+commit pointer, validates everything else against it, and binds the rest of the generation to what it
+found). Publishing under a different incarnation than a committed record refuses rather than
+displacing another session's lineage.
 
 Every identity field is validated on read; a mismatch quarantines rather than applies
 (invariant 27). This is required because the current disk mapping is non-injective — `tenant/a` and
@@ -1393,6 +1471,12 @@ framework change than this design should carry.
 Also fix `_update_http_bearer_token()`'s addressing defect per §11.7; its current `get_active_workflow()`
 lookup occurs outside a turn and can return no workflow, making refresh a no-op.
 
+**Revision 4 — confirmed while implementing.** That addressing defect was real: `get_active_workflow()`
+reads a stack populated only while a command is executing, so the refresh ran from the event loop and
+silently did nothing. The function is gone rather than fixed. The credential now travels on the
+`TurnExecution` and is installed against the bound app workflow inside the accepted turn
+(`turns.installed_credential`), which resolves the addressing defect and invariant 29 together.
+
 ### 11.10 Namespace lifecycle, growth, and fleet version `[R5, R2-17, R2-18]`
 
 **Durable growth is quantified and gated, not monitored.** The motivating workload is
@@ -1422,6 +1506,30 @@ A future revision should record whether a channel has ever been revisited, so si
 excluded from checkpointing entirely. This design has no mechanism to express that, which is itself worth
 stating: for the exact workload that motivated the change, the persistence machinery is pure cost at zero
 benefit.
+
+**Revision 4 — `fix-jtr` is delivered, and the plateau gate is met.** `RetentionPolicy` states the policy
+rather than hiding a TTL: an age window plus `max_channels`/`max_bytes` caps, with the resulting byte
+ceiling printed rather than left to be multiplied. The age window alone is *not* a byte bound — steady
+state is arrival rate × window × record size, which plateaus at a level nobody in the system controls —
+so the count cap is what makes size independent of arrival rate, and it is on by default.
+
+The reaper is **invoked, never scheduled**. There is no thread inside the store, for two reasons that
+both come from this document: decision 16 forbids a hidden durable-state TTL, and a background sweeper
+would be a second writer on a channel whose only writer is supposed to be the process that owns it
+(invariant 15). The server drives it from a lifespan task every 300 s and names every live or leased
+channel as protected. Reclamation is publication's prepare-then-flip run backwards, so no interrupted
+pass leaves a readable partial generation, and debris sweeping runs first rather than last.
+
+Operator verbs, as §11.10 required: `inspect`/`list_channels`, `quarantine`/`list_quarantine_entries`,
+`delete`, `reset`, `reap(dry_run=)`, and `stats()`. Channel reuse is made safe two ways — `delete` is a
+single atomic rename so nothing of the old lineage survives to be adopted, and `reset` records a
+generation floor so numbers never repeat for a reused `channel_id`.
+
+Measured: the namespace plateaus at 56.0 MB across 1,592 channels (§16.5.2). **What this still does not
+bound** is stated in the module's own docstring and repeated here because it is easy to over-read: nothing
+is reclaimed unless `reap` is called; growth between passes is unbounded; one record's size is unbounded;
+caps are per namespace, so a workflow fingerprint that changes every deploy creates a new namespace whose
+predecessor is reclaimed only by age.
 
 **Mixed-version rollout** `[R2-18]`. Schema evolution was called "forward-only" while §17 treated raising
 `MAX_LIVE_SESSIONS` as rollback — that is tuning, not binary compatibility. Old `2.24.1` code does not read
@@ -1578,6 +1686,28 @@ Invariant 17 separately forbids holding `registry._lock` across the same I/O.
 ---
 
 ## 15. Implementation map
+
+> **Revision 4 — as built.** The plan below is retained; this table is what shipped, and where to look.
+>
+> | Concern | Module |
+> |---|---|
+> | Strict serializer | `fastworkflow/state_serialization.py` |
+> | Author serialization hooks, anchor + locators, trichotomy | `fastworkflow/serialization_hooks.py` |
+> | Checkpoint records, identity, generations, retention | `fastworkflow/checkpoint_store.py` |
+> | Eligibility, retirement, restore, reconciliation, startup states | `fastworkflow/run_fastapi_mcp/checkpoint.py` |
+> | Leases, union predicate, `MAX_LIVE_SESSIONS` resolver | `fastworkflow/run_fastapi_mcp/utils.py` |
+> | Turn ownership, credential install, startup commit | `fastworkflow/run_fastapi_mcp/turns.py` |
+> | DSPy memory policy | `fastworkflow/run_fastapi_mcp/server_memory.py` |
+>
+> Verification: `tests/test_state_serialization.py`, `test_workflow_serialization_hooks.py`,
+> `test_checkpoint_store.py`, `test_checkpoint_integration.py`, `test_fastapi_session_leases.py`,
+> `test_fastapi_streaming_lifecycle.py`, `test_manager_shutdown_matrix.py`,
+> `test_credential_lifecycle.py`, `test_max_live_sessions_resolver.py`, `test_server_dspy_memory.py`,
+> `test_fastapi_memory_bounds.py`, and the soak harness at `tests/soak/memory_soak.py`.
+>
+> One module exceeds the repo's 1,000-line guideline: `checkpoint_store.py` at ~2,250 lines. The natural
+> split is a package — keys and records, the read/write store, the lifecycle — and it is deliberately
+> not done here rather than left unmentioned.
 
 **Release A**
 
@@ -1994,6 +2124,27 @@ therefore remains a starting point sized against the live-session budget, not a 
 - Never train in or delete `fastworkflow/examples/*/___command_info`.
 - Do not remove, skip, or weaken existing tests.
 
+### 16.8 What the matrices found that review did not `[revision 4]`
+
+Nine defects reached the verification matrices — eight in production code, one a latent test defect —
+every one of them in code that read correctly to two adversarial review rounds and to the author. They
+are recorded because "which defects survive review" is the most transferable result this work produced.
+
+| Defect | Found by | Why review missed it |
+|---|---|---|
+| A failed checkpoint write aborted the whole eviction sweep — the `except` tuple named a class the module never imported, so it raised `NameError` | §16.3 matrix | The handler *reads* correct; only an actually-failing write evaluates the tuple |
+| The startup commit was wired into the streaming path only, so `/initialize` — the one path that runs startup — never reached it | §16.3 matrix | Both halves exist and are correct; nothing connects them, which no single file shows |
+| Admission closure was registry-only, so the manager kept creating sessions during shutdown and a channel mid-creation was invisible to the drain | §16.4 matrix | §10.5 says "registry **and manager**"; implementing half of a conjunction still satisfies a reading of it |
+| Graceful shutdown closed runtimes without ever publishing their checkpoints | §16.4 matrix | The deadline rule dominates the section; the *quiescent* path had no rule of its own to violate |
+| A test persisted a `MagicMock` that `default=str` had been silently stringifying for as long as it existed | strict serializer | The test passed, which is exactly the problem lossy coercion creates |
+| `get_active_workflow()` returned `None` outside a turn, so the credential refresh was a no-op | credential tests | §11.9 predicted it; nothing had exercised it |
+| Three inside the checkpoint store (non-injective keys under case folding; a generation assembled from two lineages; a per-part digest that no test reached) | the store's own mutation testing | Green tests are not evidence that a protection is load-bearing |
+
+**The method that found them was mutation testing, not more review.** Breaking each protection in turn
+and confirming a test fails is what distinguished a test that guards a behaviour from one that merely
+executes it — and on two occasions it exposed tests that were passing only through a redundant guard.
+Where a matrix could not construct a hazard, it says so rather than shipping a vacuous test.
+
 ---
 
 ## 17. Observability and rollout
@@ -2071,7 +2222,12 @@ unsupported** `[R2-18]` — raising a cap is tuning, not a version rollback.
    observed need of ≈6; revision 1's 100 would have cost ≈87 MB.
 4. **Default live-session target of 50:** accepted **only as Release C**, gated on the full Release B
    protocol `[review §5]`.
-5. **Only `MAX_LIVE_SESSIONS` as new config:** accepted.
+5. **Only `MAX_LIVE_SESSIONS` as new config:** accepted, **amended in revision 4**. Two more shipped,
+   both namespace identity rather than tuning, and both optional with working defaults:
+   `FASTWORKFLOW_DEPLOYMENT_ID` (so two deployments sharing a backend cannot collide) and
+   `FASTWORKFLOW_CHECKPOINT_PROTOCOL_FLOOR` (invariant 31's fleet floor). Retention policy and the reap
+   interval are deliberately **not** env vars: they are private constants, so an operator has one dial
+   rather than four.
 6. **No live idle TTL:** accepted.
 7. **Weak creation locks:** accepted.
 8. **Persist only at retirement/shutdown:** accepted, **amended** `[R2-4]`. The semantic-metadata commit
@@ -2095,11 +2251,17 @@ unsupported** `[R2-18]` — raising a cap is tuning, not a version rollback.
     blobs.
 17. **Production slope remains supplied until reproduced:** accepted.
 18. **Fix 2's bound is conditional on workflow shape, disclosed rather than mitigated:** accepted `[R1]`,
-    with the census corrected `[review §3]`. Alternatives considered: evicting without a snapshot
-    (rejected — reintroduces silent state loss); capping the pinned set and shedding load with 503
-    (rejected for this release train, needs the admission-control work in
+    **then upgraded from "disclose" to "guard and fix" in revision 4**. Alternatives considered:
+    evicting without a snapshot (rejected — reintroduces silent state loss); capping the pinned set and
+    shedding load with 503 (rejected for this release train, needs the admission-control work in
     `docs/fastworkflow_turns_async_execution_design.md` Step 2 to be coherent; still the preferred
     long-term answer).
+    **What changed the decision was a measurement, not an argument.** These sessions did not merely stay
+    unbounded — evicting one *silently lost* its command context (`root=NoneType`, `current='*'`), which
+    made this a correctness question rather than a scope question. Disclosure is defensible for a memory
+    bound and weak ground for silent state loss. Resolution: a session that cannot be checkpointed is
+    never evicted and warns once per context class, and all five bundled workflows got hooks so the
+    limitation applies to authored workflows rather than to the scaffold. Recorded as `fix-3vy`.
 19. **Eviction safety uses the union of registry pointer and held lock; 409 idempotency does not:**
     accepted `[R2]`, **and found insufficient** `[R2-2]`. See decision 24.
 20. **Launch-time context is reconciled, not discarded:** accepted `[R6]`, **mechanism replaced**
@@ -2126,6 +2288,16 @@ unsupported** `[R2-18]` — raising a cap is tuning, not a version rollback.
     Release C's bound an opt-in property and preserves today's semantics for every workflow that does not
     opt in. Rejected alternative: an allowlist of framework-known-safe keys — rejected because it still
     guesses on application state.
+    **REVERSED 2026-08-05.** The shipped model is the opposite default: JSON-native workflow context
+    persists by default, with author hooks to extend or override, a warning when a workflow that needs a
+    hook has not implemented one, and no warning for an explicit no-op — because a no-op is the author
+    saying they know. The trade is coverage-by-default instead of safety-by-default, with visibility
+    managing the risk: Release C's bound applies to everyone who engages with the hook rather than only
+    to those who classify every key they own. The security argument that motivated the original decision
+    is not dismissed, it is deferred and tracked (`fix-cj4`), with one exclusion kept immediately —
+    `http_bearer_token`, because the framework injects it and invariant 29 forbids persisting it.
+    Full specification: `docs/fastworkflow_serialization_hooks_design.md`. §11.1 and §11.2 are rewritten
+    accordingly rather than annotated, so no reader implements the withdrawn model.
 26. **Awaiting and continuation sessions are pinned in Release B v1:** accepted `[R2-8]`. Today's
     suspended-state restore already loses the logical-turn accumulator and the CME continuation keys;
     pinning avoids making a pre-existing defect routine without pretending to have fixed it. Recorded
@@ -2150,13 +2322,15 @@ unsupported** `[R2-18]` — raising a cap is tuning, not a version rollback.
 
 1. Active concurrency remains unbounded; trigger the existing backpressure work when active channels
    dominate RSS.
-2. Durable checkpoint records have no lifecycle policy yet. **Quantified** `[R5]`: ≈700 MB/day at the
-   observed rate and payload. Release C waits on `fix-jtr` `[R2-17]`; `fix-6b4` does not cover this
-   namespace.
-3. Undeclared or object-context application state pins a runtime. **This trigger has already fired**
-   `[R1]`: five bundled workflows including `simple_workflow_template` assign a command-context object, so
-   a workflow-owned serializer (never pickle) is a known prerequisite for a general live-session bound, not
-   a conditional follow-up.
+2. ~~Durable checkpoint records have no lifecycle policy yet.~~ **CLOSED in revision 4.** `fix-jtr`
+   delivered a stated retention policy, an invoked reaper, the four operator verbs and namespace
+   measurement; the plateau gate is met at 56.0 MB (§16.5.2). What remains unbounded is listed in
+   §11.10 — chiefly that nothing is reclaimed unless `reap` is called.
+3. ~~Undeclared or object-context application state pins a runtime.~~ **CLOSED in revision 4** for every
+   bundled workflow `[R1]`: all five now implement `get_state`/`from_state`, so a workflow copied from
+   `simple_workflow_template` is born bounded. The limitation survives in a narrower and more honest
+   form — a workflow whose author has not written the hook yet is pinned, and warned about once per
+   context class. Never pickle remains the rule; the hooks are author-written projections.
 4. Terminal retention is in-process; restart loses results, and eviction makes them unreachable
    `[R2-16]`. The startup-completion *fact* is durable `[R3]`.
 5. The 300-second age window is opportunistic and, in a burst of more than 20 startups, does not bind at
@@ -2176,6 +2350,18 @@ unsupported** `[R2-18]` — raising a cap is tuning, not a version rollback.
     pinning bounds only the local eviction path `[R2-8]`.
 12. Exactly-once startup is scoped to framework-managed effects; external side effects need
     application-owned idempotency `[R2-5]`.
+13. *New in revision 4.* Persist-all-by-default means an `api_key` or PII an author puts in
+    `workflow.context` reaches disk. The boundary is documentation plus one framework-owned exclusion
+    until `fix-cj4` lands. `durable_context()` strips `http_bearer_token` at the **top level only**, so
+    a credential copied into a nested dict would persist; the credential test greps raw bytes and will
+    catch that the day the framework claims otherwise.
+14. *New in revision 4.* The slope estimator cannot resolve 0.05 MB/request at 300 samples on this host
+    — it reports a flat series as exceeding the threshold about a third of the time, which happened
+    twice during this work and looked like a real failure both times. **Size gated soak arms at 500
+    requests minimum**, and the durable plateau needs ~3,500 to span two reap intervals.
+15. *New in revision 4.* A torn checkpoint surfaces only on restore, and §16.5 arm C's channels are
+    unique and never revisited, so that arm cannot detect one. Detecting it needs a revisiting workload,
+    which is an arm this design does not specify.
 
 ---
 
