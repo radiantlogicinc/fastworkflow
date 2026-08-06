@@ -358,6 +358,19 @@ readinessProbe:
   periodSeconds: 5
 ```
 
+### Handling secrets and PII
+
+fastWorkflow persists session state so conversations survive restarts. Two things reach disk in the clear today:
+
+- **command parameters**, in the conversation record written after every turn;
+- **the agent's trajectory and its inputs**, in the pending-session file written whenever a turn suspends on `ask_user`.
+
+Three norms, in priority order:
+
+1. **A credential that arrives with a request belongs to that request.** Re-supply it per request rather than storing it in workflow context. fastWorkflow does this with the caller's JWT: it is refreshed on every authenticated request and is never written to session state.
+2. **Keep secrets and PII out of command contexts, workflow context, and agent trajectories.** Pass an opaque handle — a user id, a lookup key — and resolve it to the sensitive value inside the command, where it stays in memory and never reaches a parameter, a trace, or a trajectory.
+3. **If state is both long-lived and genuinely secret, encrypt it — with a key that does not travel with the ciphertext.** A key sitting beside the data it protects moves an audit checkbox, not the exposure. Use your deployment's KMS or secret manager.
+
 ---
 
 ## Developer FAQ
