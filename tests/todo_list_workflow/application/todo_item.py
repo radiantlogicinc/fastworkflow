@@ -142,4 +142,36 @@ class TodoItem:
             description=data['description'],
             assign_to=data['assign_to'],
             status=data['status']
-        ) 
+        )
+
+    def to_state_dict(self) -> Dict[str, Any]:
+        """Snapshot this todo item as JSON-native data.
+
+        ``parent`` is a back-reference that makes the live graph cyclic, so it
+        is omitted and re-established from the containing list on restore. The
+        type discriminator lets a TodoList tell its two kinds of child apart.
+        """
+        return {
+            'id': self.id,
+            'description': self.description,
+            'assign_to': self.assign_to,
+            'status': self.status,
+            'type': 'TodoItem'
+        }
+
+    @classmethod
+    def from_state_dict(cls: Type['TodoItem'], state: Dict[str, Any]) -> 'TodoItem':
+        """Rebuild a todo item from :meth:`to_state_dict`.
+
+        Args:
+            state (dict): A snapshot produced by :meth:`to_state_dict`.
+
+        Returns:
+            TodoItem: The restored todo item, with ``parent`` still unset.
+        """
+        return cls(
+            id=state['id'],
+            description=state['description'],
+            assign_to=state['assign_to'],
+            status=state['status']
+        )

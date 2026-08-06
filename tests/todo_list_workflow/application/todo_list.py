@@ -240,4 +240,48 @@ class TodoList(TodoItem):
 
         except (KeyError, TypeError, ValueError) as e:
             # Enhance the error message with context
-            raise ValueError(f"Error deserializing TodoList: {str(e)}") from e 
+            raise ValueError(f"Error deserializing TodoList: {str(e)}") from e
+
+    def to_state_dict(self) -> Dict[str, Any]:
+        """Snapshot this TodoList and its descendants as JSON-native data.
+
+        Unlike :meth:`_to_dict` this needs no visited set: children are always
+        freshly created by add_child_todoitem/add_child_todolist, so the only
+        edge that closes a cycle is ``parent``, which is omitted here and
+        re-established top-down by :meth:`from_state_dict`. Ids are unique only
+        among siblings, so a visited set keyed on id would also mistake two
+        unrelated branches for a cycle.
+        """
+        state = super().to_state_dict()
+        state['type'] = 'TodoList'
+        state['children'] = [child.to_state_dict() for child in self.children]
+        return state
+
+    @classmethod
+    def from_state_dict(cls, state: Dict[str, Any]) -> 'TodoList':
+        """Rebuild a TodoList and its descendants from :meth:`to_state_dict`.
+
+        Args:
+            state (dict): A snapshot produced by :meth:`to_state_dict`.
+
+        Returns:
+            TodoList: The restored TodoList, with every descendant's ``parent``
+            pointing back at its container.
+        """
+        todo_list = cls(
+            id=state['id'],
+            description=state['description'],
+            assign_to=state['assign_to'],
+            status=state['status']
+        )
+
+        for child_state in state.get('children', []):
+            child = (
+                cls.from_state_dict(child_state)
+                if child_state.get('type') == 'TodoList'
+                else TodoItem.from_state_dict(child_state)
+            )
+            child.parent = todo_list
+            todo_list.children.append(child)
+
+        return todo_list

@@ -4,7 +4,8 @@ import queue
 import time
 import weakref
 from collections import OrderedDict
-from dataclasses import dataclass
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from queue import Queue
 from typing import Any, Callable, Optional
 
@@ -15,9 +16,17 @@ from pydantic import BaseModel, field_validator
 
 import fastworkflow
 from fastworkflow.session_state_store import SessionStateStore, get_session_state_store
+from fastworkflow.state_serialization import StateEncodingError
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 from fastworkflow.utils.logging import logger
 
+from fastworkflow.checkpoint_store import (
+    ChannelCheckpointStore,
+    CheckpointIdentity,
+    CheckpointStoreError,
+    QuarantineReason,
+)
+from . import checkpoint
 from .conversation_store import ConversationStore, restore_history_from_turns
 from .jwt_manager import verify_token
 
@@ -247,17 +256,14 @@ def _merge_workflow_context(
     context: Optional[dict],
     http_bearer_token: Optional[str],
 ) -> Optional[dict]:
-    if not http_bearer_token:
-        return context
-    merged = dict(context) if context else {}
-    merged["http_bearer_token"] = http_bearer_token
-    return merged
+    """Launch context only. The credential is installed per accepted turn.
 
-
-def _update_http_bearer_token(runtime: "ChannelRuntime", token: str) -> None:
-    workflow = runtime.execution_context.get_active_workflow()
-    if workflow and workflow.context is not None:
-        workflow.context["http_bearer_token"] = token
+    It used to be merged in here and refreshed on every lookup, which put a
+    request-scoped secret into shared, checkpointable workflow state — readable
+    by whichever turn happened to be running, and durable once state is
+    persisted. See turns.installed_credential.
+    """
+    return context
 
 
 def _run_startup_sync(
@@ -293,9 +299,15 @@ async def ensure_user_runtime_exists(
     existing_runtime = await session_manager.get_session(channel_id)
     if existing_runtime:
         logger.debug(f"Session for channel_id {channel_id} already exists, skipping creation")
-        if http_bearer_token:
-            _update_http_bearer_token(existing_runtime, http_bearer_token)
         return
+
+    if session_manager.admission_closed:
+        # Creating one now would produce a session the drain has already scanned
+        # past, so it would be neither drained nor closed.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Server is shutting down; not creating new sessions",
+        )
 
     # Single-flight session creation (§3.5): serialize per-channel so two
     # concurrent cold requests don't both build a ctx (and double-run startup).
@@ -309,21 +321,91 @@ async def ensure_user_runtime_exists(
             logger.debug(
                 f"Session for channel_id {channel_id} created concurrently, skipping creation"
             )
-            if http_bearer_token:
-                _update_http_bearer_token(existing_runtime, http_bearer_token)
             return
 
-        await _create_user_runtime(
+        # Hold the lease across creation so the overflow sweep inside
+        # create_session cannot choose the runtime being created (invariant 20).
+        async with session_manager.initialization_lease(channel_id):
+            await _create_user_runtime(
+                channel_id=channel_id,
+                session_manager=session_manager,
+                workflow_path=workflow_path,
+                context=context,
+                startup_command=startup_command,
+                startup_action=startup_action,
+                stream_format=stream_format,
+                http_bearer_token=http_bearer_token,
+                run_startup=run_startup,
+            )
+
+
+@dataclass
+class _RestoredCheckpoint:
+    """What a checkpoint contributed to a freshly built runtime."""
+
+    session_incarnation: str
+    runtime_fields: dict = field(default_factory=dict)
+    startup: dict = field(default_factory=dict)
+    applied: bool = False
+
+
+def _restore_from_checkpoint(
+    session_manager: "ChannelSessionManager",
+    channel_id: str,
+    workflow_path: str,
+    app_workflow: fastworkflow.Workflow,
+    launch_context: Optional[dict],
+) -> _RestoredCheckpoint:
+    """Apply this channel's checkpoint, or start from launch configuration.
+
+    A record that cannot be applied is quarantined and the channel starts clean.
+    Partially applying one would leave a session that looks restored and is not.
+    """
+    store = session_manager.checkpoint_store
+    fresh_incarnation = checkpoint.new_session_incarnation()
+
+    try:
+        # Adoption, not continuation: a cold session has no way to know which
+        # incarnation the stored record names until it reads it. Every other
+        # identity field is still validated.
+        record = store.load_for_adoption(
+            deployment_id=checkpoint.deployment_id(),
+            workflow_fingerprint=checkpoint.workflow_fingerprint(workflow_path),
             channel_id=channel_id,
-            session_manager=session_manager,
-            workflow_path=workflow_path,
-            context=context,
-            startup_command=startup_command,
-            startup_action=startup_action,
-            stream_format=stream_format,
-            http_bearer_token=http_bearer_token,
-            run_startup=run_startup,
         )
+    except Exception as exc:
+        logger.warning(
+            f"Checkpoint for channel_id {channel_id} could not be read "
+            f"({type(exc).__name__}); starting from launch configuration"
+        )
+        record = None
+
+    if record is None:
+        return _RestoredCheckpoint(session_incarnation=fresh_incarnation)
+
+    try:
+        runtime_fields = checkpoint.restore(
+            app_workflow,
+            record,
+            current_launch=dict(launch_context or {}),
+            channel_id=channel_id,
+        )
+    except Exception as exc:
+        logger.error(
+            f"Checkpoint for channel_id {channel_id} could not be applied "
+            f"({type(exc).__name__}: {exc}); quarantining and starting from "
+            "launch configuration"
+        )
+        store.quarantine(record.identity, QuarantineReason.UNREADABLE_RECORD)
+        return _RestoredCheckpoint(session_incarnation=fresh_incarnation)
+
+    logger.info(f"Restored checkpoint for channel_id {channel_id}")
+    return _RestoredCheckpoint(
+        session_incarnation=record.identity.session_incarnation,
+        runtime_fields=runtime_fields,
+        startup=dict(record.startup or {}),
+        applied=True,
+    )
 
 
 async def _create_user_runtime(
@@ -355,6 +437,10 @@ async def _create_user_runtime(
     )
     ctx.bind_app_workflow(app_workflow)
 
+    restored = _restore_from_checkpoint(
+        session_manager, channel_id, workflow_path, app_workflow, context
+    )
+
     conv_id_to_restore = None
     if conv_id_to_restore := conversation_store.get_last_conversation_id():
         conversation = conversation_store.get_conversation(conv_id_to_restore)
@@ -372,13 +458,26 @@ async def _create_user_runtime(
             conv_id_to_restore = None
 
     loop = asyncio.get_running_loop()
-    startup_ran = False
-    if run_startup and (startup_command or startup_action):
+    startup_state = restored.startup.get("state") or checkpoint.STARTUP_NOT_ATTEMPTED
+    startup_epoch = int(restored.startup.get("epoch") or 0)
+    startup_key = restored.startup.get("idempotency_key")
+    startup_ran = bool(restored.runtime_fields.get("startup_ran"))
+
+    # Whether startup already ran is read from the durable record, never from
+    # in-process turn retention, so it cannot depend on a retention window.
+    already_succeeded = startup_state == checkpoint.STARTUP_SUCCEEDED
+    if run_startup and (startup_command or startup_action) and not already_succeeded:
         await loop.run_in_executor(
             None,
             lambda: _run_startup_sync(ctx, startup_command, startup_action),
         )
         startup_ran = True
+        startup_state = checkpoint.STARTUP_SUCCEEDED
+    elif already_succeeded:
+        logger.info(
+            f"Skipping startup for channel_id {channel_id}: the durable record "
+            f"says it already succeeded at epoch {startup_epoch}"
+        )
 
     if pending := session_manager.session_state_store.load(channel_id):
         ctx.apply_serialized_state(pending)
@@ -390,15 +489,29 @@ async def _create_user_runtime(
         len(ctx.conversation_history.messages) if conv_id_to_restore else 0
     )
 
+    # A restored record is authoritative for the fields the framework knows how
+    # to restore; the request's stream_format only applies to a fresh session.
     await session_manager.create_session(
         channel_id=channel_id,
         execution_context=ctx,
         conversation_store=conversation_store,
-        active_conversation_id=conv_id_to_restore,
-        stream_format=stream_format,
+        active_conversation_id=(
+            restored.runtime_fields.get("active_conversation_id")
+            if restored.applied
+            else conv_id_to_restore
+        ),
+        stream_format=(
+            restored.runtime_fields.get("stream_format") or stream_format
+            if restored.applied
+            else stream_format
+        ),
         workflow_path=workflow_path,
         startup_ran=startup_ran,
         durable_turn_count=durable_turn_count,
+        session_incarnation=restored.session_incarnation,
+        startup_state=startup_state,
+        startup_idempotency_key=startup_key,
+        startup_epoch=startup_epoch,
     )
     logger.info(f"Successfully created session for channel_id: {channel_id}")
 
@@ -436,10 +549,15 @@ def persist_pending_after_turn(
     """Save or clear durable suspended state after a Topology-B turn."""
     ctx = runtime.execution_context
     if ctx.awaiting_user or _is_awaiting_user_output(output):
-        session_manager.session_state_store.save(
-            runtime.channel_id,
-            ctx.serialize_state(channel_id=runtime.channel_id),
-        )
+        try:
+            state = ctx.serialize_state(channel_id=runtime.channel_id)
+        except StateEncodingError as exc:
+            logger.warning(
+                f"Suspended state for channel_id {runtime.channel_id} is not "
+                f"losslessly encodable, so it was not persisted: {exc}"
+            )
+            return
+        session_manager.session_state_store.save(runtime.channel_id, state)
     else:
         session_manager.session_state_store.clear(runtime.channel_id)
 
@@ -520,14 +638,18 @@ def _format_trace_event(evt: Any, user_id: Optional[str]) -> dict[str, Any]:
     return trace
 
 
+async def _maybe_await(result: Any) -> None:
+    """Accept either a sync or an async callback."""
+    if asyncio.iscoroutine(result):
+        await result
+
+
 async def _emit_trace_callback(
     on_trace: Callable[[dict[str, Any]], Any],
     trace_dict: dict[str, Any],
     _user_id: Optional[str],
 ) -> None:
-    result = on_trace(trace_dict)
-    if asyncio.iscoroutine(result):
-        await result
+    await _maybe_await(on_trace(trace_dict))
 
 
 async def run_process_message_with_trace_stream(
@@ -537,9 +659,16 @@ async def run_process_message_with_trace_stream(
     session_manager: "ChannelSessionManager",
     on_trace: Callable[[dict[str, Any]], Any],
     user_id: Optional[str] = None,
+    on_timeout: Optional[Callable[[str], Any]] = None,
 ) -> fastworkflow.CommandOutput:
     """
     Run process_message in an executor while draining command_trace_queue concurrently.
+
+    The deadline governs *delivery*, not ownership. When it passes, ``on_timeout``
+    is invoked once so the caller can tell the client, but the executor future is
+    still awaited to completion: abandoning it would leave a thread mutating the
+    workflow context after the caller released ``runtime.lock``, free for eviction
+    or shutdown to snapshot and close that context underneath it.
     """
     loop = asyncio.get_running_loop()
     ctx = runtime.execution_context
@@ -553,8 +682,9 @@ async def run_process_message_with_trace_stream(
         None, lambda: ctx._execute_message(message)
     )
     start = time.time()
+    timed_out = False
 
-    while not exec_future.done() and time.time() - start < timeout_seconds:
+    while not exec_future.done():
         while True:
             try:
                 evt = trace_queue.get_nowait()
@@ -565,13 +695,20 @@ async def run_process_message_with_trace_stream(
             await _emit_trace_callback(
                 on_trace, _format_trace_event(evt, user_id), user_id
             )
+        if not timed_out and time.time() - start >= timeout_seconds:
+            timed_out = True
+            logger.warning(
+                f"Streaming turn for channel_id {runtime.channel_id} passed its "
+                f"{timeout_seconds}s delivery deadline; still owning the executor "
+                "until it exits"
+            )
+            if on_timeout is not None:
+                await _maybe_await(
+                    on_timeout(
+                        f"Command execution timed out after {timeout_seconds} seconds"
+                    )
+                )
         await asyncio.sleep(0.05)
-
-    if not exec_future.done():
-        raise HTTPException(
-            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail=f"Command execution timed out after {timeout_seconds} seconds",
-        )
 
     output = await exec_future
 
@@ -673,6 +810,16 @@ class ChannelRuntime:
     stream_format: str = "ndjson"
     workflow_path: str = ""
     startup_ran: bool = False
+    # Startup authority is durable (invariant 18): whether startup already ran
+    # is read from the checkpoint, never inferred from in-process turn
+    # retention, so it cannot depend on a wall-clock retention window.
+    startup_state: str = checkpoint.STARTUP_NOT_ATTEMPTED
+    startup_idempotency_key: Optional[str] = None
+    startup_epoch: int = 0
+    # Binds this live session to the checkpoint it may write. A record carrying
+    # a different incarnation is a channel-id reuse, and is quarantined rather
+    # than applied.
+    session_incarnation: str = field(default_factory=checkpoint.new_session_incarnation)
     # High-water mark: how many of the leading in-memory conversation turns are
     # already durably recorded. Everything after it is what the next incremental
     # save appends. Trimming the in-memory window lowers it by the number of
@@ -725,6 +872,117 @@ class ChannelSessionManager:
         # turn registry's active-execution pointer. Eviction must never close a
         # live turn's ctx, so a busy channel is skipped. See §3.6 of the design.
         self.is_channel_busy: Optional[Callable[[str], bool]] = None
+        # Per-channel eviction leases (refcounts). A lease is taken under the
+        # manager lock by the same lookup that hands out the runtime, which is
+        # what makes lookup and admission atomic. A boolean sampled afterwards
+        # cannot: get_session() releases the manager lock before the caller has
+        # registered a turn or taken runtime.lock, and in that window both halves
+        # of the busy predicate are false while the runtime is very much in use.
+        # Keyed by channel_id rather than by runtime, so a channel can be leased
+        # while it is still being created.
+        self._leases: dict[str, int] = {}
+        self._checkpoint_store: Optional[ChannelCheckpointStore] = None
+        self._admission_closed = False
+        # The configured initial context, kept so restore can tell an operator's
+        # change from an application's (three-way merge, design 11.9).
+        self._launch_context: dict = {}
+
+    @asynccontextmanager
+    async def leased_session(self, channel_id: str):
+        """Look up a runtime and hold an eviction lease for the whole block.
+
+        This is the safe way to obtain a runtime you are going to *use*. The
+        lease outlives the manager lock and is released only when the block
+        exits, by which time either the turn registry or ``runtime.lock`` owns
+        the runtime — so there is no interval where a live runtime looks idle.
+
+        Yields None when the channel has no live session, so callers keep their
+        existing not-found handling.
+        """
+        async with self._lock:
+            runtime = self._sessions.get(channel_id)
+            if runtime is not None:
+                self._touch(channel_id)
+                self._acquire_lease(channel_id)
+        try:
+            yield runtime
+        finally:
+            if runtime is not None:
+                self._release_lease(channel_id)
+
+    @asynccontextmanager
+    async def initialization_lease(self, channel_id: str):
+        """Hold a lease across session creation, before the session exists.
+
+        A runtime under construction is the *only* apparently safe eviction
+        candidate exactly when every older session is pinned — it has no registry
+        pointer, its lock is free, and its workflow has no context object yet. So
+        the manager can evict the runtime it is in the middle of creating, inside
+        create_session's own overflow sweep. Leasing the channel_id before
+        creation starts closes that window.
+        """
+        async with self._lock:
+            self._acquire_lease(channel_id)
+        try:
+            yield
+        finally:
+            self._release_lease(channel_id)
+
+    def _acquire_lease(self, channel_id: str) -> None:
+        """Caller holds ``self._lock``."""
+        self._leases[channel_id] = self._leases.get(channel_id, 0) + 1
+
+    def _release_lease(self, channel_id: str) -> None:
+        remaining = self._leases.get(channel_id, 0) - 1
+        if remaining > 0:
+            self._leases[channel_id] = remaining
+        else:
+            self._leases.pop(channel_id, None)
+
+    def close_admission(self) -> None:
+        """Stop creating sessions. Closing the registry alone is not enough.
+
+        A channel created concurrently with shutdown is in neither the registry
+        nor ``_sessions`` when the drain scans, so it would be neither drained
+        nor closed.
+        """
+        self._admission_closed = True
+
+    @property
+    def admission_closed(self) -> bool:
+        return self._admission_closed
+
+    def busy_channel_ids(self) -> list[str]:
+        """Channels that are leased or have work in flight.
+
+        The shutdown drain needs this rather than ``runtime.lock.locked()``: a
+        QUEUED execution whose task has not yet taken the lock reports not-busy,
+        and so does a request that has been handed a runtime but not yet
+        registered its turn.
+
+        Leases are scanned separately from ``_sessions`` because a channel being
+        created holds one before it has a session to be found under.
+        """
+        candidates = set(self._sessions) | set(self._leases)
+        return sorted(
+            channel_id
+            for channel_id in candidates
+            if self._leases.get(channel_id) or self._has_work_in_flight(channel_id)
+        )
+
+    def _has_work_in_flight(self, channel_id: str) -> bool:
+        """Union predicate: a live registry execution OR a held runtime lock.
+
+        The registry pointer alone is not enough, because /invoke_agent_stream
+        runs an entire turn without ever creating a TurnExecution and guards
+        itself with the lock instead. Invariant 2 still forbids the lock as the
+        409 idempotency source; eviction safety is a different question, and the
+        lock answers it correctly where the pointer does not.
+        """
+        if self.is_channel_busy and self.is_channel_busy(channel_id):
+            return True
+        runtime = self._sessions.get(channel_id)
+        return runtime is not None and runtime.lock.locked()
 
     def get_creation_lock(self, channel_id: str) -> asyncio.Lock:
         """Return the per-channel creation lock, creating it on first use.
@@ -750,39 +1008,124 @@ class ChannelSessionManager:
             )
         return self._session_state_store
 
+    @property
+    def checkpoint_store(self) -> ChannelCheckpointStore:
+        # Built lazily for the same reason as the state store: the
+        # SPEEDDICT_FOLDERNAME read must happen after fastworkflow.init().
+        if self._checkpoint_store is None:
+            self._checkpoint_store = ChannelCheckpointStore(
+                checkpoint.get_checkpoint_dir(),
+                min_readable_protocol_version=checkpoint.fleet_protocol_floor(),
+            )
+        return self._checkpoint_store
+
+    def set_launch_context(self, launch_context: Optional[dict]) -> None:
+        """The configured initial context, needed for three-way reconciliation."""
+        self._launch_context = dict(launch_context or {})
+
+    def checkpoint_for_shutdown(self, skip_channel_ids: list[str]) -> int:
+        """Publish checkpoints for quiescent runtimes before the process exits.
+
+        Retirement writes on eviction; without this, a clean restart loses
+        everything a live channel accumulated since it was last evicted — the
+        same loss the deadline rule guards against, reached by writing nothing
+        rather than by writing something stale. Busy channels are skipped for
+        exactly that reason: their snapshot would predate work still running.
+        """
+        skip = set(skip_channel_ids)
+        written = 0
+        for channel_id, runtime in list(self._sessions.items()):
+            if channel_id in skip:
+                continue
+            eligibility = checkpoint.assess(runtime)
+            if not eligibility.evictable:
+                continue
+            try:
+                checkpoint.publish(
+                    self.checkpoint_store, runtime, eligibility, self._launch_context
+                )
+                written += 1
+            except Exception as exc:
+                logger.warning(
+                    f"Could not checkpoint channel_id {channel_id} at shutdown "
+                    f"({type(exc).__name__}: {exc})"
+                )
+        return written
+
+    def commit_startup_state(self, runtime: ChannelRuntime) -> None:
+        """Persist the startup outcome now, not at retirement.
+
+        Invariant 25: a fact whose loss changes restart behaviour is committed
+        before it becomes observable, and its durability must not depend on
+        whether the application happened to mutate its context.
+        """
+        eligibility = checkpoint.assess(runtime)
+        if not eligibility.evictable:
+            # Nothing durable to attach it to. The session is pinned anyway, so
+            # it will not be evicted and the fact stays in memory where it is
+            # still correct for this process.
+            return
+        checkpoint.publish(
+            self.checkpoint_store, runtime, eligibility, self._launch_context
+        )
+
     def _touch(self, channel_id: str) -> None:
         if channel_id in self._sessions:
             self._sessions.move_to_end(channel_id)
 
     async def _evict_oldest_if_needed(self) -> None:
         while len(self._sessions) > self._max_live_sessions:
-            # Pick the oldest channel that is NOT running a turn. Never close a
-            # live turn's ctx mid-mutation (§3.6) — eviction would race the
-            # executor thread. OrderedDict iterates oldest-first.
-            victim_id: Optional[str] = None
-            for channel_id in self._sessions:
-                if self.is_channel_busy and self.is_channel_busy(channel_id):
-                    continue
-                victim_id = channel_id
+            # Never close a live turn's ctx mid-mutation (§3.6) — eviction would
+            # race the executor thread — and never evict a session whose state
+            # cannot be written back. OrderedDict iterates oldest-first.
+            if not await self._retire_one_candidate():
                 break
 
-            if victim_id is None:
-                # Every over-capacity channel is busy; stay over capacity until
-                # a turn finishes rather than evict a live execution.
+    async def _retire_one_candidate(self) -> bool:
+        """Retire the oldest retirable session. False when none can be.
+
+        Retirement is publish-then-pop. Popping first and writing "best effort"
+        afterwards is how a failed write becomes lost application state.
+        """
+        skipped_pinned = 0
+        for channel_id, runtime in list(self._sessions.items()):
+            if self._leases.get(channel_id) or self._has_work_in_flight(channel_id):
+                continue
+
+            eligibility = checkpoint.assess(runtime)
+            if not eligibility.evictable:
+                skipped_pinned += 1
+                checkpoint.warn_pinned_once(
+                    channel_id, runtime.workflow_path, eligibility.reason
+                )
+                continue
+
+            try:
+                generation = checkpoint.publish(
+                    self.checkpoint_store, runtime, eligibility, self._launch_context
+                )
+            except (StateEncodingError, CheckpointStoreError, OSError) as exc:
+                # Leave it live and try the next candidate. The cache staying
+                # over target is a visible, metered condition; a dropped runtime
+                # whose state never landed is not.
                 logger.warning(
-                    "Session cache over capacity but all eviction candidates "
-                    "have active turns; deferring eviction"
+                    f"Not evicting channel_id {channel_id}: checkpoint write "
+                    f"failed ({type(exc).__name__}: {exc})"
                 )
-                break
+                continue
 
-            runtime = self._sessions.pop(victim_id)
-            if runtime.execution_context.awaiting_user:
-                self.session_state_store.save(
-                    victim_id,
-                    runtime.execution_context.serialize_state(channel_id=victim_id),
-                )
+            self._sessions.pop(channel_id, None)
             runtime.execution_context.close()
-            logger.debug(f"Evicted live session cache for channel_id {victim_id}")
+            logger.debug(
+                f"Retired channel_id {channel_id} at generation {generation}"
+            )
+            return True
+
+        logger.warning(
+            "Session cache over capacity but no candidate could be retired "
+            f"({skipped_pinned} pinned); staying over target"
+        )
+        return False
 
     async def get_session(self, channel_id: str) -> Optional[ChannelRuntime]:
         async with self._lock:
@@ -801,6 +1144,10 @@ class ChannelSessionManager:
         workflow_path: str = "",
         startup_ran: bool = False,
         durable_turn_count: int = 0,
+        session_incarnation: Optional[str] = None,
+        startup_state: str = checkpoint.STARTUP_NOT_ATTEMPTED,
+        startup_idempotency_key: Optional[str] = None,
+        startup_epoch: int = 0,
     ) -> ChannelRuntime:
         async with self._lock:
             runtime = ChannelRuntime(
@@ -813,6 +1160,12 @@ class ChannelSessionManager:
                 workflow_path=workflow_path,
                 startup_ran=startup_ran,
                 durable_turn_count=durable_turn_count,
+                session_incarnation=(
+                    session_incarnation or checkpoint.new_session_incarnation()
+                ),
+                startup_state=startup_state,
+                startup_idempotency_key=startup_idempotency_key,
+                startup_epoch=startup_epoch,
             )
             self._sessions[channel_id] = runtime
             self._touch(channel_id)

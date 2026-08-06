@@ -30,10 +30,29 @@ def initialized_fastworkflow(tmp_path):
     RoutingRegistry.clear_registry()
 
 
+def _suspended_react_blob() -> dict:
+    """The shape WorkflowToolAgent.export_suspended() actually returns.
+
+    Has to be a real JSON-native blob: serialize_state is strict now, so a stub
+    that returned an opaque object would be rejected rather than quietly
+    stringified — which is the whole point, and is what this test used to do
+    without noticing.
+    """
+    return {
+        "trajectory": {"thought_0": "find the task", "observation_0": "two matches"},
+        "idx": 1,
+        "input_args": {"user_query": "list tasks"},
+        "max_iters": 25,
+        "clarification": "Which task?",
+        "iteration_counter": 1,
+    }
+
+
 def _wire_mock_agent(ctx, suspended, completed):
     mock_agent = MagicMock()
     mock_agent.return_value = suspended
     mock_agent.resume.return_value = completed
+    mock_agent.export_suspended.return_value = _suspended_react_blob()
     ctx._workflow_tool_agent = mock_agent
     ctx._intent_clarification_agent = MagicMock()
 

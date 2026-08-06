@@ -14,6 +14,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Optional
 
 import fastworkflow
+from fastworkflow.state_serialization import encode_state
 from fastworkflow.utils.logging import logger
 
 PENDING_STATE_KEY = "pending"
@@ -60,8 +61,10 @@ class DiskSessionStateStore(SessionStateStore):
 
     def save(self, channel_id: str, state: dict[str, Any]) -> None:
         path = self._json_path(channel_id)
+        # Strictness is established upstream at serialize_state; encoding here
+        # canonically keeps the two ends in agreement instead of re-coercing.
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(state, f, default=str)
+            f.write(encode_state(state))
 
     def clear(self, channel_id: str) -> None:
         path = self._json_path(channel_id)
@@ -100,7 +103,7 @@ class RedisSessionStateStore(SessionStateStore):
         return json.loads(raw)
 
     def save(self, channel_id: str, state: dict[str, Any]) -> None:
-        self._client.set(self._key(channel_id), json.dumps(state))
+        self._client.set(self._key(channel_id), encode_state(state))
 
     def clear(self, channel_id: str) -> None:
         self._client.delete(self._key(channel_id))

@@ -141,6 +141,46 @@ class CommandOutput(BaseModel):
             isError=not self.success
         )
 
+class _Ephemeral:
+    """Sentinel: this state is deliberately not persisted.
+
+    Returned from a serialization hook to say "I know about this and I choose
+    nothing", which pins the session WITHOUT the warning that an absent hook
+    earns. It is a distinct object rather than None so that a hook which falls
+    off the end of a function is a reportable bug instead of silent consent.
+    """
+
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:
+        return "fastworkflow.EPHEMERAL"
+
+    def __bool__(self) -> bool:
+        return False
+
+
+EPHEMERAL = _Ephemeral()
+
+
+class UnsupportedStateVersion(Exception):
+    """Raised by a from_state hook that will not migrate the version it was given.
+
+    The framework treats this as "this snapshot is not restorable": the record is
+    quarantined and the request fails, rather than state being partly applied.
+    """
+
+    def __init__(self, state_version: int, message: Optional[str] = None):
+        self.state_version = state_version
+        super().__init__(
+            message or f"cannot migrate state written at version {state_version}"
+        )
+
+
 class ModuleType(Enum):
     """Specifies which part of a command's implementation to load."""
     INPUT_FOR_PARAM_EXTRACTION_CLASS = 0

@@ -34,6 +34,7 @@ import fastworkflow
 import fastworkflow.turn
 from fastworkflow import active_workflow
 from fastworkflow.session_state_store import SCHEMA_VERSION
+from fastworkflow.state_serialization import validate_state
 from fastworkflow.turn import TurnResult, TurnStatus, mint_turn_key
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_utils
@@ -362,7 +363,12 @@ class WorkflowExecutionContext:
                 self.conversation_history
             ),
         }
-        return json.loads(json.dumps(payload, default=str))
+        # No default=str round-trip. This is the first serializer, so coercing
+        # here is what made every downstream strictness check vacuous: an
+        # unsupported value would already be a string by the time anything
+        # looked. Raising instead lets the caller keep the runtime live.
+        validate_state(payload)
+        return payload
 
     def apply_serialized_state(self, state: dict[str, Any]) -> None:
         """Restore fields from serialize_state() onto this context."""
