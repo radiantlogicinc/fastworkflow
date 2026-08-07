@@ -252,3 +252,6 @@ docs/turn_result_design_review.md
 .param_validator_quality_results/
 .fix-*-results/
 rejected_examples.json
+
+# Beads / Dolt files (added by bd init)
+.beads/proxieddb/
