@@ -17,6 +17,7 @@ from typing import Any, Iterable, Optional
 
 import fastworkflow
 from fastworkflow.state_serialization import encode_state
+from fastworkflow.storage_keys import encode_path_component
 from fastworkflow.utils.logging import logger
 
 PENDING_STATE_KEY = "pending"
@@ -196,6 +197,21 @@ class SessionStateStore(ABC):
         )
 
 
+PENDING_SUFFIX = ".pending.json"
+
+# What a blob written before fix-7hn is called. The old derivation folded
+# separators -- `channel_id.replace(os.sep, "_").replace("/", "_")` -- so
+# `tenant/user-1` and `tenant_user-1` addressed one file and whichever suspended
+# second handed the other user its ReAct trajectory and its ask_user answers.
+#
+# The two suffixes differ in the character at position -13 (`.` against `_`), so
+# no legacy name can ever equal a new one. That is load-bearing rather than
+# cosmetic: a folded name like `tenant_a` is exactly what the new encoder emits
+# for the channel id `tenant_a`, so had the suffix been kept, a new-form read
+# could still land on a blob the old mapping had already conflated.
+LEGACY_PENDING_SUFFIX = "_pending.json"
+
+
 class DiskSessionStateStore(SessionStateStore):
     """One JSON file per channel under base_folder (portable, no pickle)."""
 
@@ -204,15 +220,55 @@ class DiskSessionStateStore(SessionStateStore):
         os.makedirs(base_folder, exist_ok=True)
 
     def _json_path(self, channel_id: str) -> str:
+        return os.path.join(
+            self.base_folder,
+            f"{encode_path_component(channel_id)}{PENDING_SUFFIX}",
+        )
+
+    def _legacy_json_path(self, channel_id: str) -> str:
+        """The pre-fix-7hn name. Read and removed, never written -- transitional.
+
+        A suspended session is a user's half-finished conversation, so an upgrade
+        must not orphan what is already on disk. This whole fallback -- here, in
+        `load`/`exists`, the second unlink in `clear` and the second suffix in
+        `iter_entries` -- can go once every deployment has run longer since
+        upgrading than `PendingRetentionPolicy.max_age_seconds`, because by then
+        no legacy blob can still be a live suspension.
+        """
         safe_id = channel_id.replace(os.sep, "_").replace("/", "_")
-        return os.path.join(self.base_folder, f"{safe_id}_pending.json")
+        return os.path.join(self.base_folder, f"{safe_id}{LEGACY_PENDING_SUFFIX}")
 
     def load(self, channel_id: str) -> Optional[dict[str, Any]]:
         path = self._json_path(channel_id)
         if not os.path.isfile(path):
-            return None
+            return self._load_legacy(channel_id)
         with open(path, encoding="utf-8") as f:
             return json.load(f)
+
+    def _load_legacy(self, channel_id: str) -> Optional[dict[str, Any]]:
+        """A blob still at its pre-fix-7hn name, but only if it is ours.
+
+        The old name was shared by every channel id that folded onto it, so the
+        channel_id inside the blob is the only evidence of ownership left. A
+        mismatch reads as absent, and so does a blob too damaged to check:
+        losing a suspended turn costs the user one re-ask, whereas serving one
+        costs them a stranger's conversation. A blob carrying no channel_id at
+        all cannot be checked either way and is served, as it was before.
+        """
+        path = self._legacy_json_path(channel_id)
+        if not os.path.isfile(path):
+            return None
+        try:
+            with open(path, encoding="utf-8") as f:
+                blob = json.load(f)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(blob, dict):
+            return None
+        stored = blob.get("channel_id")
+        if isinstance(stored, str) and stored != channel_id:
+            return None
+        return blob
 
     def save(self, channel_id: str, state: dict[str, Any]) -> None:
         path = self._json_path(channel_id)
@@ -220,20 +276,40 @@ class DiskSessionStateStore(SessionStateStore):
         # canonically keeps the two ends in agreement instead of re-coercing.
         with open(path, "w", encoding="utf-8") as f:
             f.write(encode_state(self._stamp(state)))
+        # The legacy copy is superseded the instant that lands, and leaving it
+        # would give one channel two entries in `iter_entries` -- one stale, one
+        # fresh -- so the reaper could age out the stale entry and take the live
+        # blob with it, since `clear` removes both names.
+        legacy = self._legacy_json_path(channel_id)
+        if os.path.isfile(legacy):
+            os.remove(legacy)
 
     def clear(self, channel_id: str) -> None:
-        path = self._json_path(channel_id)
-        if os.path.isfile(path):
-            os.remove(path)
+        # Both names, always: a session that can be resurrected from its legacy
+        # file has not been cleared. Where two folded ids shared that file this
+        # can drop the other one's blob, which is the lesser harm -- that blob
+        # was already destined for whichever channel saved next.
+        for path in (
+            self._json_path(channel_id),
+            self._legacy_json_path(channel_id),
+        ):
+            if os.path.isfile(path):
+                os.remove(path)
 
     def exists(self, channel_id: str) -> bool:
-        return os.path.isfile(self._json_path(channel_id))
+        if os.path.isfile(self._json_path(channel_id)):
+            return True
+        # Agreeing with `load` is worth more than saving a read: a legacy blob at
+        # a shared name belongs to this channel only if it says so.
+        return self._load_legacy(channel_id) is not None
 
     def iter_entries(self) -> Iterable[tuple[str, Optional[float]]]:
         if not os.path.isdir(self.base_folder):
             return
         for entry in os.scandir(self.base_folder):
-            if not entry.is_file() or not entry.name.endswith("_pending.json"):
+            if not entry.is_file() or not entry.name.endswith(
+                (PENDING_SUFFIX, LEGACY_PENDING_SUFFIX)
+            ):
                 continue
             try:
                 with open(entry.path, encoding="utf-8") as f:

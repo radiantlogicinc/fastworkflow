@@ -2,10 +2,13 @@
 
 This is a *second* record kind, deliberately not sharing a key space with
 `session_state_store`'s pending namespace (invariant 16). It exists because the
-pending store's disk mapping is non-injective — `_json_path` collapses
+pending store's disk mapping was non-injective — `_json_path` collapsed
 ``tenant/a`` and ``tenant_a`` onto one file — and revision 3 of the memory-bounds
 design makes the checkpoint authoritative. Making an authoritative record inherit
-a collision does not inherit a defect, it enlarges one.
+a collision does not inherit a defect, it enlarges one. That collision is closed
+at its source now too: `encode_path_component` moved to
+`fastworkflow.storage_keys` and the pending store keys through it (fix-7hn), so
+the two derivations cannot drift.
 
 Three hazards drive nearly every decision here.
 
@@ -93,6 +96,11 @@ from fastworkflow.state_serialization import (
     encode_state,
     state_digest,
 )
+
+# Imported, not defined here: the pending-state store keys by channel id too, and
+# two encoders would be two chances to reintroduce a shared path (fix-7hn). This
+# import is also the re-export existing callers reach through.
+from fastworkflow.storage_keys import encode_path_component
 from fastworkflow.utils.logging import logger
 
 PROTOCOL_VERSION = 1
@@ -140,23 +148,12 @@ _FILE_MODE = 0o600
 # does surface in a record or a log, the bug names itself.
 _ADOPTION_PROBE_INCARNATION = "!adoption-probe-not-a-real-incarnation"
 
-# NAME_MAX is 255 bytes almost everywhere; percent-encoding can triple a name.
-# 200 leaves room for the ".{64 hex}" tail and for temp-name suffixes.
-_MAX_NAME_LEN = 200
-
 # The committed generation plus one recovery point, matching the convention the
 # training artifacts already use.
 _GENERATIONS_RETAINED = 2
 
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
-
-# Lowercase only. Uppercase is escaped because a case-insensitive volume folds
-# `Tenant` onto `tenant`, and a fold is an alias the record-level identity check
-# would only ever report *after* one channel had already overwritten the other.
-# `.` is escaped too, which reserves it as an unambiguous delimiter for the
-# oversized-id tail hash and rules out the `.` and `..` directory names.
-_UNRESERVED = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-_")
 
 
 class CheckpointStoreError(RuntimeError):
@@ -179,45 +176,6 @@ class QuarantineReason(Enum):
     DIGEST_MISMATCH = "digest_mismatch"
     UNREADABLE_RECORD = "unreadable_record"
     OPERATOR_REQUEST = "operator_request"
-
-
-def encode_path_component(raw: str) -> str:
-    """Percent-encode ``raw`` into an injective, filesystem-safe ASCII name.
-
-    Injective because decoding is unambiguous: `%` is itself always escaped, so
-    every `%` in the output opens an escape, and every other output character
-    stands for itself. Hence ``tenant/a`` -> ``tenant%2Fa``, ``tenant_a`` ->
-    ``tenant_a`` and ``tenant%2Fa`` -> ``tenant%252Fa`` are three names.
-
-    Injective *after case folding* as well, because escapes emit uppercase hex
-    and nothing else emits a capital: two outputs that fold together must have
-    identical `%` positions and therefore be identical.
-
-    Oversized ids fall back to ``<prefix>.<sha256 of the raw id>``. That is
-    collision-*resistant* rather than injective, which is why the raw id is also
-    stored in the record and compared on read: an astronomically unlikely
-    collision quarantines instead of cross-serving state.
-    """
-    if not isinstance(raw, str) or not raw:
-        raise ValueError("path component must be a non-empty str")
-
-    encoded = "".join(
-        chr(byte) if chr(byte) in _UNRESERVED else f"%{byte:02X}"
-        for byte in raw.encode("utf-8")
-    )
-    if len(encoded) <= _MAX_NAME_LEN:
-        return encoded
-
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-    prefix = _trim_partial_escape(encoded[: _MAX_NAME_LEN - len(digest) - 1])
-    return f"{prefix}.{digest}"
-
-
-def _trim_partial_escape(text: str) -> str:
-    """Drop a truncated `%XX` so the readable prefix stays decodable."""
-    if text.endswith("%"):
-        return text[:-1]
-    return text[:-2] if len(text) >= 2 and text[-2] == "%" else text
 
 
 @dataclass(frozen=True)

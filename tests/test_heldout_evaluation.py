@@ -12,7 +12,16 @@ import json
 
 import pytest
 
-from fastworkflow.model_pipeline_training import _score_heldout_context
+from collections import Counter
+from pathlib import Path
+
+from fastworkflow.model_pipeline_training import (
+    TrainingDataError,
+    _score_heldout_context,
+    split_training_data,
+)
+from fastworkflow.nlu_labels import WILDCARD_LABEL
+from fastworkflow.train.selective_training import _recompute_heldout_totals
 from fastworkflow.train.heldout_evaluation import (
     REPORT_SCHEMA_VERSION,
     SEED_PERSONA_ID,
@@ -22,6 +31,7 @@ from fastworkflow.train.heldout_evaluation import (
     EscalationScore,
     HeldoutReport,
     LabeledUtterance,
+    MIN_TRAINING_ROWS_PER_LABEL,
     RoutingScore,
     aggregate_totals,
     assert_benchmark_disjoint_from_seeds,
@@ -32,6 +42,7 @@ from fastworkflow.train.heldout_evaluation import (
     labeled_utterances_from_provenance,
     load_benchmark_file,
     normalize_utterance,
+    partition_by_routability,
     score_escalation,
     score_routing,
     split_by_persona,
@@ -254,7 +265,10 @@ def test_label_that_would_have_zero_training_rows_is_returned_to_train():
 
     starved = "Ctx/only_p1" if split.heldout_personas == ["p1"] else "Ctx/only_p2"
     assert starved not in {r.label for r in split.heldout}
-    assert any("zero training rows" in note for note in split.notes)
+    # The note now says "below the trainer's floor" rather than "zero training rows":
+    # the rescue threshold was raised from 0 to the trainer's floor of 2 so the two
+    # modules stop disagreeing. Zero is still rescued -- it is below the floor.
+    assert any("floor" in note for note in split.notes)
     assert any(starved in note for note in split.notes)
 
 
@@ -930,3 +944,200 @@ def test_persona_split_feeds_scoring_and_reporting_end_to_end(tmp_path):
     assert payload["totals"]["routing_top1"] == pytest.approx(0.5)
     assert payload["contexts"][0]["in_distribution_f1"] == pytest.approx(0.94)
     assert payload["contexts"][0]["heldout_personas"] == split.heldout_personas
+
+
+# ---------------------------------------------------------------------------
+# D2: routing and escalation are never blended (fix-k0i.10, fix-k0i.15, fix-k0i.35)
+# ---------------------------------------------------------------------------
+
+
+def test_score_routing_refuses_a_non_routable_expected_label():
+    """A lone wildcard escalates to an ancestor; it is not a route.
+
+    Escalation-class rows carry real persona attribution, so they reach the
+    holdout split like any other row. Counting predictions[0] == "wildcard" as a
+    correct top-1 scores a semantics the runtime does not have -- and in a
+    context with ancestors those rows are most of the population, so it does not
+    skew the headline number, it replaces it.
+    """
+    cases = [LabeledUtterance(utterance="do the thing", label=WILDCARD_LABEL,
+                              persona="p1")]
+
+    with pytest.raises(ValueError) as excinfo:
+        score_routing(cases, lambda _u: [WILDCARD_LABEL])
+
+    assert WILDCARD_LABEL in str(excinfo.value)
+    assert "score_escalation" in str(excinfo.value)
+
+
+def test_partition_by_routability_splits_the_two_populations():
+    records = _records([
+        ("p1", "TodoList/add_item", ["add milk"]),
+        ("p1", WILDCARD_LABEL, ["something an ancestor owns"]),
+        ("p2", "TodoList/add_item", ["add eggs"]),
+    ])
+
+    routable, escalation_class = partition_by_routability(records)
+
+    assert [r.utterance for r in routable] == ["add milk", "add eggs"]
+    assert [r.utterance for r in escalation_class] == ["something an ancestor owns"]
+
+
+def test_heldout_escalation_rows_are_scored_on_their_own_axis():
+    """Split, not dropped: in a context with ancestors these are most of the rows."""
+    report = HeldoutReport(context="TodoList")
+    records = _records([
+        ("p1", "TodoList/add_item", ["add milk"]),
+        ("p1", WILDCARD_LABEL, ["what can this app do"]),
+    ])
+
+    # Routes the command correctly; escalates correctly on the wildcard row.
+    def predict(utterance):
+        return ["TodoList/add_item"] if utterance == "add milk" else [WILDCARD_LABEL]
+
+    _score_heldout_context(report, records, [], predict)
+
+    assert report.routing is not None
+    assert report.routing.total == 1, "escalation rows must not inflate routing N"
+    assert report.routing.top1_correct == 1
+
+    assert report.holdout_escalation is not None
+    assert report.holdout_escalation.total == 1
+    assert report.holdout_escalation.correct == 1
+
+
+def test_a_context_of_only_escalation_rows_scores_no_routing_and_says_so():
+    report = HeldoutReport(context="TodoList")
+    records = _records([("p1", WILDCARD_LABEL, ["ancestor thing", "another"])])
+
+    _score_heldout_context(report, records, [], lambda _u: [WILDCARD_LABEL])
+
+    assert report.routing is None, "0-case routing is absent, not a fake 0%"
+    assert report.holdout_escalation.total == 2
+    assert any("escalation-class" in note for note in report.notes)
+
+
+def test_benchmark_routing_reaches_the_totals_and_the_table():
+    """The fixed benchmark is the only number comparable between two runs.
+
+    The persona holdout is re-drawn every run, so its top-1 cannot be compared.
+    Benchmark routing used to be visible only in a transient per-context print.
+    """
+    report = HeldoutReport(
+        context="TodoList",
+        routing=RoutingScore(total=10, top1_correct=7, in_list_correct=9),
+        benchmark_routing=RoutingScore(total=4, top1_correct=3, in_list_correct=4),
+    )
+
+    totals = aggregate_totals([report])
+    assert totals["benchmark_routing_total"] == 4
+    assert totals["benchmark_routing_top1_correct"] == 3
+    assert totals["benchmark_routing_top1"] == pytest.approx(0.75)
+    # Kept separate from the persona-holdout population, never summed into it.
+    assert totals["routing_total"] == 10
+
+    rendered = format_report([report])
+    assert "bench N" in rendered
+    assert "bench top-1" in rendered
+
+
+def test_zero_denominator_metrics_are_null_not_zero():
+    """0.0 and "not measured" are different facts and JSON cannot tell them apart.
+
+    format_report renders "-" for both, but a JSON consumer diffing two runs
+    reads a missing measurement as a total failure.
+    """
+    totals = aggregate_totals([HeldoutReport(context="TodoList")])
+
+    assert totals["escalation_recall"] is None
+    assert totals["routing_top1"] is None
+    assert totals["routing_in_list"] is None
+    assert totals["benchmark_routing_top1"] is None
+    assert totals["holdout_escalation_recall"] is None
+    assert totals["mean_in_distribution_f1"] is None
+
+
+def test_merged_and_fresh_totals_have_the_same_schema():
+    """A merged report and a full-retrain report must be diffable.
+
+    The selective path used to re-sum the totals in a parallel implementation
+    that dropped keys and turned a missing mean into a literal 0.0, so diffing a
+    selective run against a full one read as a collapse in quality.
+    """
+    entries = [
+        {
+            "context": "TodoList",
+            "routing": {"total": 10, "top1_correct": 7, "in_list_correct": 9},
+            "escalation": {"total": 2, "correct": 1},
+            "in_distribution_f1": 0.9,
+        },
+        {"context": "TodoItem", "carried_forward": True},
+    ]
+
+    merged = _recompute_heldout_totals(entries)
+    fresh = aggregate_totals([HeldoutReport.model_validate(e) for e in entries])
+
+    assert set(merged) == set(fresh)
+    assert merged == fresh
+
+
+def test_merged_totals_preserve_a_missing_mean_as_null():
+    merged = _recompute_heldout_totals([{"context": "TodoList"}])
+
+    assert merged["mean_in_distribution_f1"] is None, "a missing mean is not 0.0"
+    assert merged["escalation_recall"] is None
+
+
+def test_rescue_threshold_matches_the_trainers_floor():
+    """Two modules used to enforce the same requirement with different numbers.
+
+    The rescue fired only at ZERO training rows while split_training_data demands
+    two, so a label could pass the split with exactly one row and then abort the
+    whole run mid-loop -- after earlier contexts had already spent their LLM and
+    GPU budget.
+    """
+    # p2 is held out. 'rare' then has exactly one training row (from p1), which
+    # the old zero-threshold rescue accepted and the trainer then rejected.
+    records = _records([
+        ("p1", "Ctx/rare", ["only training row"]),
+        ("p2", "Ctx/rare", ["held out row"]),
+        ("p1", "Ctx/common", ["a", "b", "c"]),
+        ("p2", "Ctx/common", ["d", "e", "f"]),
+    ])
+
+    split = split_by_persona(records, seed=7, holdout_fraction=0.5)
+
+    trained = Counter(r.label for r in split.train)
+    assert trained["Ctx/rare"] >= MIN_TRAINING_ROWS_PER_LABEL, (
+        "the split handed the trainer a label it will refuse"
+    )
+    # The rescued label is no longer measured, and the report says so.
+    assert not any(r.label == "Ctx/rare" for r in split.heldout)
+    assert any("floor" in note for note in split.notes)
+
+
+def test_split_training_data_names_commands_not_encoded_ids():
+    """A developer cannot map label id 3 to a command without the LabelEncoder."""
+    dataset = [("only row", 3), ("a", 11), ("b", 11)]
+
+    with pytest.raises(TrainingDataError) as excinfo:
+        split_training_data(dataset, lambda encoded: f"TodoList/cmd_{encoded}")
+
+    assert "TodoList/cmd_3" in str(excinfo.value)
+    assert "[3]" not in str(excinfo.value)
+
+
+def test_report_discloses_which_model_was_evaluated(tmp_path):
+    """AR1: state whether the number is a lower bound. It was stated nowhere a
+    JSON or table consumer could see."""
+    reports = [HeldoutReport(context="TodoList",
+                             routing=RoutingScore(total=4, top1_correct=3))]
+    path = write_report(str(tmp_path), reports)
+    payload = json.loads(Path(path).read_text())
+
+    disclosure = payload["metric_notes"]["which_model_was_evaluated"]
+    assert "LOWER BOUND" in disclosure
+    assert "in-generator" in disclosure
+
+    rendered = format_report(reports)
+    assert "LOWER BOUND" in rendered

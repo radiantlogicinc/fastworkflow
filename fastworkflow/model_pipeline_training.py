@@ -1,6 +1,6 @@
 import contextlib
 import os
-from typing import ClassVar
+from typing import Callable, ClassVar, Optional
 from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification
 from torch.optim import AdamW
 from sklearn.decomposition import PCA
@@ -57,19 +57,31 @@ class TrainingDataError(ValueError):
 
 def split_training_data(
     dataset: list[tuple[str, int]],
+    decode_label: Optional[Callable[[int], str]] = None,
 ) -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
     """Create a deterministic, class-aware train/evaluation split.
 
     Every label must contribute at least one row to both sets. This replaces the
     unstratified 25% split that could randomly put every row for a small class in the
     evaluation set, leaving the classifier unable to learn that command.
+
+    ``decode_label`` turns the encoded label back into its command name for the
+    error message. Without it the abort names labels the developer cannot map to
+    commands without reverse-engineering the LabelEncoder, which is the state
+    this argument exists to prevent.
     """
     label_counts = Counter(label for _, label in dataset)
-    starved = sorted(label for label, count in label_counts.items() if count < 2)
+    starved = sorted(
+        label
+        for label, count in label_counts.items()
+        if count < heldout_evaluation.MIN_TRAINING_ROWS_PER_LABEL
+    )
     if starved:
+        named = [decode_label(label) for label in starved] if decode_label else starved
         raise TrainingDataError(
-            "Each intent label needs at least two rows (one for training and one for "
-            f"evaluation); labels with fewer rows: {starved}"
+            f"Each intent label needs at least "
+            f"{heldout_evaluation.MIN_TRAINING_ROWS_PER_LABEL} rows (one for training "
+            f"and one for evaluation); labels with fewer rows: {named}"
         )
 
     label_count = len(label_counts)
@@ -1043,8 +1055,25 @@ def _score_heldout_context(
     if heldout_records:
         if predict_labels is None:
             raise ValueError("persona holdout scoring requires a predictor")
-        report.routing = heldout_evaluation.score_routing(
-            heldout_records, predict_labels)
+        # Escalation-class rows are appended to the training tuples before the
+        # persona split is drawn, so they arrive here carrying real persona
+        # attribution and used to be scored as routes. Split them onto their own
+        # axis (D2) rather than dropping them: in a context with ancestors they
+        # are most of the population, and losing them would trade a wrong number
+        # for a blind spot.
+        routable, escalation_class = heldout_evaluation.partition_by_routability(
+            heldout_records)
+        if routable:
+            report.routing = heldout_evaluation.score_routing(
+                routable, predict_labels)
+        if escalation_class:
+            report.holdout_escalation = heldout_evaluation.score_escalation(
+                escalation_class, predict_labels)
+        if not routable:
+            report.notes.append(
+                f"Persona holdout for this context is entirely escalation-class "
+                f"({len(escalation_class)} rows); no held-out routing was scored."
+            )
     else:
         report.notes.append(
             "Persona holdout unavailable; persona-held-out routing was not scored. "
@@ -1416,7 +1445,9 @@ def train(workflow: fastworkflow.Workflow,
 
         # Now create the dataset with encoded labels
         dataset = list(zip(X, y_encoded))
-        train_data, test_data = split_training_data(dataset)
+        train_data, test_data = split_training_data(
+            dataset, lambda encoded: label_encoder.inverse_transform([encoded])[0]
+        )
 
         # ---------------------------------------------------------------
         # Collate fn that keeps raw *texts* so we can avoid decode→encode

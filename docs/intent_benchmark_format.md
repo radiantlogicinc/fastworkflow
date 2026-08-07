@@ -37,7 +37,7 @@ wrapper.
 | `context` | string | yes | Which context's classifier this case tests. Use the context name as it appears in `___command_info/` — `"*"` for the global context. |
 | `utterance` | string | yes | The phrasing to send. Must NOT appear in any command's seed utterances (see "Disjointness" below). |
 | `kind` | `"routing"` \| `"escalation"` | no (default `"routing"`) | Which axis this case scores. |
-| `expected_label` | string | routing cases only | The fully-qualified label the classifier should return, e.g. `"Account/close_account"`. Must match a label in that context's `label_encoder.pkl` exactly. |
+| `expected_label` | string | routing cases only | The fully-qualified label the classifier should return, e.g. `"Account/close_account"`. Must match a label in that context's `label_encoder.pkl` exactly — comparison only trims whitespace (`normalize_label`), so there is no near-match. See "Label qualification" below. |
 | `expected_ancestor_command` | string | escalation cases only | The command that is absent from `context`'s label space and present in one of its ancestors. |
 
 ## The two case kinds
@@ -124,7 +124,7 @@ Utterances that are merely *similar* to a seed are reported by
     {
       "context": "*",
       "utterance": "what am I able to do right now",
-      "expected_label": "what_can_i_do",
+      "expected_label": "IntentDetection/what_can_i_do",
       "kind": "routing"
     }
   ]
@@ -135,6 +135,25 @@ The escalation case above is a real measured example: in context `ReviewTicket` 
 returned `['wildcard', 'ReviewTicket/certify_approve', 'ReviewTicket/show_review_item']` and
 produced a two-option prompt, when the correct behaviour was to escalate to
 `AccessReviewWorkspace/bulk_decide`. It scores as a failure, correctly.
+
+## Label qualification
+
+A command's label is its path under `_commands/` with `/` separators, so a command written
+in a context folder is `Account/close_account` while one written at the `_commands/` root is
+bare (`get_order_details`). Framework commands are injected into **every** context's label
+space from the internal workflow's `_commands/IntentDetection/`, so they keep that prefix
+everywhere, including in `"*"`: the last case above is `IntentDetection/what_can_i_do`, never
+`what_can_i_do`. `wildcard` and `parameter_value` are reserved NLU labels rather than
+commands and are never qualified.
+
+Getting this wrong does not produce a near miss, it produces a case that fails forever, so
+it is worth checking against the label space rather than guessing. `validate_routing_cases()`
+reports every routing case whose expected label is absent from the tested context's label
+space, and the trainer logs each one as a `Benchmark defect:` warning before the run starts —
+read those warnings as benchmark defects, not as model defects. The authoritative list of a
+context's labels is the `contexts` map in `___command_info/routing_definition.json`, or the
+`classes_` of its `label_encoder.pkl` under `___command_info/` (the folder for `"*"` is named
+`global`, since `*` is not a directory name).
 
 ## How many cases
 
@@ -156,15 +175,26 @@ Held-out evaluation writes `<workflow>/___command_info/heldout_evaluation.json`:
 
 ```jsonc
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "generated_at": "2026-08-02T14:31:07.123456+00:00",
   "metric_notes": { /* what each metric does and does not mean */ },
   "totals": {
+    // The persona holdout. Re-drawn every run, so these score DIFFERENT cases
+    // each time and must not be compared between runs.
     "routing_total": 446,
     "routing_top1": 0.462,
     "routing_in_list": 0.639,
+    // The fixed benchmark from this file. The only cross-run-comparable number.
+    "benchmark_routing_total": 446,
+    "benchmark_routing_top1": 0.508,
+    "benchmark_routing_in_list": 0.671,
+    // Escalation cases from this file.
     "escalation_total": 37,
     "escalation_recall": 0.919,
+    // Persona-held-out rows whose expected label is an escalation class. Scored
+    // on lone-escalation semantics and never summed into routing.
+    "holdout_escalation_total": 88,
+    "holdout_escalation_recall": 0.83,
     "mean_in_distribution_f1": 0.94
   },
   "contexts": [
@@ -173,7 +203,11 @@ Held-out evaluation writes `<workflow>/___command_info/heldout_evaluation.json`:
       "in_distribution_f1": 0.94,
       "routing": { "total": 42, "top1_correct": 20, "in_list_correct": 27,
                    "top1": 0.476, "in_list": 0.643, "per_command": { } },
+      "benchmark_routing": { "total": 42, "top1_correct": 22, "in_list_correct": 29,
+                             "top1": 0.524, "in_list": 0.690, "per_command": { } },
       "escalation": { "total": 4, "correct": 3, "recall": 0.75, "failures": [ ] },
+      "holdout_escalation": { "total": 9, "correct": 7, "recall": 0.778,
+                              "failures": [ ] },
       "seed": 42,
       "heldout_personas": ["persona_03", "persona_06"],
       "notes": [ ]
@@ -181,6 +215,11 @@ Held-out evaluation writes `<workflow>/___command_info/heldout_evaluation.json`:
   ]
 }
 ```
+
+A ratio whose denominator is zero is `null`, never `0.0` — `"escalation_recall": null`
+means "no escalation cases were scored", which is a different fact from a measured 0%.
+The human table renders both as `-`, but a JSON consumer diffing two runs would read a
+missing measurement as a total failure.
 
 `in_distribution_f1` is the legacy training-split score. It is kept so runs stay comparable
 with older ones, and named so it can no longer be mistaken for a generalisation measure.

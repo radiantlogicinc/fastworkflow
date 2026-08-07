@@ -198,134 +198,84 @@ def _validate_parameter_value(
     }
 
 
-def extract_field_details(field_annotations) -> List[Dict[str, Any]]:
+def extract_field_details(
+    field_annotations: Dict[str, Any]
+) -> List[Dict[str, Any]]:
     """
     Extract detailed information about fields from Pydantic model_fields.
-    
-    Works with both string annotations and actual model_fields dictionary.
-    
+
     Args:
-        field_annotations: Either a string of field annotations or the model_fields dict
-        
+        field_annotations: a parameter model's ``model_fields`` mapping
+
     Returns:
         List of dictionaries with field details
+
+    A regex parser for a STRINGIFIED ``model_fields`` repr used to live here as
+    "legacy support", and it was a fail-open path rather than a fallback (bd
+    fix-k0i.46). Downstream, `generate_dspy_examples` derives
+    ``model_fields = field_annotations if isinstance(field_annotations, dict) else {}``,
+    so under a string every type check and every enum-membership check found an empty
+    mapping and silently passed — the exact validation hole bd fix-b8h closed for
+    dicts stayed wide open through this function's own declared parameter type. It
+    also guessed ``required`` from whether the substring "Optional" appeared. No
+    caller has ever passed a string: the only production call site
+    (`train/__main__.py`) passes ``fields.model_fields``. So the parser is gone and a
+    non-mapping now raises, because failing at build time beats shipping a command
+    whose parameter examples were never validated.
     """
+    if not isinstance(field_annotations, dict):
+        raise TypeError(
+            f"extract_field_details needs a parameter model's model_fields mapping, "
+            f"not {type(field_annotations).__name__}. Pass "
+            f"YourSignature.Input.model_fields; a stringified repr cannot be validated "
+            f"against, so accepting one would accept every generated example unchecked."
+        )
+
     field_details = []
 
-    # Handle the case when field_annotations is already a dictionary (model_fields)
-    if isinstance(field_annotations, dict):
-        for field_name, field_info in field_annotations.items():
-            # Extract field type
-            annotation = field_info.annotation
-            annotation_args = get_args(annotation)
-            is_union = get_origin(annotation) in (Union, UnionType)
-            non_none_types = [
-                arg for arg in annotation_args if arg is not type(None)
-            ]
-            is_optional = (
-                (is_union and len(non_none_types) != len(annotation_args))
-                or field_info.is_required() is False
-            )
-            is_required = field_info.is_required()
-            base_annotation = (
-                non_none_types[0]
-                if is_union and len(non_none_types) == 1
-                else annotation
-            )
-            field_type = (
-                str(base_annotation).replace("typing.", "")
-                if get_origin(base_annotation) is not None
-                else getattr(base_annotation, "__name__", str(base_annotation))
-            )
+    for field_name, field_info in field_annotations.items():
+        # Extract field type
+        annotation = field_info.annotation
+        annotation_args = get_args(annotation)
+        is_union = get_origin(annotation) in (Union, UnionType)
+        non_none_types = [
+            arg for arg in annotation_args if arg is not type(None)
+        ]
+        is_optional = (
+            (is_union and len(non_none_types) != len(annotation_args))
+            or field_info.is_required() is False
+        )
+        is_required = field_info.is_required()
+        base_annotation = (
+            non_none_types[0]
+            if is_union and len(non_none_types) == 1
+            else annotation
+        )
+        field_type = (
+            str(base_annotation).replace("typing.", "")
+            if get_origin(base_annotation) is not None
+            else getattr(base_annotation, "__name__", str(base_annotation))
+        )
 
-            # Extract description and examples from metadata
-            description = ""
-            examples = []
-            pattern = None
-            enum_values = []
-
-            if hasattr(field_info, 'json_schema_extra') and field_info.json_schema_extra:
-                schema_extra = field_info.json_schema_extra
-                description = schema_extra.get('description', '')
-                if 'examples' in schema_extra:
-                    examples = schema_extra['examples']
-                if 'pattern' in schema_extra:
-                    pattern = schema_extra['pattern']
-                enum_values = list(schema_extra.get('enum', []))
-            description = field_info.description or description
-            examples = list(field_info.examples or examples)
-            for metadata in field_info.metadata:
-                if pattern is None and hasattr(metadata, "pattern"):
-                    pattern = metadata.pattern
-
-            # Add to field details
-            field_details.append({
-                "name": field_name,
-                "type": field_type,
-                "optional": is_optional,
-                "required": is_required,
-                "description": description,
-                "examples": examples,
-                "pattern": pattern,
-                "enum": enum_values,
-            })
-
-        return field_details
-
-    # If field_annotations is a string, parse it (legacy support)
-    field_names = re.findall(r'(\w+)(?=:)', field_annotations)
-
-    for field_name in field_names:
-        # Find this field's section in the annotations
-        field_pattern = rf'{field_name}:\s*(.*?)(?=\w+:|$)'
-        field_match = re.search(field_pattern, field_annotations, re.DOTALL)
-
-        if not field_match:
-            continue
-
-        field_text = field_match.group(1).strip()
-
-        # Check if optional
-        is_optional = "Optional" in field_text or "None" in field_text
-        is_required = not is_optional
-
-        # Extract field type - handle various formats
-        if "Annotated" in field_text:
-            # Extract the base type from Annotated
-            type_match = re.search(r'Annotated\[\s*([^,\]]+)', field_text)
-            field_type = type_match.group(1) if type_match else "str"
-        elif "Optional" in field_text:
-            # Extract the type from Optional
-            type_match = re.search(r'Optional\[\s*([^,\]]+)', field_text)
-            field_type = type_match.group(1) if type_match else "str"
-        else:
-            # Direct type
-            field_type = field_text.split('=')[0].strip()
-
-        # Clean up the type
-        field_type = field_type.strip()
-
-        # Extract description
-        desc_match = re.search(r'description="([^"]+)"', field_text)
-        description = desc_match.group(1) if desc_match else ""
-
-        # Extract examples
+        # Extract description and examples from metadata
+        description = ""
         examples = []
-        if examples_match := re.search(r'examples=\[(.*?)\]', field_text):
-            examples_text = examples_match.group(1)
-            if example_items := re.findall(r'"([^"]*)"', examples_text):
-                examples = example_items
-            else:
-                # Try to safely evaluate the examples
-                try:
-                    examples = ast.literal_eval(f"[{examples_text}]")
-                except (SyntaxError, ValueError):
-                    # If evaluation fails, try to parse manually
-                    examples = [item.strip() for item in examples_text.split(',')]
+        pattern = None
+        enum_values = []
 
-        # Extract pattern
-        pattern_match = re.search(r'pattern=r?["\']([^"\']+)["\']', field_text)
-        pattern = pattern_match.group(1) if pattern_match else None
+        if hasattr(field_info, 'json_schema_extra') and field_info.json_schema_extra:
+            schema_extra = field_info.json_schema_extra
+            description = schema_extra.get('description', '')
+            if 'examples' in schema_extra:
+                examples = schema_extra['examples']
+            if 'pattern' in schema_extra:
+                pattern = schema_extra['pattern']
+            enum_values = list(schema_extra.get('enum', []))
+        description = field_info.description or description
+        examples = list(field_info.examples or examples)
+        for metadata in field_info.metadata:
+            if pattern is None and hasattr(metadata, "pattern"):
+                pattern = metadata.pattern
 
         # Add to field details
         field_details.append({
@@ -336,11 +286,12 @@ def extract_field_details(field_annotations) -> List[Dict[str, Any]]:
             "description": description,
             "examples": examples,
             "pattern": pattern,
-            "enum": [],
+            "enum": enum_values,
         })
 
     return field_details
-    
+
+
 def _is_supported_literal(value: Any) -> bool:
     """Return whether a literal can round-trip through the runtime JSON schema."""
     if value is None or isinstance(value, (str, bool, int, float)):
@@ -659,13 +610,19 @@ def param_example_fingerprint(
     model: Optional[str],
     field_details: Optional[List[Dict[str, Any]]] = None,
     completion_fn: Optional[Callable] = None,
-) -> Fingerprint:
+) -> Optional[Fingerprint]:
     """Fingerprint this command's parameter-example configuration for the cache.
 
     Everything the LLM sees is in here, plus the two inputs that decide how its
     response is written to disk (`validation_threshold` and the payload-shaping
     source). See `param_example_cache.compute_fingerprint` for the per-field
     rationale.
+
+    Returns None — meaning "this command cannot be cached this run" — when a field
+    detail has no run-stable representation to digest. That is deliberately loud and
+    deliberately not fatal: a cache must never be the reason a training run fails, but
+    a command that silently re-draws its examples every run while looking like a first
+    run is precisely the invisible cost bd fix-k0i.46 reports.
 
     The proxy base is read with a code default so an absent one does not log a warning
     per command; `LITELLM_PROXY_API_BASE` is an env-file setting in this project, never
@@ -674,23 +631,32 @@ def param_example_fingerprint(
     api_base = fastworkflow.get_env_var("LITELLM_PROXY_API_BASE", str, default="")
     if field_details is None:
         field_details = extract_field_details(field_annotations)
-    return compute_fingerprint(
-        command_name=str(command_name),
-        field_annotations_text=str(field_annotations),
-        field_details=field_details,
-        num_examples=num_examples,
-        validation_threshold=validation_threshold,
-        temperature=DSPY_EXAMPLE_TEMPERATURE,
-        model=model,
-        api_base=api_base or None,
-        completion_backend=callable_identity(
-            completion_fn, PRODUCTION_COMPLETION_BACKEND),
-        generator_source_digest=prompt_source_digest(),
-    )
+    try:
+        return compute_fingerprint(
+            command_name=str(command_name),
+            field_annotations_text=str(field_annotations),
+            field_details=field_details,
+            num_examples=num_examples,
+            validation_threshold=validation_threshold,
+            temperature=DSPY_EXAMPLE_TEMPERATURE,
+            model=model,
+            api_base=api_base or None,
+            completion_backend=callable_identity(
+                completion_fn, PRODUCTION_COMPLETION_BACKEND),
+            generator_source_digest=prompt_source_digest(),
+        )
+    except TypeError as exc:
+        logger.warning(
+            f"Cannot compute a parameter-example cache key for command "
+            f"'{command_name}': {exc} Its examples will be regenerated from the LLM on "
+            f"every training run, and two runs at the same seed will write different "
+            f"{command_name}_param_labeled.json files."
+        )
+        return None
 
 
 def generate_dspy_examples(
-    field_annotations: str,
+    field_annotations: Dict[str, Any],
     command_name: str,
     num_examples: int = 10,
     validation_threshold: float = 0.4,
@@ -701,7 +667,9 @@ def generate_dspy_examples(
     Generate DSPy examples for parameter extraction based on field annotations.
 
     Args:
-        field_annotations: String containing Pydantic field annotations
+        field_annotations: a parameter model's ``model_fields`` mapping. Declared as
+            ``str`` until bd fix-k0i.46: a string made every generated value pass
+            validation unchecked, so it now raises in `extract_field_details`.
         command_name: Name of the command for which examples are generated
         num_examples: Number of examples to generate
         temperature: Temperature for generation
@@ -959,7 +927,10 @@ def generate_dspy_examples(
                 for field in field_details
                 if field["name"] in parsed_example["fields"]
             }
-            model_fields = field_annotations if isinstance(field_annotations, dict) else {}
+            # `extract_field_details` has already rejected a non-mapping, so this is the
+            # real model_fields. It used to fall back to `{}` for a string, which made
+            # every malformed-value check below a no-op instead of a check (bd fix-k0i.46).
+            model_fields = field_annotations
             if missing_required := [
                 field["name"]
                 for field in field_details
@@ -1078,6 +1049,22 @@ def generate_dspy_examples(
     # run that reused write the same bytes. See `canonicalized`.
     dict_examples = canonicalized(dict_examples)
     rejected_examples = canonicalized(rejected_examples)
+
+    # A command that accepted NOTHING ships an empty few-shot corpus: the runtime falls
+    # back to zero-shot parameter extraction for it, silently and for the whole life of
+    # the artifact. "Validated 0 examples, rejected 15 examples" printed among tens of
+    # thousands of progress-bar lines does not distinguish that from "13 of 15 accepted",
+    # which is a normal, healthy run. Warn at WARNING and name the command, so the one
+    # case that degrades the shipped model is greppable (bd fix-k0i.37).
+    if not dict_examples and num_examples > 0:
+        logger.warning(
+            f"NO usable DSPy parameter examples for command '{command_name}': "
+            f"{num_examples} requested, {len(examples)} parsed out of the response, "
+            f"all {len(rejected_examples)} rejected. Parameter extraction for this "
+            f"command will run ZERO-SHOT. Nothing was cached, so the next training "
+            f"run retries; if it keeps happening, inspect the rejected examples in "
+            f"___command_info/{command_name}_param_labeled.json."
+        )
 
     # A draw that parsed to nothing is degraded data -- a truncated response, a model
     # that ignored the output format, a provider hiccup. Caching it would make that

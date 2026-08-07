@@ -1,3 +1,27 @@
+"""LLM-written synthetic utterances for intent training (spec R2/R3/R6, F2/F3/F12).
+
+What is digested into the utterance-cache key, and why
+------------------------------------------------------
+`utterance_fingerprint` hashes the SOURCE TEXT of every function that decides what
+this command's generated utterances will be. `_DIGESTED_GENERATION_SOURCES` names
+them, in two groups:
+
+* **What the LLM is asked, and which answers survive** —
+  `generate_utterances_for_personas` (it *is* the prompt) and `_is_template_echo`
+  (it decides which returned rows become training rows).
+* **WHICH personas do the asking** — `derived_seed`, `select_persona_indices`,
+  `personas.resolve_personas` and `personas.PersonaSource.select`. The persona *ids*
+  are deliberately absent from the key, because computing them would require the
+  200k-row PersonaHub download the cache exists to avoid (decision D6). That makes
+  the selection CODE the only thing standing between an edit to persona sampling and
+  a cache full of entries written by personas a fresh run would no longer pick — so
+  it has to be in here. Editing any of them invalidates every entry once, which is
+  the intended cost.
+
+Nothing else in this module belongs in the key: the fallback and reporting helpers
+run only when generation has already failed, and a fallen-back run is never cached.
+"""
+
 from typing import Callable, List, Optional
 import random
 import re
@@ -26,6 +50,7 @@ from fastworkflow.train.utterance_cache import (
     source_digest,
 )
 from fastworkflow.train.personas import (
+    PersonaSource,
     active_persona_source_label,
     active_persona_source_name,
     persona_source_needs_corpus,
@@ -56,6 +81,40 @@ RETRYABLE_LLM_EXCEPTIONS = (
     litellm.exceptions.InternalServerError,
     litellm.exceptions.BadGatewayError,
 )
+
+# Failures that are a property of ONE command's prompt rather than of the account or
+# the configuration: this command's seed list is too long for the context window, or
+# its wording tripped a content filter or a guardrail. Retrying is pointless (the
+# prompt would be identical), but so is aborting: every OTHER command in the workflow
+# would have generated fine, and on a 160-command workflow the exception used to
+# arrive hours in and take the whole run with it. So these take the same R3 fallback a
+# terminal rate limit takes - command name + hand-written seeds, `fell_back` recorded,
+# nothing cached - and the run continues to the next command.
+#
+# All three are `BadRequestError` subclasses, and BadRequestError itself is
+# deliberately NOT in here: a plain 400 means the request we built is malformed, which
+# dooms every subsequent command, and swallowing it per command would turn one
+# programming error into 160 silently degraded commands. Same ruling for
+# AuthenticationError, PermissionDeniedError, NotFoundError (a mistyped model) and
+# BudgetExceededError - all account- or config-scoped, all still fatal.
+CONTENT_SHAPED_LLM_EXCEPTIONS = (
+    litellm.exceptions.ContextWindowExceededError,
+    litellm.exceptions.ContentPolicyViolationError,
+    litellm.exceptions.RejectedRequestError,
+)
+
+# A provider's rejection message can run to thousands of characters of echoed request.
+# The reason string is rendered into the degraded-training banner and stored in
+# training_provenance.json, so keep the actionable head of it and drop the rest.
+_FALLBACK_REASON_DETAIL_LIMIT = 200
+
+
+def _fallback_detail(exc: BaseException) -> str:
+    """The head of *exc*'s message, for a fallback reason a human will read."""
+    detail = " ".join(str(exc).split())
+    if len(detail) > _FALLBACK_REASON_DETAIL_LIMIT:
+        detail = f"{detail[:_FALLBACK_REASON_DETAIL_LIMIT]}..."
+    return detail
 
 
 def _resolve_generation_count(value: Optional[int], env_name: str) -> int:
@@ -293,7 +352,12 @@ def generate_utterances_for_personas(
     loop can be exercised against a supplied `completion_fn` without a network call
     and without a PersonaHub download. Mutates *provenance* in place: persona
     attribution, and `fell_back` / `fallback_reason` when a batch exhausts its
-    retries. Returns only the generated utterances (no seeds, no command name).
+    retries or is rejected for what its prompt contains. Returns only the generated
+    utterances (no seeds, no command name).
+
+    Never raises for a failure that is scoped to this one command. Account- and
+    configuration-scoped failures (authentication, budget, an unknown model) still
+    propagate, because they doom every command that would follow.
     """
     utterances_per_persona = _resolve_generation_count(
         utterances_per_persona,
@@ -417,6 +481,20 @@ def generate_utterances_for_personas(
                 f"remaining batches abandoned"
             )
             break
+        except CONTENT_SHAPED_LLM_EXCEPTIONS as exc:
+            # Not retried, because the prompt is what was rejected and it would be
+            # byte-identical on a second attempt. Abandoning the remaining batches is
+            # right for the same reason: every batch embeds the same seed utterances
+            # and the same command name, so whatever this one tripped, the next one
+            # trips too. See CONTENT_SHAPED_LLM_EXCEPTIONS for why this is a fallback
+            # rather than a raise.
+            provenance.fell_back = True
+            provenance.fallback_reason = (
+                f"{type(exc).__name__} on personas {batch_start + 1}-{batch_end} of "
+                f"{len(selected_personas)}: {_fallback_detail(exc)}; this command's "
+                f"prompt was rejected, remaining batches abandoned"
+            )
+            break
 
         # Process responses
         content = response.choices[0].message.content.strip()
@@ -461,6 +539,36 @@ def generate_utterances_for_personas(
     return [utt["utterance"] for utt in result["generated_utterances"]]
 
 
+_DIGESTED_GENERATION_SOURCES: tuple[Callable, ...] = (
+    generate_utterances_for_personas,
+    _is_template_echo,
+    # The persona-SELECTION half. See the module docstring: persona ids cannot be in the
+    # key without forcing a corpus download, so the code that picks them must be.
+    derived_seed,
+    select_persona_indices,
+    resolve_personas,
+    PersonaSource.select,
+)
+
+
+def _digested_source_identity(func: Callable) -> str:
+    """`qualname:digest` for one digested function.
+
+    Labelled rather than a bare digest so that a developer looking at a stale-cache
+    miss can read which function moved out of `fingerprint_inputs` directly, instead
+    of re-deriving six hashes by hand. `UtteranceCache.lookup` reports the differing
+    fingerprint input; this makes that report actionable.
+    """
+    return f"{getattr(func, '__qualname__', '?')}:{source_digest(func)}"
+
+
+def generation_source_digest() -> str:
+    """Digest of every function that decides what this command will be trained on."""
+    return "+".join(
+        _digested_source_identity(func) for func in _DIGESTED_GENERATION_SOURCES
+    )
+
+
 def utterance_fingerprint(
     seed_utterances: List[str],
     command_name,
@@ -475,7 +583,10 @@ def utterance_fingerprint(
 
     Everything the LLM sees is in here, including a digest of the source of
     `generate_utterances_for_personas` — that function IS the prompt, so an edit to
-    it must invalidate every entry. See `utterance_cache.compute_fingerprint`.
+    it must invalidate every entry — and of the persona-selection code, which decides
+    which personas write the utterances. `_DIGESTED_GENERATION_SOURCES` is the full
+    list and the module docstring explains the split. See
+    `utterance_cache.compute_fingerprint`.
 
     The proxy base is read with a code default so an absent one does not log a
     warning per command; `LITELLM_PROXY_API_BASE` is an env-file setting in this
@@ -507,10 +618,9 @@ def utterance_fingerprint(
         # become training data just as surely as the prompt decides which rows exist. If only
         # the generator were digested, editing `_is_template_echo` would leave every cached
         # entry looking valid while the filter it was written under had changed.
-        generator_source_digest="+".join((
-            source_digest(generate_utterances_for_personas),
-            source_digest(_is_template_echo),
-        )),
+        # The persona-selection functions are in `_DIGESTED_GENERATION_SOURCES` for the
+        # same reason, one step further back: they decide who is asked.
+        generator_source_digest=generation_source_digest(),
     )
 
 

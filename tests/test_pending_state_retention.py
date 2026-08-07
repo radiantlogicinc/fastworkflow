@@ -189,9 +189,11 @@ def test_dry_run_reports_without_deleting(store):
 def test_channel_id_comes_from_the_blob_not_the_filename(store):
     """The disk key is not reversible, so the filename cannot identify a channel.
 
-    _json_path folds separators, so 'a/b' and 'a_b' produce the same name. The
-    reaper compares against protected ids, and comparing a mangled name would
-    fail to protect a live channel.
+    _json_path used to fold separators, so 'a/b' and 'a_b' produced the same
+    name; fix-7hn made the mapping injective, and it is still not reversible
+    because an oversized id carries a hash tail. The reaper compares against
+    protected ids, and comparing a mangled name would fail to protect a live
+    channel.
     """
     _save(store, "tenant/user-1")
 

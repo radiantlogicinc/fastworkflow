@@ -81,12 +81,17 @@ import uuid
 from pathlib import Path
 from typing import Iterable, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 import fastworkflow
 from fastworkflow.command_directory import CommandDirectory
 from fastworkflow.nlu_labels import PARAMETER_VALUE_PLACEHOLDERS, WILDCARD_LABEL
-from fastworkflow.train import artifact_versioning, determinism, utterance_cache
+from fastworkflow.train import (
+    artifact_versioning,
+    determinism,
+    heldout_evaluation,
+    utterance_cache,
+)
 from fastworkflow.train.personas import active_persona_source_label
 from fastworkflow.utils.logging import logger
 
@@ -1251,7 +1256,10 @@ def merge_heldout_evaluation(
     current["contexts"] = merged
     try:
         current["totals"] = _recompute_heldout_totals(merged)
-    except (KeyError, TypeError) as exc:
+    except (KeyError, TypeError, ValidationError) as exc:
+        # ValidationError joins the set now that the totals are recomputed by
+        # validating entries into HeldoutReport: a malformed entry must still
+        # degrade to stale totals with a warning, not abort the merge.
         logger.warning(
             f"Merged carried-forward contexts into {path} but could not recompute "
             f"the totals ({exc}); they describe only the retrained contexts."
@@ -1271,35 +1279,18 @@ def _recompute_heldout_totals(entries: list[dict]) -> dict:
     Every total in the report is a plain sum or a ratio of two sums, so merging is
     exact -- there is no approximation here, and a merged report is numerically what
     a full retrain would have produced given the same per-context results.
-    """
-    def _sum(section: str, key: str) -> int:
-        return sum(
-            (entry.get(section) or {}).get(key) or 0 for entry in entries)
 
-    routing_total = _sum("routing", "total")
-    routing_top1 = _sum("routing", "top1_correct")
-    routing_in_list = _sum("routing", "in_list_correct")
-    escalation_total = _sum("escalation", "total")
-    escalation_correct = _sum("escalation", "correct")
-    f1_values = [
-        entry["in_distribution_f1"] for entry in entries
-        if entry.get("in_distribution_f1") is not None
+    Delegates to ``aggregate_totals`` rather than re-summing, because this used to
+    be a parallel implementation and drifted from it: it dropped keys the fresh
+    path always emits and turned a missing mean into a literal 0.0, so a merged
+    report and a full-retrain report had different schemas and a diff between them
+    read as a collapse in quality. Sharing the function makes that class of
+    divergence unrepresentable.
+    """
+    reports = [
+        heldout_evaluation.HeldoutReport.model_validate(entry) for entry in entries
     ]
-    return {
-        "contexts": len(entries),
-        "routing_total": routing_total,
-        "routing_top1_correct": routing_top1,
-        "routing_in_list_correct": routing_in_list,
-        "routing_top1": (routing_top1 / routing_total) if routing_total else 0.0,
-        "routing_in_list": (
-            routing_in_list / routing_total) if routing_total else 0.0,
-        "escalation_total": escalation_total,
-        "escalation_correct": escalation_correct,
-        "escalation_recall": (
-            escalation_correct / escalation_total) if escalation_total else 0.0,
-        "mean_in_distribution_f1": (
-            sum(f1_values) / len(f1_values)) if f1_values else 0.0,
-    }
+    return heldout_evaluation.aggregate_totals(reports)
 
 
 def format_plan(plan: TrainingPlan) -> str:
