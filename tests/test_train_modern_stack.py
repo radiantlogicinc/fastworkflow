@@ -33,9 +33,26 @@ from fastworkflow.train.generate_synthetic import (
 from fastworkflow.train.utterance_cache import MODE_REUSE, UtteranceCache
 
 
+# Every test in this module drives a real `train_workflow`, so every one of them costs
+# minutes of fine-tuning plus (when a key is configured) real DSPy parameter-example
+# calls. Marked at module scope so `-m "not slow"` deselects the whole file; the
+# `requires_llm_key` marker names the other reason a caller may want to exclude them.
+# Without this there was no way to deselect the ~7 full training runs in the suite.
+# bd fix-k0i.42.
+pytestmark = [pytest.mark.slow, pytest.mark.requires_llm_key]
+
 HELLO_WORLD_PATH = os.path.join("fastworkflow", "examples", "hello_world")
 ADD_TWO_NUMBERS_COMMAND = "add_two_numbers"
 ROUTING_UTTERANCE = "add 2 and 3"
+
+# ROUTING_UTTERANCE is planted verbatim in `_fixed_generated_corpus` so that the corpus
+# -- and therefore the trained model -- is identical on every run (the flake this fixture
+# exists to remove). Routing it back is consequently a MEMORISATION check: a regression
+# that destroyed generalisation while preserving the training rows would still pass it.
+# HELDOUT_ROUTING_UTTERANCE is deliberately absent from the corpus and from
+# hello_world's seed list, so routing it is evidence about the model rather than about
+# the fixture. bd fix-k0i.30.
+HELDOUT_ROUTING_UTTERANCE = "what is 2 plus 3"
 _FIXTURE_PERSONA_IDS = [f"fixture:{index}" for index in range(4)]
 
 # Artifacts written by the intent-detection trainer for each context.
@@ -272,13 +289,16 @@ def trained_hello_world(tmp_path_factory):
     _cleanup(workflow_path, env_vars)
 
     fastworkflow.init(env_vars=env_vars)
-    expected_corpora = _preseed_fixed_utterance_cache(workflow_path)
-    train_workflow(workflow_path)
-    _assert_fixed_corpus_was_used(workflow_path, expected_corpora)
+    # try/finally so that a failure in setup (or in any test using this fixture) still
+    # removes `./___workflow_contexts` from the repo root. bd fix-k0i.48.
+    try:
+        expected_corpora = _preseed_fixed_utterance_cache(workflow_path)
+        train_workflow(workflow_path)
+        _assert_fixed_corpus_was_used(workflow_path, expected_corpora)
 
-    yield workflow_path, env_vars
-
-    _cleanup(workflow_path, env_vars)
+        yield workflow_path, env_vars
+    finally:
+        _cleanup(workflow_path, env_vars)
 
 
 def test_train_produces_model_artifacts(trained_hello_world):
@@ -335,38 +355,43 @@ def test_benchmark_that_leaks_a_seed_utterance_fails_fast(tmp_path_factory):
     _cleanup(workflow_path, env_vars)
     fastworkflow.init(env_vars=env_vars)
 
-    cmd_dir = CommandDirectory.load(workflow_path)
-    leaked = None
-    for command_key in cmd_dir.get_utterance_keys():
-        metadata = cmd_dir.get_utterance_metadata(command_key)
-        if metadata and metadata.plain_utterances:
-            leaked = metadata.plain_utterances[0]
-            break
-    assert leaked, "hello_world has no seed utterances to leak; test cannot run."
+    # try/finally, because `_cleanup` also removes `./___workflow_contexts` from the
+    # REPO ROOT -- `train_workflow` creates it in the process's cwd. Leaving the cleanup
+    # after the assertions meant one failure here littered the working tree, and the
+    # next run inherited that directory. bd fix-k0i.48.
+    try:
+        cmd_dir = CommandDirectory.load(workflow_path)
+        leaked = None
+        for command_key in cmd_dir.get_utterance_keys():
+            metadata = cmd_dir.get_utterance_metadata(command_key)
+            if metadata and metadata.plain_utterances:
+                leaked = metadata.plain_utterances[0]
+                break
+        assert leaked, "hello_world has no seed utterances to leak; test cannot run."
 
-    benchmark_path = heldout_evaluation.default_benchmark_path(workflow_path)
-    os.makedirs(os.path.dirname(benchmark_path), exist_ok=True)
-    with open(benchmark_path, "w") as f:
-        json.dump(
-            {
-                "schema_version": heldout_evaluation.BENCHMARK_SCHEMA_VERSION,
-                "cases": [
-                    {
-                        "utterance": leaked,
-                        "kind": "routing",
-                        "expected_label": "add_two_numbers",
-                        "context": "*",
-                    }
-                ],
-            },
-            f,
-        )
+        benchmark_path = heldout_evaluation.default_benchmark_path(workflow_path)
+        os.makedirs(os.path.dirname(benchmark_path), exist_ok=True)
+        with open(benchmark_path, "w") as f:
+            json.dump(
+                {
+                    "schema_version": heldout_evaluation.BENCHMARK_SCHEMA_VERSION,
+                    "cases": [
+                        {
+                            "utterance": leaked,
+                            "kind": "routing",
+                            "expected_label": "add_two_numbers",
+                            "context": "*",
+                        }
+                    ],
+                },
+                f,
+            )
 
-    with pytest.raises(heldout_evaluation.BenchmarkLeakError) as excinfo:
-        train_workflow(workflow_path)
-    assert leaked in str(excinfo.value)
-
-    _cleanup(workflow_path, env_vars)
+        with pytest.raises(heldout_evaluation.BenchmarkLeakError) as excinfo:
+            train_workflow(workflow_path)
+        assert leaked in str(excinfo.value)
+    finally:
+        _cleanup(workflow_path, env_vars)
 
 
 def test_benchmark_routing_cases_are_scored(tmp_path_factory):
@@ -400,51 +425,54 @@ def test_benchmark_routing_cases_are_scored(tmp_path_factory):
     _cleanup(workflow_path, env_vars)
     fastworkflow.init(env_vars=env_vars)
 
-    # Phrasings deliberately unlike hello_world's seeds, so the disjointness guard passes.
-    benchmark_path = heldout_evaluation.default_benchmark_path(workflow_path)
-    os.makedirs(os.path.dirname(benchmark_path), exist_ok=True)
-    with open(benchmark_path, "w") as f:
-        json.dump(
-            {
-                "schema_version": heldout_evaluation.BENCHMARK_SCHEMA_VERSION,
-                "cases": [
-                    {"utterance": "what is 41 plus 1", "kind": "routing",
-                     "expected_label": "add_two_numbers", "context": "*"},
-                    {"utterance": "please total 19 with 23", "kind": "routing",
-                     "expected_label": "add_two_numbers", "context": "*"},
-                ],
-            },
-            f,
+    # try/finally for the same reason as the leak test above: `_cleanup` removes
+    # `./___workflow_contexts` from the repo root. bd fix-k0i.48.
+    try:
+        # Phrasings deliberately unlike hello_world's seeds, so the disjointness guard passes.
+        benchmark_path = heldout_evaluation.default_benchmark_path(workflow_path)
+        os.makedirs(os.path.dirname(benchmark_path), exist_ok=True)
+        with open(benchmark_path, "w") as f:
+            json.dump(
+                {
+                    "schema_version": heldout_evaluation.BENCHMARK_SCHEMA_VERSION,
+                    "cases": [
+                        {"utterance": "what is 41 plus 1", "kind": "routing",
+                         "expected_label": "add_two_numbers", "context": "*"},
+                        {"utterance": "please total 19 with 23", "kind": "routing",
+                         "expected_label": "add_two_numbers", "context": "*"},
+                    ],
+                },
+                f,
+            )
+
+        train_workflow(workflow_path)
+
+        report_path = os.path.join(
+            _command_info_path(workflow_path), heldout_evaluation.REPORT_FILENAME
         )
+        with open(report_path) as f:
+            payload = json.load(f)
 
-    train_workflow(workflow_path)
+        scored = [
+            entry for entry in payload["contexts"]
+            if (entry.get("benchmark_routing") or {}).get("total", 0) > 0
+        ]
+        assert scored, (
+            "The benchmark's routing cases were never scored. Check the report notes for a "
+            f"swallowed scoring failure: {payload}"
+        )
+        for entry in scored:
+            benchmark_routing = entry["benchmark_routing"]
+            assert benchmark_routing["total"] == 2
+            assert benchmark_routing["top1_correct"] <= 2
 
-    report_path = os.path.join(
-        _command_info_path(workflow_path), heldout_evaluation.REPORT_FILENAME
-    )
-    with open(report_path) as f:
-        payload = json.load(f)
-
-    scored = [
-        entry for entry in payload["contexts"]
-        if (entry.get("benchmark_routing") or {}).get("total", 0) > 0
-    ]
-    assert scored, (
-        "The benchmark's routing cases were never scored. Check the report notes for a "
-        f"swallowed scoring failure: {payload}"
-    )
-    for entry in scored:
-        benchmark_routing = entry["benchmark_routing"]
-        assert benchmark_routing["total"] == 2
-        assert benchmark_routing["top1_correct"] <= 2
-
-    # The guard must not have fired: a note here means scoring raised and was swallowed.
-    for entry in payload["contexts"]:
-        assert not any(
-            "evaluation failed" in note for note in entry.get("notes", [])
-        ), f"Held-out evaluation raised and was swallowed: {entry['notes']}"
-
-    _cleanup(workflow_path, env_vars)
+        # The guard must not have fired: a note here means scoring raised and was swallowed.
+        for entry in payload["contexts"]:
+            assert not any(
+                "evaluation failed" in note for note in entry.get("notes", [])
+            ), f"Held-out evaluation raised and was swallowed: {entry['notes']}"
+    finally:
+        _cleanup(workflow_path, env_vars)
 
 
 def test_training_produces_heldout_evaluation_report(trained_hello_world):
@@ -492,8 +520,25 @@ def test_training_produces_heldout_evaluation_report(trained_hello_world):
     assert payload["totals"]["routing_total"] > 0
 
 
+def _routes_to_add_two_numbers(command_info: str, utterance: str) -> bool:
+    """True when *utterance* reaches `add_two_numbers` in any trained context."""
+    for model_dir in _find_model_dirs(command_info):
+        router = CommandRouter(model_dir)
+        labels = router.predict(utterance)
+        if any("add_two_numbers" in label for label in labels):
+            return True
+    return False
+
+
 def test_trained_model_routes_utterance(trained_hello_world):
-    """A representative utterance must route to the add_two_numbers command."""
+    """A representative utterance must route to the add_two_numbers command.
+
+    ROUTING_UTTERANCE is a training row (see `_fixed_generated_corpus`), so this is a
+    memorisation/smoke check: it proves the artifacts load and the label reaches the
+    encoder, not that the model generalises. The generalisation claim is
+    `test_trained_model_routes_a_heldout_paraphrase` below; do not cite this one as
+    routing-quality evidence. bd fix-k0i.30.
+    """
     workflow_path, _env_vars = trained_hello_world
     command_info = _command_info_path(workflow_path)
 
@@ -501,15 +546,54 @@ def test_trained_model_routes_utterance(trained_hello_world):
     model_dirs = _find_model_dirs(command_info)
     assert model_dirs, "No trained model directories to route against."
 
-    routed = False
-    for model_dir in model_dirs:
-        router = CommandRouter(model_dir)
-        labels = router.predict("add 2 and 3")
-        if any("add_two_numbers" in label for label in labels):
-            routed = True
-            break
-
-    assert routed, (
-        "Utterance 'add 2 and 3' did not route to 'add_two_numbers' in any "
+    assert _routes_to_add_two_numbers(command_info, ROUTING_UTTERANCE), (
+        f"Utterance {ROUTING_UTTERANCE!r} did not route to 'add_two_numbers' in any "
         f"trained context under {command_info}."
+    )
+
+
+def test_the_heldout_probe_is_actually_held_out(trained_hello_world):
+    """The probe below is only evidence if it is absent from everything trained on.
+
+    Cheap and worth pinning: the natural way to "fix" a flaky generalisation test is to
+    paste its probe into the fixed corpus, which silently converts it back into the
+    memorisation check it was written to replace.
+    """
+    workflow_path, _env_vars = trained_hello_world
+    trained_rows = set(_fixed_generated_corpus(ADD_TWO_NUMBERS_COMMAND))
+
+    cmd_dir = CommandDirectory.load(workflow_path)
+    for command_key in cmd_dir.get_utterance_keys():
+        cmd_dir.ensure_command_hydrated(command_key)
+        metadata = cmd_dir.get_utterance_metadata(command_key)
+        trained_rows.update(_fixed_generated_corpus(command_key))
+        trained_rows.update(metadata.plain_utterances)
+        trained_rows.update(metadata.template_utterances)
+
+    normalised = {row.strip().casefold() for row in trained_rows}
+    assert HELDOUT_ROUTING_UTTERANCE.strip().casefold() not in normalised, (
+        f"{HELDOUT_ROUTING_UTTERANCE!r} is in the training data, so routing it proves "
+        f"only that the model memorised its training rows"
+    )
+
+
+def test_trained_model_routes_a_heldout_paraphrase(trained_hello_world):
+    """The routing claim that is not memorisation.
+
+    `HELDOUT_ROUTING_UTTERANCE` never appears in the preseeded corpus or in
+    hello_world's seed list, so a regression that keeps reproducing training rows while
+    losing every paraphrase fails here and nowhere else in this module. The fixed corpus
+    stays fixed -- the determinism it buys is real (spec section 11 documents this test
+    flaking on fresh LLM draws) -- and this probe is measured against it. bd fix-k0i.30.
+    """
+    workflow_path, _env_vars = trained_hello_world
+    command_info = _command_info_path(workflow_path)
+
+    model_dirs = _find_model_dirs(command_info)
+    assert model_dirs, "No trained model directories to route against."
+
+    assert _routes_to_add_two_numbers(command_info, HELDOUT_ROUTING_UTTERANCE), (
+        f"Held-out paraphrase {HELDOUT_ROUTING_UTTERANCE!r} did not route to "
+        f"'add_two_numbers' in any trained context under {command_info}. The model "
+        f"reproduces its training rows but does not generalise."
     )

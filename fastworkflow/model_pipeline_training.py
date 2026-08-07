@@ -1,4 +1,3 @@
-import contextlib
 import os
 from typing import Callable, ClassVar, Optional
 from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification
@@ -1104,6 +1103,77 @@ def _score_heldout_context(
         )
 
 
+def preflight_benchmark(
+    workflow_folderpath: str,
+    crd: Optional[RoutingDefinition] = None,
+) -> list[heldout_evaluation.BenchmarkCase]:
+    """Load and validate the workflow's benchmark file, raising on a seed leak.
+
+    Returns the loaded cases (empty when the workflow ships no benchmark) so a caller
+    that is about to score can reuse them.
+
+    Runs off the command directory and routing definition alone — no workflow instance,
+    no model, no LLM — which is what lets `train.__main__.train_workflow` call it before
+    it spends anything. `train` calls it again as a second line of defence for direct
+    callers that bypass the orchestrator.
+
+    ------------------------------------------------------------------
+    R1b: a benchmark that shares phrasings with the training seeds measures
+    memorisation, so it is checked BEFORE any training happens. Failing fast is the
+    point: discovering the leak after the run would mean every number it produced has
+    to be thrown away, and the run costs LLM calls and GPU minutes.
+    ------------------------------------------------------------------
+    """
+    benchmark_path = heldout_evaluation.default_benchmark_path(workflow_folderpath)
+    if not os.path.isfile(benchmark_path):
+        return []
+
+    if crd is None:
+        crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
+    cmd_dir = crd.command_directory
+
+    benchmark_cases = heldout_evaluation.load_benchmark_file(benchmark_path)
+    seed_utterances_by_command: dict[str, list[str]] = {}
+    for command_key in cmd_dir.get_utterance_keys():
+        if metadata := cmd_dir.get_utterance_metadata(command_key):
+            seed_utterances_by_command[command_key] = list(metadata.plain_utterances)
+    # Deliberately NOT caught: an unnoticed leak silently turns the whole evaluation
+    # into a memorisation score, which is the failure R1 exists to remove.
+    heldout_evaluation.assert_benchmark_disjoint_from_seeds(
+        benchmark_cases, seed_utterances_by_command)
+    # A close-but-not-equal match is a judgement call, so it is reported, not enforced.
+    for warning in heldout_evaluation.find_near_duplicate_benchmark_cases(
+        benchmark_cases, seed_utterances_by_command
+    ):
+        logger.warning(warning)
+
+    # A benchmark case can also be defective in a way that has nothing to do with
+    # leakage: a routing case naming a label the context does not have can never
+    # pass, and an "escalation" case whose command is not actually absent here and
+    # present in an ancestor is not testing escalation at all. Either one drags the
+    # reported score down for a reason that is not the model's fault, so both are
+    # reported before the run rather than discovered as a mysteriously low number.
+    core_command_names = set(cmd_dir.core_command_names)
+    context_label_space = {
+        context_name: set(command_list) | core_command_names
+        for context_name, command_list in crd.contexts.items()
+    }
+    ancestor_map = {
+        context_name: list(crd.context_model.get_ancestor_contexts(context_name))
+        for context_name in crd.contexts
+    }
+    for problem in (
+        heldout_evaluation.validate_routing_cases(
+            benchmark_cases, context_label_space)
+        + heldout_evaluation.validate_escalation_cases(
+            benchmark_cases, context_label_space, ancestor_map)
+    ):
+        logger.warning(f"Benchmark defect: {problem}")
+
+    print(f"Benchmark: {len(benchmark_cases)} case(s) from {benchmark_path}")
+    return benchmark_cases
+
+
 def train(workflow: fastworkflow.Workflow,
           contexts_to_train: Optional[set[str]] = None):
     """Train intent-classification models **per command context**.
@@ -1135,54 +1205,10 @@ def train(workflow: fastworkflow.Workflow,
     crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath, load_cached=False)
     cmd_dir = crd.command_directory
 
-    # ------------------------------------------------------------------
-    # R1b: a benchmark that shares phrasings with the training seeds measures
-    # memorisation, so it is checked BEFORE any training happens. Failing fast is the
-    # point: discovering the leak after the run would mean every number it produced has
-    # to be thrown away, and the run costs LLM calls and GPU minutes.
-    # ------------------------------------------------------------------
-    benchmark_cases: list[heldout_evaluation.BenchmarkCase] = []
-    benchmark_path = heldout_evaluation.default_benchmark_path(workflow_folderpath)
-    if os.path.isfile(benchmark_path):
-        benchmark_cases = heldout_evaluation.load_benchmark_file(benchmark_path)
-        seed_utterances_by_command: dict[str, list[str]] = {}
-        for command_key in cmd_dir.get_utterance_keys():
-            if metadata := cmd_dir.get_utterance_metadata(command_key):
-                seed_utterances_by_command[command_key] = list(metadata.plain_utterances)
-        # Deliberately NOT caught: an unnoticed leak silently turns the whole evaluation
-        # into a memorisation score, which is the failure R1 exists to remove.
-        heldout_evaluation.assert_benchmark_disjoint_from_seeds(
-            benchmark_cases, seed_utterances_by_command)
-        # A close-but-not-equal match is a judgement call, so it is reported, not enforced.
-        for warning in heldout_evaluation.find_near_duplicate_benchmark_cases(
-            benchmark_cases, seed_utterances_by_command
-        ):
-            logger.warning(warning)
-
-        # A benchmark case can also be defective in a way that has nothing to do with
-        # leakage: a routing case naming a label the context does not have can never
-        # pass, and an "escalation" case whose command is not actually absent here and
-        # present in an ancestor is not testing escalation at all. Either one drags the
-        # reported score down for a reason that is not the model's fault, so both are
-        # reported before the run rather than discovered as a mysteriously low number.
-        core_command_names = set(cmd_dir.core_command_names)
-        context_label_space = {
-            context_name: set(command_list) | core_command_names
-            for context_name, command_list in crd.contexts.items()
-        }
-        ancestor_map = {
-            context_name: list(crd.context_model.get_ancestor_contexts(context_name))
-            for context_name in crd.contexts
-        }
-        for problem in (
-            heldout_evaluation.validate_routing_cases(
-                benchmark_cases, context_label_space)
-            + heldout_evaluation.validate_escalation_cases(
-                benchmark_cases, context_label_space, ancestor_map)
-        ):
-            logger.warning(f"Benchmark defect: {problem}")
-
-        print(f"Benchmark: {len(benchmark_cases)} case(s) from {benchmark_path}")
+    # Second line of defence. `train.__main__.train_workflow` runs the same preflight
+    # before it spends anything on parameter-example generation; this call covers direct
+    # callers of `train()` and re-reads the file in case it changed since.
+    benchmark_cases = preflight_benchmark(workflow_folderpath, crd)
 
     context_utterance_cache = {}
     # Generation identity is the fully-qualified command. Context identity belongs to
@@ -1785,8 +1811,38 @@ def train(workflow: fastworkflow.Workflow,
 
     if heldout_reports:
         print(heldout_evaluation.format_report(heldout_reports))
-        with contextlib.suppress(OSError):
-            report_path = heldout_evaluation.write_report(
-                workflow_folderpath, heldout_reports)
-            print(f"Held-out evaluation report: {report_path}")
+        _write_heldout_report(workflow_folderpath, heldout_reports)
     return None
+
+
+def _write_heldout_report(
+    workflow_folderpath: str,
+    heldout_reports: list[heldout_evaluation.HeldoutReport],
+) -> Optional[str]:
+    """Persist the held-out evaluation report, saying so loudly when it cannot.
+
+    Returns the path written, or None on failure.
+
+    Not fatal — the models are already on disk and usable, and a failed report write is
+    not a reason to discard a completed run. Not silent either: a failure leaves
+    `heldout_evaluation.json` stale or absent while the run reports success, and
+    `selective_training.merge_heldout_evaluation` then merges this run's contexts into a
+    baseline describing different artifacts, while `capture_heldout_evaluation` returns
+    None on the next run. Both consequences are invisible from the training output, which
+    is why the write cannot simply be suppressed.
+    """
+    try:
+        report_path = heldout_evaluation.write_report(
+            workflow_folderpath, heldout_reports)
+    except OSError as exc:
+        message = (
+            f"Could not write the held-out evaluation report for "
+            f"{workflow_folderpath}: {type(exc).__name__}: {exc}. The scores printed "
+            f"above are NOT on disk; heldout_evaluation.json is stale or absent, so the "
+            f"next selective run merges against the wrong baseline."
+        )
+        logger.error(message)
+        print(f"WARNING: {message}", flush=True)
+        return None
+    print(f"Held-out evaluation report: {report_path}")
+    return report_path

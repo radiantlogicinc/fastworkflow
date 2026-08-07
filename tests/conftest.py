@@ -106,6 +106,15 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "slow: mark test as slow running"
     )
+    # Every test that drives a real `train_workflow` carries both markers, so
+    # `-m "not slow"` deselects the full training runs (minutes each) and
+    # `-m "not requires_llm_key"` deselects everything that needs a real
+    # LITELLM_API_KEY_* to do anything but skip. Before these existed there was no way
+    # to run the suite without the ~7 full trains. bd fix-k0i.42.
+    config.addinivalue_line(
+        "markers",
+        "requires_llm_key: mark test as needing a real LLM API key to do more than skip",
+    )
 
 
 @pytest.fixture(autouse=True, scope="function")

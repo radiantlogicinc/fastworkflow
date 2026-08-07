@@ -65,13 +65,25 @@ measures how often each command's own utterances are routed to another command. 
 "cluster label centroids" half of R9b, done through the model's decisions rather than its
 weights: it needs no torch import here, it works with any model, and it reports the thing a
 developer actually cares about (what the router does) rather than a distance in a space
-nobody can inspect.
+nobody can inspect. `train.__main__` runs it after training against the routers the run
+just produced, where the lexical scan cannot reach; it warns and never blocks, because by
+then the money is already spent.
+
+The accept-list
+---------------
+R9b's third option is "merge, alias, OR ACCEPT". Without somewhere to record an
+acceptance, a deliberately-aliased pair produces the same warning on every run forever,
+and a permanent warning is one nobody reads. ``<workflow>/accepted_duplicates.json``
+(`load_accept_list`) is that record: data the developer owns, not a training-policy flag,
+and it suppresses a pair on BOTH instruments at once. Accepted pairs are still scanned and
+still listed — as accepted, with the stated reason — so the tool never hides what it found.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -85,6 +97,14 @@ import fastworkflow
 COMMAND_INFO_DIRNAME = "___command_info"
 REPORT_FILENAME = "duplicate_capabilities.json"
 REPORT_SCHEMA_VERSION = 1
+
+#: Hand-authored accept-list, at the WORKFLOW ROOT rather than beside the generated
+#: report inside ``___command_info``. It records a developer's decision, so it is input
+#: like ``intent_benchmark.json`` — not output. Under ``___command_info`` it would sit in
+#: territory the trainer prunes and that developers are told to delete to force a rebuild,
+#: and losing the decision would silently resurrect a warning the author already answered.
+ACCEPT_LIST_FILENAME = "accepted_duplicates.json"
+ACCEPT_LIST_SCHEMA_VERSION = 1
 
 #: Separability at or below which a pair is reported as a duplicate. 0.5 is the chance
 #: line for a balanced two-class decision, not a fitted constant.
@@ -360,6 +380,47 @@ class ConfusionFinding(BaseModel):
     cases_b: int
 
 
+class AcceptedPair(BaseModel):
+    """One pair a developer has decided is a legitimate near-duplicate."""
+
+    command_a: str
+    command_b: str
+    reason: Optional[str] = None
+
+    @property
+    def pair(self) -> tuple[str, str]:
+        return (self.command_a, self.command_b)
+
+
+class AcceptList(BaseModel):
+    """A workflow's parsed accept-list, plus whatever could not be parsed.
+
+    Malformed entries become `problems` rather than an exception. This file is read on
+    the path to an expensive training run, and a typo in it must not be what stops that
+    run — an unparsed entry simply does not suppress anything, which fails toward
+    reporting the pair.
+    """
+
+    path: Optional[str] = None
+    exists: bool = False
+    pairs: list[AcceptedPair] = Field(default_factory=list)
+    problems: list[str] = Field(default_factory=list)
+
+    def accepted(self, command_a: str, command_b: str) -> Optional[AcceptedPair]:
+        """Return the entry accepting this pair, or None.
+
+        Matched on the sorted pair of exact command names, so the order they are written
+        in does not matter. Exact, not leaf-name: the report prints fully-qualified names
+        for the author to copy, and matching a bare leaf would let one accept-list entry
+        silently suppress a same-named command in an unrelated context.
+        """
+        wanted = tuple(sorted((command_a, command_b)))
+        return next(
+            (entry for entry in self.pairs if tuple(sorted(entry.pair)) == wanted),
+            None,
+        )
+
+
 class DuplicateReport(BaseModel):
     """The result of one scan, in the shape written to disk and printed."""
 
@@ -370,6 +431,22 @@ class DuplicateReport(BaseModel):
     duplicates: list[DuplicateFinding] = Field(default_factory=list)
     overlapping: list[DuplicateFinding] = Field(default_factory=list)
     confusable: list[ConfusionFinding] = Field(default_factory=list)
+    #: Findings the workflow's accept-list answers. Kept in the report rather than
+    #: filtered out of it: an accepted duplicate is still a fact about the workflow, and
+    #: a reader must be able to see that the tool found the pair and was told about it.
+    accepted: list[DuplicateFinding] = Field(default_factory=list)
+    accepted_confusable: list[ConfusionFinding] = Field(default_factory=list)
+    #: The accept-list entries that matched, which is where the developer's stated reason
+    #: lives. A finding carries no reason of its own.
+    accepted_pairs: list[AcceptedPair] = Field(default_factory=list)
+    accept_list_path: Optional[str] = None
+    #: Accept-list entries naming pairs this scan did not report. Usually a pair whose
+    #: seeds have since been made distinctive, i.e. an entry that can be deleted.
+    unmatched_accepted_pairs: list[AcceptedPair] = Field(default_factory=list)
+    #: Kept out of `notes`, which carries routine scan observations that a clean workflow
+    #: has too. An unreadable accept-list means a suppression the author believes is in
+    #: place is not, so it must be able to raise the report's visibility on its own.
+    accept_list_problems: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     thresholds: dict = Field(default_factory=dict)
 
@@ -630,13 +707,188 @@ def scan_workflow(
     workflow_folderpath: str,
     **kwargs,
 ) -> DuplicateReport:
-    """Convenience: collect a workflow's seeds and contexts, then scan them."""
-    return find_duplicate_capabilities(
+    """Convenience: collect a workflow's seeds and contexts, scan, apply the accept-list."""
+    report = find_duplicate_capabilities(
         utterances_from_workflow(workflow_folderpath),
         contexts=contexts_from_workflow(workflow_folderpath),
         workflow_folderpath=workflow_folderpath,
         **kwargs,
     )
+    apply_accept_list(report, load_accept_list(workflow_folderpath))
+    return report
+
+
+# ---------------------------------------------------------------------------
+# Accept-list
+# ---------------------------------------------------------------------------
+
+
+def _separability_order(finding: DuplicateFinding) -> tuple:
+    return (finding.separability, finding.command_a, finding.command_b)
+
+
+def _confusion_order(finding: ConfusionFinding) -> tuple:
+    return (-finding.symmetric_confusion, finding.command_a, finding.command_b)
+
+
+def accept_list_path(workflow_folderpath: str) -> str:
+    """Return the path of a workflow's accept-list, whether or not it exists."""
+    return str(Path(workflow_folderpath) / ACCEPT_LIST_FILENAME)
+
+
+def _parse_accept_entry(
+    raw: object, index: int, problems: list[str]
+) -> Optional[AcceptedPair]:
+    """Parse one accept-list entry.
+
+    Two forms, because an author writing this by hand will reach for either: the
+    documented object ``{"commands": ["a", "b"], "reason": "..."}`` and the bare pair
+    ``["a", "b"]``. The object form is the one the report tells them to write, since it
+    is the only one with somewhere to record WHY.
+    """
+    if isinstance(raw, dict):
+        commands = raw.get("commands")
+        reason = raw.get("reason")
+    elif isinstance(raw, (list, tuple)):
+        commands = raw
+        reason = None
+    else:
+        problems.append(
+            f"entry {index} is a {type(raw).__name__}, not a pair or an object with "
+            f'"commands"'
+        )
+        return None
+
+    if not isinstance(commands, (list, tuple)) or len(commands) != 2:
+        problems.append(
+            f"entry {index} must name exactly two commands; got {commands!r}"
+        )
+        return None
+    if any(not isinstance(name, str) or not name.strip() for name in commands):
+        problems.append(f"entry {index} names something that is not a command: {commands!r}")
+        return None
+    if commands[0].strip() == commands[1].strip():
+        problems.append(
+            f"entry {index} accepts {commands[0]!r} against itself; a pair needs two "
+            f"different commands"
+        )
+        return None
+
+    return AcceptedPair(
+        command_a=commands[0].strip(),
+        command_b=commands[1].strip(),
+        reason=str(reason).strip() if isinstance(reason, str) and reason.strip() else None,
+    )
+
+
+def load_accept_list(workflow_folderpath: str) -> AcceptList:
+    """Load ``<workflow>/accepted_duplicates.json``. Never raises.
+
+    An absent file is the normal case and produces an empty accept-list with no
+    problems: a workflow that has never had to accept a pair should not be told about a
+    file it does not need.
+    """
+    path = accept_list_path(workflow_folderpath)
+    accept_list = AcceptList(path=path)
+    if not os.path.isfile(path):
+        return accept_list
+    accept_list.exists = True
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        accept_list.problems.append(
+            f"{path} could not be read ({type(exc).__name__}: {exc}); no pair is "
+            f"suppressed"
+        )
+        return accept_list
+
+    if isinstance(payload, dict):
+        entries = payload.get("accepted")
+        declared_version = payload.get("schema_version")
+        if declared_version not in (None, ACCEPT_LIST_SCHEMA_VERSION):
+            accept_list.problems.append(
+                f"{path} declares schema_version {declared_version!r}; reading it as "
+                f"schema {ACCEPT_LIST_SCHEMA_VERSION}"
+            )
+    elif isinstance(payload, list):
+        entries = payload
+    else:
+        accept_list.problems.append(
+            f'{path} must be an object with "accepted" or a list of pairs'
+        )
+        return accept_list
+
+    if entries is None:
+        accept_list.problems.append(f'{path} has no "accepted" list')
+        return accept_list
+    if not isinstance(entries, list):
+        accept_list.problems.append(f'{path}: "accepted" must be a list')
+        return accept_list
+
+    problems: list[str] = []
+    for index, raw in enumerate(entries):
+        if parsed := _parse_accept_entry(raw, index, problems):
+            accept_list.pairs.append(parsed)
+    accept_list.problems.extend(f"{path}: {problem}" for problem in problems)
+    return accept_list
+
+
+def apply_accept_list(report: DuplicateReport, accept_list: AcceptList) -> None:
+    """Move accepted findings out of the warning bands and onto `report.accepted`.
+
+    In place, and applied to `confusable` as well as the lexical bands, so accepting a
+    pair answers it on both axes — a developer who has decided two commands are the same
+    capability should not have to answer the same finding again after training.
+
+    Safe to call more than once on the same report, which is what lets the post-training
+    router scan attach its findings to the report the pre-flight already wrote: every
+    band is rebuilt from the union of reported and already-accepted findings, using each
+    finding's own recorded `severity` rather than which list it happens to be in.
+    """
+    report.accept_list_path = accept_list.path
+    report.accept_list_problems = list(accept_list.problems)
+
+    matched: set[tuple[str, str]] = set()
+    duplicates: list[DuplicateFinding] = []
+    overlapping: list[DuplicateFinding] = []
+    accepted: list[DuplicateFinding] = []
+    for finding in [*report.duplicates, *report.overlapping, *report.accepted]:
+        if entry := accept_list.accepted(finding.command_a, finding.command_b):
+            matched.add(tuple(sorted(entry.pair)))
+            accepted.append(finding)
+        elif finding.severity == "duplicate":
+            duplicates.append(finding)
+        else:
+            overlapping.append(finding)
+
+    reported_confusable: list[ConfusionFinding] = []
+    accepted_confusable: list[ConfusionFinding] = []
+    for confusion in [*report.confusable, *report.accepted_confusable]:
+        if entry := accept_list.accepted(confusion.command_a, confusion.command_b):
+            matched.add(tuple(sorted(entry.pair)))
+            accepted_confusable.append(confusion)
+        else:
+            reported_confusable.append(confusion)
+
+    # Re-sorted rather than left in partition order: on a repeat call an already-accepted
+    # finding is visited last, and every band must stay in the order
+    # `find_duplicate_capabilities` established regardless of how it was assembled.
+    report.duplicates = sorted(duplicates, key=_separability_order)
+    report.overlapping = sorted(overlapping, key=_separability_order)
+    report.accepted = sorted(accepted, key=_separability_order)
+    report.confusable = sorted(reported_confusable, key=_confusion_order)
+    report.accepted_confusable = sorted(accepted_confusable, key=_confusion_order)
+
+    report.accepted_pairs = [
+        entry for entry in accept_list.pairs if tuple(sorted(entry.pair)) in matched
+    ]
+    report.unmatched_accepted_pairs = [
+        entry
+        for entry in accept_list.pairs
+        if tuple(sorted(entry.pair)) not in matched
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -670,6 +922,53 @@ def _format_finding(finding: DuplicateFinding) -> list[str]:
     return lines
 
 
+def format_confusion_line(confusion: ConfusionFinding) -> str:
+    """One line describing a pair the trained router routes interchangeably.
+
+    Shared with the post-training warning in `train.__main__`, which prints the model
+    axis on its own rather than repeating the whole pre-flight scan.
+    """
+    return (
+        f"  {confusion.command_a} <-> {confusion.command_b}: "
+        f"{confusion.symmetric_confusion:.0%} symmetric "
+        f"({confusion.a_routed_to_b:.0%} / {confusion.b_routed_to_a:.0%} over "
+        f"{confusion.cases_a} / {confusion.cases_b} utterances)"
+    )
+
+
+def _format_accept_instructions(report: DuplicateReport) -> list[str]:
+    """Tell the developer how to record "yes, I meant that" so it stops being a warning.
+
+    Printed with the findings rather than in a doc, because the moment someone is reading
+    a pair they have already judged is legitimate is the moment the third option in
+    "merge, alias, or accept" needs to be actionable.
+    """
+    path = report.accept_list_path or (
+        accept_list_path(report.workflow_folderpath)
+        if report.workflow_folderpath
+        else ACCEPT_LIST_FILENAME
+    )
+    example = report.duplicates[0] if report.duplicates else (
+        report.overlapping[0] if report.overlapping else None
+    )
+    pair = (
+        f'["{example.command_a}", "{example.command_b}"]'
+        if example
+        else '["command_a", "command_b"]'
+    )
+    return [
+        "",
+        f"To accept a pair as a deliberate near-duplicate, add it to {path}:",
+        '  {"schema_version": 1, "accepted": [',
+        f'    {{"commands": {pair}, "reason": "why this pair is intentional"}}',
+        "  ]}",
+        "  Accepted pairs are still scanned and still listed below, as accepted. Command "
+        "names must match",
+        "  exactly as printed here. This file is yours, not generated: nothing rewrites "
+        "it.",
+    ]
+
+
 def format_report(report: DuplicateReport) -> str:
     """Render the scan for the end of a training run."""
     lines = [
@@ -678,7 +977,13 @@ def format_report(report: DuplicateReport) -> str:
         f"{report.commands_examined} command(s), {report.pairs_examined} pair(s) examined.",
     ]
 
-    if not report.duplicates and not report.overlapping and not report.confusable:
+    if not (
+        report.duplicates
+        or report.overlapping
+        or report.confusable
+        or report.accepted
+        or report.accepted_confusable
+    ):
         lines.append("No near-duplicate capabilities detected.")
     else:
         if report.duplicates:
@@ -705,13 +1010,53 @@ def format_report(report: DuplicateReport) -> str:
                 f"MODEL CONFUSION ({len(report.confusable)}): the trained router sends these "
                 f"commands' own utterances to each other."
             )
-            for confusion in report.confusable:
+            lines.extend(
+                format_confusion_line(confusion) for confusion in report.confusable
+            )
+        if report.accepted or report.accepted_confusable:
+            lines.append("")
+            total_accepted = len(report.accepted) + len(report.accepted_confusable)
+            lines.append(
+                f"ACCEPTED ({total_accepted}): reported by the scan and answered by "
+                f"{report.accept_list_path or ACCEPT_LIST_FILENAME}. No action needed."
+            )
+            reasons = {
+                tuple(sorted(entry.pair)): entry.reason
+                for entry in report.accepted_pairs
+            }
+            for finding in report.accepted:
+                lines.extend(_format_finding(finding))
+                if reason := reasons.get(tuple(sorted(finding.pair))):
+                    lines.append(f"    accepted because: {reason}")
+            for confusion in report.accepted_confusable:
+                pair = (confusion.command_a, confusion.command_b)
                 lines.append(
                     f"  {confusion.command_a} <-> {confusion.command_b}: "
-                    f"{confusion.symmetric_confusion:.0%} symmetric "
-                    f"({confusion.a_routed_to_b:.0%} / {confusion.b_routed_to_a:.0%} over "
-                    f"{confusion.cases_a} / {confusion.cases_b} utterances)"
+                    f"{confusion.symmetric_confusion:.0%} symmetric router confusion"
                 )
+                if reason := reasons.get(tuple(sorted(pair))):
+                    lines.append(f"    accepted because: {reason}")
+        if report.duplicates or report.overlapping:
+            lines.extend(_format_accept_instructions(report))
+
+    if report.accept_list_problems:
+        lines.append("")
+        lines.append(
+            f"ACCEPT-LIST PROBLEMS ({len(report.accept_list_problems)}): nothing listed "
+            f"below suppresses anything until it is fixed."
+        )
+        lines.extend(f"  {problem}" for problem in report.accept_list_problems)
+
+    if report.unmatched_accepted_pairs:
+        lines.append("")
+        lines.append(
+            f"STALE ACCEPT-LIST ENTRIES ({len(report.unmatched_accepted_pairs)}): these "
+            f"pairs are accepted but no longer reported, so the entries can be deleted."
+        )
+        lines.extend(
+            f"  {entry.command_a} / {entry.command_b}"
+            for entry in report.unmatched_accepted_pairs
+        )
 
     if report.notes:
         lines.append("")

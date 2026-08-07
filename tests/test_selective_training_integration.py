@@ -26,6 +26,7 @@ import importlib.util
 import json
 import os
 import shutil
+from pathlib import Path
 
 import pytest
 from dotenv import dotenv_values
@@ -34,10 +35,15 @@ import fastworkflow
 from fastworkflow.command_context_model import CommandContextModel
 from fastworkflow.command_directory import CommandDirectory
 from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
-from fastworkflow.model_pipeline_training import CommandRouter
+from fastworkflow.model_pipeline_training import (
+    CommandRouter,
+    TrainingDataError,
+    get_artifact_path,
+)
 from fastworkflow.nlu_labels import WILDCARD_LABEL
 from fastworkflow.train import artifact_versioning, heldout_evaluation, training_report
 from fastworkflow.train import selective_training as st
+from fastworkflow.train.__main__ import _repair_noop_publication
 from fastworkflow.train.determinism import (
     ContextTrainingStatus,
     ProvenanceRecorder,
@@ -54,8 +60,23 @@ MESSAGING_APP_PATH = os.path.join("fastworkflow", "examples", "messaging_app_4")
 NEW_PRIORITY_UTTERANCE = (
     "flag this note to sara@fastworkflow.ai as urgent priority mail"
 )
+
+# NEW_PRIORITY_UTTERANCE is planted verbatim in the changed command's preseeded corpus so
+# the second train is deterministic, which makes routing it a MEMORISATION check.
+# HELDOUT_PRIORITY_UTTERANCE is in neither corpus nor seed list, so routing it is evidence
+# that the retrained model learned the intent rather than the row. bd fix-k0i.30.
+HELDOUT_PRIORITY_UTTERANCE = (
+    "mark this memo to dana@fastworkflow.ai as urgent priority mail"
+)
 PRIORITY_COMMAND = "PremiumUser/send_priority_message"
 USER_MESSAGE_COMMAND = "User/send_message"
+
+# Contexts messaging_app_4 trains, as artifact folder names resolve them.
+ALL_CONTEXTS = ("*", "ChatRoom", "PremiumUser", "User")
+
+# The grandchild context the AR2 compose case needs and messaging_app_4 does not ship.
+PREMIUM_SESSION_CONTEXT = "PremiumSession"
+PREMIUM_SESSION_COMMAND = "PremiumSession/end_session"
 
 
 def _datasets_available() -> bool:
@@ -100,6 +121,97 @@ def _copy_workflow(destination_root, name: str = "messaging_app_4") -> str:
         ),
     )
     return workflow_path
+
+
+_PREMIUM_SESSION_APPLICATION = '''\
+"""A session owned by a PremiumUser, so the workflow has a third generation."""
+
+
+class PremiumSession:
+    def __init__(self, user):
+        self.user = user
+
+    def end_session(self) -> str:
+        return f"ended {self.user.name}'s session"
+'''
+
+_PREMIUM_SESSION_CONTEXT_CLASS = '''\
+from ...application.session import PremiumSession
+from ...application.user import PremiumUser
+
+
+class Context:
+    @classmethod
+    def get_parent(cls, command_context_object: PremiumSession) -> PremiumUser:
+        return command_context_object.user
+'''
+
+_PREMIUM_SESSION_COMMAND = '''\
+import fastworkflow
+from fastworkflow.train.generate_synthetic import generate_diverse_utterances
+
+from ...application.session import PremiumSession
+
+
+class Signature:
+    plain_utterances = [
+        "close out this session",
+    ]
+
+    @staticmethod
+    def generate_utterances(workflow: fastworkflow.Workflow, command_name: str) -> list[str]:
+        """This function will be called by the framework to generate utterances for training"""
+        return [
+            command_name.split('/')[-1].lower().replace('_', ' ')
+        ] + generate_diverse_utterances(Signature.plain_utterances, command_name)
+
+
+class ResponseGenerator:
+    def __call__(self, workflow: fastworkflow.Workflow, command: str) -> fastworkflow.CommandOutput:
+        session: PremiumSession = workflow.command_context_for_response_generation
+        return fastworkflow.CommandOutput(
+            command_responses=[
+                fastworkflow.CommandResponse(response=session.end_session())
+            ]
+        )
+'''
+
+
+def _add_premium_session_context(workflow_path: str) -> None:
+    """Give the copied workflow the grandchild the AR2 compose case needs.
+
+    ``messaging_app_4`` ships two children of ``ChatRoom`` and no grandchild, so the
+    composition AR2 identified as the real gap in the closure rule cannot be reproduced in
+    it at all::
+
+        User            owns    User/send_message
+        PremiumUser     base:   [User]          -> inherits User/send_message
+        PremiumSession  parent: [PremiumUser]   -> wildcard class carries it
+
+    ``PremiumSession`` is not a descendant of ``User`` and does not inherit from it, yet
+    its wildcard class is assembled from ``PremiumUser``'s utterances, which include
+    ``User/send_message`` *because of* the ``base`` edge. Expanding over ``parent`` alone
+    misses it and expanding over ``base`` alone misses it; only the union catches it, and
+    only if the planner derives an ancestor's commands from the RESOLVED command list
+    rather than from the raw base graph -- which is the anti-decision AR2 names.
+
+    Built into a copy rather than into the bundled example, because adding a context to
+    the shipped workflow would invalidate its checked-in trained artifacts. bd fix-k0i.49.
+    """
+    (Path(workflow_path) / "application" / "session.py").write_text(
+        _PREMIUM_SESSION_APPLICATION, encoding="utf-8")
+
+    commands_dir = Path(workflow_path) / "_commands" / PREMIUM_SESSION_CONTEXT
+    commands_dir.mkdir(parents=True)
+    (commands_dir / f"_{PREMIUM_SESSION_CONTEXT}.py").write_text(
+        _PREMIUM_SESSION_CONTEXT_CLASS, encoding="utf-8")
+    (commands_dir / "end_session.py").write_text(
+        _PREMIUM_SESSION_COMMAND, encoding="utf-8")
+
+    hierarchy_path = Path(workflow_path) / "context_hierarchy_model.json"
+    hierarchy = json.loads(hierarchy_path.read_text())
+    hierarchy[PREMIUM_SESSION_CONTEXT] = {"parent": ["PremiumUser"]}
+    hierarchy_path.write_text(json.dumps(hierarchy, indent=2), encoding="utf-8")
 
 
 def _rebuild(workflow_path: str) -> None:
@@ -315,6 +427,22 @@ def baseline(tmp_path, env_vars):
     RoutingRegistry.clear_registry()
 
 
+@pytest.fixture
+def baseline_with_grandchild(tmp_path, env_vars):
+    """The same, plus the `PremiumSession` grandchild the AR2 compose case needs.
+
+    A separate fixture rather than a change to `baseline`, because every other test in
+    this file asserts on the exact set of four contexts messaging_app_4 ships and adding a
+    fifth to all of them would say nothing about the closure. bd fix-k0i.49.
+    """
+    workflow_path = _copy_workflow(tmp_path)
+    _add_premium_session_context(workflow_path)
+    _rebuild(workflow_path)
+    version_id, _signature = _publish_baseline(workflow_path)
+    yield workflow_path, version_id
+    RoutingRegistry.clear_registry()
+
+
 # ---------------------------------------------------------------------
 # The closure, against a real workflow
 # ---------------------------------------------------------------------
@@ -448,6 +576,117 @@ def test_a_new_command_retrains_its_context_and_every_descendant(baseline):
 
 
 # ---------------------------------------------------------------------
+# AR2: base and parent compose, against a real workflow (bd fix-k0i.49)
+#
+# `tests/test_selective_training.py::test_base_and_parent_axes_compose` exercises the
+# shipped `close_dirty_contexts` but with hand-built context maps, so it says nothing about
+# how the PLANNER derives those maps. The derivation is where the composition can be lost:
+# taking an ancestor's contribution from the raw base graph rather than from the resolved
+# `commands()` leaves the grandchild clean while every existing test still passes. No
+# bundled example had a grandchild to notice it with.
+# ---------------------------------------------------------------------
+
+
+def test_the_grandchild_fixture_really_has_both_axes(baseline_with_grandchild):
+    """The compose case is only observable if the fixture actually composes.
+
+    Checked separately from the closure below so that a fixture that quietly stopped
+    declaring the `base` edge, or a `PremiumSession` that never became a context, fails as
+    a fixture problem rather than as a spurious "the closure is fine" pass.
+    """
+    workflow_path, _version_id = baseline_with_grandchild
+    crd = RoutingRegistry.get_definition(workflow_path)
+
+    assert PREMIUM_SESSION_CONTEXT in st.contexts_for_training(workflow_path)
+
+    # base axis: PremiumUser's resolved commands include the command User owns.
+    assert USER_MESSAGE_COMMAND in crd.context_model.commands("PremiumUser")
+    # ...and PremiumSession does NOT inherit it -- it has no `base` entry at all.
+    assert USER_MESSAGE_COMMAND not in crd.context_model.commands(
+        PREMIUM_SESSION_CONTEXT)
+    # parent axis: PremiumUser is PremiumSession's ancestor, and User is not.
+    ancestors = crd.context_model.get_ancestor_contexts(PREMIUM_SESSION_CONTEXT)
+    assert "PremiumUser" in ancestors
+    assert "ChatRoom" in ancestors
+    assert "User" not in ancestors
+
+
+def test_a_base_inherited_command_edit_dirties_the_grandchild(baseline_with_grandchild):
+    """The composition, end to end through `compute_training_plan`.
+
+    `User/send_message` is edited. `PremiumSession` neither owns it nor inherits it nor
+    descends from `User`, so neither axis alone reaches it -- it is dirty only because its
+    wildcard class is built from `PremiumUser`'s utterances and `PremiumUser` carries the
+    command through `base`. Leaving it on its old model desyncs what that model treats as
+    "belongs upstairs", with no error and no visible symptom.
+    """
+    workflow_path, version_id = baseline_with_grandchild
+    _append_utterance(
+        os.path.join(workflow_path, "_commands/User/send_message.py"),
+        "shoot a quick note over to dana@fastworkflow.ai",
+    )
+    _rebuild(workflow_path)
+
+    plan = _plan(workflow_path, version_id)
+
+    assert plan.dirty_commands == [USER_MESSAGE_COMMAND]
+    assert PREMIUM_SESSION_CONTEXT in plan.contexts_to_train, (
+        "the grandchild's wildcard class is assembled from PremiumUser's utterances, "
+        "which include User/send_message through `base`; carrying it forward is silent "
+        "staleness"
+    )
+    reasons = plan.reasons[PREMIUM_SESSION_CONTEXT]
+    assert any("wildcard class is stale" in reason for reason in reasons), reasons
+    assert any("PremiumUser" in reason for reason in reasons), reasons
+    # The reason must name the ANCESTOR that carries it, not User: a developer reading
+    # this has to be able to follow the two hops.
+    assert all(
+        "label space contains" not in reason for reason in reasons
+    ), f"the grandchild does not own the command; got {reasons}"
+    # And the closure is still a closure. Without this, "dirty everything" would satisfy
+    # the assertion above and the compose claim would be indistinguishable from a planner
+    # that gave up: `ChatRoom` owns none of the edited command and has no ancestors, and
+    # `*` carries only core commands.
+    assert set(plan.contexts_carried_forward) == {"*", "ChatRoom"}
+
+
+def test_an_unchanged_grandchild_workflow_carries_every_context_forward(
+    baseline_with_grandchild,
+):
+    """The grandchild must be carryable too, or the fixture proves nothing about staleness.
+
+    A planner that always dirtied `PremiumSession` would pass the compose test for the
+    wrong reason.
+    """
+    workflow_path, version_id = baseline_with_grandchild
+    plan = _plan(workflow_path, version_id)
+
+    assert plan.contexts_to_train == []
+    assert set(plan.contexts_carried_forward) == {
+        "*", "ChatRoom", "PremiumUser", "User", PREMIUM_SESSION_CONTEXT}
+
+
+def test_a_leaf_edit_in_the_grandchild_stays_in_the_grandchild(
+    baseline_with_grandchild,
+):
+    """`PremiumSession` is a leaf: nothing inherits from it, nothing descends from it."""
+    workflow_path, version_id = baseline_with_grandchild
+    _append_utterance(
+        os.path.join(
+            workflow_path, "_commands", PREMIUM_SESSION_CONTEXT, "end_session.py"),
+        "wrap up and log me out of this session",
+    )
+    _rebuild(workflow_path)
+
+    plan = _plan(workflow_path, version_id)
+
+    assert plan.dirty_commands == [PREMIUM_SESSION_COMMAND]
+    assert plan.contexts_to_train == [PREMIUM_SESSION_CONTEXT]
+    assert set(plan.contexts_carried_forward) == {
+        "*", "ChatRoom", "PremiumUser", "User"}
+
+
+# ---------------------------------------------------------------------
 # Safety: everything ambiguous must retrain
 # ---------------------------------------------------------------------
 
@@ -469,6 +708,83 @@ def test_an_incomplete_artifact_set_forces_a_retrain(baseline):
         "no complete model artifact set" in reason
         for reason in plan.reasons["ChatRoom"]
     )
+
+
+def test_an_unreadable_command_source_is_unresolved_and_forces_a_retrain(baseline):
+    """"I could not check this command" must never be reported as "it did not change".
+
+    The `(None, None) == (None, None)` failure: a command whose source cannot be read has
+    no hashes, and two consecutive runs that both failed to read it produced two identical
+    empty fingerprints -- so it looked unchanged forever and every context carrying it was
+    carried forward on a stale model. Nothing in the suite exercised the fail-closed
+    branch, so reverting `training_inputs_differ` to a plain field comparison reintroduced
+    exactly that and passed everything.
+
+    The file is removed WITHOUT rebuilding, deliberately: a rebuild would drop the command
+    from the directory entirely, which is a removal (already covered by
+    `changed_commands`). What is under test is the command the directory still knows about
+    whose bytes have become unreadable. bd fix-k0i.28.
+    """
+    workflow_path, version_id = baseline
+    os.remove(os.path.join(workflow_path, "_commands/User/send_message.py"))
+
+    fingerprints = st.compute_command_fingerprints(workflow_path)
+    unreadable = fingerprints[USER_MESSAGE_COMMAND]
+    assert unreadable.resolved is False
+    assert unreadable.source_sha256 is None
+    assert "could not be read" in unreadable.unresolved_reason
+    # It must differ from the baseline's readable fingerprint AND from another unresolved
+    # one -- the second is the comparison that used to fail equal.
+    baseline_signature = st.load_training_signature(workflow_path, version_id)
+    assert baseline_signature.command_fingerprints[USER_MESSAGE_COMMAND].resolved is True
+    assert unreadable.training_inputs_differ(
+        baseline_signature.command_fingerprints[USER_MESSAGE_COMMAND])
+    assert unreadable.training_inputs_differ(unreadable)
+
+    plan = _plan(workflow_path, version_id)
+
+    assert USER_MESSAGE_COMMAND in plan.dirty_commands
+    assert "User" in plan.contexts_to_train
+    assert "PremiumUser" in plan.contexts_to_train, (
+        "PremiumUser inherits the unreadable command through `base`, so it cannot be "
+        "proven clean either"
+    )
+
+
+def test_a_command_unreadable_on_both_runs_is_still_dirty_on_the_second(baseline):
+    """The regression's actual shape: TWO runs that both failed to read the same file.
+
+    One unresolved side against one resolved side would be caught by a plain field
+    comparison too, because the hashes differ. What a plain comparison cannot catch is two
+    unresolved sides, which is what a persistent permissions or packaging problem produces
+    -- and which is the state a workflow sits in for as long as the problem lasts.
+    """
+    workflow_path, version_id = baseline
+    source = os.path.join(workflow_path, "_commands/User/send_message.py")
+    os.remove(source)
+
+    # Record an unresolved baseline, exactly as the first failing run would have.
+    first_run = st.compute_command_fingerprints(workflow_path)
+    unresolved_baseline = st.TrainingSignature(
+        **{
+            **st.load_training_signature(workflow_path, version_id).model_dump(),
+            "command_fingerprints": {
+                name: fingerprint.model_dump()
+                for name, fingerprint in first_run.items()
+            },
+        }
+    )
+    st.save_training_signature(workflow_path, version_id, unresolved_baseline)
+
+    plan = _plan(workflow_path, version_id)
+
+    assert USER_MESSAGE_COMMAND in plan.dirty_commands, (
+        "the command was unreadable on both runs, so the two fingerprints are identical "
+        "and a field comparison calls it unchanged -- which is an inability to check "
+        "being reported as a passing check"
+    )
+    for context_name in ("User", "PremiumUser"):
+        assert context_name in plan.contexts_to_train
 
 
 def test_a_changed_seed_forces_a_full_retrain(baseline):
@@ -560,6 +876,203 @@ def test_carry_forward_places_real_artifacts_in_the_new_version(baseline):
     for context_name in carried:
         assert st.context_artifacts_complete(
             workflow_path, new_version, context_name)
+
+
+# ---------------------------------------------------------------------
+# AR3's crash invariant, through the REAL reader paths (bd fix-k0i.29)
+#
+# `train_workflow` carries unchanged contexts forward BEFORE it publishes, and publishes
+# `current.json` LAST. Both orderings were enforced only by comments: nothing killed a run
+# between the two and asserted that the old version was still what every reader saw. The
+# two reader paths are checked independently because they are derived independently --
+# `get_artifact_path` reads the authoritative pointer, while `intent_detection.py` builds
+# `f"{workflow}/___command_info/{context}"` as a literal string and resolves through the
+# per-context compatibility entries.
+# ---------------------------------------------------------------------
+
+
+def _mark_version_artifacts(workflow_path: str, version_id: str, marker: float) -> None:
+    """Give one version's threshold files distinguishable content.
+
+    `_publish_baseline` writes empty placeholders, which is enough for the planner's
+    completeness check but cannot answer "which version am I reading?" from content.
+    """
+    for context_name in st.contexts_for_training(workflow_path):
+        folder = artifact_versioning.version_dir(
+            workflow_path, version_id
+        ) / artifact_versioning.context_folder_name(context_name)
+        folder.mkdir(parents=True, exist_ok=True)
+        for artifact in st.REQUIRED_CONTEXT_ARTIFACTS:
+            path = folder / artifact
+            if artifact.endswith(".json"):
+                path.write_text(
+                    json.dumps(
+                        {"confidence_threshold": marker, "version": version_id}),
+                    encoding="utf-8",
+                )
+            elif not path.exists():
+                path.touch()
+
+
+def _literal_reader_path(workflow_path: str, context_name: str) -> str:
+    """The path `intent_detection.py` builds by hand, as an f-string, for one context."""
+    folder = artifact_versioning.context_folder_name(context_name)
+    return f"{workflow_path}/___command_info/{folder}/threshold.json"
+
+
+def _assemble_next_version(workflow_path: str, from_version: str) -> str:
+    """Do everything a selective train does before `publish_version`, and stop there."""
+    new_version = artifact_versioning.new_version_id()
+    artifact_versioning.write_manifest(
+        workflow_path, new_version, seed=42, previous_version=from_version)
+    retrained = artifact_versioning.version_dir(
+        workflow_path, new_version
+    ) / artifact_versioning.context_folder_name("PremiumUser")
+    retrained.mkdir(parents=True, exist_ok=True)
+    for artifact in st.REQUIRED_CONTEXT_ARTIFACTS:
+        path = retrained / artifact
+        if artifact.endswith(".json"):
+            path.write_text(
+                json.dumps({"confidence_threshold": 0.99, "version": new_version}),
+                encoding="utf-8",
+            )
+        else:
+            path.touch()
+    plan = st.TrainingPlan(
+        contexts_to_train=["PremiumUser"],
+        contexts_carried_forward=["*", "ChatRoom", "User"],
+        carry_forward_from=from_version,
+    )
+    assert st.carry_forward_contexts(workflow_path, plan, new_version) == [
+        "*", "ChatRoom", "User"]
+    return new_version
+
+
+def test_a_crash_between_carry_forward_and_publish_leaves_every_reader_on_the_old_version(
+    baseline,
+):
+    """The version is fully assembled and the run dies. Nothing may have moved.
+
+    This is the ordering `train_workflow` enforces with a comment: carry forward, then
+    publish. A crash in the window between them -- an OOM in the confusion scan, a failed
+    signature write, a SIGKILL -- must leave the workflow exactly as runnable as it was,
+    because publishing a version that is missing a context silently un-trains part of the
+    workflow and there is no signal that would surface it.
+    """
+    workflow_path, version_id = baseline
+    _mark_version_artifacts(workflow_path, version_id, 0.11)
+    new_version = _assemble_next_version(workflow_path, version_id)
+
+    # ---- the crash: `publish_version` is never reached ----
+
+    assert artifact_versioning.resolve_current_version(workflow_path) == version_id
+    for context_name in ALL_CONTEXTS:
+        derived = get_artifact_path(workflow_path, context_name, "threshold.json")
+        literal = _literal_reader_path(workflow_path, context_name)
+        assert f"versions{os.sep}{version_id}{os.sep}" in derived, derived
+        assert new_version not in derived, derived
+        # The two reader paths are derived independently; they must land on the same file.
+        assert os.path.realpath(literal) == os.path.realpath(derived), (
+            f"{context_name}: the literal reader path and get_artifact_path disagree"
+        )
+        payload = json.loads(open(literal, encoding="utf-8").read())
+        assert payload["version"] == version_id, (
+            f"{context_name} is being read out of the unpublished version"
+        )
+    # The assembled version is still on disk and protected -- it is the thing a retry
+    # resumes into, and pruning it would make the crash cost a full retrain.
+    assert artifact_versioning.version_dir(workflow_path, new_version).is_dir()
+
+
+def test_a_crash_midway_through_the_compat_swaps_keeps_the_old_version_authoritative(
+    baseline, monkeypatch
+):
+    """A fault injected BETWEEN compatibility swaps, not before the first one.
+
+    `publish_version` swaps the per-context entries one at a time and writes
+    `current.json` last, so a crash inside the loop leaves reader paths mixed. The
+    invariant that has to hold is that the AUTHORITATIVE pointer never moved: the
+    trainer's own path derivation (`get_artifact_path`) still names the old version, so a
+    rerun reads and writes against the version that is actually complete, and no literal
+    reader path is left dangling on a `threshold.json` that does not exist -- this repo's
+    best-known failure signature.
+    """
+    workflow_path, version_id = baseline
+    _mark_version_artifacts(workflow_path, version_id, 0.11)
+    new_version = _assemble_next_version(workflow_path, version_id)
+
+    real_point_compat_entry = artifact_versioning._point_compat_entry
+    swapped: list[str] = []
+
+    def fail_after_the_first_swap(dest, target):
+        if swapped:
+            raise OSError("injected crash midway through the compatibility swaps")
+        swapped.append(dest.name)
+        real_point_compat_entry(dest, target)
+
+    monkeypatch.setattr(
+        artifact_versioning, "_point_compat_entry", fail_after_the_first_swap)
+    with pytest.raises(OSError, match="injected crash"):
+        artifact_versioning.publish_version(workflow_path, new_version)
+    monkeypatch.undo()
+
+    assert swapped, "the injected failure fired before any swap happened"
+    assert artifact_versioning.resolve_current_version(workflow_path) == version_id
+    assert json.loads(
+        artifact_versioning.pointer_path(workflow_path).read_text()
+    )["version_id"] == version_id
+
+    for context_name in ALL_CONTEXTS:
+        derived = get_artifact_path(workflow_path, context_name, "threshold.json")
+        assert f"versions{os.sep}{version_id}{os.sep}" in derived, derived
+        # Never a dangling entry: the runtime opens the literal path directly.
+        literal = _literal_reader_path(workflow_path, context_name)
+        assert os.path.isfile(literal), (
+            f"{context_name}'s compatibility entry is dangling after the crash; the "
+            f"runtime would raise FileNotFoundError on threshold.json"
+        )
+
+    # The state IS mixed -- that is why it needs repairing rather than merely surviving.
+    mixed = [
+        context_name for context_name in ALL_CONTEXTS
+        if new_version in os.path.realpath(
+            _literal_reader_path(workflow_path, context_name))
+    ]
+    assert mixed, (
+        "no compatibility entry was swapped, so this test is not exercising the "
+        "mid-publish window at all"
+    )
+
+    # The repair is the production one: the next run finds nothing to train and calls
+    # `_repair_noop_publication`, which republishes the current version.
+    _repair_noop_publication(workflow_path, version_id)
+
+    assert artifact_versioning.resolve_current_version(workflow_path) == version_id
+    for context_name in ALL_CONTEXTS:
+        derived = get_artifact_path(workflow_path, context_name, "threshold.json")
+        literal = _literal_reader_path(workflow_path, context_name)
+        assert os.path.realpath(literal) == os.path.realpath(derived), (
+            f"{context_name}: the readers still disagree after the repair"
+        )
+        payload = json.loads(open(literal, encoding="utf-8").read())
+        assert payload["version"] == version_id
+    # ...and the abandoned half-routed version is retired, so the next run does not
+    # inherit a version nothing points at.
+    assert not artifact_versioning.version_dir(workflow_path, new_version).is_dir()
+
+
+def test_the_noop_repair_refuses_when_there_is_no_current_version(baseline):
+    """Repair cannot invent a version to route to.
+
+    Reached when the pointer is gone and no symlink survives. Publishing "whatever looks
+    newest" would be the wrong recovery: a half-assembled version from an interrupted run
+    is exactly what looks newest.
+    """
+    workflow_path, _version_id = baseline
+
+    with pytest.raises(TrainingDataError) as excinfo:
+        _repair_noop_publication(workflow_path, None)
+    assert "no current artifact version" in str(excinfo.value)
 
 
 def _generation_record(
@@ -888,6 +1401,7 @@ def test_the_heldout_merge_does_not_duplicate_an_untouched_report(baseline):
 # ---------------------------------------------------------------------
 
 @pytest.mark.slow
+@pytest.mark.requires_llm_key
 def test_selective_retrain_updates_the_changed_context_and_preserves_the_others(
     tmp_path, env_vars
 ):
@@ -980,16 +1494,34 @@ def test_selective_retrain_updates_the_changed_context_and_preserves_the_others(
     model_dir = os.path.join(
         workflow_path, "___command_info",
         artifact_versioning.context_folder_name("PremiumUser"))
-    labels = CommandRouter(model_dir).predict(
-        NEW_PRIORITY_UTTERANCE)
+    router = CommandRouter(model_dir)
+    labels = router.predict(NEW_PRIORITY_UTTERANCE)
     assert any("send_priority_message" in label for label in labels), (
         f"the retrained PremiumUser model does not route the added utterance; "
         f"got {labels}"
     )
 
+    # NEW_PRIORITY_UTTERANCE is a training row of the changed corpus (it has to be, or the
+    # second train would draw fresh utterances and this test would flake), so the
+    # assertion above is a memorisation check. This one is not: the paraphrase appears in
+    # neither corpus nor seed list, so a regression that reproduced its training rows
+    # while losing every rewording of them fails here and nowhere else. bd fix-k0i.30.
+    assert HELDOUT_PRIORITY_UTTERANCE not in changed_corpus
+    assert HELDOUT_PRIORITY_UTTERANCE not in _fixed_generated_corpus(PRIORITY_COMMAND)
+    heldout_labels = router.predict(HELDOUT_PRIORITY_UTTERANCE)
+    assert any("send_priority_message" in label for label in heldout_labels), (
+        f"the retrained PremiumUser model routes its training rows but not the held-out "
+        f"paraphrase {HELDOUT_PRIORITY_UTTERANCE!r}; got {heldout_labels}"
+    )
+
 
 def _artifact_signature(workflow_path: str, version_id: str, context: str) -> set:
-    """(relative path, size, mtime) for every artifact file of one context."""
+    """(relative path, sha256) for every artifact file of one context.
+
+    Content-addressed rather than (size, mtime): carry-forward hardlinks preserve size
+    and mtime exactly, so a stat-based signature could not tell a carried context from a
+    retrained one that happened to produce the same-sized bytes. bd fix-k0i.48.
+    """
     folder = artifact_versioning.version_dir(
         workflow_path, version_id
     ) / artifact_versioning.context_folder_name(context)

@@ -51,6 +51,16 @@ path, so it is the publication commit point: any earlier failure leaves the
 authoritative pointer on the old version. During that preparation window,
 `prune_versions` also protects versions referenced by compatibility entries or the
 convenience link.
+
+R4 also asked for a human-facing display surface, and this module used to carry one:
+`format_versions_table`, `describe_version` and the `human_size`/`human_duration`/
+`human_age` formatters, written for a `versions` CLI that was cut before it shipped.
+They were removed (bd fix-k0i.50) once it was clear nothing but their own tests had
+ever called them; the stale comments pointing at that CLI went with them. If a
+version listing is wanted again, `list_versions` returns everything it needs, and
+`VersionInfo.size_bytes` should be made lazy first (bd fix-44d) — computing it walks
+every version's tree, which is why displaying the cost was expensive enough to
+matter on the publication path.
 """
 
 from __future__ import annotations
@@ -60,6 +70,8 @@ import json
 import os
 import re
 import shutil
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,6 +80,11 @@ from typing import Optional
 from pydantic import BaseModel
 
 from fastworkflow.utils.logging import logger
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no fcntl
+    fcntl = None  # type: ignore[assignment]
 
 COMMAND_INFO_FOLDERNAME: str = "___command_info"
 VERSIONS_DIRNAME: str = "versions"
@@ -183,9 +200,10 @@ class VersionInfo(BaseModel):
     size_bytes: int
     seed: Optional[int] = None
     notes: Optional[str] = None
-    # Recorded by the trainer when it knows; drives the "this took 3h35m to build"
-    # line in `format_versions_table`, which is the cheapest way to make the cost of
-    # these directories obvious at the moment someone is about to delete one.
+    # Recorded by the trainer when it knows. It drove the "this took 3h35m to build"
+    # line in `format_versions_table` -- deleted as test-only code (bd fix-k0i.50) --
+    # and is kept because it is the cheapest way to make the cost of these directories
+    # obvious at the moment someone is about to delete one, whatever displays it next.
     train_duration_seconds: Optional[float] = None
 
 
@@ -517,7 +535,13 @@ def write_manifest(workflow_folderpath: str, version_id: str, **fields) -> str:
 
 
 def read_manifest(workflow_folderpath: str, version_id: str) -> dict:
-    """Return *version_id*'s manifest, or `{}` when there is none / it is unreadable."""
+    """Return *version_id*'s manifest, or `{}` when there is none / it is unreadable.
+
+    An empty result therefore means "nothing recorded" OR "damaged", which is safe for
+    the display and merge paths but NOT for anything that would destroy artifacts on the
+    strength of a field being absent. `manifest_is_damaged` distinguishes the two, and
+    `retain_current_and_previous` uses it before pruning.
+    """
     _validate_version_id(version_id)
     path = version_dir(workflow_folderpath, version_id) / MANIFEST_FILENAME
     if not path.is_file():
@@ -525,9 +549,156 @@ def read_manifest(workflow_folderpath: str, version_id: str) -> dict:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        logger.warning(f"Unreadable manifest {path}: {exc}")
+        logger.error(
+            f"Unreadable manifest {path}: {exc}. Everything it recorded — seed, notes, "
+            f"previous_version, build duration — is unavailable to every reader."
+        )
         return {}
-    return data if isinstance(data, dict) else {}
+    if isinstance(data, dict):
+        return data
+    logger.error(
+        f"Manifest {path} is valid JSON but not an object; treating it as unreadable."
+    )
+    return {}
+
+
+def manifest_is_damaged(workflow_folderpath: str, version_id: str) -> bool:
+    """True when *version_id* has a `manifest.json` that cannot be read as an object.
+
+    Absence is deliberately NOT damage: a version whose manifest has not been written
+    yet is a normal intermediate state (`carry_forward_context` creates the directory
+    before the trainer stamps it). Only a manifest that exists and cannot be parsed
+    counts, because that is the case where reading a missing field as "not set" turns
+    damage into a decision.
+    """
+    _validate_version_id(version_id)
+    path = version_dir(workflow_folderpath, version_id) / MANIFEST_FILENAME
+    if not path.is_file():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return True
+    return not isinstance(data, dict)
+
+
+# ---------------------------------------------------------------------
+# Cross-process publication lock
+# ---------------------------------------------------------------------
+
+#: Lives inside `___command_info` rather than `versions/` because it guards the
+#: workflow-scoped pointer and compatibility entries, not one version's bytes. The
+#: leading dot keeps it out of every entry sweep in this module and in
+#: `train.__main__._prune_stale_artifacts`, all of which skip dotted names.
+PUBLICATION_LOCK_FILENAME: str = ".publication.lock"
+
+#: Publish plus prune is seconds of work on directory entries. A wait this long means
+#: another process is wedged rather than busy, and failing loudly beats interleaving
+#: pointer writes with someone else's prune.
+PUBLICATION_LOCK_TIMEOUT_SECONDS: float = 300.0
+
+_PUBLICATION_LOCK_POLL_SECONDS: float = 0.1
+
+# resolved ___command_info path -> [file descriptor, reentrancy depth]
+_publication_lock_state: dict[str, list] = {}
+_publication_lock_bookkeeping = threading.RLock()
+_fcntl_unavailable_warned = False
+
+
+class PublicationLockTimeout(RuntimeError):
+    """Raised when another process held the publication lock past the timeout."""
+
+
+@contextlib.contextmanager
+def publication_lock(
+    workflow_folderpath: str,
+    timeout: float = PUBLICATION_LOCK_TIMEOUT_SECONDS,
+):
+    """Serialise publish-and-prune against other processes on the same workflow.
+
+    Two concurrent `fastworkflow train` runs on one workflow interleave compatibility
+    entry swaps, `current.json` writes and `retain_current_and_previous` prunes. The
+    damaging interleaving is one process pruning the version another is mid-`_link_tree`
+    carrying forward from: the reader path survives, the recovery point does not.
+    Publication is presented as transactional, so the transaction needs a boundary wider
+    than one process.
+
+    Why this cannot deadlock:
+
+    * There is exactly one lock, so no lock-ordering cycle exists to enter.
+    * It is reentrant within a process, so nesting (`retain_current_and_previous` called
+      inside an orchestrator that already holds it) is a counter bump, not a wait.
+    * `flock` is owned by the open file description, so the kernel releases it when the
+      descriptor closes or the process dies. A crash cannot strand it, which is why this
+      needs no stale-lock timeout of its own.
+    * Acquisition is bounded by *timeout*; the worst case is a named failure, not a hang.
+
+    Scope is deliberately cross-process only. Two threads in one process publishing the
+    same workflow concurrently were never serialised and are not serialised here — the
+    nested acquisition succeeds for either of them. Where `fcntl` is unavailable
+    (Windows) this degrades to no locking with one warning, because refusing to train at
+    all on that platform would be a worse trade than the single-developer race it guards.
+    """
+    info = command_info_root(workflow_folderpath)
+    info.mkdir(parents=True, exist_ok=True)
+    key = str(info.resolve())
+
+    with _publication_lock_bookkeeping:
+        nested = key in _publication_lock_state
+        if nested:
+            _publication_lock_state[key][1] += 1
+    if nested:
+        try:
+            yield
+        finally:
+            with _publication_lock_bookkeeping:
+                if state := _publication_lock_state.get(key):
+                    state[1] -= 1
+        return
+
+    if fcntl is None:
+        global _fcntl_unavailable_warned
+        if not _fcntl_unavailable_warned:
+            _fcntl_unavailable_warned = True
+            logger.warning(
+                "fcntl is unavailable on this platform; artifact publication is not "
+                "guarded against a concurrent `fastworkflow train` on the same workflow. "
+                "Run one training process per workflow at a time."
+            )
+        yield
+        return
+
+    lock_path = info / PUBLICATION_LOCK_FILENAME
+    fd = os.open(os.fspath(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    deadline = time.monotonic() + max(timeout, 0.0)
+    acquired = False
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise PublicationLockTimeout(
+                        f"Another process has held the artifact publication lock "
+                        f"{lock_path} for more than {timeout:g}s. Concurrent training "
+                        f"runs on one workflow would interleave pointer writes and prune "
+                        f"each other's recovery point, so this run is stopping instead. "
+                        f"Its version directory is intact under "
+                        f"{versions_root(workflow_folderpath)}."
+                    )
+                time.sleep(_PUBLICATION_LOCK_POLL_SECONDS)
+        with _publication_lock_bookkeeping:
+            _publication_lock_state[key] = [fd, 1]
+        yield
+    finally:
+        with _publication_lock_bookkeeping:
+            _publication_lock_state.pop(key, None)
+        if acquired:
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 # ---------------------------------------------------------------------
@@ -646,6 +817,10 @@ def publish_version(workflow_folderpath: str, version_id: str) -> None:
     Raises `LegacyArtifactsPresentError` if a real, unversioned context directory
     still occupies a name we must route. Deleting it would destroy artifacts, which
     R4 forbids doing implicitly — run `migrate_legacy_to_version` first.
+
+    Not itself locked: publication and the retention prune that follows it are one
+    critical section, so the boundary belongs to the caller holding `publication_lock`
+    across both. `train.__main__` does that on every path that publishes.
     """
     _validate_version_id(version_id)
     vdir = version_dir(workflow_folderpath, version_id)
@@ -827,21 +1002,44 @@ def retain_current_and_previous(
     Training uses immutable version directories so publication can be atomic and a
     failed run cannot overwrite the working model. That safety property needs a staging
     directory and one recovery point, not an ever-growing user-managed history.
+
+    Refuses to prune anything when the current version's manifest is damaged. Callers
+    derive *previous_version* from that manifest, and a damaged manifest yields None —
+    indistinguishable from "there is no previous version", which would delete the only
+    recovery point in response to a corrupt JSON file. R4 forbids destroying a version
+    implicitly, and acting on a field that could not be read is exactly that.
+
+    Holds `publication_lock` for the same reason: this is the destructive half of
+    publication, and it must not run against a version another process is publishing or
+    carrying forward from. The acquisition is free when the caller already holds it.
     """
-    current = resolve_current_version(workflow_folderpath)
-    retained = {version_id for version_id in (current, previous_version) if version_id}
-    doomed = [
-        info.version_id
-        for info in list_versions(workflow_folderpath)
-        if info.version_id not in retained
-    ]
-    if not doomed:
-        return []
-    return prune_versions(
-        workflow_folderpath,
-        version_ids=doomed,
-        dry_run=False,
-    )
+    with publication_lock(workflow_folderpath):
+        current = resolve_current_version(workflow_folderpath)
+        if current is not None and manifest_is_damaged(workflow_folderpath, current):
+            logger.error(
+                f"Skipping artifact retention for {workflow_folderpath}: the manifest of "
+                f"current version {current} is unreadable, so its previous_version cannot "
+                f"be distinguished from absent and pruning could destroy the only "
+                f"recovery point. Repair or remove "
+                f"{version_dir(workflow_folderpath, current) / MANIFEST_FILENAME} to "
+                f"re-enable retention; older versions are retained until then."
+            )
+            return []
+        retained = {
+            version_id for version_id in (current, previous_version) if version_id
+        }
+        doomed = [
+            info.version_id
+            for info in list_versions(workflow_folderpath)
+            if info.version_id not in retained
+        ]
+        if not doomed:
+            return []
+        return prune_versions(
+            workflow_folderpath,
+            version_ids=doomed,
+            dry_run=False,
+        )
 
 
 # ---------------------------------------------------------------------
@@ -883,8 +1081,8 @@ def migrate_legacy_to_version(
 
     Returns the version id it created, or None when there was nothing to migrate —
     which makes it idempotent and therefore safe to call unconditionally at the
-    start of a train run or a `versions list`. Artifacts are `shutil.move`d, never
-    copied and never deleted, so a migration cannot lose a 276 MB context.
+    start of a train run or of any read-only inspection. Artifacts are `shutil.move`d,
+    never copied and never deleted, so a migration cannot lose a 276 MB context.
     """
     legacy = _legacy_context_dirs(workflow_folderpath)
     if not legacy:
@@ -993,128 +1191,3 @@ def carry_forward_context(
     else:
         shutil.copytree(source, destination, dirs_exist_ok=True)
     return True
-
-
-# ---------------------------------------------------------------------
-# Human-facing formatting (R4: make the cost obvious)
-# ---------------------------------------------------------------------
-
-
-def human_size(num_bytes: int) -> str:
-    """Format a byte count in binary units, e.g. `276.4 MB`."""
-    size = float(num_bytes)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if size < 1024 or unit == "TB":
-            precision = 0 if unit == "B" else 1
-            return f"{size:.{precision}f} {unit}"
-        size /= 1024
-    return f"{size:.1f} TB"
-
-
-def human_duration(seconds: Optional[float]) -> str:
-    """Format a duration as `3h35m` / `12m04s` / `-` when unknown."""
-    if seconds is None:
-        return "-"
-    total = int(seconds)
-    hours, remainder = divmod(total, 3600)
-    minutes, secs = divmod(remainder, 60)
-    if hours:
-        return f"{hours}h{minutes:02d}m"
-    if minutes:
-        return f"{minutes}m{secs:02d}s"
-    return f"{secs}s"
-
-
-def human_age(created_at: str) -> str:
-    """Format how long ago an ISO-8601 timestamp was, e.g. `3d ago`."""
-    try:
-        when = datetime.fromisoformat(created_at)
-    except (TypeError, ValueError):
-        return "unknown"
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
-    delta = datetime.now(timezone.utc) - when
-    total = max(int(delta.total_seconds()), 0)
-    if total < 60:
-        return "just now"
-    if total < 3600:
-        return f"{total // 60}m ago"
-    if total < 86400:
-        return f"{total // 3600}h ago"
-    return f"{total // 86400}d ago"
-
-
-def format_versions_table(workflow_folderpath: str) -> str:
-    """Render `list_versions` for a CLI, leading with how expensive these are.
-
-    Printing size, age and (where the manifest recorded it) how long the version
-    took to produce is the R4 ergonomics requirement: a developer about to delete
-    one should see "8.6 GB, 3h35m to rebuild" before they do.
-    """
-    infos = list_versions(workflow_folderpath)
-    if not infos:
-        if legacy_layout_in_use(workflow_folderpath):
-            return (
-                "No artifact versions yet, but unversioned trained artifacts are "
-                f"present in {command_info_root(workflow_folderpath)}.\n"
-                "Run a train (or migrate_legacy_to_version) to bring them under "
-                "version control before anything else touches them."
-            )
-        return (
-            f"No trained artifact versions under {versions_root(workflow_folderpath)}."
-        )
-
-    lines = [
-        f"{'':2s}{'VERSION':26s} {'CREATED':20s} {'AGE':>9s} {'SIZE':>10s} "
-        f"{'BUILD':>7s} {'CTX':>4s}  NOTES",
-    ]
-    total = 0
-    for info in infos:
-        total += info.size_bytes
-        marker = "* " if info.is_current else "  "
-        notes = info.notes or ""
-        if info.seed is not None:
-            notes = f"seed={info.seed}" + (f"; {notes}" if notes else "")
-        # created_at carries microseconds for sort correctness; show seconds.
-        lines.append(
-            f"{marker}{info.version_id:26s} {info.created_at[:19]:20s} "
-            f"{human_age(info.created_at):>9s} {human_size(info.size_bytes):>10s} "
-            f"{human_duration(info.train_duration_seconds):>7s} "
-            f"{len(info.contexts):>4d}  {notes}"
-        )
-
-    lines.append("")
-    lines.append(
-        f"  * = current  |  {len(infos)} version(s), {human_size(total)} total"
-    )
-    lines.append(
-        "  These artifacts cost hours of LLM and model-training time to rebuild and "
-        "are not\n  reproducible byte-for-byte. Nothing removes them implicitly; use "
-        "`versions prune`\n  with an explicit request. The current version cannot be "
-        "pruned."
-    )
-    return "\n".join(lines)
-
-
-def describe_version(workflow_folderpath: str, version_id: str) -> str:
-    """Render one version's manifest plus its contexts, for `versions show`."""
-    _validate_version_id(version_id)
-    vdir = version_dir(workflow_folderpath, version_id)
-    if not vdir.is_dir():
-        return f"No such artifact version: {version_id}"
-    manifest = read_manifest(workflow_folderpath, version_id)
-    current = resolve_current_version(workflow_folderpath)
-    contexts = version_context_names(workflow_folderpath, version_id)
-    lines = [
-        f"version    : {version_id}{'  (current)' if version_id == current else ''}",
-        f"path       : {vdir}",
-        f"size       : {human_size(_dir_size_bytes(vdir))}",
-        f"contexts   : {len(contexts)}",
-    ]
-    for key in sorted(manifest):
-        if key in {"version_id", "contexts"}:
-            continue
-        lines.append(f"{key:11s}: {manifest[key]}")
-    lines.append("")
-    lines.extend(f"  {name}" for name in contexts)
-    return "\n".join(lines)

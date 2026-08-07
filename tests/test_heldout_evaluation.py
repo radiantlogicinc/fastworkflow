@@ -657,7 +657,11 @@ def test_assert_benchmark_disjoint_passes_when_disjoint():
     ]
     seeds = {"Account/close_account": ["close the account", "shut it down"]}
 
-    assert_benchmark_disjoint_from_seeds(cases, seeds) is None
+    # `assert`, not a bare expression: without it the `is None` comparison is dead code
+    # and the line asserts nothing at all. The raise-or-not is still what this test is
+    # really about, but a silently discarded comparison is how a reader is misled about
+    # which of the two is being checked. bd fix-k0i.48.
+    assert assert_benchmark_disjoint_from_seeds(cases, seeds) is None
 
 
 def test_near_duplicate_benchmark_cases_are_warned_about_not_raised():
@@ -670,7 +674,7 @@ def test_near_duplicate_benchmark_cases_are_warned_about_not_raised():
     ]
     seeds = {"Account/close_account": ["close the account"]}
 
-    assert_benchmark_disjoint_from_seeds(cases, seeds) is None
+    assert assert_benchmark_disjoint_from_seeds(cases, seeds) is None
 
     warnings = find_near_duplicate_benchmark_cases(cases, seeds)
     assert len(warnings) == 1

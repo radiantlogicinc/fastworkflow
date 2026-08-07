@@ -316,6 +316,7 @@ def load_persona_dataset():
 _TEMPLATE_ECHOES = frozenset({
     "utterance",
     "utterances",
+    "persona",
     "persona_name",
     "next_persona_name",
     "...",
@@ -325,11 +326,34 @@ _TEMPLATE_ECHOES = frozenset({
 # usually arrives when the model half-formats its answer.
 _LIST_MARKER = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s*")
 
+# The scaffolding also arrives numbered -- "utterance 1", "Persona_3" -- which the
+# leading-marker pattern cannot reach because the index is a suffix.
+_TRAILING_INDEX = re.compile(r"[\s_.\-]*\d+$")
+
+# Punctuation the prompt's own labels carry ("Utterance:") and that the earlier
+# strip set does not cover.
+_LABEL_PUNCTUATION = ":;.,-_"
+
 
 def _is_template_echo(utterance: str) -> bool:
-    """True if the model copied the prompt's format scaffolding instead of answering."""
+    """True if the model copied the prompt's format scaffolding instead of answering.
+
+    A trailing index is removed only as a second attempt, after the whole string has
+    already failed to match. Stripping it up front would test a different string than
+    the model produced, and the only strings that reach the second attempt are ones
+    that are otherwise nothing but scaffolding -- so a real phrasing ending in a
+    number ("add 2 and 3") keeps it.
+    """
     stripped = _LIST_MARKER.sub("", utterance).strip().strip("*_`<>[]").strip()
-    return stripped.casefold() in _TEMPLATE_ECHOES
+    # The unpunctuated form is tested first because "..." is itself an echo, and
+    # stripping label punctuation from it leaves nothing to match.
+    if stripped.casefold() in _TEMPLATE_ECHOES:
+        return True
+
+    normalized = stripped.strip(_LABEL_PUNCTUATION).strip().casefold()
+    if normalized in _TEMPLATE_ECHOES:
+        return True
+    return _TRAILING_INDEX.sub("", normalized).strip() in _TEMPLATE_ECHOES
 
 
 def generate_utterances_for_personas(

@@ -48,6 +48,11 @@ from fastworkflow.train.utterance_cache import (
 )
 
 
+# Every test here shares one module fixture that trains TWICE, so the whole module is
+# slow and key-dependent. Marked at module scope so `-m "not slow"` deselects it.
+# bd fix-k0i.42.
+pytestmark = [pytest.mark.slow, pytest.mark.requires_llm_key]
+
 HELLO_WORLD_PATH = os.path.join("fastworkflow", "examples", "hello_world")
 
 # Written by `save_pretrained` (a directory) and by the threshold calibration.

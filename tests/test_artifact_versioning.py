@@ -745,54 +745,6 @@ def test_current_pointer_carries_the_warning_and_the_version(workflow: Path):
     assert "rebuild" in payload["warning"]
 
 
-def test_format_versions_table_shows_cost_and_current_marker(workflow: Path):
-    v1 = _make_version(workflow, {"*": 0.1})
-    v2 = _make_version(workflow, {"*": 0.2, "TodoItem": 0.2})
-    av.write_manifest(str(workflow), v2, train_duration_seconds=12900, notes="v4 cap")
-    av.publish_version(str(workflow), v2)
-
-    table = av.format_versions_table(str(workflow))
-    assert v1 in table and v2 in table
-    assert f"* {v2}" in table, "the current version must be marked"
-    assert "3h35m" in table, "build time must be shown when the manifest records it"
-    assert "v4 cap" in table
-    assert "KB" in table or "MB" in table
-    assert "prune" in table
-
-
-def test_format_versions_table_flags_an_unmigrated_legacy_layout(workflow: Path):
-    _build_legacy_tree(workflow)
-    table = av.format_versions_table(str(workflow))
-    assert "unversioned" in table
-
-
-def test_format_versions_table_on_a_fresh_workflow(workflow: Path):
-    assert "No trained artifact versions" in av.format_versions_table(str(workflow))
-
-
-def test_describe_version_reports_manifest_and_contexts(workflow: Path):
-    version_id = _make_version(workflow, {"*": 0.1, "TodoItem": 0.1})
-    av.write_manifest(str(workflow), version_id, seed=13)
-    av.publish_version(str(workflow), version_id)
-
-    described = av.describe_version(str(workflow), version_id)
-    assert version_id in described
-    assert "(current)" in described
-    assert "seed" in described
-    assert "TodoItem" in described
-
-
-def test_human_helpers():
-    assert av.human_size(0) == "0 B"
-    assert av.human_size(1536) == "1.5 KB"
-    assert av.human_size(276 * 1024 * 1024) == "276.0 MB"
-    assert av.human_duration(None) == "-"
-    assert av.human_duration(12900) == "3h35m"
-    assert av.human_duration(7200) == "2h00m"
-    assert av.human_duration(45) == "45s"
-    assert av.human_age("not-a-date") == "unknown"
-
-
 # ---------------------------------------------------------------------
 # The hard constraint, end to end against the real reader
 # ---------------------------------------------------------------------

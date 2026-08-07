@@ -15,6 +15,17 @@ Activate the local `.venv` Python environment before running tests or scripts.
 - Use the real test workflows in `tests/example_workflow/`, `tests/hello_world_workflow/`, and `tests/todo_list_workflow/`
 - Do NOT remove pytest tests without explicit user approval
 
+### Never run two full suites at once
+
+The full suite loads BERT-family models, and two concurrent runs exceed this box's
+31 GB. The second run dies to the OOM killer partway through — observed twice at
+~69%, reported as `PYTEST_EXIT=137`, which reads like a crash in whatever test was
+running rather than a resource problem. If you are working alongside another agent,
+**serialise the suite runs**; a run measured against a tree another agent is still
+editing is worthless anyway, so waiting costs nothing.
+
+The suite takes ~24 minutes. Budget for it rather than backgrounding it and hoping.
+
 ## fastworkflow CLI
 
 Run `fastworkflow --help` for the full command list (`examples`, `train`, `run`, `build`, `refine`, `run_fastapi_mcp`). Non-obvious behavior:

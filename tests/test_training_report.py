@@ -761,6 +761,11 @@ def _resolve_env_vars() -> dict:
     return env_vars
 
 
+# The only test in this module that trains: minutes of fine-tuning plus real LLM spend
+# when a key is configured. Everything else here is pure report assembly and stays fast,
+# so the marker is on the test rather than on the module. bd fix-k0i.42.
+@pytest.mark.slow
+@pytest.mark.requires_llm_key
 def test_report_describes_a_real_training_run(tmp_path_factory):
     """Train the bundled hello_world for real and report on what came out.
 
