@@ -48,7 +48,11 @@ mmh3 = "^5.1.0"
 python-levenshtein = "^0.27.1"
 colorama = "^0.4.6"
 dspy = "^3.0.1"
-torch = "^2.7.1"
+# Default: CPU-only wheels from the PyTorch CPU index (portable, smaller).
+# CUDA is an explicit opt-in — Poetry cannot lock torch from two indexes, so:
+#   poetry install --with gpu && make install-gpu-torch
+# Plain `poetry install` / `--all-extras` never installs CUDA torch.
+torch = {version = "^2.7.1", source = "pytorch-cpu"}
 prompt_toolkit = "^3.0.43"
 libcst = "^1.8.2"
 openai = ">=2.8.0"
@@ -112,6 +116,25 @@ optional = true
 
 [tool.poetry.group.aws.dependencies]
 boto3 = ">=1.36.0"
+
+# Explicit opt-in for CUDA torch. Poetry cannot lock the same package from two
+# different sources (CPU default + CUDA override) in one resolve, so this group
+# is a discoverable flag only — after `poetry install --with gpu`, run:
+#   make install-gpu-torch
+# That force-reinstalls the cu130 wheels over the CPU default. Plain
+# `poetry install` / `--all-extras` never pulls CUDA torch.
+[tool.poetry.group.gpu]
+optional = true
+
+[tool.poetry.group.gpu.dependencies]
+
+# Explicit package index for the default CPU torch wheels.
+# `priority = "explicit"` means poetry only uses it when a dependency sets
+# `source = "pytorch-cpu"`.
+[[tool.poetry.source]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+priority = "explicit"
 
 [tool.poetry.extras]
 training = ["datasets"]

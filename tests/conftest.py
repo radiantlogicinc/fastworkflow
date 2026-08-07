@@ -2,10 +2,13 @@
 Pytest configuration and shared fixtures for FastWorkflow tests.
 """
 
-import pytest
 import os
 import sys
+import threading
+import time
 from pathlib import Path
+
+import pytest
 
 # Add the project root to the Python path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -119,9 +122,22 @@ def pytest_configure(config):
 
 @pytest.fixture(autouse=True, scope="function")
 def cleanup_background_threads():
-    """Ensure all background ChatWorker threads complete before next test"""
+    """Ensure background ChatWorker threads finish before the next test.
+
+    Only waits when a ChatWorker is actually alive. A blanket 0.5s sleep on
+    every test cost ~13 minutes on a ~1500-test suite; only a handful of
+    tests start ChatWorker threads.
+    """
     yield
-    # Give ChatWorker daemon threads time to complete their current operations
-    # This prevents thread pollution between tests in the full suite
-    import time
-    time.sleep(0.5) 
+    workers = [
+        t
+        for t in threading.enumerate()
+        if type(t).__name__ == "ChatWorker" and t.is_alive()
+    ]
+    if not workers:
+        return
+    # Join briefly first; fall back to a short sleep if a worker is stubborn.
+    for t in workers:
+        t.join(timeout=0.5)
+    if any(t.is_alive() for t in workers):
+        time.sleep(0.5)

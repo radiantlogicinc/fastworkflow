@@ -2,7 +2,7 @@ SHELL = /bin/bash
 
 .EXPORT_ALL_VARIABLES:
 
-.PHONY: gen-env lint audit audit-json publish-testpypi publish
+.PHONY: gen-env lint audit audit-json publish-testpypi publish install-gpu-torch
 
 gen-env:
 	chmod +x ./gen-env.sh
@@ -18,6 +18,19 @@ lint:
 	mypy --install-types --non-interactive .
 	mypy .
 	bandit -c pyproject.toml -r .
+
+# Explicit CUDA torch opt-in. Default `poetry install` pins CPU-only wheels
+# (see pyproject.toml `pytorch-cpu` source). Poetry cannot lock torch from
+# both the CPU and CUDA indexes at once, so GPU users run:
+#   poetry install --with gpu && make install-gpu-torch
+# Verifies CUDA is usable before returning success. Constrains fsspec after
+# the torch reinstall so the optional `datasets` (training) extra keeps working.
+install-gpu-torch:
+	source .venv/bin/activate && \
+	pip install --upgrade --force-reinstall 'torch>=2.7.1' \
+		--index-url https://download.pytorch.org/whl/cu130 && \
+	pip install --upgrade 'fsspec[http]>=2023.1.0,<=2026.2.0' && \
+	python -c "import torch; assert torch.cuda.is_available(), 'CUDA torch installed but torch.cuda.is_available() is False'; print('GPU torch OK:', torch.__version__, torch.cuda.get_device_name(0))"
 
 # Local dependency vulnerability scan (the same advisory data Dependabot uses).
 # Audits the FULL locked dependency graph (all groups + extras) exported from
