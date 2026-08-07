@@ -291,16 +291,20 @@ def test_session_not_found_errors(app_module):
     client = TestClient(app_module.app)
     token = app_module.create_access_token("nonexistent_user")
     headers = {"Authorization": f"Bearer {token}"}
+    # These two calls are setup, not the subject: they make real LLM calls, and
+    # /invoke_* is wait-or-defer, so 202 is as correct as 200 when the provider
+    # is slower than the wait window. Pinning them to 200 made this test fail on
+    # provider latency rather than on the behaviour it is named after.
     response = client.post("/invoke_agent", headers=headers, json={
         "user_query": "test query",
         "timeout_seconds": 10,
     })
-    assert response.status_code == 200
+    assert response.status_code in (200, 202)
     response = client.post("/invoke_assistant", headers=headers, json={
         "user_query": "test query",
         "timeout_seconds": 10,
     })
-    assert response.status_code == 200
+    assert response.status_code in (200, 202)
     response = client.post("/perform_action", headers=headers, json={
         "action": {"command_name": "test", "parameters": {}},
         "timeout_seconds": 10,

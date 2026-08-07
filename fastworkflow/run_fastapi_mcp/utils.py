@@ -15,7 +15,11 @@ from jwt.exceptions import PyJWTError as JWTError
 from pydantic import BaseModel, field_validator
 
 import fastworkflow
-from fastworkflow.session_state_store import SessionStateStore, get_session_state_store
+from fastworkflow.session_state_store import (
+    IncompatibleSessionState,
+    SessionStateStore,
+    get_session_state_store,
+)
 from fastworkflow.state_serialization import StateEncodingError
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 from fastworkflow.utils.logging import logger
@@ -523,8 +527,21 @@ async def _create_user_runtime(
         )
 
     if pending := session_manager.session_state_store.load(channel_id):
-        ctx.apply_serialized_state(pending)
-        logger.info(f"Restored pending suspended session for channel_id {channel_id}")
+        try:
+            ctx.apply_serialized_state(pending)
+        except IncompatibleSessionState as exc:
+            # Drop it rather than retrying forever: nothing about a later read
+            # makes an unreadable version readable, and leaving it in place
+            # would re-raise on every cold create for this channel.
+            session_manager.session_state_store.clear(channel_id)
+            logger.error(
+                f"Discarded unreadable pending state for channel_id {channel_id}: "
+                f"{exc}. The suspended turn is lost; the session starts clean."
+            )
+        else:
+            logger.info(
+                f"Restored pending suspended session for channel_id {channel_id}"
+            )
 
     # Anything restored from a conversation is by definition already durable, so
     # the next incremental save must not append it again.

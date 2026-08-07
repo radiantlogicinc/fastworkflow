@@ -33,7 +33,7 @@ import dspy
 import fastworkflow
 import fastworkflow.turn
 from fastworkflow import active_workflow
-from fastworkflow.session_state_store import SCHEMA_VERSION
+from fastworkflow.session_state_store import SCHEMA_VERSION, IncompatibleSessionState
 from fastworkflow.state_serialization import validate_state
 from fastworkflow.turn import TurnResult, TurnStatus, mint_turn_key
 from fastworkflow.utils.logging import logger
@@ -371,11 +371,14 @@ class WorkflowExecutionContext:
         return payload
 
     def apply_serialized_state(self, state: dict[str, Any]) -> None:
-        """Restore fields from serialize_state() onto this context."""
-        if state.get("schema_version", 0) != SCHEMA_VERSION:
-            logger.warning(
-                f"Session state schema mismatch: {state.get('schema_version')}"
-            )
+        """Restore fields from serialize_state() onto this context.
+
+        Raises IncompatibleSessionState if the blob was written at a schema
+        version this build does not read, having applied nothing.
+        """
+        found = state.get("schema_version", 0)
+        if found != SCHEMA_VERSION:
+            raise IncompatibleSessionState(found)
 
         self._awaiting_user = bool(state.get("awaiting_user"))
         self._suspended_user_message = state.get("suspended_user_message")

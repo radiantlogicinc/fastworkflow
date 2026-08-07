@@ -21,6 +21,29 @@ PENDING_STATE_KEY = "pending"
 SCHEMA_VERSION = 1
 
 
+class IncompatibleSessionState(Exception):
+    """A pending blob was written at a schema version this build cannot read.
+
+    Distinct from fastworkflow.UnsupportedStateVersion, which an author's
+    from_state hook raises about their own state. This one is about the
+    framework's blob format, so no author can act on it.
+
+    Raised instead of applying what happens to parse, because the fields of a
+    format this build does not know are not a subset of the fields it does: a
+    partial restore produces a session that is neither the suspended one nor a
+    clean one. Discarding loses the suspended turn, which is recoverable by
+    asking again; a partial restore is not.
+    """
+
+    def __init__(self, found: Any, expected: int = SCHEMA_VERSION):
+        self.found = found
+        self.expected = expected
+        super().__init__(
+            f"pending session state is schema version {found!r}, "
+            f"but this build reads version {expected}"
+        )
+
+
 class SessionStateStore(ABC):
     """Load/save/clear suspended-session blobs keyed by channel_id."""
 

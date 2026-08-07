@@ -11,7 +11,11 @@ from unittest.mock import MagicMock
 import pytest
 
 import fastworkflow
-from fastworkflow.session_state_store import DiskSessionStateStore
+from fastworkflow.session_state_store import (
+    SCHEMA_VERSION,
+    DiskSessionStateStore,
+    IncompatibleSessionState,
+)
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
 
@@ -144,3 +148,77 @@ def test_disk_session_state_store_roundtrip(tmp_path):
     assert store.load("user-1") == state
     store.clear("user-1")
     assert not store.exists("user-1")
+
+
+@pytest.mark.parametrize(
+    "found",
+    [SCHEMA_VERSION + 1, SCHEMA_VERSION - 1, 0, None, "1"],
+    ids=["newer", "older", "missing-as-zero", "null", "string"],
+)
+def test_unreadable_schema_version_applies_nothing(
+    initialized_fastworkflow, todo_workflow_path, found
+):
+    """A blob this build cannot read must not be partly applied.
+
+    Before this, the mismatch branch logged a warning and then fell through to
+    apply every field anyway, so a blob written by a future build would be
+    half-restored onto a live session.
+    """
+    channel_id = f"schema_{uuid.uuid4().hex[:8]}"
+    ctx = WorkflowExecutionContext(run_as_agent=True, session_key=channel_id)
+    workflow = fastworkflow.Workflow.create(
+        todo_workflow_path, workflow_id_str=channel_id
+    )
+    ctx.bind_app_workflow(workflow)
+
+    # Every field here is one apply_serialized_state would have written.
+    hostile = {
+        "schema_version": found,
+        "awaiting_user": True,
+        "suspended_user_message": "restored from the future",
+        "pending_clarification_request": "which one?",
+        "action_log": [{"command_name": "should_not_appear"}],
+    }
+
+    with pytest.raises(IncompatibleSessionState) as excinfo:
+        ctx.apply_serialized_state(hostile)
+
+    assert excinfo.value.found == found
+    assert excinfo.value.expected == SCHEMA_VERSION
+
+    assert not ctx.awaiting_user
+    assert ctx._suspended_user_message is None
+    assert ctx._pending_clarification_request is None
+    assert ctx._action_log == []
+    ctx.close()
+
+
+def test_readable_schema_version_still_applies(
+    initialized_fastworkflow, todo_workflow_path
+):
+    """The guard rejects on version, not on every blob it is handed.
+
+    Without this, deleting the whole restore body would still pass the test
+    above, so it is what makes that one about the version rather than about
+    apply_serialized_state doing nothing at all.
+    """
+    channel_id = f"schema_ok_{uuid.uuid4().hex[:8]}"
+    ctx = WorkflowExecutionContext(run_as_agent=True, session_key=channel_id)
+    workflow = fastworkflow.Workflow.create(
+        todo_workflow_path, workflow_id_str=channel_id
+    )
+    ctx.bind_app_workflow(workflow)
+
+    ctx.apply_serialized_state(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "awaiting_user": True,
+            "suspended_user_message": "the urgent one",
+            "action_log": [{"command_name": "list_tasks"}],
+        }
+    )
+
+    assert ctx.awaiting_user
+    assert ctx._suspended_user_message == "the urgent one"
+    assert len(ctx._action_log) == 1
+    ctx.close()
