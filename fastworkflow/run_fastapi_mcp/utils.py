@@ -608,7 +608,10 @@ def persist_pending_after_turn(
 ) -> None:
     """Save or clear durable suspended state after a Topology-B turn."""
     ctx = runtime.execution_context
-    if ctx.awaiting_user or _is_awaiting_user_output(output):
+    # has_open_command(): a mid-parameter-extraction session is not
+    # awaiting_user but still holds partially extracted parameters (see the
+    # twin in turns.persist_pending_after_turn).
+    if ctx.awaiting_user or _is_awaiting_user_output(output) or ctx.has_open_command():
         try:
             state = ctx.serialize_state(channel_id=runtime.channel_id)
         except StateEncodingError as exc:
@@ -1121,7 +1124,7 @@ class ChannelSessionManager:
         for channel_id, runtime in list(self._sessions.items()):
             if channel_id in skip:
                 continue
-            eligibility = checkpoint.assess(runtime)
+            eligibility = checkpoint.assess(runtime, self.session_state_store)
             if not eligibility.evictable:
                 continue
             try:
@@ -1143,7 +1146,7 @@ class ChannelSessionManager:
         before it becomes observable, and its durability must not depend on
         whether the application happened to mutate its context.
         """
-        eligibility = checkpoint.assess(runtime)
+        eligibility = checkpoint.assess(runtime, self.session_state_store)
         if not eligibility.evictable:
             # Nothing durable to attach it to. The session is pinned anyway, so
             # it will not be evicted and the fact stays in memory where it is
@@ -1186,7 +1189,7 @@ class ChannelSessionManager:
             if self._leases.get(channel_id) or self._has_work_in_flight(channel_id):
                 continue
 
-            eligibility = checkpoint.assess(runtime)
+            eligibility = checkpoint.assess(runtime, self.session_state_store)
             if not eligibility.evictable:
                 skipped_pinned += 1
                 checkpoint.warn_pinned_once(

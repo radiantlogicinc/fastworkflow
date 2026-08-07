@@ -43,6 +43,14 @@ warns about once per context class.
 was in code that read correctly to two adversarial rounds. They are recorded in §16.8 because "the
 tests found what the design review did not" is the most transferable result here.
 
+**Post-revision-4 amendment (v2.28.0).** Decision 26's pin on suspended sessions was reversed and
+limitation 11 closed; see those entries. The short version is that pinning a suspended session was
+itself an unbounded hold — the state had been written all along, just lossily — and Release C's lower
+cap made that reachable. Two more mutations survived the first matrix run on that work and are the same
+lesson as §16.8: a duplicated policy (`turns._persist_after_turn` and `utils.persist_pending_after_turn`)
+was tested in only one of its two copies, and a `model_construct`-vs-`model_validate` guard was tested
+with a value that happened to validate either way.
+
 What has *not* changed: every invariant except 11, the whole of §10, §11.3 and §11.5–§11.11, the §20
 prohibition list, and the §16.5 measurement discipline. Where revision 3 was right it is left alone.
 
@@ -2298,10 +2306,20 @@ unsupported** `[R2-18]` — raising a cap is tuning, not a version rollback.
     `http_bearer_token`, because the framework injects it and invariant 29 forbids persisting it.
     Full specification: `docs/fastworkflow_serialization_hooks_design.md`. §11.1 and §11.2 are rewritten
     accordingly rather than annotated, so no reader implements the withdrawn model.
-26. **Awaiting and continuation sessions are pinned in Release B v1:** accepted `[R2-8]`. Today's
-    suspended-state restore already loses the logical-turn accumulator and the CME continuation keys;
-    pinning avoids making a pre-existing defect routine without pretending to have fixed it. Recorded
-    limitation: pinning does not help multi-pod, where another pod still cold-rehydrates.
+26. **Awaiting and continuation sessions are pinned in Release B v1:** accepted `[R2-8]`, **and
+    reversed in v2.28.0** (`fix-g03.25`). The original reasoning held: the suspended restore lost the
+    logical-turn accumulator and the CME continuation keys, and pinning avoided making a known defect
+    routine. What the reasoning missed is that pinning is not free — it was itself unbounded. A
+    suspended session is pinned until the user returns, `/cancel_pending` is called, or the process
+    restarts, and decision 6 declines an idle TTL, so a user who walks away mid-question holds a runtime
+    for the life of the process. Release C lowering the cap from 2000 to 50 made that reachable roughly
+    40× sooner. This was **not** a case of the state being unsaved: the blob is written at the end of
+    the suspending turn. It was written *lossily*, so schema 2 completes it instead.
+    Two consequences beyond removing the pin. Mid-parameter-extraction sessions are now persisted at
+    all — they are not `awaiting_user`, so the old writer *cleared* their blob, silently discarding
+    partially extracted parameters on eviction. And what pins now is narrower and provable: not "this
+    session is suspended" but "this session's state is not on disk", which is only true when
+    `persist_pending_after_turn` refused to write something it could not encode losslessly.
 27. **Conversation history is bounded, and durable append lands first:** accepted `[R2-11]`. Goal 1 is
     false today on a hot single channel; and because `save_conversation_turns` replaces the full list, an
     in-memory window applied first would delete durable turns. The append change also removes O(n²) write
@@ -2346,8 +2364,13 @@ unsupported** `[R2-18]` — raising a cap is tuning, not a version rollback.
 10. The §9 DSPy policy depends on `Settings.context` inheriting `main_thread_config`, which is internal
     behavior rather than a documented contract. §9.3's assertion plus ownership converts a future DSPy
     change from a silent leak into a refused or unready startup `[R7, R2-19]`.
-11. Multi-pod suspension across pods remains incomplete until §11.6's continuation serialization lands;
-    pinning bounds only the local eviction path `[R2-8]`.
+11. ~~Multi-pod suspension across pods remains incomplete until §11.6's continuation serialization
+    lands.~~ **CLOSED in v2.28.0** (`fix-g03.25`). Schema 2 carries the logical-turn accumulator and the
+    CME continuation keys, so another pod cold-rehydrating gets the same logical turn rather than a new
+    one, and merges the user's answer into the parameters already collected rather than re-extracting
+    from the answer alone. Remaining: `stored_parameters` is rebuilt through the command's own `Input`
+    class, so a **deployed command whose parameter class was removed** cannot be resumed — the session
+    is reset to intent detection with a warning rather than stranded mid-extraction.
 12. Exactly-once startup is scoped to framework-managed effects; external side effects need
     application-owned idempotency `[R2-5]`.
 13. *New in revision 4.* Persist-all-by-default means an `api_key` or PII an author puts in

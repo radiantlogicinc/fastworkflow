@@ -18,7 +18,12 @@ from fastworkflow.state_serialization import encode_state
 from fastworkflow.utils.logging import logger
 
 PENDING_STATE_KEY = "pending"
-SCHEMA_VERSION = 1
+# 2: added the logical-turn accumulator and the CME continuation keys, without
+# which a restored session started a new turn and dropped partially extracted
+# parameters. A v1 blob is refused rather than migrated -- it is a suspended
+# turn at most minutes old, and the fields it lacks are the ones that made
+# restoring it wrong.
+SCHEMA_VERSION = 2
 
 
 class IncompatibleSessionState(Exception):

@@ -33,6 +33,8 @@ from fastworkflow.state_serialization import StateEncodingError
 from fastworkflow.utils.logging import logger
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from fastworkflow.session_state_store import SessionStateStore
+
     from .utils import ChannelRuntime
 
 # Startup states (design 11.5). A boolean cannot express "attempted and failed"
@@ -120,18 +122,29 @@ class Eligibility:
     projection: Optional[serialization_hooks.ContextProjection] = None
 
 
-def assess(runtime: "ChannelRuntime") -> Eligibility:
+def assess(
+    runtime: "ChannelRuntime",
+    store: Optional["SessionStateStore"] = None,
+) -> Eligibility:
     """Decide whether a runtime can be checkpointed, so it can be evicted.
 
     Pinning is a first-class outcome with a metric, not an error.
+
+    ``store`` is the pending-state store. Omitting it makes a suspended session
+    pin, which is the safe reading for a caller that cannot prove the suspended
+    state was written.
     """
     ctx = runtime.execution_context
 
-    if ctx.awaiting_user:
-        # The suspended snapshot does not carry the logical-turn accumulator or
-        # the CME continuation keys, so restoring one loses the pre-suspension
-        # outputs. Pin rather than make a known defect routine.
-        return Eligibility(False, "session is awaiting_user")
+    if (ctx.awaiting_user or ctx.has_open_command()) and not (
+        store is not None and store.exists(runtime.channel_id)
+    ):
+        # The suspended snapshot carries the logical-turn accumulator and the
+        # CME continuation keys as of schema 2, so suspension alone no longer
+        # pins. What pins is the snapshot not being on disk: persist_pending_
+        # after_turn declines to write state it cannot encode losslessly, and
+        # evicting then would lose exactly what it refused to write.
+        return Eligibility(False, "suspended state is not durably stored")
 
     workflow = ctx.app_workflow
     if workflow is None:

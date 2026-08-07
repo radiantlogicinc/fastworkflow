@@ -396,13 +396,20 @@ def test_a_context_without_hooks_is_never_evicted(speedict_folder, tmp_path):
 # 4. Pinning: awaiting_user
 # ---------------------------------------------------------------------------
 
-def test_a_suspended_channel_is_never_evicted(speedict_folder):
-    """Decision 26: the suspended snapshot is knowingly incomplete.
+def test_a_suspended_channel_is_evicted_now_that_its_snapshot_is_complete(
+    speedict_folder,
+):
+    """Decision 26 reversed (fix-g03.25): the snapshot is no longer incomplete.
 
-    It carries neither the logical-turn accumulator nor the CME continuation
-    keys, so restoring one loses everything the turn produced before it asked
-    its question. This workflow holds no context object, so nothing else would
-    stop the sweep — awaiting_user is the only thing keeping it alive.
+    This test previously asserted the opposite. It pinned because the suspended
+    snapshot carried neither the logical-turn accumulator nor the CME
+    continuation keys, so restoring one lost everything the turn produced before
+    it asked its question. Schema 2 carries both, and pinning every suspended
+    session was itself unbounded: a user who walks away mid-question held a
+    runtime for the life of the process, with no idle TTL to reclaim it.
+
+    This workflow holds no context object, so nothing else influences the sweep
+    — suspension is the only variable.
     """
     manager = _cap_one_manager()
     suspended, newcomer = _channel("awaiting"), _channel("newcomer")
@@ -417,6 +424,8 @@ def test_a_suspended_channel_is_never_evicted(speedict_folder):
         # does, and then persisted through the server's own post-turn writer.
         ctx._awaiting_user = True
         ctx._pending_clarification_request = "which one?"
+        ctx._begin_turn("do the thing")
+        ctx.append_ask_user_entry("which one?")
         persist_pending_after_turn(
             manager,
             runtime,
@@ -427,17 +436,23 @@ def test_a_suspended_channel_is_never_evicted(speedict_folder):
             ),
         )
 
-        eligibility = checkpoint.assess(runtime)
+        eligibility = checkpoint.assess(runtime, manager.session_state_store)
+        turn_key = ctx._turn_key
         await _create(manager, newcomer, HELLO_WORLD)
-        return eligibility, set(manager._sessions)
+        return eligibility, set(manager._sessions), turn_key
 
-    eligibility, live = asyncio.run(body())
+    eligibility, live, turn_key = asyncio.run(body())
 
-    assert not eligibility.evictable
-    assert "awaiting_user" in eligibility.reason
-    assert live == {suspended, newcomer}
-    assert manager.session_state_store.exists(suspended)
-    assert _record(manager, suspended, HELLO_WORLD) is None
+    assert eligibility.evictable, eligibility.reason
+    assert live == {newcomer}, "a suspended channel should no longer defeat the cap"
+    assert _record(manager, suspended, HELLO_WORLD) is not None
+
+    # Evicting is only safe because the suspended state is still restorable.
+    blob = manager.session_state_store.load(suspended)
+    assert blob is not None
+    assert blob["awaiting_user"] is True
+    assert blob["turn"]["key"] == turn_key
+    assert blob["turn"]["outputs"][0]["command_name"] == "ask_user"
 
 
 # ---------------------------------------------------------------------------
@@ -811,3 +826,156 @@ def test_a_startup_turn_commits_its_outcome_through_the_real_turn_engine(
     record = _record(manager, channel_id, HELLO_WORLD)
     assert record is not None, "the startup turn left no durable record"
     assert record.startup["state"] == checkpoint.STARTUP_SUCCEEDED
+
+
+# ---------------------------------------------------------------------------
+# Suspension no longer pins by itself (fix-g03.25)
+# ---------------------------------------------------------------------------
+
+
+def test_suspended_session_is_evictable_once_its_state_is_durable():
+    """An awaiting session used to pin unconditionally, which was unbounded.
+
+    The pin existed because the pending blob lacked the logical-turn accumulator
+    and the CME continuation keys. Schema 2 carries both, so what governs now is
+    whether the blob actually reached the store -- not whether the session is
+    suspended.
+    """
+    manager = _cap_one_manager()
+    channel_id = _channel("suspended")
+
+    async def body():
+        await _create(manager, channel_id, HELLO_WORLD)
+        runtime = await manager.get_session(channel_id)
+        ctx = runtime.execution_context
+        ctx._awaiting_user = True
+        ctx._pending_clarification_request = "Which one?"
+        ctx._begin_turn("do the thing")
+        ctx.append_ask_user_entry("Which one?")
+
+        persist_pending_after_turn(manager, runtime, fastworkflow.CommandOutput(
+            command_responses=[fastworkflow.CommandResponse(response="Which one?")]
+        ))
+        stored = manager.session_state_store.exists(channel_id)
+        return checkpoint.assess(runtime, manager.session_state_store), stored
+
+    eligibility, stored = asyncio.run(body())
+
+    assert stored, "the suspending turn must write the blob eviction relies on"
+    assert eligibility.evictable, eligibility.reason
+
+
+def test_suspended_session_pins_when_its_state_never_reached_the_store():
+    """The blob is the whole basis for evicting a suspended session.
+
+    persist_pending_after_turn declines to write state it cannot encode
+    losslessly. Evicting then would discard precisely what it refused to write,
+    so absence of the blob has to pin.
+    """
+    manager = _cap_one_manager()
+    channel_id = _channel("nostate")
+
+    async def body():
+        await _create(manager, channel_id, HELLO_WORLD)
+        runtime = await manager.get_session(channel_id)
+        runtime.execution_context._awaiting_user = True
+        # Deliberately no persist_pending_after_turn: this is the shape left
+        # behind by a StateEncodingError.
+        manager.session_state_store.clear(channel_id)
+        return checkpoint.assess(runtime, manager.session_state_store)
+
+    eligibility = asyncio.run(body())
+
+    assert not eligibility.evictable
+    assert "durably stored" in eligibility.reason
+
+
+def test_assess_without_a_store_pins_a_suspended_session():
+    """Omitting the store must read as 'cannot prove it was written'.
+
+    A caller that has no store cannot check, and the safe answer for a caller
+    that cannot check is to pin.
+    """
+    manager = _cap_one_manager()
+    channel_id = _channel("nostore")
+
+    async def body():
+        await _create(manager, channel_id, HELLO_WORLD)
+        runtime = await manager.get_session(channel_id)
+        runtime.execution_context._awaiting_user = True
+        return checkpoint.assess(runtime)
+
+    eligibility = asyncio.run(body())
+    assert not eligibility.evictable
+
+
+def test_mid_extraction_session_persists_instead_of_clearing():
+    """A mid-extraction session is not awaiting_user but still holds state.
+
+    persist_pending_after_turn used to clear the blob for any turn that was not
+    a suspension, which dropped the partially extracted parameters the moment
+    the session was evicted between turns.
+    """
+    manager = _cap_one_manager()
+    channel_id = _channel("midext")
+
+    async def body():
+        await _create(manager, channel_id, HELLO_WORLD)
+        runtime = await manager.get_session(channel_id)
+        ctx = runtime.execution_context
+        cme = ctx._cme_workflow.context
+        cme["NLU_Pipeline_Stage"] = fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION
+        cme["command"] = "add two numbers"
+        cme["command_name"] = "add_two_numbers"
+
+        assert ctx.has_open_command()
+        persist_pending_after_turn(manager, runtime, fastworkflow.CommandOutput(
+            command_responses=[
+                fastworkflow.CommandResponse(response="which numbers?", success=False)
+            ]
+        ))
+        return manager.session_state_store.load(channel_id)
+
+    blob = asyncio.run(body())
+
+    assert blob is not None, "mid-extraction state was cleared instead of saved"
+    assert blob["cme"]["command_name"] == "add_two_numbers"
+    assert blob["cme"]["command"] == "add two numbers"
+
+
+def test_mid_extraction_persists_through_the_turns_engine_too():
+    """turns._persist_after_turn is a second copy of the same decision.
+
+    The turns engine has its own post-turn writer, and the mid-extraction rule
+    has to hold in both. Testing only utils' copy let a mutation that reverted
+    turns' copy pass unnoticed, which is how a duplicated policy drifts.
+    """
+    from fastworkflow.run_fastapi_mcp.turns import _persist_after_turn
+
+    manager = _cap_one_manager()
+    channel_id = _channel("midturns")
+
+    async def body():
+        await _create(manager, channel_id, HELLO_WORLD)
+        runtime = await manager.get_session(channel_id)
+        cme = runtime.execution_context._cme_workflow.context
+        cme["NLU_Pipeline_Stage"] = fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION
+        cme["command"] = "add two numbers"
+        cme["command_name"] = "add_two_numbers"
+
+        # A completed (not suspended) turn: the case that used to clear.
+        _persist_after_turn(
+            manager,
+            runtime,
+            fastworkflow.TurnOutput(
+                turn_key="t-1",
+                status=fastworkflow.TurnStatus.COMPLETED,
+                answer="which numbers?",
+            ),
+        )
+        return manager.session_state_store.load(channel_id)
+
+    blob = asyncio.run(body())
+
+    assert blob is not None, "the turns engine cleared mid-extraction state"
+    assert blob["cme"]["command_name"] == "add_two_numbers"

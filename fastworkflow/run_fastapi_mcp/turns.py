@@ -390,10 +390,15 @@ def _persist_after_turn(
     consistent secondary signal.
     """
     ctx = runtime.execution_context
-    if awaiting := ctx.awaiting_user or (
+    awaiting = ctx.awaiting_user or (
         result is not None
         and result.status == fastworkflow.TurnStatus.AWAITING_USER
-    ):
+    )
+    # A session mid-parameter-extraction is not awaiting_user -- its turn
+    # completed with an error asking for the missing values -- but it holds the
+    # partially extracted parameters, and clearing here would drop them the
+    # moment it is evicted between turns.
+    if awaiting or ctx.has_open_command():
         try:
             state = ctx.serialize_state(channel_id=runtime.channel_id)
         except StateEncodingError as exc:
