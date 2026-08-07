@@ -949,6 +949,27 @@ def compute_training_plan(
     to_train = sorted(ctx for ctx in candidates if ctx in reasons)
     carried = sorted(ctx for ctx in candidates if ctx not in reasons)
 
+    # The mode check above asks whether the cache is ALLOWED to be reused. It does not
+    # ask whether there is anything in it. A deleted cache directory, a fresh clone, or
+    # a cache that was never committed all leave mode == reuse with no entries, and then
+    # every command in a retrained context is redrawn from the LLM while the carried
+    # contexts keep the superseded text in their wildcard class -- the internally
+    # inconsistent version AR3 says versioning cannot detect and this must prevent.
+    if to_train and carried:
+        if uncached := _shared_commands_absent_from_cache(
+            workflow_folderpath, to_train, carried, context_commands, context_ancestors
+        ):
+            plan = _full_retrain(
+                candidates,
+                f"full retrain ({len(uncached)} command(s) contributing to both a "
+                f"retrained and a carried-forward context have no cached utterances, "
+                f"so they would be redrawn from the LLM while the carried contexts "
+                f"keep the superseded text: "
+                f"{', '.join(sorted(uncached)[:5])}"
+                f"{' ...' if len(uncached) > 5 else ''})",
+            )
+            return plan, current_signature
+
     # `is_full_retrain` stays False even when every context turned out dirty, so the
     # per-context reasons are still rendered. "Everything was dirty, and here is why"
     # and "no selector was given" are different answers to the same question, and a
@@ -1271,6 +1292,68 @@ def merge_heldout_evaluation(
     )
     path.write_text(json.dumps(current, indent=2))
     return True
+
+
+def _commands_contributing_to(
+    context_name: str,
+    context_commands: dict[str, set[str]],
+    context_ancestors: dict[str, set[str]],
+) -> set[str]:
+    """Every command whose utterances end up in *context_name*'s training data.
+
+    Its own commands, plus its ancestors' -- an ancestor's utterances constitute
+    this context's wildcard class, which is why a change upstream is a change here.
+    """
+    contributing = set(context_commands.get(context_name) or ())
+    for ancestor in context_ancestors.get(context_name) or ():
+        contributing |= set(context_commands.get(ancestor) or ())
+    return contributing
+
+
+def _shared_commands_absent_from_cache(
+    workflow_folderpath: str,
+    to_train: Iterable[str],
+    carried: Iterable[str],
+    context_commands: dict[str, set[str]],
+    context_ancestors: dict[str, set[str]],
+) -> set[str]:
+    """Commands feeding BOTH a retrained and a carried-forward context, with no cache.
+
+    Absence of any variant file for a command is a sound proxy for "this will be
+    regenerated": a hit requires a file. The converse does not hold -- a file whose
+    variant key no longer matches still misses -- but that case is a fingerprint
+    change, which the signature diff already turns into a retrain. This check exists
+    for the case the signature diff cannot see, where nothing about the inputs
+    changed and the cached bytes simply are not there.
+    """
+    shared: set[str] = set()
+    retrained_side: set[str] = set()
+    for context_name in to_train:
+        retrained_side |= _commands_contributing_to(
+            context_name, context_commands, context_ancestors)
+    for context_name in carried:
+        shared |= retrained_side & _commands_contributing_to(
+            context_name, context_commands, context_ancestors)
+
+    if not shared:
+        return set()
+
+    cache_root = os.path.join(
+        workflow_folderpath, determinism.COMMAND_INFO_FOLDERNAME,
+        utterance_cache.CACHE_DIRNAME,
+    )
+    if not os.path.isdir(cache_root):
+        return shared
+
+    cached_stems = {
+        name.split(".", 1)[0]
+        for name in os.listdir(cache_root)
+        if name.endswith(".json")
+    }
+    return {
+        command for command in shared
+        if utterance_cache.slugify(command) not in cached_stems
+    }
 
 
 def _recompute_heldout_totals(entries: list[dict]) -> dict:

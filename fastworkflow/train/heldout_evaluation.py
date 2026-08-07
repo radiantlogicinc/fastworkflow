@@ -214,6 +214,10 @@ class HeldoutReport(BaseModel):
     #: rows used to be counted as routing successes, which in a context with ancestors
     #: meant the headline routing number was mostly escalation recognition (D2).
     holdout_escalation: EscalationScore | None = None
+    #: Residual overlap between the held-out rows and their training rows (AR1). The
+    #: holdout removes an utterance's AUTHOR, not its wording, so this is what says
+    #: how much of the routing number above is generalisation rather than recall.
+    leak_calibration: LeakCalibration | None = None
     #: Routing scored on the DEVELOPER-SUPPLIED benchmark, kept separate from `routing`
     #: because the two are different populations and must not be averaged. It is also the
     #: only one of the two that can be compared across runs: the persona holdout is
@@ -298,10 +302,131 @@ def _summarize_labels(labels: Iterable[str], limit: int = 10) -> str:
     return shown
 
 
+class LeakCalibration(BaseModel):
+    """How much of the held-out set the model had already seen, in other words (AR1).
+
+    A persona holdout removes the AUTHOR of an utterance from training. It does not
+    remove the WORDING: two personas asked the same question in one prompt often
+    answer with near-identical text, and a held-out row that repeats a training row
+    verbatim scores as generalisation while measuring memorisation.
+
+    These are string operations over rows already in memory, so the calibration costs
+    nothing and turns "treat this as a lower bound" from a caveat into a number.
+    """
+
+    #: Held-out rows measured. Zero means the rest of these fields say nothing.
+    total: int = 0
+    #: Median over held-out rows of the maximum token overlap against the training
+    #: rows of the SAME label. 0.0 is a clean holdout; 1.0 is a duplicated corpus.
+    median_max_overlap: float | None = None
+    #: Fraction of held-out rows whose closest training row overlaps >= 0.8. The
+    #: spec's threshold: above it, the two are paraphrases rather than distinct asks.
+    fraction_above_0_8: float | None = None
+    #: Held-out rows whose text appears in training verbatim after normalisation.
+    #: split_by_persona drops exact leaks, so a non-zero value here is a bug signal.
+    exact_duplicates: int = 0
+
+
+def _content_tokens(utterance: str) -> set[str]:
+    return {t for t in re.findall(r"[a-z0-9]+", utterance.casefold()) if t}
+
+
+def calibrate_leak(split: "PersonaSplit") -> LeakCalibration:
+    """Measure residual overlap between the held-out rows and their training rows.
+
+    Compared per LABEL rather than corpus-wide: overlap with a different command's
+    utterances is not leakage, it is vocabulary. Only the rows the classifier must
+    tell apart from this one matter.
+    """
+    if not split.heldout:
+        return LeakCalibration()
+
+    train_by_label: dict[str, list[set[str]]] = defaultdict(list)
+    train_text_by_label: dict[str, set[str]] = defaultdict(set)
+    for record in split.train:
+        train_by_label[record.label].append(_content_tokens(record.utterance))
+        train_text_by_label[record.label].add(normalize_utterance(record.utterance))
+
+    overlaps: list[float] = []
+    exact = 0
+    for record in split.heldout:
+        if normalize_utterance(record.utterance) in train_text_by_label[record.label]:
+            exact += 1
+        tokens = _content_tokens(record.utterance)
+        if not tokens:
+            continue
+        best = 0.0
+        for train_tokens in train_by_label.get(record.label, ()):
+            if union := tokens | train_tokens:
+                best = max(best, len(tokens & train_tokens) / len(union))
+        overlaps.append(best)
+
+    if not overlaps:
+        return LeakCalibration(total=len(split.heldout), exact_duplicates=exact)
+
+    ordered = sorted(overlaps)
+    middle = len(ordered) // 2
+    median = (
+        ordered[middle]
+        if len(ordered) % 2
+        else (ordered[middle - 1] + ordered[middle]) / 2
+    )
+    return LeakCalibration(
+        total=len(overlaps),
+        median_max_overlap=median,
+        fraction_above_0_8=sum(o >= 0.8 for o in overlaps) / len(overlaps),
+        exact_duplicates=exact,
+    )
+
+
+def persona_batch_groups(batches: Iterable[Sequence[str]]) -> list[list[str]]:
+    """Group persona ids that ever shared a generation batch (AR1).
+
+    Personas in one batch are produced by a SINGLE completion, so a held-out persona
+    sharing a batch with a training persona shares the sampler's context as well as
+    the prompt -- its "held-out" utterances were drawn while the model could see the
+    training ones. Splitting inside a batch measures less generalisation than it
+    claims to.
+
+    Co-occurrence is transitive and crosses commands: a persona can sit in one batch
+    for command A and another for command B, which transitively binds all three
+    groups. Union-find is what keeps that correct rather than approximately correct.
+    """
+    parent: dict[str, str] = {}
+
+    def find(item: str) -> str:
+        parent.setdefault(item, item)
+        while parent[item] != item:
+            parent[item] = parent[parent[item]]
+            item = parent[item]
+        return item
+
+    def union(a: str, b: str) -> None:
+        root_a, root_b = find(a), find(b)
+        if root_a != root_b:
+            parent[root_b] = root_a
+
+    for batch in batches:
+        members = [p for p in batch if p and p != SEED_PERSONA_ID]
+        for member in members:
+            # Registered before any union so a batch of one still produces a group.
+            # Relying on union() to register would silently drop solo personas, which
+            # then never appear in the holdout at all.
+            find(member)
+        for other in members[1:]:
+            union(members[0], other)
+
+    grouped: dict[str, list[str]] = defaultdict(list)
+    for persona in parent:
+        grouped[find(persona)].append(persona)
+    return sorted((sorted(group) for group in grouped.values()), key=lambda g: g[0])
+
+
 def split_by_persona(
     records: Sequence[LabeledUtterance],
     holdout_fraction: float = DEFAULT_HOLDOUT_FRACTION,
     seed: int = DEFAULT_SEED,
+    persona_batches: Optional[Iterable[Sequence[str]]] = None,
 ) -> PersonaSplit:
     """Reserve whole personas for evaluation.
 
@@ -378,8 +503,49 @@ def split_by_persona(
         )
 
     rng = random.Random(seed)
-    heldout_personas = sorted(rng.sample(all_personas, holdout_count))
-    heldout_persona_set = set(heldout_personas)
+    if groups := (
+        persona_batch_groups(persona_batches) if persona_batches is not None else []
+    ):
+        # Sample whole batches. A group is taken only if it fits, so the holdout can
+        # land under its target -- deliberately: overshooting removes more rows from
+        # training than asked, and undershooting only weakens a measurement.
+        known = set(all_personas)
+        eligible = [[p for p in group if p in known] for group in groups]
+        eligible = [group for group in eligible if group]
+        ungrouped = sorted(known - {p for group in eligible for p in group})
+        eligible.extend([p] for p in ungrouped)
+
+        rng.shuffle(eligible)
+        heldout_persona_set = set()
+        for group in eligible:
+            if len(heldout_persona_set) + len(group) > holdout_count:
+                continue
+            heldout_persona_set.update(group)
+        heldout_personas = sorted(heldout_persona_set)
+        if not heldout_personas:
+            notes.append(
+                f"Batch-aligned holdout could not reserve any personas: the smallest "
+                f"generation batch is larger than the {holdout_count}-persona target. "
+                f"Held-out routing is not measurable for this context."
+            )
+        elif ungrouped:
+            notes.append(
+                f"{len(ungrouped)} persona(s) had no recorded generation batch and were "
+                f"treated as batches of one."
+            )
+    else:
+        heldout_personas = sorted(rng.sample(all_personas, holdout_count))
+        heldout_persona_set = set(heldout_personas)
+        # AR1 requires the holdout be aligned to generation-batch boundaries. Without
+        # the batch composition this split cannot honour that, and a held-out persona
+        # may share a completion with a training one -- so the number it produces is
+        # optimistic. Disclosed rather than quietly reported as a clean holdout.
+        notes.append(
+            "Holdout is NOT batch-aligned (no generation batch composition was "
+            "supplied), so a held-out persona may share a completion with a training "
+            "persona. Treat the resulting routing number as optimistic."
+        )
+
     train_personas = [p for p in all_personas if p not in heldout_persona_set]
 
     train: list[LabeledUtterance] = []
@@ -1030,6 +1196,25 @@ def format_report(reports: Sequence[HeldoutReport]) -> str:
         ]
     )
 
+    calibrations = [r.leak_calibration for r in reports if r.leak_calibration]
+    if measured := [c for c in calibrations if c.median_max_overlap is not None]:
+        worst = max(measured, key=lambda c: c.fraction_above_0_8 or 0.0)
+        median_of_medians = sorted(c.median_max_overlap for c in measured)[
+            len(measured) // 2
+        ]
+        lines.append(
+            f"Leak calibration: median max token overlap with training rows of the "
+            f"same label is {median_of_medians:.2f} across contexts; worst context has "
+            f"{(worst.fraction_above_0_8 or 0.0):.1%} of held-out rows overlapping "
+            f">=0.8. High overlap means the routing number above is closer to recall "
+            f"than to generalisation."
+        )
+        if duplicated := sum(c.exact_duplicates for c in calibrations):
+            lines.append(
+                f"  {duplicated} held-out row(s) are verbatim training rows. The split "
+                f"drops exact leaks, so this should be 0 -- treat it as a bug signal."
+            )
+
     holdout_escalation_total = totals["holdout_escalation_total"]
     if holdout_escalation_total:
         lines.append(
@@ -1098,6 +1283,15 @@ def write_report(workflow_folderpath: str, reports: Sequence[HeldoutReport]) -> 
             "zero_denominator": (
                 "A metric with no cases is null, never 0.0. A 0.0 here would be "
                 "indistinguishable from a measured total failure."
+            ),
+            "leak_calibration": (
+                "Residual overlap between held-out rows and the training rows of the "
+                "SAME label (AR1). The persona holdout removes an utterance's AUTHOR, "
+                "not its wording, so this says how much of the routing number is "
+                "generalisation rather than recall. median_max_overlap near 0 is a "
+                "clean holdout; fraction_above_0_8 is the share of held-out rows that "
+                "are paraphrases of a training row. exact_duplicates should be 0 -- "
+                "split_by_persona drops exact leaks, so a non-zero value is a bug."
             ),
         },
         "totals": aggregate_totals(reports),

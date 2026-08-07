@@ -1044,11 +1044,37 @@ def cache_ancestor_utterances(
     return ancestor_utterances
 
 
+def _recorded_persona_batches(recorder) -> Optional[list[list[str]]]:
+    """Reconstruct each command's generation batches from provenance (AR1).
+
+    Batches are consecutive slices of the recorded ordered `persona_ids`, sized by
+    `personas_per_batch` in the same record's `generator_config` -- both already
+    written for reproducibility, so nothing new has to be recorded to align the
+    holdout to them.
+
+    Returns None when no record carries a batch size, which is the signal to
+    `split_by_persona` that it must disclose an unaligned split rather than imply a
+    clean one.
+    """
+    batches: list[list[str]] = []
+    for provenance in recorder.records.values():
+        persona_ids = list(provenance.persona_ids or ())
+        size = (provenance.generator_config or {}).get("personas_per_batch")
+        if not persona_ids or not isinstance(size, int) or size < 1:
+            continue
+        batches.extend(
+            persona_ids[start:start + size]
+            for start in range(0, len(persona_ids), size)
+        )
+    return batches or None
+
+
 def _score_heldout_context(
     report: heldout_evaluation.HeldoutReport,
     heldout_records: list[heldout_evaluation.LabeledUtterance],
     benchmark_cases: list[heldout_evaluation.BenchmarkCase],
     predict_labels: Optional[heldout_evaluation.PredictFn],
+    split_for_calibration: Optional[heldout_evaluation.PersonaSplit] = None,
 ) -> None:
     """Score independent persona-holdout and fixed-benchmark populations."""
     if heldout_records:
@@ -1060,6 +1086,10 @@ def _score_heldout_context(
         # axis (D2) rather than dropping them: in a context with ancestors they
         # are most of the population, and losing them would trade a wrong number
         # for a blind spot.
+        if split_for_calibration is not None:
+            report.leak_calibration = heldout_evaluation.calibrate_leak(
+                split_for_calibration)
+
         routable, escalation_class = heldout_evaluation.partition_by_routability(
             heldout_records)
         if routable:
@@ -1397,6 +1427,9 @@ def train(workflow: fastworkflow.Workflow,
         heldout_records: list[heldout_evaluation.LabeledUtterance] = []
         heldout_personas: list[str] = []
         split_notes: list[str] = []
+        # Initialised here rather than only inside the branch below: the scoring call
+        # is far downstream and would raise NameError on the no-recorder path.
+        heldout_split: Optional[heldout_evaluation.PersonaSplit] = None
         if (recorder := get_provenance_recorder()) is not None:
             # utterance text -> persona id, across every command generated this run.
             # Anything absent is a hand-written seed utterance, which split_by_persona
@@ -1415,7 +1448,11 @@ def train(workflow: fastworkflow.Workflow,
                 )
                 for utterance, label in utterance_command_tuples
             ]
-            split = heldout_evaluation.split_by_persona(labeled, seed=seed)
+            split = heldout_evaluation.split_by_persona(
+                labeled,
+                seed=seed,
+                persona_batches=_recorded_persona_batches(recorder),
+            )
             if split.heldout:
                 # Held-out personas are removed from training entirely. Without this
                 # the score below would be measuring the training set.
@@ -1423,6 +1460,7 @@ def train(workflow: fastworkflow.Workflow,
                     (record.utterance, record.label) for record in split.train
                 ]
                 heldout_records = list(split.heldout)
+                heldout_split = split
                 heldout_personas = list(split.heldout_personas)
                 split_notes = list(split.notes)
                 print(
@@ -1798,7 +1836,8 @@ def train(workflow: fastworkflow.Workflow,
             # never scored while routing kept working -- the failure looked like
             # "this workflow has no escalation cases" (bd fix-588).
             _score_heldout_context(
-                report, heldout_records, benchmark_cases, predict_labels)
+                report, heldout_records, benchmark_cases, predict_labels,
+                split_for_calibration=heldout_split)
         except Exception as exc:
             # A scoring failure must never destroy a completed training run: the
             # models are already on disk and usable. Record it and move on.
