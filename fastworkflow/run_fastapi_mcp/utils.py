@@ -17,6 +17,8 @@ from pydantic import BaseModel, field_validator
 import fastworkflow
 from fastworkflow.session_state_store import (
     IncompatibleSessionState,
+    PendingReapOutcome,
+    PendingRetentionPolicy,
     SessionStateStore,
     get_session_state_store,
 )
@@ -1084,6 +1086,22 @@ class ChannelSessionManager:
         """
         return self.checkpoint_store.reap(
             policy or RetentionPolicy(),
+            protected_channel_ids=set(self._sessions) | set(self._leases),
+        )
+
+    def reap_pending_state(
+        self, policy: Optional[PendingRetentionPolicy] = None
+    ) -> PendingReapOutcome:
+        """Reclaim abandoned suspended sessions, protecting every channel we hold.
+
+        A suspended session waits on a user who may never return, and since
+        v2.28.0 removed the pin it can be evicted — which means the blob is then
+        the only copy of that conversation. Protecting live and leased channels
+        is what keeps this a reaper of abandoned state rather than of state
+        someone is still using.
+        """
+        return self.session_state_store.reap(
+            policy or PendingRetentionPolicy(),
             protected_channel_ids=set(self._sessions) | set(self._leases),
         )
 

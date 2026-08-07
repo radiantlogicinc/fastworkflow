@@ -979,3 +979,58 @@ def test_mid_extraction_persists_through_the_turns_engine_too():
 
     assert blob is not None, "the turns engine cleared mid-extraction state"
     assert blob["cme"]["command_name"] == "add_two_numbers"
+
+
+# ---------------------------------------------------------------------------
+# Pending-state retention (fix-6b4)
+# ---------------------------------------------------------------------------
+
+
+def test_reap_pending_state_protects_the_channels_the_process_holds():
+    """The manager is what knows which channels are live; the store cannot.
+
+    Driving the store directly would test the policy but not the wiring, and
+    the wiring is the part that decides whether an in-use conversation is
+    deleted.
+    """
+    import json as _json
+    import time as _time
+    from pathlib import Path as _Path
+
+    from fastworkflow.session_state_store import (
+        SAVED_AT_KEY,
+        PendingRetentionPolicy,
+    )
+
+    manager = ChannelSessionManager(max_live_sessions=8)
+    live_channel = _channel("stillhere")
+    gone_channel = _channel("walkedaway")
+
+    async def body():
+        await _create(manager, live_channel, HELLO_WORLD)
+        store = manager.session_state_store
+
+        # Both look identically abandoned on disk; only one is held live.
+        for cid in (live_channel, gone_channel):
+            store.save(cid, {"channel_id": cid, "awaiting_user": True})
+            path = _Path(store._json_path(cid))
+            blob = _json.loads(path.read_text())
+            blob[SAVED_AT_KEY] = _time.time() - 400 * 86_400.0
+            path.write_text(_json.dumps(blob))
+
+        outcome = manager.reap_pending_state(
+            PendingRetentionPolicy(max_age_seconds=86_400.0)
+        )
+        return outcome, store.exists(live_channel), store.exists(gone_channel)
+
+    outcome, live_survived, gone_survived = asyncio.run(body())
+
+    assert live_survived, "reaped a channel the process still holds live"
+    assert not gone_survived, "the abandoned session was not reclaimed"
+
+    # Counts are asserted as lower bounds, not equalities. This store lives in
+    # the shared SPEEDDICT_FOLDERNAME rather than a tmp_path, so it also holds
+    # pending blobs left by other tests and by previous runs -- an equality here
+    # passes alone and fails in a full-suite run, which is exactly what it did.
+    assert outcome.reclaimed >= 1
+    assert outcome.protected >= 1

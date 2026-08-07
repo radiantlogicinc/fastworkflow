@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow.session_state_store import (
+    SAVED_AT_KEY,
     SCHEMA_VERSION,
     DiskSessionStateStore,
     IncompatibleSessionState,
@@ -145,7 +147,14 @@ def test_disk_session_state_store_roundtrip(tmp_path):
     state = {"schema_version": 1, "awaiting_user": True, "react": {"idx": 0}}
     store.save("user-1", state)
     assert store.exists("user-1")
-    assert store.load("user-1") == state
+
+    loaded = store.load("user-1")
+    # Every saved field comes back unchanged. Not compared with == because the
+    # store also stamps a save time for retention (fix-6b4); that is storage
+    # metadata rather than session state, which is why it is not in the schema.
+    assert {k: loaded[k] for k in state} == state
+    assert loaded[SAVED_AT_KEY] <= time.time()
+
     store.clear("user-1")
     assert not store.exists("user-1")
 

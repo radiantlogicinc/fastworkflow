@@ -2257,6 +2257,15 @@ unsupported** `[R2-18]` — raising a cap is tuning, not a version rollback.
 16. **No hidden durable-state TTL:** accepted, **amended** `[R5, R2-17]`. Durable growth is gated on a
     plateau, and Release C waits on `fix-jtr` — not on `fix-6b4`, which covers only orphaned suspended-session
     blobs.
+    **`fix-6b4` delivered in v2.29.0**, on the same terms `fix-jtr` set: a stated `PendingRetentionPolicy`
+    rather than a hidden expiry, a reaper that is invoked rather than scheduled, and a protected set the
+    caller names. Its ordering relative to `fix-g03.25` mattered and was not obvious. Before the pin was
+    removed, reaping a pending blob was *harmless but useless* — the pinned in-memory copy kept the
+    session working, so the reaper deleted only the crash-recovery path while the leak continued. After
+    the pin was removed the blob can be the **only** copy, which makes the reaper effective and
+    destructive at once. That is why protection is enforced at the manager, which is the only layer that
+    knows what is live, and why the default age window is 7 days: what is being deleted is a user's
+    half-finished conversation.
 17. **Production slope remains supplied until reproduced:** accepted.
 18. **Fix 2's bound is conditional on workflow shape, disclosed rather than mitigated:** accepted `[R1]`,
     **then upgraded from "disclose" to "guard and fix" in revision 4**. Alternatives considered:
@@ -2338,6 +2347,9 @@ unsupported** `[R2-18]` — raising a cap is tuning, not a version rollback.
 
 ## 19. Accepted limitations and follow-up triggers
 
+0. ~~Abandoned suspended sessions are never reclaimed.~~ **CLOSED in v2.29.0** (`fix-6b4`). Nothing else
+   reclaims one — `/cancel_pending` needs a client that has already left, and completion needs an answer
+   never given. See decision 16 for why this had to land *after* `fix-g03.25` rather than before.
 1. Active concurrency remains unbounded; trigger the existing backpressure work when active channels
    dominate RSS.
 2. ~~Durable checkpoint records have no lifecycle policy yet.~~ **CLOSED in revision 4.** `fix-jtr`
@@ -2385,6 +2397,15 @@ unsupported** `[R2-18]` — raising a cap is tuning, not a version rollback.
 15. *New in revision 4.* A torn checkpoint surfaces only on restore, and §16.5 arm C's channels are
     unique and never revisited, so that arm cannot detect one. Detecting it needs a revisiting workload,
     which is an arm this design does not specify.
+16. *New in v2.29.0 (`fix-6b4`).* Pending-state retention has the same shape of limit as §11.10's:
+    nothing is reclaimed unless `reap` is called, growth between passes is unbounded, and one blob's size
+    is unbounded. Two additions specific to this namespace. A blob whose age cannot be established is
+    **reported and left in place** rather than reclaimed on a guess, so corrupt entries accumulate — on
+    disk this is rare because file mtime supplies the age when the stamp is missing, but Redis has no
+    per-key write time and therefore no fallback. And `DiskSessionStateStore`'s key is **not injective**
+    (`tenant/user-1` and `tenant_user-1` collide), which is a pre-existing cross-session exposure rather
+    than a retention defect; the reaper avoids depending on it by reading `channel_id` from inside the
+    blob, and the collision itself is tracked as `fix-7hn`.
 
 ---
 

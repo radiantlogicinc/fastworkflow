@@ -408,16 +408,19 @@ async def lifespan(_app: FastAPI):
                     logger.error(f"Failed to finalize conversation for user {channel_id} during shutdown: {e}")
 
     async def reap_checkpoints_periodically() -> None:
-        """Drive checkpoint retention. The store deliberately has no timer.
+        """Drive checkpoint and pending-state retention. Neither store has a timer.
 
         A unique-channel workload writes a checkpoint per request that is never
         read again, so without this the namespace grows forever — which is what
-        gates lowering the live-session cap in the first place.
+        gates lowering the live-session cap in the first place. Abandoned
+        suspended sessions accumulate the same way: nothing else reclaims one,
+        because /cancel_pending needs a client that has already left.
         """
         while True:
             await asyncio.sleep(CHECKPOINT_REAP_INTERVAL_SECONDS)
+            loop = asyncio.get_running_loop()
             try:
-                outcome = await asyncio.get_running_loop().run_in_executor(
+                outcome = await loop.run_in_executor(
                     None, session_manager.reap_checkpoints
                 )
                 reclaimed = getattr(outcome, "channels_reclaimed", None)
@@ -428,6 +431,29 @@ async def lifespan(_app: FastAPI):
             except Exception as exc:
                 logger.warning(
                     f"Checkpoint reap pass failed ({type(exc).__name__}: {exc})"
+                )
+
+            # Separate try: a failure reclaiming one namespace must not stop the
+            # other, or one persistent fault silently disables all retention.
+            try:
+                pending = await loop.run_in_executor(
+                    None, session_manager.reap_pending_state
+                )
+                if pending.reclaimed:
+                    logger.info(
+                        f"Reclaimed {pending.reclaimed} abandoned suspended "
+                        f"session(s); {pending.protected} were still live"
+                    )
+                if pending.unreadable:
+                    logger.warning(
+                        f"{pending.unreadable} pending-state blob(s) have no "
+                        f"readable save time and were left in place"
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    f"Pending-state reap pass failed ({type(exc).__name__}: {exc})"
                 )
 
     async def stop_all_chat_sessions(skip_channel_ids: list[str]) -> None:

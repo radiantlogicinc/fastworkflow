@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import Any, Iterable, Optional
 
 import fastworkflow
 from fastworkflow.state_serialization import encode_state
@@ -49,6 +51,51 @@ class IncompatibleSessionState(Exception):
         )
 
 
+SAVED_AT_KEY = "_saved_at"
+
+
+@dataclass(frozen=True)
+class PendingRetentionPolicy:
+    """When an abandoned suspended session may be reclaimed. Stated, never hidden.
+
+    A suspended session waits for a user who may never come back. Nothing else
+    reclaims it: `/cancel_pending` needs a client that has already left, and
+    completion needs an answer that is never given.
+
+    * `max_age_seconds` — reclaim state nothing has written to for this long.
+      **Not a bound on bytes**: steady state is
+      `abandonment_rate x max_age_seconds x blob_size`, a plateau set by a rate
+      the operator does not control. Defaults to 7 days because the thing being
+      deleted is a user's half-finished conversation, and the cost of keeping it
+      too long is disk while the cost of deleting it too early is their work.
+    * `max_entries` — a hard count cap, oldest-first regardless of age. This is
+      what makes size independent of abandonment rate, which is why it is on by
+      default.
+
+    The age window is also the safety net: the count cap reclaims the oldest
+    entry whatever its age, so a caller that under-reports its live channels is
+    protected only by `max_age_seconds` outlasting a session. Setting it to None
+    hands that responsibility entirely to `protected_channel_ids`.
+    """
+
+    max_age_seconds: Optional[float] = 604_800.0
+    max_entries: Optional[int] = 10_000
+
+    def __post_init__(self) -> None:
+        if self.max_age_seconds is not None and self.max_age_seconds <= 0:
+            raise ValueError("max_age_seconds must be positive or None")
+        if self.max_entries is not None and self.max_entries < 0:
+            raise ValueError("max_entries must be non-negative or None")
+
+
+@dataclass(frozen=True)
+class PendingReapOutcome:
+    reclaimed: int = 0
+    protected: int = 0
+    scanned: int = 0
+    unreadable: int = 0
+
+
 class SessionStateStore(ABC):
     """Load/save/clear suspended-session blobs keyed by channel_id."""
 
@@ -67,6 +114,86 @@ class SessionStateStore(ABC):
     @abstractmethod
     def exists(self, channel_id: str) -> bool:
         """True if pending state exists for channel_id."""
+
+    @abstractmethod
+    def iter_entries(self) -> Iterable[tuple[str, Optional[float]]]:
+        """Yield (channel_id, saved_at) for every stored blob.
+
+        channel_id comes from inside the blob rather than from the storage key,
+        because neither backend's key is guaranteed to be reversible.
+
+        A saved_at of None means the age could not be established; such an entry
+        is reported and left alone rather than reclaimed on a guess.
+        """
+
+    @staticmethod
+    def _stamp(state: dict[str, Any]) -> dict[str, Any]:
+        """Attach the save time as storage metadata.
+
+        Deliberately not part of SCHEMA_VERSION: when a blob was written is a
+        fact about the store, not about the session, and putting it in the
+        session schema would make every retention change a schema migration.
+        """
+        return {**state, SAVED_AT_KEY: time.time()}
+
+    def reap(
+        self,
+        policy: Optional[PendingRetentionPolicy] = None,
+        *,
+        protected_channel_ids: Iterable[str] = (),
+        now: Optional[float] = None,
+        dry_run: bool = False,
+    ) -> PendingReapOutcome:
+        """Reclaim abandoned suspended state under a stated policy.
+
+        Invoked, never scheduled: a timer inside the store would be a second
+        writer on a channel whose only writer is meant to be the process that
+        owns it. The caller names what it holds live, and a protected channel is
+        never reclaimed however old it is.
+        """
+        policy = policy or PendingRetentionPolicy()
+        now = time.time() if now is None else now
+        protected = set(protected_channel_ids)
+
+        entries: list[tuple[str, float]] = []
+        scanned = unreadable = 0
+        for channel_id, saved_at in self.iter_entries():
+            scanned += 1
+            if saved_at is None:
+                unreadable += 1
+                continue
+            entries.append((channel_id, saved_at))
+
+        protected_hits = sum(c in protected for c, _ in entries)
+        candidates = [(c, t) for c, t in entries if c not in protected]
+        candidates.sort(key=lambda pair: pair[1])
+
+        doomed: list[str] = []
+        if policy.max_age_seconds is not None:
+            cutoff = now - policy.max_age_seconds
+            doomed = [c for c, t in candidates if t < cutoff]
+
+        if policy.max_entries is not None and len(entries) > policy.max_entries:
+            # Count against everything stored, including protected entries, or a
+            # process holding many live sessions would silently raise the cap.
+            over = len(entries) - policy.max_entries
+            for channel_id, _ in candidates:
+                if over <= 0:
+                    break
+                if channel_id not in doomed:
+                    doomed.append(channel_id)
+                    over -= 1
+
+        if not dry_run:
+            for channel_id in doomed:
+                self.clear(channel_id)
+
+        return PendingReapOutcome(
+            reclaimed=len(doomed),
+            protected=protected_hits,
+            scanned=scanned,
+            unreadable=unreadable,
+        )
 
 
 class DiskSessionStateStore(SessionStateStore):
@@ -92,7 +219,7 @@ class DiskSessionStateStore(SessionStateStore):
         # Strictness is established upstream at serialize_state; encoding here
         # canonically keeps the two ends in agreement instead of re-coercing.
         with open(path, "w", encoding="utf-8") as f:
-            f.write(encode_state(state))
+            f.write(encode_state(self._stamp(state)))
 
     def clear(self, channel_id: str) -> None:
         path = self._json_path(channel_id)
@@ -101,6 +228,30 @@ class DiskSessionStateStore(SessionStateStore):
 
     def exists(self, channel_id: str) -> bool:
         return os.path.isfile(self._json_path(channel_id))
+
+    def iter_entries(self) -> Iterable[tuple[str, Optional[float]]]:
+        if not os.path.isdir(self.base_folder):
+            return
+        for entry in os.scandir(self.base_folder):
+            if not entry.is_file() or not entry.name.endswith("_pending.json"):
+                continue
+            try:
+                with open(entry.path, encoding="utf-8") as f:
+                    blob = json.load(f)
+                channel_id = blob["channel_id"]
+                saved_at = blob.get(SAVED_AT_KEY)
+                if saved_at is None:
+                    # Written before this store stamped a save time. mtime is
+                    # the same fact from the filesystem, so those blobs age out
+                    # normally instead of being immortal for want of a field.
+                    saved_at = entry.stat().st_mtime
+            except (OSError, ValueError, KeyError, TypeError):
+                # Genuinely unreadable: counted, never guessed at. Deleting a
+                # blob whose age cannot be established would reclaim by
+                # assumption, which is how a reaper eats live state.
+                yield ("", None)
+                continue
+            yield (channel_id, float(saved_at))
 
 
 class RedisSessionStateStore(SessionStateStore):
@@ -131,13 +282,34 @@ class RedisSessionStateStore(SessionStateStore):
         return json.loads(raw)
 
     def save(self, channel_id: str, state: dict[str, Any]) -> None:
-        self._client.set(self._key(channel_id), encode_state(state))
+        self._client.set(self._key(channel_id), encode_state(self._stamp(state)))
 
     def clear(self, channel_id: str) -> None:
         self._client.delete(self._key(channel_id))
 
     def exists(self, channel_id: str) -> bool:
         return bool(self._client.exists(self._key(channel_id)))
+
+    def iter_entries(self) -> Iterable[tuple[str, Optional[float]]]:
+        # scan_iter, not keys(): keys() blocks the server for the whole scan,
+        # and this runs against a shared multi-pod instance. Redis has no
+        # per-key write time, so unlike the disk store there is no fallback for
+        # a blob written before save times were stamped.
+        for key in self._client.scan_iter(match=f"{self._prefix}*"):
+            raw = self._client.get(key)
+            if raw is None:
+                continue
+            try:
+                blob = json.loads(raw)
+                channel_id = blob["channel_id"]
+                saved_at = blob.get(SAVED_AT_KEY)
+            except (ValueError, KeyError, TypeError):
+                yield ("", None)
+                continue
+            if saved_at is None:
+                yield ("", None)
+                continue
+            yield (channel_id, float(saved_at))
 
 
 def get_session_state_store(
