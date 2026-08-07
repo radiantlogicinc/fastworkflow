@@ -38,6 +38,10 @@ CONTEXT_ANCESTORS = {
     "TodoList": {"TodoListManager"},
     "TodoItem": {"TodoList", "TodoListManager"},
 }
+# Which commands synthetic generation would actually produce utterances for. Supplied
+# explicitly here because these fixtures are dictionaries rather than real workflows;
+# in production it is read from the command directory.
+ALL_GENERATED = {c for cmds in CONTEXT_COMMANDS.values() for c in cmds}
 
 
 @pytest.fixture
@@ -79,6 +83,7 @@ def test_a_missing_cache_directory_blocks_carry_forward(workflow: Path):
         carried=["TodoList"],
         context_commands=CONTEXT_COMMANDS,
         context_ancestors=CONTEXT_ANCESTORS,
+        generation_eligible=ALL_GENERATED,
     )
 
     # TodoListManager's commands feed TodoList's wildcard class, and none is cached.
@@ -95,6 +100,7 @@ def test_a_populated_cache_allows_carry_forward(workflow: Path):
         carried=["TodoList"],
         context_commands=CONTEXT_COMMANDS,
         context_ancestors=CONTEXT_ANCESTORS,
+        generation_eligible=ALL_GENERATED,
     )
 
     assert absent == set(), "a fully cached shared set must not force a full retrain"
@@ -114,6 +120,7 @@ def test_a_partially_populated_cache_still_blocks(workflow: Path):
         carried=["TodoList"],
         context_commands=CONTEXT_COMMANDS,
         context_ancestors=CONTEXT_ANCESTORS,
+        generation_eligible=ALL_GENERATED,
     )
 
     assert absent == {"TodoListManager/delete"}
@@ -132,6 +139,7 @@ def test_commands_not_shared_with_a_carried_context_are_ignored(workflow: Path):
         carried=[],
         context_commands=CONTEXT_COMMANDS,
         context_ancestors=CONTEXT_ANCESTORS,
+        generation_eligible=ALL_GENERATED,
     )
 
     assert absent == set()
@@ -153,6 +161,7 @@ def test_the_check_matches_on_the_cache_naming_scheme(workflow: Path):
         carried=["TodoList"],
         context_commands=CONTEXT_COMMANDS,
         context_ancestors={"TodoList": {"TodoListManager"}},
+        generation_eligible=ALL_GENERATED,
     )
 
     assert "TodoListManager/create" not in absent, "a variant file must count as cached"
@@ -169,6 +178,7 @@ def test_a_non_json_file_in_the_cache_does_not_count_as_an_entry(workflow: Path)
         carried=["TodoList"],
         context_commands=CONTEXT_COMMANDS,
         context_ancestors={"TodoList": {"TodoListManager"}},
+        generation_eligible=ALL_GENERATED,
     )
 
     assert "TodoListManager/create" in absent, "a temp file is not a cached entry"
@@ -385,3 +395,105 @@ def test_the_calibration_reaches_the_human_report():
     assert "Leak calibration" in rendered
     assert "closer to recall" in rendered
     assert "verbatim training rows" in rendered, "exact duplicates are a bug signal"
+
+
+def test_a_command_with_nothing_to_generate_is_not_a_missing_cache_entry(workflow: Path):
+    """The regression this guard shipped with, and the reason it is not just
+    "does a file exist".
+
+    "No cache entry" means "will be regenerated" only for a command that has
+    something to generate. A command with no seed utterances -- set_root_context in
+    messaging_app_4 -- is never generated and so is never cached, and reading its
+    permanent absence as a miss forced a FULL RETRAIN on every selective run of any
+    workflow containing one. It broke 10 real integration tests.
+    """
+    _cache_entry(workflow, "TodoListManager/create")
+    _cache_entry(workflow, "TodoListManager/delete")
+
+    absent = _shared_commands_absent_from_cache(
+        str(workflow),
+        to_train=["TodoListManager"],
+        carried=["TodoList"],
+        context_commands={
+            **CONTEXT_COMMANDS,
+            "TodoListManager": CONTEXT_COMMANDS["TodoListManager"] | {"set_root_context"},
+        },
+        context_ancestors=CONTEXT_ANCESTORS,
+        # set_root_context is deliberately absent: generation never produces
+        # utterances for it, so it can never have a cache entry.
+        generation_eligible=ALL_GENERATED,
+    )
+
+    assert absent == set(), "a never-generated command must not force a retrain"
+
+
+def test_a_dotted_command_name_recovers_its_full_stem(workflow: Path):
+    """slugify preserves '.', so splitting on the FIRST dot truncates the stem.
+
+    A stem truncated to 'my' matches no command, so a cached command would read as
+    uncached and force a full retrain.
+    """
+    dotted = "Ctx/my.command"
+    _cache_entry(workflow, dotted)
+
+    absent = _shared_commands_absent_from_cache(
+        str(workflow),
+        to_train=["A"],
+        carried=["B"],
+        context_commands={"A": {dotted}, "B": set()},
+        context_ancestors={"B": {"A"}},
+        generation_eligible={dotted},
+    )
+
+    assert absent == set(), "the dotted stem was truncated at the first dot"
+
+
+def test_reserved_nlu_labels_are_not_generation_eligible():
+    """`wildcard` is in EVERY workflow's core command set and is never generated.
+
+    Leaving it in the eligible set made this guard fire on every selective run of
+    every workflow -- the second half of the regression, and the more universal
+    half: the first needed a workflow with a no-utterance command, this one needed
+    only a workflow.
+    """
+    import fastworkflow
+    from fastworkflow.command_routing import RoutingRegistry
+    from fastworkflow.nlu_labels import WILDCARD_LABEL
+    from fastworkflow.train.selective_training import _generation_eligible_commands
+
+    fastworkflow.init({"SPEEDDICT_FOLDERNAME": "/tmp/test_eligible_speedict"})
+    RoutingRegistry.clear_registry()
+    try:
+        eligible = _generation_eligible_commands(
+            "fastworkflow/examples/messaging_app_4")
+    finally:
+        RoutingRegistry.clear_registry()
+
+    assert eligible, "the fixture workflow should have eligible commands"
+    assert WILDCARD_LABEL not in eligible
+    assert not any(n.rsplit("/", 1)[-1] == WILDCARD_LABEL for n in eligible)
+    # Core commands other than the reserved labels ARE generated, so they stay.
+    assert any(n.startswith("IntentDetection/") for n in eligible)
+
+
+def test_an_unreadable_workflow_path_does_not_raise_or_force_a_retrain():
+    """Failing open here is deliberate.
+
+    A workflow the directory cannot describe is a problem the planner reports through
+    its own channels. Turning it into a full retrain would make this guard the
+    loudest reporter of a fault it does not own, on the least informative terms.
+
+    CommandDirectory.load does not raise for an unknown path -- it returns the core
+    commands, which every workflow has -- so what is asserted is the property that
+    matters: no exception escapes, and nothing reserved comes back.
+    """
+    from fastworkflow.nlu_labels import WILDCARD_LABEL
+    from fastworkflow.train.selective_training import _generation_eligible_commands
+
+    eligible = _generation_eligible_commands("/nonexistent/workflow/path")
+
+    assert isinstance(eligible, set)
+    assert WILDCARD_LABEL not in eligible
+    assert all(n.startswith("IntentDetection/") for n in eligible), (
+        "an unknown path should yield core commands at most, never a real command"
+    )

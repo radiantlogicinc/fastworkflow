@@ -52,6 +52,13 @@ authoritative pointer on the old version. During that preparation window,
 `prune_versions` also protects versions referenced by compatibility entries or the
 convenience link.
 
+Promotion is also gated on the version being self-consistent:
+`verify_version_consistency` re-derives the retraining closure recorded in
+`manifest.json` from that manifest alone and refuses to advance `current` when it
+contradicts itself or the version whose models were carried forward into it (AR3).
+That check reads only files, deliberately — see its docstring for why a check sharing
+inputs with the planner would not be a check.
+
 R4 also asked for a human-facing display surface, and this module used to carry one:
 `format_versions_table`, `describe_version` and the `human_size`/`human_duration`/
 `human_age` formatters, written for a `versions` CLI that was cut before it shipped.
@@ -66,6 +73,7 @@ matter on the publication path.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -75,10 +83,11 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Mapping, Optional
 
 from pydantic import BaseModel
 
+from fastworkflow.nlu_labels import WILDCARD_LABEL
 from fastworkflow.utils.logging import logger
 
 try:
@@ -187,6 +196,16 @@ class LegacyArtifactsPresentError(RuntimeError):
 
     Removing it would destroy artifacts, which R4 forbids doing implicitly, so the
     caller is told to run `migrate_legacy_to_version` first.
+    """
+
+
+class ArtifactConsistencyError(RuntimeError):
+    """Raised when a version's own records contradict each other at promotion time.
+
+    Publication is refused rather than reported, because the alternative is shipping a
+    version whose carried-forward models were trained against different data than the
+    version claims — the failure R5's closure exists to prevent and that nothing at
+    runtime would detect (spec F1/F10).
     """
 
 
@@ -583,6 +602,452 @@ def manifest_is_damaged(workflow_folderpath: str, version_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------
+# Promotion-time consistency (spec AR3)
+# ---------------------------------------------------------------------
+
+#: Manifest key holding, per context, everything needed to re-derive that context's
+#: share of R5's closure from the version alone: the ancestor set, the label space, the
+#: wildcard-class sources, and the utterance-set fingerprints those two command lists
+#: hash to. AR3 asks for the fingerprints specifically — recording wildcard sources as
+#: command NAMES cannot see an ancestor command whose *content* changed, which is the
+#: only thing that makes an ancestor-driven staleness visible at all.
+CONTEXT_CONTRIBUTIONS_KEY: str = "context_contributions"
+
+#: Manifest key mapping every command name to a digest of its training inputs. It is
+#: the raw material `utterance_set_fingerprint` hashes over, and keeping it beside the
+#: per-context digests is what lets the check recompute rather than take on trust.
+COMMAND_UTTERANCE_FINGERPRINTS_KEY: str = "command_utterance_fingerprints"
+
+#: Manifest key naming the version whose artifacts were carried forward into this one.
+CARRY_FORWARD_FROM_KEY: str = "carry_forward_from"
+
+CONTRIBUTION_FORMAT_KEY: str = "contribution_format_version"
+
+#: Bump when the shape of the two keys above changes. A version recorded under an
+#: unrecognised value is reported as unverifiable rather than checked against rules
+#: that no longer describe it.
+CONTRIBUTION_FORMAT_VERSION: int = 1
+
+#: Recorded for a command whose training inputs could not be fingerprinted at all. It
+#: is deliberately a fixed string rather than a fresh uuid: the digests below must be
+#: reproducible from the manifest, and the "this can never prove cleanliness" property
+#: is enforced by refusing to carry such a command's context forward, not by making the
+#: value differ from itself.
+UNRESOLVED_FINGERPRINT: str = "unresolved"
+
+#: Substituted when a command named by a context is absent from the fingerprint map.
+#: The absence is reported as a problem in its own right; this only keeps the digest
+#: well defined so the report says which context, not merely that something is wrong.
+MISSING_FINGERPRINT: str = "missing"
+
+_CONTRIBUTION_LIST_FIELDS: tuple[str, ...] = (
+    "ancestors",
+    "label_space",
+    "wildcard_sources",
+)
+
+
+class VersionConsistency(BaseModel):
+    """The outcome of re-deriving one version's recorded closure from its own records.
+
+    `problems` is promotion-blocking. `unverifiable_reasons` is not: it names what the
+    version does not record well enough to check, which is a different claim and must
+    never be silently rounded to "consistent".
+    """
+
+    version_id: str
+    verified: bool = False
+    unverifiable_reasons: list[str] = []
+    problems: list[str] = []
+
+
+def utterance_set_fingerprint(
+    command_fingerprints: Mapping[str, str], command_names: Iterable[str]
+) -> str:
+    """Digest the training inputs *command_names* contribute, order-independently.
+
+    Sorted and de-duplicated because a context's contribution is a set: the trainer
+    pools these commands' utterances, so a reordering is not a change and must not read
+    as one.
+    """
+    parts: list[str] = []
+    for name in sorted(set(command_names)):
+        value = command_fingerprints.get(name)
+        if not isinstance(value, str) or not value:
+            value = MISSING_FINGERPRINT
+        parts.append(f"{name}\x00{value}")
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def _contribution_block(manifest: dict) -> tuple[dict, dict]:
+    """Return (`context_contributions`, `command_utterance_fingerprints`) as dicts."""
+    contributions = manifest.get(CONTEXT_CONTRIBUTIONS_KEY)
+    fingerprints = manifest.get(COMMAND_UTTERANCE_FINGERPRINTS_KEY)
+    return (
+        contributions if isinstance(contributions, dict) else {},
+        fingerprints if isinstance(fingerprints, dict) else {},
+    )
+
+
+def _malformed_contribution_record(record: object) -> Optional[str]:
+    """Describe why *record* cannot be read as a context contribution, or None."""
+    if not isinstance(record, dict):
+        return "is not a JSON object"
+    for field in _CONTRIBUTION_LIST_FIELDS:
+        value = record.get(field)
+        if not isinstance(value, list) or any(
+            not isinstance(item, str) for item in value
+        ):
+            return f"field {field!r} is not a list of command/context names"
+    for field in ("own_utterances_sha256", "ancestor_utterances_sha256"):
+        if not isinstance(record.get(field), str) or not record.get(field):
+            return f"field {field!r} is not a recorded digest"
+    return None
+
+
+def _describe_fingerprint_drift(
+    context_name: str,
+    commands: Iterable[str],
+    current: Mapping[str, str],
+    previous: Mapping[str, str],
+) -> str:
+    """Name the commands whose recorded training inputs moved between two versions."""
+    changed = sorted(
+        name
+        for name in set(commands)
+        if current.get(name, MISSING_FINGERPRINT)
+        != previous.get(name, MISSING_FINGERPRINT)
+    )
+    if not changed:
+        return (
+            f"the ancestor contribution digest of context {context_name!r} differs "
+            f"from the version it was carried from, but no individual command's "
+            f"fingerprint does — the recorded ancestor set itself moved"
+        )
+    shown = ", ".join(changed[:5]) + (" ..." if len(changed) > 5 else "")
+    return (
+        f"context {context_name!r} was carried forward, but the training inputs of "
+        f"{len(changed)} command(s) feeding its wildcard class changed since the "
+        f"version it was carried from: {shown}"
+    )
+
+
+def verify_version_consistency(
+    workflow_folderpath: str, version_id: str
+) -> VersionConsistency:
+    """Re-derive *version_id*'s recorded closure from *version_id*'s own records.
+
+    This is AR3's promotion-time postcondition, and its whole value is that it does not
+    share inputs with the thing it checks. The plan-time signature diff cannot serve as
+    the check, because both sides of that diff come out of the same
+    `build_context_maps` call as the closure itself: a deterministic bug in
+    `commands()` or `get_ancestor_contexts` reproduces identically in the baseline and
+    in the current signature, the diff comes out clean, and the bad version publishes.
+    A check that shares its inputs with the thing it checks is not a check.
+
+    So nothing below calls the planner, imports `selective_training`, or touches the
+    routing registry. Everything it compares is already on disk, and it compares it
+    three ways, each of which fails for a different reason:
+
+    * against **laws that hold of any correct hierarchy** — ancestry is transitively
+      closed, no context is its own ancestor, every named ancestor is a context this
+      version describes, and a context's wildcard sources are exactly the union of its
+      ancestors' label spaces minus the reserved escalation label. A closure that
+      truncated an ancestor chain for one context but not for its parent contradicts
+      the first of those, and re-running `get_ancestor_contexts` would not notice
+      because it would return the same truncated chain;
+    * against **the fingerprints actually present in this version** — each recorded
+      per-context digest is recomputed from this version's own command fingerprints,
+      so a manifest whose per-context digests and per-command digests disagree cannot
+      be promoted;
+    * against **a different run's records** — for every context carried forward, the
+      digests recorded here must equal the digests recorded by the version the
+      artifacts came from. Those bytes were trained under that version's ancestor
+      contribution; if this version's differs, the closure failed to notice and the
+      models about to ship are stale. This is the comparison the plan-time diff cannot
+      make, because `wildcard_sources` holds command *names* and an ancestor command
+      whose content changed keeps its name.
+
+    Compatibility. A version published before this check existed records no
+    contribution block, and refusing to promote it would strand every workflow trained
+    by an earlier build — including the repair path, which republishes the version that
+    is already current. Absence is therefore reported as *unverifiable* and named in
+    `unverifiable_reasons` for the caller to log. It is never rounded up to "consistent".
+    Damage is different and is a problem: a manifest that exists and cannot be parsed
+    must not be read as "nothing was recorded", the same rule `retain_current_and_previous`
+    applies before it prunes a recovery point.
+    """
+    _validate_version_id(version_id)
+    result = VersionConsistency(version_id=version_id)
+
+    if manifest_is_damaged(workflow_folderpath, version_id):
+        result.problems.append(
+            f"the manifest of version {version_id} exists but cannot be read as an "
+            f"object, so nothing it recorded about the closure can be checked; a "
+            f"damaged manifest must not be read as 'nothing was recorded'"
+        )
+        return result
+
+    manifest = read_manifest(workflow_folderpath, version_id)
+    if CONTEXT_CONTRIBUTIONS_KEY not in manifest:
+        result.unverifiable_reasons.append(
+            f"version {version_id} records no per-context contribution fingerprints "
+            f"(it predates the promotion-time consistency check), so its closure "
+            f"cannot be re-derived"
+        )
+        return result
+
+    recorded_format = manifest.get(CONTRIBUTION_FORMAT_KEY)
+    if recorded_format != CONTRIBUTION_FORMAT_VERSION:
+        result.unverifiable_reasons.append(
+            f"version {version_id} records contribution format {recorded_format!r}, "
+            f"which this build does not understand (it writes "
+            f"{CONTRIBUTION_FORMAT_VERSION})"
+        )
+        return result
+
+    contributions, fingerprints = _contribution_block(manifest)
+    if not contributions:
+        result.problems.append(
+            f"version {version_id} records a {CONTEXT_CONTRIBUTIONS_KEY} block that is "
+            f"empty or not an object, so it claims to be checkable and is not"
+        )
+        return result
+
+    carried = {
+        name
+        for name, record in contributions.items()
+        if isinstance(record, dict) and record.get("carried_forward")
+    }
+    source_contributions, source_fingerprints = _resolve_carry_forward_records(
+        workflow_folderpath, manifest, carried, result
+    )
+
+    for context_name in sorted(contributions):
+        record = contributions[context_name]
+        if malformed := _malformed_contribution_record(record):
+            result.problems.append(
+                f"the recorded contribution of context {context_name!r} in version "
+                f"{version_id} {malformed}"
+            )
+            continue
+        _verify_one_context(
+            workflow_folderpath,
+            version_id,
+            context_name,
+            record,
+            contributions,
+            fingerprints,
+            source_contributions,
+            source_fingerprints,
+            result,
+        )
+
+    result.verified = not result.problems
+    return result
+
+
+def _resolve_carry_forward_records(
+    workflow_folderpath: str,
+    manifest: dict,
+    carried: set[str],
+    result: VersionConsistency,
+) -> tuple[dict, dict]:
+    """Load the records of the version this one carried artifacts forward from.
+
+    Returns empty maps when there is nothing to compare against, having recorded why.
+    A source version that is no longer on disk is *unverifiable* rather than a problem:
+    the documented rollback procedure republishes an old version by id, and its source
+    was very likely pruned years of runs ago. Refusing there would make rollback — the
+    thing versioning exists for — impossible after two more training runs.
+    """
+    if not carried:
+        return {}, {}
+
+    source_id = manifest.get(CARRY_FORWARD_FROM_KEY)
+    if not isinstance(source_id, str) or not source_id:
+        result.problems.append(
+            f"version {result.version_id} carries {len(carried)} context(s) forward "
+            f"but names no source version, so what those models were trained against "
+            f"cannot be established"
+        )
+        return {}, {}
+
+    try:
+        _validate_version_id(source_id)
+    except ValueError as exc:
+        result.problems.append(
+            f"version {result.version_id} names an unusable carry-forward source "
+            f"{source_id!r}: {exc}"
+        )
+        return {}, {}
+
+    if not version_dir(workflow_folderpath, source_id).is_dir():
+        result.unverifiable_reasons.append(
+            f"the version {source_id} that {result.version_id} carried "
+            f"{len(carried)} context(s) forward from is no longer on disk, so their "
+            f"recorded contributions cannot be compared against it"
+        )
+        return {}, {}
+
+    if manifest_is_damaged(workflow_folderpath, source_id):
+        result.problems.append(
+            f"the manifest of {source_id}, which {result.version_id} carried "
+            f"{len(carried)} context(s) forward from, cannot be read as an object, so "
+            f"what those carried models were trained against cannot be established"
+        )
+        return {}, {}
+
+    source_manifest = read_manifest(workflow_folderpath, source_id)
+    if source_manifest.get(CONTRIBUTION_FORMAT_KEY) != CONTRIBUTION_FORMAT_VERSION:
+        result.unverifiable_reasons.append(
+            f"version {source_id}, which {result.version_id} carried {len(carried)} "
+            f"context(s) forward from, records no usable contribution block, so those "
+            f"contexts cannot be checked against what their models were trained on"
+        )
+        return {}, {}
+    return _contribution_block(source_manifest)
+
+
+def _verify_one_context(
+    workflow_folderpath: str,
+    version_id: str,
+    context_name: str,
+    record: dict,
+    contributions: dict,
+    fingerprints: dict,
+    source_contributions: dict,
+    source_fingerprints: dict,
+    result: VersionConsistency,
+) -> None:
+    """Apply every promotion-blocking rule to one recorded context contribution."""
+    ancestors: list[str] = record["ancestors"]
+    label_space: list[str] = record["label_space"]
+    wildcard_sources: list[str] = record["wildcard_sources"]
+
+    if context_name in ancestors:
+        result.problems.append(
+            f"context {context_name!r} is recorded as its own ancestor in version "
+            f"{version_id}"
+        )
+
+    expected_sources: set[str] = set()
+    for ancestor in ancestors:
+        ancestor_record = contributions.get(ancestor)
+        if _malformed_contribution_record(ancestor_record) is not None:
+            result.problems.append(
+                f"context {context_name!r} names ancestor {ancestor!r}, which version "
+                f"{version_id} does not describe — that ancestor's commands would have "
+                f"contributed nothing to {context_name!r}'s wildcard class and nothing "
+                f"would have said so"
+            )
+            continue
+        if missing := sorted(set(ancestor_record["ancestors"]) - set(ancestors)):
+            result.problems.append(
+                f"the recorded ancestry of context {context_name!r} is not transitively "
+                f"closed: its ancestor {ancestor!r} lists {', '.join(missing)}, which "
+                f"{context_name!r} does not"
+            )
+        expected_sources |= {
+            command
+            for command in ancestor_record["label_space"]
+            if command.split("/")[-1] != WILDCARD_LABEL
+        }
+
+    if expected_sources != set(wildcard_sources):
+        absent = sorted(expected_sources - set(wildcard_sources))
+        extra = sorted(set(wildcard_sources) - expected_sources)
+        result.problems.append(
+            f"the recorded wildcard-class sources of context {context_name!r} are not "
+            f"the union of its ancestors' label spaces"
+            + (f"; missing {', '.join(absent)}" if absent else "")
+            + (f"; unexpected {', '.join(extra)}" if extra else "")
+        )
+
+    expects = record.get("expects_wildcard_label")
+    if isinstance(expects, bool) and expects != bool(
+        set(wildcard_sources) - set(label_space)
+    ):
+        result.problems.append(
+            f"context {context_name!r} records expects_wildcard_label={expects}, which "
+            f"contradicts its own wildcard sources and label space"
+        )
+
+    named = set(label_space) | set(wildcard_sources)
+    if orphans := sorted(named - set(fingerprints)):
+        result.problems.append(
+            f"context {context_name!r} names {len(orphans)} command(s) that version "
+            f"{version_id} records no training-input fingerprint for: "
+            f"{', '.join(orphans[:5])}{' ...' if len(orphans) > 5 else ''}"
+        )
+
+    for field, commands in (
+        ("own_utterances_sha256", label_space),
+        ("ancestor_utterances_sha256", wildcard_sources),
+    ):
+        recomputed = utterance_set_fingerprint(fingerprints, commands)
+        if record[field] != recomputed:
+            result.problems.append(
+                f"the recorded {field} of context {context_name!r} disagrees with the "
+                f"command fingerprints present in version {version_id}"
+            )
+
+    if not record.get("carried_forward"):
+        return
+
+    # Only from here down: rules that apply because these artifacts were NOT produced
+    # by this run and therefore encode an earlier run's training data.
+    if unresolved := sorted(
+        command
+        for command in named
+        if fingerprints.get(command) == UNRESOLVED_FINGERPRINT
+    ):
+        result.problems.append(
+            f"context {context_name!r} was carried forward, but the training inputs of "
+            f"{len(unresolved)} command(s) it depends on could not be fingerprinted, so "
+            f"nothing establishes that its models are still current: "
+            f"{', '.join(unresolved[:5])}{' ...' if len(unresolved) > 5 else ''}"
+        )
+
+    folder = version_dir(workflow_folderpath, version_id) / context_folder_name(
+        context_name
+    )
+    if not (folder / "threshold.json").exists():
+        result.problems.append(
+            f"context {context_name!r} is recorded as carried forward into version "
+            f"{version_id} but has no model artifacts there; publishing would remove "
+            f"its compatibility entry and un-train that part of the workflow"
+        )
+
+    source_record = source_contributions.get(context_name)
+    if _malformed_contribution_record(source_record) is not None:
+        if source_contributions:
+            result.problems.append(
+                f"context {context_name!r} was carried forward, but the version it came "
+                f"from records no usable contribution for it, so what its models were "
+                f"trained against cannot be established"
+            )
+        return
+
+    if source_record["ancestor_utterances_sha256"] != record[
+        "ancestor_utterances_sha256"
+    ]:
+        result.problems.append(
+            _describe_fingerprint_drift(
+                context_name,
+                set(wildcard_sources) | set(source_record["wildcard_sources"]),
+                fingerprints,
+                source_fingerprints,
+            )
+        )
+    if source_record["own_utterances_sha256"] != record["own_utterances_sha256"]:
+        result.problems.append(
+            f"context {context_name!r} was carried forward, but its own label space's "
+            f"training inputs differ from the version it was carried from"
+        )
+
+
+# ---------------------------------------------------------------------
 # Cross-process publication lock
 # ---------------------------------------------------------------------
 
@@ -802,6 +1267,26 @@ def _routed_version_ids(workflow_folderpath: str) -> set[str]:
     return routed
 
 
+def _require_consistent_version(workflow_folderpath: str, version_id: str) -> None:
+    """Refuse to promote *version_id* when its own records contradict each other."""
+    consistency = verify_version_consistency(workflow_folderpath, version_id)
+    if consistency.problems:
+        raise ArtifactConsistencyError(
+            f"Refusing to make artifact version {version_id} current: its own records "
+            f"contradict each other, so at least one carried-forward context's models "
+            f"were not trained on the data this version describes.\n  - "
+            + "\n  - ".join(consistency.problems)
+            + f"\nThe previously current version is untouched and still complete. "
+            f"Re-run training with --regenerate-utterances, or publish an earlier "
+            f"version from {versions_root(workflow_folderpath)}."
+        )
+    for reason in consistency.unverifiable_reasons:
+        logger.warning(
+            f"Publishing artifact version {version_id} without the promotion-time "
+            f"closure check: {reason}."
+        )
+
+
 def publish_version(workflow_folderpath: str, version_id: str) -> None:
     """Make *version_id* the current version, rewiring every reader path to it.
 
@@ -818,6 +1303,13 @@ def publish_version(workflow_folderpath: str, version_id: str) -> None:
     still occupies a name we must route. Deleting it would destroy artifacts, which
     R4 forbids doing implicitly — run `migrate_legacy_to_version` first.
 
+    Raises `ArtifactConsistencyError` when `verify_version_consistency` finds that the
+    version's own records contradict each other (AR3). That check gates *advancing*
+    `current` only. Re-publishing the version that is already current repairs reader
+    paths for artifacts that are live either way, and `_repair_noop_publication` does
+    exactly that on a workflow whose manifest may be damaged; refusing there would turn
+    a lost manifest into an unroutable workflow instead of a blocked promotion.
+
     Not itself locked: publication and the retention prune that follows it are one
     critical section, so the boundary belongs to the caller holding `publication_lock`
     across both. `train.__main__` does that on every path that publishes.
@@ -826,6 +1318,9 @@ def publish_version(workflow_folderpath: str, version_id: str) -> None:
     vdir = version_dir(workflow_folderpath, version_id)
     if not vdir.is_dir():
         raise FileNotFoundError(f"Artifact version directory does not exist: {vdir}")
+
+    if resolve_current_version(workflow_folderpath) != version_id:
+        _require_consistent_version(workflow_folderpath, version_id)
 
     info = command_info_root(workflow_folderpath)
     info.mkdir(parents=True, exist_ok=True)

@@ -41,7 +41,13 @@ from fastworkflow.model_pipeline_training import (
     get_artifact_path,
 )
 from fastworkflow.nlu_labels import WILDCARD_LABEL
-from fastworkflow.train import artifact_versioning, heldout_evaluation, training_report
+from fastworkflow.train import (
+    artifact_versioning,
+    determinism,
+    heldout_evaluation,
+    training_report,
+    utterance_cache,
+)
 from fastworkflow.train import selective_training as st
 from fastworkflow.train.__main__ import _repair_noop_publication
 from fastworkflow.train.determinism import (
@@ -229,6 +235,32 @@ def _rebuild(workflow_path: str) -> None:
     RoutingRegistry.get_definition(workflow_path, load_cached=False)
 
 
+def _seed_utterance_cache(workflow_path: str) -> None:
+    """Leave behind the cache entries a real baseline run would have written.
+
+    Same placeholder philosophy as the artifact files below: the carry-forward guard
+    (`_shared_commands_absent_from_cache`) reads only whether an entry EXISTS for a
+    command, never its contents, because it runs before this run's variant key is
+    known. Without them the fixture describes a state a real run cannot produce -- a
+    published baseline whose generated utterances were never cached -- and the
+    planner correctly refuses to carry anything forward, which is not what the tests
+    below are about.
+    """
+    cache_root = os.path.join(
+        workflow_path, determinism.COMMAND_INFO_FOLDERNAME,
+        utterance_cache.CACHE_DIRNAME,
+    )
+    os.makedirs(cache_root, exist_ok=True)
+    context_commands, _ancestors, _ = st.build_context_maps(
+        workflow_path, st.contexts_for_training(workflow_path))
+    for commands in context_commands.values():
+        for command_name in commands:
+            path = os.path.join(
+                cache_root, f"{utterance_cache.slugify(command_name)}.baseline.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"entries": {}}, f)
+
+
 def _publish_baseline(workflow_path: str, seed: int = 42) -> tuple[str, st.TrainingSignature]:
     """Publish a version holding a complete-looking artifact set for every context.
 
@@ -238,6 +270,7 @@ def _publish_baseline(workflow_path: str, seed: int = 42) -> tuple[str, st.Train
     everything the planner does read -- the version layout, the published pointer,
     and the recorded signature.
     """
+    _seed_utterance_cache(workflow_path)
     contexts = st.contexts_for_training(workflow_path)
     version_id = artifact_versioning.new_version_id()
     for context_name in contexts:

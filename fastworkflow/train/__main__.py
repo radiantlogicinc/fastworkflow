@@ -506,12 +506,19 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
     selective_training.save_training_signature(
         workflow_path, version_id, training_signature)
 
+    # The contribution fields are what makes the version checkable by something that is
+    # not the planner: `publish_version` re-derives this run's closure from them alone
+    # and refuses to advance `current` if they contradict each other or the version the
+    # carried-forward models actually came from (AR3).
     artifact_versioning.write_manifest(
         workflow_path,
         version_id,
         train_duration_seconds=time.monotonic() - started,
         contexts_retrained=sorted(plan.contexts_to_train),
         contexts_carried_forward=sorted(plan.contexts_carried_forward),
+        **selective_training.context_contribution_manifest_fields(
+            training_signature, plan
+        ),
     )
     report = training_report.report_training_data(
         workflow_path, print_report=False, write=True)

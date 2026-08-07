@@ -85,7 +85,11 @@ from pydantic import BaseModel, ValidationError
 
 import fastworkflow
 from fastworkflow.command_directory import CommandDirectory
-from fastworkflow.nlu_labels import PARAMETER_VALUE_PLACEHOLDERS, WILDCARD_LABEL
+from fastworkflow.nlu_labels import (
+    NON_ROUTABLE_LABELS,
+    PARAMETER_VALUE_PLACEHOLDERS,
+    WILDCARD_LABEL,
+)
 from fastworkflow.train import (
     artifact_versioning,
     determinism,
@@ -746,6 +750,82 @@ def load_training_signature(
         return None
 
 
+def command_utterance_fingerprint(fingerprint: CommandFingerprint) -> str:
+    """Digest one command's training inputs for the version manifest.
+
+    Collapses the two hashes ``CommandFingerprint`` keeps apart -- the file and the
+    declared seed list -- into the single value AR3's per-context utterance-set
+    fingerprints are hashed from. They are kept apart in the signature so a prose edit
+    can be told from a data change *when deciding what to retrain*; a context's
+    contribution is a set of training inputs, and either hash moving moves it.
+
+    An unresolved fingerprint records a fixed marker rather than a fresh uuid, because
+    the manifest's digests must be reproducible from the manifest. Its "this can never
+    prove cleanliness" property is enforced at promotion instead, by refusing to carry
+    a context forward when any command feeding it carries the marker.
+    """
+    if not fingerprint.resolved:
+        return artifact_versioning.UNRESOLVED_FINGERPRINT
+    payload = (
+        f"{fingerprint.source_sha256 or ''}\x00"
+        f"{fingerprint.seed_utterances_sha256 or ''}"
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def context_contribution_manifest_fields(
+    signature: TrainingSignature, plan: TrainingPlan
+) -> dict:
+    """Record what AR3 needs to re-derive this run's closure from the version alone.
+
+    ``ContextSignature`` already names each context's ancestors and wildcard sources,
+    but only as command NAMES, and a name does not move when the command's file or seed
+    list does. An ancestor command whose *content* changed is therefore invisible to
+    every comparison built on those lists -- which is precisely the staleness the
+    ancestor axis of the closure exists to catch, and precisely what a check built on
+    those lists could not catch it failing to do. Hashing each context's contribution
+    over the per-command fingerprints closes that gap.
+
+    Written into the manifest rather than beside ``training_signature.json`` because
+    ``artifact_versioning`` is what runs the check, must not import this module (the
+    dependency runs the other way), and must not import the routing registry at all --
+    a postcondition that re-consults the planner is not independent of it.
+    """
+    fingerprints = {
+        name: command_utterance_fingerprint(fingerprint)
+        for name, fingerprint in sorted(signature.command_fingerprints.items())
+    }
+    carried = set(plan.contexts_carried_forward)
+
+    contributions = {
+        context_name: {
+            "ancestors": sorted(context_signature.ancestors),
+            "label_space": sorted(context_signature.label_space),
+            "wildcard_sources": sorted(context_signature.wildcard_sources),
+            "expects_wildcard_label": context_signature.expects_wildcard_label,
+            "own_utterances_sha256": artifact_versioning.utterance_set_fingerprint(
+                fingerprints, context_signature.label_space
+            ),
+            "ancestor_utterances_sha256": artifact_versioning.utterance_set_fingerprint(
+                fingerprints, context_signature.wildcard_sources
+            ),
+            "carried_forward": context_name in carried,
+        }
+        for context_name, context_signature in sorted(signature.contexts.items())
+    }
+
+    fields = {
+        artifact_versioning.CONTRIBUTION_FORMAT_KEY: (
+            artifact_versioning.CONTRIBUTION_FORMAT_VERSION
+        ),
+        artifact_versioning.COMMAND_UTTERANCE_FINGERPRINTS_KEY: fingerprints,
+        artifact_versioning.CONTEXT_CONTRIBUTIONS_KEY: contributions,
+    }
+    if plan.carry_forward_from:
+        fields[artifact_versioning.CARRY_FORWARD_FROM_KEY] = plan.carry_forward_from
+    return fields
+
+
 def context_artifacts_complete(
     workflow_folderpath: str, version_id: str, context_name: str
 ) -> bool:
@@ -1310,12 +1390,38 @@ def _commands_contributing_to(
     return contributing
 
 
+def _generation_eligible_commands(workflow_folderpath: str) -> set[str]:
+    """Commands synthetic generation would actually produce utterances for.
+
+    The same two sources generation itself draws from, so a command that is never
+    generated cannot be mistaken for one whose cache went missing. Returns the empty
+    set if the directory cannot be read, which makes the caller's intersection empty
+    and the guard silent -- an unreadable command directory is a problem for the
+    planner to report, not for this check to turn into a full retrain.
+    """
+    try:
+        cmd_dir = CommandDirectory.load(workflow_folderpath)
+        names = set(cmd_dir.get_utterance_keys()) | set(cmd_dir.core_command_names)
+    except Exception:
+        return set()
+
+    # Reserved NLU labels appear among the core command names but generation skips
+    # them, so they can never have a cache entry. `wildcard` is the one that bites:
+    # it is in every workflow's core set, so leaving it in made this guard fire on
+    # every selective run everywhere.
+    return {
+        name for name in names
+        if name.rsplit("/", 1)[-1] not in NON_ROUTABLE_LABELS
+    }
+
+
 def _shared_commands_absent_from_cache(
     workflow_folderpath: str,
     to_train: Iterable[str],
     carried: Iterable[str],
     context_commands: dict[str, set[str]],
     context_ancestors: dict[str, set[str]],
+    generation_eligible: Optional[set[str]] = None,
 ) -> set[str]:
     """Commands feeding BOTH a retrained and a carried-forward context, with no cache.
 
@@ -1335,6 +1441,16 @@ def _shared_commands_absent_from_cache(
         shared |= retrained_side & _commands_contributing_to(
             context_name, context_commands, context_ancestors)
 
+    # "No cache entry" only means "will be regenerated" for a command that has
+    # something to generate. A command with no seed utterances -- set_root_context
+    # in messaging_app_4, for instance -- is never generated and so is never cached,
+    # and treating its permanent absence as a miss forced a full retrain on every
+    # selective run of any workflow containing one.
+    shared &= (
+        _generation_eligible_commands(workflow_folderpath)
+        if generation_eligible is None
+        else generation_eligible
+    )
     if not shared:
         return set()
 
@@ -1345,8 +1461,11 @@ def _shared_commands_absent_from_cache(
     if not os.path.isdir(cache_root):
         return shared
 
+    # rsplit, not split: slugify deliberately preserves '.', so a dotted command name
+    # produces a dotted stem and splitting on the FIRST dot would truncate it. The
+    # trailing two components are always the variant key and the extension.
     cached_stems = {
-        name.split(".", 1)[0]
+        name.rsplit(".", 2)[0]
         for name in os.listdir(cache_root)
         if name.endswith(".json")
     }
