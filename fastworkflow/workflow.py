@@ -5,9 +5,8 @@ import weakref
 from functools import wraps
 from typing import Optional
 
-from speedict import Rdict
-
 import fastworkflow
+from fastworkflow.kvstore import KVStore
 from fastworkflow.utils.logging import logger
 
 
@@ -34,9 +33,10 @@ from fastworkflow.utils.logging import logger
 # SessionStateStore + ConversationStore; the CLI no longer resumes workflow
 # context across process restarts (accepted trade-off).
 #
-# speedict is still used elsewhere (the enablecache decorator below,
-# ConversationStore, and the NLU clarification cache) and is intentionally
-# left in place there.
+# Remaining on-disk caches (enablecache below, ConversationStore, the NLU
+# clarification cache, and utterance/embedding matching) use stdlib sqlite3
+# via :class:`fastworkflow.kvstore.KVStore` / ``UtteranceCacheStore`` — JSON
+# values, WAL mode, no process-exclusive LOCK.
 # ----------------------------------------------------------------------
 _STATE_LOCK = threading.RLock()
 # workflow_id -> live Workflow (weak, so abandoned sessions auto-evict)
@@ -52,18 +52,23 @@ def enablecache(func):
         # Create a cache key based on the function arguments
         key = str(args) + str(kwargs)
 
-        # Get the cache database
-        cache_db_path = self.get_cachedb_folderpath(func.__name__)
-        cache_db = Rdict(cache_db_path)
+        # Get the cache database (folder path historically fed RocksDB; SQLite
+        # needs a file inside that folder).
+        cache_db_folder = self.get_cachedb_folderpath(func.__name__)
+        with KVStore(os.path.join(cache_db_folder, "cache.sqlite3")) as cache_db:
+            if key not in cache_db:
+                # If the result is not in the cache, call the function and store the result
+                result = func(self, *args, **kwargs)
+                try:
+                    cache_db[key] = result
+                except TypeError as exc:
+                    raise TypeError(
+                        f"@enablecache requires a JSON-serialisable return value; "
+                        f"{func.__qualname__} returned {type(result).__name__}"
+                    ) from exc
+            else:
+                result = cache_db[key]
 
-        if key not in cache_db:
-            # If the result is not in the cache, call the function and store the result
-            result = func(self, *args, **kwargs)
-            cache_db[key] = result
-        else:
-            result = cache_db[key]
-
-        cache_db.close()
         return result
 
     return wrapper

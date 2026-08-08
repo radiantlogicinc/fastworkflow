@@ -11,7 +11,7 @@ Two families:
   whole point: a turn is durably recorded before it can be dropped from memory,
   so windowing memory never shortens the durable record.
 
-Everything runs against real runtimes, a real Rdict-backed conversation store and
+Everything runs against real runtimes, a real SQLite-backed conversation store and
 the real turn engine. Turn bodies are plain callables rather than trained
 commands, so no model or LLM call is required.
 """
@@ -23,7 +23,6 @@ import gc
 import importlib
 import json
 import os
-import pickle
 import sys
 import time
 import uuid
@@ -409,15 +408,15 @@ def test_durable_conversation_keeps_turns_the_memory_window_dropped(app_module):
     ]
 
 
-class _CountingRdict:
-    """Forwards to a real Rdict and tallies the bytes handed to it."""
+class _CountingKVStore:
+    """Forwards to a real KVStore and tallies the JSON bytes handed to it."""
 
     def __init__(self, db, tally: dict):
         self._db = db
         self._tally = tally
 
     def __setitem__(self, key, value):
-        self._tally["bytes_written"] += len(pickle.dumps(value))
+        self._tally["bytes_written"] += len(json.dumps(value).encode("utf-8"))
         self._tally["writes"] += 1
         self._db[key] = value
 
@@ -436,6 +435,12 @@ class _CountingRdict:
     def close(self):
         self._db.close()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
 
 class _CountingConversationStore(ConversationStore):
     """A real store whose write volume can be measured."""
@@ -445,7 +450,7 @@ class _CountingConversationStore(ConversationStore):
         self.tally = {"bytes_written": 0, "writes": 0}
 
     def _get_db(self):
-        return _CountingRdict(super()._get_db(), self.tally)
+        return _CountingKVStore(super()._get_db(), self.tally)
 
 
 def test_incremental_save_writes_only_the_new_turns(app_module, tmp_path):
@@ -458,7 +463,7 @@ def test_incremental_save_writes_only_the_new_turns(app_module, tmp_path):
     """
     turn_count = 40
     turns = [_payload_turn(i) for i in range(turn_count)]
-    payload_bytes = sum(len(pickle.dumps(t)) for t in turns)
+    payload_bytes = sum(len(json.dumps(t).encode("utf-8")) for t in turns)
 
     appending = _CountingConversationStore("appending", str(tmp_path))
     for turn in turns:
@@ -616,33 +621,33 @@ def test_feedback_on_an_already_durable_turn_is_persisted(app_module):
     asyncio.run(check())
 
 
-def test_a_record_rewritten_by_an_older_version_is_read_intact(app_module, tmp_path):
-    """Turns moved out of the record; a downgrade-then-upgrade must not duplicate them.
+def test_a_stale_inline_turns_field_is_ignored(app_module, tmp_path):
+    """After the sqlite migration, only per-turn keys are authoritative.
 
-    An older binary rewrites the inline list while leaving the per-turn
-    bookkeeping in place. Concatenating both would return each turn twice and out
-    of order.
+    Pre-migration RocksDB stores could keep an inline ``turns`` list. New
+    ``.sqlite3`` stores ignore that field so a poisoned inline list cannot
+    duplicate or reorder the durable per-turn entries.
     """
-    from speedict import Rdict
+    from fastworkflow.kvstore import KVStore
 
     store = ConversationStore("rollback", str(tmp_path))
     conv_id = store.reserve_next_conversation_id()
     for i in range(3):
         store.append_conversation_turns(conv_id, [_payload_turn(i, size_bytes=32)])
 
-    db = Rdict(store.db_path)
+    db = KVStore(store.db_path)
     conv = db[f"conv:{conv_id}"]
     conv["turns"] = [_payload_turn(i, size_bytes=32) for i in range(4)]
     db[f"conv:{conv_id}"] = conv
     db.close()
 
     summaries = [t["conversation summary"] for t in store.get_conversation(conv_id)["turns"]]
-    assert summaries == [f"turn-{i}" for i in range(4)]
-    assert store.count_conversation_turns(conv_id) == 4
+    assert summaries == [f"turn-{i}" for i in range(3)]
+    assert store.count_conversation_turns(conv_id) == 3
 
-    store.append_conversation_turns(conv_id, [_payload_turn(4, size_bytes=32)])
+    store.append_conversation_turns(conv_id, [_payload_turn(3, size_bytes=32)])
     summaries = [t["conversation summary"] for t in store.get_conversation(conv_id)["turns"]]
-    assert summaries == [f"turn-{i}" for i in range(5)]
+    assert summaries == [f"turn-{i}" for i in range(4)]
 
 
 def test_summary_read_never_materializes_turn_payloads(app_module, tmp_path):

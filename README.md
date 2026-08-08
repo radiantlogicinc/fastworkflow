@@ -136,7 +136,7 @@ This is the fastest way to see fastWorkflow in action.
 </p>
 
 ```sh
-# 1. Install (Linux/macOS; on Windows use WSL. Python 3.11+)
+# 1. Install (Linux/macOS; on Windows use WSL. Python 3.13+)
 pip install fastworkflow
 
 # 2. Fetch the hello_world example + env file templates
@@ -494,9 +494,10 @@ pip install "fastworkflow[training]"  # adds HuggingFace datasets for the train 
 ```
 
 **Notes**
-- Linux/macOS only — on Windows use WSL. Python 3.11+.
+- Linux/macOS only — on Windows use WSL. Python 3.13–3.14 (stdlib `sqlite3` replaced the abandoned `speedict`/RocksDB dependency that blocked 3.13 installs).
 - Installs PyTorch; the first install may take a few minutes.
 - `fastworkflow train` needs the optional HuggingFace `datasets` package (`pip install datasets`, or `poetry install --with dev` from this repo).
+- On-disk conversation stores are now `{channel_id}.sqlite3` under `SPEEDDICT_FOLDERNAME/channel_conversations`. NLU caches use `*.sqlite3` under `___convo_info/`. Pre-existing RocksDB `.rdb` / `cache.db` directories are unused and may be deleted. Downstream shims that aliased `speedict.Rdict` to `rocksdict.Rdict` can be removed.
 
 The core depends on **plain** `litellm` (client only — no proxy server stack), so it co-installs cleanly with downstream apps that pin a plain `litellm`. Server-only deps live behind the `server` extra.
 

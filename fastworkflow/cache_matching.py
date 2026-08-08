@@ -1,11 +1,12 @@
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
-import fastworkflow
 import torch
-from speedict import Rdict
 import mmh3  # mmh33 implementation
 from datetime import datetime
 from functools import lru_cache
+import weakref
+
+from fastworkflow.kvstore import UtteranceCacheStore
 
 # ---------------------------------------------------------------------
 # In-process memoisation for expensive DistilBERT embeddings.
@@ -26,7 +27,6 @@ def _cached_embedding(model_id: int, text: str):
         raise RuntimeError("ModelPipeline instance no longer alive; cache invalid.")
     return _compute_embedding(text, pipeline)
 
-import weakref
 _MODEL_ID_2_REF: dict[int, weakref.ReferenceType] = {}
 
 
@@ -63,14 +63,9 @@ def store_utterance_cache(cache_path, utterance, label, model_pipeline=None):
     Returns:
         The hash key of the stored utterance
     """
-    # Open the database
-    db = Rdict(cache_path)
-    try:
+    with UtteranceCacheStore(cache_path) as db:
         # Generate hash for utterance using mmh3
         utterance_hash = str(mmh3.hash(utterance))
-        
-        # Get the cache or initialize
-        cache = db.get("cache", {})
         
         # Get current timestamp for feedback date
         current_time = datetime.now().isoformat()
@@ -78,44 +73,46 @@ def store_utterance_cache(cache_path, utterance, label, model_pipeline=None):
         # Compute embedding if model_pipeline provided
         embedding = None
         if model_pipeline is not None:
-            embedding = get_embedding(utterance, model_pipeline)[0].tolist()
-        
-        if utterance_hash in cache:
-            # Update existing entry
+            embedding = get_embedding(utterance, model_pipeline)[0]
+
+        existing = db.get(utterance_hash)
+        if existing is not None:
+            command_mapping = existing["command_mapping"]
+            stored_embedding = existing["embedding"]
+            stored_utterance = existing["utterance"]
+
             if embedding is not None:
-                cache[utterance_hash]["embedding"] = embedding
-                
-            if label in cache[utterance_hash]["command_mapping"]:
-                # Increment frequency for this label
-                cache[utterance_hash]["command_mapping"][label]["frequency"] += 1
-                cache[utterance_hash]["command_mapping"][label]["feedback_date"] = current_time
+                stored_embedding = embedding
+
+            if label in command_mapping:
+                command_mapping[label]["frequency"] += 1
+                command_mapping[label]["feedback_date"] = current_time
             else:
-                # Add new label mapping
-                cache[utterance_hash]["command_mapping"][label] = {
+                command_mapping[label] = {
                     "frequency": 1,
                     "feedback_date": current_time
                 }
+
+            db.upsert(
+                utterance_hash,
+                utterance=stored_utterance or utterance,
+                command_mapping=command_mapping,
+                embedding=stored_embedding,
+            )
         else:
-            # Create new entry
-            cache[utterance_hash] = {
-                "embedding": embedding if embedding is not None else [],
-                "utterance": utterance,  # Store original utterance for reference
-                "command_mapping": {
+            db.upsert(
+                utterance_hash,
+                utterance=utterance,
+                command_mapping={
                     label: {
                         "frequency": 1,
                         "feedback_date": current_time
                     }
-                }
-            }
-        
-        # Save updated cache to database
-        db["cache"] = cache
+                },
+                embedding=embedding if embedding is not None else None,
+            )
         
         return utterance_hash
-        
-    finally:
-        # Always close the database
-        db.close()
 
 def get_embedding(text: str, model_pipeline):
     """Return (possibly cached) embedding for *text* using *model_pipeline*."""
@@ -144,43 +141,39 @@ def cache_match(cache_path, utterance, model_pipeline, threshold=0.90, return_de
         If match found: true_label or (true_label, similarity) if return_details=True
         If no match: None
     """
-    # Open the database
-    db = Rdict(cache_path)
-    try:
-        # Get the cache dictionary
-        cache = db.get("cache", {})
-
-        # If no entries, return None
-        if not cache:
-            return None
-
+    with UtteranceCacheStore(cache_path) as db:
         # Get embedding for the query utterance
         query_embedding = get_embedding(utterance, model_pipeline)
 
         # Reshape query embedding for cosine_similarity
         query_embedding = query_embedding.reshape(1, -1)
 
-        # Check cache for similar utterances
+        # Check cache for similar utterances (stream; do not materialise all rows)
         best_similarity = 0
-        cache_match = None
+        best_key = None
+        best_mapping = None
+        saw_any = False
 
-        # Find the best matching cached utterance
-        for hash_key, entry in cache.items():
-            # Skip entries without embeddings
-            if not entry.get("embedding"):
+        for hash_key, entry in db.iter_entries():
+            saw_any = True
+            cached_embedding = entry.get("embedding")
+            if cached_embedding is None or cached_embedding.size == 0:
                 continue
 
-            # Reshape cached embedding for cosine_similarity
-            cached_embedding = np.array(entry["embedding"]).reshape(1, -1)
+            cached_embedding = np.asarray(cached_embedding, dtype=np.float32).reshape(1, -1)
             similarity = cosine_similarity(query_embedding, cached_embedding)[0][0]
 
             if similarity > best_similarity:
                 best_similarity = similarity
-                cache_match = hash_key
+                best_key = hash_key
+                best_mapping = entry["command_mapping"]
+
+        if not saw_any:
+            return None
 
         # If good cache match found, determine the best label
-        if best_similarity >= threshold and cache_match is not None:
-            command_mapping = cache[cache_match]["command_mapping"]
+        if best_similarity >= threshold and best_key is not None and best_mapping is not None:
+            command_mapping = best_mapping
 
             # If only one label, return it directly
             if len(command_mapping) == 1:
@@ -210,6 +203,3 @@ def cache_match(cache_path, utterance, model_pipeline, threshold=0.90, return_de
             return (true_label, best_similarity) if return_details else true_label
         # No good match found
         return None
-    finally:
-        # Always close the database
-        db.close()

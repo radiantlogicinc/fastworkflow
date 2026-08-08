@@ -4,12 +4,12 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from pydantic import BaseModel
-from speedict import Rdict
 
 import fastworkflow
 from fastworkflow.utils.logging import logger
 from fastworkflow import NLUPipelineStage
 from fastworkflow.cache_matching import cache_match, store_utterance_cache
+from fastworkflow.kvstore import KVStore
 from fastworkflow.model_pipeline_training import (
     CommandRouter
 )
@@ -194,7 +194,7 @@ class CommandNamePrediction:
         base_dir = convo_path
         # Create directory if it doesn't exist
         os.makedirs(base_dir, exist_ok=True)
-        return os.path.join(base_dir, f"{workflow_id}.db")
+        return os.path.join(base_dir, f"{workflow_id}.sqlite3")
 
     @staticmethod
     def _get_cache_path_cache(convo_path):
@@ -204,7 +204,7 @@ class CommandNamePrediction:
         base_dir = convo_path
         # Create directory if it doesn't exist
         os.makedirs(base_dir, exist_ok=True)
-        return os.path.join(base_dir, "cache.db")
+        return os.path.join(base_dir, "cache.sqlite3")
 
     # Store the suggested commands with the flag type
     @staticmethod
@@ -217,12 +217,10 @@ class CommandNamePrediction:
             command_list: List of suggested commands
             flag_type: Type of constraint (1=ambiguous, 2=misclassified)
         """
-        db = Rdict(cache_path)
-        try:
-            db["suggested_commands"] = command_list
-            db["flag_type"] = flag_type
-        finally:
-            db.close()
+        with KVStore(cache_path) as db:
+            # predict() returns a numpy ndarray of labels; JSON needs plain strs.
+            db["suggested_commands"] = [str(c) for c in list(command_list)]
+            db["flag_type"] = int(flag_type)
 
     # Get the suggested commands
     @staticmethod
@@ -230,29 +228,20 @@ class CommandNamePrediction:
         """
         Get the list of suggested commands for the constrained selection
         """
-        db = Rdict(cache_path)
-        try:
+        with KVStore(cache_path) as db:
             return db.get("suggested_commands", [])
-        finally:
-            db.close()
 
     @staticmethod
     def _get_count(cache_path):
-        db = Rdict(cache_path)
-        try:
+        with KVStore(cache_path) as db:
             return db.get("utterance_count", 0)  # Default to 0 if key doesn't exist
-        finally:
-            db.close()
 
     @staticmethod
     def _print_db_contents(cache_path):
-        db = Rdict(cache_path)
-        try:
+        with KVStore(cache_path) as db:
             print("All keys in database:", list(db.keys()))
             for key in db.keys():
                 print(f"Key: {key}, Value: {db[key]}")
-        finally:
-            db.close()
 
     @staticmethod
     def _store_utterance(cache_path, utterance, label):
@@ -260,10 +249,7 @@ class CommandNamePrediction:
         Store utterance in existing or new database
         Returns: The utterance count used
         """
-        # Open the database (creates if doesn't exist)
-        db = Rdict(cache_path)
-
-        try:
+        with KVStore(cache_path) as db:
             # Get existing counter or initialize to 0
             utterance_count = db.get("utterance_count", 0)
 
@@ -281,22 +267,14 @@ class CommandNamePrediction:
 
             return utterance_count - 1  # Return the count used for this utterance
 
-        finally:
-            # Always close the database
-            db.close()
-
     # Function to read from database
     @staticmethod
     def _read_utterance(cache_path, utterance_id):
         """
         Read a specific utterance from the database
         """
-        db = Rdict(cache_path)
-        try:
+        with KVStore(cache_path) as db:
             return db.get(utterance_id)['utterance']
-        finally:
-            db.close()
-
     @staticmethod
     def resolve_fully_qualified_command_name(
         command_name: Optional[str], command_name_dict: dict[str, str]) -> Optional[str]:
