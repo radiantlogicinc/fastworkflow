@@ -4,6 +4,20 @@ This file provides guidance to AI coding agents when working with code in this r
 
 Activate the local `.venv` Python environment before running tests or scripts.
 
+**On a CUDA machine, `poetry install` alone gives you CPU torch.** The default is
+pinned to CPU-only wheels, because Poetry cannot lock torch from the CPU and CUDA
+indexes at once. GPU users need both steps:
+
+```bash
+poetry install --with gpu && make install-gpu-torch
+```
+
+There is no warning if you skip it — training silently runs on CPU, which is much
+slower and easy to mistake for the suite or the model being slow. `make
+install-gpu-torch` verifies CUDA is usable before reporting success, so run
+`python -c "import torch; print(torch.cuda.is_available())"` if you are unsure
+which you have.
+
 ## Project Overview
 
 `fastWorkflow` is a Python framework for building NLP-driven workflows and AI agents with deterministic or LLM-powered business logic. It enables "AI-enabling" existing Python applications by wrapping their classes and methods with an intent-detection and parameter-extraction pipeline built on DSPy, PyTorch/Transformers, scikit-learn utilities, and Pydantic.
@@ -118,3 +132,24 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 - Do not commit or push without clear authority from the active profile or the current user request.
 - If a required sync or push is blocked, stop and report the exact command and error.
 <!-- END BEADS INTEGRATION -->
+
+## bd: closes are invisible to git until you export with `-o`
+
+Outside the managed block above, because it is repo-specific and must survive that
+block being regenerated.
+
+`bd` writes to a local Dolt database; `.beads/issues.jsonl` is a passive export and
+is the file git tracks. `bd close` updates the database, **not** the JSONL. Since bd
+1.1.2, plain `bd export` writes to stdout — the file needs `-o`:
+
+```bash
+bd export -o .beads/issues.jsonl
+```
+
+Omitting it does not error. `bd close` reports success, `git status` shows nothing,
+and the JSONL still says `open` — which looks exactly like bd silently losing writes,
+and was filed twice as that bug (`fix-46c`, `fix-fyw`) before the cause was found.
+Seven issues sat "open" for weeks while finished as a result.
+
+Verify by reading the file, not by trusting the command's output. Full detail in
+`.cursor/skills/beads-workflow/SKILL.md`.
