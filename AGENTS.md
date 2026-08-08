@@ -149,7 +149,17 @@ bd export -o .beads/issues.jsonl
 Omitting it does not error. `bd close` reports success, `git status` shows nothing,
 and the JSONL still says `open` — which looks exactly like bd silently losing writes,
 and was filed twice as that bug (`fix-46c`, `fix-fyw`) before the cause was found.
-Seven issues sat "open" for weeks while finished as a result.
+
+**A second, separate failure mode, which this habit does not catch.** Eight issues
+were found finished but open in one session, including an epic sized at a month of
+work. Their `closed_at` timestamps show nobody had ever run `bd close` on them — so
+the export bug is not what hid them. The work simply shipped under neighbouring
+issues and nobody went back for the parent. The export bug explains why closes stay
+invisible *once someone tries*; it does not explain issues nobody closed.
+
+So the habit is two things, not one: export after writing, **and** close the parent
+when the last piece of its work lands. Verifying before scheduling is the only thing
+that catches the second — one of those eight was the largest item on the board.
 
 Verify by reading the file, not by trusting the command's output. Full detail in
 `.cursor/skills/beads-workflow/SKILL.md`.
