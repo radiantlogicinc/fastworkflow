@@ -144,6 +144,27 @@ def test_session_manager_basic(app_module):
     asyncio.run(test_async())
 
 
+# Keys of the public TurnOutput projection every turn surface answers with
+# (fastworkflow/turn.py). ``success`` is a computed field, so it is part of the
+# serialized shape rather than something the server bolts on.
+TURN_OUTPUT_KEYS = frozenset(
+    {"turn_key", "status", "failure_reason", "answer", "command_outputs", "success"}
+)
+
+
+def _assert_turn_output_projection(payload: dict, *, status: str | None = None) -> None:
+    """Assert *payload* carries the TurnOutput projection."""
+    missing = TURN_OUTPUT_KEYS - set(payload)
+    assert not missing, f"TurnOutput keys missing from response: {sorted(missing)}"
+    assert isinstance(payload["turn_key"], str) and payload["turn_key"]
+    assert isinstance(payload["success"], bool)
+    assert isinstance(payload["answer"], str)
+    assert isinstance(payload["command_outputs"], list)
+    assert payload["failure_reason"] is None or isinstance(payload["failure_reason"], str)
+    if status is not None:
+        assert payload["status"] == status
+
+
 def _authorize(client: TestClient, access_token: str) -> dict:
     return {"Authorization": f"Bearer {access_token}"}
 
@@ -180,9 +201,11 @@ def test_initialize_with_startup_command_in_request(app_module, unique_user_id):
     assert "access_token" in data
     assert "refresh_token" in data
     assert "startup_output" in data
-    # Verify startup_output has expected structure
+    # startup_output is now the startup turn's TurnOutput projection; the
+    # CommandOutput it used to be is preserved under command_outputs.
     if data["startup_output"]:
-        assert "command_responses" in data["startup_output"]
+        _assert_turn_output_projection(data["startup_output"])
+        assert "command_responses" in data["startup_output"]["command_outputs"][-1]
 
 
 def test_initialize_with_startup_action_in_request(app_module, unique_user_id):
@@ -202,7 +225,8 @@ def test_initialize_with_startup_action_in_request(app_module, unique_user_id):
     assert "access_token" in data
     assert "startup_output" in data
     if data["startup_output"]:
-        assert "command_responses" in data["startup_output"]
+        _assert_turn_output_projection(data["startup_output"])
+        assert "command_responses" in data["startup_output"]["command_outputs"][-1]
 
 
 def test_initialize_requires_user_id_with_startup(app_module, unique_user_id):
@@ -253,6 +277,7 @@ def test_invoke_agent_endpoint(app_module, unique_user_id):
     assert response.status_code == 200
     data = response.json()
     assert "command_responses" in data and len(data["command_responses"]) > 0
+    _assert_turn_output_projection(data)
 
 
 def test_invoke_assistant_endpoint(app_module, unique_user_id):
@@ -267,6 +292,7 @@ def test_invoke_assistant_endpoint(app_module, unique_user_id):
     assert response.status_code == 200
     data = response.json()
     assert "command_responses" in data and len(data["command_responses"]) > 0
+    _assert_turn_output_projection(data)
 
 
 def test_perform_action_endpoint(app_module, unique_user_id):
@@ -284,6 +310,7 @@ def test_perform_action_endpoint(app_module, unique_user_id):
     assert response.status_code == 200
     data = response.json()
     assert "command_responses" in data
+    _assert_turn_output_projection(data, status="completed")
 
 
 def test_session_not_found_errors(app_module):

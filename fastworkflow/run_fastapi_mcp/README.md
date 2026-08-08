@@ -64,7 +64,7 @@ uvicorn services.run_fastapi.main:app --workflow_path /path/to/workflow
 ```
 
 Notes (trusted mode):
-- `/initialize` returns access/refresh tokens and, if a startup command/action is provided, also returns the startup `CommandOutput`.
+- `/initialize` returns access/refresh tokens and, if a startup command/action is provided, also returns the startup turn's `TurnOutput`.
 - Subsequent endpoints require `Authorization: Bearer <access_token>`.
 - Traces include `user_id` when available (from JWT `uid` claim).
 
@@ -139,7 +139,9 @@ Initialize a session for a channel. Workflow configuration is loaded at server s
   "refresh_token": "eyJhbGci...",
   "token_type": "bearer",
   "expires_in": 3600,
-  "startup_output": { /* CommandOutput, present only if startup was executed */ }
+  "startup_output": { /* TurnOutput, present only if the startup turn finished in-window */ },
+  "startup_turn_key": "20260807T193000.123456Z-a1b2c3d4e5f6",
+  "startup_exec_state": "done"
 }
 ```
 
@@ -160,6 +162,12 @@ Submit a natural language query for agentic processing.
 **Response:**
 ```json
 {
+  "turn_key": "20260807T193000.123456Z-a1b2c3d4e5f6",
+  "exec_state": "done",
+  "status": "completed",
+  "failure_reason": null,
+  "success": true,
+  "answer": "Found 3 orders for channel 42",
   "command_responses": [
     {
       "response": "Found 3 orders for channel 42",
@@ -169,13 +177,33 @@ Submit a natural language query for agentic processing.
       "recommendations": []
     }
   ],
-  "workflow_name": "default_workflow",
-  "context": "Order management context",
-  "command_name": "find_orders",
-  "command_parameters": "channel_id=42",
+  "command_outputs": [
+    {
+      "command_responses": [ /* ... */ ],
+      "workflow_name": "default_workflow",
+      "context": "Order management context",
+      "command_name": "find_orders",
+      "command_parameters": "channel_id=42"
+    }
+  ],
   "traces": [...]
 }
 ```
+
+Every turn endpoint answers with this shape — the turn's public `TurnOutput`
+projection (`turn_key`, `status`, `failure_reason`, `answer`, `command_outputs`,
+`success`), plus the transport's `exec_state`, a backward-compatible
+`command_responses`, and `traces` when collected. The per-command
+`workflow_name`/`context`/`command_name`/`command_parameters` that used to sit at
+the top level are now inside each `command_outputs` entry.
+
+`exec_state` is where the *work* is, `status` is how the *turn* came out. A turn
+that fails, or that suspends to ask the user something, is still HTTP 200: read
+the outcome from `status`/`failure_reason`/`success`, never from the status code.
+A turn still running past the wait window returns `202 {turn_key, exec_state:
+"running"}`; retrying the same request rejoins the same execution.
+
+See `docs/fastworkflow_fastapi_spec.md` §6a for the full contract.
 
 ### `POST /invoke_assistant`
 Submit a query for deterministic/assistant execution (no planning).
@@ -200,14 +228,19 @@ Execute a specific workflow action directly (bypasses parameter extraction).
 ```
 
 **Response:**
-Same format as `/invoke_agent` (CommandOutput with traces).
+Same format as `/invoke_agent`. Each direct action is its own logical turn.
 
 ### `POST /invoke_agent_stream`
-Stream trace events and final `CommandOutput` via Streamable HTTP:
+Stream trace events and the turn's final `TurnOutput` via Streamable HTTP:
 - NDJSON (default; `Content-Type: application/x-ndjson`)
 - SSE (when REST `stream_format` is set to `sse`; `Content-Type: text/event-stream`)
 
 **Headers:** Same as `/invoke_agent`.
+
+The terminal `output` event carries the bare `TurnOutput` — no `exec_state` or
+`command_responses`, since a stream has no deferral state to report. A failed or
+`awaiting_user` turn arrives as an `output` event; the `error` event is reserved
+for transport failures.
 
 ## Conversation Management (REST)
 

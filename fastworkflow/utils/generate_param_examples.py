@@ -26,6 +26,7 @@ from fastworkflow.train.determinism import get_training_seed
 from fastworkflow.train.param_example_cache import (
     compute_fingerprint,
     get_param_example_cache,
+    run_stable_form,
 )
 from fastworkflow.train.utterance_cache import (
     PRODUCTION_COMPLETION_BACKEND,
@@ -522,12 +523,82 @@ def transform_examples_to_dict_format(examples: List[str]) -> List[Dict]:
     
     return transformed_examples
 
+def _address_free(text: str) -> str:
+    """Strip the memory address `object.__repr__` embeds, wherever it appears in *text*.
+
+    The prompt interpolates ``str(field_annotations)`` verbatim inside a ```python
+    fence, and pydantic's ``FieldInfo`` repr nests the repr of anything in
+    ``json_schema_extra`` — so a field declared
+    ``Field(json_schema_extra={"examples": [Foo()]})`` puts ``<Foo object at 0x7f...>``
+    into the prompt through that block as well as through the "Examples:" line that bd
+    fix-r4p names. Fixing only the named line would leave the address in the prompt, so
+    the reproducibility it costs would be unchanged.
+
+    A textual strip rather than a structural re-render, deliberately: rendering
+    ``model_fields`` ourselves would change the prompt for every workflow in existence,
+    which is a training-data QUALITY change wearing a determinism fix's clothes. This
+    matches nothing at all in a workflow whose examples are JSON-native — which is every
+    shipped one — so their prompts stay byte-identical.
+
+    The pattern is a literal inside this function on purpose. A module-level compiled
+    constant would sit outside `prompt_source_digest`, and editing it would then change
+    the prompt without invalidating a single cache entry: the exact shape of hole this
+    function was added to close.
+    """
+    return re.sub(r" at 0x[0-9a-fA-F]+", "", text)
+
+
+def render_field_examples(
+    field_name: str, examples: List[Any], command_name: str
+) -> str:
+    """Render one field's declared examples for the prompt's "Examples:" line.
+
+    Was ``', '.join(repr(ex) for ex in examples)``. `repr` of an object inheriting
+    ``object.__repr__`` embeds ``id(self)``, so the model was shown a memory address and
+    conditioned on it, and it differed on every run (bd fix-r4p).
+
+    Canonicalised through `run_stable_form` — the same substitutions the cache key's
+    digest makes — and then ``repr``d, which keeps the rendering Python-shaped. That
+    matters because the prompt demands Python output three lines further down ("None
+    values should be represented as Python None", "Boolean values should be True or
+    False"): rendering ``null`` and ``true`` here would contradict it. For every
+    JSON-native example this produces exactly the text it produced before.
+
+    A value with no run-stable representation is rendered as its type, and reported at
+    WARNING. Both halves are needed: the type is stable and address-free, and the
+    warning is the only place a developer can learn that the model was shown a
+    placeholder instead of an example. It is a coercion, but not a silent one — and it
+    is not a raise, because `extract_field_details` accepts such a value today, a
+    command carrying one still trains (only uncached), and a prompt renderer must not be
+    the thing that fails a multi-hour run.
+    """
+    if not examples:
+        return "None"
+    rendered: List[str] = []
+    for example in examples:
+        try:
+            rendered.append(repr(run_stable_form(example)))
+        except TypeError:
+            type_name = f"{type(example).__module__}.{type(example).__qualname__}"
+            logger.warning(
+                f"Field '{field_name}' of command '{command_name}' declares an example "
+                f"of type {type_name}, which has no run-stable representation. The "
+                f"prompt shows the model the type name instead of a value; two runs "
+                f"would otherwise have been sent different memory addresses. Make the "
+                f"example JSON-native (a string, number, boolean, None, list or dict) "
+                f"to have it reach the model."
+            )
+            rendered.append(f"<{type_name}>")
+    return ", ".join(rendered)
+
+
 # Functions whose source text is hashed into the parameter-example cache key. Two
 # kinds are in here and both matter:
 #
-#   * PROMPT-BEARING  -- generate_dspy_examples holds the prompt template itself, and
-#     extract_field_details produces the "Fields to extract" block rendered into it.
-#     Edit either and the LLM is asked a different question.
+#   * PROMPT-BEARING  -- generate_dspy_examples holds the prompt template itself,
+#     extract_field_details produces the "Fields to extract" block rendered into it, and
+#     render_field_examples / _address_free decide the text of two parts of that block.
+#     Edit any of them and the LLM is asked a different question.
 #   * PAYLOAD-SHAPING -- transform_examples_to_dict_format produces the accepted
 #     examples that get cached, and validate_parameters (with the two text helpers it
 #     calls) decides which examples are rejected. Edit any of them and the same LLM
@@ -543,6 +614,8 @@ def _digested_functions() -> tuple:
     return (
         generate_dspy_examples,
         extract_field_details,
+        render_field_examples,
+        _address_free,
         transform_examples_to_dict_format,
         _parse_dspy_example,
         _is_supported_literal,
@@ -742,7 +815,7 @@ def generate_dspy_examples(
         - {field['name']} ({field['type']})
           Description: {field['description']}
           {'Required' if field['required'] else 'Optional'}
-          Examples: {', '.join(repr(ex) for ex in field['examples']) if field['examples'] else 'None'}
+          Examples: {render_field_examples(field['name'], field['examples'], command_name)}
           {f'Allowed values: {field["enum"]}' if field["enum"] else ''}
           {f'Pattern: {field["pattern"]}' if field["pattern"] else ''}
         """
@@ -756,7 +829,7 @@ def generate_dspy_examples(
 
     Here are field annotations that provide constraints and examples for fields:
     ```python
-    {field_annotations}
+    {_address_free(str(field_annotations))}
     ```
 
     {fields_section}

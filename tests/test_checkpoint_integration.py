@@ -429,10 +429,11 @@ def test_a_suspended_channel_is_evicted_now_that_its_snapshot_is_complete(
         persist_pending_after_turn(
             manager,
             runtime,
-            fastworkflow.CommandOutput(
-                command_responses=[
-                    fastworkflow.CommandResponse(response="which one?")
-                ]
+            fastworkflow.TurnOutput(
+                turn_key=ctx._turn_key,
+                status=fastworkflow.TurnStatus.AWAITING_USER,
+                answer="which one?",
+                command_outputs=list(ctx._turn_outputs),
             ),
         )
 
@@ -853,8 +854,11 @@ def test_suspended_session_is_evictable_once_its_state_is_durable():
         ctx._begin_turn("do the thing")
         ctx.append_ask_user_entry("Which one?")
 
-        persist_pending_after_turn(manager, runtime, fastworkflow.CommandOutput(
-            command_responses=[fastworkflow.CommandResponse(response="Which one?")]
+        persist_pending_after_turn(manager, runtime, fastworkflow.TurnOutput(
+            turn_key=ctx._turn_key,
+            status=fastworkflow.TurnStatus.AWAITING_USER,
+            answer="Which one?",
+            command_outputs=list(ctx._turn_outputs),
         ))
         stored = manager.session_state_store.exists(channel_id)
         return checkpoint.assess(runtime, manager.session_state_store), stored
@@ -929,10 +933,22 @@ def test_mid_extraction_session_persists_instead_of_clearing():
         cme["command_name"] = "add_two_numbers"
 
         assert ctx.has_open_command()
-        persist_pending_after_turn(manager, runtime, fastworkflow.CommandOutput(
-            command_responses=[
-                fastworkflow.CommandResponse(response="which numbers?", success=False)
-            ]
+        # A COMPLETED turn, deliberately: the turn ended (with an error asking
+        # for the missing values), so nothing in the TurnOutput says "keep this".
+        # Only has_open_command() can save the partial parameters here.
+        persist_pending_after_turn(manager, runtime, fastworkflow.TurnOutput(
+            turn_key=fastworkflow.mint_turn_key(),
+            status=fastworkflow.TurnStatus.COMPLETED,
+            answer="which numbers?",
+            command_outputs=[
+                fastworkflow.CommandOutput(
+                    command_responses=[
+                        fastworkflow.CommandResponse(
+                            response="which numbers?", success=False
+                        )
+                    ]
+                )
+            ],
         ))
         return manager.session_state_store.load(channel_id)
 

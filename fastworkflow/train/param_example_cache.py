@@ -216,6 +216,56 @@ def _canonicalize_unserialisable(value: Any) -> Any:
     )
 
 
+def run_stable_form(value: Any) -> Any:
+    """Return *value* with every part JSON cannot encode replaced by its stand-in.
+
+    `_canonical_digest` reaches the same substitutions lazily, through
+    ``json.dumps(default=_canonicalize_unserialisable)``. This applies them eagerly, for
+    the caller that needs the VALUE rather than the digest: the line of
+    `generate_param_examples` that shows the model a field's declared examples used
+    ``repr`` directly, so an example inheriting ``object.__repr__`` put a memory address
+    *inside the prompt* (bd fix-r4p). An unstable cache key costs one wasted
+    regeneration; an address in the prompt is noise the model conditions on, and it moves
+    every run, so the examples it produced are irreproducible for a reason no diff shows.
+
+    Builtin subclasses are narrowed to the builtin, because that is precisely what
+    ``json.dumps`` does with them: a ``str``-mixin enum member IS a ``str``, so the
+    encoder writes its value and never consults the hook. Rendering such a value one way
+    in the prompt and another way in the key would give up the point of sharing the
+    canonicaliser.
+
+    Narrowed through the BASE class's own dunder rather than through ``str()`` or
+    ``int()``, which dispatch to the subclass. That is not pedantry: ``str(mode)`` for a
+    ``class Mode(str, Enum)`` member is ``'Mode.EXPRESS'`` on this interpreter, while
+    ``json.dumps(mode)`` is ``'"express"'`` — using ``str()`` here would have shown the
+    model a name the key had never seen.
+
+    Raises `TypeError` for a value with no run-stable representation, exactly as the
+    digest path does, rather than approximating one. A caller that must not fail on that
+    handles it — see `generate_param_examples.render_field_examples`.
+    """
+    if value is None:
+        return None
+    # bool before int: `bool` is an `int` subclass, and `int(True)` would render the
+    # prompt's `True` as `1`.
+    if isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, int):
+        return int.__int__(value)
+    if isinstance(value, float):
+        return float.__float__(value)
+    if isinstance(value, str):
+        return str.__str__(value)
+    if isinstance(value, dict):
+        return {run_stable_form(key): run_stable_form(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        # A tuple becomes a list, which is what `json.dumps` encodes it as.
+        return [run_stable_form(item) for item in value]
+    # The hook's own output is JSON-native at the top level but can nest a value that is
+    # not (an `Enum` whose member value is a `Decimal`), so recurse into it.
+    return run_stable_form(_canonicalize_unserialisable(value))
+
+
 def _canonical_digest(payload: Any) -> str:
     """Stable short digest of any JSON-serialisable structure.
 
@@ -250,11 +300,17 @@ def compute_fingerprint(
     Every argument is something that changes what the LLM would produce, or what would
     be written to disk from what it produced:
 
-    * `field_annotations_text` — `str(ParameterModel.model_fields)`, interpolated
-      verbatim into the prompt inside a ```python fence. **This is the input whose
-      silent staleness would be worst**: a developer adds a field to a command's
-      parameter model, and without this the runtime keeps few-shot prompting with
-      examples that cannot possibly mention it.
+    * `field_annotations_text` — `str(ParameterModel.model_fields)`, which the prompt
+      interpolates inside a ```python fence. **This is the input whose silent staleness
+      would be worst**: a developer adds a field to a command's parameter model, and
+      without this the runtime keeps few-shot prompting with examples that cannot
+      possibly mention it. The prompt's copy has embedded memory addresses stripped out
+      of it (`generate_param_examples._address_free`, bd fix-r4p) and the text digested
+      here does not, so the two differ for a parameter model holding a non-JSON-native
+      example. That is safe in the only direction that matters: the raw text is strictly
+      MORE discriminating, so it can cost a miss and never cause a stale hit — and such
+      a command does not reach a key at all today, because `field_details` raises in
+      `_canonicalize_unserialisable` first and `param_example_fingerprint` returns None.
     * `field_details` — the structured extraction of the same annotations, which is
       rendered into the prompt a second time as the "Fields to extract" section AND
       drives which parameters the validator looks for. Digested separately from the

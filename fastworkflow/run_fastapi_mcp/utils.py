@@ -118,12 +118,17 @@ class InitializeResponse(BaseModel):
     and the caller polls via ``startup_turn_key`` (202). The "already exists"
     branch returns the SAME startup execution's three-state status, never a
     silently-empty result (§3.3).
+
+    ``startup_output`` is the startup turn's ``TurnOutput`` — the same public
+    projection every other turn endpoint returns. Each command's own
+    ``command_responses``/``artifacts`` are still reachable under
+    ``startup_output.command_outputs``.
     """
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
     expires_in: int  # Access token expiration in seconds
-    startup_output: Optional[fastworkflow.CommandOutput] = None  # Present if startup finished in-window
+    startup_output: Optional[fastworkflow.TurnOutput] = None  # Present if startup finished in-window
     startup_turn_key: Optional[str] = None  # Handle to poll the startup turn
     startup_exec_state: Optional[str] = None  # queued | running | done | lost
     startup_error: Optional[str] = None  # Present if the startup turn failed
@@ -319,14 +324,15 @@ def _run_startup_sync(
     ctx: WorkflowExecutionContext,
     startup_command: Optional[str],
     startup_action: Optional[fastworkflow.Action],
-) -> Optional[fastworkflow.CommandOutput]:
+) -> Optional[fastworkflow.TurnOutput]:
+    """Run startup as its own logical turn. Mirrors __main__._build_startup_work_fn."""
     if startup_action:
         if startup_action.workflow_id is None and ctx.app_workflow:
             startup_action.workflow_id = ctx.app_workflow.id
-        return ctx.process_action(startup_action)
+        return ctx.process_action_turn(startup_action)
     if startup_command:
         assistant_command = f"/{startup_command.lstrip('/')}"
-        return ctx._execute_message(assistant_command)
+        return ctx.process_turn(assistant_command)
     return None
 
 
@@ -597,16 +603,24 @@ def get_channelconversations_dir() -> str:
     return user_conversations_dir
 
 
-def _is_awaiting_user_output(output: fastworkflow.CommandOutput) -> bool:
-    if not output.command_responses:
-        return False
-    return bool(output.command_responses[0].artifacts.get("awaiting_user"))
+def _is_awaiting_user_output(output: Optional[fastworkflow.TurnOutput]) -> bool:
+    """Read suspension off the turn's own status, not out of a command's artifacts.
+
+    The artifacts key this used to inspect is a per-command detail that happens
+    to correlate with suspension; ``TurnStatus`` is the turn-level statement of
+    it, which is what a caller deciding whether to persist a suspended turn is
+    actually asking about.
+    """
+    return (
+        output is not None
+        and output.status == fastworkflow.TurnStatus.AWAITING_USER
+    )
 
 
 def persist_pending_after_turn(
     session_manager: "ChannelSessionManager",
     runtime: "ChannelRuntime",
-    output: fastworkflow.CommandOutput,
+    output: Optional[fastworkflow.TurnOutput],
 ) -> None:
     """Save or clear durable suspended state after a Topology-B turn."""
     ctx = runtime.execution_context
@@ -627,20 +641,21 @@ def persist_pending_after_turn(
         session_manager.session_state_store.clear(runtime.channel_id)
 
 
-async def run_process_message(
+async def run_process_turn(
     runtime: "ChannelRuntime",
     message: str,
     timeout_seconds: int,
     session_manager: "ChannelSessionManager",
-) -> fastworkflow.CommandOutput:
-    """Run process_message in a thread pool with timeout (Topology B)."""
+) -> fastworkflow.TurnOutput:
+    """Run one logical turn in a thread pool with timeout (Topology B)."""
     loop = asyncio.get_running_loop()
     ctx = runtime.execution_context
 
-    def _run() -> fastworkflow.CommandOutput:
-        # Use the shared, non-deprecated dispatch (process_message() only adds a
-        # DeprecationWarning on top of this).
-        return ctx._execute_message(message)
+    def _run() -> fastworkflow.TurnOutput:
+        # process_turn(), never the deprecated process_message(): same dispatch,
+        # no DeprecationWarning, and it returns the public TurnOutput the whole
+        # transport edge now speaks.
+        return ctx.process_turn(message)
 
     try:
         output = await asyncio.wait_for(
@@ -666,12 +681,12 @@ async def run_process_action(
     action: fastworkflow.Action,
     timeout_seconds: int,
     session_manager: "ChannelSessionManager",
-) -> fastworkflow.CommandOutput:
+) -> fastworkflow.TurnOutput:
     loop = asyncio.get_running_loop()
     ctx = runtime.execution_context
 
-    def _run() -> fastworkflow.CommandOutput:
-        return ctx.process_action(action)
+    def _run() -> fastworkflow.TurnOutput:
+        return ctx.process_action_turn(action)
 
     try:
         output = await asyncio.wait_for(
@@ -725,9 +740,9 @@ async def run_process_message_with_trace_stream(
     on_trace: Callable[[dict[str, Any]], Any],
     user_id: Optional[str] = None,
     on_timeout: Optional[Callable[[str], Any]] = None,
-) -> fastworkflow.CommandOutput:
+) -> fastworkflow.TurnOutput:
     """
-    Run process_message in an executor while draining command_trace_queue concurrently.
+    Run one logical turn in an executor while draining command_trace_queue concurrently.
 
     The deadline governs *delivery*, not ownership. When it passes, ``on_timeout``
     is invoked once so the caller can tell the client, but the executor future is
@@ -739,12 +754,12 @@ async def run_process_message_with_trace_stream(
     ctx = runtime.execution_context
     trace_queue = ctx.command_trace_queue
     if trace_queue is None:
-        return await run_process_message(
+        return await run_process_turn(
             runtime, message, timeout_seconds, session_manager
         )
 
     exec_future = loop.run_in_executor(
-        None, lambda: ctx._execute_message(message)
+        None, lambda: ctx.process_turn(message)
     )
     start = time.time()
     timed_out = False

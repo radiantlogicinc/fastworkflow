@@ -266,9 +266,13 @@ class EscalationBudget(BaseModel):
     always_include_rows: Optional[int] = None
     #: The bound `class_balance.reserved_class_budget` computed.
     selected_budget: Optional[int] = None
-    #: Distinct ancestor (context, command) sources. Each must keep at least one row or
-    #: it cannot be escalated to at all, so `class_balance.reserved_class_budget` takes
-    #: the max of this and the cost ratio: coverage is a requirement, cost a preference.
+    #: Distinct ancestor (context, command) sources, EXCLUDING the core commands. Each
+    #: must keep at least one row or it cannot be escalated to at all, so
+    #: `class_balance.reserved_class_budget` takes the max of this and the cost ratio:
+    #: coverage is a requirement, cost a preference. Core commands are excluded because
+    #: they are a label in every context and so are never escalation targets -- which is
+    #: also what stops this number moving when an unrelated context is renamed (bd
+    #: fix-4ej); see `class_balance`'s module docstring for the derivation.
     coverage_floor: Optional[int] = None
     coverage_floor_applied: Optional[bool] = None
     reason: Optional[str] = None
@@ -954,7 +958,10 @@ def _escalation_budget_lines(budgets: list[EscalationBudget]) -> list[str]:
         "context's own",
         "  row count; the floor raises it when coverage needs more, so every ancestor "
         "(context,",
-        "  command) source keeps at least one row. SELECTED is what actually trained.",
+        "  command) source keeps at least one row. FLOOR excludes core commands: they "
+        "are a",
+        "  label here too, so they are never escalated to. SELECTED is what actually "
+        "trained.",
         f"    {'CONTEXT':{width}s} {'SELECTED':>8s} {'OWN':>6s} {'BUDGET':>7s} "
         f"{'FLOOR':>6s} {'CAND(raw/dedup)':>17s} {'ALWAYS':>7s}",
     ]

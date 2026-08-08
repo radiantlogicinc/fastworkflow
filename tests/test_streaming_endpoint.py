@@ -75,7 +75,7 @@ def test_streaming_endpoint():
         
         print("   Streaming events:")
         trace_count = 0
-        command_output = None
+        turn_output = None
         error_occurred = False
         
         # Process SSE events
@@ -92,23 +92,28 @@ def test_streaming_endpoint():
             elif line.startswith('data: '):
                 data = json.loads(line[6:])
                 
-                if 'command_name' in data:  # This is a command_output
-                    command_output = data
-                    print(f"   ✓ Command output received: {data.get('command_name')}")
+                # The terminal 'output' event carries the turn's TurnOutput
+                # projection: {turn_key, status, failure_reason, answer,
+                # command_outputs, success}. It used to be a bare CommandOutput,
+                # which is why this looked for 'command_name' instead.
+                if 'turn_key' in data:
+                    turn_output = data
+                    print(f"   ✓ Turn output received: status={data.get('status')}")
                 elif 'detail' in data:  # This is an error
                     print(f"   ✗ Error: {data['detail']}")
         
         # Validate results
         print(f"\n3. Validation:")
         print(f"   Trace events received: {trace_count}")
-        print(f"   Command output: {'✓' if command_output else '✗'}")
+        print(f"   Turn output: {'✓' if turn_output else '✗'}")
         print(f"   Errors: {'✗' if error_occurred else '✓ None'}")
         
-        if command_output:
-            print(f"   Success: {command_output.get('success')}")
-            print(f"   Workflow: {command_output.get('workflow_name')}")
+        if turn_output:
+            print(f"   Status: {turn_output.get('status')}")
+            print(f"   Success: {turn_output.get('success')}")
+            print(f"   Answer: {turn_output.get('answer')}")
         
-        return not error_occurred and command_output is not None
+        return not error_occurred and turn_output is not None
         
     except Exception as e:
         print(f"   ✗ Failed to stream: {e}")

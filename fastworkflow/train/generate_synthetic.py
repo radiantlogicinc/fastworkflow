@@ -18,6 +18,15 @@ them, in two groups:
   it has to be in here. Editing any of them invalidates every entry once, which is
   the intended cost.
 
+One thing that decides who is asked is deliberately NOT in this tuple: the ACTIVE
+SOURCE's own row-selection code (`DomainConditionedPersonaSource._matches` and
+``rows``). It arrives through the ``persona_source`` fingerprint input instead, as the
+third component of `personas.active_persona_source_label`. That input is already a
+function of the installed source, so covering the source there costs nothing, whereas
+naming those methods here would make every workflow in existence regenerate because a
+keyword filter that only a workflow with a ``personas.json`` can reach was edited. See
+`personas.pool_source_digest` (bd fix-6r5).
+
 Nothing else in this module belongs in the key: the fallback and reporting helpers
 run only when generation has already failed, and a fallen-back run is never cached.
 """
@@ -568,6 +577,11 @@ _DIGESTED_GENERATION_SOURCES: tuple[Callable, ...] = (
     _is_template_echo,
     # The persona-SELECTION half. See the module docstring: persona ids cannot be in the
     # key without forcing a corpus download, so the code that picks them must be.
+    #
+    # These are the source-INDEPENDENT half of it. A persona source's own methods do NOT
+    # belong here even though they decide the pool: they reach the key through
+    # `personas.active_persona_source_label`, which is already source-dependent, so only
+    # the workflows that can actually reach the edited source pay for it (bd fix-6r5).
     derived_seed,
     select_persona_indices,
     resolve_personas,

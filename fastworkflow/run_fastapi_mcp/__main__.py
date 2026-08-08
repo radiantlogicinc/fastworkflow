@@ -15,6 +15,21 @@ Implementation Status:
 - ✅ Graceful shutdown (30s)
 - ✅ Complete conversation dump (all users, active or not)
 
+Response contract for the turn endpoints (/invoke_agent, /invoke_agent_stream,
+/invoke_assistant, /perform_action, and /initialize's startup_output): every one
+of them answers with the public TurnOutput projection
+{turn_key, status, failure_reason, answer, command_outputs, success}. The
+non-streaming endpoints add the transport's `exec_state`, a back-compatible
+`command_responses`, and `traces` when collected; the stream's terminal 'output'
+event carries the bare TurnOutput. This replaced the older per-endpoint mix of
+CommandOutput and TurnOutput shapes — a breaking wire change made deliberately
+before v3.0, with no back-compat for the CommandOutput-shaped top level (see
+docs/turn_result_design_final.md sections 1a, 8, 14).
+
+HTTP status and turn outcome are different questions. A turn that fails, or that
+suspends to ask the user something, is still a successful call: 200, with the
+outcome in status/failure_reason/success. HTTP codes describe the transport.
+
 See docs/fastworkflow_fastapi_spec.md for complete specification.
 """
 
@@ -699,6 +714,24 @@ async def readiness_probe(memory: bool = False) -> JSONResponse:
     )
 
 
+# Every turn endpoint answers with the same shape, so it is described once.
+# The distinction that matters to an integrator: 200 reports the TURN's outcome
+# in `status`/`failure_reason`/`success`, and a failed turn is still a 200 — the
+# HTTP code says whether the call worked, not whether the turn did.
+TURN_RESPONSE_200_DESCRIPTION = (
+    "Turn finished. Body is the turn's TurnOutput projection: "
+    "{turn_key, exec_state, status, failure_reason, success, answer, "
+    "command_outputs}, plus back-compatible command_responses and, when "
+    "collected, traces. A failed or awaiting_user turn is still a 200: read the "
+    "outcome from status/failure_reason/success."
+)
+TURN_RESPONSE_202_DESCRIPTION = (
+    "Turn still running past the wait window (wait-or-defer). Body is "
+    "{turn_key, exec_state:'running'}; the execution keeps running and is "
+    "rejoined by retrying the same request."
+)
+
+
 def _build_startup_work_fn(ctx, startup_command_str, startup_action):
     """Return a blocking work_fn that runs startup as a turn -> TurnOutput."""
     if startup_action is not None:
@@ -733,9 +766,11 @@ def _initialize_response_from_execution(
         return status.HTTP_200_OK, resp
     result = execn.result
     if result is not None and result.command_outputs:
-        # startup_output is the action's/command's CommandOutput (carries
-        # command_responses + artifacts); the TurnOutput is the source of truth.
-        resp.startup_output = result.command_outputs[-1]
+        # startup_output is the startup turn's TurnOutput — the same projection
+        # every other turn endpoint returns. The action's/command's own
+        # command_responses + artifacts are still there, under
+        # startup_output.command_outputs.
+        resp.startup_output = result
     return status.HTTP_200_OK, resp
 
 
@@ -823,7 +858,7 @@ def _turn_json_response(execn, channel_id: str) -> JSONResponse:
     response_model=InitializeResponse,
     status_code=status.HTTP_200_OK,
     responses={
-        200: {"description": "Session successfully initialized, JWT tokens returned with optional startup output"},
+        200: {"description": "Session successfully initialized, JWT tokens returned with optional startup_output (the startup turn's TurnOutput projection)"},
         202: {"description": "Session initialized; startup turn still running (poll /initialize or /turns)"},
         400: {"description": "Both startup_command and startup_action provided, or user_id missing when startup provided"},
         422: {"description": "Invalid paths or missing env vars"},
@@ -1041,7 +1076,8 @@ async def refresh_token(
     response_model=None,  # Use custom response to include traces
     status_code=status.HTTP_200_OK,
     responses={
-        200: {"description": "Agent query processed successfully"},
+        200: {"description": TURN_RESPONSE_200_DESCRIPTION},
+        202: {"description": TURN_RESPONSE_202_DESCRIPTION},
         401: {"description": "Invalid or expired JWT token"},
         404: {"description": "Session not found"},
         409: {"description": "Concurrent turn already in progress"},
@@ -1097,7 +1133,13 @@ async def invoke_agent(
     operation_id="invoke_agent",
     responses={
         200: {
-            "description": "Stream with trace events and final command output",
+            "description": (
+                "Stream of 'trace' events followed by one terminal 'output' "
+                "event carrying the turn's TurnOutput projection "
+                "{turn_key, status, failure_reason, answer, command_outputs, "
+                "success}. A failed or awaiting_user turn arrives as an "
+                "'output' event, not an 'error' one."
+            ),
             "content": {
                 "application/x-ndjson": {},
                 "text/event-stream": {}
@@ -1117,8 +1159,13 @@ async def invoke_agent_stream(
     Submit a natural language query to the agent and stream responses.
     
     Streams via NDJSON or SSE based on the session's stream_format preference.
-    - NDJSON: {"type":"trace","data":<trace_json>} for each trace, {"type":"output","data":<CommandOutput_json>} for final result
+    - NDJSON: {"type":"trace","data":<trace_json>} for each trace, {"type":"output","data":<TurnOutput_json>} for final result
     - SSE: event: trace/output with data payloads
+
+    The terminal 'output' event carries the turn's public TurnOutput projection:
+    {turn_key, status, failure_reason, answer, command_outputs, success}. A
+    suspended turn ends with status=="awaiting_user" and the clarification
+    question in answer; it is still a successful stream, not an 'error' event.
     
     Requires a valid JWT access token in the Authorization header (Bearer token format).
     Exposed as 'invoke_agent' tool for MCP clients (who don't need JWT auth).
@@ -1145,14 +1192,14 @@ async def invoke_agent_stream(
         async def emit(kind: str, data: Any) -> None:
             await events.put({"type": kind, "data": data})
 
-        async def streaming_work() -> fastworkflow.CommandOutput:
+        async def streaming_work() -> fastworkflow.TurnOutput:
             async def on_trace(trace_json: dict) -> None:
                 await emit("trace", trace_json)
 
             async def on_timeout(detail: str) -> None:
                 await emit("error", {"detail": detail})
 
-            command_output = await run_process_message_with_trace_stream(
+            turn_output = await run_process_message_with_trace_stream(
                 runtime,
                 request.user_query.lstrip("/"),
                 request.timeout_seconds,
@@ -1161,8 +1208,8 @@ async def invoke_agent_stream(
                 user_id=user_id,
                 on_timeout=on_timeout,
             )
-            await emit("output", command_output.model_dump(mode="json"))
-            return command_output
+            await emit("output", turn_output.model_dump(mode="json"))
+            return turn_output
 
         async def owned_turn(execn) -> None:
             try:
@@ -1245,7 +1292,8 @@ async def invoke_agent_stream(
     response_model=None,
     status_code=status.HTTP_200_OK,
     responses={
-        200: {"description": "Assistant query processed successfully"},
+        200: {"description": TURN_RESPONSE_200_DESCRIPTION},
+        202: {"description": TURN_RESPONSE_202_DESCRIPTION},
         401: {"description": "Invalid or expired JWT token"},
         404: {"description": "Session not found"},
         409: {"description": "Concurrent turn already in progress"},
@@ -1310,7 +1358,8 @@ async def invoke_assistant(
     response_model=None,
     status_code=status.HTTP_200_OK,
     responses={
-        200: {"description": "Action performed successfully"},
+        200: {"description": TURN_RESPONSE_200_DESCRIPTION},
+        202: {"description": TURN_RESPONSE_202_DESCRIPTION},
         401: {"description": "Invalid or expired JWT token"},
         404: {"description": "Session not found"},
         409: {"description": "Concurrent turn already in progress"},

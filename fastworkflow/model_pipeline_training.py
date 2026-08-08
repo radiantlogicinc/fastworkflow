@@ -15,7 +15,7 @@ from torch.utils.data import random_split
 import fastworkflow
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-from typing import List, Dict, Optional, Tuple,Union
+from typing import List, Dict, NamedTuple, Optional, Tuple,Union
 import pickle
 from pathlib import Path
 from collections import Counter
@@ -33,6 +33,7 @@ from fastworkflow.nlu_labels import (
     PARAMETER_VALUE_LABEL,
     PARAMETER_VALUE_PLACEHOLDERS,
     WILDCARD_LABEL,
+    label_of,
 )
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -1044,6 +1045,185 @@ def cache_ancestor_utterances(
     return ancestor_utterances
 
 
+def trained_command_labels(ctx_name: str, crd: RoutingDefinition) -> set[str]:
+    """Every command label a context trains: its own, base-resolved, plus the core ones.
+
+    `crd.contexts` is already `context_model.commands(ctx) | core_command_names`
+    (`command_routing.build`); the union is repeated here because that is the invariant
+    this function names and callers must not have to know which half supplies the core
+    commands. Shared by `train()` and by the escalation tests so the two cannot disagree
+    about the label space, which is the disagreement AR5 was.
+    """
+    return set(crd.contexts[ctx_name]) | set(crd.command_directory.core_command_names)
+
+
+def cache_context_command_utterances(
+    ctx_name: str,
+    crd: RoutingDefinition,
+    workflow: fastworkflow.Workflow,
+    cache: dict,
+    command_cache: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    """Populate ``cache[ctx_name]`` for every label this context trains, and return them.
+
+    One loop over every label, using the cache when it already holds the command and
+    GENERATING when it does not. The previous shape had two branches: a cached branch
+    that silently skipped commands absent from the cache, and a generate-everything
+    branch that only ran when the cached branch produced nothing at all. A context
+    previously visited as an ancestor has a cache holding only
+    `context_model.commands()`, so the cached branch dropped every core command for it
+    -- making those commands unroutable in that context (AR5 / bd fix-9mo).
+
+    The returned mapping is restricted to the labels asked for, so an entry an earlier
+    ancestor visit left behind for some other command can never become a label this
+    context trains.
+    """
+    workflow_folderpath = workflow.folderpath
+    cmd_dir = crd.command_directory
+    map_cmd_2_uttlist = cache.setdefault(ctx_name, {})
+
+    # `label_of` is the same split form cache_ancestor_utterances uses, so both paths
+    # agree on what the reserved label is regardless of qualification.
+    wanted = sorted(
+        cmd
+        for cmd in trained_command_labels(ctx_name, crd)
+        if label_of(cmd) != WILDCARD_LABEL
+    )
+    for cmd_name in wanted:
+        if cmd_name in map_cmd_2_uttlist:
+            print(f"Getting cached utterances for context: {ctx_name}, command: {cmd_name}\n")
+        else:
+            print(f"Generating utterances for context: {ctx_name}, command: {cmd_name} ...\n")
+            map_cmd_2_uttlist[cmd_name] = _get_cached_command_utterances(
+                workflow,
+                workflow_folderpath,
+                cmd_dir,
+                cmd_name,
+                command_cache,
+            )
+    return {cmd_name: map_cmd_2_uttlist[cmd_name] for cmd_name in wanted}
+
+
+class EscalationSelection(NamedTuple):
+    """One context's escalation-class rows and every denominator that chose them."""
+
+    #: Rows labelled `WILDCARD_LABEL`, sorted. Empty when no class is emitted.
+    rows: list[str]
+    #: False when the context has no non-local ancestor utterances at all, which is a
+    #: different thing from a class that came out empty after selection.
+    included: bool
+    raw_candidate_count: int
+    deduplicated_candidate_count: int
+    always_include_rows: list[str]
+    #: None when nothing was emitted, so no budget was computed.
+    budget: Optional[int]
+    coverage_floor: int
+
+
+def select_escalation_rows(
+    ctx_name: str,
+    crd: RoutingDefinition,
+    workflow: fastworkflow.Workflow,
+    cache: dict,
+    command_cache: dict[str, list[str]],
+    *,
+    context_utterances: set[str],
+    own_row_count: int,
+    wildcard_utterances: set[str],
+) -> EscalationSelection:
+    """Choose the escalation-class rows for one context, and report every denominator.
+
+    Extracted from `train()` so the whole R7.2 decision is one callable. It reads the
+    shared utterance cache, which every other context in the run also writes, so it is
+    where a visit-order dependence can show up in the training rows -- and a test that
+    drives this drives the shipped decision, where one that reimplements the arithmetic
+    does not.
+
+    `core_command_names` is passed to `group_ancestor_utterances` as `skip_commands`, so
+    a core command is never an escalation source no matter which path filled the cache
+    (bd fix-4ej; the derivation is in `class_balance`'s module docstring).
+
+    WILDCARD_LABEL is the ESCALATION signal: "an ancestor context can serve this". It is
+    emitted only where that can be true. In a context with no ancestors the class would
+    collapse to the single humanised command name, and a one-row class cannot satisfy the
+    class-aware split in `train()`: it needs one training row and one evaluation row.
+    Escalation is meaningless there anyway: the runtime parent walk terminates
+    immediately at the response generation root, so the turn can only ever reach
+    you_misunderstood, which an unconfident classifier already reaches.
+    """
+    ancestor_utterances = cache_ancestor_utterances(
+        ctx_name,
+        crd,
+        workflow,
+        cache,
+        command_cache,
+    )
+    net_ancestor_utterances = ancestor_utterances - context_utterances
+    grouped_ancestor_rows = class_balance.group_ancestor_utterances(
+        crd.context_model.get_ancestor_contexts(ctx_name),
+        cache,
+        skip_labels=(WILDCARD_LABEL,),
+        skip_commands=crd.command_directory.core_command_names,
+    )
+    raw_candidate_count, deduplicated_candidate_count = (
+        class_balance.reserved_candidate_counts(
+            grouped_ancestor_rows,
+            exclude=context_utterances,
+        )
+    )
+    coverage_floor = class_balance.coverage_floor_of(grouped_ancestor_rows)
+
+    if not net_ancestor_utterances:
+        return EscalationSelection(
+            rows=[],
+            included=False,
+            raw_candidate_count=raw_candidate_count,
+            deduplicated_candidate_count=deduplicated_candidate_count,
+            always_include_rows=[],
+            budget=None,
+            coverage_floor=coverage_floor,
+        )
+
+    # R7.2: bound the escalation class against this context's own row count, so
+    # training time stays linear in workflow size, but never below one row per
+    # ancestor command -- an ancestor that contributes no row cannot be escalated
+    # to at all. Round-robin over (ancestor context, command) is what stops one
+    # verbose ancestor from spending the budget the others need.
+    #
+    # `exclude` carries the `net_` semantics the flat set expression used to carry:
+    # an utterance that means something HERE must not also train the "ask my
+    # parent" class, or the same string would be trained under two labels.
+    # `own_row_count` is counted BEFORE the escalation rows are appended, which is what
+    # makes the ratio mean "multiplier on this context's own training cost".
+    # 1.0 is the fixed cost invariant: escalation may add at most as many rows
+    # as the context's real commands, so reserved rows can at most double cost.
+    # It is not an accuracy-tuned value; R7.3 weighting measured null and is
+    # intentionally not shipped.
+    budget = class_balance.reserved_class_budget(
+        own_row_count,
+        coverage_floor,
+        ratio=1.0,
+    )
+    always_include_rows = sorted(wildcard_utterances - context_utterances)
+    rows = sorted(
+        class_balance.select_reserved_rows(
+            grouped_ancestor_rows,
+            budget,
+            always_include=always_include_rows,
+            exclude=context_utterances,
+        )
+    )
+    return EscalationSelection(
+        rows=rows,
+        included=True,
+        raw_candidate_count=raw_candidate_count,
+        deduplicated_candidate_count=deduplicated_candidate_count,
+        always_include_rows=always_include_rows,
+        budget=budget,
+        coverage_floor=coverage_floor,
+    )
+
+
 def _recorded_persona_batches(recorder) -> Optional[list[list[str]]]:
     """Reconstruct each command's generation batches from provenance (AR1).
 
@@ -1245,8 +1425,6 @@ def train(workflow: fastworkflow.Workflow,
     # the labelled-row use recorded below, not to the LLM draw or utterance cache key.
     command_utterance_cache: dict[str, list[str]] = {}
 
-    core_cmds = set(cmd_dir.core_command_names)
-
     # Get contexts specific to this workflow (not from command_metadata_extraction)
     # The set itself is computed by `selective_training.contexts_for_training` so that the
     # R5 planner and this loop cannot disagree about which contexts exist. A context the
@@ -1271,43 +1449,31 @@ def train(workflow: fastworkflow.Workflow,
     # core commands. Iterating in hash order therefore decided, per interpreter start,
     # which contexts lost their core-command labels (AR5). Sorting makes the order stable;
     # the cache-fill below makes the outcome order-independent as well.
+    #
+    # Sorting alone was not enough, because a STABLE order is still an order: whether a
+    # context's cache entry held core commands when a descendant read it depended on
+    # their two names, so renaming one context moved another context's escalation
+    # budget. `select_escalation_rows` filters core commands out of the escalation
+    # population instead of relying on the fill (bd fix-4ej).
     for ctx_name in sorted(context_set_for_training):
-        ctx_cmd_list = crd.contexts[ctx_name]
         print(f"\n=== Training model for workflow_folderpath: {workflow_folderpath.split('/')[-1]} and context: {ctx_name} ===\n")
         
         # Build the label set for this context
-        train_cmds: set[str] = set(ctx_cmd_list) | core_cmds
+        train_cmds: set[str] = trained_command_labels(ctx_name, crd)
         if not train_cmds:
             print(f"Skipping context {ctx_name} - no commands to train")
             continue  # nothing to train
 
         context_utterances = set()
         utterance_command_tuples: list[tuple[str, str]] = []
-        # One loop over every label this context trains, using the cache when it already
-        # holds the command and GENERATING when it does not. The previous shape had two
-        # branches: a cached branch that silently skipped commands absent from the cache,
-        # and a generate-everything branch that only ran when the cached branch produced
-        # nothing at all. A context previously visited as an ancestor has a cache holding
-        # only context_model.commands(), so the cached branch dropped every core command
-        # for it -- making those commands unroutable in that context (AR5 / fix-9mo).
-        map_cmd_2_uttlist = context_utterance_cache.setdefault(ctx_name, {})
-        for cmd_name in sorted(train_cmds):
-            # Split form matches cache_ancestor_utterances, so both paths agree on what
-            # the reserved label is regardless of qualification.
-            if cmd_name.split('/')[-1] == WILDCARD_LABEL:
-                continue
-            if cmd_name in map_cmd_2_uttlist:
-                print(f"Getting cached utterances for context: {ctx_name}, command: {cmd_name}\n")
-            else:
-                print(f"Generating utterances for context: {ctx_name}, command: {cmd_name} ...\n")
-                map_cmd_2_uttlist[cmd_name] = _get_cached_command_utterances(
-                    workflow,
-                    workflow_folderpath,
-                    cmd_dir,
-                    cmd_name,
-                    command_utterance_cache,
-                )
-            cmd_utterances = map_cmd_2_uttlist[cmd_name]
+        map_cmd_2_uttlist = cache_context_command_utterances(
+            ctx_name,
+            crd,
+            workflow,
+            context_utterance_cache,
+            command_utterance_cache,
+        )
+        for cmd_name, cmd_utterances in map_cmd_2_uttlist.items():
             _record_context_training(
                 ctx_name, cmd_name, cmd_dir, cmd_utterances
             )
@@ -1320,83 +1486,30 @@ def train(workflow: fastworkflow.Workflow,
             print(f"Skipping context {ctx_name} - no utterances available")
             continue  # skip empty
 
-        ancestor_utterances = cache_ancestor_utterances(
+        own_rows = len(utterance_command_tuples)
+        escalation = select_escalation_rows(
             ctx_name,
             crd,
             workflow,
             context_utterance_cache,
             command_utterance_cache,
+            context_utterances=context_utterances,
+            own_row_count=own_rows,
+            wildcard_utterances=wildcard_utterances,
         )
-        net_ancestor_utterances = ancestor_utterances - context_utterances
-        own_rows = len(utterance_command_tuples)
-        grouped_ancestor_rows = class_balance.group_ancestor_utterances(
-            crd.context_model.get_ancestor_contexts(ctx_name),
-            context_utterance_cache,
-            skip_labels=(WILDCARD_LABEL,),
-        )
-        raw_candidate_count, deduplicated_candidate_count = (
-            class_balance.reserved_candidate_counts(
-                grouped_ancestor_rows,
-                exclude=context_utterances,
-            )
-        )
-        coverage_floor = class_balance.coverage_floor_of(grouped_ancestor_rows)
-
-        # WILDCARD_LABEL is the ESCALATION signal: "an ancestor context can serve this".
-        # It is emitted only where that can be true. In a context with no ancestors the
-        # class would collapse to the single humanised command name, and a one-row class
-        # cannot satisfy the class-aware split below: it needs one training row and one
-        # evaluation row. Escalation is meaningless
-        # there anyway: the runtime parent walk terminates immediately at the response
-        # generation root, so the turn can only ever reach you_misunderstood, which an
-        # unconfident classifier already reaches.
-        escalation_rows: Optional[list[str]] = None
-        always_include_rows: list[str] = []
-        budget: Optional[int] = None
-        if net_ancestor_utterances:
-            # R7.2: bound the escalation class against this context's own row count, so
-            # training time stays linear in workflow size, but never below one row per
-            # ancestor command -- an ancestor that contributes no row cannot be escalated
-            # to at all. Round-robin over (ancestor context, command) is what stops one
-            # verbose ancestor from spending the budget the others need.
-            #
-            # `exclude` carries the `net_` semantics the flat set expression used to carry:
-            # an utterance that means something HERE must not also train the "ask my
-            # parent" class, or the same string would be trained under two labels.
-            # `own_rows` is counted BEFORE the escalation rows are appended, which is what
-            # makes the ratio mean "multiplier on this context's own training cost".
-            # 1.0 is the fixed cost invariant: escalation may add at most as many rows
-            # as the context's real commands, so reserved rows can at most double cost.
-            # It is not an accuracy-tuned value; R7.3 weighting measured null and is
-            # intentionally not shipped.
-            budget = class_balance.reserved_class_budget(
-                own_rows,
-                coverage_floor,
-                ratio=1.0,
-            )
-            always_include_rows = sorted(
-                wildcard_utterances - context_utterances
-            )
-            escalation_rows = sorted(
-                class_balance.select_reserved_rows(
-                    grouped_ancestor_rows,
-                    budget,
-                    always_include=always_include_rows,
-                    exclude=context_utterances,
-                )
-            )
+        if escalation.included:
             utterance_command_tuples.extend(
-                list(zip(escalation_rows, [WILDCARD_LABEL] * len(escalation_rows)))
+                list(zip(escalation.rows, [WILDCARD_LABEL] * len(escalation.rows)))
             )
         _record_wildcard_context_training(
             ctx_name,
-            escalation_rows,
+            escalation.rows if escalation.included else None,
             own_row_count=own_rows,
-            raw_candidate_count=raw_candidate_count,
-            deduplicated_candidate_count=deduplicated_candidate_count,
-            always_include_rows=always_include_rows,
-            selected_budget=budget,
-            coverage_floor=coverage_floor,
+            raw_candidate_count=escalation.raw_candidate_count,
+            deduplicated_candidate_count=escalation.deduplicated_candidate_count,
+            always_include_rows=escalation.always_include_rows,
+            selected_budget=escalation.budget,
+            coverage_floor=escalation.coverage_floor,
         )
 
         # PARAMETER_VALUE_LABEL is the PARAMETER_EXTRACTION stage's bare-value catcher and

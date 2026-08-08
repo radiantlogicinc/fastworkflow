@@ -199,7 +199,12 @@ def test_channel_id_comes_from_the_blob_not_the_filename(store):
 
     entries = list(store.iter_entries())
 
-    assert entries == [("tenant/user-1", pytest.approx(time.time(), abs=10))]
+    assert [entry.channel_id for entry in entries] == ["tenant/user-1"]
+    assert entries[0].saved_at == pytest.approx(time.time(), abs=10)
+    # The name on disk is not that id, which is why the entry carries it too:
+    # `reap` removes this path rather than one derived from the id (fix-xm1).
+    assert entries[0].storage_key == store._json_path("tenant/user-1")
+    assert "tenant/user-1" not in entries[0].storage_key
 
 
 def test_policy_rejects_nonsense_values():

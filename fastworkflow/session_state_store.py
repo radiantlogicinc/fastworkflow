@@ -13,7 +13,7 @@ import os
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, NamedTuple, Optional
 
 import fastworkflow
 from fastworkflow.state_serialization import encode_state
@@ -91,10 +91,47 @@ class PendingRetentionPolicy:
 
 @dataclass(frozen=True)
 class PendingReapOutcome:
+    """What a reap pass did. `reclaimed` is a count of removals, not of intentions.
+
+    On a real pass `reclaimed` counts blobs this pass observed leaving the store,
+    so an operator watching it can conclude the namespace shrank by that much;
+    anything selected and not removed lands in `failures` instead. On a dry run
+    it is the projection — what a real pass would remove — because nothing was
+    removed at all.
+
+    `reclaimed + failures` can be less than the number selected: a blob another
+    process removed between this pass enumerating it and reaching it is neither
+    this pass's reclamation nor its failure.
+    """
+
     reclaimed: int = 0
     protected: int = 0
     scanned: int = 0
     unreadable: int = 0
+    failures: int = 0
+
+
+class PendingEntry(NamedTuple):
+    """One stored blob as enumerated: who it says it is, when, and where it is.
+
+    `storage_key` is the backend's own address for the blob — a file path for the
+    disk store, a Redis key for the Redis one. It is carried because `channel_id`
+    is read from *inside* the blob, and re-deriving a key from that id is only
+    correct while every blob sits at the name this store would have given it. A
+    blob that was hand-copied, restored from a backup under another name, or
+    written by an older tool breaks that assumption, and a reaper that derived
+    the path would remove nothing while reporting a reclamation — leaving the
+    blob immortal and the metric wrong (fix-xm1). Enumerating the key removes
+    reap's dependency on a blob's contents being self-consistent with its name.
+
+    `saved_at` of None marks an entry whose age could not be established; the
+    `channel_id` of such an entry carries no information either, so only its
+    `storage_key` names it.
+    """
+
+    channel_id: str
+    saved_at: Optional[float]
+    storage_key: str
 
 
 class SessionStateStore(ABC):
@@ -117,14 +154,31 @@ class SessionStateStore(ABC):
         """True if pending state exists for channel_id."""
 
     @abstractmethod
-    def iter_entries(self) -> Iterable[tuple[str, Optional[float]]]:
-        """Yield (channel_id, saved_at) for every stored blob.
+    def iter_entries(self) -> Iterable[PendingEntry]:
+        """Yield a `PendingEntry` for every stored blob.
 
         channel_id comes from inside the blob rather than from the storage key,
-        because neither backend's key is guaranteed to be reversible.
+        because neither backend's key is guaranteed to be reversible. The key
+        itself is yielded alongside it so a caller that wants to *remove* what it
+        enumerated does not have to re-derive one from the blob's own claim about
+        which channel it belongs to — see `PendingEntry`.
 
         A saved_at of None means the age could not be established; such an entry
         is reported and left alone rather than reclaimed on a guess.
+        """
+
+    @abstractmethod
+    def remove_at(self, storage_key: str) -> bool:
+        """Remove exactly the blob at *storage_key*. True when one was there.
+
+        The counterpart to `clear`, which addresses a channel and lets the
+        backend derive the key. This addresses the key directly, which is what
+        lets `reap` remove the blob it enumerated rather than one derived from
+        that blob's self-reported channel_id (fix-xm1).
+
+        Returns False for a blob that is already gone, and raises rather than
+        reporting absence when removal was attempted and refused, so a caller can
+        tell "another process got there first" from "this will never go away".
         """
 
     @staticmethod
@@ -151,49 +205,92 @@ class SessionStateStore(ABC):
         writer on a channel whose only writer is meant to be the process that
         owns it. The caller names what it holds live, and a protected channel is
         never reclaimed however old it is.
+
+        Selection is by channel_id, because that is what `protected_channel_ids`
+        is expressed in; removal is by the storage key the entry was enumerated
+        under, because that is the only address known to name the blob in hand.
+        The two are the same thing for every blob this store wrote, and when they
+        differ — a hand-copied blob, one restored under another name — removing
+        the derived path removed nothing and reported success anyway, so the blob
+        was enumerated forever while the metric said retention worked (fix-xm1).
+        `reclaimed` therefore counts confirmed removals on a real pass.
         """
         policy = policy or PendingRetentionPolicy()
         now = time.time() if now is None else now
         protected = set(protected_channel_ids)
 
-        entries: list[tuple[str, float]] = []
+        # Age carried beside the entry rather than read off it: an entry whose
+        # saved_at is None has been counted as unreadable and skipped by then, and
+        # pairing the float keeps that established for the reader and the type
+        # checker instead of re-asserting it at every comparison.
+        dated: list[tuple[PendingEntry, float]] = []
         scanned = unreadable = 0
-        for channel_id, saved_at in self.iter_entries():
+        for entry in self.iter_entries():
             scanned += 1
+            saved_at = entry.saved_at
             if saved_at is None:
                 unreadable += 1
                 continue
-            entries.append((channel_id, saved_at))
+            dated.append((entry, saved_at))
 
-        protected_hits = sum(c in protected for c, _ in entries)
-        candidates = [(c, t) for c, t in entries if c not in protected]
+        protected_hits = sum(entry.channel_id in protected for entry, _ in dated)
+        candidates = [
+            pair for pair in dated if pair[0].channel_id not in protected
+        ]
         candidates.sort(key=lambda pair: pair[1])
 
-        doomed: list[str] = []
+        doomed: list[PendingEntry] = []
         if policy.max_age_seconds is not None:
             cutoff = now - policy.max_age_seconds
-            doomed = [c for c, t in candidates if t < cutoff]
+            doomed = [entry for entry, saved_at in candidates if saved_at < cutoff]
 
-        if policy.max_entries is not None and len(entries) > policy.max_entries:
+        if policy.max_entries is not None and len(dated) > policy.max_entries:
             # Count against everything stored, including protected entries, or a
             # process holding many live sessions would silently raise the cap.
-            over = len(entries) - policy.max_entries
-            for channel_id, _ in candidates:
+            over = len(dated) - policy.max_entries
+            # Keyed by storage key rather than by channel_id: two blobs can claim
+            # one channel, and both of them occupy an entry against the cap.
+            already = {entry.storage_key for entry in doomed}
+            for entry, _ in candidates:
                 if over <= 0:
                     break
-                if channel_id not in doomed:
-                    doomed.append(channel_id)
+                if entry.storage_key not in already:
+                    doomed.append(entry)
+                    already.add(entry.storage_key)
                     over -= 1
 
-        if not dry_run:
-            for channel_id in doomed:
-                self.clear(channel_id)
+        if dry_run:
+            return PendingReapOutcome(
+                reclaimed=len(doomed),
+                protected=protected_hits,
+                scanned=scanned,
+                unreadable=unreadable,
+            )
+
+        reclaimed = failures = 0
+        for entry in doomed:
+            try:
+                if self.remove_at(entry.storage_key):
+                    reclaimed += 1
+            except OSError as exc:
+                # One blob that cannot be removed must not end the pass, and it
+                # must not be counted as reclaimed either: the operator's only
+                # evidence that retention is working is this number. A backend
+                # whose *transport* has failed raises something else, and that
+                # does end the pass — nothing it is asked to remove next would
+                # succeed, so continuing would only manufacture failures.
+                failures += 1
+                logger.warning(
+                    f"pending-state reap could not remove {entry.storage_key}: "
+                    f"{type(exc).__name__}: {exc}"
+                )
 
         return PendingReapOutcome(
-            reclaimed=len(doomed),
+            reclaimed=reclaimed,
             protected=protected_hits,
             scanned=scanned,
             unreadable=unreadable,
+            failures=failures,
         )
 
 
@@ -278,8 +375,11 @@ class DiskSessionStateStore(SessionStateStore):
             f.write(encode_state(self._stamp(state)))
         # The legacy copy is superseded the instant that lands, and leaving it
         # would give one channel two entries in `iter_entries` -- one stale, one
-        # fresh -- so the reaper could age out the stale entry and take the live
-        # blob with it, since `clear` removes both names.
+        # fresh -- which double-counts the channel against `max_entries`. Until
+        # fix-xm1 it was worse than a miscount: the reaper aged out the stale
+        # entry by calling `clear`, which removes both names, so reclaiming the
+        # stale blob took the live one with it. The reaper now removes the exact
+        # path it enumerated, and this unlink is what keeps the count honest.
         legacy = self._legacy_json_path(channel_id)
         if os.path.isfile(legacy):
             os.remove(legacy)
@@ -293,8 +393,34 @@ class DiskSessionStateStore(SessionStateStore):
             self._json_path(channel_id),
             self._legacy_json_path(channel_id),
         ):
-            if os.path.isfile(path):
-                os.remove(path)
+            self.remove_at(path)
+
+    def _is_pending_path(self, storage_key: str) -> bool:
+        """True when *storage_key* names a pending blob directly in base_folder."""
+        directory, name = os.path.split(os.path.abspath(storage_key))
+        return directory == os.path.abspath(self.base_folder) and name.endswith(
+            (PENDING_SUFFIX, LEGACY_PENDING_SUFFIX)
+        )
+
+    def remove_at(self, storage_key: str) -> bool:
+        # Refusing a path from outside this store's folder is worth the two lines:
+        # every legitimate key here is one this class derived or enumerated, so
+        # anything else is a caller bug, and the cost of taking it on trust is an
+        # unlink of an arbitrary file.
+        if not self._is_pending_path(storage_key):
+            raise ValueError(
+                f"{storage_key!r} is not a pending-state blob under "
+                f"{self.base_folder!r}"
+            )
+        if not os.path.isfile(storage_key):
+            return False
+        try:
+            os.remove(storage_key)
+        except FileNotFoundError:
+            # Gone between the check and the call: another process reclaimed it,
+            # so this pass did not.
+            return False
+        return True
 
     def exists(self, channel_id: str) -> bool:
         if os.path.isfile(self._json_path(channel_id)):
@@ -303,7 +429,7 @@ class DiskSessionStateStore(SessionStateStore):
         # a shared name belongs to this channel only if it says so.
         return self._load_legacy(channel_id) is not None
 
-    def iter_entries(self) -> Iterable[tuple[str, Optional[float]]]:
+    def iter_entries(self) -> Iterable[PendingEntry]:
         if not os.path.isdir(self.base_folder):
             return
         for entry in os.scandir(self.base_folder):
@@ -324,10 +450,11 @@ class DiskSessionStateStore(SessionStateStore):
             except (OSError, ValueError, KeyError, TypeError):
                 # Genuinely unreadable: counted, never guessed at. Deleting a
                 # blob whose age cannot be established would reclaim by
-                # assumption, which is how a reaper eats live state.
-                yield ("", None)
+                # assumption, which is how a reaper eats live state. The path is
+                # still reported, because it is the only name such an entry has.
+                yield PendingEntry("", None, entry.path)
                 continue
-            yield (channel_id, float(saved_at))
+            yield PendingEntry(channel_id, float(saved_at), entry.path)
 
 
 class RedisSessionStateStore(SessionStateStore):
@@ -361,12 +488,23 @@ class RedisSessionStateStore(SessionStateStore):
         self._client.set(self._key(channel_id), encode_state(self._stamp(state)))
 
     def clear(self, channel_id: str) -> None:
-        self._client.delete(self._key(channel_id))
+        self.remove_at(self._key(channel_id))
+
+    def remove_at(self, storage_key: str) -> bool:
+        # Same reasoning as the disk store's: a key from outside this store's
+        # prefix is a caller bug, and taking it on trust deletes an arbitrary key
+        # out of an instance that is shared across pods.
+        if not storage_key.startswith(self._prefix):
+            raise ValueError(
+                f"{storage_key!r} is not a pending-state key under "
+                f"{self._prefix!r}"
+            )
+        return bool(self._client.delete(storage_key))
 
     def exists(self, channel_id: str) -> bool:
         return bool(self._client.exists(self._key(channel_id)))
 
-    def iter_entries(self) -> Iterable[tuple[str, Optional[float]]]:
+    def iter_entries(self) -> Iterable[PendingEntry]:
         # scan_iter, not keys(): keys() blocks the server for the whole scan,
         # and this runs against a shared multi-pod instance. Redis has no
         # per-key write time, so unlike the disk store there is no fallback for
@@ -380,12 +518,12 @@ class RedisSessionStateStore(SessionStateStore):
                 channel_id = blob["channel_id"]
                 saved_at = blob.get(SAVED_AT_KEY)
             except (ValueError, KeyError, TypeError):
-                yield ("", None)
+                yield PendingEntry("", None, key)
                 continue
             if saved_at is None:
-                yield ("", None)
+                yield PendingEntry("", None, key)
                 continue
-            yield (channel_id, float(saved_at))
+            yield PendingEntry(channel_id, float(saved_at), key)
 
 
 def get_session_state_store(

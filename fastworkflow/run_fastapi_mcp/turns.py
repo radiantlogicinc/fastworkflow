@@ -656,9 +656,17 @@ def render_turn_response(execn: TurnExecution) -> tuple[int, dict[str, Any]]:
 
     * Deferred (QUEUED/RUNNING) -> 202 {turn_key, exec_state:"running"}.
     * Done with error          -> 200 {..., error} (caller may raise 500).
-    * Done with result         -> 200 {turn_key, exec_state, status, success,
-                                        answer, command_responses, command_outputs,
+    * Done with result         -> 200 {turn_key, exec_state, status,
+                                        failure_reason, success, answer,
+                                        command_responses, command_outputs,
                                         traces?}.
+
+    Everything but ``turn_key``, ``exec_state``, ``command_responses`` and
+    ``traces`` is the public ``TurnOutput`` projection. ``exec_state`` is
+    transport (where the *work* is), ``status``/``failure_reason``/``success``
+    are the turn outcome; a failed turn is still a 200. ``turn_key`` here is the
+    EXECUTION's key — the handle a deferred 202 is polled with — not
+    ``TurnOutput.turn_key``, which is the workflow's own logical-turn key.
     """
     if not execn.is_terminal:
         return 202, {
@@ -678,6 +686,7 @@ def render_turn_response(execn: TurnExecution) -> tuple[int, dict[str, Any]]:
         "turn_key": execn.turn_key,
         "exec_state": execn.exec_state.value,
         "status": result.status.value if result else None,
+        "failure_reason": result.failure_reason if result else None,
         "success": result.success if result else False,
         "answer": result.answer if result else "",
         "command_responses": _command_responses_for(execn),

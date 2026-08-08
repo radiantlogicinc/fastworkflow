@@ -41,11 +41,34 @@ holdout (decision D1) depends on that parse being correct. An app-supplied id co
 ``PERSONA_ID_SEPARATOR``, or colliding with ``SEED_PERSONA_ID`` or
 ``UNRESOLVED_PERSONA_PREFIX``, would silently corrupt the holdout into the data leak D1
 exists to prevent. ``validate_persona_id`` rejects all three, loudly, at load time.
+
+What reaches the utterance-cache key, and what does not
+------------------------------------------------------
+``active_persona_source_label`` is R6's only view of this module. It returns
+``<name>#<content fingerprint>#<pool-code digest>``, and each part closes a different
+staleness hole:
+
+* **name** — an app-supplied set and a domain-conditioned draw are different variants.
+* **content fingerprint** — the persona TEXT or the domain KEYWORDS, so editing either
+  invalidates the utterances they wrote (``fingerprint``).
+* **pool-code digest** — the source text of the code that turns that configuration into
+  a pool (``pool_source_digest``). Without it, editing
+  ``DomainConditionedPersonaSource._matches`` changed which rows a keyword selects while
+  every cache entry stayed valid: a developer tuned the matching, retrained, and
+  silently got the old personas back (bd fix-6r5).
+
+The label is still ``None`` for the default PersonaHub draw. That is decision D6, not an
+omission: a non-None label there would invalidate every cached utterance in every
+existing workflow, and the default source has no configuration to condition on — its
+pool is the whole corpus, and the code that indexes it is pinned instead by
+``select_persona_indices`` being digested in `generate_synthetic` plus the byte-identity
+test in ``tests/test_persona_domain_conditioning.py``.
 """
 
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import random
@@ -64,6 +87,7 @@ from fastworkflow.train.determinism import (
     derived_seed,
     get_training_seed,
 )
+from fastworkflow.train.utterance_cache import source_digest
 from fastworkflow.utils.logging import logger
 
 #: File an application drops in its workflow folder to describe its users. Named to sit
@@ -285,6 +309,53 @@ def persona_config_path(workflow_folderpath: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _digestable_functions(member) -> list[Callable]:
+    """Unwrap one class attribute into the plain functions inside it, or nothing.
+
+    ``property`` and the ``staticmethod``/``classmethod`` descriptors are not accepted
+    by ``inspect.getsource``, so a walk that handed them straight to `source_digest`
+    would silently record ``source-unavailable`` for them — a digest that stops
+    noticing edits while still looking like a digest.
+    """
+    if isinstance(member, property):
+        return [f for f in (member.fget, member.fset, member.fdel) if f is not None]
+    if isinstance(member, (staticmethod, classmethod)):
+        member = member.__func__
+    return [member] if inspect.isfunction(member) else []
+
+
+def implementation_functions(source_class: type) -> list[Callable]:
+    """Every function *source_class* and its bases define, in a fixed order.
+
+    Found by reflection rather than named in a list, because a hand-written list is
+    exactly what left this hole open: `generate_synthetic._DIGESTED_GENERATION_SOURCES`
+    names four selection functions, `DomainConditionedPersonaSource.rows` and
+    ``_matches`` were two more, and nothing failed when they were missing (bd fix-6r5).
+    A future subclass with a helper nobody thought to name is covered here for free,
+    which is the property a name list cannot have.
+
+    Deterministic across runs and processes, which `pool_source_digest` depends on:
+
+    * resolved from the CLASS, so no instance attribute and no ``id()`` can reach it —
+      two independently constructed sources of the same class agree;
+    * ordered by MRO and then by attribute name, so neither ``__dict__`` insertion
+      order nor the per-process string hash salt can move it;
+    * reads source TEXT only, so it never loads the corpus (`fingerprint` and the
+      label built from it are corpus-free by contract).
+
+    ``object`` is skipped and everything below it kept, including `PersonaSource`'s own
+    methods: the base's `select` and `priority_pool_size` decide the draw just as much
+    as a subclass's row filter does.
+    """
+    functions: list[Callable] = []
+    for klass in source_class.__mro__:
+        if klass is object:
+            continue
+        for _name, member in sorted(vars(klass).items()):
+            functions.extend(_digestable_functions(member))
+    return functions
+
+
 def _resolve_num_personas_hint(num_personas_hint: Optional[int]) -> int:
     """How many personas a command will ask for, for pool-sizing purposes only.
 
@@ -316,6 +387,10 @@ class PersonaSource:
     personas wrote. A subclass that overrode ``select`` would slip out from under that
     digest, so a subclass with an unusual pool states the fact through
     ``priority_pool_size`` and lets the shared code act on it.
+
+    Everything a subclass DOES define is covered by ``pool_source_digest``, which is
+    final in the same sense ``select`` is: overriding it would be a subclass declaring
+    its own cache key, which is the one thing no source may do.
     """
 
     #: One of the ``SOURCE_*`` constants.
@@ -345,6 +420,34 @@ class PersonaSource:
         require a 200k-row download would undo the reason the cache exists.
         """
         raise NotImplementedError
+
+    def pool_source_digest(self) -> str:
+        """Digest the code that turns THIS source's configuration into a pool.
+
+        The companion to `fingerprint`, and the answer to a hole `fingerprint` cannot
+        close. ``fingerprint`` identifies the CONFIGURATION — a keyword list, a persona
+        file's text. What turns that configuration into row indices is code:
+        ``DomainConditionedPersonaSource._matches`` decides which rows a keyword
+        selects, and ``rows`` decides how a thin match is padded. Editing either changes
+        the personas a command is generated from while leaving ``fingerprint`` identical,
+        so before this existed a developer could tune the matching, retrain, and be
+        served the utterances the old matching produced (bd fix-6r5).
+
+        Digested from the CLASS, not from this instance, which is what keeps it
+        deterministic without giving up the "one fingerprint per source" shape — see
+        `implementation_functions` for the three properties that carry that. Corpus-free
+        for the same reason `fingerprint` is: the label is computed before the cache
+        decides whether to generate at all.
+
+        The qualified names are deliberately NOT hashed in alongside the source text,
+        only the text itself. Two sources whose code is character-for-character the same
+        would generate the same utterances from the same configuration, so they SHOULD
+        share a cache entry; and it is what lets a test attribute a digest change to the
+        body of one method rather than to the name of the class that holds it.
+        """
+        return _hash_parts(
+            *[source_digest(func) for func in implementation_functions(type(self))]
+        )
 
     def notes(self) -> list[str]:
         """Anything the developer should know about this pool. Reported once per run."""
@@ -787,12 +890,19 @@ def active_persona_source_label() -> Optional[str]:
     utterances generated from generic PersonaHub personas out of the cache and the feature
     would appear to do nothing.
 
+    Three parts, because the configuration alone is not enough: `pool_source_digest`
+    covers the code that turns the configuration into a pool, which `fingerprint` by
+    design does not (bd fix-6r5). The parts are separated so that a miss reported by
+    ``utterance_cache.describe_fingerprint_divergence`` — which names the fingerprint
+    INPUT that moved, not the reason — can be read directly: a changed third component
+    with the first two intact says the persona code was edited, not the persona file.
+
     Corpus-free, because it is computed before the cache decides whether to generate.
     """
     source = get_persona_source() or default_persona_source(_default_dataset_loader)
     if source.name == SOURCE_PERSONAHUB:
         return None
-    return f"{source.name}#{source.fingerprint()}"
+    return f"{source.name}#{source.fingerprint()}#{source.pool_source_digest()}"
 
 
 def persona_source_needs_corpus() -> bool:

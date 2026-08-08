@@ -87,6 +87,29 @@ def _channel(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
 
 
+# Keys of the public TurnOutput projection every turn surface now answers with
+# (fastworkflow/turn.py TurnOutput). `success` is a computed field, so it is part
+# of the serialized shape rather than something the server bolts on.
+TURN_OUTPUT_KEYS = frozenset(
+    {"turn_key", "status", "failure_reason", "answer", "command_outputs", "success"}
+)
+
+
+def _assert_turn_output_shape(payload: dict, *, status: str | None = None) -> None:
+    """Assert *payload* is a TurnOutput projection, with the right value types."""
+    missing = TURN_OUTPUT_KEYS - set(payload)
+    assert not missing, f"TurnOutput keys missing from response: {sorted(missing)}"
+    assert isinstance(payload["turn_key"], str) and payload["turn_key"]
+    assert isinstance(payload["success"], bool)
+    assert isinstance(payload["answer"], str)
+    assert isinstance(payload["command_outputs"], list)
+    assert payload["failure_reason"] is None or isinstance(
+        payload["failure_reason"], str
+    )
+    if status is not None:
+        assert payload["status"] == status
+
+
 def test_initialize_startup_fast_path_runs_inline_once(app_module, tmp_path, monkeypatch):
     """A quick startup command finishes within the wait window: 200 + startup_output, one call."""
     call_log = str(tmp_path / "calls.log")
@@ -109,8 +132,12 @@ def test_initialize_startup_fast_path_runs_inline_once(app_module, tmp_path, mon
     assert data["startup_turn_key"]
     assert data["startup_error"] is None
     assert data["startup_output"] is not None
-    # startup_output preserves the CommandOutput shape (command_responses).
-    assert "command_responses" in data["startup_output"]
+    # startup_output is the startup turn's TurnOutput projection. The
+    # CommandOutput this used to be is still here, one level down, so nothing
+    # the old assertion covered was given up.
+    _assert_turn_output_shape(data["startup_output"], status="completed")
+    assert data["startup_output"]["command_outputs"]
+    assert "command_responses" in data["startup_output"]["command_outputs"][-1]
     assert _count_calls(call_log) == 1
     # The server no longer goes through the deprecated process_message().
     assert all(
@@ -169,7 +196,8 @@ def test_initialize_startup_defers_and_is_single_flight(app_module, tmp_path, mo
     assert resp_done.status_code == 200
     assert data_done["startup_turn_key"] == turn_key
     assert data_done["startup_output"] is not None
-    assert "command_responses" in data_done["startup_output"]
+    _assert_turn_output_shape(data_done["startup_output"], status="completed")
+    assert "command_responses" in data_done["startup_output"]["command_outputs"][-1]
 
     # The crux: despite 1 defer + 1 in-flight retry + several polling retries,
     # the long-running command executed EXACTLY ONCE (no duplicate LLM/work).

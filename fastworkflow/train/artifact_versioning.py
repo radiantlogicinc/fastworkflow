@@ -65,9 +65,11 @@ R4 also asked for a human-facing display surface, and this module used to carry 
 They were removed (bd fix-k0i.50) once it was clear nothing but their own tests had
 ever called them; the stale comments pointing at that CLI went with them. If a
 version listing is wanted again, `list_versions` returns everything it needs, and
-`VersionInfo.size_bytes` should be made lazy first (bd fix-44d) — computing it walks
-every version's tree, which is why displaying the cost was expensive enough to
-matter on the publication path.
+`VersionInfo.size_bytes` is now walked on access (bd fix-44d) rather than eagerly
+populated: as a field it made *every* `list_versions` call walk *every* version's
+tree, including the call `retain_current_and_previous` makes on every train and now
+makes while holding `publication_lock` — real I/O, under a lock, for a figure
+nothing in the training path reads.
 """
 
 from __future__ import annotations
@@ -210,13 +212,20 @@ class ArtifactConsistencyError(RuntimeError):
 
 
 class VersionInfo(BaseModel):
-    """Summary of one artifact version, as surfaced to a developer."""
+    """Summary of one artifact version, as surfaced to a developer.
+
+    Every field is a manifest read, a shallow directory listing or the caller's own
+    argument, so building one is cheap enough for the publication path to build one
+    per version. `size_bytes` is the exception, and is a property for that reason.
+    """
 
     version_id: str
+    #: Carried so `size_bytes` can find the version's tree at the moment it is
+    #: asked for it, rather than being handed a size nobody wanted.
+    workflow_folderpath: str
     created_at: str
     is_current: bool
     contexts: list[str]
-    size_bytes: int
     seed: Optional[int] = None
     notes: Optional[str] = None
     # Recorded by the trainer when it knows. It drove the "this took 3h35m to build"
@@ -224,6 +233,29 @@ class VersionInfo(BaseModel):
     # and is kept because it is the cheapest way to make the cost of these directories
     # obvious at the moment someone is about to delete one, whatever displays it next.
     train_duration_seconds: Optional[float] = None
+
+    @property
+    def size_bytes(self) -> int:
+        """Apparent bytes under this version, walked on access (bd fix-44d).
+
+        This was an eagerly populated field, and populating it meant `list_versions`
+        walked *every* version's entire tree on every call. `retain_current_and_previous`
+        calls `list_versions` on every train and now does so inside `publication_lock`,
+        so a multi-gigabyte workflow spent real I/O — holding a lock another training
+        process waits on — computing a figure nothing in the training path reads.
+
+        Deliberately not cached. The callers are display surfaces, a version's tree
+        does change under an interested reader (publishing hardlinks a carried-forward
+        context into it), and a stale size is worse than a slow one; a caller that
+        wants the figure twice should hold on to it. Returns 0 for a version that is
+        no longer on disk, which is what walking an absent tree reports.
+
+        Being a property rather than a field also keeps it out of `model_dump()`,
+        which costs nothing today because nothing serialises a `VersionInfo`. A future
+        surface that needs it serialised should reach for `computed_field` knowing it
+        reintroduces the walk on every dump.
+        """
+        return _dir_size_bytes(version_dir(self.workflow_folderpath, self.version_id))
 
 
 # ---------------------------------------------------------------------
@@ -510,6 +542,9 @@ def _dir_size_bytes(path: Path) -> int:
     Hardlinked carry-forwards are counted in every version that shares them, so the
     sum over versions overstates real disk usage. That bias is the safe direction:
     it never makes a version look cheaper than it is.
+
+    Reached only through `VersionInfo.size_bytes`, i.e. only when something actually
+    wants a size; that is what keeps this walk off the publication path (bd fix-44d).
     """
     total = 0
     for root, dirnames, filenames in os.walk(path, followlinks=False):
@@ -1379,6 +1414,10 @@ def list_versions(workflow_folderpath: str) -> list[VersionInfo]:
     versions produced inside the same second, because the id's random suffix would
     decide the order — and `prune_versions(keep=N)` depends on this order to pick
     which versions are the old ones.
+
+    Costs one manifest read and one shallow listing per version, and never walks a
+    version's tree: `prune_versions` and `retain_current_and_previous` both call this
+    on the publication path, and neither of them wants a size (bd fix-44d).
     """
     root = versions_root(workflow_folderpath)
     if not root.is_dir():
@@ -1406,10 +1445,10 @@ def list_versions(workflow_folderpath: str) -> list[VersionInfo]:
         infos.append(
             VersionInfo(
                 version_id=entry.name,
+                workflow_folderpath=workflow_folderpath,
                 created_at=str(created_at),
                 is_current=(entry.name == current),
                 contexts=[str(c) for c in contexts],
-                size_bytes=_dir_size_bytes(entry),
                 seed=_coerce_int(manifest.get("seed")),
                 notes=manifest.get("notes"),
                 train_duration_seconds=(

@@ -173,8 +173,10 @@ def test_saving_supersedes_the_legacy_copy(store):
     """Two files for one channel would let the reaper delete a live suspension.
 
     `iter_entries` would report the channel twice, once with the stale blob's
-    age. The stale entry ages out, and `clear` -- which must remove both names or
-    a cleared session comes back -- takes the fresh blob with it.
+    age. Until fix-xm1 the stale entry aged out and `clear` -- which must remove
+    both names or a cleared session comes back -- took the fresh blob with it.
+    The reaper now removes the exact path it enumerated, so the surviving harm is
+    a miscount: one channel occupying two entries against `max_entries`.
     """
     channel_id = "tenant/user-1"
     legacy = Path(store._legacy_json_path(channel_id))
@@ -183,7 +185,7 @@ def test_saving_supersedes_the_legacy_copy(store):
     store.save(channel_id, _blob(channel_id, "fresh"))
 
     assert not legacy.exists()
-    assert [cid for cid, _ in store.iter_entries()] == [channel_id]
+    assert [entry.channel_id for entry in store.iter_entries()] == [channel_id]
 
     outcome = store.reap(PendingRetentionPolicy(max_age_seconds=DAY))
 
@@ -203,10 +205,14 @@ def test_iter_entries_reports_both_shapes(store):
         json.dumps({**_blob("old/shape", "stale"), SAVED_AT_KEY: 1.0})
     )
 
-    found = dict(store.iter_entries())
+    found = {entry.channel_id: entry for entry in store.iter_entries()}
 
     assert set(found) == {"new/shape", "old/shape"}
-    assert found["old/shape"] == 1.0
+    assert found["old/shape"].saved_at == 1.0
+    # Each shape is enumerated under its own name, which is the name the reaper
+    # removes: deriving one from the legacy blob's id would produce the new form.
+    assert found["old/shape"].storage_key == store._legacy_json_path("old/shape")
+    assert found["new/shape"].storage_key == store._json_path("new/shape")
 
 
 def test_oversized_ids_round_trip_and_stay_distinct(store):

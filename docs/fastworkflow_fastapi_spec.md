@@ -1,7 +1,7 @@
 ### FastWorkflow FastAPI Service — Specification
 
 #### 1. Overview
-- **Goal**: Expose FastWorkflow workflows as a FastAPI web service, enabling clients to initialize for a given workflow (per channel), then interact in agent mode (forced). If a query starts with `/`, all leading slashes are stripped before processing. The service supports explicit actions, resetting conversations, listing conversations, dumping all conversations to JSONL, and posting feedback. `invoke_agent` returns a synchronous `CommandOutput` and, when enabled, includes collected trace events in the final response. Streaming is supported via NDJSON or SSE at `/invoke_agent_stream`, and MCP tools map to the same NDJSON-based streaming implementation.
+- **Goal**: Expose FastWorkflow workflows as a FastAPI web service, enabling clients to initialize for a given workflow (per channel), then interact in agent mode (forced). If a query starts with `/`, all leading slashes are stripped before processing. The service supports explicit actions, resetting conversations, listing conversations, dumping all conversations to JSONL, and posting feedback. `invoke_agent` returns the turn's `TurnOutput` projection (see §6a) and, when enabled, includes collected trace events in the final response. Streaming is supported via NDJSON or SSE at `/invoke_agent_stream`, and MCP tools map to the same NDJSON-based streaming implementation.
 - **Source parity**: Behavior mirrors the CLI runner in `fastworkflow/run/__main__.py` while replacing its interactive loop with synchronous and streaming HTTP endpoints.
 
 #### 2. Non‑Goals
@@ -31,7 +31,7 @@
    - Starts the workflow via `chat_session.start_workflow(...)` with provided context/startup parameters.
    - Stores runtime in `ChannelSessionManager` and returns:
      - A TokenResponse containing `access_token`, `refresh_token`, `token_type`, `expires_in`.
-     - If a startup command/action was provided, also return `startup_output` (a `CommandOutput`) and persist it as the first turn in `ConversationStore`.
+     - If a startup command/action was provided, also return `startup_output` (the startup turn's `TurnOutput`, see §6a) and persist it as the first turn in `ConversationStore`.
 3) Client uses the JWT access token with `/invoke_agent`, `/invoke_assistant`, `/perform_action`, or `/new_conversation`. In trusted mode, the tokens are unencrypted. Additional endpoints: `/conversations`. Admin-only endpoint: `/admin/dump_all_conversations`.
 4) On `new_conversation` or process shutdown:
    - Generate `topic` (guaranteed unique per channel via case-insensitive and whitespace-insensitive comparison; append an incrementing integer if needed) and `summary` synchronously via `dspy.ChainOfThought()`.
@@ -41,7 +41,7 @@
 #### 6. Endpoints
 
 1) POST `/initialize`
-- Purpose: Create or resume a FastWorkflow `ChatSession` for a `channel_id` and start the workflow. Optionally execute a startup command/action and return its `CommandOutput`.
+- Purpose: Create or resume a FastWorkflow `ChatSession` for a `channel_id` and start the workflow. Optionally execute a startup command/action as the channel's first logical turn and return its `TurnOutput` (§6a).
 - Request (InitializationRequest):
 ```json
 {
@@ -59,7 +59,7 @@
   - If startup is provided, `user_id` is required.
   - `stream_format`: `ndjson` (default) or `sse` for `/invoke_agent_stream`.
 - Response:
-  - TokenResponse + optional `startup_output` (`CommandOutput`).
+  - TokenResponse + optional `startup_output` (the startup turn's `TurnOutput` projection, §6a). Absent while the startup turn is still running (202, poll via `startup_turn_key`).
 - Notes:
   - `channel_id` is embedded in JWT `sub`; `user_id` (when provided) is embedded in `uid`.
   - Workflow definition can be obtained by calling the `what_can_i_do` command (IntentDetection context)
@@ -85,8 +85,8 @@
 - Behavior:
   - Validate the channel session exists. Agent mode is always enabled.
   - If `user_query` begins with `/`, strip all leading slashes before processing (compatibility path).
-  - When the turn completes, return a `CommandOutput` JSON including collected `traces`.
-- Response: `CommandOutput` (JSON).
+  - When the turn completes, return the turn's `TurnOutput` projection including collected `traces`.
+- Response: turn response (§6a).
 - Errors:
   - 404 channel not found
   - 409 concurrent turn already in progress for this channel
@@ -94,7 +94,7 @@
   - 500 unexpected error
 
 4) POST `/invoke_agent_stream`
-- Purpose: Submit a natural language query to an agentic session and stream trace events in real-time, followed by the final `CommandOutput`. Leading `/` characters are permitted and stripped.
+- Purpose: Submit a natural language query to an agentic session and stream trace events in real-time, followed by the turn's final `TurnOutput`. Leading `/` characters are permitted and stripped.
 - Headers: Same as `/invoke_agent`.
 - Request:
 ```json
@@ -104,9 +104,11 @@
   - Validate the channel session exists. Agent mode is always enabled.
   - If `user_query` begins with `/`, strip all leading slashes before processing.
   - Emit streaming records as they are available:
-    - NDJSON: `{ "type": "trace", "data": <trace_json> }` (multiple), then `{ "type": "output", "data": <CommandOutput_json> }` (final)
+    - NDJSON: `{ "type": "trace", "data": <trace_json> }` (multiple), then `{ "type": "output", "data": <TurnOutput_json> }` (final)
     - SSE: `event: trace` (multiple) and final `event: output` with JSON payloads
   - Only the final output record is streamed if no traces were produced.
+  - The terminal `output` event carries the bare `TurnOutput` (§6a) — no `exec_state`, no back-compatible `command_responses`, since a stream has no deferral state to report.
+  - A turn that fails, or that suspends to ask the user something, still arrives as an `output` event (with `status` `failed`/`awaiting_user`). The `error` event is reserved for transport failures.
 - Response: HTTP 200 with `Content-Type: application/x-ndjson` (NDJSON) or `text/event-stream` (SSE).
 - Errors:
   - 404 channel not found
@@ -121,8 +123,8 @@
 ```json
 { "user_query": "load_workflow file='...'" }
 ```
-- Behavior: Same execution path as agent, but uses assistant path (no planning). Returns `CommandOutput`.
-- Response: `CommandOutput`.
+- Behavior: Same execution path as agent, but uses assistant path (no planning). The `/`-prefixing that selects the assistant path affects routing inside the execution context, not the response type.
+- Response: turn response (§6a).
 - Errors: as above.
 
 6) POST `/perform_action`
@@ -134,10 +136,75 @@
 ```
 - Behavior:
   - Validate session exists.
-  - Invoke through the same single‑turn path used for NL queries, but bypass parameter extraction (directly execute the provided `Action`).
-  - Wait for `CommandOutput` (or timeout) and return it.
-- Response: `CommandOutput`.
+  - Invoke through the same single‑turn path used for NL queries, but bypass parameter extraction (directly execute the provided `Action`). Each direct action is its own logical turn.
+  - Wait for the turn (or defer) and return it.
+- Response: turn response (§6a).
 - Errors: 404/409/504/500 as above; 422 invalid action shape.
+
+#### 6a. Turn response contract (`TurnOutput`)
+
+Every turn surface answers with the same shape: `/invoke_agent`,
+`/invoke_agent_stream`, `/invoke_assistant`, `/perform_action`, and
+`/initialize`'s `startup_output`. This replaced a per-endpoint mix in which some
+returned the public `TurnOutput` and others returned the older `CommandOutput`,
+forcing integrators to handle both. See
+`docs/turn_result_design_final.md` sections 1a, 8 and 14.
+
+**Breaking wire change, no back-compat for the CommandOutput-shaped top level.**
+Made deliberately before v3.0 (spec section 1a). The keys that moved are
+`workflow_name`, `context`, `command_name`, `command_parameters` and
+`command_responses`: they are still there, but per command, inside each entry of
+`command_outputs`.
+
+The public projection (`fastworkflow/turn.py`, `TurnOutput`):
+
+```json
+{
+  "turn_key": "20260807T193000.123456Z-a1b2c3d4e5f6",
+  "status": "completed",
+  "failure_reason": null,
+  "answer": "The sum is 5.",
+  "command_outputs": [ /* one CommandOutput per command executed in the turn */ ],
+  "success": true
+}
+```
+
+- `status` (`TurnStatus`): `completed` | `awaiting_user` | `failed` | `cancelled` | `abandoned`.
+- `failure_reason`: elaboration of a failure status (e.g. `max_iters_exhausted`), else `null`.
+- `answer`: the turn's final answer text — the agent's synthesized answer, or the deterministic command's response text. When `status` is `awaiting_user`, this is the clarification question.
+- `command_outputs`: per-command provenance, each with its own `success`, `artifacts` and timing.
+- `success`: a computed field, `all(command_outputs succeeded)`. Deliberately **orthogonal** to `status` — the agent phrases its answer as if it succeeded, so this is the framework's signal that some command returned a failure code even when the agent recovered from it or masked it in prose.
+
+The non-streaming endpoints add three keys to that projection:
+
+- `exec_state`: the transport's own lifecycle (`running` | `done`), not the turn's outcome. A deferred turn returns `202 {turn_key, exec_state: "running"}` and nothing else; retrying the same request rejoins the same execution.
+- `command_responses`: retained for backward compatibility. For `invoke_agent` it is the synthesized final answer; for the assistant and action surfaces it is the last command's responses, artifacts preserved.
+- `traces`: present when trace events were collected.
+
+`turn_key` in a non-streaming response body is the **execution's** key — the handle
+a deferred `202` is polled with, and what `/initialize` reports as
+`startup_turn_key`. The streaming `output` event carries the bare `TurnOutput`,
+whose `turn_key` is the workflow's own logical-turn key. The two key spaces are
+distinct.
+
+**HTTP status is not the turn outcome.** A turn that fails, or that suspends to
+ask the user something, is a *successful call*: HTTP 200 with the outcome in
+`status`/`failure_reason`/`success`. HTTP codes describe the transport — the
+session was missing (404), another turn holds the channel (409), the request's
+wait window elapsed (504), the server broke (500). Collapsing the two would
+leave a client unable to tell "the workflow could not finish" from "the server is
+broken".
+
+**MCP `isError` is deliberately not mapped** to `not success` (fix-qtq.6).
+`fastapi-mcp` 0.4.0 exposes no hook: it answers from a private
+`_execute_api_tool` returning `list[TextContent]`, and the MCP SDK marks a result
+`isError` only when the handler raises — which that function does solely for HTTP
+4xx/5xx. The only available lever is therefore the HTTP status code, and using it
+would destroy the transport/outcome separation above. The streaming
+`invoke_agent` tool could not read `success` anyway: its body is a stream, so
+there is no top-level field to map. MCP clients read the outcome from the
+`TurnOutput` in the tool result body. See the TODO in
+`fastworkflow/run_fastapi_mcp/mcp_specific.py`.
 
 7) POST `/new_conversation`
 - Purpose: Persist and close the current conversation (topic + summary via GenAI), then reset history and start a new internal conversation.
@@ -224,9 +291,18 @@ class CommandOutput(BaseModel):
     command_parameters: dict[str, Any] | None = None
     command_responses: list[CommandResponse]
     traces: list[dict[str, Any]] | None = None
+
+class TurnOutput(BaseModel):
+    turn_key: str
+    status: TurnStatus              # completed | awaiting_user | failed | cancelled | abandoned
+    failure_reason: str | None = None
+    answer: str = ""
+    command_outputs: list[CommandOutput] = []
+    # success is a computed field: all(command_outputs succeeded)
 ```
 
 Notes:
+- `TurnOutput` is the response type of every turn surface (§6a). `CommandOutput` is no longer a top-level response shape — it appears only inside `TurnOutput.command_outputs`.
 - Align `CommandOutput` and `CommandResponse` fields with FastWorkflow’s canonical definitions to avoid divergence. If Pydantic models exist in FastWorkflow, import them instead of redefining.
 - `Action` mirrors the runtime execution object consumed by `CommandExecutor`.
 - `user_id` is extracted on authenticated endpoints from JWT `uid` and included in traces alongside `raw_command`.
@@ -236,7 +312,10 @@ Notes:
 - 409 Conflict: A turn is already in progress for the same `channel_id` (serialize turns per channel).
 - 422 Unprocessable Entity: Validation failures (invalid paths/action schema/channel input) and XOR violation in `/post_feedback`.
 - 500 Internal Server Error: Unexpected errors (log with stack trace; avoid broad except without logging).
-- 504 Gateway Timeout: No `CommandOutput` received before `timeout_seconds`.
+- 504 Gateway Timeout: No turn output received before `timeout_seconds`.
+
+A turn that reports `status: failed` or `success: false` is NOT an error status —
+see §6a. These codes describe the transport only.
 
 Error body format (example):
 ```json
@@ -325,7 +404,7 @@ Type hints & structure should follow existing FastWorkflow dataclasses/Pydantic 
   - SSE formatting: verify correct event structure for trace and command_output events.
 - Integration
   - Spin up FastAPI app via `TestClient`.
-  - Initialize with a sample workflow (fixture) and perform one agent turn; assert `CommandOutput` fields.
+  - Initialize with a sample workflow (fixture) and perform one agent turn; assert the `TurnOutput` projection fields (§6a). Covered by `tests/test_fastapi_turn_output_contract.py`.
   - Perform action path using a known command; verify response.
   - New conversation persists old history and resets runtime; validate prior conversation is stored and later appears in `/conversations`.
   - Test `/invoke_agent_stream` by parsing SSE events: verify trace events arrive before final command_output event; validate JSON structure of each event.
