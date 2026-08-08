@@ -120,6 +120,7 @@ class WorkflowExecutionContext:
 
         self._workflow_tool_agent = None
         self._intent_clarification_agent = None
+        self._context_change_listener = None
 
         self._awaiting_user = False
         self._suspended_user_message: Optional[str] = None
@@ -710,6 +711,11 @@ class WorkflowExecutionContext:
         self._app_workflow = workflow
         self._cme_workflow.context["app_workflow"] = workflow
 
+    def _on_app_context_change(self) -> None:
+        """Context-change observer: refresh the ReAct agent's available_commands."""
+        from fastworkflow.workflow_agent import _refresh_agent_available_commands
+        _refresh_agent_available_commands(self)
+
     def close(self) -> bool:
         """
         Release the cme_workflow speedict session store.
@@ -717,6 +723,11 @@ class WorkflowExecutionContext:
         Call when an embedder session ends; does not close the app workflow
         (caller owns that lifecycle).
         """
+        listener = getattr(self, "_context_change_listener", None)
+        if listener is not None and self._app_workflow is not None:
+            self._app_workflow.remove_context_change_listener(listener)
+            self._context_change_listener = None
+
         if self._cme_workflow is None:
             return True
         try:
@@ -961,6 +972,15 @@ class WorkflowExecutionContext:
         self._workflow_tool_agent = initialize_workflow_tool_agent(
             self, execution_insights=self._execution_insights
         )
+
+        # Re-scope the active ReAct agent's available_commands whenever the context changes,
+        # driven by the workflow's context-change observer (the single switch chokepoint)
+        # Registered once per WEC (agent init runs once). The listener reads the *active* agent
+        # dynamically. No-ops when no agent is running. Bound method + remove on close()
+        # (and WeakMethod storage on Workflow) avoid listener leaks.
+        if self._app_workflow is not None:
+            self._app_workflow.add_context_change_listener(self._on_app_context_change)
+            self._context_change_listener = self._on_app_context_change
 
         from fastworkflow.intent_clarification_agent import initialize_intent_clarification_agent
         self._intent_clarification_agent = initialize_intent_clarification_agent(self)

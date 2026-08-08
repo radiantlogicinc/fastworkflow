@@ -161,6 +161,11 @@ class Workflow:
         self._current_command_context = None
         self._command_context_for_response_generation = None
 
+        # Observers invoked when current_command_context changes. Kept on
+        # the workflow because the setter is the single chokepoint every context switch
+        # (set_current_*, go_up, reset_context) passes through.
+        self._context_change_listeners: list = []
+
         # Child workflow ids (parent/child topology lives on the live object so
         # it is reclaimed when the object is garbage-collected).
         self._children: list[int] = []
@@ -202,7 +207,60 @@ class Workflow:
 
     @current_command_context.setter
     def current_command_context(self, value: Optional[object]) -> None:
+        changed = value is not self._current_command_context
         self._current_command_context = value
+        if changed:
+            self._notify_context_change()
+
+    def add_context_change_listener(self, listener) -> None:
+        """Register a zero-arg callable invoked whenever the current context changes.
+
+        Bound methods are stored as ``weakref.WeakMethod`` so a short-lived
+        WorkflowExecutionContext (or similar) can be GC'd without an explicit
+        unsubscribe. Plain callables (including closures) are stored strongly;
+        callers that register those should call ``remove_context_change_listener``.
+        """
+        # Bound methods: WeakMethod so WEC/agent GC is not blocked by the list.
+        if getattr(listener, "__self__", None) is not None and hasattr(listener, "__func__"):
+            try:
+                self._context_change_listeners.append(weakref.WeakMethod(listener))
+                return
+            except TypeError:
+                pass
+        self._context_change_listeners.append(listener)
+
+    def remove_context_change_listener(self, listener) -> None:
+        """Unregister a previously added context-change listener (no-op if absent)."""
+        remaining = []
+        for entry in self._context_change_listeners:
+            if isinstance(entry, weakref.WeakMethod):
+                current = entry()
+                if current is None:
+                    continue
+                if current is listener or current == listener:
+                    continue
+                remaining.append(entry)
+            elif entry is listener or entry == listener:
+                continue
+            else:
+                remaining.append(entry)
+        self._context_change_listeners = remaining
+
+    def _notify_context_change(self) -> None:
+        alive = []
+        for entry in list(self._context_change_listeners):
+            if isinstance(entry, weakref.WeakMethod):
+                listener = entry()
+                if listener is None:
+                    continue
+            else:
+                listener = entry
+            alive.append(entry)
+            try:
+                listener()
+            except Exception:  # a listener must never break context switching
+                logger.warning("context-change listener failed", exc_info=True)
+        self._context_change_listeners = alive
 
     @property
     def root_command_context(self) -> object:
