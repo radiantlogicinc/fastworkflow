@@ -63,8 +63,7 @@ def store_utterance_cache(cache_path, utterance, label, model_pipeline=None):
     Returns:
         The hash key of the stored utterance
     """
-    db = UtteranceCacheStore(cache_path)
-    try:
+    with UtteranceCacheStore(cache_path) as db:
         # Generate hash for utterance using mmh3
         utterance_hash = str(mmh3.hash(utterance))
         
@@ -114,9 +113,6 @@ def store_utterance_cache(cache_path, utterance, label, model_pipeline=None):
             )
         
         return utterance_hash
-        
-    finally:
-        db.close()
 
 def get_embedding(text: str, model_pipeline):
     """Return (possibly cached) embedding for *text* using *model_pipeline*."""
@@ -145,24 +141,21 @@ def cache_match(cache_path, utterance, model_pipeline, threshold=0.90, return_de
         If match found: true_label or (true_label, similarity) if return_details=True
         If no match: None
     """
-    db = UtteranceCacheStore(cache_path)
-    try:
-        entries = list(db.iter_entries())
-        if not entries:
-            return None
-
+    with UtteranceCacheStore(cache_path) as db:
         # Get embedding for the query utterance
         query_embedding = get_embedding(utterance, model_pipeline)
 
         # Reshape query embedding for cosine_similarity
         query_embedding = query_embedding.reshape(1, -1)
 
-        # Check cache for similar utterances
+        # Check cache for similar utterances (stream; do not materialise all rows)
         best_similarity = 0
         best_key = None
         best_mapping = None
+        saw_any = False
 
-        for hash_key, entry in entries:
+        for hash_key, entry in db.iter_entries():
+            saw_any = True
             cached_embedding = entry.get("embedding")
             if cached_embedding is None or cached_embedding.size == 0:
                 continue
@@ -174,6 +167,9 @@ def cache_match(cache_path, utterance, model_pipeline, threshold=0.90, return_de
                 best_similarity = similarity
                 best_key = hash_key
                 best_mapping = entry["command_mapping"]
+
+        if not saw_any:
+            return None
 
         # If good cache match found, determine the best label
         if best_similarity >= threshold and best_key is not None and best_mapping is not None:
@@ -207,5 +203,3 @@ def cache_match(cache_path, utterance, model_pipeline, threshold=0.90, return_de
             return (true_label, best_similarity) if return_details else true_label
         # No good match found
         return None
-    finally:
-        db.close()

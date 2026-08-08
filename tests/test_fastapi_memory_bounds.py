@@ -435,6 +435,12 @@ class _CountingKVStore:
     def close(self):
         self._db.close()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
 
 class _CountingConversationStore(ConversationStore):
     """A real store whose write volume can be measured."""

@@ -21,19 +21,31 @@ def _key_str(key: Any) -> str:
     return key if isinstance(key, str) else str(key)
 
 
+def _open_sqlite(path: str, *, timeout: float) -> sqlite3.Connection:
+    """Open a WAL connection. ``timeout`` is enforced by sqlite3.connect (seconds)."""
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    # check_same_thread=False is safe here because sqlite3 serialises access
+    # internally and every method below is a single self-contained statement.
+    # Busy waiting uses connect(timeout=...); do not interpolate into PRAGMA SQL.
+    conn = sqlite3.connect(path, timeout=timeout, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
+
+
 class KVStore:
-    """A durable dict[str, Any]. Values must be JSON-serialisable."""
+    """A durable dict[str, Any]. Values must be JSON-serialisable.
+
+    Values are stored as JSON TEXT. That matches today's call sites (scalars,
+    small dicts, conversation turns). Large binary or high-cardinality payloads
+    should use a dedicated table with typed columns / BLOBs (see
+    :class:`UtteranceCacheStore`) rather than stuffing them into ``v``.
+    """
 
     def __init__(self, path: str, *, timeout: float = 30.0) -> None:
-        parent = os.path.dirname(path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        # check_same_thread=False is safe here because sqlite3 serialises access
-        # internally and every method below is a single self-contained statement.
-        self._conn = sqlite3.connect(path, timeout=timeout, check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._conn.execute(f"PRAGMA busy_timeout={int(timeout * 1000)}")
+        self._conn = _open_sqlite(path, timeout=timeout)
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)"
         )
@@ -98,13 +110,7 @@ class UtteranceCacheStore:
     """
 
     def __init__(self, path: str, *, timeout: float = 30.0) -> None:
-        parent = os.path.dirname(path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        self._conn = sqlite3.connect(path, timeout=timeout, check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._conn.execute(f"PRAGMA busy_timeout={int(timeout * 1000)}")
+        self._conn = _open_sqlite(path, timeout=timeout)
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS utterance_cache (
@@ -166,10 +172,11 @@ class UtteranceCacheStore:
         self._conn.commit()
 
     def iter_entries(self) -> Iterator[tuple[str, dict[str, Any]]]:
-        rows = self._conn.execute(
+        # Stream rows from the cursor — do not fetchall(); cache_match only
+        # needs the best match and must not hold every embedding in memory.
+        for key, meta_json, vec in self._conn.execute(
             "SELECT k, meta, vec FROM utterance_cache"
-        ).fetchall()
-        for key, meta_json, vec in rows:
+        ):
             meta = json.loads(meta_json)
             yield key, {
                 "utterance": meta.get("utterance", ""),

@@ -55,22 +55,20 @@ def enablecache(func):
         # Get the cache database (folder path historically fed RocksDB; SQLite
         # needs a file inside that folder).
         cache_db_folder = self.get_cachedb_folderpath(func.__name__)
-        cache_db = KVStore(os.path.join(cache_db_folder, "cache.sqlite3"))
+        with KVStore(os.path.join(cache_db_folder, "cache.sqlite3")) as cache_db:
+            if key not in cache_db:
+                # If the result is not in the cache, call the function and store the result
+                result = func(self, *args, **kwargs)
+                try:
+                    cache_db[key] = result
+                except TypeError as exc:
+                    raise TypeError(
+                        f"@enablecache requires a JSON-serialisable return value; "
+                        f"{func.__qualname__} returned {type(result).__name__}"
+                    ) from exc
+            else:
+                result = cache_db[key]
 
-        if key not in cache_db:
-            # If the result is not in the cache, call the function and store the result
-            result = func(self, *args, **kwargs)
-            try:
-                cache_db[key] = result
-            except TypeError as exc:
-                raise TypeError(
-                    f"@enablecache requires a JSON-serialisable return value; "
-                    f"{func.__qualname__} returned {type(result).__name__}"
-                ) from exc
-        else:
-            result = cache_db[key]
-
-        cache_db.close()
         return result
 
     return wrapper

@@ -104,12 +104,9 @@ class ConversationStore:
     
     def get_last_conversation_id(self) -> Optional[int]:
         """Get the last conversation ID for this user"""
-        try:
-            db = self._get_db()
+        with self._get_db() as db:
             meta = db.get("meta", {})
             return meta.get("last_conversation_id")
-        finally:
-            db.close()
     
     def _increment_conversation_id(self, db: KVStore) -> int:
         """Increment and return new conversation ID"""
@@ -121,11 +118,8 @@ class ConversationStore:
     
     def reserve_next_conversation_id(self) -> int:
         """Reserve the next conversation ID by incrementing the counter without creating a conversation"""
-        db = self._get_db()
-        try:
+        with self._get_db() as db:
             return self._increment_conversation_id(db)
-        finally:
-            db.close()
     
     def _ensure_unique_topic(self, db: KVStore, candidate_topic: str) -> str:
         """Ensure topic is unique per user with case/whitespace insensitive comparison"""
@@ -169,8 +163,7 @@ class ConversationStore:
         Returns:
             The conversation ID used
         """
-        db = self._get_db()
-        try:
+        with self._get_db() as db:
             if conversation_id is not None:
                 # Use the specified ID (assumes it's valid and reserved)
                 conv_id = conversation_id
@@ -190,22 +183,16 @@ class ConversationStore:
             self._replace_turns(db, conv_id, conversation, turns)
             db[f"conv:{conv_id}"] = conversation
             return conv_id
-        finally:
-            db.close()
     
     def get_conversation(self, conv_id: int) -> Optional[dict[str, Any]]:
         """Get a conversation by ID"""
-        db = self._get_db()
-        try:
+        with self._get_db() as db:
             conv = db.get(f"conv:{conv_id}")
             return None if conv is None else self._hydrated(db, conv_id, conv)
-        finally:
-            db.close()
     
     def get_conversation_by_topic(self, topic: str) -> Optional[tuple[int, dict[str, Any]]]:
         """Get conversation ID and data by topic (case/whitespace insensitive)"""
-        db = self._get_db()
-        try:
+        with self._get_db() as db:
             meta = db.get("meta", {"last_conversation_id": 0})
             normalized_topic = topic.lower().strip()
             
@@ -216,13 +203,10 @@ class ConversationStore:
                     if conv.get("topic", "").lower().strip() == normalized_topic:
                         return i, self._hydrated(db, i, conv)
             return None
-        finally:
-            db.close()
     
     def list_conversations(self, limit: int) -> list[ConversationSummary]:
         """List conversations ordered by updated_at desc, up to limit"""
-        db = self._get_db()
-        try:
+        with self._get_db() as db:
             meta = db.get("meta", {"last_conversation_id": 0})
             conversations = []
             
@@ -243,8 +227,6 @@ class ConversationStore:
             # Sort by updated_at desc and limit
             conversations.sort(key=lambda c: c.updated_at, reverse=True)
             return conversations[:limit]
-        finally:
-            db.close()
     
     def update_conversation(
         self,
@@ -254,8 +236,7 @@ class ConversationStore:
         turns: list[dict[str, Any]]
     ) -> None:
         """Update an existing conversation with new topic, summary, and turns"""
-        db = self._get_db()
-        try:
+        with self._get_db() as db:
             conv_key = f"conv:{conv_id}"
             if conv_key not in db:
                 raise ValueError(f"Conversation {conv_id} not found")
@@ -270,8 +251,6 @@ class ConversationStore:
             self._replace_turns(db, conv_id, conv, turns)
             
             db[conv_key] = conv
-        finally:
-            db.close()
     
     def update_conversation_topic_summary(
         self,
@@ -283,8 +262,7 @@ class ConversationStore:
         Update only the topic and summary of an existing conversation.
         Used when finalizing a conversation (turns already saved incrementally).
         """
-        db = self._get_db()
-        try:
+        with self._get_db() as db:
             conv_key = f"conv:{conv_id}"
             if conv_key not in db:
                 raise ValueError(f"Conversation {conv_id} not found")
@@ -298,8 +276,6 @@ class ConversationStore:
             conv["updated_at"] = int(time.time() * 1000)
             
             db[conv_key] = conv
-        finally:
-            db.close()
     
     def save_conversation_turns(
         self,
@@ -320,8 +296,7 @@ class ConversationStore:
         Returns:
             The conversation ID used
         """
-        db = self._get_db()
-        try:
+        with self._get_db() as db:
             conv_key = f"conv:{conversation_id}"
             
             if conv_key in db:
@@ -341,8 +316,6 @@ class ConversationStore:
             db[conv_key] = conv
             
             return conversation_id
-        finally:
-            db.close()
 
     def append_conversation_turns(
         self,
@@ -367,8 +340,7 @@ class ConversationStore:
         if not new_turns:
             return conversation_id
 
-        db = self._get_db()
-        try:
+        with self._get_db() as db:
             conv_key = f"conv:{conversation_id}"
             now = int(time.time() * 1000)
 
@@ -393,19 +365,14 @@ class ConversationStore:
             db[conv_key] = conv
 
             return conversation_id
-        finally:
-            db.close()
 
     def count_conversation_turns(self, conversation_id: int) -> int:
         """Number of turns durably recorded for a conversation (0 if absent)."""
-        db = self._get_db()
-        try:
+        with self._get_db() as db:
             conv = db.get(f"conv:{conversation_id}")
             if conv is None:
                 return 0
             return int(conv.get("appended_turn_count") or 0)
-        finally:
-            db.close()
 
     def get_conversation_summaries(self, conversation_id: int) -> list[dict[str, Any]]:
         """Each turn's summary, without holding whole turns in memory.
@@ -415,8 +382,7 @@ class ConversationStore:
         size of the whole conversation, which is the growth this store exists to
         keep out of the process.
         """
-        db = self._get_db()
-        try:
+        with self._get_db() as db:
             conv = db.get(f"conv:{conversation_id}")
             if conv is None:
                 return []
@@ -424,8 +390,6 @@ class ConversationStore:
                 {"conversation summary": turn.get("conversation summary")}
                 for turn in self._iter_turn_records(db, conversation_id, conv)
             ]
-        finally:
-            db.close()
     
     # NOTE: update_turn_feedback() removed - feedback is saved from the incremental
     # save flow after modifying conversation_history in memory, via the append path
@@ -443,8 +407,7 @@ class ConversationStore:
         Used when a turn that is already recorded is edited (feedback), which the
         append path cannot express. Returns False if there is no turn to rewrite.
         """
-        db = self._get_db()
-        try:
+        with self._get_db() as db:
             conv_key = f"conv:{conversation_id}"
             if conv_key not in db:
                 return False
@@ -458,13 +421,10 @@ class ConversationStore:
             conv["updated_at"] = int(time.time() * 1000)
             db[conv_key] = conv
             return True
-        finally:
-            db.close()
     
     def get_all_conversations_for_dump(self) -> list[dict[str, Any]]:
         """Get all conversations for admin dump"""
-        db = self._get_db()
-        try:
+        with self._get_db() as db:
             meta = db.get("meta", {"last_conversation_id": 0})
             conversations = []
             
@@ -478,8 +438,6 @@ class ConversationStore:
                     })
             
             return conversations
-        finally:
-            db.close()
 
 
 def generate_topic_and_summary(turns: list[dict[str, Any]]) -> tuple[str, str]:

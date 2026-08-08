@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import multiprocessing
-import os
 from pathlib import Path
 
 import numpy as np
@@ -82,6 +81,50 @@ def test_utterance_cache_float32_blob_round_trip(tmp_path: Path):
         assert entries[0][0] == "123"
 
 
+def test_utterance_cache_none_embedding_round_trip(tmp_path: Path):
+    path = str(tmp_path / "utt_none.sqlite3")
+    with UtteranceCacheStore(path) as store:
+        store.upsert(
+            "none-emb",
+            utterance="hello-none",
+            command_mapping={"cmd": {"frequency": 1, "feedback_date": "t"}},
+            embedding=None,
+        )
+        entry = store.get("none-emb")
+        assert entry is not None
+        assert entry["utterance"] == "hello-none"
+        assert entry["command_mapping"]["cmd"]["frequency"] == 1
+        assert entry["embedding"] is None
+
+        entries = list(store.iter_entries())
+        assert len(entries) == 1
+        assert entries[0][0] == "none-emb"
+        assert entries[0][1]["embedding"] is None
+
+
+def test_utterance_cache_empty_embedding_round_trip(tmp_path: Path):
+    path = str(tmp_path / "utt_empty.sqlite3")
+    empty_vec = np.array([], dtype=np.float32)
+    with UtteranceCacheStore(path) as store:
+        store.upsert(
+            "empty-emb",
+            utterance="hello-empty",
+            command_mapping={"cmd": {"frequency": 1, "feedback_date": "t"}},
+            embedding=empty_vec,
+        )
+        entry = store.get("empty-emb")
+        assert entry is not None
+        assert entry["utterance"] == "hello-empty"
+        assert entry["command_mapping"]["cmd"]["frequency"] == 1
+        # Empty vectors should round-trip to a None embedding, not an empty ndarray
+        assert entry["embedding"] is None
+
+        entries = list(store.iter_entries())
+        assert len(entries) == 1
+        assert entries[0][0] == "empty-emb"
+        assert entries[0][1]["embedding"] is None
+
+
 def test_kvstore_and_utterance_cache_share_file(tmp_path: Path):
     path = str(tmp_path / "shared.sqlite3")
     with KVStore(path) as kv:
@@ -134,4 +177,12 @@ def test_kvstore_four_process_concurrency(tmp_path: Path):
 
     with KVStore(path) as db:
         keys = list(db.keys())
-    assert len(keys) == n_workers * n_ops
+        assert len(keys) == n_workers * n_ops
+        for key in keys:
+            worker_s, i_s = key.split(":", 1)
+            worker_id = int(worker_s[1:])
+            i = int(i_s)
+            assert db[key] == {"worker": worker_id, "i": i}
+        for worker_id in range(n_workers):
+            for i in range(n_ops):
+                assert db[f"w{worker_id}:{i}"] == {"worker": worker_id, "i": i}
