@@ -144,6 +144,25 @@ def select_reserved_rows(
     removes rows that are valid in the local context — an utterance that means
     something *here* must not also train the "ask my parent" class.
 
+    **Invariant: `always_include` must stay small relative to the budgets real
+    contexts get, or `budget` stops being observable.** Always-included rows count
+    against `budget` without being chosen by it, so each one spends a row of the fill
+    pass's headroom. Once
+    ``len(always_include) + <rows the coverage pass took> >= budget`` the fill pass
+    never runs and `budget` is dead input: every value of it, correct or not, yields
+    the same selection. Since the coverage floor reaches selection *only* through
+    `budget` — `reserved_class_budget` is where it is applied — a defect in how the
+    floor is derived is then invisible to any test that inspects selected rows, and
+    survives as a wrong number in the provenance record alone.
+
+    That is not hypothetical. fix-4ej counted core commands as ancestor sources,
+    inflating the floor by one source per core command per ancestor context (four, in
+    this repo). It reached the selected rows only because `always_include` holds
+    exactly one row — the humanised wildcard command name. A wildcard corpus of four
+    non-local rows would have absorbed the inflation entirely and hidden the defect.
+    `tests/test_class_balance.py` asserts that margin, so widening the corpus is a
+    decision someone makes rather than one they discover afterwards.
+
     Returns rows in selection order, deduplicated. The caller sorts if it wants a
     stable training-row order.
     """

@@ -438,9 +438,21 @@ async def lifespan(_app: FastAPI):
                 outcome = await loop.run_in_executor(
                     None, session_manager.reap_checkpoints
                 )
-                reclaimed = getattr(outcome, "channels_reclaimed", None)
-                if reclaimed:
-                    logger.info(f"Reclaimed {reclaimed} abandoned checkpoint(s)")
+                # Attribute access, not getattr-with-default: this read named a
+                # field that has never existed (`channels_reclaimed` vs
+                # `reclaimed_channels`), and the default silently turned that
+                # into "nothing was reclaimed" for every pass since retention
+                # shipped. A plain access would have raised on the first run.
+                if outcome.reclaimed_channels:
+                    logger.info(
+                        f"Reclaimed {outcome.reclaimed_channels} abandoned "
+                        f"checkpoint(s)"
+                    )
+                if outcome.failures:
+                    logger.warning(
+                        f"{outcome.failures} checkpoint namespace entr(ies) could "
+                        f"not be reclaimed"
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -463,6 +475,14 @@ async def lifespan(_app: FastAPI):
                     logger.warning(
                         f"{pending.unreadable} pending-state blob(s) have no "
                         f"readable save time and were left in place"
+                    )
+                if pending.failures:
+                    # reap already warns per blob and names the path. The
+                    # aggregate is what says "retention is not keeping up",
+                    # which a per-blob line buried among others does not.
+                    logger.warning(
+                        f"{pending.failures} pending-state blob(s) were selected "
+                        f"for reclamation but could not be removed"
                     )
             except asyncio.CancelledError:
                 raise
@@ -861,7 +881,7 @@ def _turn_json_response(execn, channel_id: str) -> JSONResponse:
         200: {"description": "Session successfully initialized, JWT tokens returned with optional startup_output (the startup turn's TurnOutput projection)"},
         202: {"description": "Session initialized; startup turn still running (poll /initialize or /turns)"},
         400: {"description": "Both startup_command and startup_action provided, or user_id missing when startup provided"},
-        422: {"description": "Invalid paths or missing env vars"},
+        422: {"description": "Empty channel_id, invalid paths, or missing env vars"},
         500: {"description": "Internal error during initialization"}
     }
 )
@@ -1760,6 +1780,7 @@ async def dump_all_conversations(request: DumpConversationsRequest) -> dict[str,
     status_code=status.HTTP_200_OK,
     responses={
         200: {"description": "MCP token generated successfully"},
+        422: {"description": "Empty channel_id"},
         500: {"description": "Failed to generate token"}
     }
 )

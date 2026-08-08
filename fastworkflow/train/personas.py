@@ -444,9 +444,26 @@ class PersonaSource:
         would generate the same utterances from the same configuration, so they SHOULD
         share a cache entry; and it is what lets a test attribute a digest change to the
         body of one method rather than to the name of the class that holds it.
+
+        `DEFAULT_MIN_POOL_MULTIPLE`'s VALUE is folded in beside the source text because
+        digesting text alone does not reach it: `rows` reads it through the
+        ``min_pool_multiple`` default, so retuning the constant changes the pool a
+        command is generated from without changing one character of any digested
+        function — a developer would retune it, retrain, and be served the utterances
+        the old pool wrote (bd fix-l48). Folded as a named ``NAME=value`` string so the
+        digest stays byte-stable across processes, which `implementation_functions`
+        documents this depending on.
+
+        That is the narrow fix, and the general shape is worth naming: ANY module
+        constant a digested function reads has this property, and reflection over source
+        text cannot see any of them. A general fix would digest the constants a function
+        closes over, or move every tunable into the source's `fingerprint`. Neither is
+        done here; this is the only such constant today, and it is enumerated rather
+        than derived.
         """
         return _hash_parts(
-            *[source_digest(func) for func in implementation_functions(type(self))]
+            *[source_digest(func) for func in implementation_functions(type(self))],
+            f"DEFAULT_MIN_POOL_MULTIPLE={DEFAULT_MIN_POOL_MULTIPLE}",
         )
 
     def notes(self) -> list[str]:

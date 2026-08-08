@@ -7,12 +7,12 @@ from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from queue import Queue
-from typing import Any, Callable, Optional
+from typing import Annotated, Any, Callable, Optional
 
 from fastapi import HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jwt.exceptions import PyJWTError as JWTError
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 import fastworkflow
 from fastworkflow.session_state_store import (
@@ -90,9 +90,26 @@ MAX_CONVERSATION_TURNS_IN_MEMORY = 20
 # Data Models (aligned with FastWorkflow canonical types)
 # ============================================================================
 
+# A channel id as a client supplies it. Empty is the one value the storage layer
+# refuses: both durable stores key records by `encode_path_component(channel_id)`,
+# which raises on "" and is total for every other string. Rejected here so a
+# malformed request is answered as one, rather than surfacing as a 500 carrying a
+# storage-layer message the caller cannot act on (fix-3xf). The ValueError stays
+# as the backstop; this is what makes it unreachable from a well-formed request.
+#
+# Deliberately no length cap. The encoder's ceiling is 200 bytes on the *encoded*
+# name, which percent-escaping can triple, so any raw-length number derived from
+# it would reject ordinary ids to prevent nothing: an oversized id is a supported
+# path (prefix plus sha256, with the raw id re-checked on read), not an error.
+#
+# Applies to values a client sends. `SessionData.channel_id` comes out of a JWT
+# this server minted, so closing both minting endpoints closes that route too.
+ChannelId = Annotated[str, Field(min_length=1)]
+
+
 class InitializationRequest(BaseModel):
     """Request to initialize a FastWorkflow session for a channel"""
-    channel_id: str
+    channel_id: ChannelId
     user_id: Optional[str] = None  # Required if startup_command or startup_action provided
     stream_format: Optional[str] = None  # "ndjson" | "sse" (default ndjson)
     startup_command: Optional[str] = None  # Mutually exclusive with startup_action
@@ -198,7 +215,7 @@ class DumpConversationsRequest(BaseModel):
 
 class GenerateMCPTokenRequest(BaseModel):
     """Request to generate a long-lived MCP token"""
-    channel_id: str
+    channel_id: ChannelId
     user_id: Optional[str] = None
     expires_days: int = 365
 

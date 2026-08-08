@@ -11,6 +11,7 @@ touch as about what it must.
 from __future__ import annotations
 
 import json
+import textwrap
 import time
 import uuid
 from pathlib import Path
@@ -226,3 +227,70 @@ def test_retention_off_keeps_everything(store):
 
     assert outcome.reclaimed == 0
     assert store.exists("ancient")
+
+
+# ---------------------------------------------------------------------------
+# The reaper's own reporting must name fields that exist
+# ---------------------------------------------------------------------------
+
+
+def test_the_periodic_reaper_reads_only_fields_its_outcomes_actually_have():
+    """A log line that names a missing field reports silence, not an error.
+
+    The checkpoint branch read `outcome.channels_reclaimed` through a
+    getattr default; the field is `reclaimed_channels`, so every pass since
+    retention shipped logged nothing and looked like "nothing was reclaimed".
+    A plain attribute access would have raised on the first run.
+
+    Asserted structurally rather than by driving the loop, because the defect
+    was a NAME, and a test that drove the loop with a real store would have
+    passed just as happily against the wrong one.
+    """
+    import ast
+    from dataclasses import fields as dataclass_fields
+    from pathlib import Path
+
+    from fastworkflow.checkpoint_store import ReapReport
+    from fastworkflow.session_state_store import PendingReapOutcome
+
+    known = {f.name for f in dataclass_fields(ReapReport)}
+    known |= {f.name for f in dataclass_fields(PendingReapOutcome)}
+
+    # Parsed from the file rather than imported: importing __main__ runs its
+    # argparse and exits the interpreter.
+    server_path = (
+        Path(__file__).parent.parent
+        / "fastworkflow" / "run_fastapi_mcp" / "__main__.py"
+    )
+    tree = ast.parse(server_path.read_text(encoding="utf-8"))
+
+    # Both spellings, because the defect used the second one and a getattr
+    # default is the only form that can hide a bad name at runtime. Checking
+    # only direct attribute access would miss the very bug this pins.
+    outcome_names = {"outcome", "pending"}
+    read = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id in outcome_names
+    }
+    read |= {
+        node.args[1].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and len(node.args) >= 2
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id in outcome_names
+        and isinstance(node.args[1], ast.Constant)
+        and isinstance(node.args[1].value, str)
+    }
+
+    assert read, "found no reap-outcome attribute reads to check"
+    unknown = read - known
+    assert not unknown, (
+        f"the reaper reads fields no reap outcome defines: {sorted(unknown)}. "
+        f"Known fields: {sorted(known)}"
+    )

@@ -495,7 +495,24 @@ class NamespaceStats:
 
 @dataclass(frozen=True)
 class ReapReport:
-    """What one `reap` pass did, in the units an operator and a soak both need."""
+    """What one `reap` pass did, in the units an operator and a soak both need.
+
+    `reclaimed_channels` — and the `reclaimed_bytes_*` and `reclaimed_keys` that
+    accompany it — count what this pass observed leaving the live namespace, not
+    what it selected. Anything selected and refused lands in `failures` instead,
+    so an operator watching the number can conclude the namespace shrank by that
+    much. On a dry run they are the projection, because nothing was attempted.
+
+    `reclaimed_channels + failures` can therefore be less than
+    `aged_out + over_capacity`: a channel another process reclaimed between this
+    pass enumerating it and reaching it is neither this pass's reclamation nor
+    its failure. This is the same contract as
+    `session_state_store.PendingReapOutcome`, deliberately — the two numbers
+    share a name across namespaces and an operator compares them (fix-3lm).
+
+    `failures` spans channels and quarantined records both, since either leaves
+    the namespace over the cap it was reaped down to.
+    """
 
     dry_run: bool = False
     scanned_channels: int = 0
@@ -1175,23 +1192,34 @@ class ChannelCheckpointStore:
 
             reclaim_root = self._reclaim_dir(dep_key, fp_key)
             for info in aged + over_capacity:
+                # Counted after the flip, never before it. A dry run has nothing
+                # to confirm and counts the projection; a real pass counts only
+                # what `_retire_directory` says left the live namespace. Counting
+                # the selection instead reported channels as reclaimed that are
+                # still on disk, and did so at precisely the moment an operator
+                # is reading the number to find out why the namespace did not
+                # shrink (fix-3lm).
+                confirmed = dry_run
+                if not dry_run:
+                    try:
+                        confirmed, _apparent, _physical = self._retire_directory(
+                            info.directory, reclaim_root
+                        )
+                    except (CheckpointStoreError, OSError) as exc:
+                        # One unreclaimable channel must not stop the pass; the
+                        # namespace stays over its cap and says so in `failures`.
+                        totals["failures"] += 1
+                        logger.warning(
+                            f"checkpoint reap could not reclaim a channel: "
+                            f"channel_key={info.channel_key} backend={BACKEND} "
+                            f"exception={type(exc).__name__}"
+                        )
+                if not confirmed:
+                    continue
                 reclaimed_keys.append(info.channel_key)
                 totals["reclaimed"] += 1
                 totals["apparent"] += info.bytes_apparent
                 totals["physical"] += info.bytes_physical
-                if dry_run:
-                    continue
-                try:
-                    self._retire_directory(info.directory, reclaim_root)
-                except (CheckpointStoreError, OSError) as exc:
-                    # One unreclaimable channel must not stop the pass; the
-                    # namespace stays over its cap and says so in `failures`.
-                    totals["failures"] += 1
-                    logger.warning(
-                        f"checkpoint reap could not reclaim a channel: "
-                        f"channel_key={info.channel_key} backend={BACKEND} "
-                        f"exception={type(exc).__name__}"
-                    )
 
             entries, bytes_freed, failures = self._reap_quarantine(
                 dep_key, fp_key, policy, moment, dry_run=dry_run

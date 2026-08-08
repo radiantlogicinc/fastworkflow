@@ -41,7 +41,9 @@ from fastworkflow.train.generate_synthetic import (
     generate_diverse_utterances_with_provenance,
     utterance_fingerprint,
 )
+from fastworkflow.train import personas
 from fastworkflow.train.personas import (
+    DEFAULT_MIN_POOL_MULTIPLE,
     SOURCE_DOMAIN_CONDITIONED,
     AppPersonaSource,
     DomainConditionedPersonaSource,
@@ -301,6 +303,86 @@ def test_the_two_methods_fix_6r5_names_are_in_the_digested_set():
     functions = implementation_functions(DomainConditionedPersonaSource)
     assert DomainConditionedPersonaSource._matches in functions
     assert DomainConditionedPersonaSource.rows.fget in functions
+
+
+# ---------------------------------------------------------------------------
+# The residue: a constant `rows` reads is not in any function's TEXT (bd fix-l48)
+# ---------------------------------------------------------------------------
+
+def test_retuning_the_pool_floor_constant_moves_the_digest_and_the_variant_key(
+    monkeypatch
+):
+    """`rows` reads `DEFAULT_MIN_POOL_MULTIPLE`, so the VALUE has to be in the key.
+
+    Digesting source text cannot reach it: retuning the constant changes the pool a
+    command is generated from while every digested function's text stays identical.
+    Asserted against the shipped `utterance_fingerprint` as well as the digest, because
+    the digest only matters where the cache reads it.
+    """
+    before = _source(_MatchesOnZip)
+    before_digest = before.pool_source_digest()
+    before_key = _variant_key(before)
+
+    monkeypatch.setattr(
+        personas, "DEFAULT_MIN_POOL_MULTIPLE", DEFAULT_MIN_POOL_MULTIPLE * 2
+    )
+    # Built after the change, so the pool floor the source will actually use and the
+    # value its digest reports are the same one -- as they are when the constant is
+    # edited in the file rather than here.
+    after = _source(_MatchesOnZip)
+
+    assert after.pool_source_digest() != before_digest
+    assert _variant_key(after) != before_key
+
+
+def test_an_entry_written_under_the_old_pool_floor_is_not_reused(tmp_path, monkeypatch):
+    """The consequence, through the real cache and the real generation path (fix-l48).
+
+    The harm the issue describes end to end: retune the floor, retrain, and be served
+    the utterances the old, smaller pool wrote — with the retuning sitting in the diff
+    apparently doing nothing.
+    """
+    workflow_dir = str(tmp_path / "workflow")
+    os.mkdir(workflow_dir)
+    cache = UtteranceCache(workflow_dir)
+    set_utterance_cache(cache)
+
+    set_persona_source(_source(_MatchesOnZip))
+    first = CountingCompletion()
+    _utterances, provenance = generate_diverse_utterances_with_provenance(
+        SEED_UTTERANCES,
+        COMMAND_NAME,
+        num_personas=2,
+        utterances_per_persona=2,
+        personas_per_batch=1,
+        seed=42,
+        completion_fn=first,
+        persona_dataset_loader=_loader,
+    )
+    assert first.calls > 0
+    assert provenance.fell_back is False
+    assert cache.stats["stored"] == 1, cache.stats
+
+    monkeypatch.setattr(
+        personas, "DEFAULT_MIN_POOL_MULTIPLE", DEFAULT_MIN_POOL_MULTIPLE * 2
+    )
+    set_persona_source(_source(_MatchesOnZip))
+    after_the_retune = CountingCompletion()
+    generate_diverse_utterances_with_provenance(
+        SEED_UTTERANCES,
+        COMMAND_NAME,
+        num_personas=2,
+        utterances_per_persona=2,
+        personas_per_batch=1,
+        seed=42,
+        completion_fn=after_the_retune,
+        persona_dataset_loader=_loader,
+    )
+    assert after_the_retune.calls > 0, (
+        "the entry written under the previous pool floor was reused, so retuning "
+        "DEFAULT_MIN_POOL_MULTIPLE silently kept serving the old pool's personas"
+    )
+    assert cache.stats["hit"] == 0, cache.stats
 
 
 # ---------------------------------------------------------------------------

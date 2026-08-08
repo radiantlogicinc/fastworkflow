@@ -254,6 +254,37 @@ def test_initialize_xor_validation(app_module, unique_user_id):
     assert "both startup_command and startup_action" in resp.json()["detail"].lower()
 
 
+def test_initialize_rejects_an_empty_channel_id(app_module):
+    """A malformed request is answered as one, not as an internal error (fix-3xf).
+
+    Both durable stores key records by encode_path_component(channel_id), which
+    refuses "". With no boundary check that refusal surfaced from inside storage
+    as a 500 carrying a storage-layer message — telling the caller our code broke
+    when in fact their request did, and giving them nothing to act on.
+    """
+    client = TestClient(app_module.app)
+    resp = client.post("/initialize", json={"channel_id": ""})
+
+    assert resp.status_code == 422
+    # The rejected field is named, which a storage-layer message is not.
+    assert any(
+        "channel_id" in detail.get("loc", ())
+        for detail in resp.json()["detail"]
+    )
+
+
+def test_generate_mcp_token_rejects_an_empty_channel_id(app_module):
+    """The other endpoint that mints a token from a client-supplied channel id.
+
+    Closing both is what keeps SessionData.channel_id non-empty without a check
+    of its own: it is read out of a JWT this server issued, never off the wire.
+    """
+    client = TestClient(app_module.app)
+    resp = client.post("/admin/generate_mcp_token", json={"channel_id": ""})
+
+    assert resp.status_code == 422
+
+
 def test_initialize_validation_errors(app_module):
     """Invalid workflow path via ARGS should 500"""
     client = TestClient(app_module.app)

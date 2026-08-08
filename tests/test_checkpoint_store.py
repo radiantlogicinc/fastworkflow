@@ -1762,6 +1762,22 @@ def interrupt_flip(store, source: str, identity) -> str:
     return destination
 
 
+def block_reclamation(store, identity) -> str:
+    """Make retiring any channel in this namespace fail, as a crash would not.
+
+    A plain file where the reclaim holding area belongs: the rename that makes a
+    channel invisible has nowhere to land, so `_retire_directory` refuses and the
+    channel stays live and loadable. Injected at the filesystem rather than by
+    revoking write permission on a parent, which a suite running as root would
+    not even notice.
+    """
+    root = reclaim_root(store, identity)
+    os.makedirs(os.path.dirname(root), mode=0o700, exist_ok=True)
+    with open(root, "w", encoding="utf-8") as handle:
+        handle.write("not a directory")
+    return root
+
+
 def write_floor(store, identity, floor: int) -> None:
     """The first step of `reset`, on its own, so a crash after it can be tested."""
     path = os.path.join(store.channel_directory(identity), "GENERATION_FLOOR")
@@ -2119,6 +2135,31 @@ def test_reaping_survives_a_channel_it_cannot_reclaim(store, tmp_path):
 
     assert report.reclaimed_channels >= 1
     assert store.load(ordinary) is None
+
+
+def test_a_channel_that_could_not_be_retired_is_not_counted_as_reclaimed(store):
+    """`reclaimed` is confirmations, as PendingReapOutcome's is (fix-3lm).
+
+    The two stores' reap reports share this field name across namespaces and an
+    operator compares them to judge whether retention is working. Counting the
+    selection here made the answer optimistic in exactly the case that matters:
+    when something failed.
+    """
+    stuck = identity_for("stuck-count")
+    publish(store, stuck)
+    block_reclamation(store, stuck)
+
+    report = store.reap(now=time.time() + 400 * DAY)
+
+    assert report.aged_out == 1
+    assert report.failures == 1
+    assert report.reclaimed_channels == 0
+    # The bytes are still occupied, so reporting them as freed would make an
+    # unshrinking namespace look like one that shrank and refilled.
+    assert report.reclaimed_bytes_apparent == 0
+    assert report.reclaimed_keys == ()
+    assert store.load(stuck) is not None
+    assert store.stats().bytes_apparent > 0
 
 
 # -- quarantine reclamation -------------------------------------------------
