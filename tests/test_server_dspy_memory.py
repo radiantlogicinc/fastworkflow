@@ -430,7 +430,7 @@ def test_install_policy_asserts_dspy_actually_reads_both_keys():
     assert observed["asserted"] is True
     assert observed["history_off"] is True
     assert observed["trace_off"] is True
-    assert observed["disk_cache_off"] is True
+    assert observed["disk_cache_off"] is False
     # The cap is read back off the live cache, not echoed from the request, so
     # a release that ignored memory_max_entries could not be logged as bounded.
     assert observed["details"] == {
@@ -494,12 +494,13 @@ def test_readiness_probe_reports_unready_once_the_policy_drifts(server_argv_prea
     assert "drifted" in observed["body_after_drift"]["checks"]["dspy_memory_policy"]
 
 
-def test_response_cache_is_bounded_and_the_disk_cache_is_untouched():
-    """Step 9: the response cache honours its entry cap and never writes to disk.
+def test_response_cache_is_bounded_and_disk_cache_is_enabled():
+    """Step 9: the response cache honours its entry cap; disk cache stays on.
 
     Installed with a cap of 5 and driven with 20 unique requests so the bound is
     observable. The repeat call at the end must not reach the provider, which is
     what makes the entry count evidence of a live cache rather than a dead one.
+    Disk cache is intentionally enabled (size-capped) for repeat-prompt hits.
     """
     observed = _run_in_venv(_CACHE_BOUND_SCRIPT)
 
@@ -511,10 +512,9 @@ def test_response_cache_is_bounded_and_the_disk_cache_is_untouched():
     assert observed["max_observed_entries"] <= observed["cap"]
     assert observed["entries"] <= observed["max_entries"]
     assert observed["default_cap"] == 200
-    assert observed["disk_cache_enabled"] is False
-    assert observed["cache_enable_disk_cache"] is False
-    assert observed["disk_cache_truthy"] is False
-    assert observed["disk_cache_len"] == 0
+    assert observed["disk_cache_enabled"] is True
+    assert observed["cache_enable_disk_cache"] is True
+    assert observed["disk_cache_truthy"] is True
     # The bound is worthless if the calls that filled the cache also filled the
     # retainers the policy is supposed to have closed.
     assert observed["lm_history"] == 0
@@ -578,4 +578,4 @@ def test_policy_holds_on_the_minimum_supported_dspy():
 
     cache = _run_in_venv(_CACHE_BOUND_SCRIPT, python=interpreter)
     assert cache["entries"] <= cache["cap"]
-    assert cache["disk_cache_enabled"] is False
+    assert cache["disk_cache_enabled"] is True

@@ -3,11 +3,12 @@
 DSPy keeps three things across calls that grow with request size: a global
 diagnostic history, a per-LM history, and the predictor trace. It also ships a
 response cache defaulting to a million in-memory entries and a 30 GB disk cache.
-None of that is useful to a long-lived server, and all of it retains prompts.
+History and trace are turned off; the in-memory cache is bounded; the disk cache
+stays enabled (capped) so repeat prompts hit disk and skip provider calls.
 
-This module turns them off (or bounds them), and — because configuring is not
-evidence that a policy is in force — proves it structurally before the server
-accepts traffic, then keeps owning it:
+This module installs that policy, and — because configuring is not evidence that
+a policy is in force — proves it structurally before the server accepts traffic,
+then keeps owning it:
 
 * ``install_policy()`` runs synchronously from the server entrypoint, BEFORE
   uvicorn creates the event loop and before any LM exists. DSPy's global config
@@ -45,9 +46,12 @@ from fastworkflow.utils.logging import logger
 # entry count is the load-bearing knob; a million entries of request-sized
 # prompts is unbounded for practical purposes. 200 entries is ~90 MB worst case
 # at a 450 KB payload, sized to keep worst-case retention comparable to the
-# live-session budget. The disk cache is off: 30 GB is not a sane container
-# default and DSPy's disk cache is pickle-backed.
+# live-session budget. Disk cache stays ON for repeat-prompt performance, but
+# capped well below DSPy's 30 GB default so containers cannot grow without bound.
+# CVE-2025-69872 (diskcache pickle) is accepted via OpenVEX: see
+# security/vex/fastworkflow.openvex.json.
 SERVER_DSPY_MEMORY_CACHE_ENTRIES = 200
+SERVER_DSPY_DISK_CACHE_LIMIT_BYTES = 1_000_000_000  # 1 GiB
 
 # The settings that constitute the policy. Re-applied when the async owner is
 # claimed, and compared against on every readiness probe.
@@ -158,7 +162,8 @@ def install_policy(
         dspy.configure_cache(
             enable_memory_cache=True,
             memory_max_entries=memory_cache_entries,
-            enable_disk_cache=False,
+            enable_disk_cache=True,
+            disk_size_limit_bytes=SERVER_DSPY_DISK_CACHE_LIMIT_BYTES,
         )
         dspy.settings.configure(**POLICY_SETTINGS, trace=[])
     except Exception as exc:
@@ -284,8 +289,8 @@ def check_policy_in_force() -> Optional[str]:
         for key, expected in POLICY_SETTINGS.items()
         if _effective(key) != expected
     ]
-    if getattr(dspy.cache, "enable_disk_cache", False):
-        drift.append("disk cache re-enabled")
+    if not getattr(dspy.cache, "enable_disk_cache", True):
+        drift.append("disk cache disabled")
     if _memory_cache_maxsize() != _status.memory_cache_entries:
         drift.append(
             f"memory cache maxsize={_memory_cache_maxsize()} "

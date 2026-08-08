@@ -209,6 +209,7 @@ redoc.html
 # Local security audit artifacts
 .audit-requirements.txt
 audit-report.json
+security-reports/
 
 # Beads / Dolt files (added by bd init)
 .dolt/

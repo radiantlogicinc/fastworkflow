@@ -55,15 +55,15 @@ def clear_dspy_disk_cache(cache_dir: Optional[str] = None):
 
 
 def reset_dspy_cache_settings():
-    """Reset DSPy cache to default settings."""
+    """Reset DSPy cache to defaults (memory + disk on, LiteLLM cache off)."""
     print("🔄 Resetting DSPy cache to default settings...")
-    
+
     dspy.configure_cache(
         enable_disk_cache=True,
         enable_memory_cache=True,
         enable_litellm_cache=False
     )
-    
+
     print("✅ DSPy cache reset to defaults")
 
 

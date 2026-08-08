@@ -8,7 +8,7 @@ import os
 import time
 
 import dspy
-from dspy.clients import litellm
+import litellm
 
 import fastworkflow
 from fastworkflow import active_workflow
