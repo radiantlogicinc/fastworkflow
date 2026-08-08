@@ -5,7 +5,7 @@ Exposes FastWorkflow workflows as HTTP endpoints with synchronous and streaming 
 Implementation Status:
 - ✅ All endpoints implemented per spec
 - ✅ Session management and concurrency control  
-- ✅ Rdict-backed conversation persistence
+- ✅ SQLite-backed conversation persistence
 - ✅ Agent trace collection and inclusion in responses
 - ✅ SSE streaming for real-time trace events (/invoke_agent_stream)
 - ✅ Error handling with proper HTTP status codes
@@ -1738,7 +1738,7 @@ async def activate_conversation(
 async def dump_all_conversations(request: DumpConversationsRequest) -> dict[str, str]:
     """
     Admin endpoint: dump all conversations from all sessions to a JSONL file.
-    Scans all .rdb files in the base folder, not just active sessions.
+    Scans all .sqlite3 conversation stores in the base folder, not just active sessions.
     """
     try:
         os.makedirs(request.output_folder, exist_ok=True)
@@ -1751,12 +1751,12 @@ async def dump_all_conversations(request: DumpConversationsRequest) -> dict[str,
         all_conversations = []
         session_count = 0
         
-        # Scan the base folder for all .rdb files (all users, active or not)
+        # Scan the base folder for all .sqlite3 files (all users, active or not)
         if os.path.isdir(base_folder):
             for filename in os.listdir(base_folder):
-                if filename.endswith('.rdb'):
-                    # Extract channel_id from filename (format: <channel_id>.rdb)
-                    channel_id = filename[:-4]  # Remove .rdb extension
+                if filename.endswith('.sqlite3'):
+                    # Extract channel_id from filename (format: <channel_id>.sqlite3)
+                    channel_id = filename[:-8]  # Remove .sqlite3 extension
                     
                     # Create temporary ConversationStore for this user
                     store = ConversationStore(channel_id, base_folder)

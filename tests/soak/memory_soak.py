@@ -859,7 +859,9 @@ class ServerProcess:
         conversations_dir = os.path.join(self.speeddict_dir, "channel_conversations")
         records = 0
         if os.path.isdir(conversations_dir):
-            records = sum(name.endswith(".rdb") for name in os.listdir(conversations_dir))
+            records = sum(
+                name.endswith(".sqlite3") for name in os.listdir(conversations_dir)
+            )
         return {
             "records": records,
             "conversation_bytes": _dir_bytes(conversations_dir),

@@ -1,6 +1,6 @@
 """
 Conversation persistence layer for FastWorkflow
-Provides Rdict-backed storage for multi-turn conversations with AI-generated topics/summaries
+Provides SQLite-backed storage for multi-turn conversations with AI-generated topics/summaries
 """
 
 import json
@@ -11,8 +11,8 @@ from typing import Any, Optional
 
 import dspy
 from pydantic import BaseModel
-from speedict import Rdict
 
+from fastworkflow.kvstore import KVStore
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils.dspy_utils import get_lm
 
@@ -33,57 +33,46 @@ class ConversationSummary(BaseModel):
 
 
 class ConversationStore:
-    """Rdict-backed conversation persistence per user.
+    """SQLite-backed conversation persistence per user.
 
-    Turns are stored one Rdict entry per turn (``conv:{id}:turn:{index}``) so an
+    Turns are stored one key per turn (``conv:{id}:turn:{index}``) so an
     incremental save writes only the new turns instead of rewriting the whole
     conversation. The ``conv:{id}`` record keeps the metadata plus
     ``appended_turn_count``; reads rehydrate ``turns`` so callers see the same
-    record shape as before. Records written by earlier versions keep their turns
-    inline under ``turns`` and are migrated to per-turn entries on first append.
+    record shape as before. Pre-migration ``.rdb`` (RocksDB) files are abandoned;
+    this store uses ``{channel_id}.sqlite3`` only.
     """
     
     def __init__(self, channel_id: str, base_folder: str):
         self.channel_id = channel_id
-        self.db_path = os.path.join(base_folder, f"{channel_id}.rdb")
+        self.db_path = os.path.join(base_folder, f"{channel_id}.sqlite3")
         os.makedirs(base_folder, exist_ok=True)
     
-    def _get_db(self) -> Rdict:
-        """Get Rdict instance"""
-        return Rdict(self.db_path)
+    def _get_db(self) -> KVStore:
+        """Get KVStore instance"""
+        return KVStore(self.db_path)
 
     @staticmethod
     def _turn_key(conversation_id: int, index: int) -> str:
         return f"conv:{conversation_id}:turn:{index}"
 
     def _iter_turn_records(
-        self, db: Rdict, conversation_id: int, conv: dict[str, Any]
+        self, db: KVStore, conversation_id: int, conv: dict[str, Any]
     ):
-        """Yield a conversation's turns in order, one at a time.
-
-        An inline ``turns`` list wins outright. Only a writer that rewrites the
-        whole list produces one, and every writer here empties it, so a record
-        that still has one was written by an older version of this store — which
-        makes it the authoritative list and any leftover per-turn entries stale.
-        Concatenating the two instead would duplicate and reorder turns after a
-        version rollback.
-        """
-        if inline_turns := conv.get("turns") or []:
-            yield from inline_turns
-            return
+        """Yield a conversation's turns in order, one at a time."""
         for index in range(int(conv.get("appended_turn_count") or 0)):
             turn_key = self._turn_key(conversation_id, index)
             if turn_key in db:
                 yield db[turn_key]
 
     def _read_turns(
-        self, db: Rdict, conversation_id: int, conv: dict[str, Any]
+        self, db: KVStore, conversation_id: int, conv: dict[str, Any]
     ) -> list[dict[str, Any]]:
         """Rehydrate a conversation's turns."""
         return list(self._iter_turn_records(db, conversation_id, conv))
 
     def _hydrated(
-        self, db: Rdict, conversation_id: int, conv: dict[str, Any]
+        self, db: KVStore, conversation_id: int, conv: dict[str, Any]
     ) -> dict[str, Any]:
         """The stored record as callers expect it: turns rehydrated, bookkeeping hidden."""
         hydrated = {k: v for k, v in conv.items() if k != "appended_turn_count"}
@@ -92,7 +81,7 @@ class ConversationStore:
 
     def _replace_turns(
         self,
-        db: Rdict,
+        db: KVStore,
         conversation_id: int,
         conv: dict[str, Any],
         turns: list[dict[str, Any]],
@@ -122,7 +111,7 @@ class ConversationStore:
         finally:
             db.close()
     
-    def _increment_conversation_id(self, db: Rdict) -> int:
+    def _increment_conversation_id(self, db: KVStore) -> int:
         """Increment and return new conversation ID"""
         meta = db.get("meta", {"last_conversation_id": 0})
         new_id = meta["last_conversation_id"] + 1
@@ -138,7 +127,7 @@ class ConversationStore:
         finally:
             db.close()
     
-    def _ensure_unique_topic(self, db: Rdict, candidate_topic: str) -> str:
+    def _ensure_unique_topic(self, db: KVStore, candidate_topic: str) -> str:
         """Ensure topic is unique per user with case/whitespace insensitive comparison"""
         # Normalize for comparison
         normalized_candidate = candidate_topic.lower().strip()
@@ -395,14 +384,6 @@ class ConversationStore:
                 }
 
             next_index = int(conv.get("appended_turn_count") or 0)
-            # A record written by an earlier version keeps its turns inline.
-            # Move them out once, so this and every later append stays O(1) in
-            # bytes written instead of rewriting the inline list every turn.
-            # Inline is the authoritative list (see _iter_turn_records), so any
-            # per-turn entries it coexists with are stale and get replaced.
-            if inline_turns := list(conv.get("turns") or []):
-                self._replace_turns(db, conversation_id, conv, inline_turns)
-                next_index = len(inline_turns)
 
             for offset, turn in enumerate(new_turns):
                 db[self._turn_key(conversation_id, next_index + offset)] = turn
@@ -422,8 +403,6 @@ class ConversationStore:
             conv = db.get(f"conv:{conversation_id}")
             if conv is None:
                 return 0
-            if inline_turns := conv.get("turns") or []:
-                return len(inline_turns)
             return int(conv.get("appended_turn_count") or 0)
         finally:
             db.close()
@@ -472,14 +451,10 @@ class ConversationStore:
 
             conv = db[conv_key]
             appended = int(conv.get("appended_turn_count") or 0)
-            if appended:
-                db[self._turn_key(conversation_id, appended - 1)] = turn
-            elif inline_turns := list(conv.get("turns") or []):
-                inline_turns[-1] = turn
-                conv["turns"] = inline_turns
-            else:
+            if not appended:
                 return False
 
+            db[self._turn_key(conversation_id, appended - 1)] = turn
             conv["updated_at"] = int(time.time() * 1000)
             db[conv_key] = conv
             return True
@@ -533,4 +508,3 @@ def generate_topic_and_summary(turns: list[dict[str, Any]]) -> tuple[str, str]:
         generator = dspy.ChainOfThought(TopicSummarySignature)
         result = generator(conversation_turns=turns_str)
         return result.topic, result.summary
-
