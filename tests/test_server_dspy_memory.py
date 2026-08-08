@@ -88,7 +88,20 @@ def _run_in_venv(script_source: str, python: str = _VENV_PYTHON) -> dict:
             capture_output=True,
             text=True,
             cwd=_REPO_ROOT,
-            env={**os.environ, "PYTHONPATH": _REPO_ROOT},
+            # A private, empty DSPy cache per probe. The cache-bound probe
+            # asserts that every prompt reached the provider, which is only true
+            # against a COLD cache -- and once the server policy began enabling
+            # the disk cache (v2.29.1) the shared ~/.dspy_cache served the fixed
+            # probe strings instead, so the test passed exactly once per machine.
+            # DSPY_CACHEDIR is read at import time, which is why it is set here
+            # rather than in the script: install_policy calls configure_cache
+            # without a directory, so anything the script set would be replaced.
+            # It also stops these probes writing into the developer's real cache.
+            env={
+                **os.environ,
+                "PYTHONPATH": _REPO_ROOT,
+                "DSPY_CACHEDIR": os.path.join(tmp_dir, "dspy_cache"),
+            },
             timeout=_SUBPROCESS_TIMEOUT_SECONDS,
         )
 
