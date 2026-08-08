@@ -93,18 +93,44 @@ def _what_can_i_do(chat_session_obj: fastworkflow.ChatSession) -> str:
         active_context_name=current_workflow.current_command_context_name,
     )
 
-def _refresh_agent_available_commands(chat_session_obj) -> None:
+def _refresh_agent_available_commands(host) -> None:
     """Re-scope the active ReAct agent's ``available_commands`` to the CURRENT context.
 
     Invoked by the workflow's context-change observer (registered in WEC agent init), so it
     fires only on an actual context switch. This is the EXECUTOR's scoped view
     (_what_can_i_do); it never touches the planner's full map. No-ops if there is no active
     agent or it was invoked without available_commands.
+
+    ``host`` is duck-typed for ChatSession and WorkflowExecutionContext: resolve the agent
+    via the public ``workflow_tool_agent`` property first, then ``_workflow_tool_agent``.
+    Resolve the workflow via ``get_active_workflow()`` with an ``app_workflow`` /
+    ``_app_workflow`` fallback so a missing contextvar stack does not skip the refresh.
     """
-    agent = getattr(chat_session_obj, "workflow_tool_agent", None)
+    agent = getattr(host, "workflow_tool_agent", None)
+    if agent is None:
+        agent = getattr(host, "_workflow_tool_agent", None)
     inputs = getattr(agent, "inputs", None)
-    if isinstance(inputs, dict) and "available_commands" in inputs:
-        inputs["available_commands"] = _what_can_i_do(chat_session_obj)
+    if not (isinstance(inputs, dict) and "available_commands" in inputs):
+        return
+
+    current_workflow = None
+    getter = getattr(host, "get_active_workflow", None)
+    if callable(getter):
+        current_workflow = getter()
+    if current_workflow is None:
+        current_workflow = getattr(host, "app_workflow", None)
+    if current_workflow is None:
+        current_workflow = getattr(host, "_app_workflow", None)
+    if current_workflow is None:
+        return
+
+    inputs["available_commands"] = CommandMetadataAPI.get_command_display_text(
+        subject_workflow_path=current_workflow.folderpath,
+        cme_workflow_path=fastworkflow.get_internal_workflow_path(
+            "command_metadata_extraction"
+        ),
+        active_context_name=current_workflow.current_command_context_name,
+    )
 
 
 def _intent_misunderstood(

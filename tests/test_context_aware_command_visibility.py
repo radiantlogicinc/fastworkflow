@@ -285,6 +285,54 @@ def test_refresh_agent_available_commands_on_context_change(todo_list_env):
     assert host.workflow_tool_agent.inputs == {"query": "x"}
 
 
+def test_refresh_finds_wec_private_agent_and_app_workflow_fallback(todo_list_env):
+    """WEC-shaped host: private _workflow_tool_agent + empty active stack → still refresh."""
+    subject = _todo_list_path()
+    workflow = fastworkflow.Workflow.create(
+        subject, workflow_id_str="ctx-refresh-wec-shape"
+    )
+
+    class FakeAgent:
+        def __init__(self):
+            self.inputs = {"available_commands": "STALE"}
+
+    class WECShapedHost:
+        """Mirrors WorkflowExecutionContext attribute layout without a public agent field."""
+
+        def __init__(self, app_workflow):
+            self._app_workflow = app_workflow
+            self._workflow_tool_agent = FakeAgent()
+
+        @property
+        def workflow_tool_agent(self):
+            return self._workflow_tool_agent
+
+        @property
+        def app_workflow(self):
+            return self._app_workflow
+
+        def get_active_workflow(self):
+            # Match WEC when the contextvar stack is empty.
+            return None
+
+    host = WECShapedHost(workflow)
+    _refresh_agent_available_commands(host)
+    refreshed = host._workflow_tool_agent.inputs["available_commands"]
+    assert refreshed != "STALE"
+    assert isinstance(refreshed, str)
+    assert len(refreshed) > 0
+
+    # Private-only host (no property): still resolve via _workflow_tool_agent.
+    class PrivateOnlyHost:
+        def __init__(self, app_workflow):
+            self._app_workflow = app_workflow
+            self._workflow_tool_agent = FakeAgent()
+
+    private = PrivateOnlyHost(workflow)
+    _refresh_agent_available_commands(private)
+    assert private._workflow_tool_agent.inputs["available_commands"] != "STALE"
+
+
 def test_wec_close_removes_context_change_listener(todo_list_env):
     """WEC.close() must unsubscribe its bound context-change listener."""
     from fastworkflow.workflow_execution_context import WorkflowExecutionContext
