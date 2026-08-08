@@ -93,6 +93,20 @@ def _what_can_i_do(chat_session_obj: fastworkflow.ChatSession) -> str:
         active_context_name=current_workflow.current_command_context_name,
     )
 
+def _refresh_agent_available_commands(chat_session_obj) -> None:
+    """Re-scope the active ReAct agent's ``available_commands`` to the CURRENT context.
+
+    Invoked by the workflow's context-change observer (registered in WEC agent init), so it
+    fires only on an actual context switch. This is the EXECUTOR's scoped view
+    (_what_can_i_do); it never touches the planner's full map. No-ops if there is no active
+    agent or it was invoked without available_commands.
+    """
+    agent = getattr(chat_session_obj, "workflow_tool_agent", None)
+    inputs = getattr(agent, "inputs", None)
+    if isinstance(inputs, dict) and "available_commands" in inputs:
+        inputs["available_commands"] = _what_can_i_do(chat_session_obj)
+
+
 def _intent_misunderstood(
         chat_session_obj: fastworkflow.ChatSession) -> str:
     """
@@ -549,7 +563,7 @@ def build_query_with_next_steps(user_query: str,
         next_steps: str = dspy.OutputField(desc="task descriptions as a numbered list of short sentences separated by line breaks")
 
     current_workflow = chat_session_obj.get_active_workflow()
-    available_commands = CommandMetadataAPI.get_command_display_text(
+    available_commands = CommandMetadataAPI.get_all_contexts_command_display_text(
         subject_workflow_path=current_workflow.folderpath,
         cme_workflow_path=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
         active_context_name=current_workflow.current_command_context_name,
