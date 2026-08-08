@@ -1,6 +1,7 @@
 import fastworkflow
 import pytest
 
+from fastworkflow import ModuleType
 from fastworkflow.command_executor import CommandExecutor, CommandNotFoundError
 
 
@@ -16,7 +17,12 @@ class FaultyRG:  # noqa: D401
 
 class DummyCRD:  # minimal stand-in for RoutingDefinition
     def get_command_class(self, name, module_type):  # noqa: D401
-        return FaultyRG if name == "fail" else None
+        # Only the response generator is faulty. Returning FaultyRG for
+        # COMMAND_PARAMETERS_CLASS would make perform_action treat it as a
+        # pydantic Input model and run validate_parameters on it.
+        if name == "fail" and module_type == ModuleType.RESPONSE_GENERATION_INFERENCE:
+            return FaultyRG
+        return None
 
 
 def _monkey_registry(monkeypatch):
