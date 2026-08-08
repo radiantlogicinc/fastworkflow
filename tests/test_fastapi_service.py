@@ -44,7 +44,7 @@ def unique_user_id():
 
 
 @pytest.fixture
-def app_module(hello_world_workflow_path, env_files):
+def app_module(hello_world_workflow_path, env_files, tmp_path):
     """Import the FastAPI app module with required CLI ARGS configured."""
     env_file, passwords_file = env_files
     # Ensure a fresh import with required CLI args present
@@ -56,21 +56,16 @@ def app_module(hello_world_workflow_path, env_files):
     ]
     import fastworkflow.run_fastapi_mcp.__main__ as main
     importlib.reload(main)
-    
-    # Manually trigger fastworkflow.init() since TestClient doesn't invoke lifespan
-    import fastworkflow
-    from dotenv import dotenv_values
-    env_vars = {
-        **dotenv_values(env_file),
-        **dotenv_values(passwords_file)
-    }
-    fastworkflow.init(env_vars)
-    
-    # Clear routing caches to ensure clean state for each test
-    if fastworkflow.RoutingRegistry:
-        fastworkflow.RoutingRegistry.clear_registry()
-    
-    return main
+
+    from tests.fastapi_hermetic import init_fastapi_hermetic_env, restore_fastapi_env
+
+    previous_env = init_fastapi_hermetic_env(
+        env_file, passwords_file, tmp_path / "speedict"
+    )
+    try:
+        yield main
+    finally:
+        restore_fastapi_env(previous_env)
 
 
 def test_fastapi_imports(app_module):
@@ -144,6 +139,27 @@ def test_session_manager_basic(app_module):
     asyncio.run(test_async())
 
 
+# Keys of the public TurnOutput projection every turn surface answers with
+# (fastworkflow/turn.py). ``success`` is a computed field, so it is part of the
+# serialized shape rather than something the server bolts on.
+TURN_OUTPUT_KEYS = frozenset(
+    {"turn_key", "status", "failure_reason", "answer", "command_outputs", "success"}
+)
+
+
+def _assert_turn_output_projection(payload: dict, *, status: str | None = None) -> None:
+    """Assert *payload* carries the TurnOutput projection."""
+    missing = TURN_OUTPUT_KEYS - set(payload)
+    assert not missing, f"TurnOutput keys missing from response: {sorted(missing)}"
+    assert isinstance(payload["turn_key"], str) and payload["turn_key"]
+    assert isinstance(payload["success"], bool)
+    assert isinstance(payload["answer"], str)
+    assert isinstance(payload["command_outputs"], list)
+    assert payload["failure_reason"] is None or isinstance(payload["failure_reason"], str)
+    if status is not None:
+        assert payload["status"] == status
+
+
 def _authorize(client: TestClient, access_token: str) -> dict:
     return {"Authorization": f"Bearer {access_token}"}
 
@@ -180,9 +196,11 @@ def test_initialize_with_startup_command_in_request(app_module, unique_user_id):
     assert "access_token" in data
     assert "refresh_token" in data
     assert "startup_output" in data
-    # Verify startup_output has expected structure
+    # startup_output is now the startup turn's TurnOutput projection; the
+    # CommandOutput it used to be is preserved under command_outputs.
     if data["startup_output"]:
-        assert "command_responses" in data["startup_output"]
+        _assert_turn_output_projection(data["startup_output"])
+        assert "command_responses" in data["startup_output"]["command_outputs"][-1]
 
 
 def test_initialize_with_startup_action_in_request(app_module, unique_user_id):
@@ -202,7 +220,8 @@ def test_initialize_with_startup_action_in_request(app_module, unique_user_id):
     assert "access_token" in data
     assert "startup_output" in data
     if data["startup_output"]:
-        assert "command_responses" in data["startup_output"]
+        _assert_turn_output_projection(data["startup_output"])
+        assert "command_responses" in data["startup_output"]["command_outputs"][-1]
 
 
 def test_initialize_requires_user_id_with_startup(app_module, unique_user_id):
@@ -230,6 +249,37 @@ def test_initialize_xor_validation(app_module, unique_user_id):
     assert "both startup_command and startup_action" in resp.json()["detail"].lower()
 
 
+def test_initialize_rejects_an_empty_channel_id(app_module):
+    """A malformed request is answered as one, not as an internal error (fix-3xf).
+
+    Both durable stores key records by encode_path_component(channel_id), which
+    refuses "". With no boundary check that refusal surfaced from inside storage
+    as a 500 carrying a storage-layer message — telling the caller our code broke
+    when in fact their request did, and giving them nothing to act on.
+    """
+    client = TestClient(app_module.app)
+    resp = client.post("/initialize", json={"channel_id": ""})
+
+    assert resp.status_code == 422
+    # The rejected field is named, which a storage-layer message is not.
+    assert any(
+        "channel_id" in detail.get("loc", ())
+        for detail in resp.json()["detail"]
+    )
+
+
+def test_generate_mcp_token_rejects_an_empty_channel_id(app_module):
+    """The other endpoint that mints a token from a client-supplied channel id.
+
+    Closing both is what keeps SessionData.channel_id non-empty without a check
+    of its own: it is read out of a JWT this server issued, never off the wire.
+    """
+    client = TestClient(app_module.app)
+    resp = client.post("/admin/generate_mcp_token", json={"channel_id": ""})
+
+    assert resp.status_code == 422
+
+
 def test_initialize_validation_errors(app_module):
     """Invalid workflow path via ARGS should 500"""
     client = TestClient(app_module.app)
@@ -253,6 +303,7 @@ def test_invoke_agent_endpoint(app_module, unique_user_id):
     assert response.status_code == 200
     data = response.json()
     assert "command_responses" in data and len(data["command_responses"]) > 0
+    _assert_turn_output_projection(data)
 
 
 def test_invoke_assistant_endpoint(app_module, unique_user_id):
@@ -267,6 +318,7 @@ def test_invoke_assistant_endpoint(app_module, unique_user_id):
     assert response.status_code == 200
     data = response.json()
     assert "command_responses" in data and len(data["command_responses"]) > 0
+    _assert_turn_output_projection(data)
 
 
 def test_perform_action_endpoint(app_module, unique_user_id):
@@ -284,6 +336,7 @@ def test_perform_action_endpoint(app_module, unique_user_id):
     assert response.status_code == 200
     data = response.json()
     assert "command_responses" in data
+    _assert_turn_output_projection(data, status="completed")
 
 
 def test_session_not_found_errors(app_module):
@@ -291,16 +344,20 @@ def test_session_not_found_errors(app_module):
     client = TestClient(app_module.app)
     token = app_module.create_access_token("nonexistent_user")
     headers = {"Authorization": f"Bearer {token}"}
+    # These two calls are setup, not the subject: they make real LLM calls, and
+    # /invoke_* is wait-or-defer, so 202 is as correct as 200 when the provider
+    # is slower than the wait window. Pinning them to 200 made this test fail on
+    # provider latency rather than on the behaviour it is named after.
     response = client.post("/invoke_agent", headers=headers, json={
         "user_query": "test query",
         "timeout_seconds": 10,
     })
-    assert response.status_code == 200
+    assert response.status_code in (200, 202)
     response = client.post("/invoke_assistant", headers=headers, json={
         "user_query": "test query",
         "timeout_seconds": 10,
     })
-    assert response.status_code == 200
+    assert response.status_code in (200, 202)
     response = client.post("/perform_action", headers=headers, json={
         "action": {"command_name": "test", "parameters": {}},
         "timeout_seconds": 10,

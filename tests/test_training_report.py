@@ -38,7 +38,11 @@ from fastworkflow.train.determinism import (
 from fastworkflow.train.generate_synthetic import (
     generate_diverse_utterances_with_provenance,
 )
-from fastworkflow.train.heldout_evaluation import HeldoutReport, RoutingScore
+from fastworkflow.train.heldout_evaluation import (
+    MIN_TRAINING_ROWS_PER_LABEL,
+    HeldoutReport,
+    RoutingScore,
+)
 
 HELLO_WORLD_PATH = os.path.join("fastworkflow", "examples", "hello_world")
 EXAMPLE_COMMAND_INFO = os.path.join(HELLO_WORLD_PATH, COMMAND_INFO_FOLDERNAME)
@@ -512,12 +516,29 @@ def test_class_aware_split_keeps_every_label_in_train_and_evaluation():
 
 
 def test_class_aware_split_fails_before_fitting_a_one_row_label():
-    with pytest.raises(TrainingDataError, match="at least two rows"):
+    # Matched against the constant rather than the spelled-out "two": the floor is
+    # now shared with the persona split (heldout_evaluation.MIN_TRAINING_ROWS_PER_LABEL)
+    # so the two modules cannot disagree, and the message interpolates it. Hard-coding
+    # the English here would break the moment the floor is retuned.
+    with pytest.raises(
+        TrainingDataError, match=f"at least {MIN_TRAINING_ROWS_PER_LABEL} rows"
+    ):
         split_training_data([
             ("alpha one", 0),
             ("alpha two", 0),
             ("beta only", 1),
         ])
+
+
+def test_class_aware_split_error_names_the_command_not_its_encoded_id():
+    """A developer cannot map label id 1 to a command without the LabelEncoder."""
+    with pytest.raises(TrainingDataError) as excinfo:
+        split_training_data(
+            [("alpha one", 0), ("alpha two", 0), ("beta only", 1)],
+            lambda encoded: f"Ctx/command_{encoded}",
+        )
+
+    assert "Ctx/command_1" in str(excinfo.value)
 
 
 def test_floor_environment_variables_are_ignored(workflow):
@@ -740,6 +761,11 @@ def _resolve_env_vars() -> dict:
     return env_vars
 
 
+# The only test in this module that trains: minutes of fine-tuning plus real LLM spend
+# when a key is configured. Everything else here is pure report assembly and stays fast,
+# so the marker is on the test rather than on the module. bd fix-k0i.42.
+@pytest.mark.slow
+@pytest.mark.requires_llm_key
 def test_report_describes_a_real_training_run(tmp_path_factory):
     """Train the bundled hello_world for real and report on what came out.
 

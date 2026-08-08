@@ -48,6 +48,26 @@ with zero rows in a descendant's escalation class cannot be escalated to from th
 which is F3's failure mode reached by a different route. **When cost and coverage
 conflict, coverage wins**, because cost is a preference and coverage is a requirement.
 
+**Core commands are not ancestor sources and do not count toward the floor** (bd
+fix-4ej). `command_routing` unions `core_command_names` into *every* context, so a core
+command is already a local label wherever it could be escalated to — it has no
+escalation requirement to satisfy, and every one of its rows is removed by `exclude`
+as locally valid. Counting it would therefore add a source the coverage pass can never
+give a row to, which makes the floor a claim about coverage that the selection does not
+honour, and inflates the budget by a per-hierarchy constant the derivation does not
+justify. It would also double-count: those same rows are already in the descendant's
+`own_row_count`, and a row cannot be both the local data the ratio bounds *and* the
+ancestor data the ratio bounds it against.
+
+This is stated here because the trainer's utterance cache is written by two paths that
+disagree about core commands — `cache_ancestor_utterances` walks
+`context_model.commands()`, which excludes them, while the trainee loop walks
+`crd.contexts[ctx] | core_cmds`, which includes them — so whichever path reached a
+context first used to decide its descendants' floor. Since visit order is alphabetical,
+renaming one context could then change a *different* context's training data. Pass the
+core command names to `group_ancestor_utterances` as `skip_commands` and the derivation
+stops depending on which path filled the cache.
+
 **Selection is round-robin** (decision D4), in two passes:
 
 * a coverage pass taking one row from every ancestor command, which is what makes the
@@ -123,6 +143,25 @@ def select_reserved_rows(
     dropped *by the budget*, though they are still subject to `exclude`. `exclude`
     removes rows that are valid in the local context — an utterance that means
     something *here* must not also train the "ask my parent" class.
+
+    **Invariant: `always_include` must stay small relative to the budgets real
+    contexts get, or `budget` stops being observable.** Always-included rows count
+    against `budget` without being chosen by it, so each one spends a row of the fill
+    pass's headroom. Once
+    ``len(always_include) + <rows the coverage pass took> >= budget`` the fill pass
+    never runs and `budget` is dead input: every value of it, correct or not, yields
+    the same selection. Since the coverage floor reaches selection *only* through
+    `budget` — `reserved_class_budget` is where it is applied — a defect in how the
+    floor is derived is then invisible to any test that inspects selected rows, and
+    survives as a wrong number in the provenance record alone.
+
+    That is not hypothetical. fix-4ej counted core commands as ancestor sources,
+    inflating the floor by one source per core command per ancestor context (four, in
+    this repo). It reached the selected rows only because `always_include` holds
+    exactly one row — the humanised wildcard command name. A wildcard corpus of four
+    non-local rows would have absorbed the inflation entirely and hidden the defect.
+    `tests/test_class_balance.py` asserts that margin, so widening the corpus is a
+    decision someone makes rather than one they discover afterwards.
 
     Returns rows in selection order, deduplicated. The caller sorts if it wants a
     stable training-row order.
@@ -209,6 +248,7 @@ def group_ancestor_utterances(
     ancestor_contexts: Iterable[str],
     cache: Mapping[str, Mapping[str, Sequence[str]]],
     skip_labels: Iterable[str] = (),
+    skip_commands: Iterable[str] = (),
 ) -> dict[str, dict[str, list[str]]]:
     """Regroup the trainer's flat utterance cache by ancestor context and command.
 
@@ -218,11 +258,20 @@ def group_ancestor_utterances(
     cap needs no second pass over the generator and no change to how utterances are
     produced.
 
+    `skip_labels` drops a cache entry by its bare label (`Ctx/wildcard` and `wildcard`
+    are the same reserved label). `skip_commands` drops it by exact cache key, which is
+    what the core commands need: they are cache keys the trainee path writes and the
+    ancestor path does not, so filtering them HERE — at the single point the escalation
+    population is derived — is what makes the derivation independent of which path
+    filled the cache. Matching them by bare label instead would also silence a
+    workflow command that merely shares a simple name with a core one.
+
     Ancestor contexts absent from the cache are skipped rather than raising: a context
     can legitimately contribute nothing, and a missing key here must not be the thing
     that fails a training run.
     """
     skipped = set(skip_labels)
+    skipped_commands = set(skip_commands)
     grouped: dict[str, dict[str, list[str]]] = {}
     for ancestor_ctx in ancestor_contexts:
         commands = cache.get(ancestor_ctx)
@@ -231,7 +280,9 @@ def group_ancestor_utterances(
         by_command = {
             cmd: list(rows)
             for cmd, rows in commands.items()
-            if rows and cmd.split("/")[-1] not in skipped
+            if rows
+            and cmd not in skipped_commands
+            and cmd.split("/")[-1] not in skipped
         }
         if by_command:
             grouped[ancestor_ctx] = by_command
@@ -239,5 +290,11 @@ def group_ancestor_utterances(
 
 
 def coverage_floor_of(rows_by_group: Mapping[str, Mapping[str, Sequence[str]]]) -> int:
-    """Number of distinct sources across all groups — the derived coverage floor."""
+    """Number of distinct sources across all groups — the derived coverage floor.
+
+    Counts what is in `rows_by_group`, so the caller's filtering decides what a source
+    is. `group_ancestor_utterances(..., skip_commands=core_cmds)` is what makes this a
+    count of escalation targets rather than of cache entries; see the module docstring
+    on why core commands are not sources.
+    """
     return sum(len(sources) for sources in rows_by_group.values())

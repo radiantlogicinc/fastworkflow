@@ -52,6 +52,32 @@ unreachable through the shipped trainer and is intentionally absent. Multiple se
 entries still share one file so each seed can be reused exactly without overwriting
 another seed's generated data.
 
+Retention: how many variants per command survive
+------------------------------------------------
+Every edit to a command's seed utterances, to the model string, or to the
+prompt-building code produces a NEW variant key and therefore a new file, leaving the
+previous one on disk forever. `_prune_stale_artifacts` deliberately skips this
+directory (see above), so on an actively-tuned 160-command workflow the orphans
+accumulated without bound.
+
+Writing a variant therefore prunes that command's older ones, keeping the
+`MAX_VARIANTS_PER_COMMAND` most recently written. Three properties make that safe:
+
+* Only files whose stored `command_name` matches are considered, so two command names
+  that happen to collapse to the same filename slug cannot delete each other's data.
+* Recency is by modification time, so the file just written always survives, and so
+  does anything a concurrent run wrote moments ago.
+* Losing a variant costs one regeneration, never a wrong answer — the same direction
+  every other degradation in this module takes. Toggling an edit back and forth stays
+  free, because the variant you return to is one of the recent ones.
+
+Diagnosing a miss
+-----------------
+A miss is reported at INFO with the fingerprint inputs that diverged from the closest
+variant already on disk, because "why did this regenerate?" is otherwise answered by
+hand-diffing JSON. `fingerprint_inputs` is stored in every file precisely to make that
+question answerable; `describe_fingerprint_divergence` is what reads it.
+
 Conservative by construction
 ----------------------------
 The failure mode that matters is a developer editing a command's seed utterances and
@@ -88,6 +114,21 @@ CACHE_FORMAT_VERSION: int = 1
 
 CACHE_DIRNAME: str = "utterance_cache"
 CACHE_README_FILENAME: str = "README.md"
+
+# How many variants of ONE command survive a write. See "Retention" above. Three rather
+# than one so that a developer flipping a prompt edit back and forth, or training the
+# same workflow under two model strings, keeps paying for regeneration only once.
+MAX_VARIANTS_PER_COMMAND: int = 3
+
+# `compute_fingerprint` truncates a sha256 hexdigest to this many characters. Used to
+# recognise a variant filename, so pruning can never touch a file it did not write.
+VARIANT_KEY_LENGTH: int = 24
+
+# At most this many diverging inputs are named in a miss report; a fingerprint has
+# eleven inputs and a first-ever variant differs in most of them, which is a wall of
+# text rather than a diagnosis.
+_MISS_REPORT_MAX_KEYS: int = 3
+_MISS_REPORT_VALUE_LIMIT: int = 60
 
 MODE_REUSE: str = "reuse"
 MODE_REGENERATE: str = "regenerate"
@@ -265,6 +306,154 @@ def atomic_write_model(path: str, payload: BaseModel) -> None:
         raise
 
 
+def _looks_like_variant_key(candidate: str) -> bool:
+    """Whether *candidate* could be a variant key this module wrote."""
+    return len(candidate) == VARIANT_KEY_LENGTH and all(
+        ch in "0123456789abcdef" for ch in candidate
+    )
+
+
+def stored_variants(root: str, command_name: str) -> list[tuple[str, dict]]:
+    """Every readable variant file in *root* belonging to *command_name*.
+
+    Shared by the miss report and the retention sweep, and by both generated-data
+    caches, because both file shapes carry `command_name`, `variant_key` and
+    `fingerprint_inputs` at the top level.
+
+    Matching on the STORED command name rather than on the filename is the point: the
+    filename is only a slug (`slugify` folds every non-alphanumeric character and
+    truncates at 80), so two different commands can be filed under the same stem. That
+    is harmless for addressing, because the variant key disambiguates — but it would
+    not be harmless for deletion.
+
+    Unreadable files are skipped rather than reported: a caller that cares has already
+    tried to read the one it wanted and counted it. Never raises.
+    """
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return []
+
+    prefix = f"{slugify(command_name)}."
+    found: list[tuple[str, dict]] = []
+    for name in names:
+        if not name.startswith(prefix) or not name.endswith(".json"):
+            continue
+        if not _looks_like_variant_key(name[len(prefix):-len(".json")]):
+            continue
+        path = os.path.join(root, name)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict) and payload.get("command_name") == command_name:
+            found.append((path, payload))
+    return found
+
+
+def prune_orphaned_variants(
+    root: str,
+    command_name: str,
+    keep: int = MAX_VARIANTS_PER_COMMAND,
+) -> list[str]:
+    """Delete all but the *keep* most recently written variants of *command_name*.
+
+    Called after a successful write, so the file just written is always among the
+    survivors. Returns the paths deleted, for the caller to count and report. Never
+    raises: an undeletable orphan is a disk-space problem, not a reason to fail a
+    training run.
+    """
+    if keep < 1:
+        return []
+    variants = stored_variants(root, command_name)
+    if len(variants) <= keep:
+        return []
+
+    def modified_at(path: str) -> float:
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return 0.0
+
+    # Newest first, and ties broken by path so the outcome is deterministic on a
+    # filesystem whose mtime granularity is coarse enough for two writes to collide.
+    ordered = sorted(
+        (path for path, _payload in variants),
+        key=lambda path: (-modified_at(path), path),
+    )
+    deleted: list[str] = []
+    for path in ordered[keep:]:
+        try:
+            os.remove(path)
+        except OSError as exc:
+            logger.debug(f"Could not prune the orphaned cache variant {path}: {exc}")
+            continue
+        deleted.append(path)
+    return deleted
+
+
+def _render_fingerprint_value(value) -> str:
+    """A short, readable rendering of one fingerprint input, for a log line."""
+    try:
+        text = json.dumps(value, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        text = str(value)
+    if len(text) > _MISS_REPORT_VALUE_LIMIT:
+        text = f"{text[:_MISS_REPORT_VALUE_LIMIT]}..."
+    return text
+
+
+def describe_fingerprint_divergence(
+    root: str, fingerprint: Fingerprint
+) -> Optional[str]:
+    """Name the fingerprint inputs that differ from the closest variant on disk.
+
+    Returns None when nothing comparable is stored — a first run has no divergence to
+    report, and 160 lines saying "nothing cached yet" would bury the ones that matter.
+
+    The comparison is against the CLOSEST stored variant (fewest differing inputs)
+    rather than the newest, because the useful answer to "why did this regenerate?" is
+    "your seed utterances changed", not "this is not the variant you trained under
+    three model swaps ago".
+    """
+    candidates: list[tuple[str, dict]] = []
+    for path, payload in stored_variants(root, fingerprint.command_name):
+        inputs = payload.get("fingerprint_inputs")
+        if isinstance(inputs, dict) and inputs and (
+            payload.get("variant_key") != fingerprint.variant_key
+        ):
+            candidates.append((path, inputs))
+    if not candidates:
+        return None
+
+    def differing_keys(inputs: dict) -> list[str]:
+        return sorted(
+            key
+            for key in set(inputs) | set(fingerprint.inputs)
+            if inputs.get(key) != fingerprint.inputs.get(key)
+        )
+
+    path, inputs = min(candidates, key=lambda item: len(differing_keys(item[1])))
+    keys = differing_keys(inputs)
+    if not keys:
+        # Identical inputs under a different variant key: the key derivation itself
+        # changed, which no per-input diff can explain.
+        return (
+            f"closest stored variant {os.path.basename(path)} has identical "
+            f"fingerprint inputs but a different variant key, so the key derivation "
+            f"changed"
+        )
+    rendered = "; ".join(
+        f"{key}: {_render_fingerprint_value(inputs.get(key))} -> "
+        f"{_render_fingerprint_value(fingerprint.inputs.get(key))}"
+        for key in keys[:_MISS_REPORT_MAX_KEYS]
+    )
+    if len(keys) > _MISS_REPORT_MAX_KEYS:
+        rendered += f"; and {len(keys) - _MISS_REPORT_MAX_KEYS} more input(s)"
+    return f"differs from {os.path.basename(path)} in {rendered}"
+
+
 class Fingerprint(BaseModel):
     """Identifies one generation configuration for one command.
 
@@ -407,6 +596,7 @@ class UtteranceCache:
             "stored": 0,
             "unreadable": 0,
             "write_failed": 0,
+            "pruned": 0,
         }
 
     # -- configuration -------------------------------------------------
@@ -474,19 +664,52 @@ class UtteranceCache:
         return cached
 
     def lookup(self, fingerprint: Fingerprint, seed: int) -> Optional[UtteranceCacheEntry]:
-        """Return the entry for exactly (*fingerprint*, *seed*), or None."""
+        """Return the entry for exactly (*fingerprint*, *seed*), or None.
+
+        A read that is disabled by `regenerate` counts as a miss, because the caller's
+        next move is identical to a miss's: it calls the LLM. Returning before the
+        counter ran made `format_summary` report "0 reused, 0 generated, N written"
+        after N real completions, so a developer auditing what
+        `--regenerate-utterances` costs read zero calls (bd fix-k0i.37, reported
+        against the sibling parameter-example cache and present here in the same shape).
+        """
         if not self.reads_enabled:
+            self._bump("miss")
             return None
         cached = self._read_file(fingerprint)
-        if cached is None:
-            self._bump("miss")
-            return None
-        entry = cached.entries.get(str(int(seed)))
+        entry = None if cached is None else cached.entries.get(str(int(seed)))
         if entry is None or not entry.is_usable():
             self._bump("miss")
+            self._report_miss(fingerprint, seed, cached)
             return None
         self._bump("hit")
         return entry
+
+    def _report_miss(
+        self,
+        fingerprint: Fingerprint,
+        seed: int,
+        cached: Optional[UtteranceCacheFile],
+    ) -> None:
+        """Say at INFO WHY this lookup missed, in one line.
+
+        The counters alone only say that a miss happened, which leaves a developer
+        hand-diffing JSON to find out whether it was their seed-utterance edit, a model
+        string, or a prompt change that cost them the reuse (bd fix-k0i.36).
+        """
+        if cached is not None:
+            available = ", ".join(sorted(cached.entries)) or "none"
+            logger.info(
+                f"Utterance cache miss for '{fingerprint.command_name}': variant "
+                f"{fingerprint.variant_key} is on disk but has no usable entry for "
+                f"seed {seed} (seeds present: {available})."
+            )
+            return
+        if divergence := describe_fingerprint_divergence(self.root, fingerprint):
+            logger.info(
+                f"Utterance cache miss for '{fingerprint.command_name}' (seed {seed}): "
+                f"{divergence}."
+            )
 
     # Historical aggregation notes retained after deleting the unreachable mode:
     # The lowest contributing seed labels the union; the individual entries
@@ -559,6 +782,10 @@ class UtteranceCache:
                     entries=entries,
                 )
                 self._atomic_write(path, payload)
+                # Inside the lock and after the write, so the file just written is the
+                # newest and cannot be the one pruned. See "Retention" in the module
+                # docstring for why unbounded growth was the alternative.
+                pruned = prune_orphaned_variants(self.root, fingerprint.command_name)
         except OSError as exc:
             self._bump("write_failed")
             logger.warning(
@@ -568,6 +795,15 @@ class UtteranceCache:
             )
             return False
         self._bump("stored")
+        if pruned:
+            for _path in pruned:
+                self._bump("pruned")
+            logger.info(
+                f"Pruned {len(pruned)} superseded utterance cache variant(s) for "
+                f"'{fingerprint.command_name}', keeping the "
+                f"{MAX_VARIANTS_PER_COMMAND} most recent: "
+                f"{', '.join(os.path.basename(p) for p in pruned)}."
+            )
         return True
 
     def _ensure_root(self) -> None:
@@ -609,6 +845,7 @@ class UtteranceCache:
             f"{stats['stored']} written"
             + (f", {stats['unreadable']} unreadable" if stats["unreadable"] else "")
             + (f", {stats['write_failed']} write failures" if stats["write_failed"] else "")
+            + (f", {stats['pruned']} superseded pruned" if stats.get("pruned") else "")
         )
 
 

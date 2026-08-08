@@ -78,9 +78,10 @@ Guidance, with its provenance stated honestly:
   sentence buy almost nothing.
 - **Never paste a failing benchmark case into `plain_utterances` to "fix" it.** That turns
   your benchmark into a memorisation test. Keep the seeds disjoint from
-  `<workflow>/intent_benchmark.json` (see `docs/intent_benchmark_format.md`); the package
-  ships `heldout_evaluation.assert_benchmark_disjoint_from_seeds` for the check, but as of
-  2026-08-02 nothing calls it during training (`fix-eia`), so run it yourself.
+  `<workflow>/intent_benchmark.json` (see `docs/intent_benchmark_format.md`);
+  `heldout_evaluation.assert_benchmark_disjoint_from_seeds` is called during training
+  (`fix-eia`, fixed) and aborts the run with `BenchmarkLeakError`, so a leak fails the
+  build instead of quietly inflating the score.
 - **Count what you actually have** after a run: `seed_utterance_count` per command in
   `<workflow>/___command_info/training_provenance.json`. The same file's `fell_back` flag
   tells you whether a command's utterances degraded to seeds-only because generation was

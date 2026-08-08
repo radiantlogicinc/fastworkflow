@@ -143,17 +143,25 @@ class CommandExecutor(CommandExecutorInterface):
             command_output.context = context
             return command_output
 
+        # Always resolve the command's Signature class via create() so
+        # validate_extracted_parameters (and db_lookup) run on the direct-action
+        # path the same way they do on the NLU path. Validate even when
+        # action.parameters is empty/falsy — context preconditions still apply.
         if action.parameters:
             input_obj = command_parameters_class(**action.parameters)
-
-            input_for_param_extraction = InputForParamExtraction(command=action.command)
-            is_valid, error_msg, _, _ = input_for_param_extraction.validate_parameters(
-                workflow, action.command_name, input_obj
-            )
-            if not is_valid:
-                raise ValueError(f"Invalid action parameters for command '{action.command_name}'\n{error_msg}")
         else:
             input_obj = command_parameters_class()
+
+        input_for_param_extraction = InputForParamExtraction.create(
+            workflow, action.command_name, action.command
+        )
+        is_valid, error_msg, _, _ = input_for_param_extraction.validate_parameters(
+            workflow, action.command_name, input_obj
+        )
+        if not is_valid:
+            raise ValueError(
+                f"Invalid action parameters for command '{action.command_name}'\n{error_msg}"
+            )
 
         command_output = response_generation_object(workflow, action.command, input_obj)
         

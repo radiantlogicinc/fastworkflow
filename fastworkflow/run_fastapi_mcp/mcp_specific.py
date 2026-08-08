@@ -22,7 +22,30 @@ def setup_mcp(
     
     Note: Prompt registration (format-command, clarify-params) is commented out
     as fastapi-mcp 0.4.0 does not support custom prompts.
+
+    MCP isError vs. turn outcome (deliberately NOT mapped — see below).
     """
+    # TODO(fix-qtq.6): map MCP isError = not TurnOutput.success once the library
+    # allows it without lying about the transport. It cannot be done today, and
+    # the reason is worth recording so nobody re-derives it:
+    #
+    # 1. There is no hook. fastapi-mcp 0.4.0 registers its own @call_tool
+    #    handler inside FastApiMCP.setup_server() and answers from the private
+    #    _execute_api_tool(), which returns list[TextContent]. The MCP SDK marks
+    #    a result isError=True only when the handler RAISES, and _execute_api_tool
+    #    raises for exactly one reason: an HTTP status of 400-599.
+    # 2. So the only available lever is the HTTP status code — and a failed turn
+    #    is NOT a failed call. Turning `success == False` into a 4xx/5xx would
+    #    destroy the separation this migration exists to establish: transport
+    #    status answers "did the call work", TurnOutput answers "did the turn
+    #    work" (turn_result_design_final.md section 14).
+    # 3. The streaming `invoke_agent` tool could not read `success` anyway: its
+    #    body is an NDJSON/SSE stream, so response.json() fails and the tool
+    #    result is the raw stream text. There is no top-level success field to
+    #    map without parsing the stream and locating its terminal output event.
+    #
+    # Until then, MCP clients read the outcome from the tool result body, which
+    # carries the full TurnOutput projection (status, failure_reason, success).
 
     # =========================================================================
     # Mount MCP (FastApiMCP will scan and find all FastAPI endpoints)

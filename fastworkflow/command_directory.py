@@ -5,7 +5,7 @@ from typing import Optional
 from pathlib import Path
 from functools import lru_cache
 
-from pydantic import BaseModel, field_validator, model_validator, ConfigDict, Field, FieldValidationInfo
+from pydantic import BaseModel, field_validator, model_validator, ConfigDict, Field, ValidationInfo
 
 from fastworkflow.utils import python_utils
 from fastworkflow.workflow_inheritance_model import WorkflowInheritanceModel
@@ -332,7 +332,7 @@ class CommandDirectory(BaseModel):
         command_directory.register_utterance_metadata(command_name, utterance_metadata)
 
     @field_validator("map_command_2_metadata", mode="before")
-    def validate_map_command_2_metadata(cls, v, info: FieldValidationInfo):
+    def validate_map_command_2_metadata(cls, v, info: ValidationInfo):
         # This validator is primarily for when CommandDirectory is created from a dict (e.g. JSON)
         # In our `load` method, we construct CommandMetadata objects directly.
         if not isinstance(v, dict):
@@ -354,7 +354,7 @@ class CommandDirectory(BaseModel):
 
     @field_validator("map_command_2_utterance_metadata", mode="before")
     def parse_map_command_2_utterances(
-        cls, v: dict[str, UtteranceMetadata], info: FieldValidationInfo
+        cls, v: dict[str, UtteranceMetadata], info: ValidationInfo
     ):
         # Similar to above, mainly for dict -> model conversion
         if not isinstance(v, dict):
@@ -504,7 +504,7 @@ class CommandDirectory(BaseModel):
     # ---------------------- Validators for context metadata ---------------------- #
 
     @field_validator("map_context_2_metadata", mode="before")
-    def validate_map_context_2_metadata(cls, v, info: FieldValidationInfo):
+    def validate_map_context_2_metadata(cls, v, info: ValidationInfo):
         if not isinstance(v, dict):
             raise ValueError("map_context_2_metadata must be a dictionary.")
 

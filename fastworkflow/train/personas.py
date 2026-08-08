@@ -41,11 +41,34 @@ holdout (decision D1) depends on that parse being correct. An app-supplied id co
 ``PERSONA_ID_SEPARATOR``, or colliding with ``SEED_PERSONA_ID`` or
 ``UNRESOLVED_PERSONA_PREFIX``, would silently corrupt the holdout into the data leak D1
 exists to prevent. ``validate_persona_id`` rejects all three, loudly, at load time.
+
+What reaches the utterance-cache key, and what does not
+------------------------------------------------------
+``active_persona_source_label`` is R6's only view of this module. It returns
+``<name>#<content fingerprint>#<pool-code digest>``, and each part closes a different
+staleness hole:
+
+* **name** — an app-supplied set and a domain-conditioned draw are different variants.
+* **content fingerprint** — the persona TEXT or the domain KEYWORDS, so editing either
+  invalidates the utterances they wrote (``fingerprint``).
+* **pool-code digest** — the source text of the code that turns that configuration into
+  a pool (``pool_source_digest``). Without it, editing
+  ``DomainConditionedPersonaSource._matches`` changed which rows a keyword selects while
+  every cache entry stayed valid: a developer tuned the matching, retrained, and
+  silently got the old personas back (bd fix-6r5).
+
+The label is still ``None`` for the default PersonaHub draw. That is decision D6, not an
+omission: a non-None label there would invalidate every cached utterance in every
+existing workflow, and the default source has no configuration to condition on — its
+pool is the whole corpus, and the code that indexes it is pinned instead by
+``select_persona_indices`` being digested in `generate_synthetic` plus the byte-identity
+test in ``tests/test_persona_domain_conditioning.py``.
 """
 
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import random
@@ -64,6 +87,7 @@ from fastworkflow.train.determinism import (
     derived_seed,
     get_training_seed,
 )
+from fastworkflow.train.utterance_cache import source_digest
 from fastworkflow.utils.logging import logger
 
 #: File an application drops in its workflow folder to describe its users. Named to sit
@@ -100,6 +124,14 @@ SOURCE_DOMAIN_CONDITIONED: str = "domain_conditioned"
 #: that the whole-persona holdout exists to detect. Below it, the pool is topped up from
 #: the unfiltered corpus and the fact is reported.
 DEFAULT_MIN_POOL_MULTIPLE: int = 4
+
+#: Where the per-command persona count comes from when a caller does not supply one.
+#: `DomainConditionedPersonaSource` needs it to know how big a pool is big enough, and
+#: the only production caller (`train/__main__.py`) has no reason to know about persona
+#: pools, so the source reads the same setting `generate_synthetic` resolves
+#: `num_personas` from. Read with a code default: an absent value must not log a warning
+#: and must not make the pool floor collapse to the multiple alone (bd fix-k0i.38).
+NUM_PERSONAS_ENV_VAR: str = "SYNTHETIC_UTTERANCE_GEN_NUMOF_PERSONAS"
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
@@ -277,6 +309,70 @@ def persona_config_path(workflow_folderpath: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _digestable_functions(member) -> list[Callable]:
+    """Unwrap one class attribute into the plain functions inside it, or nothing.
+
+    ``property`` and the ``staticmethod``/``classmethod`` descriptors are not accepted
+    by ``inspect.getsource``, so a walk that handed them straight to `source_digest`
+    would silently record ``source-unavailable`` for them — a digest that stops
+    noticing edits while still looking like a digest.
+    """
+    if isinstance(member, property):
+        return [f for f in (member.fget, member.fset, member.fdel) if f is not None]
+    if isinstance(member, (staticmethod, classmethod)):
+        member = member.__func__
+    return [member] if inspect.isfunction(member) else []
+
+
+def implementation_functions(source_class: type) -> list[Callable]:
+    """Every function *source_class* and its bases define, in a fixed order.
+
+    Found by reflection rather than named in a list, because a hand-written list is
+    exactly what left this hole open: `generate_synthetic._DIGESTED_GENERATION_SOURCES`
+    names four selection functions, `DomainConditionedPersonaSource.rows` and
+    ``_matches`` were two more, and nothing failed when they were missing (bd fix-6r5).
+    A future subclass with a helper nobody thought to name is covered here for free,
+    which is the property a name list cannot have.
+
+    Deterministic across runs and processes, which `pool_source_digest` depends on:
+
+    * resolved from the CLASS, so no instance attribute and no ``id()`` can reach it —
+      two independently constructed sources of the same class agree;
+    * ordered by MRO and then by attribute name, so neither ``__dict__`` insertion
+      order nor the per-process string hash salt can move it;
+    * reads source TEXT only, so it never loads the corpus (`fingerprint` and the
+      label built from it are corpus-free by contract).
+
+    ``object`` is skipped and everything below it kept, including `PersonaSource`'s own
+    methods: the base's `select` and `priority_pool_size` decide the draw just as much
+    as a subclass's row filter does.
+    """
+    functions: list[Callable] = []
+    for klass in source_class.__mro__:
+        if klass is object:
+            continue
+        for _name, member in sorted(vars(klass).items()):
+            functions.extend(_digestable_functions(member))
+    return functions
+
+
+def _resolve_num_personas_hint(num_personas_hint: Optional[int]) -> int:
+    """How many personas a command will ask for, for pool-sizing purposes only.
+
+    Falls back to `NUM_PERSONAS_ENV_VAR` so the hint is a real number in production
+    rather than the 0 that made the pool floor collapse to `DEFAULT_MIN_POOL_MULTIPLE`
+    on its own. Never raises: a malformed value degrades to "no hint", because a
+    persona pool is not worth failing a training run over.
+    """
+    if num_personas_hint is not None:
+        return max(0, int(num_personas_hint))
+    try:
+        configured = fastworkflow.get_env_var(NUM_PERSONAS_ENV_VAR, int, default=0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, int(configured or 0))
+
+
 class PersonaSource:
     """A pool of personas that a command can draw a deterministic sample from.
 
@@ -284,6 +380,17 @@ class PersonaSource:
     strings for it, per command, would dominate generation time. Subclasses expose
     ``pool_size()`` and ``persona_at(position)``; the sampling logic is shared and lives
     in ``select``.
+
+    Sampling lives in ONE place on purpose. `generate_synthetic` digests
+    ``PersonaSource.select`` into the utterance-cache key (bd fix-k0i.43) precisely so
+    that an edit to how personas are drawn invalidates the cached utterances those
+    personas wrote. A subclass that overrode ``select`` would slip out from under that
+    digest, so a subclass with an unusual pool states the fact through
+    ``priority_pool_size`` and lets the shared code act on it.
+
+    Everything a subclass DOES define is covered by ``pool_source_digest``, which is
+    final in the same sense ``select`` is: overriding it would be a subclass declaring
+    its own cache key, which is the one thing no source may do.
     """
 
     #: One of the ``SOURCE_*`` constants.
@@ -295,6 +402,16 @@ class PersonaSource:
     def persona_at(self, position: int) -> Persona:
         raise NotImplementedError
 
+    def priority_pool_size(self) -> int:
+        """How many leading pool positions must be exhausted before the rest.
+
+        0 (the default) means the pool is one uniform population, which is what every
+        source whose rows it actually wanted should say. A source that had to pad a
+        thin pool with rows it did NOT want overrides this with the count of the rows
+        it did — see `DomainConditionedPersonaSource.priority_pool_size`.
+        """
+        return 0
+
     def fingerprint(self) -> str:
         """Identify this source's *content*, without loading the corpus.
 
@@ -303,6 +420,51 @@ class PersonaSource:
         require a 200k-row download would undo the reason the cache exists.
         """
         raise NotImplementedError
+
+    def pool_source_digest(self) -> str:
+        """Digest the code that turns THIS source's configuration into a pool.
+
+        The companion to `fingerprint`, and the answer to a hole `fingerprint` cannot
+        close. ``fingerprint`` identifies the CONFIGURATION — a keyword list, a persona
+        file's text. What turns that configuration into row indices is code:
+        ``DomainConditionedPersonaSource._matches`` decides which rows a keyword
+        selects, and ``rows`` decides how a thin match is padded. Editing either changes
+        the personas a command is generated from while leaving ``fingerprint`` identical,
+        so before this existed a developer could tune the matching, retrain, and be
+        served the utterances the old matching produced (bd fix-6r5).
+
+        Digested from the CLASS, not from this instance, which is what keeps it
+        deterministic without giving up the "one fingerprint per source" shape — see
+        `implementation_functions` for the three properties that carry that. Corpus-free
+        for the same reason `fingerprint` is: the label is computed before the cache
+        decides whether to generate at all.
+
+        The qualified names are deliberately NOT hashed in alongside the source text,
+        only the text itself. Two sources whose code is character-for-character the same
+        would generate the same utterances from the same configuration, so they SHOULD
+        share a cache entry; and it is what lets a test attribute a digest change to the
+        body of one method rather than to the name of the class that holds it.
+
+        `DEFAULT_MIN_POOL_MULTIPLE`'s VALUE is folded in beside the source text because
+        digesting text alone does not reach it: `rows` reads it through the
+        ``min_pool_multiple`` default, so retuning the constant changes the pool a
+        command is generated from without changing one character of any digested
+        function — a developer would retune it, retrain, and be served the utterances
+        the old pool wrote (bd fix-l48). Folded as a named ``NAME=value`` string so the
+        digest stays byte-stable across processes, which `implementation_functions`
+        documents this depending on.
+
+        That is the narrow fix, and the general shape is worth naming: ANY module
+        constant a digested function reads has this property, and reflection over source
+        text cannot see any of them. A general fix would digest the constants a function
+        closes over, or move every tunable into the source's `fingerprint`. Neither is
+        done here; this is the only such constant today, and it is enumerated rather
+        than derived.
+        """
+        return _hash_parts(
+            *[source_digest(func) for func in implementation_functions(type(self))],
+            f"DEFAULT_MIN_POOL_MULTIPLE={DEFAULT_MIN_POOL_MULTIPLE}",
+        )
 
     def notes(self) -> list[str]:
         """Anything the developer should know about this pool. Reported once per run."""
@@ -318,6 +480,13 @@ class PersonaSource:
         depends on how many draws happened earlier in the process. This reproduces
         `generate_synthetic.select_persona_indices` exactly for the PersonaHub source,
         which is what keeps the no-persona-file path byte-identical to before.
+
+        When ``priority_pool_size`` is non-zero the priority rows are drawn from first
+        and the remainder of the request is filled from the rest of the pool. That is
+        what keeps domain conditioning from being nullified by its own padding: a pool
+        of 3 matched rows plus 13 generic ones sampled uniformly would put a matched
+        persona in roughly one draw in five, whereas exhausting the matched rows first
+        uses all 3 of them in every command (bd fix-k0i.38).
         """
         size = self.pool_size()
         if not size or not num_personas or num_personas <= 0:
@@ -328,7 +497,20 @@ class PersonaSource:
                 notes=list(self.notes()),
             )
         rng = random.Random(derived_seed(seed, command_name))
-        positions = rng.sample(range(size), min(num_personas, size))
+        requested = min(num_personas, size)
+        priority = min(max(0, self.priority_pool_size()), size)
+        if 0 < priority < size:
+            from_priority = min(requested, priority)
+            positions = rng.sample(range(priority), from_priority)
+            if from_priority < requested:
+                positions += rng.sample(
+                    range(priority, size), requested - from_priority
+                )
+        else:
+            # The uniform draw, byte-identical to `select_persona_indices`. Every
+            # source that has not padded its pool takes this branch, including the
+            # default PersonaHub one — `test_personas` pins that equivalence.
+            positions = rng.sample(range(size), requested)
         personas = [self.persona_at(position) for position in positions]
         return PersonaSelection(
             personas=[persona.text for persona in personas],
@@ -429,7 +611,7 @@ class DomainConditionedPersonaSource(PersonaSource):
         self,
         dataset_loader: Callable,
         keywords: Iterable[str],
-        num_personas_hint: int = 0,
+        num_personas_hint: Optional[int] = None,
         min_pool_multiple: int = DEFAULT_MIN_POOL_MULTIPLE,
         origin: str = "",
     ):
@@ -437,11 +619,14 @@ class DomainConditionedPersonaSource(PersonaSource):
         self._keywords = sorted({str(k).strip().lower() for k in keywords if str(k).strip()})
         if not self._keywords:
             raise PersonaConfigError("Domain conditioning needs at least one keyword.")
-        self._num_personas_hint = int(num_personas_hint or 0)
+        self._num_personas_hint = _resolve_num_personas_hint(num_personas_hint)
         self._min_pool_multiple = int(min_pool_multiple)
         self._origin = origin
         self._dataset = None
         self._rows: Optional[list[int]] = None
+        #: How many of the leading entries in ``rows`` actually matched the keywords.
+        #: Equal to ``len(rows)`` unless the pool had to be padded.
+        self._matched_count: int = 0
         self._notes: list[str] = []
 
     @property
@@ -485,6 +670,7 @@ class DomainConditionedPersonaSource(PersonaSource):
                 f"personas. Domain conditioning had no effect on this run."
             )
             self._rows = list(range(total))
+            self._matched_count = 0
             return self._rows
 
         if len(matched) < wanted:
@@ -492,15 +678,38 @@ class DomainConditionedPersonaSource(PersonaSource):
             # empty-handed abort would make a mistyped keyword stop a multi-hour training
             # run at the first command. The developer is told, in the same place fallen-back
             # generation is reported.
+            #
+            # Only the SHORTFALL is added, and it goes AFTER the matched rows so
+            # `priority_pool_size` can make the shared sampler exhaust the matched rows
+            # first. Appending every unmatched row instead — which is what this did —
+            # made the pool the entire ~200k corpus and reduced a matched persona's
+            # chance of being drawn to ~matched/200k, nullifying the conditioning at
+            # exactly the moment it was thinnest and reporting it as merely "partial"
+            # (bd fix-k0i.38).
             matched_set = set(matched)
-            top_up = [index for index in range(total) if index not in matched_set]
+            candidates = [index for index in range(total) if index not in matched_set]
+            shortfall = wanted - len(matched)
+            if shortfall < len(candidates):
+                # Sampled rather than sliced, so the padding is spread across the corpus
+                # instead of being the first N rows of it, and seeded from the keywords
+                # rather than the training seed so the POOL is the same on every run at
+                # every seed — a pool that moved per seed would make the utterance cache
+                # miss for a reason no fingerprint input records.
+                padding_rng = random.Random(
+                    derived_seed(0, SOURCE_DOMAIN_CONDITIONED, *self._keywords)
+                )
+                candidates = sorted(padding_rng.sample(candidates, shortfall))
             self._notes.append(
                 f"Only {len(matched)} of {total} PersonaHub personas matched domain "
                 f"keywords {', '.join(self._keywords)}, fewer than the {wanted} needed for "
-                f"a varied per-command draw. The pool was topped up from the unfiltered "
-                f"corpus, so conditioning is partial."
+                f"a varied per-command draw. The pool was topped up to "
+                f"{len(matched) + len(candidates)} with unfiltered personas; the "
+                f"{len(matched)} matching one(s) are still drawn first, so a command "
+                f"asking for more than {len(matched)} personas gets unconditioned ones "
+                f"for the remainder. Add keywords or supply personas.json to fix it."
             )
-            self._rows = matched + top_up
+            self._rows = matched + candidates
+            self._matched_count = len(matched)
             return self._rows
 
         self._notes.append(
@@ -510,10 +719,22 @@ class DomainConditionedPersonaSource(PersonaSource):
             + "."
         )
         self._rows = matched
+        self._matched_count = len(matched)
         return self._rows
 
     def pool_size(self) -> int:
         return len(self.rows)
+
+    def priority_pool_size(self) -> int:
+        """The count of keyword-matching rows, which lead ``rows``.
+
+        Equal to ``pool_size()`` when nothing was padded, which makes
+        `PersonaSource.select` take its plain uniform branch. Only a padded pool
+        reports a smaller number, and only then does the draw treat the pool as two
+        tiers.
+        """
+        _ = self.rows
+        return self._matched_count
 
     def persona_at(self, position: int) -> Persona:
         row = self.rows[position]
@@ -539,13 +760,17 @@ def _hash_parts(*parts: str) -> str:
 def persona_source_from_config(
     config: PersonaConfig,
     dataset_loader: Callable,
-    num_personas_hint: int = 0,
+    num_personas_hint: Optional[int] = None,
 ) -> PersonaSource:
     """Build the source a parsed config asks for.
 
     An explicit ``personas`` list wins over ``domain_keywords``: supplying personas is the
     stronger statement, and honouring the keywords as well would silently mix generic
     PersonaHub rows into a set the developer curated.
+
+    ``num_personas_hint`` is advisory and only sizes a domain-conditioned pool. None
+    means "read the configured per-command persona count", which is what every
+    production caller wants and none of them should have to know.
     """
     if config.personas:
         return AppPersonaSource(config.personas, origin=config.origin)
@@ -560,7 +785,7 @@ def persona_source_from_config(
 def persona_source_for_workflow(
     workflow_folderpath: str,
     dataset_loader: Optional[Callable] = None,
-    num_personas_hint: int = 0,
+    num_personas_hint: Optional[int] = None,
 ) -> PersonaSource:
     """Return the persona source for *workflow_folderpath*.
 
@@ -682,12 +907,19 @@ def active_persona_source_label() -> Optional[str]:
     utterances generated from generic PersonaHub personas out of the cache and the feature
     would appear to do nothing.
 
+    Three parts, because the configuration alone is not enough: `pool_source_digest`
+    covers the code that turns the configuration into a pool, which `fingerprint` by
+    design does not (bd fix-6r5). The parts are separated so that a miss reported by
+    ``utterance_cache.describe_fingerprint_divergence`` — which names the fingerprint
+    INPUT that moved, not the reason — can be read directly: a changed third component
+    with the first two intact says the persona code was edited, not the persona file.
+
     Corpus-free, because it is computed before the cache decides whether to generate.
     """
     source = get_persona_source() or default_persona_source(_default_dataset_loader)
     if source.name == SOURCE_PERSONAHUB:
         return None
-    return f"{source.name}#{source.fingerprint()}"
+    return f"{source.name}#{source.fingerprint()}#{source.pool_source_digest()}"
 
 
 def persona_source_needs_corpus() -> bool:

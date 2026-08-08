@@ -19,6 +19,7 @@ No API key is required — the lexical detector reads seeds, never generated utt
 
 import json
 import os
+import re
 import shutil
 import warnings
 
@@ -540,12 +541,37 @@ def _run_cli(*args: str) -> subprocess.CompletedProcess:
     )
 
 
+def _cli_subcommands(help_output: str) -> set[str]:
+    """The subcommand names argparse advertises, parsed out of its usage line.
+
+    argparse renders the choices as `usage: cli.py [-h] {a,b,c} ...`. Reading the names
+    out of that brace group is what makes the assertion below about the CLI's SURFACE
+    rather than about prose: a substring check over the whole help text fails the moment
+    any unrelated description happens to contain the word "report" or "versions", and
+    passes for a subcommand whose name merely does not appear in its own help line.
+    bd fix-k0i.48.
+    """
+    match = re.search(r"\{([^}]+)\}", help_output)
+    assert match, f"could not find the subcommand list in the CLI help:\n{help_output}"
+    return {name.strip() for name in match.group(1).split(",") if name.strip()}
+
+
 def test_duplicate_validation_is_integrated_in_train_not_a_second_cli_command():
     result = _run_cli("--help")
     assert result.returncode == 0, result.stderr
-    assert "duplicates" not in result.stdout
-    assert "report" not in result.stdout
-    assert "versions" not in result.stdout
+
+    subcommands = _cli_subcommands(result.stdout)
+    # Non-empty, or the parse silently matched something else and the exclusions below
+    # would be vacuous.
+    assert "train" in subcommands, (
+        f"the parsed subcommand list looks wrong: {sorted(subcommands)}"
+    )
+    for retired in ("duplicates", "report", "versions"):
+        assert retired not in subcommands, (
+            f"{retired!r} is exposed as a CLI subcommand; duplicate validation and "
+            f"artifact reporting belong to `fastworkflow train`, not to a second "
+            f"command a user has to discover"
+        )
 
 
 def test_training_preflight_finds_the_control_workflow_duplicate_pair(

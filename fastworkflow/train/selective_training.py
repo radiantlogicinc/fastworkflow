@@ -81,12 +81,21 @@ import uuid
 from pathlib import Path
 from typing import Iterable, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 import fastworkflow
 from fastworkflow.command_directory import CommandDirectory
-from fastworkflow.nlu_labels import PARAMETER_VALUE_PLACEHOLDERS, WILDCARD_LABEL
-from fastworkflow.train import artifact_versioning, determinism, utterance_cache
+from fastworkflow.nlu_labels import (
+    NON_ROUTABLE_LABELS,
+    PARAMETER_VALUE_PLACEHOLDERS,
+    WILDCARD_LABEL,
+)
+from fastworkflow.train import (
+    artifact_versioning,
+    determinism,
+    heldout_evaluation,
+    utterance_cache,
+)
 from fastworkflow.train.personas import active_persona_source_label
 from fastworkflow.utils.logging import logger
 
@@ -741,6 +750,82 @@ def load_training_signature(
         return None
 
 
+def command_utterance_fingerprint(fingerprint: CommandFingerprint) -> str:
+    """Digest one command's training inputs for the version manifest.
+
+    Collapses the two hashes ``CommandFingerprint`` keeps apart -- the file and the
+    declared seed list -- into the single value AR3's per-context utterance-set
+    fingerprints are hashed from. They are kept apart in the signature so a prose edit
+    can be told from a data change *when deciding what to retrain*; a context's
+    contribution is a set of training inputs, and either hash moving moves it.
+
+    An unresolved fingerprint records a fixed marker rather than a fresh uuid, because
+    the manifest's digests must be reproducible from the manifest. Its "this can never
+    prove cleanliness" property is enforced at promotion instead, by refusing to carry
+    a context forward when any command feeding it carries the marker.
+    """
+    if not fingerprint.resolved:
+        return artifact_versioning.UNRESOLVED_FINGERPRINT
+    payload = (
+        f"{fingerprint.source_sha256 or ''}\x00"
+        f"{fingerprint.seed_utterances_sha256 or ''}"
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def context_contribution_manifest_fields(
+    signature: TrainingSignature, plan: TrainingPlan
+) -> dict:
+    """Record what AR3 needs to re-derive this run's closure from the version alone.
+
+    ``ContextSignature`` already names each context's ancestors and wildcard sources,
+    but only as command NAMES, and a name does not move when the command's file or seed
+    list does. An ancestor command whose *content* changed is therefore invisible to
+    every comparison built on those lists -- which is precisely the staleness the
+    ancestor axis of the closure exists to catch, and precisely what a check built on
+    those lists could not catch it failing to do. Hashing each context's contribution
+    over the per-command fingerprints closes that gap.
+
+    Written into the manifest rather than beside ``training_signature.json`` because
+    ``artifact_versioning`` is what runs the check, must not import this module (the
+    dependency runs the other way), and must not import the routing registry at all --
+    a postcondition that re-consults the planner is not independent of it.
+    """
+    fingerprints = {
+        name: command_utterance_fingerprint(fingerprint)
+        for name, fingerprint in sorted(signature.command_fingerprints.items())
+    }
+    carried = set(plan.contexts_carried_forward)
+
+    contributions = {
+        context_name: {
+            "ancestors": sorted(context_signature.ancestors),
+            "label_space": sorted(context_signature.label_space),
+            "wildcard_sources": sorted(context_signature.wildcard_sources),
+            "expects_wildcard_label": context_signature.expects_wildcard_label,
+            "own_utterances_sha256": artifact_versioning.utterance_set_fingerprint(
+                fingerprints, context_signature.label_space
+            ),
+            "ancestor_utterances_sha256": artifact_versioning.utterance_set_fingerprint(
+                fingerprints, context_signature.wildcard_sources
+            ),
+            "carried_forward": context_name in carried,
+        }
+        for context_name, context_signature in sorted(signature.contexts.items())
+    }
+
+    fields = {
+        artifact_versioning.CONTRIBUTION_FORMAT_KEY: (
+            artifact_versioning.CONTRIBUTION_FORMAT_VERSION
+        ),
+        artifact_versioning.COMMAND_UTTERANCE_FINGERPRINTS_KEY: fingerprints,
+        artifact_versioning.CONTEXT_CONTRIBUTIONS_KEY: contributions,
+    }
+    if plan.carry_forward_from:
+        fields[artifact_versioning.CARRY_FORWARD_FROM_KEY] = plan.carry_forward_from
+    return fields
+
+
 def context_artifacts_complete(
     workflow_folderpath: str, version_id: str, context_name: str
 ) -> bool:
@@ -943,6 +1028,27 @@ def compute_training_plan(
 
     to_train = sorted(ctx for ctx in candidates if ctx in reasons)
     carried = sorted(ctx for ctx in candidates if ctx not in reasons)
+
+    # The mode check above asks whether the cache is ALLOWED to be reused. It does not
+    # ask whether there is anything in it. A deleted cache directory, a fresh clone, or
+    # a cache that was never committed all leave mode == reuse with no entries, and then
+    # every command in a retrained context is redrawn from the LLM while the carried
+    # contexts keep the superseded text in their wildcard class -- the internally
+    # inconsistent version AR3 says versioning cannot detect and this must prevent.
+    if to_train and carried:
+        if uncached := _shared_commands_absent_from_cache(
+            workflow_folderpath, to_train, carried, context_commands, context_ancestors
+        ):
+            plan = _full_retrain(
+                candidates,
+                f"full retrain ({len(uncached)} command(s) contributing to both a "
+                f"retrained and a carried-forward context have no cached utterances, "
+                f"so they would be redrawn from the LLM while the carried contexts "
+                f"keep the superseded text: "
+                f"{', '.join(sorted(uncached)[:5])}"
+                f"{' ...' if len(uncached) > 5 else ''})",
+            )
+            return plan, current_signature
 
     # `is_full_retrain` stays False even when every context turned out dirty, so the
     # per-context reasons are still rendered. "Everything was dirty, and here is why"
@@ -1251,7 +1357,10 @@ def merge_heldout_evaluation(
     current["contexts"] = merged
     try:
         current["totals"] = _recompute_heldout_totals(merged)
-    except (KeyError, TypeError) as exc:
+    except (KeyError, TypeError, ValidationError) as exc:
+        # ValidationError joins the set now that the totals are recomputed by
+        # validating entries into HeldoutReport: a malformed entry must still
+        # degrade to stale totals with a warning, not abort the merge.
         logger.warning(
             f"Merged carried-forward contexts into {path} but could not recompute "
             f"the totals ({exc}); they describe only the retrained contexts."
@@ -1265,41 +1374,125 @@ def merge_heldout_evaluation(
     return True
 
 
+def _commands_contributing_to(
+    context_name: str,
+    context_commands: dict[str, set[str]],
+    context_ancestors: dict[str, set[str]],
+) -> set[str]:
+    """Every command whose utterances end up in *context_name*'s training data.
+
+    Its own commands, plus its ancestors' -- an ancestor's utterances constitute
+    this context's wildcard class, which is why a change upstream is a change here.
+    """
+    contributing = set(context_commands.get(context_name) or ())
+    for ancestor in context_ancestors.get(context_name) or ():
+        contributing |= set(context_commands.get(ancestor) or ())
+    return contributing
+
+
+def _generation_eligible_commands(workflow_folderpath: str) -> set[str]:
+    """Commands synthetic generation would actually produce utterances for.
+
+    The same two sources generation itself draws from, so a command that is never
+    generated cannot be mistaken for one whose cache went missing. Returns the empty
+    set if the directory cannot be read, which makes the caller's intersection empty
+    and the guard silent -- an unreadable command directory is a problem for the
+    planner to report, not for this check to turn into a full retrain.
+    """
+    try:
+        cmd_dir = CommandDirectory.load(workflow_folderpath)
+        names = set(cmd_dir.get_utterance_keys()) | set(cmd_dir.core_command_names)
+    except Exception:
+        return set()
+
+    # Reserved NLU labels appear among the core command names but generation skips
+    # them, so they can never have a cache entry. `wildcard` is the one that bites:
+    # it is in every workflow's core set, so leaving it in made this guard fire on
+    # every selective run everywhere.
+    return {
+        name for name in names
+        if name.rsplit("/", 1)[-1] not in NON_ROUTABLE_LABELS
+    }
+
+
+def _shared_commands_absent_from_cache(
+    workflow_folderpath: str,
+    to_train: Iterable[str],
+    carried: Iterable[str],
+    context_commands: dict[str, set[str]],
+    context_ancestors: dict[str, set[str]],
+    generation_eligible: Optional[set[str]] = None,
+) -> set[str]:
+    """Commands feeding BOTH a retrained and a carried-forward context, with no cache.
+
+    Absence of any variant file for a command is a sound proxy for "this will be
+    regenerated": a hit requires a file. The converse does not hold -- a file whose
+    variant key no longer matches still misses -- but that case is a fingerprint
+    change, which the signature diff already turns into a retrain. This check exists
+    for the case the signature diff cannot see, where nothing about the inputs
+    changed and the cached bytes simply are not there.
+    """
+    shared: set[str] = set()
+    retrained_side: set[str] = set()
+    for context_name in to_train:
+        retrained_side |= _commands_contributing_to(
+            context_name, context_commands, context_ancestors)
+    for context_name in carried:
+        shared |= retrained_side & _commands_contributing_to(
+            context_name, context_commands, context_ancestors)
+
+    # "No cache entry" only means "will be regenerated" for a command that has
+    # something to generate. A command with no seed utterances -- set_root_context
+    # in messaging_app_4, for instance -- is never generated and so is never cached,
+    # and treating its permanent absence as a miss forced a full retrain on every
+    # selective run of any workflow containing one.
+    shared &= (
+        _generation_eligible_commands(workflow_folderpath)
+        if generation_eligible is None
+        else generation_eligible
+    )
+    if not shared:
+        return set()
+
+    cache_root = os.path.join(
+        workflow_folderpath, determinism.COMMAND_INFO_FOLDERNAME,
+        utterance_cache.CACHE_DIRNAME,
+    )
+    if not os.path.isdir(cache_root):
+        return shared
+
+    # rsplit, not split: slugify deliberately preserves '.', so a dotted command name
+    # produces a dotted stem and splitting on the FIRST dot would truncate it. The
+    # trailing two components are always the variant key and the extension.
+    cached_stems = {
+        name.rsplit(".", 2)[0]
+        for name in os.listdir(cache_root)
+        if name.endswith(".json")
+    }
+    return {
+        command for command in shared
+        if utterance_cache.slugify(command) not in cached_stems
+    }
+
+
 def _recompute_heldout_totals(entries: list[dict]) -> dict:
     """Re-aggregate the report totals over a merged context list.
 
     Every total in the report is a plain sum or a ratio of two sums, so merging is
     exact -- there is no approximation here, and a merged report is numerically what
     a full retrain would have produced given the same per-context results.
-    """
-    def _sum(section: str, key: str) -> int:
-        return sum(
-            (entry.get(section) or {}).get(key) or 0 for entry in entries)
 
-    routing_total = _sum("routing", "total")
-    routing_top1 = _sum("routing", "top1_correct")
-    routing_in_list = _sum("routing", "in_list_correct")
-    escalation_total = _sum("escalation", "total")
-    escalation_correct = _sum("escalation", "correct")
-    f1_values = [
-        entry["in_distribution_f1"] for entry in entries
-        if entry.get("in_distribution_f1") is not None
+    Delegates to ``aggregate_totals`` rather than re-summing, because this used to
+    be a parallel implementation and drifted from it: it dropped keys the fresh
+    path always emits and turned a missing mean into a literal 0.0, so a merged
+    report and a full-retrain report had different schemas and a diff between them
+    read as a collapse in quality. Sharing the function makes that class of
+    divergence unrepresentable.
+    """
+    reports = [
+        heldout_evaluation.HeldoutReport.model_validate(entry) for entry in entries
     ]
-    return {
-        "contexts": len(entries),
-        "routing_total": routing_total,
-        "routing_top1_correct": routing_top1,
-        "routing_in_list_correct": routing_in_list,
-        "routing_top1": (routing_top1 / routing_total) if routing_total else 0.0,
-        "routing_in_list": (
-            routing_in_list / routing_total) if routing_total else 0.0,
-        "escalation_total": escalation_total,
-        "escalation_correct": escalation_correct,
-        "escalation_recall": (
-            escalation_correct / escalation_total) if escalation_total else 0.0,
-        "mean_in_distribution_f1": (
-            sum(f1_values) / len(f1_values)) if f1_values else 0.0,
-    }
+    return heldout_evaluation.aggregate_totals(reports)
 
 
 def format_plan(plan: TrainingPlan) -> str:

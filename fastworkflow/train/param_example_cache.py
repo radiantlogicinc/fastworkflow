@@ -74,6 +74,13 @@ Never cached: a generation that produced no usable examples. Freezing an empty d
 would turn one transient parse failure or truncated response into a command that
 trains with no few-shot examples on every subsequent run, with nothing left to explain
 why. Same ruling as R6, same reason.
+
+Retention and miss diagnosis are also R6's, and are shared code rather than a second
+implementation: `utterance_cache.prune_orphaned_variants` keeps the
+`MAX_VARIANTS_PER_COMMAND` most recently written variants of each command after every
+write, and `utterance_cache.describe_fingerprint_divergence` turns a miss into one INFO
+line naming the inputs that changed. See that module's docstring for the policy and
+why it is safe.
 """
 
 from __future__ import annotations
@@ -81,8 +88,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import threading
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
+from decimal import Decimal
+from enum import Enum
 from typing import Any, Optional
 
 from pydantic import BaseModel, ValidationError
@@ -90,11 +100,14 @@ from pydantic import BaseModel, ValidationError
 from fastworkflow.train.determinism import COMMAND_INFO_FOLDERNAME
 from fastworkflow.train.utterance_cache import (
     DEFAULT_CACHE_MODE,
+    MAX_VARIANTS_PER_COMMAND,
     MODE_REGENERATE,
     MODE_REUSE,
     Fingerprint,
     atomic_write_model,
+    describe_fingerprint_divergence,
     normalize_mode,
+    prune_orphaned_variants,
     slugify,
 )
 from fastworkflow.utils.logging import logger
@@ -145,17 +158,126 @@ def resolve_cache_mode() -> str:
     return DEFAULT_CACHE_MODE
 
 
+def _canonicalize_unserialisable(value: Any) -> Any:
+    """Render one non-JSON value as something a digest can depend on run to run.
+
+    This replaces a `default=repr` hook, which was a silent trap (bd fix-k0i.46). Most
+    objects inherit `object.__repr__`, whose text embeds `id(value)`; digesting that
+    produces a DIFFERENT variant key on every run, so the command misses its cache
+    forever and pays one LLM call per training run. The miss is invisible by
+    construction — it looks exactly like a first run — so nothing would ever have
+    pointed at it.
+
+    The types below are the ones a workflow's parameter model can realistically put
+    into a field-details record, and each is rendered by its own identity rather than
+    by its address. Everything else raises: a digest that cannot be computed
+    *correctly* must not be computed approximately, because the failure mode of an
+    approximation is two different configurations sharing one entry — a stale hit,
+    which is the one direction this cache may never go. `param_example_fingerprint`
+    turns that raise into "this command is not cacheable this run", loudly.
+    """
+    if isinstance(value, Enum):
+        # Labelled by the member AND its class, so two enums that happen to share a
+        # value stay distinct constraints. Only reached for a plain `Enum`: a member of
+        # a `str`- or `int`-mixin enum IS a str or an int, so `json.dumps` encodes it
+        # directly as its value and never consults this hook. That is stable, which is
+        # all this function promises; what distinguishes two mixin enums sharing a
+        # value is `field_annotations_digest`, which covers the annotation itself.
+        return {
+            "__enum__": f"{type(value).__module__}.{type(value).__qualname__}",
+            "name": value.name,
+            "value": value.value,
+        }
+    if isinstance(value, re.Pattern):
+        return {"__pattern__": value.pattern, "flags": int(value.flags)}
+    if isinstance(value, type):
+        return {"__type__": f"{value.__module__}.{value.__qualname__}"}
+    if isinstance(value, (set, frozenset)):
+        # Sorted by canonical text, because set iteration order for strings varies with
+        # the per-process hash salt and would move the digest between runs. The items
+        # themselves are left alone: `json.dumps` will encode the returned list and
+        # re-enter this hook for any member that needs it.
+        return sorted(
+            value,
+            key=lambda item: json.dumps(
+                item, sort_keys=True, default=_canonicalize_unserialisable
+            ),
+        )
+    if isinstance(value, (bytes, bytearray)):
+        return {"__bytes__": bytes(value).hex()}
+    if isinstance(value, (datetime, date, time)):
+        return {"__temporal__": value.isoformat()}
+    if isinstance(value, Decimal):
+        return {"__decimal__": str(value)}
+    raise TypeError(
+        f"{type(value).__module__}.{type(value).__qualname__} cannot be digested into "
+        f"a parameter-example cache key: it has no run-stable representation. Add one "
+        f"to param_example_cache._canonicalize_unserialisable."
+    )
+
+
+def run_stable_form(value: Any) -> Any:
+    """Return *value* with every part JSON cannot encode replaced by its stand-in.
+
+    `_canonical_digest` reaches the same substitutions lazily, through
+    ``json.dumps(default=_canonicalize_unserialisable)``. This applies them eagerly, for
+    the caller that needs the VALUE rather than the digest: the line of
+    `generate_param_examples` that shows the model a field's declared examples used
+    ``repr`` directly, so an example inheriting ``object.__repr__`` put a memory address
+    *inside the prompt* (bd fix-r4p). An unstable cache key costs one wasted
+    regeneration; an address in the prompt is noise the model conditions on, and it moves
+    every run, so the examples it produced are irreproducible for a reason no diff shows.
+
+    Builtin subclasses are narrowed to the builtin, because that is precisely what
+    ``json.dumps`` does with them: a ``str``-mixin enum member IS a ``str``, so the
+    encoder writes its value and never consults the hook. Rendering such a value one way
+    in the prompt and another way in the key would give up the point of sharing the
+    canonicaliser.
+
+    Narrowed through the BASE class's own dunder rather than through ``str()`` or
+    ``int()``, which dispatch to the subclass. That is not pedantry: ``str(mode)`` for a
+    ``class Mode(str, Enum)`` member is ``'Mode.EXPRESS'`` on this interpreter, while
+    ``json.dumps(mode)`` is ``'"express"'`` — using ``str()`` here would have shown the
+    model a name the key had never seen.
+
+    Raises `TypeError` for a value with no run-stable representation, exactly as the
+    digest path does, rather than approximating one. A caller that must not fail on that
+    handles it — see `generate_param_examples.render_field_examples`.
+    """
+    if value is None:
+        return None
+    # bool before int: `bool` is an `int` subclass, and `int(True)` would render the
+    # prompt's `True` as `1`.
+    if isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, int):
+        return int.__int__(value)
+    if isinstance(value, float):
+        return float.__float__(value)
+    if isinstance(value, str):
+        return str.__str__(value)
+    if isinstance(value, dict):
+        return {run_stable_form(key): run_stable_form(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        # A tuple becomes a list, which is what `json.dumps` encodes it as.
+        return [run_stable_form(item) for item in value]
+    # The hook's own output is JSON-native at the top level but can nest a value that is
+    # not (an `Enum` whose member value is a `Decimal`), so recurse into it.
+    return run_stable_form(_canonicalize_unserialisable(value))
+
+
 def _canonical_digest(payload: Any) -> str:
     """Stable short digest of any JSON-serialisable structure.
 
-    `default=repr` so a `FieldInfo`, a type object or anything else pydantic hands us
-    inside a field-details record still digests rather than raising. A repr that moves
-    between library versions produces a different digest, which invalidates the entry
-    — the safe direction, and in this case the correct one, because that same repr is
-    what gets rendered into the prompt.
+    Stable is the operative word: the same field details must digest to the same
+    string in a fresh process tomorrow. See `_canonicalize_unserialisable` for what
+    happens to values JSON cannot encode, and why they are not simply `repr`d.
     """
     canonical = json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), default=repr
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=_canonicalize_unserialisable,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
@@ -178,11 +300,17 @@ def compute_fingerprint(
     Every argument is something that changes what the LLM would produce, or what would
     be written to disk from what it produced:
 
-    * `field_annotations_text` — `str(ParameterModel.model_fields)`, interpolated
-      verbatim into the prompt inside a ```python fence. **This is the input whose
-      silent staleness would be worst**: a developer adds a field to a command's
-      parameter model, and without this the runtime keeps few-shot prompting with
-      examples that cannot possibly mention it.
+    * `field_annotations_text` — `str(ParameterModel.model_fields)`, which the prompt
+      interpolates inside a ```python fence. **This is the input whose silent staleness
+      would be worst**: a developer adds a field to a command's parameter model, and
+      without this the runtime keeps few-shot prompting with examples that cannot
+      possibly mention it. The prompt's copy has embedded memory addresses stripped out
+      of it (`generate_param_examples._address_free`, bd fix-r4p) and the text digested
+      here does not, so the two differ for a parameter model holding a non-JSON-native
+      example. That is safe in the only direction that matters: the raw text is strictly
+      MORE discriminating, so it can cost a miss and never cause a stale hit — and such
+      a command does not reach a key at all today, because `field_details` raises in
+      `_canonicalize_unserialisable` first and `param_example_fingerprint` returns None.
     * `field_details` — the structured extraction of the same annotations, which is
       rendered into the prompt a second time as the "Fields to extract" section AND
       drives which parameters the validator looks for. Digested separately from the
@@ -285,6 +413,7 @@ class ParamExampleCache:
             "stored": 0,
             "unreadable": 0,
             "write_failed": 0,
+            "pruned": 0,
         }
 
     # -- configuration -------------------------------------------------
@@ -358,19 +487,52 @@ class ParamExampleCache:
     def lookup(
         self, fingerprint: Fingerprint, seed: int
     ) -> Optional[ParamExampleCacheEntry]:
-        """Return the entry for exactly (*fingerprint*, *seed*), or None."""
+        """Return the entry for exactly (*fingerprint*, *seed*), or None.
+
+        A read that is disabled by `regenerate` counts as a miss, because the caller's
+        next move is identical to a miss's: it calls the LLM. Returning before the
+        counter ran made `format_summary` report "0 reused, 0 generated, 12 written"
+        after twelve real completions, so a developer auditing what
+        `--regenerate-utterances` costs read zero calls (bd fix-k0i.37).
+        """
         if not self.reads_enabled:
+            self._bump("miss")
             return None
         cached = self._read_file(fingerprint)
-        if cached is None:
-            self._bump("miss")
-            return None
-        entry = cached.entries.get(str(int(seed)))
+        entry = None if cached is None else cached.entries.get(str(int(seed)))
         if entry is None or not entry.is_usable():
             self._bump("miss")
+            self._report_miss(fingerprint, seed, cached)
             return None
         self._bump("hit")
         return entry
+
+    def _report_miss(
+        self,
+        fingerprint: Fingerprint,
+        seed: int,
+        cached: Optional[ParamExampleCacheFile],
+    ) -> None:
+        """Say at INFO WHY this lookup missed, in one line.
+
+        Same reasoning and the same shared helper as R6's cache: the counters alone say
+        only that a miss happened, which leaves a developer hand-diffing
+        `fingerprint_inputs` to learn whether it was the parameter model, the model
+        string, or the prompt code that cost them the reuse (bd fix-k0i.36).
+        """
+        if cached is not None:
+            available = ", ".join(sorted(cached.entries)) or "none"
+            logger.info(
+                f"Parameter-example cache miss for '{fingerprint.command_name}': "
+                f"variant {fingerprint.variant_key} is on disk but has no usable entry "
+                f"for seed {seed} (seeds present: {available})."
+            )
+            return
+        if divergence := describe_fingerprint_divergence(self.root, fingerprint):
+            logger.info(
+                f"Parameter-example cache miss for '{fingerprint.command_name}' "
+                f"(seed {seed}): {divergence}."
+            )
 
     # -- writing -------------------------------------------------------
 
@@ -424,6 +586,11 @@ class ParamExampleCache:
                     entries=entries,
                 )
                 atomic_write_model(path, payload)
+                # Inside the lock and after the write, so the file just written is the
+                # newest and cannot be the one pruned. Every edit to a parameter model
+                # orphans that command's previous variant, and nothing else ever
+                # collects them.
+                pruned = prune_orphaned_variants(self.root, fingerprint.command_name)
         except OSError as exc:
             self._bump("write_failed")
             logger.warning(
@@ -433,6 +600,15 @@ class ParamExampleCache:
             )
             return False
         self._bump("stored")
+        if pruned:
+            for _path in pruned:
+                self._bump("pruned")
+            logger.info(
+                f"Pruned {len(pruned)} superseded parameter-example cache variant(s) "
+                f"for '{fingerprint.command_name}', keeping the "
+                f"{MAX_VARIANTS_PER_COMMAND} most recent: "
+                f"{', '.join(os.path.basename(p) for p in pruned)}."
+            )
         return True
 
     def _ensure_root(self) -> None:
@@ -473,6 +649,7 @@ class ParamExampleCache:
                 if stats["write_failed"]
                 else ""
             )
+            + (f", {stats['pruned']} superseded pruned" if stats.get("pruned") else "")
         )
 
 

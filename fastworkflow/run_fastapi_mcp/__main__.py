@@ -15,10 +15,26 @@ Implementation Status:
 - ✅ Graceful shutdown (30s)
 - ✅ Complete conversation dump (all users, active or not)
 
+Response contract for the turn endpoints (/invoke_agent, /invoke_agent_stream,
+/invoke_assistant, /perform_action, and /initialize's startup_output): every one
+of them answers with the public TurnOutput projection
+{turn_key, status, failure_reason, answer, command_outputs, success}. The
+non-streaming endpoints add the transport's `exec_state`, a back-compatible
+`command_responses`, and `traces` when collected; the stream's terminal 'output'
+event carries the bare TurnOutput. This replaced the older per-endpoint mix of
+CommandOutput and TurnOutput shapes — a breaking wire change made deliberately
+before v3.0, with no back-compat for the CommandOutput-shaped top level (see
+docs/turn_result_design_final.md sections 1a, 8, 14).
+
+HTTP status and turn outcome are different questions. A turn that fails, or that
+suspends to ask the user something, is still a successful call: 200, with the
+outcome in status/failure_reason/success. HTTP codes describe the transport.
+
 See docs/fastworkflow_fastapi_spec.md for complete specification.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -44,8 +60,11 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from .mcp_specific import setup_mcp
 from .utils import (
     get_channelconversations_dir,
+    CHECKPOINT_REAP_INTERVAL_SECONDS,
     ChannelSessionManager,
+    MAX_CONVERSATION_TURNS_IN_MEMORY,
     save_conversation_incremental,
+    save_last_turn_feedback,
     InitializationRequest,
     TokenResponse,
     InitializeResponse,
@@ -63,11 +82,16 @@ from .utils import (
 from .turns import (
     TurnRegistry,
     ExecState,
+    AdmissionClosedError,
     ChannelBusyError,
+    MAX_RETAINED_STARTUP_TURNS,
+    TURN_RETENTION_SECONDS,
+    run_owned_turn,
     submit_turn,
     render_turn_response,
     compute_idempotency_key,
 )
+from . import server_memory
 from .jwt_manager import (
     create_access_token,
     create_refresh_token,
@@ -226,9 +250,11 @@ async def get_session_and_ensure_runtime(
         ```python
         @app.post("/endpoint")
         async def endpoint(session: SessionData = Depends(get_session_and_ensure_runtime)):
-            # session.channel_id can now safely be used with session_manager
-            runtime = await session_manager.get_session(session.channel_id)
-            # runtime is guaranteed to exist
+            # session.channel_id can now safely be used with session_manager.
+            # leased_session holds an eviction lease for the block, so the
+            # runtime cannot be closed underneath the request that is using it.
+            async with session_manager.leased_session(session.channel_id) as runtime:
+                return await do_work(runtime)
         ```
     """        
     # Ensure the user runtime exists (creates if missing). Startup is NOT run
@@ -246,6 +272,61 @@ async def get_session_and_ensure_runtime(
     )
     
     return session
+
+
+def _log_memory_bounds() -> None:
+    """One INFO record naming every retention bound this process is running under.
+
+    Byte annotations because a count cap is unauditable without the payload size
+    it was sized against, and "(asserted)" because a previous revision of this
+    work would have logged "off" even on a DSPy release that ignored the setting.
+    """
+    dspy_policy = server_memory.policy_status()
+    if dspy_policy is None:
+        # The policy installs from the server entrypoint, before the event loop.
+        # Reaching here without one means the app was imported some other way.
+        dspy_bounds = "dspy_policy=not installed (no server entrypoint)"
+    else:
+        asserted = "asserted" if dspy_policy.asserted else "NOT ASSERTED"
+        owner = "claimed" if dspy_policy.async_owner_claimed else "unclaimed"
+        dspy_bounds = (
+            f"dspy_history=off ({asserted}), dspy_trace=off ({asserted}), "
+            f"dspy_memory_cache={dspy_policy.memory_cache_entries} entries ({asserted}), "
+            f"dspy_disk_cache={'off' if dspy_policy.disk_cache_off else 'ON'}, "
+            f"dspy_policy_owner={owner}"
+        )
+
+    logger.info(
+        "memory bounds active: "
+        f"max_live_sessions={session_manager.max_live_sessions} "
+        f"(source={session_manager.max_live_sessions_source}), "
+        f"max_retained_startup_turns={MAX_RETAINED_STARTUP_TURNS} "
+        "(~17 MB at 450 KB payload), "
+        f"turn_retention_seconds={TURN_RETENTION_SECONDS:.0f}, "
+        f"max_conversation_turns_in_memory={MAX_CONVERSATION_TURNS_IN_MEMORY} "
+        "(~9 MB per channel at 450 KB payload), "
+        f"{dspy_bounds}"
+    )
+
+
+def _conversation_turns_for_summary(runtime) -> list[dict[str, Any]]:
+    """Turns to summarize a conversation from.
+
+    In-memory history is a bounded window of the newest turns, so summarizing it
+    would silently produce "topic of the last N turns". The durable record is the
+    whole conversation, and only each turn's summary is read, so the store
+    projects to that field rather than handing back every turn's payload.
+
+    The fallback returns whole in-memory turns, which is what the caller that
+    also persists them (the no-active-conversation branch of /new_conversation)
+    needs; that branch is reachable only when nothing is recorded yet.
+    """
+    if runtime.active_conversation_id > 0:
+        if summaries := runtime.conversation_store.get_conversation_summaries(
+            runtime.active_conversation_id
+        ):
+            return summaries
+    return extract_turns_from_history(runtime.execution_context.conversation_history)
 
 
 # ============================================================================
@@ -267,6 +348,12 @@ async def lifespan(_app: FastAPI):
         # Configure JWT verification mode based on CLI parameter
         set_jwt_verification_mode(ARGS.expect_encrypted_jwt)
         
+        # Resolved here, after init() has loaded the workflow env files, and
+        # validated before readiness — a cap that is going to reject traffic
+        # should reject startup instead.
+        resolved, source = session_manager.configure_max_live_sessions()
+        logger.info(f"max_live_sessions={resolved} (source={source})")
+
         # Mark FastWorkflow as initialized for readiness probe
         readiness_state.set_initialized(True)
         
@@ -278,34 +365,49 @@ async def lifespan(_app: FastAPI):
             logger.warning(f"Workflow path not valid or not found: {ARGS.workflow_path}")
             readiness_state.set_workflow_path_valid(False)
 
-    async def _active_turn_channel_ids() -> list[str]:
-        active: list[str] = []
-        for channel_id in list(session_manager._sessions.keys()):
-            rt = await session_manager.get_session(channel_id)
-            if rt and rt.lock.locked():
-                active.append(channel_id)
-        return active
+    async def wait_for_active_turns_to_complete(max_wait_seconds: int) -> list[str]:
+        """Close admission, then drain. Returns the channels still busy at the deadline.
 
-    async def wait_for_active_turns_to_complete(max_wait_seconds: int) -> None:
+        Admission is closed first, and atomically with respect to submission, so
+        a turn cannot be registered behind an empty scan and then be shut down
+        underneath.
+        """
+        await turn_registry.close_admission()
+        # The manager too: a channel created concurrently with shutdown would
+        # otherwise be in neither the registry nor the session map when we scan.
+        session_manager.close_admission()
         logger.info(f"Waiting up to {max_wait_seconds}s for active turns to complete...")
         start_time = time.time()
         while time.time() - start_time < max_wait_seconds:
-            active_turns = await _active_turn_channel_ids()
+            active_turns = session_manager.busy_channel_ids()
             if not active_turns:
                 logger.info("All turns completed, shutting down gracefully")
-                return
+                return []
             logger.debug(f"Waiting for {len(active_turns)} active turns: {active_turns}")
             await asyncio.sleep(0.5)
-        remaining = await _active_turn_channel_ids()
-        logger.warning(f"Shutdown timeout reached with {len(remaining)} turns still active")
 
-    async def finalize_conversations_on_shutdown() -> None:
+        remaining = session_manager.busy_channel_ids()
+        if remaining:
+            # Never snapshot or close a runtime that is still being mutated: the
+            # snapshot would predate the work and would then be authoritative on
+            # the next creation. Leave those to the host and say so loudly.
+            logger.error(
+                f"Shutdown deadline expired with {len(remaining)} channel(s) still "
+                f"working: {remaining}. They will NOT be finalized or closed; "
+                "queued work is left to process termination."
+            )
+        return remaining
+
+    async def finalize_conversations_on_shutdown(skip_channel_ids: list[str]) -> None:
         logger.info("Finalizing conversations with topic and summary...")
+        skip = set(skip_channel_ids)
         for channel_id in list(session_manager._sessions.keys()):
+            if channel_id in skip:
+                continue
             runtime = await session_manager.get_session(channel_id)
             if not runtime:
                 continue
-            if turns := extract_turns_from_history(runtime.execution_context.conversation_history):
+            if turns := _conversation_turns_for_summary(runtime):
                 try:
                     topic, summary = generate_topic_and_summary(turns)
                     if runtime.active_conversation_id > 0:
@@ -320,8 +422,86 @@ async def lifespan(_app: FastAPI):
                 except Exception as e:
                     logger.error(f"Failed to finalize conversation for user {channel_id} during shutdown: {e}")
 
-    async def stop_all_chat_sessions() -> None:
+    async def reap_checkpoints_periodically() -> None:
+        """Drive checkpoint and pending-state retention. Neither store has a timer.
+
+        A unique-channel workload writes a checkpoint per request that is never
+        read again, so without this the namespace grows forever — which is what
+        gates lowering the live-session cap in the first place. Abandoned
+        suspended sessions accumulate the same way: nothing else reclaims one,
+        because /cancel_pending needs a client that has already left.
+        """
+        while True:
+            await asyncio.sleep(CHECKPOINT_REAP_INTERVAL_SECONDS)
+            loop = asyncio.get_running_loop()
+            try:
+                outcome = await loop.run_in_executor(
+                    None, session_manager.reap_checkpoints
+                )
+                # Attribute access, not getattr-with-default: this read named a
+                # field that has never existed (`channels_reclaimed` vs
+                # `reclaimed_channels`), and the default silently turned that
+                # into "nothing was reclaimed" for every pass since retention
+                # shipped. A plain access would have raised on the first run.
+                if outcome.reclaimed_channels:
+                    logger.info(
+                        f"Reclaimed {outcome.reclaimed_channels} abandoned "
+                        f"checkpoint(s)"
+                    )
+                if outcome.failures:
+                    logger.warning(
+                        f"{outcome.failures} checkpoint namespace entr(ies) could "
+                        f"not be reclaimed"
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    f"Checkpoint reap pass failed ({type(exc).__name__}: {exc})"
+                )
+
+            # Separate try: a failure reclaiming one namespace must not stop the
+            # other, or one persistent fault silently disables all retention.
+            try:
+                pending = await loop.run_in_executor(
+                    None, session_manager.reap_pending_state
+                )
+                if pending.reclaimed:
+                    logger.info(
+                        f"Reclaimed {pending.reclaimed} abandoned suspended "
+                        f"session(s); {pending.protected} were still live"
+                    )
+                if pending.unreadable:
+                    logger.warning(
+                        f"{pending.unreadable} pending-state blob(s) have no "
+                        f"readable save time and were left in place"
+                    )
+                if pending.failures:
+                    # reap already warns per blob and names the path. The
+                    # aggregate is what says "retention is not keeping up",
+                    # which a per-blob line buried among others does not.
+                    logger.warning(
+                        f"{pending.failures} pending-state blob(s) were selected "
+                        f"for reclamation but could not be removed"
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    f"Pending-state reap pass failed ({type(exc).__name__}: {exc})"
+                )
+
+    async def stop_all_chat_sessions(skip_channel_ids: list[str]) -> None:
+        # Write before closing: a context closed without a checkpoint loses
+        # whatever it accumulated since its last retirement.
+        written = session_manager.checkpoint_for_shutdown(skip_channel_ids)
+        if written:
+            logger.info(f"Checkpointed {written} channel(s) at shutdown")
+
+        skip = set(skip_channel_ids)
         for channel_id in list(session_manager._sessions.keys()):
+            if channel_id in skip:
+                continue
             runtime = await session_manager.get_session(channel_id)
             if runtime:
                 runtime.execution_context.close()
@@ -331,15 +511,29 @@ async def lifespan(_app: FastAPI):
         # Log startup info AFTER init() so log level from env file is respected
         logger.info("FastWorkflow FastAPI service starting...")
         logger.info(f"Startup with CLI params: workflow_path={ARGS.workflow_path}, env_file_path={ARGS.env_file_path}, passwords_file_path={ARGS.passwords_file_path}")
+        # Reconciliation needs the launch configuration as this process was
+        # started with, so a redeployed value can be told apart from one the
+        # application wrote.
+        session_manager.set_launch_context(
+            json.loads(ARGS.context) if ARGS.context else {}
+        )
+        # Take DSPy's async config ownership before any request coroutine can,
+        # then report the bounds this process is actually running under.
+        server_memory.claim_async_owner()
+        _log_memory_bounds()
         # Mark application as ready to accept traffic
         readiness_state.set_ready(True)
         logger.info("Application ready to accept traffic")
+        reaper = asyncio.create_task(reap_checkpoints_periodically())
         yield
     finally:
         logger.info("FastWorkflow FastAPI service shutting down...")
-        await wait_for_active_turns_to_complete(max_wait_seconds=30)
-        await finalize_conversations_on_shutdown()
-        await stop_all_chat_sessions()
+        reaper.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await reaper
+        still_busy = await wait_for_active_turns_to_complete(max_wait_seconds=30)
+        await finalize_conversations_on_shutdown(still_busy)
+        await stop_all_chat_sessions(still_busy)
         logger.info("FastWorkflow FastAPI service shutdown complete")
 
 
@@ -488,7 +682,7 @@ async def liveness_probe() -> dict:
     },
     tags=["probes"]
 )
-async def readiness_probe() -> JSONResponse:
+async def readiness_probe(memory: bool = False) -> JSONResponse:
     """
     Readiness probe endpoint for Kubernetes.
     
@@ -498,6 +692,12 @@ async def readiness_probe() -> JSONResponse:
     This endpoint verifies:
     - FastWorkflow has been initialized
     - The configured workflow path is valid and accessible
+    - The DSPy memory policy is still in force (drift makes the pod unready
+      rather than leaving it to leak quietly)
+
+    Pass ``?memory=true`` for retention metrics (DSPy response-cache entries and
+    bytes, in-memory conversation turns and bytes). They are off by default
+    because computing them walks live objects, and probes are frequent.
     
     This endpoint is not logged unless it returns a non-200 status code
     to avoid excessive logging from frequent Kubernetes health checks.
@@ -507,23 +707,49 @@ async def readiness_probe() -> JSONResponse:
         503 Service Unavailable: {"status": "not_ready", "checks": {...}} - Not ready
     """
     status_info = readiness_state.get_status()
-    
-    if readiness_state.is_ready():
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content={
-                "status": "ready",
-                "checks": status_info
-            }
-        )
-    else:
-        return JSONResponse(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={
-                "status": "not_ready",
-                "checks": status_info
-            }
-        )
+
+    drift = server_memory.check_policy_in_force()
+    server_memory.log_policy_drift(drift)
+    if drift:
+        status_info["dspy_memory_policy"] = f"drifted: {drift}"
+
+    content: dict[str, Any] = {"status": "ready", "checks": status_info}
+    if memory:
+        content["memory"] = {
+            "live_sessions": len(session_manager._sessions),
+            "retained_turns": len(turn_registry._by_key),
+            "dspy_cache": server_memory.dspy_cache_metrics(),
+            "conversations": server_memory.conversation_memory_metrics(
+                list(session_manager._sessions.values())
+            ),
+        }
+
+    if readiness_state.is_ready() and "dspy_memory_policy" not in status_info:
+        return JSONResponse(status_code=status.HTTP_200_OK, content=content)
+
+    content["status"] = "not_ready"
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content=content
+    )
+
+
+# Every turn endpoint answers with the same shape, so it is described once.
+# The distinction that matters to an integrator: 200 reports the TURN's outcome
+# in `status`/`failure_reason`/`success`, and a failed turn is still a 200 — the
+# HTTP code says whether the call worked, not whether the turn did.
+TURN_RESPONSE_200_DESCRIPTION = (
+    "Turn finished. Body is the turn's TurnOutput projection: "
+    "{turn_key, exec_state, status, failure_reason, success, answer, "
+    "command_outputs}, plus back-compatible command_responses and, when "
+    "collected, traces. A failed or awaiting_user turn is still a 200: read the "
+    "outcome from status/failure_reason/success."
+)
+TURN_RESPONSE_202_DESCRIPTION = (
+    "Turn still running past the wait window (wait-or-defer). Body is "
+    "{turn_key, exec_state:'running'}; the execution keeps running and is "
+    "rejoined by retrying the same request."
+)
 
 
 def _build_startup_work_fn(ctx, startup_command_str, startup_action):
@@ -560,9 +786,11 @@ def _initialize_response_from_execution(
         return status.HTTP_200_OK, resp
     result = execn.result
     if result is not None and result.command_outputs:
-        # startup_output is the action's/command's CommandOutput (carries
-        # command_responses + artifacts); the TurnOutput is the source of truth.
-        resp.startup_output = result.command_outputs[-1]
+        # startup_output is the startup turn's TurnOutput — the same projection
+        # every other turn endpoint returns. The action's/command's own
+        # command_responses + artifacts are still there, under
+        # startup_output.command_outputs.
+        resp.startup_output = result
     return status.HTTP_200_OK, resp
 
 
@@ -583,6 +811,7 @@ async def _submit_turn_endpoint(
     idempotency_args: tuple,
     wait_seconds: float,
     user_id=None,
+    http_bearer_token=None,
 ):
     """Submit a turn for a turn endpoint, mapping ChannelBusyError -> 409.
 
@@ -603,6 +832,7 @@ async def _submit_turn_endpoint(
             kind=kind,
             idempotency_key=idempotency_key,
             user_id=user_id,
+            http_bearer_token=http_bearer_token,
         )
     except ChannelBusyError as busy:
         raise HTTPException(
@@ -629,15 +859,23 @@ def _reject_if_busy(channel_id: str) -> None:
 
 
 def _turn_json_response(execn, channel_id: str) -> JSONResponse:
-    """Render a turn endpoint execution: 200 done / 202 deferred / 500 on error."""
+    """Render a turn endpoint execution: 200 done / 202 deferred / 409 or 500 on error."""
     if execn.error is not None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=(
+        # 409: client conflict (e.g. resume with no suspended trajectory). 500: unexpected.
+        error_status = getattr(execn, "http_status_on_error", None) or (
+            status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+        if error_status == status.HTTP_409_CONFLICT:
+            detail = (
+                f"A turn cannot be resumed for user: {channel_id} "
+                f"({execn.error})"
+            )
+        else:
+            detail = (
                 f"Internal error executing turn for channel_id "
                 f"{channel_id}: {execn.error}"
-            ),
-        )
+            )
+        raise HTTPException(status_code=error_status, detail=detail)
     code, body = render_turn_response(execn)
     return JSONResponse(content=body, status_code=code)
 
@@ -648,10 +886,10 @@ def _turn_json_response(execn, channel_id: str) -> JSONResponse:
     response_model=InitializeResponse,
     status_code=status.HTTP_200_OK,
     responses={
-        200: {"description": "Session successfully initialized, JWT tokens returned with optional startup output"},
+        200: {"description": "Session successfully initialized, JWT tokens returned with optional startup_output (the startup turn's TurnOutput projection)"},
         202: {"description": "Session initialized; startup turn still running (poll /initialize or /turns)"},
         400: {"description": "Both startup_command and startup_action provided, or user_id missing when startup provided"},
-        422: {"description": "Invalid paths or missing env vars"},
+        422: {"description": "Empty channel_id, invalid paths, or missing env vars"},
         500: {"description": "Internal error during initialization"}
     }
 )
@@ -687,22 +925,22 @@ async def initialize(
             )
 
         # Check if user already has an active session
-        existing_runtime = await session_manager.get_session(channel_id)
-        if existing_runtime:
-            logger.info(f"Session for channel_id {channel_id} already exists, generating new tokens")
-            if startup_turn_key := (
-                existing_runtime.startup_turn_key
-                or turn_registry.active_turn_key(channel_id)
-            ):
-                execn = turn_registry.get(startup_turn_key)
-                if execn is not None:
-                    code, resp = _initialize_response_from_execution(
-                        channel_id, user_id, execn
-                    )
-                    response.status_code = code
-                    return resp
-            # No startup turn for this session — plain token refresh.
-            return _tokens_only_response(channel_id, user_id)
+        async with session_manager.leased_session(channel_id) as existing_runtime:
+            if existing_runtime:
+                logger.info(f"Session for channel_id {channel_id} already exists, generating new tokens")
+                if startup_turn_key := (
+                    existing_runtime.startup_turn_key
+                    or turn_registry.active_turn_key(channel_id)
+                ):
+                    execn = turn_registry.get(startup_turn_key)
+                    if execn is not None:
+                        code, resp = _initialize_response_from_execution(
+                            channel_id, user_id, execn
+                        )
+                        response.status_code = code
+                        return resp
+                # No startup turn for this session — plain token refresh.
+                return _tokens_only_response(channel_id, user_id)
 
         startup_command_str = request.startup_command or ARGS.startup_command
 
@@ -732,44 +970,44 @@ async def initialize(
         if not (startup_command_str or startup_action):
             return _tokens_only_response(channel_id, user_id)
 
-        runtime = await session_manager.get_session(channel_id)
-        if not runtime:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Runtime not found after creation for channel_id: {channel_id}"
-            )
+        async with session_manager.leased_session(channel_id) as runtime:
+            if not runtime:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Runtime not found after creation for channel_id: {channel_id}"
+                )
 
-        ctx = runtime.execution_context
-        logger.info(
-            f"Submitting startup turn for channel_id {channel_id}: "
-            f"{'action' if startup_action else 'command'}"
-        )
-        work_fn = _build_startup_work_fn(ctx, startup_command_str, startup_action)
-        idempotency_key = compute_idempotency_key(
-            channel_id,
-            "initialize_startup",
-            startup_command_str,
-            startup_action.model_dump() if startup_action is not None else None,
-        )
-        try:
-            execn = await submit_turn(
-                runtime,
-                turn_registry,
-                work_fn,
-                session_manager,
-                wait_seconds=request.timeout_seconds,
-                kind="initialize_startup",
-                idempotency_key=idempotency_key,
-                user_id=user_id,
+            ctx = runtime.execution_context
+            logger.info(
+                f"Submitting startup turn for channel_id {channel_id}: "
+                f"{'action' if startup_action else 'command'}"
             )
-        except ChannelBusyError as busy:
-            # A different turn is already active on this channel; report its key.
-            execn = busy.execution
+            work_fn = _build_startup_work_fn(ctx, startup_command_str, startup_action)
+            idempotency_key = compute_idempotency_key(
+                channel_id,
+                "initialize_startup",
+                startup_command_str,
+                startup_action.model_dump() if startup_action is not None else None,
+            )
+            try:
+                execn = await submit_turn(
+                    runtime,
+                    turn_registry,
+                    work_fn,
+                    session_manager,
+                    wait_seconds=request.timeout_seconds,
+                    kind="initialize_startup",
+                    idempotency_key=idempotency_key,
+                    user_id=user_id,
+                )
+            except ChannelBusyError as busy:
+                # A different turn is already active on this channel; report its key.
+                execn = busy.execution
 
-        runtime.startup_turn_key = execn.turn_key
-        code, resp = _initialize_response_from_execution(channel_id, user_id, execn)
-        response.status_code = code
-        return resp
+            runtime.startup_turn_key = execn.turn_key
+            code, resp = _initialize_response_from_execution(channel_id, user_id, execn)
+            response.status_code = code
+            return resp
 
     except HTTPException:
         raise
@@ -866,7 +1104,8 @@ async def refresh_token(
     response_model=None,  # Use custom response to include traces
     status_code=status.HTTP_200_OK,
     responses={
-        200: {"description": "Agent query processed successfully"},
+        200: {"description": TURN_RESPONSE_200_DESCRIPTION},
+        202: {"description": TURN_RESPONSE_202_DESCRIPTION},
         401: {"description": "Invalid or expired JWT token"},
         404: {"description": "Session not found"},
         409: {"description": "Concurrent turn already in progress"},
@@ -886,24 +1125,25 @@ async def invoke_agent(
     channel_id = session.channel_id
     user_id = session.user_id
     try:
-        runtime = await session_manager.get_session(channel_id)
-        if not runtime:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User session not found: {channel_id}"
-            )
+        async with session_manager.leased_session(channel_id) as runtime:
+            if not runtime:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"User session not found: {channel_id}"
+                )
 
-        ctx = runtime.execution_context
-        user_query = request.user_query.lstrip('/')
-        execn = await _submit_turn_endpoint(
-            runtime,
-            kind="invoke_agent",
-            work_fn=lambda: ctx.process_turn(user_query),
-            idempotency_args=(user_query,),
-            wait_seconds=request.timeout_seconds,
-            user_id=user_id,
-        )
-        return _turn_json_response(execn, channel_id)
+            ctx = runtime.execution_context
+            user_query = request.user_query.lstrip('/')
+            execn = await _submit_turn_endpoint(
+                runtime,
+                kind="invoke_agent",
+                work_fn=lambda: ctx.process_turn(user_query),
+                idempotency_args=(user_query,),
+                wait_seconds=request.timeout_seconds,
+                user_id=user_id,
+                http_bearer_token=session.http_bearer_token,
+            )
+            return _turn_json_response(execn, channel_id)
 
     except HTTPException:
         raise
@@ -921,7 +1161,13 @@ async def invoke_agent(
     operation_id="invoke_agent",
     responses={
         200: {
-            "description": "Stream with trace events and final command output",
+            "description": (
+                "Stream of 'trace' events followed by one terminal 'output' "
+                "event carrying the turn's TurnOutput projection "
+                "{turn_key, status, failure_reason, answer, command_outputs, "
+                "success}. A failed or awaiting_user turn arrives as an "
+                "'output' event, not an 'error' one."
+            ),
             "content": {
                 "application/x-ndjson": {},
                 "text/event-stream": {}
@@ -941,147 +1187,130 @@ async def invoke_agent_stream(
     Submit a natural language query to the agent and stream responses.
     
     Streams via NDJSON or SSE based on the session's stream_format preference.
-    - NDJSON: {"type":"trace","data":<trace_json>} for each trace, {"type":"output","data":<CommandOutput_json>} for final result
+    - NDJSON: {"type":"trace","data":<trace_json>} for each trace, {"type":"output","data":<TurnOutput_json>} for final result
     - SSE: event: trace/output with data payloads
+
+    The terminal 'output' event carries the turn's public TurnOutput projection:
+    {turn_key, status, failure_reason, answer, command_outputs, success}. A
+    suspended turn ends with status=="awaiting_user" and the clarification
+    question in answer; it is still a successful stream, not an 'error' event.
     
     Requires a valid JWT access token in the Authorization header (Bearer token format).
     Exposed as 'invoke_agent' tool for MCP clients (who don't need JWT auth).
     """
     channel_id = session.channel_id
     user_id = session.user_id
-    
-    # Get runtime and validate session exists
-    runtime = await session_manager.get_session(channel_id)
-    if not runtime:
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content={"detail": f"User session not found: {channel_id}"}
-        )
 
-    async def _run_streaming_turn(emit_trace, emit_output, emit_error):
-        try:
-            if runtime.lock.locked():
-                await emit_error(
-                    f"A turn is already in progress for user: {channel_id}"
-                )
-                return
-
-            trace_queue_async: asyncio.Queue = asyncio.Queue()
-
-            async def on_trace(trace_json: dict) -> None:
-                await trace_queue_async.put(trace_json)
-
-            async with runtime.lock:
-                turn_task = asyncio.create_task(
-                    run_process_message_with_trace_stream(
-                        runtime,
-                        request.user_query.lstrip("/"),
-                        request.timeout_seconds,
-                        session_manager,
-                        on_trace,
-                        user_id=user_id,
-                    )
-                )
-
-                while not turn_task.done():
-                    try:
-                        trace_json = await asyncio.wait_for(
-                            trace_queue_async.get(), timeout=0.05
-                        )
-                        await emit_trace(trace_json)
-                    except asyncio.TimeoutError:
-                        continue
-
-                try:
-                    command_output = await turn_task
-                except HTTPException as http_exc:
-                    await emit_error(str(http_exc.detail))
-                    return
-
-                while not trace_queue_async.empty():
-                    trace_json = await trace_queue_async.get()
-                    await emit_trace(trace_json)
-
-                save_conversation_incremental(
-                    runtime, extract_turns_from_history, logger
-                )
-                await emit_output(command_output.model_dump(mode="json"))
-
-        except Exception as e:
-            logger.error(f"Error in invoke_agent_stream for user {channel_id}: {e}")
-            traceback.print_exc()
-            await emit_error(
-                f"Internal error in invoke_agent_stream() for channel_id: {channel_id}"
+    # The lease covers the gap between lookup and registry admission. Once the
+    # turn is registered the registry pointer keeps the channel busy, which is
+    # what protects the runtime after this handler returns and the body is
+    # still being produced.
+    async with session_manager.leased_session(channel_id) as runtime:
+        if not runtime:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"detail": f"User session not found: {channel_id}"}
             )
 
-    async def ndjson_stream():
+        # Events are queued by the owning turn and drained by the response body.
+        # Separating them is the point: a client that disconnects stops draining,
+        # while the turn runs to completion and retires itself normally.
         events: asyncio.Queue = asyncio.Queue()
 
-        async def pump():
-            async def et(t):
-                await events.put({"type": "trace", "data": t})
+        async def emit(kind: str, data: Any) -> None:
+            await events.put({"type": kind, "data": data})
 
-            async def eo(d):
-                await events.put({"type": "output", "data": d})
+        async def streaming_work() -> fastworkflow.TurnOutput:
+            async def on_trace(trace_json: dict) -> None:
+                await emit("trace", trace_json)
 
-            async def ee(d):
-                await events.put({"type": "error", "data": {"detail": d}})
+            async def on_timeout(detail: str) -> None:
+                await emit("error", {"detail": detail})
 
-            await _run_streaming_turn(et, eo, ee)
-            await events.put(None)
+            turn_output = await run_process_message_with_trace_stream(
+                runtime,
+                request.user_query.lstrip("/"),
+                request.timeout_seconds,
+                session_manager,
+                on_trace,
+                user_id=user_id,
+                on_timeout=on_timeout,
+            )
+            await emit("output", turn_output.model_dump(mode="json"))
+            return turn_output
 
-        pump_task = asyncio.create_task(pump())
+        async def owned_turn(execn) -> None:
+            try:
+                await run_owned_turn(
+                    runtime, turn_registry, execn, streaming_work, session_manager
+                )
+                if execn.error is not None:
+                    await emit(
+                        "error",
+                        {
+                            "detail": (
+                                "Internal error in invoke_agent_stream() for "
+                                f"channel_id: {channel_id}"
+                            )
+                        },
+                    )
+            finally:
+                await events.put(None)
+
+        try:
+            await turn_registry.start_or_get_active(
+                channel_id,
+                kind="invoke_agent_stream",
+                idempotency_key=compute_idempotency_key(
+                    channel_id, "invoke_agent_stream", request.user_query
+                ),
+                user_id=user_id,
+                http_bearer_token=session.http_bearer_token,
+                run_turn=lambda execn: asyncio.create_task(owned_turn(execn)),
+            )
+        except ChannelBusyError as busy:
+            return JSONResponse(
+                status_code=status.HTTP_409_CONFLICT,
+                content={
+                    "detail": (
+                        f"A turn is already in progress for user: {channel_id} "
+                        f"(active turn {busy.execution.turn_key})"
+                    )
+                },
+            )
+        except AdmissionClosedError:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"detail": "Server is shutting down"},
+            )
+
+        stream_format = runtime.stream_format
+
+    async def drain():
         while True:
             item = await events.get()
             if item is None:
                 break
             yield item
-        await pump_task
 
-    async def sse_stream():
-        events: asyncio.Queue = asyncio.Queue()
-
-        async def pump():
-            async def et(t):
-                await events.put(
-                    "event: trace\n" + f"data: {json.dumps(t)}\n\n"
+    if stream_format == "sse":
+        async def sse_body():
+            async for part in drain():
+                yield (
+                    f"event: {part['type']}\n"
+                    f"data: {json.dumps(part['data'])}\n\n"
                 )
 
-            async def eo(d):
-                await events.put(
-                    "event: output\n" + f"data: {json.dumps(d)}\n\n"
-                )
-
-            async def ee(d):
-                await events.put(
-                    "event: error\n"
-                    + f"data: {json.dumps({'detail': d})}\n\n"
-                )
-
-            await _run_streaming_turn(et, eo, ee)
-            await events.put(None)
-
-        pump_task = asyncio.create_task(pump())
-        while True:
-            item = await events.get()
-            if item is None:
-                break
-            yield item
-        await pump_task
-
-    # Route to appropriate stream format
-    if runtime.stream_format == "sse":
         return StreamingResponse(
-            sse_stream(),
+            sse_body(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
-    
-    # Default to NDJSON with JSON serialization wrapper
+
     async def ndjson_body():
-        async for part in ndjson_stream():
+        async for part in drain():
             yield json.dumps(part) + "\n"
-    
+
     return StreamingResponse(ndjson_body(), media_type="application/x-ndjson")
 
 
@@ -1091,7 +1320,8 @@ async def invoke_agent_stream(
     response_model=None,
     status_code=status.HTTP_200_OK,
     responses={
-        200: {"description": "Assistant query processed successfully"},
+        200: {"description": TURN_RESPONSE_200_DESCRIPTION},
+        202: {"description": TURN_RESPONSE_202_DESCRIPTION},
         401: {"description": "Invalid or expired JWT token"},
         404: {"description": "Session not found"},
         409: {"description": "Concurrent turn already in progress"},
@@ -1111,32 +1341,33 @@ async def invoke_assistant(
     channel_id = session.channel_id
     user_id = session.user_id
     try:
-        runtime = await session_manager.get_session(channel_id)
-        if not runtime:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User session not found: {channel_id}"
+        async with session_manager.leased_session(channel_id) as runtime:
+            if not runtime:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"User session not found: {channel_id}"
+                )
+
+            ctx = runtime.execution_context
+
+            def assistant_work_fn():
+                # Resolve the assistant prefix inside the turn (under the lock).
+                if "is_assistant_mode_command" in ctx.cme_workflow.context:
+                    assistant_query = request.user_query
+                else:
+                    assistant_query = f"/{request.user_query.lstrip('/')}"
+                return ctx.process_turn(assistant_query)
+
+            execn = await _submit_turn_endpoint(
+                runtime,
+                kind="invoke_assistant",
+                work_fn=assistant_work_fn,
+                idempotency_args=(request.user_query,),
+                wait_seconds=request.timeout_seconds,
+                user_id=user_id,
+                http_bearer_token=session.http_bearer_token,
             )
-
-        ctx = runtime.execution_context
-
-        def assistant_work_fn():
-            # Resolve the assistant prefix inside the turn (under the lock).
-            if "is_assistant_mode_command" in ctx.cme_workflow.context:
-                assistant_query = request.user_query
-            else:
-                assistant_query = f"/{request.user_query.lstrip('/')}"
-            return ctx.process_turn(assistant_query)
-
-        execn = await _submit_turn_endpoint(
-            runtime,
-            kind="invoke_assistant",
-            work_fn=assistant_work_fn,
-            idempotency_args=(request.user_query,),
-            wait_seconds=request.timeout_seconds,
-            user_id=user_id,
-        )
-        return _turn_json_response(execn, channel_id)
+            return _turn_json_response(execn, channel_id)
 
     except HTTPException:
         raise
@@ -1155,7 +1386,8 @@ async def invoke_assistant(
     response_model=None,
     status_code=status.HTTP_200_OK,
     responses={
-        200: {"description": "Action performed successfully"},
+        200: {"description": TURN_RESPONSE_200_DESCRIPTION},
+        202: {"description": TURN_RESPONSE_202_DESCRIPTION},
         401: {"description": "Invalid or expired JWT token"},
         404: {"description": "Session not found"},
         409: {"description": "Concurrent turn already in progress"},
@@ -1175,32 +1407,33 @@ async def perform_action(
     channel_id = session.channel_id
     user_id = session.user_id
     try:
-        runtime = await session_manager.get_session(channel_id)
-        if not runtime:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User session not found: {channel_id}"
+        async with session_manager.leased_session(channel_id) as runtime:
+            if not runtime:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"User session not found: {channel_id}"
+                )
+
+            # Convert dict to fastworkflow.Action (422 on bad format, before submit).
+            try:
+                action = fastworkflow.Action(**request.action)
+            except Exception as e:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Invalid action format: {e}",
+                ) from e
+
+            ctx = runtime.execution_context
+            execn = await _submit_turn_endpoint(
+                runtime,
+                kind="perform_action",
+                work_fn=lambda: ctx.process_action_turn(action),
+                idempotency_args=(request.action,),
+                wait_seconds=request.timeout_seconds,
+                user_id=user_id,
+                http_bearer_token=session.http_bearer_token,
             )
-
-        # Convert dict to fastworkflow.Action (422 on bad format, before submit).
-        try:
-            action = fastworkflow.Action(**request.action)
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Invalid action format: {e}",
-            ) from e
-
-        ctx = runtime.execution_context
-        execn = await _submit_turn_endpoint(
-            runtime,
-            kind="perform_action",
-            work_fn=lambda: ctx.process_action_turn(action),
-            idempotency_args=(request.action,),
-            wait_seconds=request.timeout_seconds,
-            user_id=user_id,
-        )
-        return _turn_json_response(execn, channel_id)
+            return _turn_json_response(execn, channel_id)
 
     except HTTPException:
         raise
@@ -1230,18 +1463,18 @@ async def cancel_pending(
     Abandon a suspended Topology-B ask_user turn and clear durable pending state.
     """
     channel_id = session.channel_id
-    runtime = await session_manager.get_session(channel_id)
-    if not runtime:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"User session not found: {channel_id}",
-        )
+    async with session_manager.leased_session(channel_id) as runtime:
+        if not runtime:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User session not found: {channel_id}",
+            )
 
-    async with runtime.lock:
-        cleared = runtime.execution_context.cancel_pending()
-        session_manager.session_state_store.clear(channel_id)
+        async with runtime.lock:
+            cleared = runtime.execution_context.cancel_pending()
+            session_manager.session_state_store.clear(channel_id)
 
-    return {"status": "ok", "cleared": cleared}
+        return {"status": "ok", "cleared": cleared}
 
 
 @app.post(
@@ -1266,46 +1499,48 @@ async def new_conversation(
     """
     channel_id = session.channel_id
     try:
-        runtime = await session_manager.get_session(channel_id)
-        if not runtime:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User session not found: {channel_id}"
-            )
+        async with session_manager.leased_session(channel_id) as runtime:
+            if not runtime:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"User session not found: {channel_id}"
+                )
 
-        # Serialize ctx mutation with turns; reject if a turn is active (§3.4).
-        _reject_if_busy(channel_id)
-        async with runtime.lock:
-            # Extract turns from chat_session conversation history
-            if turns := extract_turns_from_history(runtime.execution_context.conversation_history):
-                # Generate topic and summary synchronously (turns already saved incrementally)
-                topic, summary = generate_topic_and_summary(turns)
+            # Serialize ctx mutation with turns; reject if a turn is active (§3.4).
+            _reject_if_busy(channel_id)
+            async with runtime.lock:
+                # Summarize the whole conversation, not just the in-memory window
+                if turns := _conversation_turns_for_summary(runtime):
+                    # Generate topic and summary synchronously (turns already saved incrementally)
+                    topic, summary = generate_topic_and_summary(turns)
 
-                # Update topic/summary for the conversation (turns already persisted)
-                if runtime.active_conversation_id > 0:
-                    conv_id = runtime.active_conversation_id
-                    runtime.conversation_store.update_conversation_topic_summary(
-                        conv_id, topic, summary
-                    )
-                    logger.info(f"Finalized conversation {conv_id} with topic and summary for session {channel_id}")
+                    # Update topic/summary for the conversation (turns already persisted)
+                    if runtime.active_conversation_id > 0:
+                        conv_id = runtime.active_conversation_id
+                        runtime.conversation_store.update_conversation_topic_summary(
+                            conv_id, topic, summary
+                        )
+                        logger.info(f"Finalized conversation {conv_id} with topic and summary for session {channel_id}")
+                    else:
+                        # Edge case: conversation history exists but no active ID (shouldn't happen with incremental saves)
+                        logger.warning(f"Conversation history exists but no active_conversation_id for session {channel_id}")
+                        conv_id = runtime.conversation_store.save_conversation(topic, summary, turns)
+                        logger.info(f"Created conversation {conv_id} for session {channel_id}")
+
+                    # Reserve next conversation ID for the next conversation
+                    next_id = runtime.conversation_store.reserve_next_conversation_id()
+                    runtime.active_conversation_id = next_id
+                    runtime.execution_context.clear_conversation_history()
+                    runtime.durable_turn_count = 0
+
+                    logger.info(f"Ready for new conversation {runtime.active_conversation_id} for session {channel_id}")
+                    return {"status": "ok"}
                 else:
-                    # Edge case: conversation history exists but no active ID (shouldn't happen with incremental saves)
-                    logger.warning(f"Conversation history exists but no active_conversation_id for session {channel_id}")
-                    conv_id = runtime.conversation_store.save_conversation(topic, summary, turns)
-                    logger.info(f"Created conversation {conv_id} for session {channel_id}")
-
-                # Reserve next conversation ID for the next conversation
-                next_id = runtime.conversation_store.reserve_next_conversation_id()
-                runtime.active_conversation_id = next_id
-                runtime.execution_context.clear_conversation_history()
-
-                logger.info(f"Ready for new conversation {runtime.active_conversation_id} for session {channel_id}")
-                return {"status": "ok"}
-            else:
-                # No turns to save, just clear history and start fresh
-                runtime.execution_context.clear_conversation_history()
-                logger.info(f"No turns to save for session {channel_id}, cleared history")
-                return {"status": "ok", "message": "No turns to save"}
+                    # No turns to save, just clear history and start fresh
+                    runtime.execution_context.clear_conversation_history()
+                    runtime.durable_turn_count = 0
+                    logger.info(f"No turns to save for session {channel_id}, cleared history")
+                    return {"status": "ok", "message": "No turns to save"}
 
     except HTTPException:
         raise
@@ -1341,13 +1576,13 @@ async def list_conversations(
     """
     channel_id = session.channel_id
     try:
-        runtime = await session_manager.get_session(channel_id)
-        if not runtime:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User session not found: {channel_id}"
-            )
-        return runtime.conversation_store.list_conversations(limit)
+        async with session_manager.leased_session(channel_id) as runtime:
+            if not runtime:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"User session not found: {channel_id}"
+                )
+            return runtime.conversation_store.list_conversations(limit)
     except HTTPException:
         raise
     except Exception as e:
@@ -1384,36 +1619,36 @@ async def post_feedback(
     """
     channel_id = session.channel_id
     try:
-        runtime = await session_manager.get_session(channel_id)
-        if not runtime:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User session not found: {channel_id}"
-            )
-
-        # Serialize ctx mutation with turns; reject if a turn is active (§3.4).
-        _reject_if_busy(channel_id)
-        async with runtime.lock:
-            # Check if there are any in-memory turns to give feedback on
-            if not runtime.execution_context.conversation_history.messages:
+        async with session_manager.leased_session(channel_id) as runtime:
+            if not runtime:
                 raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=f"No turns available to give feedback on for user: {channel_id}"
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"User session not found: {channel_id}"
                 )
 
-            # Update feedback on the last turn in the in-memory conversation history
-            last_turn = runtime.execution_context.conversation_history.messages[-1]
-            last_turn["feedback"] = {
-                "binary_or_numeric_score": request.binary_or_numeric_score,
-                "nl_feedback": request.nl_feedback,
-                "timestamp": int(time.time() * 1000)
-            }
+            # Serialize ctx mutation with turns; reject if a turn is active (§3.4).
+            _reject_if_busy(channel_id)
+            async with runtime.lock:
+                # Check if there are any in-memory turns to give feedback on
+                if not runtime.execution_context.conversation_history.messages:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=f"No turns available to give feedback on for user: {channel_id}"
+                    )
 
-            # Incrementally save the updated turns with feedback
-            save_conversation_incremental(runtime, extract_turns_from_history, logger)
+                # Update feedback on the last turn in the in-memory conversation history
+                last_turn = runtime.execution_context.conversation_history.messages[-1]
+                last_turn["feedback"] = {
+                    "binary_or_numeric_score": request.binary_or_numeric_score,
+                    "nl_feedback": request.nl_feedback,
+                    "timestamp": int(time.time() * 1000)
+                }
 
-            logger.info(f"Added feedback to latest turn for session {channel_id}")
-            return {"status": "ok"}
+                # Persist the edit to the turn it belongs to
+                save_last_turn_feedback(runtime, extract_turns_from_history, logger)
+
+                logger.info(f"Added feedback to latest turn for session {channel_id}")
+                return {"status": "ok"}
 
     except HTTPException:
         raise
@@ -1447,32 +1682,38 @@ async def activate_conversation(
     """
     channel_id = session.channel_id
     try:
-        runtime = await session_manager.get_session(channel_id)
-        if not runtime:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User session not found: {channel_id}"
-            )
+        async with session_manager.leased_session(channel_id) as runtime:
+            if not runtime:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"User session not found: {channel_id}"
+                )
 
-        # Get conversation by ID
-        conv = runtime.conversation_store.get_conversation(request.conversation_id)
-        if not conv:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Conversation not found with ID: {request.conversation_id}"
-            )
+            # Get conversation by ID
+            conv = runtime.conversation_store.get_conversation(request.conversation_id)
+            if not conv:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Conversation not found with ID: {request.conversation_id}"
+                )
 
-        # Serialize ctx mutation with turns; reject if a turn is active (§3.4).
-        _reject_if_busy(channel_id)
-        async with runtime.lock:
-            runtime.active_conversation_id = request.conversation_id
+            # Serialize ctx mutation with turns; reject if a turn is active (§3.4).
+            _reject_if_busy(channel_id)
+            async with runtime.lock:
+                runtime.active_conversation_id = request.conversation_id
 
-            # Restore conversation history to chat_session
-            restored_history = restore_history_from_turns(conv["turns"])
-            runtime.execution_context._conversation_history = restored_history
-            logger.info(f"Activated conversation {request.conversation_id} for session {channel_id}")
+                # Restore the newest window of the conversation; the rest stays in
+                # the durable record. Everything restored is already recorded, so
+                # the high-water mark moves with it and the next incremental save
+                # does not append the conversation a second time.
+                restored_history = restore_history_from_turns(
+                    conv["turns"][-MAX_CONVERSATION_TURNS_IN_MEMORY:]
+                )
+                runtime.execution_context._conversation_history = restored_history
+                runtime.durable_turn_count = len(restored_history.messages)
+                logger.info(f"Activated conversation {request.conversation_id} for session {channel_id}")
 
-            return {"status": "ok"}
+                return {"status": "ok"}
 
     except HTTPException:
         raise
@@ -1547,6 +1788,7 @@ async def dump_all_conversations(request: DumpConversationsRequest) -> dict[str,
     status_code=status.HTTP_200_OK,
     responses={
         200: {"description": "MCP token generated successfully"},
+        422: {"description": "Empty channel_id"},
         500: {"description": "Failed to generate token"}
     }
 )
@@ -1604,9 +1846,20 @@ setup_mcp(
 # ============================================================================
 
 def main():
-    """Entry point for the FastAPI MCP server."""
+    """Entry point for the FastAPI MCP server.
+
+    The DSPy memory policy is installed here, synchronously, before uvicorn
+    creates the event loop and before any LM exists — DSPy's global config is
+    owned by the thread that configures it first, and doing this from the async
+    lifespan instead would leave the async owner unset for a request coroutine
+    to claim. uvicorn.run() is given the app object, so multi-worker and
+    --reload (which re-import the app in processes that never ran this) are not
+    reachable from this entrypoint.
+    """
     host = ARGS.host if hasattr(ARGS, 'host') else "0.0.0.0"
     port = ARGS.port if hasattr(ARGS, 'port') else 8000
+
+    server_memory.install_policy()
     
     # Read LOG_LEVEL from env file to configure uvicorn's logger
     # (env file isn't loaded until lifespan, but uvicorn needs log_level at startup)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,7 +12,12 @@ from unittest.mock import MagicMock
 import pytest
 
 import fastworkflow
-from fastworkflow.session_state_store import DiskSessionStateStore
+from fastworkflow.session_state_store import (
+    SAVED_AT_KEY,
+    SCHEMA_VERSION,
+    DiskSessionStateStore,
+    IncompatibleSessionState,
+)
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
 
@@ -30,10 +36,29 @@ def initialized_fastworkflow(tmp_path):
     RoutingRegistry.clear_registry()
 
 
+def _suspended_react_blob() -> dict:
+    """The shape WorkflowToolAgent.export_suspended() actually returns.
+
+    Has to be a real JSON-native blob: serialize_state is strict now, so a stub
+    that returned an opaque object would be rejected rather than quietly
+    stringified — which is the whole point, and is what this test used to do
+    without noticing.
+    """
+    return {
+        "trajectory": {"thought_0": "find the task", "observation_0": "two matches"},
+        "idx": 1,
+        "input_args": {"user_query": "list tasks"},
+        "max_iters": 25,
+        "clarification": "Which task?",
+        "iteration_counter": 1,
+    }
+
+
 def _wire_mock_agent(ctx, suspended, completed):
     mock_agent = MagicMock()
     mock_agent.return_value = suspended
     mock_agent.resume.return_value = completed
+    mock_agent.export_suspended.return_value = _suspended_react_blob()
     ctx._workflow_tool_agent = mock_agent
     ctx._intent_clarification_agent = MagicMock()
 
@@ -122,6 +147,87 @@ def test_disk_session_state_store_roundtrip(tmp_path):
     state = {"schema_version": 1, "awaiting_user": True, "react": {"idx": 0}}
     store.save("user-1", state)
     assert store.exists("user-1")
-    assert store.load("user-1") == state
+
+    loaded = store.load("user-1")
+    # Every saved field comes back unchanged. Not compared with == because the
+    # store also stamps a save time for retention (fix-6b4); that is storage
+    # metadata rather than session state, which is why it is not in the schema.
+    assert {k: loaded[k] for k in state} == state
+    assert loaded[SAVED_AT_KEY] <= time.time()
+
     store.clear("user-1")
     assert not store.exists("user-1")
+
+
+@pytest.mark.parametrize(
+    "found",
+    [SCHEMA_VERSION + 1, SCHEMA_VERSION - 1, 0, None, "1"],
+    ids=["newer", "older", "missing-as-zero", "null", "string"],
+)
+def test_unreadable_schema_version_applies_nothing(
+    initialized_fastworkflow, todo_workflow_path, found
+):
+    """A blob this build cannot read must not be partly applied.
+
+    Before this, the mismatch branch logged a warning and then fell through to
+    apply every field anyway, so a blob written by a future build would be
+    half-restored onto a live session.
+    """
+    channel_id = f"schema_{uuid.uuid4().hex[:8]}"
+    ctx = WorkflowExecutionContext(run_as_agent=True, session_key=channel_id)
+    workflow = fastworkflow.Workflow.create(
+        todo_workflow_path, workflow_id_str=channel_id
+    )
+    ctx.bind_app_workflow(workflow)
+
+    # Every field here is one apply_serialized_state would have written.
+    hostile = {
+        "schema_version": found,
+        "awaiting_user": True,
+        "suspended_user_message": "restored from the future",
+        "pending_clarification_request": "which one?",
+        "action_log": [{"command_name": "should_not_appear"}],
+    }
+
+    with pytest.raises(IncompatibleSessionState) as excinfo:
+        ctx.apply_serialized_state(hostile)
+
+    assert excinfo.value.found == found
+    assert excinfo.value.expected == SCHEMA_VERSION
+
+    assert not ctx.awaiting_user
+    assert ctx._suspended_user_message is None
+    assert ctx._pending_clarification_request is None
+    assert ctx._action_log == []
+    ctx.close()
+
+
+def test_readable_schema_version_still_applies(
+    initialized_fastworkflow, todo_workflow_path
+):
+    """The guard rejects on version, not on every blob it is handed.
+
+    Without this, deleting the whole restore body would still pass the test
+    above, so it is what makes that one about the version rather than about
+    apply_serialized_state doing nothing at all.
+    """
+    channel_id = f"schema_ok_{uuid.uuid4().hex[:8]}"
+    ctx = WorkflowExecutionContext(run_as_agent=True, session_key=channel_id)
+    workflow = fastworkflow.Workflow.create(
+        todo_workflow_path, workflow_id_str=channel_id
+    )
+    ctx.bind_app_workflow(workflow)
+
+    ctx.apply_serialized_state(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "awaiting_user": True,
+            "suspended_user_message": "the urgent one",
+            "action_log": [{"command_name": "list_tasks"}],
+        }
+    )
+
+    assert ctx.awaiting_user
+    assert ctx._suspended_user_message == "the urgent one"
+    assert len(ctx._action_log) == 1
+    ctx.close()

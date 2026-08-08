@@ -185,6 +185,121 @@ def test_fingerprints_round_trip_through_json():
     assert restored == original
 
 
+# ---------------------------------------------------------------------
+# Fail-closed comparison: an unresolved fingerprint must never compare equal
+#
+# This is the M12 post-mortem's headline -- "a comparison that can fail must not fail
+# equal". Two consecutive runs that both failed to read a command's source produced two
+# identical `(None, None)` fingerprints, so the command looked unchanged forever and its
+# context was carried forward on a stale model with no signal anywhere. The shipped fix is
+# the `resolved` flag; nothing in the suite exercised it, so reverting
+# `training_inputs_differ` to a plain field comparison -- the exact regression -- passed
+# everything. bd fix-k0i.28.
+# ---------------------------------------------------------------------
+
+
+def _unresolved(name, reason="source file could not be read"):
+    return st._unresolvable(name, reason)
+
+
+def test_an_unresolvable_fingerprint_records_why_it_could_not_be_computed():
+    """The reason is the only thing that tells a developer why a run retrained."""
+    fingerprint = _unresolved("Account/close", "source file could not be read: /gone.py")
+
+    assert fingerprint.resolved is False
+    assert fingerprint.unresolved_reason == "source file could not be read: /gone.py"
+    assert fingerprint.source_sha256 is None
+    assert fingerprint.seed_utterances_sha256 is None
+
+
+def test_two_unresolved_fingerprints_differ_even_though_their_fields_are_identical():
+    """The `(None, None) == (None, None)` bug, asserted directly.
+
+    Both sides carry exactly the same field values -- that is the whole point. A plain
+    field comparison returns "unchanged" here, which is an inability to check being
+    reported as a check that passed.
+    """
+    previous = _unresolved("Account/close")
+    current = _unresolved("Account/close")
+
+    assert previous.source_sha256 == current.source_sha256 is None
+    assert previous.seed_utterances_sha256 == current.seed_utterances_sha256 is None
+    assert current.training_inputs_differ(previous) is True
+    assert previous.training_inputs_differ(current) is True
+
+
+def test_an_unresolved_fingerprint_differs_from_itself():
+    """Not reflexive, deliberately: "I could not check this" is never "this is the same"."""
+    fingerprint = _unresolved("Account/close")
+    assert fingerprint.training_inputs_differ(fingerprint) is True
+
+
+@pytest.mark.parametrize("unresolved_side", ["previous", "current"])
+def test_either_side_being_unresolved_is_enough_to_differ(unresolved_side):
+    """A command that stopped being readable, and one that started being readable again.
+
+    Both directions matter: the first is a source that vanished under a still-published
+    model, the second is a baseline recorded during an outage. Neither may be treated as
+    "unchanged", because in both cases one of the two hashes does not exist.
+    """
+    resolved = _fingerprint("Account/close")
+    unresolved = _unresolved("Account/close")
+    previous, current = (
+        (unresolved, resolved) if unresolved_side == "previous"
+        else (resolved, unresolved)
+    )
+
+    assert current.training_inputs_differ(previous) is True
+
+
+def test_two_resolved_identical_fingerprints_still_compare_equal():
+    """The other half of the contract: failing closed must not mean failing always.
+
+    Without this, "return True" would satisfy every assertion above and turn every
+    automatic incremental run into a full retrain.
+    """
+    previous = _fingerprint("Account/close")
+    current = _fingerprint("Account/close")
+
+    assert previous.resolved is True
+    assert current.training_inputs_differ(previous) is False
+
+
+def test_changed_commands_reports_an_unresolved_command_as_dirty():
+    """The closure input, not just the predicate: `changed_commands` must pass it through.
+
+    This is where the fail-closed comparison actually reaches the plan -- a command absent
+    from the dirty set is a command whose context can be carried forward.
+    """
+    previous = {"a": _unresolved("a"), "b": _fingerprint("b")}
+    current = {"a": _unresolved("a"), "b": _fingerprint("b")}
+
+    assert changed_commands(previous, current) == {"a"}
+
+
+def test_unresolved_state_survives_the_json_round_trip():
+    """The baseline is READ BACK from `training_signature.json` before it is compared.
+
+    If `resolved` did not round-trip it would validate back to its `True` default, and the
+    fail-closed branch would be bypassed for every comparison against a stored baseline --
+    which is every comparison the trainer actually makes.
+    """
+    original = _unresolved("Account/close", "could not hydrate command metadata: boom")
+    restored = CommandFingerprint.model_validate(json.loads(original.model_dump_json()))
+
+    assert restored.resolved is False
+    assert restored.unresolved_reason == "could not hydrate command metadata: boom"
+    assert restored.training_inputs_differ(original) is True
+
+    signature = st.TrainingSignature(command_fingerprints={"Account/close": original})
+    reloaded = st.TrainingSignature.model_validate(
+        json.loads(signature.model_dump_json()))
+    assert reloaded.command_fingerprints["Account/close"].resolved is False
+    assert changed_commands(
+        reloaded.command_fingerprints, signature.command_fingerprints
+    ) == {"Account/close"}
+
+
 def test_format_plan_states_both_retrained_and_carried_forward():
     """R5 requires the developer to be able to see the closure, not just trust it."""
     plan = TrainingPlan(

@@ -455,13 +455,27 @@ in lifetime/transport:
 
 ### 7.1 Current persistence mechanism (baseline)
 
-`fastworkflow/session_state_store.py` defines `SessionStateStore` (ABC) with
-`load`/`save`/`clear`/`exists`, keyed by `channel_id`, with two backends:
+`fastworkflow/session_state_store.py` defines `SessionStateStore` (ABC) with six abstract members —
+`load`/`save`/`clear`/`exists`/`iter_entries`/`remove_at` — keyed by `channel_id`, plus one concrete
+`reap` that applies a `PendingRetentionPolicy` over what `iter_entries` yields. `iter_entries` yields
+a `PendingEntry` NamedTuple (`channel_id`, `saved_at`, `storage_key`) rather than a bare tuple, and
+`remove_at` addresses a storage key rather than a channel: `channel_id` is read from *inside* the
+blob, so carrying the backend's own key is what lets `reap` remove the blob it enumerated instead of
+one re-derived from that blob's self-reported channel id. Two backends:
 
-- `DiskSessionStateStore` — one JSON file per channel (`{safe_id}_pending.json`), `json.dump(..., default=str)`.
+- `DiskSessionStateStore` — one JSON file per channel (`{encoded_id}.pending.json`, percent-encoded
+  through `fastworkflow/storage_keys.py` so two channel ids can never share a file), written with
+  the strict encoder rather than `default=str`.
 - `RedisSessionStateStore` — one JSON string per channel under `fw:session:pending:{channel_id}`.
 
 Factory `get_session_state_store()` selects via `SESSION_STATE_STORE=disk|redis`.
+
+> **Maintenance note.** This enumeration has now gone stale three times — the filename format and
+> `default=str` (corrected during `fix-7hn`), then `remove_at` and `PendingEntry` (`fix-xm1`,
+> corrected in `fix-ax6`). Keep it enumerated anyway: the paragraph is useful *because* it lists the
+> members, and replacing it with a pointer at the ABC would be accurate and useless. The obligation
+> is on the other side — anyone changing the store's interface should update this list in the same
+> change.
 
 In the xray runner, durable I/O fires **only at suspend/eviction**:
 

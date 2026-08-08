@@ -5,6 +5,7 @@ with attributes like id, type, and status.
 """
 
 from typing import Dict, Any, Type, Optional, List
+import copy
 import re
 import json
 
@@ -1000,4 +1001,69 @@ class WorkItem:
         if is_complete_value:
             workitem.is_complete = True
             
+        return workitem
+
+    def to_state_dict(self) -> Dict[str, Any]:
+        """Snapshot this work item and its descendants as JSON-native data.
+
+        Only the downward edges are written. ``_parent`` makes the live graph
+        cyclic and ``_child_pos`` is keyed by object identity, so neither can
+        cross JSON; both are implied by child order, and
+        :meth:`from_state_dict` re-derives them. ``_workflow_schema`` is shared
+        by every node of the tree and is static workflow configuration, so it is
+        reloaded on restore rather than written once per node.
+
+        Data dictionaries are deep-copied because the snapshot must not alias
+        live application data: a later mutation of this work item would
+        otherwise change a snapshot already handed to the framework, and two
+        nodes sharing one container would restore as two independent copies.
+        """
+        state: Dict[str, Any] = {
+            'workitem_type': self._workitem_type,
+            'is_complete': self._is_complete,
+            'data_dict': copy.deepcopy(self._data_dict),
+            'children': [child.to_state_dict() for child in self._children],
+        }
+
+        # Include id if it exists
+        if self._id is not None:
+            state['id'] = self._id
+
+        return state
+
+    @classmethod
+    def from_state_dict(cls: Type['WorkItem'], state: Dict[str, Any],
+                        workflow_schema: Optional["WorkItem.WorkflowSchema"] = None) -> 'WorkItem':
+        """Rebuild a work item and its descendants from :meth:`to_state_dict`.
+
+        Args:
+            state (dict): A snapshot produced by :meth:`to_state_dict`.
+            workflow_schema (WorkflowSchema, optional): The one schema instance
+                shared by the whole restored tree.
+
+        Returns:
+            WorkItem: The restored work item, with parent pointers and child
+            positions re-established.
+        """
+        # Construct without the schema so that __init__ does not auto-create the
+        # min_cardinality children the snapshot already carries; attaching the
+        # schema before add_child keeps the cardinality rules enforced, and
+        # passing the same instance down keeps every node on one schema.
+        workitem = cls(
+            workitem_type=state['workitem_type'],
+            data_dict=copy.deepcopy(state.get('data_dict') or {}),
+            id=state.get('id')
+        )
+        workitem._workflow_schema = workflow_schema
+
+        # add_child is what sets _parent and the identity-keyed _child_pos, so
+        # rebuilding through it restores the links a plain dict cannot carry.
+        for child_state in state.get('children', []):
+            workitem.add_child(cls.from_state_dict(child_state, workflow_schema))
+
+        # Assign the field rather than the property: for a leaf the setter
+        # propagates upward into a parent that is still being built, and for a
+        # non-leaf it discards the value in favour of a recalculation.
+        workitem._is_complete = bool(state.get('is_complete', False))
+
         return workitem

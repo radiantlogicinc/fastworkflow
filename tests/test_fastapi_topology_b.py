@@ -34,7 +34,7 @@ def env_files():
 
 
 @pytest.fixture
-def app_module(hello_world_workflow_path, env_files):
+def app_module(hello_world_workflow_path, env_files, tmp_path):
     env_file, passwords_file = env_files
     sys.argv = [
         "pytest",
@@ -48,13 +48,15 @@ def app_module(hello_world_workflow_path, env_files):
     import fastworkflow.run_fastapi_mcp.__main__ as main
 
     importlib.reload(main)
-    import fastworkflow
-    from dotenv import dotenv_values
+    from tests.fastapi_hermetic import init_fastapi_hermetic_env, restore_fastapi_env
 
-    fastworkflow.init({**dotenv_values(env_file), **dotenv_values(passwords_file)})
-    if fastworkflow.RoutingRegistry:
-        fastworkflow.RoutingRegistry.clear_registry()
-    return main
+    previous_env = init_fastapi_hermetic_env(
+        env_file, passwords_file, tmp_path / "speedict"
+    )
+    try:
+        yield main
+    finally:
+        restore_fastapi_env(previous_env)
 
 
 def _initialize(client: TestClient, channel_id: str) -> dict:
@@ -89,6 +91,34 @@ def test_cancel_pending_endpoint(app_module):
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
     assert not app_module.session_manager.session_state_store.exists(channel_id)
+
+
+def test_invoke_agent_while_awaiting_without_suspended_is_409(app_module):
+    """fix-quw: desynced awaiting_user must map to 409, not 500."""
+    channel_id = f"desync_{uuid.uuid4().hex[:8]}"
+    client = TestClient(app_module.app)
+    init = _initialize(client, channel_id)
+    headers = _authorize(init["access_token"])
+
+    async def setup_desync():
+        runtime = await app_module.session_manager.get_session(channel_id)
+        assert runtime is not None
+        ctx = runtime.execution_context
+        ctx._awaiting_user = True
+        ctx._pending_clarification_request = "clarify?"
+        ctx._ensure_agent_initialized()
+        if ctx._workflow_tool_agent is not None:
+            ctx._workflow_tool_agent.clear_suspension()
+
+    asyncio.run(setup_desync())
+
+    resp = client.post(
+        "/invoke_agent",
+        headers=headers,
+        json={"user_query": "answer", "timeout_seconds": 10},
+    )
+    assert resp.status_code == 409
+    assert "No suspended ReAct state" in resp.json()["detail"]
 
 
 def test_cold_rehydrate_after_cache_evict(app_module):

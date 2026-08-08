@@ -49,7 +49,7 @@ import math
 import random
 import re
 import unicodedata
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Literal, Mapping, Sequence
@@ -60,6 +60,12 @@ from pydantic import BaseModel, Field
 # it here costs nothing and keeps the escalation set from drifting between the trainer,
 # the runtime and this module.
 from fastworkflow.nlu_labels import ESCALATION_LABELS as _ESCALATION_LABELS
+from fastworkflow.nlu_labels import NON_ROUTABLE_LABELS
+
+#: Rows a label needs to survive training. Owned here rather than in the trainer only
+#: because the import runs this way; ``split_training_data`` is what enforces it, and
+#: the persona split must not hand it a label it will reject. One number, two callers.
+MIN_TRAINING_ROWS_PER_LABEL = 2
 # Provided by the determinism work (R2). It owns persona attribution; this module only
 # consumes it.
 # The former fallback kept held-out evaluation independently importable; direct in-package
@@ -203,6 +209,15 @@ class HeldoutReport(BaseModel):
     #: reported; named so it can no longer be mistaken for a generalisation measure.
     in_distribution_f1: float | None = None
     routing: RoutingScore | None = None
+    #: Persona-held-out rows whose expected label is an escalation class rather than a
+    #: command. Scored on lone-escalation semantics and reported on its own axis: these
+    #: rows used to be counted as routing successes, which in a context with ancestors
+    #: meant the headline routing number was mostly escalation recognition (D2).
+    holdout_escalation: EscalationScore | None = None
+    #: Residual overlap between the held-out rows and their training rows (AR1). The
+    #: holdout removes an utterance's AUTHOR, not its wording, so this is what says
+    #: how much of the routing number above is generalisation rather than recall.
+    leak_calibration: LeakCalibration | None = None
     #: Routing scored on the DEVELOPER-SUPPLIED benchmark, kept separate from `routing`
     #: because the two are different populations and must not be averaged. It is also the
     #: only one of the two that can be compared across runs: the persona holdout is
@@ -287,10 +302,131 @@ def _summarize_labels(labels: Iterable[str], limit: int = 10) -> str:
     return shown
 
 
+class LeakCalibration(BaseModel):
+    """How much of the held-out set the model had already seen, in other words (AR1).
+
+    A persona holdout removes the AUTHOR of an utterance from training. It does not
+    remove the WORDING: two personas asked the same question in one prompt often
+    answer with near-identical text, and a held-out row that repeats a training row
+    verbatim scores as generalisation while measuring memorisation.
+
+    These are string operations over rows already in memory, so the calibration costs
+    nothing and turns "treat this as a lower bound" from a caveat into a number.
+    """
+
+    #: Held-out rows measured. Zero means the rest of these fields say nothing.
+    total: int = 0
+    #: Median over held-out rows of the maximum token overlap against the training
+    #: rows of the SAME label. 0.0 is a clean holdout; 1.0 is a duplicated corpus.
+    median_max_overlap: float | None = None
+    #: Fraction of held-out rows whose closest training row overlaps >= 0.8. The
+    #: spec's threshold: above it, the two are paraphrases rather than distinct asks.
+    fraction_above_0_8: float | None = None
+    #: Held-out rows whose text appears in training verbatim after normalisation.
+    #: split_by_persona drops exact leaks, so a non-zero value here is a bug signal.
+    exact_duplicates: int = 0
+
+
+def _content_tokens(utterance: str) -> set[str]:
+    return {t for t in re.findall(r"[a-z0-9]+", utterance.casefold()) if t}
+
+
+def calibrate_leak(split: "PersonaSplit") -> LeakCalibration:
+    """Measure residual overlap between the held-out rows and their training rows.
+
+    Compared per LABEL rather than corpus-wide: overlap with a different command's
+    utterances is not leakage, it is vocabulary. Only the rows the classifier must
+    tell apart from this one matter.
+    """
+    if not split.heldout:
+        return LeakCalibration()
+
+    train_by_label: dict[str, list[set[str]]] = defaultdict(list)
+    train_text_by_label: dict[str, set[str]] = defaultdict(set)
+    for record in split.train:
+        train_by_label[record.label].append(_content_tokens(record.utterance))
+        train_text_by_label[record.label].add(normalize_utterance(record.utterance))
+
+    overlaps: list[float] = []
+    exact = 0
+    for record in split.heldout:
+        if normalize_utterance(record.utterance) in train_text_by_label[record.label]:
+            exact += 1
+        tokens = _content_tokens(record.utterance)
+        if not tokens:
+            continue
+        best = 0.0
+        for train_tokens in train_by_label.get(record.label, ()):
+            if union := tokens | train_tokens:
+                best = max(best, len(tokens & train_tokens) / len(union))
+        overlaps.append(best)
+
+    if not overlaps:
+        return LeakCalibration(total=len(split.heldout), exact_duplicates=exact)
+
+    ordered = sorted(overlaps)
+    middle = len(ordered) // 2
+    median = (
+        ordered[middle]
+        if len(ordered) % 2
+        else (ordered[middle - 1] + ordered[middle]) / 2
+    )
+    return LeakCalibration(
+        total=len(overlaps),
+        median_max_overlap=median,
+        fraction_above_0_8=sum(o >= 0.8 for o in overlaps) / len(overlaps),
+        exact_duplicates=exact,
+    )
+
+
+def persona_batch_groups(batches: Iterable[Sequence[str]]) -> list[list[str]]:
+    """Group persona ids that ever shared a generation batch (AR1).
+
+    Personas in one batch are produced by a SINGLE completion, so a held-out persona
+    sharing a batch with a training persona shares the sampler's context as well as
+    the prompt -- its "held-out" utterances were drawn while the model could see the
+    training ones. Splitting inside a batch measures less generalisation than it
+    claims to.
+
+    Co-occurrence is transitive and crosses commands: a persona can sit in one batch
+    for command A and another for command B, which transitively binds all three
+    groups. Union-find is what keeps that correct rather than approximately correct.
+    """
+    parent: dict[str, str] = {}
+
+    def find(item: str) -> str:
+        parent.setdefault(item, item)
+        while parent[item] != item:
+            parent[item] = parent[parent[item]]
+            item = parent[item]
+        return item
+
+    def union(a: str, b: str) -> None:
+        root_a, root_b = find(a), find(b)
+        if root_a != root_b:
+            parent[root_b] = root_a
+
+    for batch in batches:
+        members = [p for p in batch if p and p != SEED_PERSONA_ID]
+        for member in members:
+            # Registered before any union so a batch of one still produces a group.
+            # Relying on union() to register would silently drop solo personas, which
+            # then never appear in the holdout at all.
+            find(member)
+        for other in members[1:]:
+            union(members[0], other)
+
+    grouped: dict[str, list[str]] = defaultdict(list)
+    for persona in parent:
+        grouped[find(persona)].append(persona)
+    return sorted((sorted(group) for group in grouped.values()), key=lambda g: g[0])
+
+
 def split_by_persona(
     records: Sequence[LabeledUtterance],
     holdout_fraction: float = DEFAULT_HOLDOUT_FRACTION,
     seed: int = DEFAULT_SEED,
+    persona_batches: Optional[Iterable[Sequence[str]]] = None,
 ) -> PersonaSplit:
     """Reserve whole personas for evaluation.
 
@@ -367,8 +503,49 @@ def split_by_persona(
         )
 
     rng = random.Random(seed)
-    heldout_personas = sorted(rng.sample(all_personas, holdout_count))
-    heldout_persona_set = set(heldout_personas)
+    if groups := (
+        persona_batch_groups(persona_batches) if persona_batches is not None else []
+    ):
+        # Sample whole batches. A group is taken only if it fits, so the holdout can
+        # land under its target -- deliberately: overshooting removes more rows from
+        # training than asked, and undershooting only weakens a measurement.
+        known = set(all_personas)
+        eligible = [[p for p in group if p in known] for group in groups]
+        eligible = [group for group in eligible if group]
+        ungrouped = sorted(known - {p for group in eligible for p in group})
+        eligible.extend([p] for p in ungrouped)
+
+        rng.shuffle(eligible)
+        heldout_persona_set = set()
+        for group in eligible:
+            if len(heldout_persona_set) + len(group) > holdout_count:
+                continue
+            heldout_persona_set.update(group)
+        heldout_personas = sorted(heldout_persona_set)
+        if not heldout_personas:
+            notes.append(
+                f"Batch-aligned holdout could not reserve any personas: the smallest "
+                f"generation batch is larger than the {holdout_count}-persona target. "
+                f"Held-out routing is not measurable for this context."
+            )
+        elif ungrouped:
+            notes.append(
+                f"{len(ungrouped)} persona(s) had no recorded generation batch and were "
+                f"treated as batches of one."
+            )
+    else:
+        heldout_personas = sorted(rng.sample(all_personas, holdout_count))
+        heldout_persona_set = set(heldout_personas)
+        # AR1 requires the holdout be aligned to generation-batch boundaries. Without
+        # the batch composition this split cannot honour that, and a held-out persona
+        # may share a completion with a training one -- so the number it produces is
+        # optimistic. Disclosed rather than quietly reported as a clean holdout.
+        notes.append(
+            "Holdout is NOT batch-aligned (no generation batch composition was "
+            "supplied), so a held-out persona may share a completion with a training "
+            "persona. Treat the resulting routing number as optimistic."
+        )
+
     train_personas = [p for p in all_personas if p not in heldout_persona_set]
 
     train: list[LabeledUtterance] = []
@@ -383,18 +560,32 @@ def split_by_persona(
         else:
             train.append(record)
 
-    # Guard: a label must never lose all of its training rows. Rescue it wholesale rather
-    # than leaving a partially-trained label, which would corrupt the model to buy a metric.
-    trained_labels = {record.label for record in train}
-    starved_labels = {record.label for record in heldout} - trained_labels
+    # Guard: a label must never drop below the trainer's floor. Rescue it wholesale
+    # rather than leaving a partially-trained label, which would corrupt the model to
+    # buy a metric.
+    #
+    # The threshold is MIN_TRAINING_ROWS_PER_LABEL, not zero. Rescuing only at zero
+    # left a label with exactly one training row -- enough to pass here, one short of
+    # what split_training_data demands -- so the run died mid-loop, after earlier
+    # contexts had already spent their LLM and GPU budget. Two modules enforcing the
+    # same requirement with different numbers is the defect; sharing the constant is
+    # the fix.
+    trained_counts = Counter(record.label for record in train)
+    starved_labels = {
+        record.label
+        for record in heldout
+        if trained_counts[record.label] < MIN_TRAINING_ROWS_PER_LABEL
+    }
+    trained_labels = set(trained_counts)
     if starved_labels:
         rescued = [r for r in heldout if r.label in starved_labels]
         heldout = [r for r in heldout if r.label not in starved_labels]
         train.extend(rescued)
         notes.append(
-            f"{len(starved_labels)} label(s) would have had zero training rows after the "
-            f"persona split; their {len(rescued)} held-out row(s) were returned to train, "
-            f"so those labels have no held-out coverage: {_summarize_labels(starved_labels)}"
+            f"{len(starved_labels)} label(s) would have been left below the trainer's "
+            f"floor of {MIN_TRAINING_ROWS_PER_LABEL} training row(s) after the persona "
+            f"split; their {len(rescued)} held-out row(s) were returned to train, so "
+            f"those labels have no held-out coverage: {_summarize_labels(starved_labels)}"
         )
 
     # Leak: the same utterance text produced by both a held-out and a training persona.
@@ -468,6 +659,28 @@ def _expected_routing_label(case) -> str | None:
     return label
 
 
+def partition_by_routability(
+    cases: Sequence[LabeledUtterance | BenchmarkCase],
+) -> tuple[list, list]:
+    """Split *cases* into (routable, escalation-class) by their expected label.
+
+    The two populations answer different questions -- "does this reach the right
+    command" versus "does this correctly give up and escalate" -- and averaging
+    them produces a number that answers neither.
+    """
+    routable: list = []
+    escalation_class: list = []
+    for case in cases:
+        expected = _expected_routing_label(case)
+        target = (
+            escalation_class
+            if expected is not None and normalize_label(expected) in NON_ROUTABLE_LABELS
+            else routable
+        )
+        target.append(case)
+    return routable, escalation_class
+
+
 def score_routing(
     cases: Sequence[LabeledUtterance | BenchmarkCase],
     predict_fn: PredictFn,
@@ -493,6 +706,20 @@ def score_routing(
                 f"Routing case has no expected label: {getattr(case, 'utterance', case)!r}"
             )
         expected = normalize_label(expected)
+        if expected in NON_ROUTABLE_LABELS:
+            # Decision D2: routing and escalation are never blended. A lone
+            # wildcard escalates to an ancestor -- it is not a route -- so
+            # counting predictions[0] == "wildcard" as a correct top-1 would
+            # score a semantics the runtime does not have. Escalation-class rows
+            # are 48-91% of rows in contexts with ancestors, so admitting them
+            # here does not skew the number, it replaces it. Raised rather than
+            # filtered because a caller that reaches this has mixed two
+            # populations and needs to say which one it meant.
+            raise ValueError(
+                f"Non-routable label {expected!r} was passed to score_routing "
+                f"(utterance: {getattr(case, 'utterance', case)!r}). Score "
+                f"escalation-class rows with score_escalation instead."
+            )
         predictions = [normalize_label(p) for p in (predict_fn(case.utterance) or [])]
 
         bucket = per_command.setdefault(
@@ -835,6 +1062,21 @@ def aggregate_totals(reports: Sequence[HeldoutReport]) -> dict:
     in_list = sum(r.routing.in_list_correct for r in reports if r.routing)
     escalation_total = sum(r.escalation.total for r in reports if r.escalation)
     escalation_correct = sum(r.escalation.correct for r in reports if r.escalation)
+    holdout_escalation_total = sum(
+        r.holdout_escalation.total for r in reports if r.holdout_escalation
+    )
+    holdout_escalation_correct = sum(
+        r.holdout_escalation.correct for r in reports if r.holdout_escalation
+    )
+    benchmark_total = sum(
+        r.benchmark_routing.total for r in reports if r.benchmark_routing
+    )
+    benchmark_top1 = sum(
+        r.benchmark_routing.top1_correct for r in reports if r.benchmark_routing
+    )
+    benchmark_in_list = sum(
+        r.benchmark_routing.in_list_correct for r in reports if r.benchmark_routing
+    )
     f1_values = [
         r.in_distribution_f1 for r in reports if r.in_distribution_f1 is not None
     ]
@@ -844,12 +1086,35 @@ def aggregate_totals(reports: Sequence[HeldoutReport]) -> dict:
         "routing_total": routing_total,
         "routing_top1_correct": top1,
         "routing_in_list_correct": in_list,
-        "routing_top1": (top1 / routing_total) if routing_total else 0.0,
-        "routing_in_list": (in_list / routing_total) if routing_total else 0.0,
+        # None, not 0.0, when the denominator is zero. In JSON "0.0" is
+        # indistinguishable from a measured total failure, and a reader diffing
+        # two runs cannot tell "we did not measure this" from "this scored zero".
+        "routing_top1": (top1 / routing_total) if routing_total else None,
+        "routing_in_list": (in_list / routing_total) if routing_total else None,
+        # The fixed benchmark is the only cross-run-comparable population: the
+        # persona holdout is re-drawn every run, so two runs score different
+        # cases. Excluding it from the totals left the one comparable number
+        # visible nowhere but a transient per-context print.
+        "benchmark_routing_total": benchmark_total,
+        "benchmark_routing_top1_correct": benchmark_top1,
+        "benchmark_routing_in_list_correct": benchmark_in_list,
+        "benchmark_routing_top1": (
+            benchmark_top1 / benchmark_total if benchmark_total else None
+        ),
+        "benchmark_routing_in_list": (
+            benchmark_in_list / benchmark_total if benchmark_total else None
+        ),
         "escalation_total": escalation_total,
         "escalation_correct": escalation_correct,
         "escalation_recall": (
-            escalation_correct / escalation_total if escalation_total else 0.0
+            escalation_correct / escalation_total if escalation_total else None
+        ),
+        "holdout_escalation_total": holdout_escalation_total,
+        "holdout_escalation_correct": holdout_escalation_correct,
+        "holdout_escalation_recall": (
+            holdout_escalation_correct / holdout_escalation_total
+            if holdout_escalation_total
+            else None
         ),
         "mean_in_distribution_f1": (
             sum(f1_values) / len(f1_values) if f1_values else None
@@ -868,7 +1133,8 @@ def format_report(reports: Sequence[HeldoutReport]) -> str:
 
     header = (
         f"{'Context':<28} {'in-dist F1':>10} {'heldout N':>9} {'top-1':>8} "
-        f"{'in-list':>8} {'escal N':>8} {'escal recall':>13}"
+        f"{'in-list':>8} {'bench N':>8} {'bench top-1':>12} "
+        f"{'escal N':>8} {'escal recall':>13}"
     )
     rule = "-" * len(header)
 
@@ -882,6 +1148,7 @@ def format_report(reports: Sequence[HeldoutReport]) -> str:
     for report in sorted(reports, key=lambda r: r.context):
         routing = report.routing
         escalation = report.escalation
+        bench = report.benchmark_routing
         f1 = (
             f"{report.in_distribution_f1:.3f}"
             if report.in_distribution_f1 is not None
@@ -892,6 +1159,8 @@ def format_report(reports: Sequence[HeldoutReport]) -> str:
             f"{(routing.total if routing else 0):>9} "
             f"{(_fmt_pct(routing.top1_correct, routing.total) if routing else '-'):>8} "
             f"{(_fmt_pct(routing.in_list_correct, routing.total) if routing else '-'):>8} "
+            f"{(bench.total if bench else 0):>8} "
+            f"{(_fmt_pct(bench.top1_correct, bench.total) if bench else '-'):>12} "
             f"{(escalation.total if escalation else 0):>8} "
             f"{(_fmt_pct(escalation.correct, escalation.total) if escalation else '-'):>13}"
         )
@@ -906,6 +1175,8 @@ def format_report(reports: Sequence[HeldoutReport]) -> str:
             f"{totals['routing_total']:>9} "
             f"{_fmt_pct(totals['routing_top1_correct'], totals['routing_total']):>8} "
             f"{_fmt_pct(totals['routing_in_list_correct'], totals['routing_total']):>8} "
+            f"{totals['benchmark_routing_total']:>8} "
+            f"{_fmt_pct(totals['benchmark_routing_top1_correct'], totals['benchmark_routing_total']):>12} "
             f"{totals['escalation_total']:>8} "
             f"{_fmt_pct(totals['escalation_correct'], totals['escalation_total']):>13}",
             rule,
@@ -915,8 +1186,43 @@ def format_report(reports: Sequence[HeldoutReport]) -> str:
             "top-1 / in-list / escalation recall.",
             "Routing accuracy and escalation recall trade against each other and are never",
             "blended into one number.",
+            "'heldout N' is re-drawn every run, so its top-1 is NOT comparable across runs.",
+            "'bench N' is the fixed developer-supplied benchmark: that is the number to",
+            "compare between run N and run N-1.",
+            "The evaluated model IS the shipped model: held-out personas are removed from",
+            "training, so these are LOWER BOUNDS. The holdout is in-generator (held-out",
+            "personas came from the same generator), so it measures generalisation across",
+            "personas, not across real users.",
         ]
     )
+
+    calibrations = [r.leak_calibration for r in reports if r.leak_calibration]
+    if measured := [c for c in calibrations if c.median_max_overlap is not None]:
+        worst = max(measured, key=lambda c: c.fraction_above_0_8 or 0.0)
+        median_of_medians = sorted(c.median_max_overlap for c in measured)[
+            len(measured) // 2
+        ]
+        lines.append(
+            f"Leak calibration: median max token overlap with training rows of the "
+            f"same label is {median_of_medians:.2f} across contexts; worst context has "
+            f"{(worst.fraction_above_0_8 or 0.0):.1%} of held-out rows overlapping "
+            f">=0.8. High overlap means the routing number above is closer to recall "
+            f"than to generalisation."
+        )
+        if duplicated := sum(c.exact_duplicates for c in calibrations):
+            lines.append(
+                f"  {duplicated} held-out row(s) are verbatim training rows. The split "
+                f"drops exact leaks, so this should be 0 -- treat it as a bug signal."
+            )
+
+    holdout_escalation_total = totals["holdout_escalation_total"]
+    if holdout_escalation_total:
+        lines.append(
+            f"Persona-holdout escalation-class rows: "
+            f"{totals['holdout_escalation_correct']}/{holdout_escalation_total} "
+            f"({_fmt_pct(totals['holdout_escalation_correct'], holdout_escalation_total)}) "
+            f"scored separately -- these are not routes and are excluded from top-1."
+        )
 
     notes = [
         (report.context, note)
@@ -955,6 +1261,37 @@ def write_report(workflow_folderpath: str, reports: Sequence[HeldoutReport]) -> 
             "escalation": (
                 "Recall of a lone, confident escalation label; reported separately from "
                 "routing accuracy because the two trade against each other."
+            ),
+            "holdout_escalation": (
+                "Persona-held-out rows whose expected label is an escalation class. "
+                "Scored on lone-escalation semantics and kept off the routing axis: a "
+                "lone wildcard escalates to an ancestor, it is not a route."
+            ),
+            "benchmark_routing": (
+                "Routing on the fixed developer-supplied benchmark. This is the only "
+                "number comparable BETWEEN runs; the persona holdout is re-drawn every "
+                "run, so its top-1 scores different cases each time."
+            ),
+            "which_model_was_evaluated": (
+                "The evaluated model IS the shipped model: held-out personas are removed "
+                "from training entirely, so the published model is trained without them. "
+                "Treat every held-out number as a LOWER BOUND on the shipped model's "
+                "quality. This is also an in-generator holdout -- held-out personas came "
+                "from the same generator as the training rows -- so it measures "
+                "generalisation across personas, not across real users."
+            ),
+            "zero_denominator": (
+                "A metric with no cases is null, never 0.0. A 0.0 here would be "
+                "indistinguishable from a measured total failure."
+            ),
+            "leak_calibration": (
+                "Residual overlap between held-out rows and the training rows of the "
+                "SAME label (AR1). The persona holdout removes an utterance's AUTHOR, "
+                "not its wording, so this says how much of the routing number is "
+                "generalisation rather than recall. median_max_overlap near 0 is a "
+                "clean holdout; fraction_above_0_8 is the share of held-out rows that "
+                "are paraphrases of a training row. exact_duplicates should be 0 -- "
+                "split_by_persona drops exact leaks, so a non-zero value is a bug."
             ),
         },
         "totals": aggregate_totals(reports),

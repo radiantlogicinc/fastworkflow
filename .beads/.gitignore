@@ -1,6 +1,7 @@
 # Dolt database (managed by Dolt, not git)
 dolt/
 embeddeddolt/
+proxieddb/
 
 # Runtime files
 bd.sock
@@ -24,6 +25,8 @@ push-state.json
 # Local version tracking (prevents upgrade notification spam after git ops)
 .local_version
 
+proxied_server_client_info.json
+
 # Worktree redirect file (contains relative path to main repo's .beads/)
 # Must not be committed as paths would be wrong in other clones
 redirect
@@ -33,6 +36,7 @@ redirect
 .sync.lock
 export-state/
 export-state.json
+last_pull
 
 # Ephemeral store (SQLite - wisps/molecules, intentionally not versioned)
 ephemeral.sqlite3
@@ -46,6 +50,9 @@ dolt-server.log
 dolt-server.lock
 dolt-server.port
 dolt-server.activity
+
+# Debug-mode pprof artifacts (written when dolt.debug: true in config.yaml)
+dolt-pprof/
 
 # Corrupt backup directories (created by bd doctor --fix recovery)
 *.corrupt.backup/

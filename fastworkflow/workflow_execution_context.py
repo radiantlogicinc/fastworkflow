@@ -24,6 +24,7 @@ import os
 import time
 import uuid
 import warnings
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from queue import Queue
 from typing import Any, Optional
@@ -33,10 +34,12 @@ import dspy
 import fastworkflow
 import fastworkflow.turn
 from fastworkflow import active_workflow
-from fastworkflow.session_state_store import SCHEMA_VERSION
+from fastworkflow.session_state_store import SCHEMA_VERSION, IncompatibleSessionState
+from fastworkflow.state_serialization import validate_state
 from fastworkflow.turn import TurnResult, TurnStatus, mint_turn_key
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_utils
+from fastworkflow.utils.react import NoSuspendedAgentStateError
 
 
 class CommandCancelledError(BaseException):
@@ -47,6 +50,33 @@ class CommandCancelledError(BaseException):
     Subclasses BaseException so fastWorkflowReAct's ``except Exception`` does not
     swallow it; process_message converts it to a failed CommandOutput.
     """
+
+
+@dataclass(frozen=True)
+class _RestoredAgentResult:
+    """Stand-in for a restored agent result.
+
+    The finalize path reads exactly one attribute off _turn_agent_result
+    (``exhausted``) plus whether it is None at all, so a restore carries those
+    two facts rather than a dspy Prediction it could not encode anyway.
+    """
+
+    exhausted: bool = False
+
+
+def _parse_isoformat(value: Optional[str]) -> Optional[datetime]:
+    """Parse a serialized timestamp, tolerating a missing or malformed one.
+
+    A timestamp only feeds duration reporting, so a bad one degrades a metric.
+    Raising here would fail a restore that is otherwise complete.
+    """
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except (ValueError, TypeError):
+        logger.warning(f"Unparseable timestamp in restored turn state: {value!r}")
+        return None
 
 
 class WorkflowExecutionContext:
@@ -318,6 +348,108 @@ class WorkflowExecutionContext:
         """True when the agent suspended on ask_user and awaits the next process_message."""
         return self._awaiting_user
 
+    def _serialize_turn_accumulator(self) -> Optional[dict[str, Any]]:
+        """Project the logical-turn accumulator, or None when no turn is open.
+
+        Resume continues the same logical turn rather than starting a new one
+        (_begin_turn is deliberately skipped), so without this the resumed turn
+        takes a fresh key and reports only its post-resume commands.
+
+        _turn_agent_result is distilled to the one fact the finalize path reads
+        (`exhausted`) instead of being serialized whole: it is a dspy Prediction
+        whose other fields nothing downstream consults, and storing an opaque
+        object would fail the strict encoder for no gain.
+        """
+        if self._turn_key is None:
+            return None
+
+        agent_result = None
+        if self._turn_agent_result is not None:
+            agent_result = {
+                "exhausted": bool(
+                    getattr(self._turn_agent_result, "exhausted", False)
+                )
+            }
+
+        return {
+            "key": self._turn_key,
+            "outputs": [o.model_dump(mode="json") for o in self._turn_outputs],
+            "started_at": (
+                self._turn_started_at.isoformat() if self._turn_started_at else None
+            ),
+            "user_message": self._turn_user_message,
+            "refined_message": self._turn_refined_message,
+            "suspended_ms": self._turn_suspended_ms,
+            "suspend_began_at": (
+                self._suspend_began_at.isoformat() if self._suspend_began_at else None
+            ),
+            "entry_workflow_name": self._turn_entry_workflow_name,
+            "entry_context": self._turn_entry_context,
+            "agent_result": agent_result,
+        }
+
+    def _serialize_cme_continuation(self) -> Optional[dict[str, Any]]:
+        """Project the in-flight CME command, or None when none is in flight.
+
+        Restoring nlu_stage alone is not enough and is actively unsafe: at
+        PARAMETER_EXTRACTION, wildcard.py reads context["command_name"]
+        unconditionally, and parameter_extraction.py merges the user's answer
+        into stored_parameters. Without these three keys a restored session
+        either raises KeyError or silently discards every parameter collected
+        so far and re-extracts from the answer text alone.
+        """
+        if self._cme_workflow is None:
+            # close() treats this as reachable, and has_open_command() runs
+            # after every turn rather than only suspensions, so a missing CME
+            # workflow must read as "nothing in flight" instead of raising in
+            # the post-turn persist path.
+            return None
+
+        ctx = self._cme_workflow.context
+        stored = ctx.get("stored_parameters")
+
+        # command_name is deliberately NOT part of this test. Unlike command and
+        # stored_parameters, end_command_processing() leaves it behind, so a
+        # session that merely ran a command once would look mid-extraction
+        # forever and its state would be written on every completed turn.
+        if stored is None and not self._is_extracting_parameters():
+            return None
+
+        command_name = ctx.get("command_name")
+        command = ctx.get("command")
+
+        stored_dump = None
+        if stored is not None:
+            # model_construct built this without validation (missing fields hold
+            # NOT_FOUND sentinels), so dump without validating on the way out.
+            stored_dump = stored.model_dump(mode="json")
+
+        return {
+            "command": command,
+            "command_name": command_name,
+            "stored_parameters": stored_dump,
+        }
+
+    def _is_extracting_parameters(self) -> bool:
+        """True when the NLU pipeline is parked at parameter extraction.
+
+        The stage survives serialization as a raw value, so compare on value
+        rather than on enum identity.
+        """
+        if self._cme_workflow is None:
+            return False
+        stage = self._cme_workflow.context.get("NLU_Pipeline_Stage")
+        target = fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION
+        return stage == target or getattr(stage, "value", stage) == target.value
+
+    def has_open_command(self) -> bool:
+        """True when a CME command is mid-extraction.
+
+        Such a session is not awaiting_user, so nothing else marks it as holding
+        state that must survive eviction.
+        """
+        return self._serialize_cme_continuation() is not None
+
     def serialize_state(self, *, channel_id: str) -> dict[str, Any]:
         """
         Export durable Topology-B state for cross-process resume.
@@ -356,20 +488,30 @@ class WorkflowExecutionContext:
             "pending_clarification_request": self._pending_clarification_request,
             "react": react_blob,
             "nlu_stage": nlu_stage,
+            "turn": self._serialize_turn_accumulator(),
+            "cme": self._serialize_cme_continuation(),
             "current_command_context_name": current_context_name,
             "action_log": list(self._action_log),
             "conversation_history_turns": extract_turns_from_history(
                 self.conversation_history
             ),
         }
-        return json.loads(json.dumps(payload, default=str))
+        # No default=str round-trip. This is the first serializer, so coercing
+        # here is what made every downstream strictness check vacuous: an
+        # unsupported value would already be a string by the time anything
+        # looked. Raising instead lets the caller keep the runtime live.
+        validate_state(payload)
+        return payload
 
     def apply_serialized_state(self, state: dict[str, Any]) -> None:
-        """Restore fields from serialize_state() onto this context."""
-        if state.get("schema_version", 0) != SCHEMA_VERSION:
-            logger.warning(
-                f"Session state schema mismatch: {state.get('schema_version')}"
-            )
+        """Restore fields from serialize_state() onto this context.
+
+        Raises IncompatibleSessionState if the blob was written at a schema
+        version this build does not read, having applied nothing.
+        """
+        found = state.get("schema_version", 0)
+        if found != SCHEMA_VERSION:
+            raise IncompatibleSessionState(found)
 
         self._awaiting_user = bool(state.get("awaiting_user"))
         self._suspended_user_message = state.get("suspended_user_message")
@@ -393,6 +535,9 @@ class WorkflowExecutionContext:
             except (ValueError, TypeError):
                 self._cme_workflow.context["NLU_Pipeline_Stage"] = nlu_stage
 
+        self._apply_cme_continuation(state.get("cme"))
+        self._apply_turn_accumulator(state.get("turn"))
+
         react_blob = state.get("react")
         if react_blob and self._awaiting_user:
             self._ensure_agent_initialized()
@@ -412,6 +557,83 @@ class WorkflowExecutionContext:
                 self._app_workflow.current_command_context_name,
                 saved_context_name,
             )
+
+    def _apply_turn_accumulator(self, turn: Optional[dict[str, Any]]) -> None:
+        """Restore the logical turn so resume continues it instead of starting one."""
+        if not turn:
+            return
+
+        self._turn_key = turn.get("key")
+        self._turn_outputs = [
+            fastworkflow.CommandOutput.model_validate(o)
+            for o in (turn.get("outputs") or [])
+        ]
+        self._turn_started_at = _parse_isoformat(turn.get("started_at"))
+        self._turn_user_message = turn.get("user_message") or ""
+        self._turn_refined_message = turn.get("refined_message")
+        self._turn_suspended_ms = int(turn.get("suspended_ms") or 0)
+        self._suspend_began_at = _parse_isoformat(turn.get("suspend_began_at"))
+        self._turn_entry_workflow_name = turn.get("entry_workflow_name") or ""
+        self._turn_entry_context = turn.get("entry_context") or ""
+
+        if agent_result := turn.get("agent_result"):
+            self._turn_agent_result = _RestoredAgentResult(
+                exhausted=bool(agent_result.get("exhausted"))
+            )
+
+    def _apply_cme_continuation(self, cme: Optional[dict[str, Any]]) -> None:
+        """Restore the in-flight CME command so the next message continues it.
+
+        stored_parameters is rebuilt through model_construct rather than
+        model_validate: the saved instance was itself built that way and holds
+        NOT_FOUND sentinels in the missing fields, which is precisely the state
+        validation exists to reject.
+        """
+        if not cme:
+            return
+
+        context = self._cme_workflow.context
+        command_name = cme.get("command_name")
+
+        if cme.get("command") is not None:
+            context["command"] = cme["command"]
+        if command_name is not None:
+            context["command_name"] = command_name
+
+        stored = cme.get("stored_parameters")
+        if stored is None or command_name is None:
+            return
+
+        params_class = self._command_parameters_class(command_name)
+        if params_class is None:
+            # Losing the partial parameters is bad, but resuming into a command
+            # whose parameter class no longer exists is worse. Reset to intent
+            # detection so the next message is routed rather than merged into a
+            # command that cannot be completed.
+            logger.warning(
+                f"Cannot restore stored_parameters for '{command_name}': its "
+                f"parameter class is gone. Resetting to intent detection."
+            )
+            context.pop("command", None)
+            context.pop("command_name", None)
+            context["NLU_Pipeline_Stage"] = fastworkflow.NLUPipelineStage.INTENT_DETECTION
+            return
+
+        context["stored_parameters"] = params_class.model_construct(**stored)
+
+    def _command_parameters_class(self, command_name: str):
+        """The Input class for a command name, or None if it cannot be resolved."""
+        if self._app_workflow is None:
+            return None
+        try:
+            routing = fastworkflow.RoutingRegistry.get_definition(
+                self._app_workflow.folderpath
+            )
+            return routing.get_command_class(
+                command_name, fastworkflow.ModuleType.COMMAND_PARAMETERS_CLASS
+            )
+        except Exception:
+            return None
 
     def cancel_pending(self) -> bool:
         """
@@ -449,6 +671,21 @@ class WorkflowExecutionContext:
                 "feedback": feedback,
             }
         )
+
+    def trim_conversation_history(self, max_turns: int) -> int:
+        """Drop all but the newest ``max_turns`` turns; return how many were dropped.
+
+        Turns are request-sized, so an unbounded history grows with every request
+        on a hot channel. Only the newest few are ever read (see
+        _refine_user_query). Callers that persist history must record a turn
+        durably BEFORE trimming it out of memory.
+        """
+        messages = self._conversation_history.messages
+        excess = len(messages) - max_turns
+        if excess <= 0:
+            return 0
+        del messages[:excess]
+        return excess
 
     def summarize_and_record_turn(
         self, message: str, actions: list, result_text: str
@@ -889,6 +1126,14 @@ class WorkflowExecutionContext:
 
     def _resume_agent_message(self, user_answer: str) -> fastworkflow.CommandOutput:
         self._ensure_agent_initialized()
+        # Catch awaiting_user/_suspended desync before any LLM work: resume()
+        # consumes _suspended at entry, so a second request (or a restore that
+        # lost the react blob) must not become a bare 500.
+        agent = self._workflow_tool_agent
+        if agent is None or agent.export_suspended() is None:
+            raise NoSuspendedAgentStateError(
+                "No suspended ReAct state to resume"
+            )
         self._note_agent_resume()
 
         from fastworkflow.workflow_agent import _post_ask_user_response

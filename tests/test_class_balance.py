@@ -15,6 +15,9 @@ import os
 
 import pytest
 
+from fastworkflow._workflows.command_metadata_extraction._commands.wildcard import (
+    Signature as WildcardSignature,
+)
 from fastworkflow.command_directory import CommandDirectory
 from fastworkflow.command_routing import RoutingDefinition
 from fastworkflow.nlu_labels import WILDCARD_LABEL
@@ -347,3 +350,83 @@ def test_escalation_rows_never_collide_with_the_context_own_rows(
 
     # And the exclusion must not be achieved by returning nothing at all.
     assert selected, "every escalation row was excluded; the class would vanish"
+
+
+# ---------------------------------------------------------------------------
+# The observability invariant on `always_include` (bd fix-ii6)
+# ---------------------------------------------------------------------------
+
+
+def test_always_include_spends_the_headroom_the_budget_needs_to_be_observable():
+    """A large `always_include` makes `budget` dead input (fix-ii6).
+
+    Always-included rows count against the budget without being chosen by it. Once
+    they plus the coverage pass reach it, the fill pass never runs and every value of
+    `budget` — including one computed from a wrong coverage floor — yields the same
+    selection. This test is the mechanism, so the invariant stated on
+    `select_reserved_rows` is checkable rather than merely asserted.
+    """
+    groups = {"A": {"A/one": ["one-0", "one-1", "one-2", "one-3"]}}
+    # One source, so the coverage pass takes exactly one row. The inert threshold is
+    # therefore `len(always_include) + 1 >= budget`.
+    budget, inflated = 4, 6
+
+    small = set(select_reserved_rows(groups, budget, always_include=["w"]))
+    small_inflated = set(select_reserved_rows(groups, inflated, always_include=["w"]))
+    assert small_inflated > small, "the budget must still influence selection here"
+
+    # Enough always-included rows to reach the threshold for the larger budget too:
+    # both are already spent before the fill pass, so an inflated budget now leaves no
+    # trace whatsoever in the selected rows.
+    crowded = [f"w-{index}" for index in range(inflated - 1)]
+    wide = set(select_reserved_rows(groups, budget, always_include=crowded))
+    wide_inflated = set(select_reserved_rows(groups, inflated, always_include=crowded))
+    assert wide == wide_inflated
+    assert wide - set(crowded) == {"one-0"}, (
+        "only the unbudgeted coverage row should have survived"
+    )
+
+
+def test_the_production_always_include_corpus_keeps_a_floor_defect_visible(
+    todo_routing_definition, todo_command_directory, todo_ancestor_cache
+):
+    """The wildcard corpus is the whole observability margin (fix-ii6).
+
+    `select_escalation_rows` passes the core `wildcard` command's generated rows as
+    `always_include`. Today that is one row, which is why fix-4ej — a floor inflated
+    by one source per core command per ancestor context — moved the selected rows at
+    all instead of only the reported denominators. Widening the corpus to the size of
+    that asymmetry would absorb it.
+
+    The bound is derived, not chosen: it is the number of core commands that
+    `group_ancestor_utterances` does NOT already drop by label.
+    """
+    always_include = WildcardSignature.generate_utterances(None, WILDCARD_LABEL)
+    asymmetry = [
+        name
+        for name in todo_command_directory.core_command_names
+        if name.split("/")[-1] != WILDCARD_LABEL
+    ]
+    assert asymmetry, "core commands are the source of the fix-4ej asymmetry"
+    assert len(always_include) < len(asymmetry), (
+        f"the wildcard corpus has grown to {len(always_include)} row(s), which is no "
+        f"smaller than the {len(asymmetry)}-source coverage-floor asymmetry it has to "
+        "leave visible. See the invariant on select_reserved_rows: widening this "
+        "silently reduces the observability of every coverage-floor defect."
+    )
+
+    # And on a real hierarchy at a real budget, headroom is actually left over — the
+    # budget is live rather than merely nominally larger than the corpus.
+    ancestors = todo_routing_definition.context_model.get_ancestor_contexts("TodoItem")
+    grouped = group_ancestor_utterances(
+        ancestors, todo_ancestor_cache, skip_labels={WILDCARD_LABEL}
+    )
+    floor = coverage_floor_of(grouped)
+    budget = reserved_class_budget(
+        own_row_count=1000, coverage_floor=floor, ratio=1.0
+    )
+    selected = select_reserved_rows(grouped, budget, always_include=always_include)
+    assert len(always_include) + floor < budget, "no headroom; budget is dead input"
+    assert len(selected) > len(always_include) + floor, (
+        "the fill pass contributed nothing, so the budget did not influence selection"
+    )

@@ -73,15 +73,20 @@ class TodoListManager:
         lists (dict): Dictionary of TodoList objects indexed by their IDs.
     """
 
-    def __init__(self, file_path: str = "@todo_list.json") -> None:
+    def __init__(self, file_path: str = "@todo_list.json", load_from_file: bool = True) -> None:
         """Initialize a new TodoListManager.
 
         Args:
             file_path (str, optional): Path to the JSON file. Defaults to "@todo_list.json".
+            load_from_file (bool, optional): Whether to seed the lists from the
+                JSON file. from_state_dict passes False because the snapshot,
+                not the file, is authoritative for a restored manager: it also
+                captures mutations that were never saved.
         """
         self.file_path: str = file_path
         self.lists: Dict[int, TodoList] = {}
-        self._load_lists()
+        if load_from_file:
+            self._load_lists()
 
     def _load_lists(self) -> None:
         """Load todo lists from the JSON file.
@@ -213,3 +218,38 @@ class TodoListManager:
             list: List of TodoLists.
         """
         return list(self.lists.values())
+
+    def to_state_dict(self) -> Dict[str, Any]:
+        """Snapshot the manager and every list it owns as JSON-native data.
+
+        The lists go out as an array rather than as the live dict, whose keys
+        are ints and so cannot survive JSON; each list already carries its own
+        id, which from_state_dict re-keys on. file_path is omitted because it
+        is derived from the workflow folder and an absolute path baked into a
+        snapshot goes stale the moment the workflow is deployed elsewhere.
+        """
+        return {
+            'lists': [todo_list.to_state_dict() for todo_list in self.lists.values()]
+        }
+
+    @classmethod
+    def from_state_dict(cls, state: Dict[str, Any], file_path: str) -> 'TodoListManager':
+        """Rebuild a manager from :meth:`to_state_dict`.
+
+        Args:
+            state (dict): A snapshot produced by :meth:`to_state_dict`.
+            file_path (str): Where this manager should save, recomputed by the
+                caller from the workflow folder.
+
+        Returns:
+            TodoListManager: The restored manager, with parent references
+            re-established throughout the hierarchy.
+        """
+        manager = cls(file_path, load_from_file=False)
+
+        for list_state in state.get('lists', []):
+            todo_list = TodoList.from_state_dict(list_state)
+            todo_list.parent = manager
+            manager.lists[todo_list.id] = todo_list
+
+        return manager

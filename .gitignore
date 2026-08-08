@@ -209,6 +209,7 @@ redoc.html
 # Local security audit artifacts
 .audit-requirements.txt
 audit-report.json
+security-reports/
 
 # Beads / Dolt files (added by bd init)
 .dolt/
@@ -252,3 +253,6 @@ docs/turn_result_design_review.md
 .param_validator_quality_results/
 .fix-*-results/
 rejected_examples.json
+
+# Beads / Dolt files (added by bd init)
+.beads/proxieddb/

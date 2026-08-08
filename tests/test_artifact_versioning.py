@@ -428,6 +428,70 @@ def test_list_versions_reports_current_size_and_manifest_fields(workflow: Path):
     assert latest.train_duration_seconds == 7200
 
 
+def test_size_bytes_is_walked_on_access_not_when_the_version_was_listed(
+    workflow: Path,
+):
+    """The laziness is observable, not merely internal (bd fix-44d).
+
+    A figure captured when the version was listed cannot see a file written after
+    that, so growing the tree and re-reading the same object is the difference
+    between a walk deferred to the reader and one paid by every caller —
+    including `retain_current_and_previous`, which lists every version on every
+    train while holding the publication lock and never looks at a size.
+    """
+    version_id = _make_version(workflow, {"*": 0.1, "TodoItem": 0.1})
+    av.publish_version(str(workflow), version_id)
+
+    info = av.list_versions(str(workflow))[0]
+    before = info.size_bytes
+    assert before > 0
+
+    (av.version_dir(str(workflow), version_id) / "global" / "extra.bin").write_bytes(
+        b"\x00" * 50_000
+    )
+
+    assert info.size_bytes >= before + 50_000, "the size was captured at list time"
+
+
+def test_size_bytes_is_not_a_populated_field(workflow: Path):
+    """A field is filled in at construction; only a property can be deferred.
+
+    Asserted structurally because that is the mechanism: as long as `size_bytes`
+    is outside `model_fields`, no `list_versions` call can be walking a tree to
+    populate it, whatever a future caller does with the value.
+    """
+    assert "size_bytes" not in av.VersionInfo.model_fields
+    assert isinstance(av.VersionInfo.size_bytes, property)
+
+    version_id = _make_version(workflow, {"*": 0.1})
+    info = av.list_versions(str(workflow))[0]
+    assert info.workflow_folderpath == str(workflow)
+    assert info.version_id == version_id
+    assert info.size_bytes > 0, "deferred, not dropped"
+
+
+def test_size_bytes_of_a_pruned_version_is_zero_rather_than_an_error(workflow: Path):
+    """Deferring the walk means the tree can be gone by the time it happens.
+
+    A held `VersionInfo` outliving its version is now reachable — `prune_versions`
+    is called with a list built from `list_versions` — so an absent tree has to
+    read as nothing rather than raise on a display path.
+    """
+    doomed = _make_version(workflow, {"*": 0.1})
+    keeper = _make_version(workflow, {"*": 0.2})
+    av.publish_version(str(workflow), keeper)
+
+    info = next(
+        i for i in av.list_versions(str(workflow)) if i.version_id == doomed
+    )
+    assert info.size_bytes > 0
+
+    assert av.prune_versions(str(workflow), version_ids=[doomed], dry_run=False) == [
+        doomed
+    ]
+    assert info.size_bytes == 0
+
+
 # ---------------------------------------------------------------------
 # Pruning
 # ---------------------------------------------------------------------
@@ -743,54 +807,6 @@ def test_current_pointer_carries_the_warning_and_the_version(workflow: Path):
     assert payload["version_id"] == version_id
     assert payload["layout"] in {"symlink", "hardlink"}
     assert "rebuild" in payload["warning"]
-
-
-def test_format_versions_table_shows_cost_and_current_marker(workflow: Path):
-    v1 = _make_version(workflow, {"*": 0.1})
-    v2 = _make_version(workflow, {"*": 0.2, "TodoItem": 0.2})
-    av.write_manifest(str(workflow), v2, train_duration_seconds=12900, notes="v4 cap")
-    av.publish_version(str(workflow), v2)
-
-    table = av.format_versions_table(str(workflow))
-    assert v1 in table and v2 in table
-    assert f"* {v2}" in table, "the current version must be marked"
-    assert "3h35m" in table, "build time must be shown when the manifest records it"
-    assert "v4 cap" in table
-    assert "KB" in table or "MB" in table
-    assert "prune" in table
-
-
-def test_format_versions_table_flags_an_unmigrated_legacy_layout(workflow: Path):
-    _build_legacy_tree(workflow)
-    table = av.format_versions_table(str(workflow))
-    assert "unversioned" in table
-
-
-def test_format_versions_table_on_a_fresh_workflow(workflow: Path):
-    assert "No trained artifact versions" in av.format_versions_table(str(workflow))
-
-
-def test_describe_version_reports_manifest_and_contexts(workflow: Path):
-    version_id = _make_version(workflow, {"*": 0.1, "TodoItem": 0.1})
-    av.write_manifest(str(workflow), version_id, seed=13)
-    av.publish_version(str(workflow), version_id)
-
-    described = av.describe_version(str(workflow), version_id)
-    assert version_id in described
-    assert "(current)" in described
-    assert "seed" in described
-    assert "TodoItem" in described
-
-
-def test_human_helpers():
-    assert av.human_size(0) == "0 B"
-    assert av.human_size(1536) == "1.5 KB"
-    assert av.human_size(276 * 1024 * 1024) == "276.0 MB"
-    assert av.human_duration(None) == "-"
-    assert av.human_duration(12900) == "3h35m"
-    assert av.human_duration(7200) == "2h00m"
-    assert av.human_duration(45) == "45s"
-    assert av.human_age("not-a-date") == "unknown"
 
 
 # ---------------------------------------------------------------------

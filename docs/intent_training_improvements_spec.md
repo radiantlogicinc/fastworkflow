@@ -439,6 +439,16 @@ Four parts, in dependency order:
      has 33 ancestor intents, so the floor is 33 against a budget of 170", came from the
      unavailable app-side prototype and is not reproducible from this checkout. The algorithmic
      coverage rule stands; the workflow-specific counts are retracted. [AR6]
+   - **Core commands are not ancestor sources and do not count toward the floor** (`fix-4ej`).
+     `command_routing` unions the core commands into *every* context, so a core command is
+     already a local label wherever it could be escalated to: it has no escalation requirement
+     to satisfy, and every one of its rows is removed as locally valid before selection. Counting
+     it would add a source the coverage pass can never give a row to — making the floor a claim
+     about coverage the selection does not honour — and would double-count, since those same rows
+     are already in the descendant's own row count and a row cannot be both the local data the
+     ratio bounds and the ancestor data it is bounded against. This is also what makes the
+     population independent of visit order rather than merely deterministic in it; see the
+     correction under AR5 for why ordering alone did not achieve that.
    - If a class-balance justification is wanted later, normalise against the smallest real
      class (or a stated quantile), state the invariant being preserved, and sweep the ratio
      over {1, 2, 3, 5, ∞} on **at least two workflows**, paired, on both R1 axes, after
@@ -801,6 +811,30 @@ for the spec is recorded against R2, whose acceptance criterion as written would
 intermittently. Whether this contributes materially to the 20.6% churn in §2 is **not
 established** and should not be assumed; it is a second candidate mechanism alongside the
 unseeded RNGs, and the `PYTHONHASHSEED` experiment above separates them.
+
+**Correction — the asymmetry had two consequences, and ordering closed only one of them.**
+The framing above treats it as a determinism defect throughout, which reads as though a
+stable visit order is the whole repair. It is not, and the two halves were fixed by
+different mechanisms two beads apart:
+
+- **The label loss** (core-command labels never entering a context's classifier) was closed
+  by `fix-9mo`, and **sorting is not what closed it**. Sorting the context set made *which*
+  contexts lost their labels deterministic rather than per-interpreter; the loss itself
+  stopped only when the cached branch was made to fill in the commands missing from
+  `map_cmd_2_uttlist` instead of skipping them.
+- **The escalation coverage floor** was not fixed by either, and stayed open until `fix-4ej`.
+  The floor is derived from whatever the shared cache holds when a descendant reads it, so
+  ordering the visits only made the floor's value predictable: **a stable order is still an
+  order**, and the floor still took whichever value the first visitor wrote. Renaming a
+  context changed alphabetical position, which changed which path filled its cache entry
+  first, which changed a *sibling's* escalation budget — spooky action at a distance with
+  nothing in the diff to explain it. `fix-4ej` removed the dependency rather than
+  stabilising it, by filtering core commands out of the escalation population at the single
+  point it is derived (`class_balance.group_ancestor_utterances(..., skip_commands=...)`).
+
+So do not reason from AR5 that a deterministic visit order makes the escalation population
+order-independent. It makes it *reproducible*, which is a weaker property, and the two were
+conflated here.
 
 ### AR6 — R7.2's `Exception` figures are retracted (resolved)
 

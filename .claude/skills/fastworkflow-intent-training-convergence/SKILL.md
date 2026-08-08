@@ -80,7 +80,9 @@ which is a fixed row count that does not grow with workflow size. Selective trai
 implementation detail: unchanged contexts are reused, while missing baselines, global
 changes, regeneration, or incomplete artifacts force a full retrain automatically.
 
-Five gaps you must work around, all verified rather than assumed:
+Seven things to know about the tooling, all verified rather than assumed. Most are gaps you
+must work around; one records a gap that has since been closed, kept because the workaround
+it replaced is still in circulation:
 
 - **`fastworkflow train` has no benchmark flag.** The trainer looks for the benchmark at the fixed default path
   `<workflow>/intent_benchmark.json` (`heldout_evaluation.default_benchmark_path`). Put it
@@ -135,10 +137,12 @@ per command is a reasonable floor.
 
 Keep the benchmark disjoint from the seed table. Without that the benchmark decays into a
 memorisation test the first time somebody pastes a failing case into their seeds to "fix"
-it. The package ships the check but does not yet run it (`fix-eia`), so enforce it
-yourself — `heldout_evaluation.assert_benchmark_disjoint_from_seeds(cases,
-{command: seeds})` raises `BenchmarkLeakError` listing every collision, comparing on a
-normalised form so `"Close the account."` collides with `"close the account"`.
+it. The trainer enforces this for you (`fix-eia`, fixed):
+`heldout_evaluation.assert_benchmark_disjoint_from_seeds(cases, {command: seeds})` is called
+from `model_pipeline_training.py` before any model is fitted, and raises `BenchmarkLeakError`
+listing every collision, comparing on a normalised form so `"Close the account."` collides
+with `"close the account"`. Call it yourself only when you want the failure earlier than a
+training run gives it to you — in CI, or in an editor loop.
 
 **2. Both axes measured, not just routing.**
 Intent detection has two jobs and they trade against each other.
@@ -169,9 +173,10 @@ Both resolve to `command_name=None` and neither is ever shown to a user as a cho
 command (`NON_ROUTABLE_LABELS`). Only `wildcard` is in `ESCALATION_LABELS`, and only it
 counts as a correct escalation. Consequences for this loop: a root context has no
 escalation axis to measure; escalation cases in your benchmark file must target a context
-that actually has ancestors (`validate_escalation_cases` checks this, but you have to call
-it — see the gaps above); and artifacts trained before the split still carry the old merged
-`wildcard` class, so they are not comparable to post-split artifacts on either axis.
+that actually has ancestors (`validate_escalation_cases` checks this and the trainer calls
+it, logging each offender as a `Benchmark defect:` warning — see the gaps above); and
+artifacts trained before the split still carry the old merged `wildcard` class, so they are
+not comparable to post-split artifacts on either axis.
 
 **4. Hold the training inputs fixed.**
 The fixed production seed and the two caches make unchanged inputs reusable. See Phase 0.
@@ -188,8 +193,11 @@ The historical warning still matters: before the caches landed, two back-to-back
 the same seed produced identical utterance sets for **0 of 5 commands**. The fixed seed
 cannot control an LLM response. That is why deleting or bypassing either cache invalidates
 a paired comparison. The often-quoted **20.6% verdict churn (92 of 446 routing cases)** was
-measured before this machinery existed; treat it as historical evidence for persistence,
-not the current noise floor.
+measured before this machinery existed; treat it as historical evidence for persistence
+when generation is uncached, not the warm-cache floor. That prediction is now measured:
+with both caches warm, two independent full retrains of a 32-context workflow produced
+zero verdict changes across 446 routing and 37 escalation cases, with byte-identical
+models (recorded in `docs/intent_benchmark_format.md` "How many cases").
 
 The floor determines what you are able to detect at all. With `n` discordant pairs, an
 exact two-sided McNemar test at α = 0.05 needs the split to be at least:
@@ -355,9 +363,10 @@ the floor first.
   runs. Per-command numbers are for finding candidates to investigate, never for
   concluding.
 - **Pasting benchmark failures into your seeds.** The most tempting and most destructive
-  move available, and right now nothing stops you: the disjointness check exists but is
-  not called from the training path (`fix-eia`). Run
-  `assert_benchmark_disjoint_from_seeds` yourself, in CI if you can.
+  move available, and the package now stops it: the disjointness check runs from the
+  training path and aborts the run with `BenchmarkLeakError` (`fix-eia`, fixed). It only
+  fires when you train, so run `assert_benchmark_disjoint_from_seeds` in CI as well if a
+  leaked seed could reach a reviewer before a training run does.
 - **Trusting the training F1.** It is now labelled `in_distribution_f1` in the report
   precisely so it cannot be misread, but it will still look excellent throughout. It is a
   random split over the same synthetic utterances the model trained on. It is retained
@@ -417,9 +426,16 @@ external 160-command workflow and are recorded in
 are in that document's §11, and the adversarial review that withdrew several previously
 quoted figures is §10.
 
+**Closed (warm-cache noise floor):** with utterance and parameter-example caches warm,
+two independent full retrains produced zero verdict changes (446 routing + 37 escalation)
+and byte-identical models — see `docs/intent_benchmark_format.md` "How many cases". The
+historical 20.6% figure remains the floor when generation is regenerated or the cache is
+cold.
+
 **Explicitly not verified here**, and therefore not claimed above: whether the historical
-20.6% verdict-churn figure persists on a different machine or model stack, and whether the
-whole-persona holdout's residual leak is small. Use the hand-written benchmark for claims.
+20.6% verdict-churn figure under regeneration persists on a different machine or model
+stack, and whether the whole-persona holdout's residual leak is small. Use the
+hand-written benchmark for claims.
 
 Re-verify volatile claims:
 

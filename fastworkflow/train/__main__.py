@@ -15,7 +15,9 @@ from fastworkflow.utils.logging import logger
 from fastworkflow.utils import python_utils
 from fastworkflow import ModuleType
 from fastworkflow.model_pipeline_training import (
+    CommandRouter,
     TrainingDataError,
+    preflight_benchmark,
     train,
     get_route_layer_filepath_model,
     set_active_artifact_version,
@@ -58,7 +60,18 @@ def _validate_command_inputs(
     """Report suspiciously similar command seeds and return the scan result."""
     duplicate_report = duplicate_detection.scan_workflow(workflow_path)
     duplicate_detection.write_report(workflow_path, duplicate_report)
-    if duplicate_report.duplicates or duplicate_report.overlapping:
+    # Accepted pairs are printed too. A developer who recorded a decision in the
+    # accept-list needs to see that it was read and applied, and a malformed accept-list
+    # has to be visible or its author believes a pair is suppressed when it is not.
+    # `notes` is deliberately NOT a trigger: it carries routine scan observations that a
+    # clean workflow has as well, so including it would print the report on every run.
+    if (
+        duplicate_report.duplicates
+        or duplicate_report.overlapping
+        or duplicate_report.accepted
+        or duplicate_report.unmatched_accepted_pairs
+        or duplicate_report.accept_list_problems
+    ):
         print(duplicate_detection.format_report(duplicate_report))
 
     crd = RoutingRegistry.get_definition(workflow_path)
@@ -89,6 +102,171 @@ def _validate_command_inputs(
     return duplicate_report
 
 
+def _report_router_confusion(
+    workflow_path: str,
+    version_id: str,
+    duplicate_report: duplicate_detection.DuplicateReport | None,
+) -> list[duplicate_detection.ConfusionFinding]:
+    """Ask the routers this run just trained which commands they cannot tell apart.
+
+    The pre-flight scan in `_validate_command_inputs` is lexical, and its own docstring
+    says what defeats it: a duplicate pair whose vocabulary is genuinely disjoint. This is
+    the other half of R9b — `find_confusable_commands` against the real
+    `CommandRouter.predict` — and until it was called here the case it exists for was
+    never detected in a real training run.
+
+    Warns and never raises. It runs after the money is spent, so blocking would only
+    convert a diagnostic into a destroyed run; a pair reported here is answered by editing
+    seeds, merging the commands, or recording the pair in the workflow's accept-list.
+
+    Per context, because a router only knows its own label space: feeding it commands it
+    was never trained on would score misroutes that cannot happen at runtime. The seeds
+    are utterances the models trained on, which makes a non-zero rate a strong signal —
+    the model failed to separate the pair with the answer in its training set.
+    """
+    findings: dict[tuple[str, str], duplicate_detection.ConfusionFinding] = {}
+    try:
+        seeds = duplicate_detection.utterances_from_workflow(workflow_path)
+        contexts = duplicate_detection.contexts_from_workflow(workflow_path)
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must not fail a trained run
+        logger.warning(
+            f"Could not collect seeds for the post-training confusable-command scan of "
+            f"{workflow_path}: {type(exc).__name__}: {exc}"
+        )
+        return []
+
+    version_root = artifact_versioning.version_dir(workflow_path, version_id)
+    for context_name, command_list in sorted(contexts.items()):
+        scoped = {
+            command: seeds[command] for command in command_list if command in seeds
+        }
+        if len(scoped) < 2:
+            continue
+        model_dir = version_root / artifact_versioning.context_folder_name(context_name)
+        if not (model_dir / "threshold.json").is_file():
+            continue
+        try:
+            router = CommandRouter(str(model_dir))
+            context_findings = duplicate_detection.find_confusable_commands(
+                scoped, router.predict
+            )
+        except Exception as exc:  # noqa: BLE001 - as above
+            logger.warning(
+                f"Post-training confusable-command scan skipped context "
+                f"{context_name!r}: {type(exc).__name__}: {exc}"
+            )
+            continue
+        for finding in context_findings:
+            # A pair can be a label in several contexts. Keep the worst reading: that is
+            # the one a developer needs to see, and the report has no context dimension.
+            key = (finding.command_a, finding.command_b)
+            existing = findings.get(key)
+            if (
+                existing is None
+                or finding.symmetric_confusion > existing.symmetric_confusion
+            ):
+                findings[key] = finding
+
+    if duplicate_report is None:
+        return list(findings.values())
+
+    duplicate_report.confusable = list(findings.values())
+    duplicate_detection.apply_accept_list(
+        duplicate_report, duplicate_detection.load_accept_list(workflow_path)
+    )
+    try:
+        duplicate_detection.write_report(workflow_path, duplicate_report)
+    except OSError as exc:
+        logger.error(
+            f"Could not update {duplicate_detection.REPORT_FILENAME} with the "
+            f"post-training router findings: {type(exc).__name__}: {exc}. The file still "
+            f"holds the pre-flight scan only, so its confusable list understates what was "
+            f"found; the findings below are the complete result."
+        )
+
+    if duplicate_report.confusable:
+        lines = [
+            f"MODEL CONFUSION ({len(duplicate_report.confusable)}): the routers just "
+            f"trained send these commands' own seed utterances to each other. Training is "
+            f"complete and these models are published; this is a diagnostic.",
+        ]
+        lines.extend(
+            duplicate_detection.format_confusion_line(confusion)
+            for confusion in duplicate_report.confusable
+        )
+        lines.append(
+            f"  Merge the pair, make their seeds more distinctive, or record the pair in "
+            f"{duplicate_detection.accept_list_path(workflow_path)}."
+        )
+        rendered = "\n".join(lines)
+        print(f"{Fore.YELLOW}{rendered}{Style.RESET_ALL}")
+    return duplicate_report.confusable
+
+
+def _save_run_provenance(
+    workflow_path: str,
+    version_id: str,
+    recorder: determinism.ProvenanceRecorder,
+    plan,
+    previous_provenance,
+) -> str:
+    """Persist this run's provenance and stamp a copy into its artifact version.
+
+    Written twice, deliberately. The top-level copy is the stable path the per-command
+    training report (fix-551.4) reads. The copy inside the version is what makes a
+    version self-describing: without it the next train overwrites the top-level file and
+    an older version can no longer say which personas and seed produced its utterances,
+    which is most of what rolling back to it is worth.
+
+    Returns the top-level provenance path.
+    """
+    try:
+        provenance_path = recorder.save()
+    except OSError as exc:
+        # Fatal, not suppressed: `_require_publishable_training_report` reads
+        # training_provenance.json, and a failed save leaves the PREVIOUS run's file in
+        # place. The gate would then pass or fail on data describing different artifacts,
+        # which is worse than not publishing -- refusing leaves the previous version
+        # current and complete, and this run's version beside it for inspection.
+        logger.error(
+            f"Could not save training provenance for {workflow_path}: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        raise TrainingDataError(
+            "Training provenance could not be written, so the publication gate would "
+            f"evaluate a previous run's records: {exc}"
+        ) from exc
+
+    if (
+        plan.contexts_carried_forward
+        and not selective_training.merge_training_provenance(
+            workflow_path, plan, previous_provenance
+        )
+    ):
+        raise selective_training.SelectiveTrainingError(
+            "Could not merge carried-forward training provenance."
+        )
+
+    try:
+        shutil.copy2(
+            provenance_path,
+            artifact_versioning.version_dir(workflow_path, version_id)
+            / determinism.PROVENANCE_FILENAME,
+        )
+    except OSError as exc:
+        # Deliberately not fatal: the top-level provenance for THIS run is already
+        # correct, so the gate and the report are sound and the trained models are worth
+        # publishing. What is lost is the version's ability to describe itself after the
+        # next run overwrites the top-level file, so it is stated rather than suppressed.
+        logger.error(
+            f"Could not copy training provenance into artifact version {version_id}: "
+            f"{type(exc).__name__}: {exc}. The version will not be able to report which "
+            f"seed and personas produced it once the next run overwrites "
+            f"{provenance_path}."
+        )
+    return provenance_path
+
+
 def _repair_noop_publication(
     workflow_path: str, current_version: str | None
 ) -> None:
@@ -99,13 +277,16 @@ def _repair_noop_publication(
             "cannot repair compatibility entries or apply retention."
         )
 
-    artifact_versioning.publish_version(workflow_path, current_version)
-    previous_version = artifact_versioning.read_manifest(
-        workflow_path, current_version
-    ).get("previous_version")
-    artifact_versioning.retain_current_and_previous(
-        workflow_path, previous_version
-    )
+    # One critical section: a concurrent train must not slip a publish between this
+    # repair and the prune that follows it.
+    with artifact_versioning.publication_lock(workflow_path):
+        artifact_versioning.publish_version(workflow_path, current_version)
+        previous_version = artifact_versioning.read_manifest(
+            workflow_path, current_version
+        ).get("previous_version")
+        artifact_versioning.retain_current_and_previous(
+            workflow_path, previous_version
+        )
 
 
 def _require_publishable_training_report(report) -> None:
@@ -184,8 +365,16 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
         )
         return
 
-    _validate_command_inputs(workflow_path)
-    
+    duplicate_report = _validate_command_inputs(workflow_path)
+
+    # Before anything that costs money. `train()` checks this too, but it is reached only
+    # after `_generate_dspy_examples_helper` below has already made paid DSPy calls, so a
+    # leaked benchmark used to abort a run that had already spent on every command with
+    # parameters. Placed above the no-op early return as well: a leak that goes unreported
+    # on an up-to-date workflow is a leak that surfaces at the worst possible moment, the
+    # next time something does need retraining.
+    preflight_benchmark(workflow_path)
+
     # Bring any pre-versioning artifacts under version control BEFORE writing anything,
     # so this run cannot merge new work into a set that has no rollback point.
     if migrated := artifact_versioning.migrate_legacy_to_version(workflow_path):
@@ -288,27 +477,9 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
     if cache.enabled:
         print(f"{Fore.CYAN}{cache.format_summary()}{Style.RESET_ALL}")
 
-    # Written twice, deliberately. The top-level copy is the stable path the per-command
-    # training report (fix-551.4) reads. The copy inside the version is what makes a
-    # version self-describing: without it the next train overwrites the top-level file and
-    # an older version can no longer say which personas and seed produced its utterances,
-    # which is most of what rolling back to it is worth.
-    with contextlib.suppress(OSError):
-        provenance_path = recorder.save()
-        if (
-            plan.contexts_carried_forward
-            and not selective_training.merge_training_provenance(
-                workflow_path, plan, previous_provenance
-            )
-        ):
-            raise selective_training.SelectiveTrainingError(
-                "Could not merge carried-forward training provenance."
-            )
-        shutil.copy2(
-            provenance_path,
-            artifact_versioning.version_dir(workflow_path, version_id)
-            / determinism.PROVENANCE_FILENAME,
-        )
+    _save_run_provenance(
+        workflow_path, version_id, recorder, plan, previous_provenance
+    )
 
     # Runs BEFORE publishing, and raises rather than degrading. A selective run's version
     # holds only the contexts it retrained; `publish_version` removes the compatibility
@@ -323,18 +494,31 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
     selective_training.merge_heldout_evaluation(
         workflow_path, plan, previous_heldout)
 
-    # Written into the version, not to a fixed top-level path, so that rolling back with
-    # `versions publish <old>` also rolls the selective-training baseline back to the one
-    # describing the artifacts that rollback restored.
+    # Runs here, after carry-forward, because it needs EVERY context's router present in
+    # this version -- a selective run's own contexts are not enough.
+    _report_router_confusion(workflow_path, version_id, duplicate_report)
+
+    # Written into the version, not to a fixed top-level path, so that rolling the models
+    # back also rolls the selective-training baseline back to the one describing the
+    # artifacts that rollback restored. There is no rollback CLI: the procedure is
+    # `artifact_versioning.publish_version(workflow_path, <old version id>)` from Python,
+    # against a version id from `artifact_versioning.list_versions(workflow_path)`.
     selective_training.save_training_signature(
         workflow_path, version_id, training_signature)
 
+    # The contribution fields are what makes the version checkable by something that is
+    # not the planner: `publish_version` re-derives this run's closure from them alone
+    # and refuses to advance `current` if they contradict each other or the version the
+    # carried-forward models actually came from (AR3).
     artifact_versioning.write_manifest(
         workflow_path,
         version_id,
         train_duration_seconds=time.monotonic() - started,
         contexts_retrained=sorted(plan.contexts_to_train),
         contexts_carried_forward=sorted(plan.contexts_carried_forward),
+        **selective_training.context_contribution_manifest_fields(
+            training_signature, plan
+        ),
     )
     report = training_report.report_training_data(
         workflow_path, print_report=False, write=True)
@@ -342,9 +526,12 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
     # Only a SUCCESSFUL train becomes current. A failed one leaves the previous version
     # published and complete, with its own partial version beside it rather than on top
     # of it -- which is strictly stronger than the pre-versioning behaviour this replaces.
-    artifact_versioning.publish_version(workflow_path, version_id)
-    artifact_versioning.retain_current_and_previous(
-        workflow_path, previous_version)
+    # Publish and prune are held together: a concurrent train that published between the
+    # two would have its own version pruned here as an unretained leftover.
+    with artifact_versioning.publication_lock(workflow_path):
+        artifact_versioning.publish_version(workflow_path, version_id)
+        artifact_versioning.retain_current_and_previous(
+            workflow_path, previous_version)
     print(f"{Fore.GREEN}Training complete.{Style.RESET_ALL}")
 
     # Only after training has successfully (re)generated artifacts do we prune

@@ -60,7 +60,12 @@ from typing import Iterable, Optional
 
 from pydantic import BaseModel, Field, ValidationError
 
-from fastworkflow.nlu_labels import NON_ROUTABLE_LABELS, PARAMETER_VALUE_LABEL, label_of
+from fastworkflow.nlu_labels import (
+    NON_ROUTABLE_LABELS,
+    PARAMETER_VALUE_LABEL,
+    WILDCARD_LABEL,
+    label_of,
+)
 from fastworkflow.train.determinism import (
     COMMAND_INFO_FOLDERNAME,
     PROVENANCE_FILENAME,
@@ -233,6 +238,46 @@ class CommandRow(BaseModel):
         return self.status in BLOCKING_STATUSES
 
 
+class EscalationBudget(BaseModel):
+    """Every number that decided one context's reserved escalation-class row count.
+
+    "Why does this context's `wildcard` class have 87 rows?" is the question AR6 spent a
+    spec section on, because the reference workflow's numbers could not be reconstructed
+    after the fact. `model_pipeline_training._record_wildcard_context_training` writes
+    these into provenance; this is the row that puts them in front of a person.
+    """
+
+    context_name: str
+    #: False when the context has no non-local ancestor utterances, so no escalation class
+    #: was emitted at all. Its `selected_rows` is 0 and every denominator is moot.
+    included: bool
+    #: Rows the escalation class actually trained on.
+    selected_rows: int
+    #: This context's own labelled rows, counted BEFORE escalation rows were appended.
+    #: The budget is a multiplier on this, which is what bounds training cost.
+    own_rows: Optional[int] = None
+    #: Ancestor rows available before and after de-duplication against this context's own
+    #: utterances. The gap between them is how much of the ancestor corpus means
+    #: something here and therefore cannot train "ask my parent".
+    raw_candidate_rows: Optional[int] = None
+    deduplicated_candidate_rows: Optional[int] = None
+    #: Rows the selection had to include regardless of budget (the base `wildcard`
+    #: command's own utterances).
+    always_include_rows: Optional[int] = None
+    #: The bound `class_balance.reserved_class_budget` computed.
+    selected_budget: Optional[int] = None
+    #: Distinct ancestor (context, command) sources, EXCLUDING the core commands. Each
+    #: must keep at least one row or it cannot be escalated to at all, so
+    #: `class_balance.reserved_class_budget` takes the max of this and the cost ratio:
+    #: coverage is a requirement, cost a preference. Core commands are excluded because
+    #: they are a label in every context and so are never escalation targets -- which is
+    #: also what stops this number moving when an unrelated context is renamed (bd
+    #: fix-4ej); see `class_balance`'s module docstring for the derivation.
+    coverage_floor: Optional[int] = None
+    coverage_floor_applied: Optional[bool] = None
+    reason: Optional[str] = None
+
+
 class TrainingReport(BaseModel):
     """The whole report: rows, the floors they were judged against, and what broke."""
 
@@ -241,6 +286,9 @@ class TrainingReport(BaseModel):
     min_rows: int
     min_seeds: int
     rows: list[CommandRow] = Field(default_factory=list)
+    #: Per-context escalation-class budget decisions, newest run only. Empty for a
+    #: workflow trained before these were recorded, and for one with no ancestor contexts.
+    escalation_budgets: list[EscalationBudget] = Field(default_factory=list)
     #: Human-readable descriptions of anything that stopped the report being complete —
     #: a missing provenance file, unreadable JSON, a record that failed validation.
     #: Never an exception: a broken report must not mask the training result the
@@ -306,6 +354,7 @@ class TrainingReport(BaseModel):
             "excluded_from_training": len(self.with_status(RowStatus.EXCLUDED)),
             "ok": len(self.with_status(RowStatus.OK)),
             "has_blocking_problems": self.has_blocking_problems,
+            "escalation_contexts": len(self.escalation_budgets),
         }
         return payload
 
@@ -552,6 +601,41 @@ def _load_heldout_per_command(
 # Building
 # ---------------------------------------------------------------------
 
+def _build_escalation_budgets(
+    context_training: dict[tuple[str, str], ContextTrainingProvenance],
+) -> list[EscalationBudget]:
+    """Pull the escalation-class budget records out of the context-training provenance.
+
+    Keyed on the reserved label rather than on a separate provenance block, because that
+    is where the trainer already records them — the fields exist on every
+    `ContextTrainingProvenance` and only the reserved labels populate them.
+    """
+    budgets: list[EscalationBudget] = []
+    for (context_name, command_name), record in sorted(context_training.items()):
+        if command_name != WILDCARD_LABEL:
+            continue
+        budgets.append(
+            EscalationBudget(
+                context_name=context_name,
+                included=record.status
+                in {
+                    ContextTrainingStatus.INCLUDED,
+                    ContextTrainingStatus.INCLUDED_FALLBACK,
+                },
+                selected_rows=record.row_count,
+                own_rows=record.own_row_count,
+                raw_candidate_rows=record.raw_candidate_count,
+                deduplicated_candidate_rows=record.deduplicated_candidate_count,
+                always_include_rows=record.always_include_count,
+                selected_budget=record.selected_budget,
+                coverage_floor=record.coverage_floor,
+                coverage_floor_applied=record.coverage_floor_applied,
+                reason=record.reason,
+            )
+        )
+    return budgets
+
+
 def _classify_kind(command_name: str, core_commands: set[str]) -> CommandKind:
     """Decide who owns *command_name*.
 
@@ -781,6 +865,7 @@ def build_report(
         min_rows=resolved_min_rows,
         min_seeds=resolved_min_seeds,
         rows=rows,
+        escalation_budgets=_build_escalation_budgets(context_training),
         problems=problems,
         provenance_path=str(path) if path.is_file() else None,
         heldout_available=bool(heldout),
@@ -817,8 +902,10 @@ def _detail_lines(
 ) -> list[str]:
     """Render a group of rows as an aligned table.
 
-    Column style follows `artifact_versioning.format_versions_table` so the two
-    outputs a training run prints look like one program's work.
+    Column style was shared with `artifact_versioning.format_versions_table` so the
+    two outputs a training run prints looked like one program's work. That function
+    was deleted as test-only code (bd fix-k0i.50), so this is now the only place the
+    style lives; anything rendering a version listing again should follow it.
     """
     rows = list(rows)
     if not rows:
@@ -850,6 +937,56 @@ def _detail_lines(
             lines.append(f"{indent}  reason: {row.fallback_reason}")
         for context, reason in sorted(row.skipped_contexts.items()):
             lines.append(f"{indent}  skipped in {context}: {reason}")
+    return lines
+
+
+def _escalation_budget_lines(budgets: list[EscalationBudget]) -> list[str]:
+    """Render the escalation-class budget table.
+
+    Present even when nothing is wrong, because it is not a defect list: it is the
+    artifact that answers "why does this context's wildcard class have this many rows"
+    without a retained console log, which is the AR6 requirement.
+    """
+    if not budgets:
+        return []
+    width = max(28, min(46, max(len(b.context_name) for b in budgets) + 1))
+    lines = [
+        "",
+        f"  ESCALATION BUDGET ({len(budgets)}) — rows given to the reserved "
+        f"`{WILDCARD_LABEL}` class, and",
+        "  the denominators that chose them. Budget bounds ancestor rows at this "
+        "context's own",
+        "  row count; the floor raises it when coverage needs more, so every ancestor "
+        "(context,",
+        "  command) source keeps at least one row. FLOOR excludes core commands: they "
+        "are a",
+        "  label here too, so they are never escalated to. SELECTED is what actually "
+        "trained.",
+        f"    {'CONTEXT':{width}s} {'SELECTED':>8s} {'OWN':>6s} {'BUDGET':>7s} "
+        f"{'FLOOR':>6s} {'CAND(raw/dedup)':>17s} {'ALWAYS':>7s}",
+    ]
+    for budget in budgets:
+        candidates = (
+            f"{_fmt_count(budget.raw_candidate_rows)}/"
+            f"{_fmt_count(budget.deduplicated_candidate_rows)}"
+        )
+        lines.append(
+            f"    {budget.context_name:{width}s} {budget.selected_rows:>8d} "
+            f"{_fmt_count(budget.own_rows):>6s} "
+            f"{_fmt_count(budget.selected_budget):>7s} "
+            f"{_fmt_count(budget.coverage_floor):>6s} {candidates:>17s} "
+            f"{_fmt_count(budget.always_include_rows):>7s}"
+        )
+        if not budget.included:
+            lines.append(
+                f"      no escalation class: {budget.reason or 'not emitted here'}"
+            )
+        elif budget.coverage_floor_applied:
+            lines.append(
+                f"      coverage floor bound the budget: {budget.coverage_floor} "
+                f"ancestor source(s) needed a row each, above this context's "
+                f"{_fmt_count(budget.own_rows)} own row(s)"
+            )
     return lines
 
 
@@ -999,6 +1136,8 @@ def format_report(report: TrainingReport) -> str:
             "holdout."
         )
         lines.extend(_detail_lines(never_routed, width))
+
+    lines.extend(_escalation_budget_lines(report.escalation_budgets))
 
     lines.append("")
     lines.append("  SUMMARY")
