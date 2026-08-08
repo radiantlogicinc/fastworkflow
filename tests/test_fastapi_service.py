@@ -44,7 +44,7 @@ def unique_user_id():
 
 
 @pytest.fixture
-def app_module(hello_world_workflow_path, env_files):
+def app_module(hello_world_workflow_path, env_files, tmp_path):
     """Import the FastAPI app module with required CLI ARGS configured."""
     env_file, passwords_file = env_files
     # Ensure a fresh import with required CLI args present
@@ -56,21 +56,16 @@ def app_module(hello_world_workflow_path, env_files):
     ]
     import fastworkflow.run_fastapi_mcp.__main__ as main
     importlib.reload(main)
-    
-    # Manually trigger fastworkflow.init() since TestClient doesn't invoke lifespan
-    import fastworkflow
-    from dotenv import dotenv_values
-    env_vars = {
-        **dotenv_values(env_file),
-        **dotenv_values(passwords_file)
-    }
-    fastworkflow.init(env_vars)
-    
-    # Clear routing caches to ensure clean state for each test
-    if fastworkflow.RoutingRegistry:
-        fastworkflow.RoutingRegistry.clear_registry()
-    
-    return main
+
+    from tests.fastapi_hermetic import init_fastapi_hermetic_env, restore_fastapi_env
+
+    previous_env = init_fastapi_hermetic_env(
+        env_file, passwords_file, tmp_path / "speedict"
+    )
+    try:
+        yield main
+    finally:
+        restore_fastapi_env(previous_env)
 
 
 def test_fastapi_imports(app_module):

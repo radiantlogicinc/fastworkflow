@@ -2117,23 +2117,26 @@ def test_a_channel_republishes_cleanly_after_an_interrupted_reap(store):
     assert store.load(identity).context["marker"] == "new"
 
 
-def test_reaping_survives_a_channel_it_cannot_reclaim(store, tmp_path):
+def test_reaping_survives_a_channel_it_cannot_reclaim(store):
     """One stuck channel must not abort the pass."""
-    stuck = identity_for("stuck")
-    ordinary = identity_for("ordinary")
+    # Separate fingerprints so `block_reclamation` only poisons the stuck
+    # channel's reclaim root (it is per deployment/fingerprint, not per channel).
+    stuck = identity_for("stuck", workflow_fingerprint="wf-stuck")
+    ordinary = identity_for("ordinary", workflow_fingerprint="wf-ordinary")
     publish(store, stuck)
     publish(store, ordinary)
 
-    # A directory replaced by a symlink is not a channel and cannot be renamed
-    # away as one; the pass must report it and carry on.
-    shutil.rmtree(store.channel_directory(stuck))
-    elsewhere = tmp_path / "not-a-channel"
-    elsewhere.mkdir()
-    os.symlink(str(elsewhere), store.channel_directory(stuck))
+    # Real unreclaimable path: plain file where the reclaim holding area belongs
+    # (same injection as fix-3lm). A symlink was previously planted here, but
+    # `_listdir_dirs` excludes symlinks, so that channel was never scanned and
+    # the assertion only exercised reclaiming `ordinary`.
+    block_reclamation(store, stuck)
 
     report = store.reap(now=time.time() + 400 * DAY)
 
+    assert report.failures >= 1
     assert report.reclaimed_channels >= 1
+    assert store.load(stuck) is not None
     assert store.load(ordinary) is None
 
 

@@ -28,6 +28,16 @@ class AskUserSuspend(BaseException):
         super().__init__(clarification_request)
 
 
+class NoSuspendedAgentStateError(RuntimeError):
+    """Resume requested but no suspended ReAct trajectory exists.
+
+    Happens when ``_awaiting_user`` is set after the trajectory was already
+    consumed (e.g. a deferred resume still in flight that later failed, or a
+    restored blob that lost ``react``) so a second message cannot honestly
+    continue the turn. Embedders map this to HTTP 409 Conflict — not 500.
+    """
+
+
 class fastWorkflowReAct(Module):
     def __init__(self, signature: type["Signature"], tools: list[Callable], max_iters: int = 10,
                  on_step_complete: Callable[[int, dict], bool] | None = None):
@@ -180,7 +190,9 @@ class fastWorkflowReAct(Module):
     def resume(self, observation: str):
         """Resume a suspended run after the user answered an ask_user clarification."""
         if self._suspended is None:
-            raise RuntimeError("No suspended ReAct state to resume")
+            raise NoSuspendedAgentStateError(
+                "No suspended ReAct state to resume"
+            )
 
         stash = self._suspended
         trajectory = stash["trajectory"]

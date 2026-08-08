@@ -39,6 +39,7 @@ from fastworkflow.state_serialization import validate_state
 from fastworkflow.turn import TurnResult, TurnStatus, mint_turn_key
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_utils
+from fastworkflow.utils.react import NoSuspendedAgentStateError
 
 
 class CommandCancelledError(BaseException):
@@ -1125,6 +1126,14 @@ class WorkflowExecutionContext:
 
     def _resume_agent_message(self, user_answer: str) -> fastworkflow.CommandOutput:
         self._ensure_agent_initialized()
+        # Catch awaiting_user/_suspended desync before any LLM work: resume()
+        # consumes _suspended at entry, so a second request (or a restore that
+        # lost the react blob) must not become a bare 500.
+        agent = self._workflow_tool_agent
+        if agent is None or agent.export_suspended() is None:
+            raise NoSuspendedAgentStateError(
+                "No suspended ReAct state to resume"
+            )
         self._note_agent_resume()
 
         from fastworkflow.workflow_agent import _post_ask_user_response

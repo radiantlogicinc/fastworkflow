@@ -859,15 +859,23 @@ def _reject_if_busy(channel_id: str) -> None:
 
 
 def _turn_json_response(execn, channel_id: str) -> JSONResponse:
-    """Render a turn endpoint execution: 200 done / 202 deferred / 500 on error."""
+    """Render a turn endpoint execution: 200 done / 202 deferred / 409 or 500 on error."""
     if execn.error is not None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=(
+        # 409: client conflict (e.g. resume with no suspended trajectory). 500: unexpected.
+        error_status = getattr(execn, "http_status_on_error", None) or (
+            status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+        if error_status == status.HTTP_409_CONFLICT:
+            detail = (
+                f"A turn cannot be resumed for user: {channel_id} "
+                f"({execn.error})"
+            )
+        else:
+            detail = (
                 f"Internal error executing turn for channel_id "
                 f"{channel_id}: {execn.error}"
-            ),
-        )
+            )
+        raise HTTPException(status_code=error_status, detail=detail)
     code, body = render_turn_response(execn)
     return JSONResponse(content=body, status_code=code)
 

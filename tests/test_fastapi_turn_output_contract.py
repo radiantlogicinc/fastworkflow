@@ -58,7 +58,7 @@ def env_files():
     return env_file, passwords_file
 
 
-def _load_app_module(workflow_path: str, env_files):
+def _load_app_module(workflow_path: str, env_files, speedict_dir):
     env_file, passwords_file = env_files
     sys.argv = [
         "pytest",
@@ -72,32 +72,45 @@ def _load_app_module(workflow_path: str, env_files):
     import fastworkflow.run_fastapi_mcp.__main__ as main
 
     importlib.reload(main)
-    from dotenv import dotenv_values
+    from tests.fastapi_hermetic import init_fastapi_hermetic_env
 
-    fastworkflow.init({**dotenv_values(env_file), **dotenv_values(passwords_file)})
-    if fastworkflow.RoutingRegistry:
-        fastworkflow.RoutingRegistry.clear_registry()
-    return main
+    return main, init_fastapi_hermetic_env(env_file, passwords_file, speedict_dir)
 
 
 @pytest.fixture
-def action_app_module(env_files):
+def action_app_module(env_files, tmp_path):
     """Server over tests/hello_world_workflow: direct actions need no NLU or LLM."""
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     workflow_path = os.path.join(project_root, "tests", "hello_world_workflow")
     if not os.path.isdir(workflow_path):
         pytest.skip(f"hello_world_workflow not found at {workflow_path}")
-    return _load_app_module(workflow_path, env_files)
+    from tests.fastapi_hermetic import restore_fastapi_env
+
+    main, previous_env = _load_app_module(
+        workflow_path, env_files, tmp_path / "speedict"
+    )
+    try:
+        yield main
+    finally:
+        restore_fastapi_env(previous_env)
 
 
 @pytest.fixture
-def agent_app_module(env_files):
+def agent_app_module(env_files, tmp_path):
     """Server over the trained example workflow, for real agent (streaming) turns."""
     package_path = fastworkflow.get_fastworkflow_package_path()
     workflow_path = os.path.join(package_path, "examples", "hello_world")
     if not os.path.isdir(workflow_path):
         pytest.skip(f"hello_world workflow not found at {workflow_path}")
-    return _load_app_module(workflow_path, env_files)
+    from tests.fastapi_hermetic import restore_fastapi_env
+
+    main, previous_env = _load_app_module(
+        workflow_path, env_files, tmp_path / "speedict"
+    )
+    try:
+        yield main
+    finally:
+        restore_fastapi_env(previous_env)
 
 
 def _channel(prefix: str) -> str:

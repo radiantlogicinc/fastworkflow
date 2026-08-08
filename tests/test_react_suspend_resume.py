@@ -181,9 +181,11 @@ def test_resume_mirrors_user_answer_into_current_trajectory():
 
 
 def test_clear_suspension_drops_stash():
+    from fastworkflow.utils.react import NoSuspendedAgentStateError
+
     agent = _bare_react_agent()
     agent._suspended = {"trajectory": {}, "idx": 0, "input_args": {}, "max_iters": 5}
     agent.clear_suspension()
     assert agent._suspended is None
-    with pytest.raises(RuntimeError, match="No suspended"):
+    with pytest.raises(NoSuspendedAgentStateError, match="No suspended"):
         agent.resume("too late")

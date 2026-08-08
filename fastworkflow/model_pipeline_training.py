@@ -1384,8 +1384,12 @@ def preflight_benchmark(
     return benchmark_cases
 
 
-def train(workflow: fastworkflow.Workflow,
-          contexts_to_train: Optional[set[str]] = None):
+def train(
+    workflow: fastworkflow.Workflow,
+    contexts_to_train: Optional[set[str]] = None,
+    *,
+    stop_before_fit: bool = False,
+):
     """Train intent-classification models **per command context**.
 
     ``contexts_to_train`` is R5's selective-retraining hook. ``None`` trains every
@@ -1396,6 +1400,11 @@ def train(workflow: fastworkflow.Workflow,
     (``train.selective_training.carry_forward_contexts``). Skipping a context here and
     forgetting that is not a slow workflow, it is an un-trained one: `publish_version`
     removes the compatibility entry of any context its version does not contain.
+
+    ``stop_before_fit`` runs the complete per-context training-data assembly, including
+    provenance recording, but skips model loading, fitting, evaluation, and artifact
+    writes. It is a cheap support seam for checking trainer orchestration without
+    downloading or fitting HuggingFace models.
     """
 
     import time
@@ -1586,6 +1595,13 @@ def train(workflow: fastworkflow.Workflow,
                     "No held-out personas available for this context; "
                     "only the in-distribution score will be reported"
                 )
+
+        if stop_before_fit:
+            print(
+                f"Training data assembly complete for context {ctx_name}; "
+                "stopping before model fitting"
+            )
+            continue
 
         print("Utterances generation complete! Beginning model pipeline training\n")
 
@@ -1960,6 +1976,9 @@ def train(workflow: fastworkflow.Workflow,
         heldout_reports.append(report)
 
     # End of context loop
+
+    if stop_before_fit:
+        return None
 
     if heldout_reports:
         print(heldout_evaluation.format_report(heldout_reports))

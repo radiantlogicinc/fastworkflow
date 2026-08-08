@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import fastworkflow
+from fastworkflow.utils.react import NoSuspendedAgentStateError
 from fastworkflow.workflow_agent import _ask_user_tool
 from fastworkflow.workflow_execution_context import (
     CommandCancelledError,
@@ -330,6 +331,23 @@ def test_abort_resets_awaiting_user(
     assert "Done after fresh turn" in fresh.command_responses[0].response
     assert mock_agent.call_count == 2
     mock_agent.resume.assert_called_once()
+
+
+def test_awaiting_user_without_suspended_raises_conflict(
+    initialized_fastworkflow,
+    todo_workflow_path,
+    monkeypatch,
+):
+    """fix-quw: desynced awaiting_user must not become a bare RuntimeError/500."""
+    ctx, _wf = _make_agent_ctx(initialized_fastworkflow, todo_workflow_path, monkeypatch)
+    ctx._awaiting_user = True
+    mock_agent = MagicMock()
+    mock_agent.export_suspended.return_value = None
+    _set_agents(ctx, mock_agent)
+
+    with pytest.raises(NoSuspendedAgentStateError, match="No suspended"):
+        ctx.process_message("second request during desync")
+    mock_agent.resume.assert_not_called()
 
 
 def test_cancel_pending_clears_awaiting_user(

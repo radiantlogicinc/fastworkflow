@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 import fastworkflow
 from fastworkflow.state_serialization import StateEncodingError
 from fastworkflow.utils.logging import logger
+from fastworkflow.utils.react import NoSuspendedAgentStateError
 
 from .checkpoint import (
     STARTUP_FAILED,
@@ -134,6 +135,10 @@ class TurnExecution:
     exec_state: ExecState = ExecState.QUEUED
     result: Optional["fastworkflow.TurnOutput"] = None
     error: Optional[str] = None
+    # When set, ``_turn_json_response`` uses this instead of 500. Used for
+    # client-conflict failures that happen inside work_fn (e.g. resume desync)
+    # where ChannelBusyError cannot fire at admission time.
+    http_status_on_error: Optional[int] = None
     traces: list[dict[str, Any]] = field(default_factory=list)
     user_id: Optional[str] = None
     # Carried on the execution, never written to shared workflow state by the
@@ -484,6 +489,13 @@ async def _run_turn(
                 runtime, extract_turns_from_history, logger
             )
             _persist_after_turn(session_manager, runtime, result)
+    except NoSuspendedAgentStateError as exc:
+        execn.error = str(exc)
+        execn.http_status_on_error = 409
+        logger.warning(
+            f"Turn {execn.turn_key} (kind={execn.kind}, "
+            f"channel={execn.channel_id}) resume conflict: {exc}"
+        )
     except Exception as exc:
         execn.error = str(exc)
         logger.error(
@@ -532,6 +544,13 @@ async def run_owned_turn(
             save_conversation_incremental(
                 runtime, extract_turns_from_history, logger
             )
+    except NoSuspendedAgentStateError as exc:
+        execn.error = str(exc)
+        execn.http_status_on_error = 409
+        logger.warning(
+            f"Turn {execn.turn_key} (kind={execn.kind}, "
+            f"channel={execn.channel_id}) resume conflict: {exc}"
+        )
     except Exception as exc:
         execn.error = str(exc)
         logger.error(

@@ -88,9 +88,9 @@ def extract_command_metadata(command_files: List[str]) -> List[Dict[str, Any]]:
                             if isinstance(node.value, ast.List):
                                 values = []
                                 for elt in node.value.elts:
-                                    if isinstance(elt, ast.Str):
-                                        values.append(elt.s)
-                                    elif hasattr(ast, "Constant") and isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                                    # ast.Str / elt.s removed in Python 3.14; Constant is the
+                                    # supported form since 3.8 (our minimum is well above that).
+                                    if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
                                         values.append(elt.value)
                                 meta["plain_utterances"] = values
                             else:

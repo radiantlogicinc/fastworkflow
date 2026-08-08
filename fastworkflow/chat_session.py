@@ -14,7 +14,6 @@ import fastworkflow
 from fastworkflow import active_workflow
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 from fastworkflow.utils.logging import logger
-from fastworkflow.model_pipeline_training import CommandRouter
 from fastworkflow.utils.startup_progress import StartupProgress
 
 
@@ -207,7 +206,11 @@ class ChatSession:
         # Loading transformer checkpoints and moving them to device is
         # expensive (~1 s).  We do it here *once* for every model artifact
         # directory so that the first user message does not pay the cost.
+        # Import is deferred so `import fastworkflow` / ChatSession does not
+        # pull transformers/torch/sklearn at package import time.
         try:
+            from fastworkflow.model_pipeline_training import CommandRouter
+
             command_info_root = Path(workflow.folderpath) / "___command_info"
             if command_info_root.is_dir():
                 subdirs = [d for d in command_info_root.iterdir() if d.is_dir()]

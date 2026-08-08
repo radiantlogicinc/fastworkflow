@@ -1346,6 +1346,27 @@ socks = ["socksio (==1.*)"]
 trio = ["trio (>=0.22.0,<1.0)"]
 
 [[package]]
+name = "httpcore2"
+version = "2.9.1"
+description = "A minimal low-level HTTP client."
+optional = false
+python-versions = ">=3.10"
+files = [
+    {file = "httpcore2-2.9.1-py3-none-any.whl", hash = "sha256:6182472379e855fe4221246a2bb7ecede403bc61c6798062ae1787d051ccde26"},
+    {file = "httpcore2-2.9.1.tar.gz", hash = "sha256:4d8acbf8b306f48c9d6046591fd5ba4037d1b1b1000d140fc2c3eab1e9a0c0e2"},
+]
+
+[package.dependencies]
+h11 = ">=0.16"
+truststore = ">=0.10"
+
+[package.extras]
+asyncio = ["anyio (>=4.5.0,<5.0)"]
+http2 = ["h2 (>=3,<5)"]
+socks = ["socksio (==1.*)"]
+trio = ["trio (>=0.22.0,<1.0)"]
+
+[[package]]
 name = "httpx"
 version = "0.28.1"
 description = "The next generation HTTP client."
@@ -1379,6 +1400,32 @@ files = [
     {file = "httpx_sse-0.4.3-py3-none-any.whl", hash = "sha256:0ac1c9fe3c0afad2e0ebb25a934a59f4c7823b60792691f779fad2c5568830fc"},
     {file = "httpx_sse-0.4.3.tar.gz", hash = "sha256:9b1ed0127459a66014aec3c56bebd93da3c1bc8bb6618c8082039a44889a755d"},
 ]
+
+[[package]]
+name = "httpx2"
+version = "2.9.1"
+description = "The next generation HTTP client."
+optional = false
+python-versions = ">=3.10"
+files = [
+    {file = "httpx2-2.9.1-py3-none-any.whl", hash = "sha256:1820fe14a9ab1107bfeff39259987429450b070ec0ff38cc87eb0d8c97fdc71a"},
+    {file = "httpx2-2.9.1.tar.gz", hash = "sha256:1932a768737e3666291582833da748cc4e563c337cf96706fccc04fa6e58764a"},
+]
+
+[package.dependencies]
+anyio = ">=4.10"
+httpcore2 = "2.9.1"
+idna = ">=3.18"
+truststore = ">=0.10"
+typing-extensions = {version = ">=4.5.0", markers = "python_version < \"3.13\""}
+
+[package.extras]
+brotli = ["brotli", "brotlicffi"]
+cli = ["click (>=8.4)", "pygments (==2.*)", "rich (>=10,<16)"]
+http2 = ["h2 (>=3,<5)"]
+socks = ["socksio (==1.*)"]
+ws = ["wsproto (>=1.2)"]
+zstd = ["zstandard (>=0.18.0)"]
 
 [[package]]
 name = "huggingface-hub"
@@ -4932,6 +4979,17 @@ video = ["av"]
 vision = ["Pillow (>=10.0.1,<=15.0)", "torchvision"]
 
 [[package]]
+name = "truststore"
+version = "0.10.4"
+description = "Verify certificates using native system trust stores"
+optional = false
+python-versions = ">=3.10"
+files = [
+    {file = "truststore-0.10.4-py3-none-any.whl", hash = "sha256:adaeaecf1cbb5f4de3b1959b42d41f6fab57b2b1666adb59e89cb0b53361d981"},
+    {file = "truststore-0.10.4.tar.gz", hash = "sha256:9d91bd436463ad5e4ee4aba766628dd6cd7010cf3e2461756b3303710eebc301"},
+]
+
+[[package]]
 name = "typer"
 version = "0.27.1"
 description = "Typer, build great CLIs. Easy to code. Based on Python type hints."
@@ -5364,11 +5422,11 @@ test = ["big-O", "jaraco.functools", "jaraco.itertools", "jaraco.test", "more_it
 type = ["pytest-mypy (>=1.0.1)"]
 
 [extras]
-fastapi = ["fastapi", "fastapi-mcp", "mcp", "pydantic-settings", "pyjwt", "python-multipart", "starlette", "uvicorn"]
-server = ["fastapi", "fastapi-mcp", "mcp", "pydantic-settings", "pyjwt", "python-multipart", "starlette", "uvicorn"]
+fastapi = ["fastapi", "fastapi-mcp", "httpx2", "mcp", "pydantic-settings", "pyjwt", "python-multipart", "starlette", "uvicorn"]
+server = ["fastapi", "fastapi-mcp", "httpx2", "mcp", "pydantic-settings", "pyjwt", "python-multipart", "starlette", "uvicorn"]
 training = ["datasets"]
 
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.11,<3.14"
-content-hash = "0c522fb2add3bc1d1c0391d5b78822c2878318d2c7b380eec0705cbc69124894"
+content-hash = "493ab610110ac16f696c2e42cefc676aff799c7ec699468776e937bbce93a53c"

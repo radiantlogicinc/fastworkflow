@@ -9,39 +9,47 @@
 - No WebSocket support. For streaming, use NDJSON or SSE at `/invoke_agent_stream`. MCP Streamable HTTP is mounted on the same FastAPI app and maps to the same server-side streaming (NDJSON).
 
 #### 3. References
-- CLI runner setup (initialization and single ChatSession orchestration):
-  - Initializes env vars, validates workflow folder, constructs `ChatSession`, calls `start_workflow(...)`, and prints outputs.
-  - Parity we need to preserve: environment loading, startup command/action handling, deterministic vs agentic execution, command output shape.
+- CLI runner (`fastworkflow/run/__main__.py`) uses **Topology A**: a `ChatSession` chassis around a `WorkflowExecutionContext`, with queues and (for `keep_alive`) a worker thread that **blocks** on `ask_user`.
+- This FastAPI service uses **Topology B**: no ChatSession worker, no request-path queues. The server embeds a transport-free `WorkflowExecutionContext` per channel and drives it with `process_turn` / `process_action_turn`. `ask_user` **suspends** the agent trajectory and returns; the next message resumes it.
+- Parity with the CLI that still matters: environment loading, startup command/action handling, agent vs assistant (`/`-prefix) routing, and the public `TurnOutput` shape (§6a).
 
 #### 4. Architecture Summary
-- FastAPI app with a process‑wide in‑memory `ChannelSessionManager` that manages per‑channel runtime state keyed by `channel_id`.
-- For each `channel_id`, maintain:
-  - An active `ChatSession` (always agent mode) bound to the current conversation (internal id only).
-  - A persistent `ConversationStore` backed by `Rdict` (one DB file per channel) storing: `conversation_id` (internal), `topic` (unique per channel), `summary`, timestamps, per‑turn history, and optional feedback per turn.
-- For requests, enqueue a channel message and synchronously wait for a `CommandOutput` on the `command_output_queue` (with timeout and single‑turn serialization per channel).
-- Trace events are collected and included in responses by default for REST streaming and collected into the synchronous response for `/invoke_agent`.
+
+**Topology B (current).** Implementation lives in `fastworkflow/run_fastapi_mcp/` (`__main__.py`, `utils.py`, `turns.py`).
+
+- FastAPI app with a process-wide `ChannelSessionManager`: an in-memory LRU of live `ChannelRuntime` objects keyed by `channel_id`, plus durable stores for conversations and suspended session state.
+- For each live `channel_id`, a `ChannelRuntime` holds:
+  - A `WorkflowExecutionContext` (`run_as_agent=True`) — synchronous, transport-free; no `user_message_queue` / `command_output_queue` on the FastAPI path.
+  - A per-channel `asyncio.Lock` held for the duration of one turn *attempt* (released on terminal outcome **or** `awaiting_user`, never held across a suspension).
+  - A `ConversationStore` (Rdict, one DB file per channel): `conversation_id`, `topic`, `summary`, timestamps, per-turn history, optional feedback.
+  - Session metadata: stream format, startup state / idempotency, session incarnation, durable turn high-water mark.
+- **Turns engine** (`TurnRegistry` in `turns.py`): every unit of work is a registered `TurnExecution`. Endpoints call `submit_turn` (wait-or-defer): wait up to `timeout_seconds`; if still running, return **202** while the execution keeps going. The registry's per-channel **active-execution pointer** is the source of truth for liveness and the 409 busy guard (not `lock.locked()`).
+- Blocking WEC work runs in `loop.run_in_executor`; a `ContextVar` stack isolates the active workflow per thread/task so concurrent channels are safe in one process.
+- Trace events: collected into the non-streaming response when enabled; for `/invoke_agent_stream`, emitted live as NDJSON/`SSE` `trace` records, then a terminal `output` carrying bare `TurnOutput`.
+- Suspended (`awaiting_user`) state is persisted via `SessionStateStore` so a worker can cold-rehydrate after eviction or restart.
+
+**Not Topology A.** Do not enqueue a message and wait on `command_output_queue`. Do not assume a ChatSession daemon worker. The terminal streaming event is `output` (TurnOutput), not `command_output`.
+
+**Not yet shipped (fix-85g Step 2).** `GET /turns/{turn_key}`, a durable poll/replay surface, sized global executor backpressure (429), and TTL eviction of retained terminal executions are **design**, not current API. Today a deferred client **retries the same request**; same idempotency key rejoins the same execution. Do not document Step 2 as live.
 
 #### 5. Channel and Conversation Lifecycle
-1) Client calls `POST /initialize` with `channel_id` (required) and optional `user_id`, plus optional startup command/action.
+1) Client calls `POST /initialize` with `channel_id` (required) and optional `user_id`, plus optional startup command/action and `stream_format`.
 2) Server:
-   - Loads environment from `env_file_path` and `passwords_file_path` only.
-   - Calls `fastworkflow.init(env_vars=<file_based_env_dict>)`.
-   - Creates a new `ChatSession` with `run_as=RUN_AS_AGENT` (forced agent mode), bound to `channel_id` and a current conversation (internal id only).
-   - If the channel has a prior conversation, resume it by default (restore last conversation history); otherwise create a new conversation.
-   - Starts the workflow via `chat_session.start_workflow(...)` with provided context/startup parameters.
-   - Stores runtime in `ChannelSessionManager` and returns:
-     - A TokenResponse containing `access_token`, `refresh_token`, `token_type`, `expires_in`.
-     - If a startup command/action was provided, also return `startup_output` (the startup turn's `TurnOutput`, see §6a) and persist it as the first turn in `ConversationStore`.
-3) Client uses the JWT access token with `/invoke_agent`, `/invoke_assistant`, `/perform_action`, or `/new_conversation`. In trusted mode, the tokens are unencrypted. Additional endpoints: `/conversations`. Admin-only endpoint: `/admin/dump_all_conversations`.
-4) On `new_conversation` or process shutdown:
-   - Generate `topic` (guaranteed unique per channel via case-insensitive and whitespace-insensitive comparison; append an incrementing integer if needed) and `summary` synchronously via `dspy.ChainOfThought()`.
-   - If generation succeeds, persist the conversation to Rdict and rotate to a new internal conversation; if it fails, log a critical error, do NOT persist, and do NOT rotate.
-5) Conversation histories persist across restarts; users resume from their last conversation by default.
+   - Loads environment from `env_file_path` and `passwords_file_path` only; calls `fastworkflow.init(env_vars=...)`.
+   - Ensures a Topology-B runtime via `ensure_user_runtime_exists` / `ChannelSessionManager` (single-flight per channel): builds a `WorkflowExecutionContext`, binds the app workflow, restores conversation history and any durable pending suspension / checkpoint when present.
+   - If a startup command/action is provided, submits it as `submit_turn(..., kind="initialize_startup")` (wait-or-defer).
+   - Returns JWT tokens (`access_token`, `refresh_token`, `token_type`, `expires_in`). When startup was requested: `startup_output` (TurnOutput, §6a) on completion; or **202** with `startup_turn_key` + `startup_exec_state: "running"` while it is still running. The "already exists" branch never returns a silently empty `startup_output` for a still-running startup — it reports the same three-state status.
+3) Client uses the JWT access token with `/invoke_agent`, `/invoke_agent_stream`, `/invoke_assistant`, `/perform_action`, `/new_conversation`, etc. Trusted mode may omit encryption of JWTs. Additional endpoints: `/conversations`, `/activate_conversation`, `/abandon_clarification`. Admin: `/admin/dump_all_conversations`.
+4) On `new_conversation` (and similarly at shutdown persistence paths):
+   - Generate `topic` (unique per channel; case- and whitespace-insensitive; integer suffix if needed) and `summary` via `dspy.ChainOfThought()`.
+   - If generation succeeds, persist to Rdict and rotate to a new internal conversation; if it fails, log critically, do **not** persist, do **not** rotate.
+5) Conversation histories and suspended pending state can survive process restart (Rdict + session-state store). Cold rehydrate does not re-run startup when startup already completed durably.
+6) `ask_user` (Topology B): the turn ends with HTTP 200 / stream `output` and `status: awaiting_user` (clarification in `answer`). The next user message on the same channel resumes the same **logical** turn; it is a new **execution** in the registry.
 
 #### 6. Endpoints
 
 1) POST `/initialize`
-- Purpose: Create or resume a FastWorkflow `ChatSession` for a `channel_id` and start the workflow. Optionally execute a startup command/action as the channel's first logical turn and return its `TurnOutput` (§6a).
+- Purpose: Create or resume a Topology-B `WorkflowExecutionContext` for a `channel_id` and start the workflow. Optionally execute a startup command/action as the channel's first logical turn and return its `TurnOutput` (§6a).
 - Request (InitializationRequest):
 ```json
 {
@@ -89,8 +97,8 @@
 - Response: turn response (§6a).
 - Errors:
   - 404 channel not found
-  - 409 concurrent turn already in progress for this channel
-  - 504 turn timed out (no output on queue within `timeout_seconds`)
+  - 409 concurrent turn already in progress for this channel (different idempotency key)
+  - 202 deferred: wait window elapsed; execution still running — retry the same request to rejoin (see §6a `turn_key`)
   - 500 unexpected error
 
 4) POST `/invoke_agent_stream`
@@ -113,8 +121,7 @@
 - Errors:
   - 404 channel not found
   - 409 concurrent turn already in progress for this channel
-  - 504 turn timed out (no output within `timeout_seconds`)
-  - On error, send a terminal record `{ "type": "error", "data": { "detail": "..." } }` then close the connection
+  - On transport failure, send a terminal record `{ "type": "error", "data": { "detail": "..." } }` then close the connection (a turn with `status: failed` or `awaiting_user` is still an `output` event, not `error`)
 
 5) POST `/invoke_assistant`
 - Purpose: Deterministic/assistant invocation for a channel. The server accepts plain queries; clients need not prefix `/`.
@@ -139,7 +146,7 @@
   - Invoke through the same single‑turn path used for NL queries, but bypass parameter extraction (directly execute the provided `Action`). Each direct action is its own logical turn.
   - Wait for the turn (or defer) and return it.
 - Response: turn response (§6a).
-- Errors: 404/409/504/500 as above; 422 invalid action shape.
+- Errors: 404/409/202/500 as above; 422 invalid action shape.
 
 #### 6a. Turn response contract (`TurnOutput`)
 
@@ -181,19 +188,55 @@ The non-streaming endpoints add three keys to that projection:
 - `command_responses`: retained for backward compatibility. For `invoke_agent` it is the synthesized final answer; for the assistant and action surfaces it is the last command's responses, artifacts preserved.
 - `traces`: present when trace events were collected.
 
-`turn_key` in a non-streaming response body is the **execution's** key — the handle
-a deferred `202` is polled with, and what `/initialize` reports as
-`startup_turn_key`. The streaming `output` event carries the bare `TurnOutput`,
-whose `turn_key` is the workflow's own logical-turn key. The two key spaces are
-distinct.
+##### Two `turn_key` meanings (deliberately distinct)
+
+The JSON field name `turn_key` is used in **two different key spaces** on this API.
+They are not interchangeable. Renaming one (e.g. to `execution_key`) is a
+breaking wire change and is **not** done here; clients must treat the meanings
+as deliberately distinct.
+
+| Where you see `turn_key` | Key space | Minted by | Survives `ask_user`? | Use it to |
+|---|---|---|---|---|
+| Non-streaming body (`/invoke_agent`, `/invoke_assistant`, `/perform_action`) and `/initialize`'s `startup_turn_key` | **Execution key** | `TurnRegistry` (`TurnExecution.turn_key`) | No — each HTTP submission / resume attempt gets a new execution | Identify the in-flight registry execution; rejoin after **202** by **retrying the same request** (same args → same idempotency key). Today there is **no** `GET /turns/{turn_key}` (that is fix-85g Step 2, not shipped). |
+| Streaming terminal `output` event (`/invoke_agent_stream`); also `startup_output.turn_key` when `/initialize` returns a full `TurnOutput` | **Logical turn key** | `WorkflowExecutionContext` (`TurnOutput.turn_key`) | Yes — one logical turn spans suspension and resume | Correlate conversation / TurnResult identity across clarifications. **Never** use this as a 202 poll / rejoin handle. |
+
+On a non-streaming **200** that flattens the turn into the HTTP body, the top-level
+`turn_key` field is the **execution** key (see `render_turn_response`). The
+logical key is not separately exposed on that flattened body. On `/initialize`
+**200** with `startup_output`, both appear: `startup_turn_key` (execution) and
+`startup_output.turn_key` (logical) — and they usually differ.
+
+**Worked correlation example**
+
+1. Client posts `POST /invoke_agent` with a long-running query. Wait window
+   elapses → **202** `{ "turn_key": "20260808T120000.000001Z-aaaaaaaaaaaa", "exec_state": "running" }`.
+   That string is an **execution** key. Store it only as a label for logs; to
+   recover the result, **retry the same POST** (same `user_query`). The server
+   rejoins that execution via idempotency and eventually returns **200** with
+   the same execution `turn_key` plus `status` / `answer` / `command_outputs`.
+2. Separately, client posts `POST /invoke_agent_stream` for another query. The
+   stream ends with `event: output` / NDJSON `{"type":"output","data":{...,"turn_key":"20260808T120100.000002Z-bbbbbbbbbbbb", "status":"awaiting_user", ...}}`.
+   That `turn_key` is the **logical** turn key. If the client later polls or
+   retries using it as if it were an execution key, the registry will not find
+   that execution (**404** / no match) — or, worse, a client that stores
+   "the turn_key" from a stream and later compares it to a non-streaming body's
+   `turn_key` will silently mismatch across an `ask_user` resume, because the
+   next non-streaming attempt mints a **new** execution key while the logical
+   key in a subsequent stream `output` stays the same.
+3. Correct pairing after a clarification: send the user's answer as a **new**
+   `/invoke_agent` or `/invoke_agent_stream` on the same channel (resume). Do
+   not look up the previous stream's logical `turn_key` in the registry. If you
+   need both identities after `/initialize`, read `startup_turn_key` (execution)
+   and `startup_output.turn_key` (logical) from the same 200 payload.
 
 **HTTP status is not the turn outcome.** A turn that fails, or that suspends to
 ask the user something, is a *successful call*: HTTP 200 with the outcome in
 `status`/`failure_reason`/`success`. HTTP codes describe the transport — the
 session was missing (404), another turn holds the channel (409), the request's
-wait window elapsed (504), the server broke (500). Collapsing the two would
-leave a client unable to tell "the workflow could not finish" from "the server is
-broken".
+wait window elapsed without a terminal result (**202** deferred — retry to
+rejoin; not a hard abort), the server broke (500). Collapsing transport and
+outcome would leave a client unable to tell "the workflow could not finish"
+from "the server is broken".
 
 **MCP `isError` is deliberately not mapped** to `not success` (fix-qtq.6).
 `fastapi-mcp` 0.4.0 exposes no hook: it answers from a private
@@ -308,11 +351,11 @@ Notes:
 - `user_id` is extracted on authenticated endpoints from JWT `uid` and included in traces alongside `raw_command`.
 
 #### 8. Error Handling
-- 404 Not Found: Missing `channel_id`.
-- 409 Conflict: A turn is already in progress for the same `channel_id` (serialize turns per channel).
+- 404 Not Found: Missing `channel_id` / session.
+- 409 Conflict: A different turn is already in progress for the same `channel_id` (registry active-execution pointer; retry with the same args rejoins instead).
 - 422 Unprocessable Entity: Validation failures (invalid paths/action schema/channel input) and XOR violation in `/post_feedback`.
 - 500 Internal Server Error: Unexpected errors (log with stack trace; avoid broad except without logging).
-- 504 Gateway Timeout: No turn output received before `timeout_seconds`.
+- 202 Accepted: Wait window elapsed; execution still running (wait-or-defer). Retry the same request to rejoin. **Not** a hard abort of the work.
 
 A turn that reports `status: failed` or `success: false` is NOT an error status —
 see §6a. These codes describe the transport only.
@@ -325,16 +368,17 @@ Error body format (example):
 ```
 
 #### 9. Concurrency & Timeouts
-- Only one in‑flight turn per channel. Use a per‑channel asyncio Lock or queue state flag.
-- Default `timeout_seconds=60` per request; configurable per call.
-- Consider a global `MAX_CONCURRENT_SESSIONS` guard if needed.
+- Only one active turn **execution** per channel (registry pointer). Same-args retries rejoin; different work → 409.
+- Per-channel `asyncio.Lock` serializes WEC mutation for one attempt; released on terminal status or `awaiting_user`.
+- Default `timeout_seconds=60` is the **wait** window for wait-or-defer, not a kill switch for the execution.
+- Live-session cache is bounded (`MAX_LIVE_SESSIONS`); busy channels (active execution or eviction lease) are not evicted out from under a turn.
 
 #### 10. CORS & Security
 - CORS: Allow configured origins; default to `*` for development only.
 - Restrict `workflow_path` to an allow‑list of directories via config.
 
 - Log each call with `channel_id`, action/command, and timing.
-- Keep file logging to `action.jsonl` unchanged inside FastWorkflow.
+- Keep file logging to `action.jsonl` unchanged inside FastWorkflow when mirroring is enabled.
 
 #### 10. Storage (Rdict) and Limits
 
@@ -351,73 +395,74 @@ Error body format (example):
 - Functional constraint: one active conversation per channel to avoid write concurrency.
 - `/conversations` accepts `limit` (default `20`) controlling the max conversations returned (latest N by `updated_at`).
 - Shutdown waits up to 30 seconds for active turns before persistence.
+- Suspended Topology-B state: `SessionStateStore` under the session-state folder (injective channel-key encoding); not the conversation Rdict.
 - `LLM_CONVERSATION_STORE`: LiteLLM model string for conversation topic/summary generation (e.g., `mistral/mistral-small-latest`).
 - `LITELLM_API_KEY_CONVERSATION_STORE`: API key for the `LLM_CONVERSATION_STORE` model.
 
-#### 11. Implementation Plan
+#### 11. Current implementation (Topology B)
 
-Minimal edits in `fastworkflow/run_fastapi/main.py`:
-1) Replace legacy imports and undefined helpers with FastWorkflow runtime imports.
-2) Implement a `ChannelSessionManager` holding `{ channel_id: { active_conversation_id, chat_session, lock } }`.
-3) `POST /initialize`:
-   - Validate `workflow_path` exists and contains `_commands/` (optional warning).
-   - Load env from files only; call `fastworkflow.init(env_vars=env)`.
-   - Create `chat_session = fastworkflow.ChatSession(run_as_agent=True)` (keep_alive=True internally).
-   - `chat_session.start_workflow(workflow_path, workflow_context=context, startup_command=..., startup_action=...)`.
-   - If `conversation_id` provided and exists, restore its history; else restore last; else start new.
-   - Store and return `{channel_id}`.
-4) `POST /invoke_agent`:
-   - Serialize turns per channel: acquire channel lock.
-   - Put `user_query` on `user_message_queue`; wait for `command_output_queue.get(timeout=timeout_seconds)`.
-   - If `show_agent_traces=True`, drain `command_trace_queue` and include events in `traces` array of the final response.
-5) `POST /invoke_agent_stream`:
-   - Serialize turns per channel: acquire channel lock.
-   - Put `user_query` on `user_message_queue`.
-   - Set response content-type to `text/event-stream`.
-   - If `show_agent_traces=True`, continuously drain `command_trace_queue` and emit each trace as an SSE event (`event: trace`).
-   - Wait for `command_output_queue.get(timeout=timeout_seconds)`.
-   - Emit the final `CommandOutput` as an SSE event (`event: command_output`).
-   - Handle errors by emitting `event: error` with error details before closing the stream.
-6) `POST /perform_action`:
-   - Similar to above, but bypass parameter extraction by directly invoking the action path (either put a special message on the queue or a helper on `CommandExecutor`).
-7) `POST /new_conversation`:
-   - Persist current history to `Rdict`; schedule background job to generate topic/summary via `dspy.ChainOfThought()` and update the record.
-   - Rotate internal conversation id and clear history.
-8) `GET /conversations`:
-   - Read from `Rdict` and return list of at most `FASTWORKFLOW_CONVERSATIONS_LIST_LIMIT` items: `{conversation_id, topic, summary}` ordered by `updated_at` desc.
-9) `POST /admin/dump_all_conversations`:
-   - Iterate all users and conversations in `Rdict` and write JSONL file at provided folder, return file path.
-10) `POST /post_feedback`:
-   - Validate presence (at least one field); attach to latest turn of active conversation in `Rdict`.
-11) `POST /activate_conversation`:
-   - Body: { channel_id, conversation_id }. Find conversation by ID for channel and set as active; if not found 404.
-12) Root endpoint doubles as health check; remove `/healthz`.
+Code of record: `fastworkflow/run_fastapi_mcp/` (package entry: `python -m fastworkflow.run_fastapi_mcp`). The older path names `services.run_fastapi.main` / `fastworkflow/run_fastapi/main.py` are obsolete.
 
-Type hints & structure should follow existing FastWorkflow dataclasses/Pydantic models for compatibility.
+What ships today (Step 1 of the turns design — see `docs/fastworkflow_turns_async_execution_design.md`):
+
+1) **`ChannelSessionManager` + `ChannelRuntime`** (`utils.py`)
+   - Live map `{ channel_id → ChannelRuntime }` with eviction leases, creation single-flight, busy-channel skip, optional pending-state reaper.
+   - `ChannelRuntime.execution_context` is a `WorkflowExecutionContext` (agent mode). Property `chat_session` is a **backward-compatible alias** for that WEC — not a Topology-A `ChatSession`.
+
+2) **`POST /initialize`**
+   - Env from files → `fastworkflow.init`.
+   - `ensure_user_runtime_exists` builds/binds WEC, restores conversation + durable pending/checkpoint when present.
+   - Optional startup via `submit_turn(kind="initialize_startup")`; three-state already-exists / running / done responses (`startup_turn_key`, `startup_exec_state`, `startup_output` / `startup_error`).
+
+3) **Non-streaming turn endpoints** (`/invoke_agent`, `/invoke_assistant`, `/perform_action`)
+   - Thin wrappers: lease session → `submit_turn` → `render_turn_response` (200 done / 202 deferred / 409 busy).
+   - Work calls `process_turn` or `process_action_turn` on the WEC (not queue put/get).
+   - Top-level `turn_key` in the body is the **execution** key (§6a).
+
+4) **`POST /invoke_agent_stream`**
+   - Registers an owned turn (`run_owned_turn`) so disconnect stops *reading*, not *execution*.
+   - Emits NDJSON or SSE `trace` records, then terminal `output` with bare `TurnOutput` (**logical** `turn_key`).
+   - Never emits Topology-A `event: command_output`.
+
+5) **Conversation admin surfaces**
+   - `/new_conversation`, `/conversations`, `/activate_conversation`, `/post_feedback`, `/admin/dump_all_conversations`, `/abandon_clarification` — pointer/lock guarded where they touch the live WEC.
+
+6) **Persistence**
+   - Incremental conversation save before `exec_state=DONE`; pending suspend blobs via `SessionStateStore`; startup outcome committed durably before it becomes observable.
+
+**Explicitly not implemented yet (fix-85g Step 2 — do not treat as current):**
+- `GET /turns/{turn_key}` and client poll-by-GET
+- Non-destructive per-execution trace replay buffer for reconnect
+- Sized executor + global admission 429 + TTL eviction of terminal registry entries
+- Step 3 distributed/durable turn store
+
+Until Step 2 ships, deferred clients **retry the same HTTP request** to rejoin.
+
+Type hints follow FastWorkflow's `TurnOutput` / `CommandOutput` models; import them rather than forking shapes.
 
 #### 12. Testing Strategy
-- Unit
-  - SessionManager: concurrency and lifecycle.
+- Unit / focused integration
+  - SessionManager: concurrency, leases, lifecycle, busy-channel eviction skip.
   - Env loading from files only.
   - Validation: reject both `startup_command` and `startup_action` together.
-  - Timeout behavior: ensure 504 when queue has no output.
-  - SSE formatting: verify correct event structure for trace and command_output events.
+  - Wait-or-defer: 202 when work exceeds wait window; same-args retry rejoins one execution (`tests/test_fastapi_turns_async.py`).
+  - Stream formatting: `trace` then terminal `output` (TurnOutput), not `command_output`.
 - Integration
   - Spin up FastAPI app via `TestClient`.
   - Initialize with a sample workflow (fixture) and perform one agent turn; assert the `TurnOutput` projection fields (§6a). Covered by `tests/test_fastapi_turn_output_contract.py`.
   - Perform action path using a known command; verify response.
   - New conversation persists old history and resets runtime; validate prior conversation is stored and later appears in `/conversations`.
-  - Test `/invoke_agent_stream` by parsing SSE events: verify trace events arrive before final command_output event; validate JSON structure of each event.
-  - Test streaming with `show_agent_traces=false`: verify only command_output event is emitted.
-  - Test streaming error handling: verify `event: error` emission when turn fails.
+  - Test `/invoke_agent_stream` by parsing SSE/NDJSON: trace events before final `output`; validate TurnOutput JSON.
+  - Test streaming with traces disabled: only the `output` event.
+  - Test stream transport failure: terminal `error` record; `awaiting_user` / `failed` still arrive as `output`.
 
 #### 13. Deployment Notes
-- Run via Uvicorn: `uvicorn services.run_fastapi.main:app --host 0.0.0.0 --port 8000`.
-- Consider setting `lifespan="on"` only if using startup/shutdown hooks.
+- Run: `python -m fastworkflow.run_fastapi_mcp --workflow_path <dir> --port 8000` (see README). Do not use the deleted `services.run_fastapi.main` module path.
+- Consider setting lifespan hooks only when using the server's startup/shutdown drain (active turns + pending reaper).
 
 #### 14. Future Enhancements
 - WebSocket support as an alternative to SSE for bidirectional communication.
-- Session TTL and eviction policy; persistence layer for sessions if required.
+- fix-85g Step 2: `GET /turns/{turn_key}`, trace replay, sized executor / 429 backpressure, TTL on terminal executions (not shipped — see §4 / §11).
 - Richer observability: correlate CLI trace colors to structured HTTP traces.
 - Security hardening: workflow/path allow‑list, authn/z.
 

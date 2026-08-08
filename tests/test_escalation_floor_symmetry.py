@@ -56,10 +56,21 @@ from fastworkflow.model_pipeline_training import (
     _get_utterances,
     cache_context_command_utterances,
     select_escalation_rows,
+    train,
     trained_command_labels,
 )
-from fastworkflow.nlu_labels import WILDCARD_LABEL, label_of
-from fastworkflow.train import class_balance
+from fastworkflow.nlu_labels import (
+    PARAMETER_VALUE_LABEL,
+    WILDCARD_LABEL,
+    label_of,
+)
+from fastworkflow.train import class_balance, generate_synthetic
+from fastworkflow.train.determinism import (
+    ProvenanceRecorder,
+    UtteranceProvenance,
+    get_provenance_recorder,
+    set_provenance_recorder,
+)
 from fastworkflow.train.selective_training import contexts_for_training
 
 MESSAGING_APP_PATH = os.path.join("fastworkflow", "examples", "messaging_app_4")
@@ -280,6 +291,76 @@ def _quiet():
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
         yield buffer
+
+
+# ---------------------------------------------------------------------
+# 0. The real train() glue loop must stay cheaply reachable
+# ---------------------------------------------------------------------
+
+def test_train_assembles_every_context_before_model_fitting(tmp_path, monkeypatch):
+    """Drive real ``train()`` through every copied workflow context without fitting.
+
+    The copy protects the bundled example's untracked trained artifacts. Synthetic
+    generation is replaced only at its LLM boundary with deterministic command-specific
+    rows; routing, command hydration, inheritance, assembly, balancing, and provenance
+    recording all remain real.
+    """
+    workflow_path = _copy_messaging_app(tmp_path, "train_glue_copy")
+
+    def deterministic_generation(seed_utterances, command_name, **_kwargs):
+        rows = [
+            f"{command_name} deterministic utterance one",
+            f"{command_name} deterministic utterance two",
+        ]
+        return rows, UtteranceProvenance(
+            command_name=command_name,
+            seed=42,
+            seed_utterance_count=len(seed_utterances),
+            generated_count=len(rows),
+            final_count=len(rows),
+        )
+
+    monkeypatch.setattr(
+        generate_synthetic,
+        "generate_diverse_utterances_with_provenance",
+        deterministic_generation,
+    )
+
+    RoutingRegistry.clear_registry()
+    expected_contexts = set(contexts_for_training(workflow_path))
+    recorder = ProvenanceRecorder(workflow_path)
+    previous_recorder = get_provenance_recorder()
+    set_provenance_recorder(recorder)
+    workflow = fastworkflow.Workflow.create(
+        workflow_path, workflow_id_str="train-glue-stop-before-fit")
+    try:
+        with _quiet() as output:
+            train(workflow, stop_before_fit=True)
+    finally:
+        workflow.close()
+        set_provenance_recorder(previous_recorder)
+        RoutingRegistry.clear_registry()
+
+    context_records = recorder.context_records
+    wildcard_contexts = {
+        context_name
+        for context_name, command_name in context_records
+        if command_name == WILDCARD_LABEL
+    }
+    parameter_value_contexts = {
+        context_name
+        for context_name, command_name in context_records
+        if command_name == PARAMETER_VALUE_LABEL
+    }
+
+    assert len(expected_contexts) > 1
+    assert wildcard_contexts == expected_contexts
+    assert parameter_value_contexts == expected_contexts
+    assert output.getvalue().count("stopping before model fitting") == len(
+        expected_contexts)
+    assert "Loading google/bert" not in output.getvalue()
+    assert not list(Path(workflow_path).rglob("tinymodel.pth"))
+    assert not list(Path(workflow_path).rglob("largemodel.pth"))
 
 
 # ---------------------------------------------------------------------

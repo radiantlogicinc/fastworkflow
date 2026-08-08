@@ -45,7 +45,7 @@ def env_files():
 
 
 @pytest.fixture
-def app_module(workflow_path, env_files):
+def app_module(workflow_path, env_files, tmp_path):
     env_file, passwords_file = env_files
     sys.argv = [
         "pytest",
@@ -59,13 +59,15 @@ def app_module(workflow_path, env_files):
     import fastworkflow.run_fastapi_mcp.__main__ as main
 
     importlib.reload(main)
-    import fastworkflow
-    from dotenv import dotenv_values
+    from tests.fastapi_hermetic import init_fastapi_hermetic_env, restore_fastapi_env
 
-    fastworkflow.init({**dotenv_values(env_file), **dotenv_values(passwords_file)})
-    if fastworkflow.RoutingRegistry:
-        fastworkflow.RoutingRegistry.clear_registry()
-    return main
+    previous_env = init_fastapi_hermetic_env(
+        env_file, passwords_file, tmp_path / "speedict"
+    )
+    try:
+        yield main
+    finally:
+        restore_fastapi_env(previous_env)
 
 
 def _startup_action() -> dict:
