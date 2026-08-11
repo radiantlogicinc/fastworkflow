@@ -420,12 +420,8 @@ class Workflow:
 
     def get_cachedb_folderpath(self, function_name: str) -> str:
         """Get the cache database folder path for a specific function"""
-        speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
-        return os.path.join(
-            self._folderpath,
-            speedict_foldername,
-            f"function_cache/{function_name}",
-        )
+        from fastworkflow import state_paths
+        return state_paths.function_cache_dir(self._folderpath, function_name)
 
     @classmethod
     def _load(cls, workflow_id: int) -> dict[str, str|int|bool]:

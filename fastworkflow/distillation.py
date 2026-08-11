@@ -556,7 +556,7 @@ class DistillationSession:
             # Build CommandOutput
             command_response = fastworkflow.CommandResponse(response=result_text)
             command_output = fastworkflow.CommandOutput(
-                command_responses=[command_response]
+                command_response=command_response
             )
             command_output.workflow_name = (
                 self.chat_session.get_active_workflow().folderpath.split("/")[-1]

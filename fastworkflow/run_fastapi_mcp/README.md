@@ -46,11 +46,12 @@ Configure in your environment (loaded at process startup via CLI args or env loa
 
 | Variable | Description | Required | Default |
 |----------|-------------|----------|---------|
-| `SPEEDDICT_FOLDERNAME` | Base folder for workflow contexts and conversation storage | Yes | - |
+| `FASTWORKFLOW_STATE_ROOT` | Absolute root for all persistent state (conversations, suspended sessions, checkpoints) | No | `~/.local/state/fastworkflow` |
+| `FASTWORKFLOW_WORKFLOW_ID` | Overrides the per-workflow state namespace (defaults to the workflow folder name) | No | *workflow folder name* |
 | `--expect_encrypted_jwt` | Enable full JWT signature verification (pass flag to require signed tokens) | No | False (no verification by default) |
 
 Notes:
-- Conversation DBs are stored under `SPEEDDICT_FOLDERNAME/channel_conversations` (directory is auto-created).
+- Conversation DBs are stored under `FASTWORKFLOW_STATE_ROOT/workflows/<workflow-id>/conversations` (directory is auto-created).
 - `/conversations` now accepts a `limit` query parameter (default `20`).
 - Shutdown waits up to 30 seconds for active turns (hard-coded).
 

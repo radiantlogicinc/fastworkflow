@@ -135,7 +135,7 @@ def fetch_example(args):
                     f.write("# Add your API keys below\n")
                     f.write("LITELLM_API_KEY_SYNDATA_GEN=<API KEY for synthetic data generation model>\n")
                     f.write("LITELLM_API_KEY_PARAM_EXTRACTION=<API KEY for parameter extraction model>\n")
-                    f.write("LITELLM_API_KEY_RESPONSE_GEN=<API KEY for response generation model>\n")
+                    f.write("LITELLM_API_KEY_PLANNER=<API KEY for the agent's task planner model>\n")
                     f.write("LITELLM_API_KEY_AGENT=<API KEY for the agent model>\n")
         
         # After copying, show the results

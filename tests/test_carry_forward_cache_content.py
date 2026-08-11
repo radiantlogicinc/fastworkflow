@@ -461,7 +461,7 @@ def test_reserved_nlu_labels_are_not_generation_eligible():
     from fastworkflow.nlu_labels import WILDCARD_LABEL
     from fastworkflow.train.selective_training import _generation_eligible_commands
 
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": "/tmp/test_eligible_speedict"})
+    fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": "/tmp/test_eligible_workflow_contexts"})
     RoutingRegistry.clear_registry()
     try:
         eligible = _generation_eligible_commands(

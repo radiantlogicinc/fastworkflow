@@ -18,7 +18,7 @@ class Ctx:
 
 def test_command_not_found(monkeypatch, tmp_path):
     """Test that attempting to execute a non-existent command raises an appropriate error."""
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
+    fastworkflow.init({})
     
     # Get the path to the hello_world example directory
     hello_world_path = os.path.join(os.path.dirname(__file__), "hello_world_workflow")
@@ -53,7 +53,7 @@ def test_command_not_found(monkeypatch, tmp_path):
 
 def test_invalid_action_parameters(monkeypatch, tmp_path):
     """Test that providing invalid parameters to a command raises an appropriate error."""
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
+    fastworkflow.init({})
     
     # Get the path to the hello_world example directory
     hello_world_path = os.path.join(os.path.dirname(__file__), "hello_world_workflow")
@@ -68,9 +68,8 @@ def test_invalid_action_parameters(monkeypatch, tmp_path):
     class MockResponseGenerator:
         def __call__(self, *args, **kwargs):
             return fastworkflow.CommandOutput(
-                command_responses=[
+                command_response=
                     fastworkflow.CommandResponse(response="mock response", success=True)
-                ]
             )
     
     # Create a mock RoutingDefinition

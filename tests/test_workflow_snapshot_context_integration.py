@@ -5,7 +5,7 @@ from fastworkflow.workflow import Workflow
 
 def test_context_helpers_todo_list(tmp_path):
     """Integration test for context helpers using the tests/todo_list_workflow."""
-    env_vars = {"SPEEDDICT_FOLDERNAME": "___workflow_contexts"}
+    env_vars = {}
     fastworkflow.init(env_vars=env_vars)
 
     # Use the real workflow directory from the repo

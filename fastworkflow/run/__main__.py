@@ -69,41 +69,32 @@ def run_main(args):
             from rich.rule import Rule
             all_renderables.append(Rule(style="dim"))
         
-        # Process each command response
-        num_responses = len(command_output.command_responses)
-        for i, command_response in enumerate(command_output.command_responses, start=1):
-            if command_response.response:
-                if num_responses > 1:
-                    all_renderables.extend(
-                        (
-                            Text(f"Command Response {i}", style="bold green"),
-                            Text(command_response.response, style="green")
-                        )
-                    )
-                else:
-                    all_renderables.append(Text(command_response.response, style="green"))
+        # Process the command response
+        command_response = command_output.command_response
+        if command_response.response:
+            all_renderables.append(Text(command_response.response, style="green"))
 
-            if command_response.artifacts:
-                all_renderables.extend(
-                    (
-                        Text("Artifacts", style="bold cyan"),
-                        _build_artifact_table(command_response.artifacts),
-                    )
+        if command_response.artifacts:
+            all_renderables.extend(
+                (
+                    Text("Artifacts", style="bold cyan"),
+                    _build_artifact_table(command_response.artifacts),
                 )
-            if command_response.next_actions:
-                actions_table = Table(show_header=False, box=None)
-                for act in command_response.next_actions:
-                    actions_table.add_row(Text(str(act), style="blue"))
-                all_renderables.extend(
-                    (Text("Next Actions", style="bold blue"), actions_table)
-                )
-            if command_response.recommendations:
-                rec_table = Table(show_header=False, box=None)
-                for rec in command_response.recommendations:
-                    rec_table.add_row(Text(str(rec), style="magenta"))
-                all_renderables.extend(
-                    (Text("Recommendations", style="bold magenta"), rec_table)
-                )
+            )
+        if command_response.next_actions:
+            actions_table = Table(show_header=False, box=None)
+            for act in command_response.next_actions:
+                actions_table.add_row(Text(str(act), style="blue"))
+            all_renderables.extend(
+                (Text("Next Actions", style="bold blue"), actions_table)
+            )
+        if command_response.recommendations:
+            rec_table = Table(show_header=False, box=None)
+            for rec in command_response.recommendations:
+                rec_table.add_row(Text(str(rec), style="magenta"))
+            all_renderables.extend(
+                (Text("Recommendations", style="bold magenta"), rec_table)
+            )
 
         # Group all renderables together
         group = Group(*all_renderables)
@@ -126,10 +117,15 @@ def run_main(args):
         **dotenv_values(args.env_file_path),
         **dotenv_values(args.passwords_file_path)
     }
-    if not env_vars.get("SPEEDDICT_FOLDERNAME"):
-        raise ValueError(f"Env file {args.env_file_path} is missing or path is incorrect")
+    if not os.path.isfile(args.env_file_path):
+        raise ValueError(f"Env file not found: {args.env_file_path}")
+    if not env_vars:
+        raise ValueError(f"Env file {args.env_file_path} loaded no variables; path may be incorrect")
     if not env_vars.get("LITELLM_API_KEY_SYNDATA_GEN"):
-        raise ValueError(f"Password env file {args.passwords_file_path} is missing or path is incorrect")
+        print(
+            "LITELLM_API_KEY_SYNDATA_GEN not found. OK if this is Bedrock/proxy. "
+            f"Otherwise check the passwords file: {args.passwords_file_path}"
+        )
 
     if args.startup_command and args.startup_action:
         raise ValueError("Cannot provide both startup_command and startup_action")

@@ -54,7 +54,6 @@ class ResponseGenerator:
             f'Response: {output.model_dump_json()}'
         )
         return CommandOutput(
-            command_responses=[
+            command_response=
                 CommandResponse(response=response)
-            ]
         )

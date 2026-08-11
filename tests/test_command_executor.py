@@ -68,7 +68,8 @@ class TestCommandExecutor:
 
         assert isinstance(result, fastworkflow.CommandOutput)
         assert result.success is True
-        assert any("product" in resp.response.lower() for resp in result.command_responses)
+        assert "product" in result.command_response.response.lower()
+
 
     def test_perform_action_with_parameters(self, chat_session: ChatSession):
         """Execute a command that expects parameters and verify validation passes."""
@@ -83,4 +84,4 @@ class TestCommandExecutor:
 
         assert isinstance(result, fastworkflow.CommandOutput)
         # Response text should contain a user id (pattern xyz_xyz_\d+)
-        assert any("user id" in resp.response.lower() for resp in result.command_responses) 
+        assert "user id" in result.command_response.response.lower()

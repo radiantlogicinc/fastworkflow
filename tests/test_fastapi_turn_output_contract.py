@@ -44,8 +44,11 @@ TURN_OUTPUT_KEYS = frozenset(
 
 # Top-level keys the pre-migration CommandOutput shape had. They must NOT be at
 # the top level of a turn response any more; they live inside each entry of
-# ``command_outputs``.
-COMMAND_OUTPUT_ONLY_KEYS = frozenset({"workflow_name", "command_name", "command_parameters"})
+# ``command_outputs``. ``command_responses`` was also a v2.x top-level compat
+# alias removed in the v3.0 collapse.
+COMMAND_OUTPUT_ONLY_KEYS = frozenset(
+    {"workflow_name", "command_name", "command_parameters", "command_responses"}
+)
 
 
 @pytest.fixture
@@ -87,7 +90,7 @@ def action_app_module(env_files, tmp_path):
     from tests.fastapi_hermetic import restore_fastapi_env
 
     main, previous_env = _load_app_module(
-        workflow_path, env_files, tmp_path / "speedict"
+        workflow_path, env_files, tmp_path / "workflow_contexts"
     )
     try:
         yield main
@@ -105,7 +108,7 @@ def agent_app_module(env_files, tmp_path):
     from tests.fastapi_hermetic import restore_fastapi_env
 
     main, previous_env = _load_app_module(
-        workflow_path, env_files, tmp_path / "speedict"
+        workflow_path, env_files, tmp_path / "workflow_contexts"
     )
     try:
         yield main
@@ -178,7 +181,7 @@ def test_perform_action_answers_with_the_turn_output_projection(action_app_modul
     assert body["exec_state"] == "done"
     # Each command's CommandOutput is preserved one level down, artifacts and all.
     assert body["command_outputs"], "the action produced no command output"
-    assert "command_responses" in body["command_outputs"][-1]
+    assert "command_response" in body["command_outputs"][-1]
     assert "5" in body["answer"], f"expected the sum in the answer, got {body['answer']!r}"
 
 
@@ -234,9 +237,8 @@ def test_a_failed_turn_is_still_a_successful_response():
         answer="I ran out of steps.",
         command_outputs=[
             fastworkflow.CommandOutput(
-                command_responses=[
+                command_response=
                     fastworkflow.CommandResponse(response="nope", success=False)
-                ]
             )
         ],
     )
@@ -259,11 +261,10 @@ def test_an_awaiting_user_turn_reports_its_question_in_the_answer():
         command_outputs=[
             fastworkflow.CommandOutput(
                 command_name="ask_user",
-                command_responses=[
+                command_response=
                     fastworkflow.CommandResponse(
                         response="Which list did you mean?", success=False
-                    )
-                ],
+                    ),
             )
         ],
     )
@@ -300,7 +301,7 @@ def test_a_deferred_turn_reports_only_its_polling_handle():
 def test_suspended_state_is_persisted_from_the_turn_status(action_app_module):
     """persist_pending_after_turn reads TurnStatus, not a command's artifacts dict.
 
-    It used to infer suspension from ``command_responses[0].artifacts
+    It used to infer suspension from ``command_response.artifacts
     ['awaiting_user']`` — a per-command detail standing in for a turn-level fact.
     Here the context does NOT claim to be awaiting_user, so only the status can
     save the blob.

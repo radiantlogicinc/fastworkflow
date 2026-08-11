@@ -22,7 +22,7 @@ def todo_workflow_path() -> str:
 
 @pytest.fixture
 def initialized_fastworkflow():
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
+    fastworkflow.init({})
     from fastworkflow.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
@@ -57,7 +57,7 @@ def test_two_contexts_do_not_cross_contaminate(
         ]
         exec_marker = session.get_active_workflow().context["session_marker"]
         return fastworkflow.CommandOutput(
-            command_responses=[
+            command_response=
                 fastworkflow.CommandResponse(
                     response="ok",
                     artifacts={
@@ -65,7 +65,6 @@ def test_two_contexts_do_not_cross_contaminate(
                         "exec_marker": exec_marker,
                     },
                 )
-            ]
         )
 
     monkeypatch.setattr(
@@ -80,8 +79,8 @@ def test_two_contexts_do_not_cross_contaminate(
     def run_probe(index: int) -> None:
         barrier.wait()
         ctx = contexts[index]
-        output = ctx.process_message("probe")
-        artifacts = output.command_responses[0].artifacts
+        output = ctx._execute_message("probe")
+        artifacts = output.command_response.artifacts
         captured[index] = (artifacts["nlu_marker"], artifacts["exec_marker"])
 
     threads = [

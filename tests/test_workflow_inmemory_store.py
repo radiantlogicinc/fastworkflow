@@ -18,7 +18,7 @@ def _internal_path() -> str:
 
 
 def test_get_workflow_returns_same_live_object():
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
+    fastworkflow.init({})
     wf = fastworkflow.Workflow.create(_internal_path(), workflow_id_str="store-identity")
     try:
         wf.context["k"] = "v"
@@ -31,7 +31,7 @@ def test_get_workflow_returns_same_live_object():
 
 
 def test_recreate_same_id_returns_existing_with_context_override():
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
+    fastworkflow.init({})
     wf = fastworkflow.Workflow.create(_internal_path(), workflow_id_str="store-recreate")
     try:
         wf.context["k"] = "v"
@@ -47,7 +47,7 @@ def test_recreate_same_id_returns_existing_with_context_override():
 
 
 def test_child_topology_and_close_teardown():
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
+    fastworkflow.init({})
     parent = fastworkflow.Workflow.create(_internal_path(), workflow_id_str="store-parent")
     child = fastworkflow.Workflow.create(
         _internal_path(), parent_workflow_id=parent.id
@@ -67,7 +67,7 @@ def test_child_topology_and_close_teardown():
 
 def test_abandoned_workflow_is_auto_evicted_on_gc():
     """fix-04r: dropping all strong refs reclaims the registry entry (no leak)."""
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
+    fastworkflow.init({})
     wf = fastworkflow.Workflow.create(
         _internal_path(), workflow_id_str="store-ephemeral"
     )

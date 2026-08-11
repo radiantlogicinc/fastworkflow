@@ -755,9 +755,11 @@ def train_main(args):
         **dotenv_values(args.env_file_path),
         **dotenv_values(args.passwords_file_path)
     }
-    if not env_vars.get("SPEEDDICT_FOLDERNAME"):
+    if not os.path.isfile(args.env_file_path):
+        raise ValueError(f"Env file not found: {args.env_file_path}")
+    if not env_vars:
         print(f'Env file path: {args.env_file_path}')
-        raise ValueError("SPEEDDICT_FOLDERNAME env var not found! Is the env file missing? or path is incorrect?")
+        raise ValueError("Env file loaded no variables! Is the env file missing? or path is incorrect?")
     if not env_vars.get("LITELLM_API_KEY_SYNDATA_GEN"):
         print(f"LITELLM_API_KEY_SYNDATA_GEN password env var not found! OK if this is Bedrock. Otherwise, is the password env file missing or incorrect path? Path: {args.passwords_file_path}")
 

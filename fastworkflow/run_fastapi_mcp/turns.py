@@ -651,25 +651,6 @@ async def submit_turn(
 # Response rendering helpers (keep response shapes in one place)
 # ---------------------------------------------------------------------------
 
-def _command_responses_for(execn: TurnExecution) -> list[dict[str, Any]]:
-    """Backward-compatible ``command_responses`` for a finished turn.
-
-    Per-surface semantics:
-      * ``invoke_agent`` — the synthesized final agent answer text.
-      * everything else (assistant / action) — the last command's responses,
-        preserving artifacts.
-    """
-    result = execn.result
-    if result is None:
-        return []
-    if execn.kind != "invoke_agent" and result.command_outputs:
-        return [
-            cr.model_dump(mode="json")
-            for cr in result.command_outputs[-1].command_responses
-        ]
-    return [{"response": result.answer, "success": result.success}]
-
-
 def render_turn_response(execn: TurnExecution) -> tuple[int, dict[str, Any]]:
     """Render a (status_code, body) for a turn endpoint.
 
@@ -677,15 +658,18 @@ def render_turn_response(execn: TurnExecution) -> tuple[int, dict[str, Any]]:
     * Done with error          -> 200 {..., error} (caller may raise 500).
     * Done with result         -> 200 {turn_key, exec_state, status,
                                         failure_reason, success, answer,
-                                        command_responses, command_outputs,
-                                        traces?}.
+                                        command_outputs, traces?}.
 
-    Everything but ``turn_key``, ``exec_state``, ``command_responses`` and
-    ``traces`` is the public ``TurnOutput`` projection. ``exec_state`` is
-    transport (where the *work* is), ``status``/``failure_reason``/``success``
-    are the turn outcome; a failed turn is still a 200. ``turn_key`` here is the
-    EXECUTION's key — the handle a deferred 202 is polled with — not
-    ``TurnOutput.turn_key``, which is the workflow's own logical-turn key.
+    Everything but ``turn_key``, ``exec_state``, and ``traces`` is the public
+    ``TurnOutput`` projection. ``exec_state`` is transport (where the *work*
+    is), ``status``/``failure_reason``/``success`` are the turn outcome; a
+    failed turn is still a 200. ``turn_key`` here is the EXECUTION's key — the
+    handle a deferred 202 is polled with — not ``TurnOutput.turn_key``, which
+    is the workflow's own logical-turn key.
+
+    As of v3.0 the legacy top-level ``command_responses`` list is no longer
+    emitted; clients should read ``answer`` and
+    ``command_outputs[*].command_response``.
     """
     if not execn.is_terminal:
         return 202, {
@@ -708,7 +692,6 @@ def render_turn_response(execn: TurnExecution) -> tuple[int, dict[str, Any]]:
         "failure_reason": result.failure_reason if result else None,
         "success": result.success if result else False,
         "answer": result.answer if result else "",
-        "command_responses": _command_responses_for(execn),
         "command_outputs": (
             [co.model_dump(mode="json") for co in result.command_outputs]
             if result

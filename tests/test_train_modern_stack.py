@@ -118,9 +118,10 @@ def _cleanup(workflow_path: str, env_vars: dict) -> None:
     command_info = _command_info_path(workflow_path)
     if os.path.isdir(command_info):
         shutil.rmtree(command_info)
-    speeddict = env_vars.get("SPEEDDICT_FOLDERNAME")
-    if speeddict and os.path.isdir(os.path.join(workflow_path, speeddict)):
-        shutil.rmtree(os.path.join(workflow_path, speeddict))
+    # Persistent state is rooted at FASTWORKFLOW_STATE_ROOT (isolated per-test by
+    # the conftest fixture), not under the workflow folder, so nothing
+    # workflow-local remains to remove. The legacy CWD folder is purged
+    # defensively for older runs.
     if os.path.isdir("./___workflow_contexts"):
         shutil.rmtree("./___workflow_contexts")
 

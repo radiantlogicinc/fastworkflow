@@ -54,7 +54,6 @@ class ResponseGenerator:
         )
 
         return fastworkflow.CommandOutput(
-            command_responses=[
+            command_response=
                 fastworkflow.CommandResponse(response=response)
-            ]
         )

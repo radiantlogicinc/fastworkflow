@@ -62,7 +62,7 @@ def app_module(workflow_path, env_files, tmp_path):
     from tests.fastapi_hermetic import init_fastapi_hermetic_env, restore_fastapi_env
 
     previous_env = init_fastapi_hermetic_env(
-        env_file, passwords_file, tmp_path / "speedict"
+        env_file, passwords_file, tmp_path / "workflow_contexts"
     )
     try:
         yield main
@@ -139,7 +139,7 @@ def test_initialize_startup_fast_path_runs_inline_once(app_module, tmp_path, mon
     # the old assertion covered was given up.
     _assert_turn_output_shape(data["startup_output"], status="completed")
     assert data["startup_output"]["command_outputs"]
-    assert "command_responses" in data["startup_output"]["command_outputs"][-1]
+    assert "command_response" in data["startup_output"]["command_outputs"][-1]
     assert _count_calls(call_log) == 1
     # The server no longer goes through the deprecated process_message().
     assert all(
@@ -199,7 +199,7 @@ def test_initialize_startup_defers_and_is_single_flight(app_module, tmp_path, mo
     assert data_done["startup_turn_key"] == turn_key
     assert data_done["startup_output"] is not None
     _assert_turn_output_shape(data_done["startup_output"], status="completed")
-    assert "command_responses" in data_done["startup_output"]["command_outputs"][-1]
+    assert "command_response" in data_done["startup_output"]["command_outputs"][-1]
 
     # The crux: despite 1 defer + 1 in-flight retry + several polling retries,
     # the long-running command executed EXACTLY ONCE (no duplicate LLM/work).

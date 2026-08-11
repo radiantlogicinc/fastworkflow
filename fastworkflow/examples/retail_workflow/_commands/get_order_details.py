@@ -85,9 +85,8 @@ class ResponseGenerator:
     ) -> CommandOutput:
         output = self._process_command(workflow, command_parameters)
         return CommandOutput(
-            command_responses=[
-                CommandResponse(response=f"Order details: {output.order_details}")
-            ],
+            command_response=
+                CommandResponse(response=f"Order details: {output.order_details}"),
         )
 
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:

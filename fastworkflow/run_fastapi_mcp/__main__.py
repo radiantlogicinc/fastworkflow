@@ -19,12 +19,13 @@ Response contract for the turn endpoints (/invoke_agent, /invoke_agent_stream,
 /invoke_assistant, /perform_action, and /initialize's startup_output): every one
 of them answers with the public TurnOutput projection
 {turn_key, status, failure_reason, answer, command_outputs, success}. The
-non-streaming endpoints add the transport's `exec_state`, a back-compatible
-`command_responses`, and `traces` when collected; the stream's terminal 'output'
-event carries the bare TurnOutput. This replaced the older per-endpoint mix of
-CommandOutput and TurnOutput shapes — a breaking wire change made deliberately
-before v3.0, with no back-compat for the CommandOutput-shaped top level (see
-docs/turn_result_design_final.md sections 1a, 8, 14).
+non-streaming endpoints add the transport's `exec_state` and `traces` when
+collected; the stream's terminal 'output' event carries the bare TurnOutput.
+As of v3.0 each CommandOutput carries a singular `command_response` (not a
+`command_responses` list), and the legacy top-level `command_responses` key is
+no longer emitted — clients should read `answer` and
+`command_outputs[*].command_response`. See docs/turn_result_design_final.md
+sections 1a, 8, 14.
 
 HTTP status and turn outcome are different questions. A turn that fails, or that
 suspends to ask the user something, is still a successful call: 200, with the
@@ -344,7 +345,12 @@ async def lifespan(_app: FastAPI):
         if ARGS.passwords_file_path:
             env_vars.update(dotenv_values(ARGS.passwords_file_path))
         fastworkflow.init(env_vars=env_vars)
-        
+
+        # A FastAPI process serves exactly one workflow. Pin it on the manager
+        # now, before any lazily-built store reads it, so conversation, session
+        # and checkpoint trees are namespaced under this workflow's state dir.
+        session_manager.workflow_path = ARGS.workflow_path
+
         # Configure JWT verification mode based on CLI parameter
         set_jwt_verification_mode(ARGS.expect_encrypted_jwt)
         
@@ -741,9 +747,8 @@ async def readiness_probe(memory: bool = False) -> JSONResponse:
 TURN_RESPONSE_200_DESCRIPTION = (
     "Turn finished. Body is the turn's TurnOutput projection: "
     "{turn_key, exec_state, status, failure_reason, success, answer, "
-    "command_outputs}, plus back-compatible command_responses and, when "
-    "collected, traces. A failed or awaiting_user turn is still a 200: read the "
-    "outcome from status/failure_reason/success."
+    "command_outputs}, and, when collected, traces. A failed or awaiting_user "
+    "turn is still a 200: read the outcome from status/failure_reason/success."
 )
 TURN_RESPONSE_202_DESCRIPTION = (
     "Turn still running past the wait window (wait-or-defer). Body is "
@@ -787,9 +792,8 @@ def _initialize_response_from_execution(
     result = execn.result
     if result is not None and result.command_outputs:
         # startup_output is the startup turn's TurnOutput — the same projection
-        # every other turn endpoint returns. The action's/command's own
-        # command_responses + artifacts are still there, under
-        # startup_output.command_outputs.
+        # every other turn endpoint returns. Each command's own
+        # command_response + artifacts are under startup_output.command_outputs.
         resp.startup_output = result
     return status.HTTP_200_OK, resp
 
@@ -1745,8 +1749,8 @@ async def dump_all_conversations(request: DumpConversationsRequest) -> dict[str,
         timestamp = int(time.time())
         output_file = os.path.join(request.output_folder, f"all_conversations_{timestamp}.jsonl")
         
-        # Resolve base folder using SPEEDDICT_FOLDERNAME/channel_conversations
-        base_folder = get_channelconversations_dir()
+        # Resolve the workflow-namespaced conversations folder
+        base_folder = get_channelconversations_dir(ARGS.workflow_path)
         
         all_conversations = []
         session_count = 0

@@ -35,10 +35,9 @@ class ResponseGenerator:
     def __call__(self, workflow: Workflow, command: str) -> CommandOutput:
         output = self._process_command(workflow, command)
         return CommandOutput(
-            command_responses=[
+            command_response=
                 CommandResponse(
                     response="command aborted\n",
                     artifacts=output.model_dump(),
-                )
-            ],
+                ),
         ) 

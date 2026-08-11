@@ -3,7 +3,9 @@ Pytest configuration and shared fixtures for FastWorkflow tests.
 """
 
 import os
+import shutil
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -17,6 +19,30 @@ if project_root not in sys.path:
 
 # Set up environment for tests
 os.environ.setdefault("PYTEST_RUNNING", "1")
+
+
+@pytest.fixture(autouse=True, scope="function")
+def isolate_state_root(tmp_path_factory):
+    """Point FASTWORKFLOW_STATE_ROOT at a private temp dir for every test.
+
+    Persistent state (conversations, suspended sessions, checkpoints, function
+    caches) is rooted at FASTWORKFLOW_STATE_ROOT, defaulting to
+    ~/.local/state/fastworkflow. Without this fixture a test that touches disk
+    state would write into the developer's real home directory and could observe
+    another test's records. Tests that need a specific root still override it via
+    their own init dict (the dict wins over the OS environment).
+    """
+    previous = os.environ.get("FASTWORKFLOW_STATE_ROOT")
+    root = tmp_path_factory.mktemp("fw_state_root")
+    os.environ["FASTWORKFLOW_STATE_ROOT"] = str(root)
+    try:
+        yield str(root)
+    finally:
+        if previous is None:
+            os.environ.pop("FASTWORKFLOW_STATE_ROOT", None)
+        else:
+            os.environ["FASTWORKFLOW_STATE_ROOT"] = previous
+        shutil.rmtree(root, ignore_errors=True)
 
 
 @pytest.fixture(scope="session")

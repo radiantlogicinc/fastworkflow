@@ -18,7 +18,7 @@ def todo_workflow_path() -> str:
 
 @pytest.fixture
 def initialized_fastworkflow(tmp_path):
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": str(tmp_path / "speedict")})
+    fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(tmp_path / "workflow_contexts")})
     from fastworkflow.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()

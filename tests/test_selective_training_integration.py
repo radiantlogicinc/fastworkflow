@@ -176,9 +176,8 @@ class ResponseGenerator:
     def __call__(self, workflow: fastworkflow.Workflow, command: str) -> fastworkflow.CommandOutput:
         session: PremiumSession = workflow.command_context_for_response_generation
         return fastworkflow.CommandOutput(
-            command_responses=[
+            command_response=
                 fastworkflow.CommandResponse(response=session.end_session())
-            ]
         )
 '''
 
