@@ -44,7 +44,6 @@ class ResponseGenerator:
         response = f"Work item '{workitem.get_absolute_path()}' has been marked as {status}."
         
         return CommandOutput(
-            command_responses=[
+            command_response=
                 CommandResponse(response=response)
-            ]
         )

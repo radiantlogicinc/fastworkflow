@@ -60,7 +60,7 @@ def app_module(hello_world_workflow_path, env_files, tmp_path):
     from tests.fastapi_hermetic import init_fastapi_hermetic_env, restore_fastapi_env
 
     previous_env = init_fastapi_hermetic_env(
-        env_file, passwords_file, tmp_path / "speedict"
+        env_file, passwords_file, tmp_path / "workflow_contexts"
     )
     try:
         yield main
@@ -200,7 +200,7 @@ def test_initialize_with_startup_command_in_request(app_module, unique_user_id):
     # CommandOutput it used to be is preserved under command_outputs.
     if data["startup_output"]:
         _assert_turn_output_projection(data["startup_output"])
-        assert "command_responses" in data["startup_output"]["command_outputs"][-1]
+        assert "command_response" in data["startup_output"]["command_outputs"][-1]
 
 
 def test_initialize_with_startup_action_in_request(app_module, unique_user_id):
@@ -221,7 +221,7 @@ def test_initialize_with_startup_action_in_request(app_module, unique_user_id):
     assert "startup_output" in data
     if data["startup_output"]:
         _assert_turn_output_projection(data["startup_output"])
-        assert "command_responses" in data["startup_output"]["command_outputs"][-1]
+        assert "command_response" in data["startup_output"]["command_outputs"][-1]
 
 
 def test_initialize_requires_user_id_with_startup(app_module, unique_user_id):
@@ -302,7 +302,7 @@ def test_invoke_agent_endpoint(app_module, unique_user_id):
     })
     assert response.status_code == 200
     data = response.json()
-    assert "command_responses" in data and len(data["command_responses"]) > 0
+    assert data.get("answer") or data.get("command_outputs")
     _assert_turn_output_projection(data)
 
 
@@ -317,7 +317,7 @@ def test_invoke_assistant_endpoint(app_module, unique_user_id):
     })
     assert response.status_code == 200
     data = response.json()
-    assert "command_responses" in data and len(data["command_responses"]) > 0
+    assert data.get("answer") or data.get("command_outputs")
     _assert_turn_output_projection(data)
 
 
@@ -335,7 +335,8 @@ def test_perform_action_endpoint(app_module, unique_user_id):
     })
     assert response.status_code == 200
     data = response.json()
-    assert "command_responses" in data
+    assert "answer" in data
+    assert "command_outputs" in data
     _assert_turn_output_projection(data, status="completed")
 
 

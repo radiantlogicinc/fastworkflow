@@ -34,7 +34,7 @@ def workflow_path() -> str:
 
 @pytest.fixture
 def initialized(tmp_path, workflow_path: str):
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": str(tmp_path / "speedict")})
+    fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(tmp_path / "workflow_contexts")})
     fastworkflow.RoutingRegistry.clear_registry()
     # Force a fresh directory/routing build for the fixture workflow.
     fastworkflow.RoutingRegistry.get_definition(workflow_path, load_cached=False)
@@ -99,8 +99,8 @@ def test_perform_action_succeeds_when_payload_present(initialized, workflow_path
     result = CommandExecutor.perform_action(workflow, action)
 
     assert result.success is True
-    assert any("payload=abc" in r.response for r in result.command_responses)
-    assert any("note=hello" in r.response for r in result.command_responses)
+    assert "payload=abc" in result.command_response.response
+    assert "note=hello" in result.command_response.response
 
 
 @pytest.mark.parametrize(
@@ -139,4 +139,4 @@ def test_perform_action_no_params_succeeds_when_ready(initialized, workflow_path
     result = CommandExecutor.perform_action(workflow, action)
 
     assert result.success is True
-    assert any("ready=true" in r.response for r in result.command_responses)
+    assert "ready=true" in result.command_response.response

@@ -54,5 +54,5 @@ class ResponseGenerator:
     ) -> CommandOutput:
         output = self._process_command(workflow, command_parameters)
         return CommandOutput(
-            command_responses=[CommandResponse(response=output.findings)]
+            command_response=CommandResponse(response=output.findings)
         )

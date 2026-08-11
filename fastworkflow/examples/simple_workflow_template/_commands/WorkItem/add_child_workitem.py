@@ -77,7 +77,6 @@ class ResponseGenerator:
         )
         
         return CommandOutput(
-            command_responses=[
+            command_response=
                 CommandResponse(response=response)
-            ]
         )

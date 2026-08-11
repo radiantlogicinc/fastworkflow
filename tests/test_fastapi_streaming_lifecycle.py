@@ -63,7 +63,7 @@ def app_module(hello_world_workflow_path, env_files, tmp_path):
     from tests.fastapi_hermetic import init_fastapi_hermetic_env, restore_fastapi_env
 
     previous_env = init_fastapi_hermetic_env(
-        env_file, passwords_file, tmp_path / "speedict"
+        env_file, passwords_file, tmp_path / "workflow_contexts"
     )
     try:
         yield main

@@ -30,7 +30,7 @@ TESTS = Path(__file__).parent
 
 @pytest.fixture
 def initialized_fastworkflow(tmp_path):
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": str(tmp_path / "speedict")})
+    fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(tmp_path / "workflow_contexts")})
     RoutingRegistry.clear_registry()
     serialization_hooks.reset_warnings()
     yield
@@ -424,7 +424,7 @@ import fastworkflow
 class ResponseGenerator:
     def __call__(self, workflow, command) -> fastworkflow.CommandOutput:
         return fastworkflow.CommandOutput(
-            command_responses=[fastworkflow.CommandResponse(response="poked")]
+            command_response=fastworkflow.CommandResponse(response="poked")
         )
 '''
 

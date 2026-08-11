@@ -58,5 +58,5 @@ class ResponseGenerator:
         command_parameters: Signature.Input,
     ) -> CommandOutput:
         return CommandOutput(
-            command_responses=[CommandResponse(response="ready=true")]
+            command_response=CommandResponse(response="ready=true")
         )

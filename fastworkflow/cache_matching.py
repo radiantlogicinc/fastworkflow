@@ -142,6 +142,13 @@ def cache_match(cache_path, utterance, model_pipeline, threshold=0.90, return_de
         If no match: None
     """
     with UtteranceCacheStore(cache_path) as db:
+        # Empty cache: nothing to compare against. Short-circuit before the
+        # DistilBERT embed — both a cold-start cost and the invariant the
+        # RocksDB path (and the first sqlite port) preserved. The streaming
+        # refactor in 5eea8f9 accidentally inverted the order.
+        if not db.has_entries():
+            return None
+
         # Get embedding for the query utterance
         query_embedding = get_embedding(utterance, model_pipeline)
 
@@ -152,10 +159,8 @@ def cache_match(cache_path, utterance, model_pipeline, threshold=0.90, return_de
         best_similarity = 0
         best_key = None
         best_mapping = None
-        saw_any = False
 
         for hash_key, entry in db.iter_entries():
-            saw_any = True
             cached_embedding = entry.get("embedding")
             if cached_embedding is None or cached_embedding.size == 0:
                 continue
@@ -167,9 +172,6 @@ def cache_match(cache_path, utterance, model_pipeline, threshold=0.90, return_de
                 best_similarity = similarity
                 best_key = hash_key
                 best_mapping = entry["command_mapping"]
-
-        if not saw_any:
-            return None
 
         # If good cache match found, determine the best label
         if best_similarity >= threshold and best_key is not None and best_mapping is not None:

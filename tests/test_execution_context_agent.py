@@ -47,7 +47,7 @@ def todo_workflow_path() -> str:
 
 @pytest.fixture
 def initialized_fastworkflow():
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
+    fastworkflow.init({})
     from fastworkflow.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
@@ -88,10 +88,10 @@ def test_process_message_agent_mode_mocked_agent(
     )
     _set_agents(ctx, mock_agent)
 
-    output = ctx.process_message("list my tasks")
+    output = ctx._execute_message("list my tasks")
 
     assert output.success
-    assert "Agent finished successfully" in output.command_responses[0].response
+    assert "Agent finished successfully" in output.command_response.response
     mock_agent.assert_called_once()
 
 
@@ -109,9 +109,9 @@ def test_topology_b_ask_user_is_non_blocking_and_suspends_indefinitely(
     )
     _set_agents(ctx, mock_agent)
 
-    out = ctx.process_message("start")  # returns without blocking
+    out = ctx._execute_message("start")  # returns without blocking
     assert ctx.awaiting_user
-    assert out.command_responses[0].artifacts.get("awaiting_user") is True
+    assert out.command_response.artifacts.get("awaiting_user") is True
 
     # A suspended Topology B turn never expires on its own; it waits in memory.
     time.sleep(0.05)
@@ -148,10 +148,10 @@ def test_process_message_converts_ask_user_cancel_to_output(
     monkeypatch.setattr(ctx, "_ensure_agent_initialized", lambda: None)
     _set_agents(ctx, failing_agent)
 
-    output = ctx.process_message("do something")
+    output = ctx._execute_message("do something")
 
     assert not output.success
-    assert "cancelled" in output.command_responses[0].response.lower()
+    assert "cancelled" in output.command_response.response.lower()
 
 
 def _make_agent_ctx(initialized_fastworkflow, todo_workflow_path, monkeypatch):
@@ -217,7 +217,7 @@ def test_run_agent_threads_planning_context_to_planner(
         lambda agent_call, lm=None: SimpleNamespace(final_answer="done"),
     )
 
-    ctx.process_message("do the thing")
+    ctx._execute_message("do the thing")
 
     assert captured["planning_insights"] is sentinel_insights
     assert captured["planner_lm"] is sentinel_planner_lm
@@ -238,17 +238,17 @@ def test_topology_b_ask_user_suspend_resume_round_trip(
     mock_agent.resume.return_value = completed
     _set_agents(ctx, mock_agent)
 
-    first = ctx.process_message("list my tasks")
+    first = ctx._execute_message("list my tasks")
 
     assert ctx.awaiting_user
-    assert first.command_responses[0].artifacts.get("awaiting_user") is True
-    assert first.command_responses[0].response == "Which task?"
+    assert first.command_response.artifacts.get("awaiting_user") is True
+    assert first.command_response.response == "Which task?"
     assert len(ctx.conversation_history.messages) == 0
 
-    second = ctx.process_message("the urgent one")
+    second = ctx._execute_message("the urgent one")
 
     assert not ctx.awaiting_user
-    assert "All done" in second.command_responses[0].response
+    assert "All done" in second.command_response.response
     assert len(ctx.conversation_history.messages) == 1
     mock_agent.resume.assert_called_once()
     mock_agent.assert_called_once()
@@ -291,8 +291,8 @@ def test_topology_b_resume_parity_steps(
     mock_agent.resume.return_value = completed
     _set_agents(ctx, mock_agent)
 
-    ctx.process_message("start")
-    ctx.process_message("user answer")
+    ctx._execute_message("start")
+    ctx._execute_message("user answer")
 
     assert parity_log["iteration_counter"] == -1
     assert parity_log["clarification"] == "Need detail?"
@@ -318,17 +318,17 @@ def test_abort_resets_awaiting_user(
     mock_agent.resume.side_effect = CommandCancelledError("aborted during resume")
     _set_agents(ctx, mock_agent)
 
-    ctx.process_message("first turn")
+    ctx._execute_message("first turn")
     assert ctx.awaiting_user
 
-    failed = ctx.process_message("user tries to answer")
+    failed = ctx._execute_message("user tries to answer")
     assert not ctx.awaiting_user
     assert not failed.success
 
     mock_agent.return_value = completed
-    fresh = ctx.process_message("brand new turn")
+    fresh = ctx._execute_message("brand new turn")
     assert fresh.success
-    assert "Done after fresh turn" in fresh.command_responses[0].response
+    assert "Done after fresh turn" in fresh.command_response.response
     assert mock_agent.call_count == 2
     mock_agent.resume.assert_called_once()
 
@@ -346,7 +346,7 @@ def test_awaiting_user_without_suspended_raises_conflict(
     _set_agents(ctx, mock_agent)
 
     with pytest.raises(NoSuspendedAgentStateError, match="No suspended"):
-        ctx.process_message("second request during desync")
+        ctx._execute_message("second request during desync")
     mock_agent.resume.assert_not_called()
 
 
@@ -363,7 +363,7 @@ def test_cancel_pending_clears_awaiting_user(
     )
     _set_agents(ctx, mock_agent)
 
-    ctx.process_message("question me")
+    ctx._execute_message("question me")
     assert ctx.awaiting_user
     assert ctx.cancel_pending() is True
     assert not ctx.awaiting_user
@@ -523,7 +523,7 @@ def test_topology_a_cli_ask_user_pairs_output_with_trace_sentinel(
     worker.start()
 
     clarification = output_queue.get(timeout=1.0)
-    assert clarification.command_responses[0].response == "Pick A or B?"
+    assert clarification.command_response.response == "Pick A or B?"
     assert trace_queue.get(timeout=1.0) is None
     assert worker.is_alive()
 

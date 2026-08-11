@@ -28,7 +28,7 @@ def todo_workflow_path() -> str:
 
 @pytest.fixture
 def initialized_fastworkflow(tmp_path):
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": str(tmp_path / "speedict")})
+    fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(tmp_path / "workflow_contexts")})
     from fastworkflow.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
@@ -101,9 +101,9 @@ def test_serialize_restore_resume_across_contexts(
         SimpleNamespace(final_answer="Done"),
     )
 
-    first = ctx_a.process_message("list tasks")
+    first = ctx_a._execute_message("list tasks")
     assert ctx_a.awaiting_user
-    assert first.command_responses[0].artifacts.get("awaiting_user")
+    assert first.command_response.artifacts.get("awaiting_user")
 
     blob = ctx_a.serialize_state(channel_id=channel_id)
     store.save(channel_id, blob)
@@ -135,9 +135,9 @@ def test_serialize_restore_resume_across_contexts(
         ctx_b._workflow_tool_agent.import_suspended(loaded["react"])
 
     assert ctx_b.awaiting_user
-    second = ctx_b.process_message("the urgent one")
+    second = ctx_b._execute_message("the urgent one")
     assert not ctx_b.awaiting_user
-    assert "Done" in second.command_responses[0].response
+    assert "Done" in second.command_response.response
     store.clear(channel_id)
     ctx_b.close()
 

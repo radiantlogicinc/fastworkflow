@@ -9,7 +9,7 @@ def test_current_context_object_property(tmp_path):
     # sourcery skip: extract-duplicate-method
     """Verify getter and setter for current_command_context work as expected."""
     # Initialize FastWorkflow with a minimal set of env vars
-    env_vars = {"SPEEDDICT_FOLDERNAME": "___workflow_contexts"}
+    env_vars = {}
     fastworkflow.init(env_vars=env_vars)
 
     # Get the path to the hello_world example directory in tests

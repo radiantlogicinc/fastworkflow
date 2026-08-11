@@ -184,6 +184,13 @@ class UtteranceCacheStore:
                 "embedding": self._unpack_vec(vec),
             }
 
+    def has_entries(self) -> bool:
+        """True if the table has any rows. Cheap EXISTS check (no materialisation)."""
+        return (
+            self._conn.execute("SELECT 1 FROM utterance_cache LIMIT 1").fetchone()
+            is not None
+        )
+
     def close(self) -> None:
         self._conn.close()
 

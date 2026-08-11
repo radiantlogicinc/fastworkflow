@@ -33,7 +33,7 @@ def _assert_neutral_misunderstanding_response(cme_workflow):
     output = MisunderstoodResponseGenerator()(
         cme_workflow, "none of these commands"
     )
-    command_response = output.command_responses[0]
+    command_response = output.command_response
     response = command_response.response
 
     assert "couldn't determine which available command matches" in response
@@ -56,7 +56,7 @@ def _assert_abort_resets_for_the_next_rephrased_turn(cme_workflow):
 
     abort_output = AbortResponseGenerator()(cme_workflow, "abort")
 
-    assert abort_output.command_responses[0].response == "command aborted\n"
+    assert abort_output.command_response.response == "command aborted\n"
     assert (
         cme_workflow.context["NLU_Pipeline_Stage"]
         == fastworkflow.NLUPipelineStage.INTENT_DETECTION
@@ -65,7 +65,7 @@ def _assert_abort_resets_for_the_next_rephrased_turn(cme_workflow):
 
 def test_misunderstanding_response_does_not_presuppose_a_listed_command_is_correct():
     """Out-of-scope requests get this same response, so the list must be optional."""
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
+    fastworkflow.init({})
     app_workflow, cme_workflow = _create_workflows()
 
     try:

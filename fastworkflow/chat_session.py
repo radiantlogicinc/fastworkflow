@@ -370,7 +370,7 @@ class ChatSession:
         try:
             # Handle startup command/action
             if self._startup_command:
-                last_output = self._core.process_message(self._startup_command)
+                last_output = self._core._execute_message(self._startup_command)
             elif self._startup_action:
                 last_output = self._core.process_action(self._startup_action)
 
@@ -383,7 +383,7 @@ class ChatSession:
                     if isinstance(message, fastworkflow.Action):
                         last_output = self._core.process_action(message)
                     else:
-                        last_output = self._core.process_message(message)
+                        last_output = self._core._execute_message(message)
 
                 except Empty:
                     continue
@@ -455,17 +455,17 @@ class ChatSession:
     #         success=not mcp_result.isError
     #     )
         
-    #     command_output = fastworkflow.CommandOutput(command_responses=[command_response])
+    #     command_output = fastworkflow.CommandOutput(command_response=command_response)
     #     command_output._mcp_source = mcp_result  # Mark for special formatting
     #     return command_output
     
     def _process_message(self, message: str) -> fastworkflow.CommandOutput:
         """Back-compat shim: delegate single-message execution to the core."""
-        return self._core.process_message(message)
+        return self._core._execute_message(message)
 
     def _process_agent_message(self, message: str) -> fastworkflow.CommandOutput:
         """Back-compat shim: delegate agent-message execution to the core."""
-        return self._core.process_message(message)
+        return self._core._execute_message(message)
 
     def _process_action(self, action: fastworkflow.Action) -> fastworkflow.CommandOutput:
         """Back-compat shim: delegate action execution to the core."""

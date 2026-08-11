@@ -97,9 +97,8 @@ class ResponseGenerator:
     ) -> CommandOutput:
         output = self._process_command(workflow, command_parameters)
         return CommandOutput(
-            command_responses=[
+            command_response=
                 CommandResponse(response=f"current status is: {output.status}")
-            ]
         )
 
     def _process_command(self,

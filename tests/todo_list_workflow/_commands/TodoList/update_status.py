@@ -50,7 +50,6 @@ If all children are complete, this TodoList is complete. Otherwise, it's incompl
             f'Response: {output.model_dump_json()}'
         )
         return CommandOutput(
-            command_responses=[
+            command_response=
                 CommandResponse(response=response)
-            ]
         )

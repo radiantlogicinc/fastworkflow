@@ -54,7 +54,7 @@ def todo_workflow_path() -> str:
 
 @pytest.fixture
 def initialized_fastworkflow():
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
+    fastworkflow.init({})
     from fastworkflow.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
@@ -113,9 +113,8 @@ def _make_assistant_ctx(todo_workflow_path, monkeypatch, response_text="ok"):
     def fake_invoke(cls, session, command: str):
         return fastworkflow.CommandOutput(
             command_name=command.split()[0] if command else "",
-            command_responses=[
-                fastworkflow.CommandResponse(response=f"{response_text}:{command}")
-            ],
+            command_response=
+                fastworkflow.CommandResponse(response=f"{response_text}:{command}"),
         )
 
     monkeypatch.setattr(
@@ -168,49 +167,41 @@ class TestExportsAndTurnKey:
 # ----------------------------------------------------------------------
 
 
-class TestCommandOutputForwardCompat:
-    def test_singular_command_response_maps_to_list(self):
+class TestCommandOutputShape:
+    def test_singular_command_response_is_canonical(self):
         r = CommandResponse(response="hello")
-        new_style = CommandOutput(command_response=r)
-        old_style = CommandOutput(command_responses=[r])
-        assert new_style.command_responses == [r]
-        assert new_style == old_style
-
-    def test_old_style_still_works(self):
-        r = CommandResponse(response="legacy")
-        out = CommandOutput(command_responses=[r])
-        assert out.command_responses[0].response == "legacy"
+        out = CommandOutput(command_response=r)
+        assert out.command_response is r
         assert out.success is True
+        dumped = out.model_dump()
+        assert "command_response" in dumped
+        assert "command_responses" not in dumped
 
-    def test_both_styles_coexist_list_wins(self):
-        r_singular = CommandResponse(response="singular")
-        r_list = CommandResponse(response="list")
-        out = CommandOutput(
-            command_response=r_singular, command_responses=[r_list]
-        )
-        # explicit command_responses is preserved; the singular shim never clobbers it
-        assert out.command_responses == [r_list]
+    def test_legacy_list_keyword_is_rejected(self):
+        r = CommandResponse(response="legacy")
+        with pytest.raises(ValueError, match="command_response=CommandResponse"):
+            CommandOutput(command_responses=[r])
 
     def test_ask_user_helpers_round_trip(self):
         entry = CommandOutput(
             command_name="ask_user",
             command_parameters="Which task did you mean?",
-            command_responses=[CommandResponse(response="", success=False)],
+            command_response=CommandResponse(response="", success=False),
         )
         assert entry.is_ask_user is True
         assert entry.question == "Which task did you mean?"
         assert entry.user_reply == ""  # unanswered
         assert entry.success is False
 
-        entry.command_responses[0].response = "the urgent one"
-        entry.command_responses[0].success = True
+        entry.command_response.response = "the urgent one"
+        entry.command_response.success = True
         assert entry.user_reply == "the urgent one"
         assert entry.success is True
 
     def test_helpers_false_or_none_on_normal_outputs(self):
         out = CommandOutput(
             command_name="list_todo_lists",
-            command_responses=[CommandResponse(response="3 lists")],
+            command_response=CommandResponse(response="3 lists"),
         )
         assert out.is_ask_user is False
         assert out.question is None
@@ -239,25 +230,27 @@ class TestDeterministicTurn:
         captured = result.command_outputs[-1]
         # answer is plain text: the last captured output's first response text
         assert isinstance(result.answer, str)
-        assert result.answer == captured.command_responses[0].response
+        assert result.answer == captured.command_response.response
         # per-command timing is retained on command_outputs (nested provenance)
         assert captured.started_at is not None
         assert captured.duration_ms is not None
         assert captured.duration_ms >= 0
 
-    def test_process_message_still_returns_command_output_and_warns(
+    def test_process_message_is_removed(
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch
     ):
         ctx, _wf = _make_assistant_ctx(todo_workflow_path, monkeypatch)
 
-        with pytest.warns(DeprecationWarning, match="process_turn"):
-            output = ctx.process_message("list my todo lists")
+        # The deprecated bridge is gone at 3.0.0; callers use process_turn() (or
+        # the internal _execute_message() when a raw CommandOutput is needed).
+        assert not hasattr(ctx, "process_message")
 
+        output = ctx._execute_message("list my todo lists")
         assert isinstance(output, fastworkflow.CommandOutput)
         assert not isinstance(output, TurnResult)
         assert not isinstance(output, TurnOutput)
         assert output.success
-        assert "list my todo lists" in output.command_responses[0].response
+        assert "list my todo lists" in output.command_response.response
 
     def test_failed_deterministic_command_marks_turn_failed(
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch
@@ -267,11 +260,10 @@ class TestDeterministicTurn:
         def failing_invoke(cls, session, command: str):
             return fastworkflow.CommandOutput(
                 command_name=command.split()[0] if command else "",
-                command_responses=[
+                command_response=
                     fastworkflow.CommandResponse(
                         response="could not do that", success=False
-                    )
-                ],
+                    ),
             )
 
         _patch_invoke_with(monkeypatch, failing_invoke)
@@ -340,12 +332,11 @@ class TestAgentTurn:
         def fake_invoke(cls, session, command: str):
             return fastworkflow.CommandOutput(
                 command_name=command,
-                command_responses=[
+                command_response=
                     fastworkflow.CommandResponse(
                         response=f"ran {command}",
                         success=command != "mark_completed",  # this one fails
-                    )
-                ],
+                    ),
             )
 
         _patch_invoke_with(monkeypatch, fake_invoke)
@@ -414,9 +405,8 @@ class TestSuspendResumeTurnCapture:
         def fake_invoke(cls, session, command: str):
             return fastworkflow.CommandOutput(
                 command_name=command,
-                command_responses=[
-                    fastworkflow.CommandResponse(response=f"ran {command}")
-                ],
+                command_response=
+                    fastworkflow.CommandResponse(response=f"ran {command}"),
             )
 
         _patch_invoke_with(monkeypatch, fake_invoke)
@@ -500,7 +490,7 @@ class TestFailureCapture:
         assert len(ctx._turn_outputs) == 1
         entry = ctx._turn_outputs[0]
         assert entry.success is False
-        artifacts = entry.command_responses[0].artifacts
+        artifacts = entry.command_response.artifacts
         assert artifacts["error_type"] == "RuntimeError"
         assert "storage offline" in artifacts["error_message"]
         assert "RuntimeError" in artifacts["traceback"]
@@ -518,15 +508,14 @@ class TestCommandOutputsWithArtifacts:
         # arbitrary client-chosen artifact keys; the framework never inspects them
         chart_output = CommandOutput(
             command_name="export_csv",
-            command_responses=[
+            command_response=
                 CommandResponse(
                     response="exported", artifacts={"some_client_key": "a,b\n1,2"}
-                )
-            ],
+                ),
         )
         text_output = CommandOutput(
             command_name="list_todo_lists",
-            command_responses=[CommandResponse(response="3 lists")],
+            command_response=CommandResponse(response="3 lists"),
         )
 
         turn_output = TurnOutput(
@@ -550,23 +539,22 @@ class TestArtifactProjection:
         # the framework is key-agnostic: any non-empty artifacts dict qualifies
         artifact_out = CommandOutput(
             command_name="export_csv",
-            command_responses=[
+            command_response=
                 CommandResponse(
                     response="exported",
                     artifacts={"anything": "a,b\n1,2", "mime": "text/csv"},
-                )
-            ],
+                ),
         )
         text_out = CommandOutput(
             command_name="list_todo_lists",
-            command_responses=[CommandResponse(response="3 lists")],
+            command_response=CommandResponse(response="3 lists"),
         )
 
         projected = collect_artifact_responses([text_out, artifact_out])
 
         # original objects returned (no copy), artifact-bearing only, in order
-        assert projected == [artifact_out.command_responses[0]]
-        assert projected[0] is artifact_out.command_responses[0]
+        assert projected == [artifact_out.command_response]
+        assert projected[0] is artifact_out.command_response
 
     def test_merge_artifact_responses_into_merges_and_suffixes_collisions(self):
         target = CommandResponse(
@@ -598,7 +586,7 @@ class TestArtifactProjection:
         def fake_invoke(cls, session, command: str):
             return fastworkflow.CommandOutput(
                 command_name=command,
-                command_responses=[
+                command_response=
                     fastworkflow.CommandResponse(
                         response=f"ran {command}",
                         # arbitrary client keys — the framework preserves them verbatim
@@ -606,8 +594,7 @@ class TestArtifactProjection:
                             "client_blob": "a,b\n1,2",
                             "client_kind": "text/csv",
                         },
-                    )
-                ],
+                    ),
             )
 
         _patch_invoke_with(monkeypatch, fake_invoke)
@@ -619,12 +606,10 @@ class TestArtifactProjection:
         mock_agent = MagicMock(side_effect=fake_forward)
         _set_agents(ctx, mock_agent)
 
-        with pytest.warns(DeprecationWarning, match="process_turn"):
-            output = ctx.process_message("export my todos")
+        output = ctx._execute_message("export my todos")
 
         # single user-facing response: agent text plus merged tool artifacts
-        assert len(output.command_responses) == 1
-        answer = output.command_responses[0]
+        answer = output.command_response
         assert "Exported your data" in answer.response
         assert answer.artifacts["client_blob"] == "a,b\n1,2"
         assert answer.artifacts["client_kind"] == "text/csv"
@@ -639,12 +624,11 @@ class TestArtifactProjection:
         def fake_invoke(cls, session, command: str):
             return fastworkflow.CommandOutput(
                 command_name=command,
-                command_responses=[
+                command_response=
                     fastworkflow.CommandResponse(
                         response=f"ran {command}",
                         artifacts={"client_blob": "x,y\n3,4"},
-                    )
-                ],
+                    ),
             )
 
         _patch_invoke_with(monkeypatch, fake_invoke)
@@ -666,7 +650,7 @@ class TestArtifactProjection:
         assert len(result.command_outputs_with_artifacts) == 1
         artifact_output = result.command_outputs_with_artifacts[0]
         assert artifact_output.command_name == "export_csv"
-        assert artifact_output.command_responses[0].artifacts["client_blob"] == "x,y\n3,4"
+        assert artifact_output.command_response.artifacts["client_blob"] == "x,y\n3,4"
 
 
 # ----------------------------------------------------------------------
@@ -678,9 +662,8 @@ class TestArtifactValidation:
     def _bad_output(self) -> CommandOutput:
         return CommandOutput(
             command_name="bad_cmd",
-            command_responses=[
-                CommandResponse(response="x", artifacts={"bad": object()})
-            ],
+            command_response=
+                CommandResponse(response="x", artifacts={"bad": object()}),
         )
 
     def test_append_turn_output_warns_on_unserializable_artifacts(
@@ -707,9 +690,8 @@ class TestArtifactValidation:
     def test_validate_artifacts_serializable_flags_and_accepts(self):
         bad = CommandOutput(
             command_name="bad_cmd",
-            command_responses=[
-                CommandResponse(response="x", artifacts={"obj": object()})
-            ],
+            command_response=
+                CommandResponse(response="x", artifacts={"obj": object()}),
         )
         problems = validate_artifacts_serializable(bad)
         assert len(problems) == 1
@@ -718,7 +700,7 @@ class TestArtifactValidation:
 
         good = CommandOutput(
             command_name="good_cmd",
-            command_responses=[
+            command_response=
                 CommandResponse(
                     response="x",
                     artifacts={
@@ -730,8 +712,7 @@ class TestArtifactValidation:
                         "scalar": 42,
                         "none": None,
                     },
-                )
-            ],
+                ),
         )
         assert validate_artifacts_serializable(good) == []
 
@@ -778,11 +759,10 @@ class TestTurnOutput:
     def _turn_output(self, **overrides) -> TurnOutput:
         export_output = CommandOutput(
             command_name="export_csv",
-            command_responses=[
+            command_response=
                 CommandResponse(
                     response="exported", artifacts={"payload": "a,b\n1,2"}
-                )
-            ],
+                ),
             started_at=datetime.now(timezone.utc),
             duration_ms=12,
         )
@@ -803,7 +783,7 @@ class TestTurnOutput:
         assert len(out.command_outputs_with_artifacts) == 1
         assert out.command_outputs_with_artifacts[0].command_name == "export_csv"
         # per-command structured results live on the command outputs, not on answer
-        assert out.command_outputs[0].command_responses[0].artifacts["payload"]
+        assert out.command_outputs[0].command_response.artifacts["payload"]
 
     def test_success_is_only_all_command_outputs_succeeded(self):
         # success is purely all(command_outputs succeeded) — orthogonal to
@@ -820,7 +800,7 @@ class TestTurnOutput:
         # a command failure → success False regardless of status
         failed_command = CommandOutput(
             command_name="mark_completed",
-            command_responses=[CommandResponse(response="nope", success=False)],
+            command_response=CommandResponse(response="nope", success=False),
         )
         assert (
             self._turn_output(

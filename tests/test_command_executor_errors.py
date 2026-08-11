@@ -34,7 +34,7 @@ def _monkey_registry(monkeypatch):
 
 
 def test_perform_action_wraps_error(monkeypatch):
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
+    fastworkflow.init({})
 
     _monkey_registry(monkeypatch)
 
@@ -50,7 +50,7 @@ def test_perform_action_wraps_error(monkeypatch):
 
 
 def test_invoke_command_wraps_error(monkeypatch):
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
+    fastworkflow.init({})
 
     _monkey_registry(monkeypatch)
 
@@ -63,9 +63,8 @@ def test_invoke_command_wraps_error(monkeypatch):
 
     def _stub_extract(self, ws, cmd):
         co = CommandOutput(
-            command_responses=[
-                CommandResponse(response="stub", artifacts={"command_name": "fail", "cmd_parameters": None, "command": cmd})
-            ],
+            command_response=
+                CommandResponse(response="stub", artifacts={"command_name": "fail", "cmd_parameters": None, "command": cmd}),
             success=True,
             command_handled=False
         )

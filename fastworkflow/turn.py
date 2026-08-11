@@ -4,10 +4,9 @@ A *logical turn* is one user interaction with a workflow: every command
 execution, clarification exchange, and failure that occurs between the user's
 message and the final answer. ``TurnResult`` captures that turn.
 
-This module ships the v2.21 (non-breaking) shapes. See
-``docs/turn_result_design_final.md`` for the full v3.0 design; where the two
-differ, the v2.21 shapes here are intentional (e.g. ``CommandOutput`` still
-carries a ``command_responses`` list).
+This module ships the turn-result types. See
+``docs/turn_result_design_final.md``. As of v3.0, ``CommandOutput`` carries a
+singular ``command_response`` (multiplicity lives on ``command_outputs``).
 
 ``CommandResponse`` and ``CommandOutput`` are forward references resolved at
 the bottom of ``fastworkflow/__init__.py`` via ``TurnResult.model_rebuild``.
@@ -73,10 +72,9 @@ def collect_artifact_responses(
     (and how to render them) is entirely the consuming client's concern. [Topic 5]
     """
     return [
-        response
+        command_output.command_response
         for command_output in command_outputs
-        for response in command_output.command_responses
-        if response.artifacts
+        if command_output.command_response.artifacts
     ]
 
 
@@ -132,10 +130,9 @@ def validate_artifacts_serializable(command_output: "CommandOutput") -> list[str
     """
     problems: list[str] = []
     command_name = getattr(command_output, "command_name", "") or ""
-    for command_response in getattr(command_output, "command_responses", []) or []:
-        artifacts = getattr(command_response, "artifacts", None)
-        if not isinstance(artifacts, dict):
-            continue
+    command_response = getattr(command_output, "command_response", None)
+    artifacts = getattr(command_response, "artifacts", None) if command_response else None
+    if isinstance(artifacts, dict):
         problems.extend(
             f"artifacts[{key!r}] on command '{command_name}' is {type(value)}"
             for key, value in artifacts.items()
@@ -171,7 +168,7 @@ class TurnOutput(BaseModel):
     The agent's contribution to a turn is only the final-answer **text**
     (``answer``); it never reports success, artifacts, next actions, or
     recommendations itself. Those structured, per-command results live on each
-    entry of ``command_outputs`` (each ``CommandOutput.command_responses[*]``).
+    entry of ``command_outputs`` (each ``CommandOutput.command_response``).
 
     ``TurnOutput`` is the consumer-facing slice of the internal ``TurnResult``
     (which additionally carries observability/persistence fields). See
@@ -230,10 +227,7 @@ class TurnOutput(BaseModel):
         return [
             command_output
             for command_output in self.command_outputs
-            if any(
-                response.artifacts
-                for response in command_output.command_responses
-            )
+            if command_output.command_response.artifacts
         ]
 
 

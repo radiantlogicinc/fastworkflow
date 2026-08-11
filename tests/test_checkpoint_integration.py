@@ -75,7 +75,7 @@ def speedict_folder(tmp_path):
     """Point fastWorkflow's durable root at a private temp directory.
 
     Every checkpoint namespace these tests read is derived from
-    SPEEDDICT_FOLDERNAME, so sharing the developer's real folder would let one
+    FASTWORKFLOW_STATE_ROOT, so sharing the developer's real folder would let one
     test observe another's records — or the developer's — and would leave
     channel records behind after the run.
 
@@ -88,7 +88,7 @@ def speedict_folder(tmp_path):
 
     previous_env = fastworkflow._env_vars
     speedict = tmp_path / "speedict"
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": str(speedict)})
+    fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(speedict)})
     fastworkflow.RoutingRegistry.clear_registry()
     # Pin warnings are throttled per (workflow, reason) for the life of the
     # process, so a test that asserts on one has to start from a clean slate.
@@ -165,12 +165,14 @@ def _checkpoint_files(speedict: Path) -> dict[str, bytes]:
     structure, a key name, or a manifest is still on disk regardless of which
     field a reader would have deserialized it into.
     """
-    root = speedict / "channel_checkpoints"
+    # State is namespaced per workflow: <state-root>/workflows/<id>/checkpoints.
+    # These tests drive a single workflow, so gather across whatever id(s) exist.
     blobs: dict[str, bytes] = {}
-    for dirpath, _dirnames, filenames in os.walk(root):
-        for name in filenames:
-            path = Path(dirpath) / name
-            blobs[str(path.relative_to(root))] = path.read_bytes()
+    for root in (speedict / "workflows").glob("*/checkpoints"):
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for name in filenames:
+                path = Path(dirpath) / name
+                blobs[str(path.relative_to(root))] = path.read_bytes()
     return blobs
 
 
@@ -223,7 +225,7 @@ import fastworkflow
 class ResponseGenerator:
     def __call__(self, workflow, command) -> fastworkflow.CommandOutput:
         return fastworkflow.CommandOutput(
-            command_responses=[fastworkflow.CommandResponse(response="poked")]
+            command_response=fastworkflow.CommandResponse(response="poked")
         )
 '''
 
@@ -490,7 +492,7 @@ def test_a_failed_checkpoint_write_leaves_the_runtime_live_and_open(speedict_fol
 
     output, live = asyncio.run(body())
 
-    assert "5.0" in output.command_responses[0].response
+    assert "5.0" in output.command_response.response
     assert live == {channel_id, newcomer}
     assert _record(manager, channel_id, HELLO_WORLD) is None
     assert _checkpoint_files(speedict_folder) == {}, "a partial generation was left behind"
@@ -942,11 +944,10 @@ def test_mid_extraction_session_persists_instead_of_clearing():
             answer="which numbers?",
             command_outputs=[
                 fastworkflow.CommandOutput(
-                    command_responses=[
+                    command_response=
                         fastworkflow.CommandResponse(
                             response="which numbers?", success=False
                         )
-                    ]
                 )
             ],
         ))
@@ -1045,7 +1046,7 @@ def test_reap_pending_state_protects_the_channels_the_process_holds():
     assert not gone_survived, "the abandoned session was not reclaimed"
 
     # Counts are asserted as lower bounds, not equalities. This store lives in
-    # the shared SPEEDDICT_FOLDERNAME rather than a tmp_path, so it also holds
+    # the shared FASTWORKFLOW_STATE_ROOT rather than a tmp_path, so it also holds
     # pending blobs left by other tests and by previous runs -- an equality here
     # passes alone and fails in a full-suite run, which is exactly what it did.
     assert outcome.reclaimed >= 1

@@ -114,7 +114,7 @@ class ResponseGenerator:
             f'Response: {output.status}'
         )
         return CommandOutput(
-            command_responses=[CommandResponse(response=response)],
+            command_response=CommandResponse(response=response),
         )
 
     def _process_command(self, workflow: Workflow, input: Signature.Input) -> Signature.Output:
