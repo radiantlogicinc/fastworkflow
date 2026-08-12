@@ -7,6 +7,15 @@
 2026-06-11). Where this document conflicts with any of those, **this document wins**; they
 remain the rationale archive. Traceability tags like `[A7]`/`[X3]` link back to decisions.
 
+**Implementation note (2026-08-11, fix-i0e):** the v3.0 `command_responses` →
+`command_response` collapse ([A13]/[A15]/§14) is shipped. `CommandOutput` carries a
+singular `command_response` only — the legacy `command_responses=[...]` constructor
+keyword is rejected (no shim). The FastAPI wire no longer emits a top-level
+`command_responses` key — clients read `answer` and
+`command_outputs[*].command_response`. Remaining §14 items (`process_message` removal,
+`ConversationTurnStore` consolidation, `action_log` retirement, etc.) are tracked
+separately.
+
 ---
 
 ## 1. Overview
@@ -525,7 +534,7 @@ possible while still surfacing the previously-dropped structured outputs.
 gracefully, symmetric to A14 `[X4]`.
 
 **v3.0 (major — big-bang cutover, mixed fleets forbidden):** `command_responses` collapse
-with the constructor shim introduced here (removed v4.0); wire hard-break (endpoints +
+(no constructor shim — `command_response=` only; wire hard-break (endpoints +
 SSE return `TurnOutput.model_dump()` — the slim public projection, NOT the internal
 `TurnResult`, per §1a; MCP `isError = not success`); `ConversationTurnStore`
 consolidation (lift `generate_topic_and_summary`, `_ensure_unique_topic`,

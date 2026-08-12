@@ -80,11 +80,9 @@ def fleet_protocol_floor() -> int:
     return floor
 
 
-def get_checkpoint_dir() -> str:
-    speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
-    path = os.path.join(speedict_foldername, "channel_checkpoints")
-    os.makedirs(path, exist_ok=True)
-    return path
+def get_checkpoint_dir(workflow_path: str) -> str:
+    from fastworkflow import state_paths
+    return state_paths.checkpoints_dir(workflow_path)
 
 
 def deployment_id() -> str:

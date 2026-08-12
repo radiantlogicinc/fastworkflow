@@ -29,7 +29,7 @@ def todo_workflow_path() -> str:
 
 @pytest.fixture
 def initialized_fastworkflow(tmp_path):
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": str(tmp_path / "speedict")})
+    fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(tmp_path / "workflow_contexts")})
     from fastworkflow.command_routing import RoutingRegistry
 
     RoutingRegistry.clear_registry()
@@ -81,9 +81,8 @@ def _open_a_turn(ctx: WorkflowExecutionContext) -> None:
         fastworkflow.CommandOutput(
             command_name="TodoListManager/create_todo_list",
             command_parameters="create a todo list",
-            command_responses=[
-                fastworkflow.CommandResponse(response="need a description", success=False)
-            ],
+            command_response=
+                fastworkflow.CommandResponse(response="need a description", success=False),
             started_at=datetime.now(timezone.utc),
         )
     )
@@ -185,9 +184,52 @@ def test_turn_accumulator_survives_a_round_trip(
     output = restored._turn_outputs[0]
     assert isinstance(output, fastworkflow.CommandOutput)
     assert output.command_name == "TodoListManager/create_todo_list"
-    assert output.command_responses[0].response == "need a description"
-    assert output.command_responses[0].success is False
+    assert output.command_response.response == "need a description"
+    assert output.command_response.success is False
     assert output.started_at is not None
+    restored.close()
+
+
+def test_turn_output_with_typed_params_survives_cold_rehydrate(
+    initialized_fastworkflow, todo_workflow_path
+):
+    """CommandExecutor assigns a Pydantic params instance to command_parameters.
+
+    The field was long declared ``str`` while the write path stored a model;
+    ``model_dump(mode="json")`` emitted a dict and ``model_validate`` on
+    cold-rehydrate rejected it (fix-fjh / A10 honesty). Typed in-memory,
+    dict-on-wire, and restore must all agree.
+    """
+    channel_id = f"params_{uuid.uuid4().hex[:8]}"
+    ctx = _make_ctx(todo_workflow_path, channel_id)
+    command_name = "TodoListManager/create_todo_list"
+    params_class = _params_class(ctx, command_name)
+    assert params_class is not None
+
+    ctx._begin_turn("create a todo list called groceries")
+    output = fastworkflow.CommandOutput(
+        command_name=command_name,
+        command_response=fastworkflow.CommandResponse(
+            response="created", success=True
+        ),
+        started_at=datetime.now(timezone.utc),
+    )
+    # Mirror CommandExecutor.invoke: assign the typed instance (no re-validate).
+    output.command_parameters = params_class(description="groceries")
+    ctx.append_turn_output(output)
+
+    blob = ctx.serialize_state(channel_id=channel_id)
+    ctx.close()
+
+    assert blob["turn"]["outputs"][0]["command_parameters"] == {
+        "description": "groceries"
+    }
+
+    restored = _make_ctx(todo_workflow_path, channel_id)
+    restored.apply_serialized_state(blob)
+
+    restored_params = restored._turn_outputs[0].command_parameters
+    assert restored_params == {"description": "groceries"}
     restored.close()
 
 
@@ -214,8 +256,8 @@ def test_ask_user_entry_is_still_completable_after_restore(
 
     entry = restored._turn_outputs[-1]
     assert entry.command_name == "ask_user"
-    assert entry.command_responses[0].response == "the groceries one"
-    assert entry.command_responses[0].success is True
+    assert entry.command_response.response == "the groceries one"
+    assert entry.command_response.success is True
     restored.close()
 
 
@@ -314,12 +356,12 @@ def test_v1_blob_is_refused_rather_than_partly_restored(
     restored.close()
 
 
-def test_schema_version_is_two(initialized_fastworkflow, todo_workflow_path):
-    """Adding fields without bumping would let a v1 reader half-apply a v2 blob."""
-    assert SCHEMA_VERSION == 2
+def test_schema_version_is_current(initialized_fastworkflow, todo_workflow_path):
+    """Adding fields without bumping would let an old reader half-apply a new blob."""
+    assert SCHEMA_VERSION == 3
     channel_id = f"ver_{uuid.uuid4().hex[:8]}"
     ctx = _make_ctx(todo_workflow_path, channel_id)
-    assert ctx.serialize_state(channel_id=channel_id)["schema_version"] == 2
+    assert ctx.serialize_state(channel_id=channel_id)["schema_version"] == SCHEMA_VERSION
     ctx.close()
 
 

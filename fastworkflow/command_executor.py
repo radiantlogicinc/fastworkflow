@@ -31,11 +31,10 @@ class CommandExecutor(CommandExecutorInterface):
     ) -> fastworkflow.CommandOutput:
         if not command:
             return CommandOutput(
-                command_responses=[
+                command_response=
                     fastworkflow.CommandResponse(
                         response="You just hit the <Enter> key. How about a command or some feedback instead?"
                     )
-                ]
             )
 
         command_output = cls.perform_action(
@@ -53,8 +52,8 @@ class CommandExecutor(CommandExecutorInterface):
         elif not command_output.success:       
             return command_output
 
-        command_name = command_output.command_responses[0].artifacts["command_name"]
-        input_obj = command_output.command_responses[0].artifacts["cmd_parameters"]
+        command_name = command_output.command_response.artifacts["command_name"]
+        input_obj = command_output.command_response.artifacts["cmd_parameters"]
 
         workflow = chat_session.get_active_workflow()
         workflow_name = workflow.folderpath.split('/')[-1]

@@ -51,5 +51,5 @@ class ResponseGenerator:
         payload = workflow.context.get("payload")
         response = f"payload={payload}; note={command_parameters.note}"
         return CommandOutput(
-            command_responses=[CommandResponse(response=response)]
+            command_response=CommandResponse(response=response)
         )

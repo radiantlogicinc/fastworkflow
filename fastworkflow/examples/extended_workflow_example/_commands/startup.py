@@ -13,12 +13,11 @@ class ResponseGenerator:
         # Add custom initialization for this extended workflow
         custom_response = {
             "message": "Extended workflow initialized with custom features!",
-            "base_message": str(base_output.command_responses[0].response),
+            "base_message": str(base_output.command_response.response),
             "extended_features": ["Custom reporting", "Enhanced analytics", "Advanced notifications"]
         }
         
         return CommandOutput(
-            command_responses=[
+            command_response=
                 CommandResponse(response=str(custom_response))
-            ]
         )

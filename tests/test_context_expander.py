@@ -13,7 +13,7 @@ class DummyExpander:
 
 
 def test_workflow_has_context_methods(tmp_path):
-    env_vars = {"SPEEDDICT_FOLDERNAME": "___workflow_contexts"}
+    env_vars = {}
     fastworkflow.init(env_vars=env_vars)
 
     # Get the path to the hello_world example directory
@@ -40,7 +40,7 @@ def test_workflow_has_context_methods(tmp_path):
 
 def test_dummy_expander(tmp_path):
     """Test that DummyExpander can clear a workflow's context."""
-    env_vars = {"SPEEDDICT_FOLDERNAME": "___workflow_contexts"}
+    env_vars = {}
     fastworkflow.init(env_vars=env_vars)
 
     # Get the path to the hello_world example directory
@@ -85,7 +85,7 @@ class ChildCtx:
 
 def test_object_level_move_to_parent(tmp_path):
     """Test that a context object can implement parent navigation."""
-    env_vars = {"SPEEDDICT_FOLDERNAME": "___workflow_contexts"}
+    env_vars = {}
     fastworkflow.init(env_vars=env_vars)
 
     # Get the path to the hello_world example directory

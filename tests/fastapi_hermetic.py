@@ -1,10 +1,10 @@
-"""Shared helpers so FastAPI tests do not pollute the developer's SPEEDDICT tree.
+"""Shared helpers so FastAPI tests do not pollute the developer's state tree.
 
-Pending Topology-B blobs under ``___workflow_contexts/channel_session_state/`` are
+Pending Topology-B blobs under ``<state-root>/workflows/<id>/session_state/`` are
 gitignored and survive across pytest runs. A leftover
 ``nonexistent_user.pending.json`` (awaiting_user=true) is restored on the next
 session create and makes unrelated FastAPI tests fail with shifting names
-(fix-j83). Every FastAPI ``app_module`` fixture must point SPEEDDICT at a
+(fix-j83). Every FastAPI ``app_module`` fixture must point the state root at a
 per-test temp directory — same pattern as ``tests/test_checkpoint_integration.py``.
 """
 
@@ -23,7 +23,7 @@ def init_fastapi_hermetic_env(
     passwords_file: str,
     speedict_dir: Path | str,
 ) -> dict[str, Any]:
-    """``fastworkflow.init`` with SPEEDDICT overridden to ``speedict_dir``.
+    """``fastworkflow.init`` with FASTWORKFLOW_STATE_ROOT overridden to ``speedict_dir``.
 
     Returns the previous ``fastworkflow._env_vars`` so callers can restore in a
     fixture ``finally`` (an interpreter left on a deleted temp dir poisons the
@@ -33,7 +33,7 @@ def init_fastapi_hermetic_env(
     env_vars = {
         **dotenv_values(env_file),
         **dotenv_values(passwords_file),
-        "SPEEDDICT_FOLDERNAME": str(speedict_dir),
+        "FASTWORKFLOW_STATE_ROOT": str(speedict_dir),
     }
     fastworkflow.init(env_vars)
     if fastworkflow.RoutingRegistry:

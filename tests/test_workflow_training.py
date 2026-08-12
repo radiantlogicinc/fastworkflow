@@ -52,12 +52,11 @@ def _cleanup_generated_files(base_path, env_vars=None):
 
     if os.path.isdir(command_info_path):
         shutil.rmtree(command_info_path)
-    
-    speeddict_folder_name = env_vars["SPEEDDICT_FOLDERNAME"]
-    if os.path.isdir(os.path.join(base_path, speeddict_folder_name)):
-        shutil.rmtree(os.path.join(base_path, speeddict_folder_name))
 
-    # Purge global cached session databases to avoid stale pointers between tests
+    # Persistent state no longer lives under the workflow folder; it is rooted at
+    # FASTWORKFLOW_STATE_ROOT (isolated to a temp dir by the conftest fixture),
+    # so there is nothing workflow-local to purge here. The legacy CWD folder is
+    # removed defensively in case an older run left one behind.
     workflow_contexts_path = "./___workflow_contexts"
     if os.path.isdir(workflow_contexts_path):
         shutil.rmtree(workflow_contexts_path)

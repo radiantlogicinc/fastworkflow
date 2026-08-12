@@ -14,7 +14,6 @@ from fastworkflow.workflow_agent import (
 @pytest.fixture
 def mock_env_vars():
     return {
-        "SPEEDDICT_FOLDERNAME": "___workflow_contexts",
         "LLM_AGENT": "gpt-4",
         "LITELLM_API_KEY_AGENT": "test-key",
         "NOT_FOUND": "NOT_FOUND",

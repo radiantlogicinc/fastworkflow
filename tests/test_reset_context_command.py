@@ -4,7 +4,7 @@ from fastworkflow._workflows.command_metadata_extraction._commands.IntentDetecti
 
 
 def test_reset_context():
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
+    fastworkflow.init({})
 
     # Create a workflow instead of directly
     workflow = fastworkflow.Workflow.create(
@@ -30,7 +30,7 @@ def test_reset_context():
     response = resp_gen(mock_workflow, "reset context")
     
     # Check that the response indicates context was reset
-    assert "context" in response.command_responses[0].response.lower()
+    assert "context" in response.command_response.response.lower()
     
     # Check that the context was actually reset
     assert workflow.current_command_context is workflow.root_command_context 

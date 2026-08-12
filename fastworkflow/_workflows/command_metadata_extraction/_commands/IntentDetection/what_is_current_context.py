@@ -37,9 +37,8 @@ class ResponseGenerator:  # noqa: D101
             else app_workflow.current_command_context_name
         )
         return fastworkflow.CommandOutput(
-            command_responses=[
+            command_response=
                 fastworkflow.CommandResponse(
                     response = f"Current context is '{current_context}'"
-                )
-            ],
+                ),
         )

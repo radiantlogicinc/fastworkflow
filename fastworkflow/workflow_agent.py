@@ -199,7 +199,7 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
                 error_message = repr(e)[:1000]
             failure_output = fastworkflow.CommandOutput(
                 command_name="",  # unknown at this point (failure pre-empted routing)
-                command_responses=[
+                command_response=
                     fastworkflow.CommandResponse(
                         response=f"Execution error: {e!r}"[:500],
                         success=False,
@@ -208,8 +208,7 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
                             "error_message": error_message,
                             "traceback": traceback.format_exc()[:4000],
                         },
-                    )
-                ],
+                    ),
                 started_at=started,
                 duration_ms=int(
                     (datetime.now(timezone.utc) - started).total_seconds() * 1000
@@ -231,20 +230,23 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     name = command_output.command_name
     params = command_output.command_parameters
 
-    # Handle parameter serialization
-    params_dict = params.model_dump() if params else None
+    # Live path: typed Pydantic instance. After cold-rehydrate of turn outputs,
+    # command_parameters is the dumped dict [A10]. Accept both.
+    if params is None:
+        params_dict = None
+    elif hasattr(params, "model_dump"):
+        params_dict = params.model_dump()
+    elif isinstance(params, dict):
+        params_dict = params
+    else:
+        params_dict = None
 
     # Extract response text
     response_text = ""
-    if command_output.command_responses:
-        response_parts = []
-        response_parts.extend(
-            cmd_response.response
-            for cmd_response in command_output.command_responses
-            if cmd_response.response
-        )
-        response_text = "\n".join(response_parts) \
-            if response_parts else "Command executed successfully but produced no output."
+    if command_output.command_response.response:
+        response_text = command_output.command_response.response
+    else:
+        response_text = "Command executed successfully but produced no output."
 
     if chat_session_obj.command_trace_queue is not None:
         chat_session_obj.command_trace_queue.put(fastworkflow.CommandTraceEvent(
@@ -414,7 +416,7 @@ def _ask_user_tool(clarification_request: str, chat_session_obj: fastworkflow.Ch
     active = chat_session_obj.get_active_workflow()
     workflow_name = active.folderpath.split('/')[-1] if active else ""
     command_output = fastworkflow.CommandOutput(
-        command_responses=[fastworkflow.CommandResponse(response=clarification_request)],
+        command_response=fastworkflow.CommandResponse(response=clarification_request),
         workflow_name=workflow_name,
     )
     if output_queue is not None:

@@ -72,33 +72,40 @@ class CommandOutput(BaseModel):
     holds the *agent's question* to the user, and the command response's
     ``response`` holds the *user's answer*. ``success=False`` on an ask_user
     entry means the question is still unanswered, not that anything failed.
+
+    ``command_parameters`` honesty [A10]: in memory this is the typed Pydantic
+    params instance (or a ``str`` question for ask_user). Record serialization
+    emits ``model_dump()`` as a dict; restore therefore accepts ``dict`` as
+    well. Declared as ``Any`` so dump→validate round-trips do not lie as ``str``.
+
+    As of v3.0, each command carries exactly one ``command_response``. Turn-level
+    multiplicity lives on ``TurnOutput.command_outputs`` / ``TurnResult``. Passing
+    the legacy ``command_responses=[...]`` keyword raises ``ValueError``.
     """
 
-    command_responses: list[CommandResponse]
+    command_response: CommandResponse
     workflow_name: str = ""
     context: str = ""
     command_name: str = ""
-    command_parameters: str = ""
+    command_parameters: Any = None  # typed model in memory; dict in records [A10]
     started_at: Optional[datetime] = None
     duration_ms: Optional[int] = None
 
     @model_validator(mode="before")
     @classmethod
-    def _map_singular_command_response(cls, data: Any) -> Any:
-        """Forward-compat shim: accept ``command_response`` (singular).
-
-        v3.0-style code constructs ``CommandOutput(command_response=...)``;
-        in v2.21 we map it onto the existing ``command_responses`` list.
-        """
-        if isinstance(data, dict) and "command_response" in data:
-            value = data.pop("command_response")
-            if "command_responses" not in data:
-                data["command_responses"] = [value]
+    def _reject_legacy_command_responses(cls, data: Any) -> Any:
+        """Reject the pre-v3.0 ``command_responses`` list keyword with a clear error."""
+        if isinstance(data, dict) and "command_responses" in data:
+            raise ValueError(
+                "CommandOutput no longer accepts command_responses=[...]; "
+                "pass command_response=CommandResponse(...) (singular). "
+                "Turn-level multiplicity lives on TurnOutput.command_outputs."
+            )
         return data
 
     @property
     def success(self) -> bool:
-        return all(response.success for response in self.command_responses)
+        return self.command_response.success
 
     @property
     def is_ask_user(self) -> bool:
@@ -113,32 +120,32 @@ class CommandOutput(BaseModel):
     @property
     def user_reply(self) -> Optional[str]:
         """The user's answer to an ask_user question, if any. [A7]"""
-        if self.is_ask_user and self.command_responses:
-            return self.command_responses[0].response
+        if self.is_ask_user:
+            return self.command_response.response
         return None
 
     @property
     def command_aborted(self) -> bool:
-        return any(response.artifacts.get("command_name", None) == "abort" for response in self.command_responses)
+        return self.command_response.artifacts.get("command_name", None) == "abort"
 
     @property
     def command_handled(self) -> bool:
-        return any(response.artifacts.get("command_handled", False) == True for response in self.command_responses)
-    
+        return self.command_response.artifacts.get("command_handled", False) is True
+
     @property
     def not_what_i_meant(self) -> bool:
-        return any(response.artifacts.get("command_name", None) == "misunderstood_intent" for response in self.command_responses)
+        return (
+            self.command_response.artifacts.get("command_name", None)
+            == "misunderstood_intent"
+        )
 
     def to_mcp_result(self) -> MCPToolResult:
         """Convert CommandOutput to MCP-compliant format"""
-        content = []
-        content.extend(
-            MCPContent(type="text", text=response.response)
-            for response in self.command_responses
-        )
         return MCPToolResult(
-            content=content,
-            isError=not self.success
+            content=[
+                MCPContent(type="text", text=self.command_response.response)
+            ],
+            isError=not self.success,
         )
 
 class _Ephemeral:

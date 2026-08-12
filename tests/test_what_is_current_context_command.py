@@ -13,7 +13,7 @@ def get_example_workflow_path():
 
 def test_global_context():
     """Test the response when in the global context."""
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
+    fastworkflow.init({})
     
     # Use the real todo_list workflow directory
     workflow_dir = get_example_workflow_path()
@@ -41,12 +41,12 @@ def test_global_context():
     response = gen(mock_workflow, "what context am I in")
     
     # Check that the response indicates the global context
-    assert "global" in response.command_responses[0].response.lower() or "*" in response.command_responses[0].response
+    assert "global" in response.command_response.response.lower() or "*" in response.command_response.response
 
 
 def test_context_no_properties():
     """Test the response when in a context without get_properties method."""
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
+    fastworkflow.init({})
     
     # Use the real todo_list_workflow directory
     workflow_dir = get_example_workflow_path()
@@ -76,12 +76,12 @@ def test_context_no_properties():
     response = ResponseGenerator()(mock_workflow, "what context am I in")
     
     # Check that the response contains the context name
-    assert "TodoListManager" in response.command_responses[0].response
+    assert "TodoListManager" in response.command_response.response
 
 
 def test_context_with_properties():
     """Test the response when in a context with properties."""
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
+    fastworkflow.init({})
     
     # Use the real todo_list_workflow directory
     workflow_dir = get_example_workflow_path()
@@ -112,4 +112,4 @@ def test_context_with_properties():
     response = ResponseGenerator()(mock_workflow, "what context am I in")
     
     # Check that the response contains the context name
-    assert "TodoList" in response.command_responses[0].response 
+    assert "TodoList" in response.command_response.response 

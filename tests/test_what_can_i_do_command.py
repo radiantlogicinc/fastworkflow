@@ -19,7 +19,7 @@ def get_example_workflow_path():
 
 
 def test_what_can_i_do_global(monkeypatch):
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
+    fastworkflow.init({})
     
     # Use the real todo_list workflow directory
     workflow_dir = get_example_workflow_path()
@@ -52,11 +52,11 @@ def test_what_can_i_do_global(monkeypatch):
     response = generator(mock_workflow, "what can i do")
     
     # Check that the response contains the commands header
-    assert "Commands available" in response.command_responses[0].response
+    assert "Commands available" in response.command_response.response
 
 
 def test_what_can_i_do_context(monkeypatch):
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
+    fastworkflow.init({})
     
     # Use the real todo_list workflow directory
     workflow_dir = get_example_workflow_path()
@@ -94,7 +94,7 @@ def test_what_can_i_do_context(monkeypatch):
     response = generator(mock_workflow, "what can i do")
     
     # Check that the response contains commands header (context name may not be displayed)
-    assert "Commands available" in response.command_responses[0].response
+    assert "Commands available" in response.command_response.response
     
     # Test reset_context functionality
     reset_gen = ResetGen()
@@ -102,7 +102,7 @@ def test_what_can_i_do_context(monkeypatch):
     
     # After reset, verify the commands header is still present (context name may not be displayed)
     resp2 = generator(mock_workflow, "what can i do")
-    assert "Commands available" in resp2.command_responses[0].response
+    assert "Commands available" in resp2.command_response.response
 
     # Mock the RoutingRegistry.get_definition method
     mock_utterance_def = MagicMock()

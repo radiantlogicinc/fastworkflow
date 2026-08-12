@@ -26,7 +26,12 @@ PENDING_STATE_KEY = "pending"
 # parameters. A v1 blob is refused rather than migrated -- it is a suspended
 # turn at most minutes old, and the fields it lacks are the ones that made
 # restoring it wrong.
-SCHEMA_VERSION = 2
+# 3: the 3.0.0 storage break. Persistent state moved from the CWD-relative
+# SPEEDDICT_FOLDERNAME tree to FASTWORKFLOW_STATE_ROOT/workflows/<id>/, so any
+# pre-3.0 pending blob is both at an abandoned path and, by policy, refused
+# rather than migrated. The bump makes the refusal explicit even if an old blob
+# is somehow presented to a 3.0 build.
+SCHEMA_VERSION = 3
 
 
 class IncompatibleSessionState(Exception):
@@ -533,7 +538,9 @@ def get_session_state_store(
     """
     Factory: SESSION_STATE_STORE=disk|redis (default disk).
 
-    For disk, uses base_folder or SPEEDDICT_FOLDERNAME/channel_session_state.
+    For disk, uses base_folder when given; callers with a workflow in scope pass
+    a workflow-namespaced folder (see fastworkflow.state_paths). When omitted it
+    falls back to a non-namespaced folder under the state root.
     For redis, uses SESSION_STATE_REDIS_URL or REDIS_URL.
     """
     backend = str(
@@ -552,8 +559,8 @@ def get_session_state_store(
         return RedisSessionStateStore(url)
 
     if base_folder is None:
-        speedict = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
-        base_folder = os.path.join(speedict, "channel_session_state")
+        from fastworkflow import state_paths
+        base_folder = os.path.join(state_paths.state_root(), "channel_session_state")
     os.makedirs(base_folder, exist_ok=True)
     logger.debug(f"Using DiskSessionStateStore at {base_folder}")
     return DiskSessionStateStore(base_folder)

@@ -31,7 +31,8 @@ Legend: `[ ]` not yet demonstrated · `[~]` partial · `[x]` mastered
 - [ ] 2.6 Suspend/resume capture: same turn key, ordering, `suspended_ms`, the two-topology double-append avoidance
 - [ ] 2.7 Failure capture in `_execute_workflow_query` (capture-then-reraise, never mask; `CommandCancelledError` passthrough)
 - [ ] 2.8 `exhausted` flow from ReAct → agent_result → `failure_reason="max_iters_exhausted"`, `success=False`, status still COMPLETED
-- [x] 2.9 Forward-compat shim: `command_response=` (singular) → `command_responses` list; build generators emit new style.
+- [x] 2.9 Forward-compat shim (v2.21): `command_response=` (singular) → `command_responses` list; build generators emit new style.
+- [x] 2.9b v3.0 collapse (fix-i0e): `CommandOutput.command_response` is canonical; legacy `command_responses=` rejected (no shim); FastAPI top-level `command_responses` removed.
       Reviewer independently re-derived the v3.0 collapse and connected it to why process_message must be deprecated.
 - [ ] 2.10 Eager artifact validation (warn-only in v2.21) and the `gallery` property
 

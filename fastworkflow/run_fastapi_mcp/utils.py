@@ -138,7 +138,7 @@ class InitializeResponse(BaseModel):
 
     ``startup_output`` is the startup turn's ``TurnOutput`` — the same public
     projection every other turn endpoint returns. Each command's own
-    ``command_responses``/``artifacts`` are still reachable under
+    ``command_response``/``artifacts`` are still reachable under
     ``startup_output.command_outputs``.
     """
     access_token: str
@@ -227,7 +227,7 @@ class CancelPendingRequest(BaseModel):
 
 # class CommandOutputWithTraces(BaseModel):
 #     """CommandOutput extended with optional traces for HTTP responses"""
-#     command_responses: list[dict[str, Any]]
+#     command_response: dict[str, Any]
 #     workflow_name: str = ""
 #     context: str = ""
 #     command_name: str = ""
@@ -495,7 +495,7 @@ async def _create_user_runtime(
     context = _merge_workflow_context(context, http_bearer_token)
     logger.info(f"Creating new Topology-B session for channel_id: {channel_id}")
 
-    conv_base_folder = get_channelconversations_dir()
+    conv_base_folder = get_channelconversations_dir(workflow_path)
     conversation_store = ConversationStore(channel_id, conv_base_folder)
 
     ctx = WorkflowExecutionContext(run_as_agent=True, session_key=channel_id)
@@ -601,23 +601,16 @@ async def _create_user_runtime(
     logger.info(f"Successfully created session for channel_id: {channel_id}")
 
 
-def get_channel_session_state_dir() -> str:
-    """SPEEDDICT_FOLDERNAME/channel_session_state for suspended Topology-B blobs."""
-    speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
-    session_state_dir = os.path.join(speedict_foldername, "channel_session_state")
-    os.makedirs(session_state_dir, exist_ok=True)
-    return session_state_dir
+def get_channel_session_state_dir(workflow_path: str) -> str:
+    """Workflow-namespaced folder for suspended Topology-B blobs (created)."""
+    from fastworkflow import state_paths
+    return state_paths.session_state_dir(workflow_path)
 
 
-def get_channelconversations_dir() -> str:
-    """
-    Return SPEEDDICT_FOLDERNAME/channel_conversations, creating the directory if missing.
-    fastworkflow is injected to avoid circular imports and to access get_env_var.
-    """
-    speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
-    user_conversations_dir = os.path.join(speedict_foldername, "channel_conversations")
-    os.makedirs(user_conversations_dir, exist_ok=True)
-    return user_conversations_dir
+def get_channelconversations_dir(workflow_path: str) -> str:
+    """Workflow-namespaced folder for per-channel conversation DBs (created)."""
+    from fastworkflow import state_paths
+    return state_paths.conversations_dir(workflow_path)
 
 
 def _is_awaiting_user_output(output: Optional[fastworkflow.TurnOutput]) -> bool:
@@ -669,9 +662,8 @@ async def run_process_turn(
     ctx = runtime.execution_context
 
     def _run() -> fastworkflow.TurnOutput:
-        # process_turn(), never the deprecated process_message(): same dispatch,
-        # no DeprecationWarning, and it returns the public TurnOutput the whole
-        # transport edge now speaks.
+        # process_turn() is the public execution API: it returns the TurnOutput
+        # the whole transport edge speaks (and captures the full turn).
         return ctx.process_turn(message)
 
     try:
@@ -949,8 +941,12 @@ class ChannelSessionManager:
         self._lock = asyncio.Lock()
         self._max_live_sessions = max_live_sessions
         self._max_live_sessions_source = "constructor"
-        # Built lazily on first access so the SPEEDDICT_FOLDERNAME read happens
-        # after fastworkflow.init() loads the env file, not at module-import time.
+        # A FastAPI process serves exactly one workflow; this is set at server
+        # startup (before any store access) so the lazily-built stores below can
+        # namespace their paths under that workflow. See set_workflow_path.
+        self.workflow_path: str = ""
+        # Built lazily on first access so the state-root read happens after
+        # fastworkflow.init() loads the env file, not at module-import time.
         self._session_state_store = session_state_store
         # Per-channel creation guard for single-flight session creation: two
         # concurrent cold requests for the same channel must not both build a
@@ -1141,17 +1137,17 @@ class ChannelSessionManager:
     def session_state_store(self) -> SessionStateStore:
         if self._session_state_store is None:
             self._session_state_store = get_session_state_store(
-                base_folder=get_channel_session_state_dir()
+                base_folder=get_channel_session_state_dir(self.workflow_path)
             )
         return self._session_state_store
 
     @property
     def checkpoint_store(self) -> ChannelCheckpointStore:
-        # Built lazily for the same reason as the state store: the
-        # SPEEDDICT_FOLDERNAME read must happen after fastworkflow.init().
+        # Built lazily for the same reason as the state store: the state-root
+        # read must happen after fastworkflow.init().
         if self._checkpoint_store is None:
             self._checkpoint_store = ChannelCheckpointStore(
-                checkpoint.get_checkpoint_dir(),
+                checkpoint.get_checkpoint_dir(self.workflow_path),
                 min_readable_protocol_version=checkpoint.fleet_protocol_floor(),
             )
         return self._checkpoint_store

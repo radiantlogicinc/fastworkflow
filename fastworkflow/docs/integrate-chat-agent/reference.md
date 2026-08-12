@@ -117,20 +117,20 @@ Execute a specific command directly, bypassing intent + parameter extraction.
 - `POST /admin/dump_all_conversations` `{ "output_folder": "…" }` → dumps all conversations to JSONL.
 - `POST /admin/generate_mcp_token` `{ "channel_id":"…", "user_id":"…", "expires_days":365 }` → long-lived token for MCP clients.
 
-## CommandOutput shape (the `output` event / final answer)
+## CommandOutput shape (inside `command_outputs[*]` on a turn response)
 
 ```json
 {
-  "command_responses": [
+  "command_response":
     { "response": "Your order W123 was cancelled.",
-      "success": true, "artifacts": {}, "next_actions": [], "recommendations": [] }
-  ],
+      "success": true, "artifacts": {}, "next_actions": [], "recommendations": [] },
   "workflow_name": "", "context": "", "command_name": "", "command_parameters": ""
 }
 ```
-Render `command_responses[*].response` as the assistant's final message(s). When `command_name` is
-`"ask_user"`, roles invert: `command_parameters` holds the agent's question and the response holds
-the user's answer; `success=false` means the question is still open.
+Prefer the turn's top-level `answer` for the assistant's final message. Per-command
+text and artifacts live at `command_outputs[*].command_response`. When `command_name`
+is `"ask_user"`, roles invert: `command_parameters` holds the agent's question and
+the response holds the user's answer; `success=false` means the question is still open.
 
 ## Workflow file formats
 
@@ -163,7 +163,7 @@ class ResponseGenerator:
         # call the app's real business logic here
         result = <callable_or_class>(...)
         return fastworkflow.CommandOutput(
-            command_responses=[fastworkflow.CommandResponse(response=str(result))],
+            command_response=fastworkflow.CommandResponse(response=str(result)),
         )
 ```
 - Use `default="NOT_FOUND"` for parameters so missing values are detected, not hallucinated.

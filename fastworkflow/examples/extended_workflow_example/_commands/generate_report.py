@@ -39,9 +39,8 @@ class ResponseGenerator:
         }
         
         return CommandOutput(
-            command_responses=[
+            command_response=
                 CommandResponse(response=str(response))
-            ]
         )
     
     def _count_workitems(self, workitem) -> int:

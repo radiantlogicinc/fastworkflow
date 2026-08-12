@@ -38,7 +38,7 @@ class FastWorkflowMCPServer:
         self.chat_session = chat_session
 
     def _active_workflow(self) -> fastworkflow.Workflow:
-        """Contextvar stack top, or the bound app workflow when outside process_message."""
+        """Contextvar stack top, or the bound app workflow when outside a turn."""
         workflow = get_active_workflow()
         if workflow is not None:
             return workflow

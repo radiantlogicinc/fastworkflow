@@ -115,7 +115,8 @@
     - NDJSON: `{ "type": "trace", "data": <trace_json> }` (multiple), then `{ "type": "output", "data": <TurnOutput_json> }` (final)
     - SSE: `event: trace` (multiple) and final `event: output` with JSON payloads
   - Only the final output record is streamed if no traces were produced.
-  - The terminal `output` event carries the bare `TurnOutput` (§6a) — no `exec_state`, no back-compatible `command_responses`, since a stream has no deferral state to report.
+  - The terminal `output` event carries the bare `TurnOutput` (§6a) — no
+    `exec_state` (a stream has no deferral state to report).
   - A turn that fails, or that suspends to ask the user something, still arrives as an `output` event (with `status` `failed`/`awaiting_user`). The `error` event is reserved for transport failures.
 - Response: HTTP 200 with `Content-Type: application/x-ndjson` (NDJSON) or `text/event-stream` (SSE).
 - Errors:
@@ -157,11 +158,11 @@ returned the public `TurnOutput` and others returned the older `CommandOutput`,
 forcing integrators to handle both. See
 `docs/turn_result_design_final.md` sections 1a, 8 and 14.
 
-**Breaking wire change, no back-compat for the CommandOutput-shaped top level.**
-Made deliberately before v3.0 (spec section 1a). The keys that moved are
-`workflow_name`, `context`, `command_name`, `command_parameters` and
-`command_responses`: they are still there, but per command, inside each entry of
-`command_outputs`.
+**Breaking wire change (v3.0):** the CommandOutput-shaped top level is gone, and
+inside each `command_outputs` entry the field is now singular
+`command_response` (not `command_responses`). The keys that moved off the top
+level are `workflow_name`, `context`, `command_name`, `command_parameters` and
+the response payload — they live per command under `command_outputs[*]`.
 
 The public projection (`fastworkflow/turn.py`, `TurnOutput`):
 
@@ -179,14 +180,18 @@ The public projection (`fastworkflow/turn.py`, `TurnOutput`):
 - `status` (`TurnStatus`): `completed` | `awaiting_user` | `failed` | `cancelled` | `abandoned`.
 - `failure_reason`: elaboration of a failure status (e.g. `max_iters_exhausted`), else `null`.
 - `answer`: the turn's final answer text — the agent's synthesized answer, or the deterministic command's response text. When `status` is `awaiting_user`, this is the clarification question.
-- `command_outputs`: per-command provenance, each with its own `success`, `artifacts` and timing.
+- `command_outputs`: per-command provenance; each entry has a singular `command_response` with `response` / `success` / `artifacts` / timing.
 - `success`: a computed field, `all(command_outputs succeeded)`. Deliberately **orthogonal** to `status` — the agent phrases its answer as if it succeeded, so this is the framework's signal that some command returned a failure code even when the agent recovered from it or masked it in prose.
 
-The non-streaming endpoints add three keys to that projection:
+The non-streaming endpoints add two keys to that projection:
 
 - `exec_state`: the transport's own lifecycle (`running` | `done`), not the turn's outcome. A deferred turn returns `202 {turn_key, exec_state: "running"}` and nothing else; retrying the same request rejoins the same execution.
-- `command_responses`: retained for backward compatibility. For `invoke_agent` it is the synthesized final answer; for the assistant and action surfaces it is the last command's responses, artifacts preserved.
 - `traces`: present when trace events were collected.
+
+**Migration (v3.0):** clients that previously read top-level `command_responses`
+or nested `command_outputs[i].command_responses[0]` must switch to `answer`
+and/or `command_outputs[i].command_response`. The Python constructor accepts
+only `command_response=...` — `command_responses=[...]` is rejected.
 
 ##### Two `turn_key` meanings (deliberately distinct)
 
@@ -332,7 +337,7 @@ class CommandOutput(BaseModel):
     context: str | None = None
     command_name: str | None = None
     command_parameters: dict[str, Any] | None = None
-    command_responses: list[CommandResponse]
+    command_response: CommandResponse
     traces: list[dict[str, Any]] | None = None
 
 class TurnOutput(BaseModel):

@@ -10,7 +10,7 @@ from fastworkflow.active_workflow import (
 
 
 def test_push_pop_nesting():
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
+    fastworkflow.init({})
 
     parent = fastworkflow.Workflow.create(
         fastworkflow.get_internal_workflow_path("command_metadata_extraction"),

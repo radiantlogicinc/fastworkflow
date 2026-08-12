@@ -49,6 +49,27 @@ def test_store_and_match_via_blob_rows(tmp_path: Path, monkeypatch):
         assert kv.get("cache") is None
 
 
+def test_cache_match_skips_embedding_when_cache_is_empty(tmp_path: Path, monkeypatch):
+    """Empty cache must return None without touching the model pipeline.
+
+    Regression for 5eea8f9: the streaming refactor moved the empty check after
+    get_embedding(), so every cold utterance paid a DistilBERT pass for nothing
+    and stubs that only implement CommandRouter.predict blew up.
+    """
+    path = str(tmp_path / "cache_empty.sqlite3")
+    # Opening the store creates the empty table; nothing is upserted.
+    with UtteranceCacheStore(path) as store:
+        assert not store.has_entries()
+
+    def boom_get_embedding(text, model_pipeline):
+        raise AssertionError("get_embedding must not run on an empty cache")
+
+    monkeypatch.setattr(
+        "fastworkflow.cache_matching.get_embedding", boom_get_embedding
+    )
+    assert cache_match(path, "query", _FakePipeline(), threshold=0.5) is None
+
+
 def test_cache_match_skips_none_and_empty_embeddings(tmp_path: Path, monkeypatch):
     path = str(tmp_path / "cache_skip.sqlite3")
     with UtteranceCacheStore(path) as store:

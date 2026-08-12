@@ -66,7 +66,7 @@ def env_files():
 
 @pytest.fixture
 def isolated_env_file(env_files, tmp_path) -> str:
-    """A copy of the real env file whose SPEEDDICT_FOLDERNAME is private.
+    """A copy of the real env file whose FASTWORKFLOW_STATE_ROOT is private.
 
     The override has to live in the *file*, not in `os.environ` and not in a
     later `fastworkflow.init()` call: the lifespan re-runs `init()` from
@@ -79,9 +79,9 @@ def isolated_env_file(env_files, tmp_path) -> str:
     kept = [
         line
         for line in Path(env_file).read_text().splitlines()
-        if not line.strip().startswith("SPEEDDICT_FOLDERNAME=")
+        if not line.strip().startswith("FASTWORKFLOW_STATE_ROOT=")
     ]
-    kept.append(f"SPEEDDICT_FOLDERNAME={tmp_path / 'speedict'}")
+    kept.append(f"FASTWORKFLOW_STATE_ROOT={tmp_path / 'workflow_contexts'}")
     isolated = tmp_path / "fastworkflow.env"
     isolated.write_text("\n".join(kept) + "\n")
     return str(isolated)

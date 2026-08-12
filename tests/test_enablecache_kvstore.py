@@ -15,10 +15,7 @@ class _Host:
         self._folderpath = folderpath
 
     def get_cachedb_folderpath(self, function_name: str) -> str:
-        speedict_foldername = fastworkflow.get_env_var("SPEEDDICT_FOLDERNAME")
-        return str(
-            Path(self._folderpath) / speedict_foldername / f"function_cache/{function_name}"
-        )
+        return str(Path(self._folderpath) / "function_cache" / function_name)
 
     @enablecache
     def add(self, a: int, b: int) -> int:
@@ -29,17 +26,15 @@ class _Host:
         return object()
 
 
-def test_enablecache_round_trip(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("SPEEDDICT_FOLDERNAME", "___workflow_contexts")
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
+def test_enablecache_round_trip(tmp_path: Path):
+    fastworkflow.init({})
     host = _Host(str(tmp_path))
     assert host.add(1, 2) == 3
     assert host.add(1, 2) == 3  # cache hit
 
 
-def test_enablecache_rejects_non_json(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("SPEEDDICT_FOLDERNAME", "___workflow_contexts")
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
+def test_enablecache_rejects_non_json(tmp_path: Path):
+    fastworkflow.init({})
     host = _Host(str(tmp_path))
     with pytest.raises(TypeError, match="JSON-serialisable"):
         host.bad()

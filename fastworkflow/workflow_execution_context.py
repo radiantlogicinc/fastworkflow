@@ -2,13 +2,13 @@
 Transport-free, synchronous workflow execution core.
 
 Embedders (e.g. FastAPI) should use one WorkflowExecutionContext per session:
-bind_app_workflow once, call process_message per request in a worker thread or
+bind_app_workflow once, call process_turn per request in a worker thread or
 asyncio task (ContextVar isolates active workflow per thread/task), and close()
 on session end.
 
 Topology B (no user_message_queue): ask_user is non-blocking — it suspends the
-ReAct trajectory in memory and process_message returns an awaiting_user
-CommandOutput; the next process_message(answer) resumes it. A suspended turn
+ReAct trajectory in memory and the turn returns an awaiting_user
+CommandOutput; the next process_turn(answer) resumes it. A suspended turn
 never hangs, so there is no timeout; embedders abandon an unanswered
 clarification with cancel_pending() per their own session lifecycle.
 
@@ -23,7 +23,6 @@ import json
 import os
 import time
 import uuid
-import warnings
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from queue import Queue
@@ -48,7 +47,7 @@ class CommandCancelledError(BaseException):
     ask_user is reached with no user_message_queue).
 
     Subclasses BaseException so fastWorkflowReAct's ``except Exception`` does not
-    swallow it; process_message converts it to a failed CommandOutput.
+    swallow it; _execute_message converts it to a failed CommandOutput.
     """
 
 
@@ -222,9 +221,8 @@ class WorkflowExecutionContext:
         entry = fastworkflow.CommandOutput(
             command_name="ask_user",
             command_parameters=question,
-            command_responses=[
-                fastworkflow.CommandResponse(response="", success=False)
-            ],
+            command_response=
+                fastworkflow.CommandResponse(response="", success=False),
             started_at=datetime.now(timezone.utc),
         )
         self.append_turn_output(entry)
@@ -239,11 +237,10 @@ class WorkflowExecutionContext:
         for entry in reversed(self._turn_outputs):
             if (
                 entry.command_name == "ask_user"
-                and entry.command_responses
-                and entry.command_responses[0].success is False
+                and entry.command_response.success is False
             ):
-                entry.command_responses[0].response = answer
-                entry.command_responses[0].success = True
+                entry.command_response.response = answer
+                entry.command_response.success = True
                 if entry.started_at is not None:
                     entry.duration_ms = int(
                         (datetime.now(timezone.utc) - entry.started_at).total_seconds()
@@ -262,8 +259,7 @@ class WorkflowExecutionContext:
         already_appended = (
             last is not None
             and last.command_name == "ask_user"
-            and last.command_responses
-            and last.command_responses[0].success is False
+            and last.command_response.success is False
             and last.command_parameters == clarification
         )
         if not already_appended:
@@ -346,7 +342,7 @@ class WorkflowExecutionContext:
 
     @property
     def awaiting_user(self) -> bool:
-        """True when the agent suspended on ask_user and awaits the next process_message."""
+        """True when the agent suspended on ask_user and awaits the next process_turn."""
         return self._awaiting_user
 
     def _serialize_turn_accumulator(self) -> Optional[dict[str, Any]]:
@@ -757,27 +753,12 @@ class WorkflowExecutionContext:
     # Public execution API
     # ------------------------------------------------------------------
 
-    def process_message(self, message: str) -> fastworkflow.CommandOutput:
-        """
-        Execute one user message synchronously (deprecated; use process_turn()).
-
-        Pushes app_workflow onto the contextvar stack for the duration of the
-        call so CommandExecutor and agent tools resolve the correct workflow.
-        """
-        warnings.warn(
-            "WorkflowExecutionContext.process_message() is deprecated; "
-            "use process_turn() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self._execute_message(message)
-
     def process_turn(self, message: str) -> "fastworkflow.TurnOutput":
         """
         Execute one user message synchronously and return the public TurnOutput.
 
-        Same dispatch as process_message(); additionally captures every command
-        execution of the logical turn (including ask_user exchanges) [A22]. The
+        Shares dispatch with _execute_message(); additionally captures every
+        command execution of the logical turn (including ask_user exchanges) [A22]. The
         full internal TurnResult is built and projected onto the slim public
         TurnOutput (see docs/turn_result_design_final.md section 1a).
         """
@@ -786,10 +767,10 @@ class WorkflowExecutionContext:
         return turn_result.turn_output
 
     def _execute_message(self, message: str) -> fastworkflow.CommandOutput:
-        """Shared message dispatch for process_message()/process_turn()."""
+        """Shared message dispatch for _execute_message()/process_turn()."""
         if self._app_workflow is None:
             raise RuntimeError(
-                "No app workflow bound; call bind_app_workflow() before process_message()"
+                "No app workflow bound; call bind_app_workflow() before executing a message"
             )
 
         if not self._awaiting_user:
@@ -821,10 +802,7 @@ class WorkflowExecutionContext:
         deterministic command's response text). Per-command structured results
         (success/artifacts) live on ``command_outputs``.
         """
-        if command_output.command_responses:
-            answer = command_output.command_responses[0].response
-        else:  # defensive; CommandOutput always carries at least one response
-            answer = ""
+        answer = command_output.command_response.response if command_output else ""
 
         failure_reason: Optional[str] = None
         if self._awaiting_user:
@@ -845,7 +823,7 @@ class WorkflowExecutionContext:
                 # output's first response text [A33]. A command-level failure is
                 # surfaced by TurnOutput.success (all command_outputs succeeded),
                 # not by status/failure_reason.
-                answer = self._turn_outputs[-1].command_responses[0].response
+                answer = self._turn_outputs[-1].command_response.response
 
         turn_output = fastworkflow.TurnOutput(
             turn_key=self._turn_key or mint_turn_key(),
@@ -929,7 +907,7 @@ class WorkflowExecutionContext:
             success=False,
         )
         command_output = fastworkflow.CommandOutput(
-            command_responses=[command_response]
+            command_response=command_response
         )
         if self._app_workflow:
             command_output.workflow_name = self._app_workflow.folderpath.split("/")[-1]
@@ -1069,7 +1047,7 @@ class WorkflowExecutionContext:
         command_response = fastworkflow.CommandResponse(response=clarification)
         command_response.artifacts["awaiting_user"] = True
         command_output = fastworkflow.CommandOutput(
-            command_responses=[command_response]
+            command_response=command_response
         )
         if self._app_workflow:
             command_output.workflow_name = self._app_workflow.folderpath.split("/")[-1]
@@ -1108,7 +1086,7 @@ class WorkflowExecutionContext:
             )
 
         command_output = fastworkflow.CommandOutput(
-            command_responses=[command_response]
+            command_response=command_response
         )
         if self._app_workflow:
             command_output.workflow_name = self._app_workflow.folderpath.split("/")[-1]
@@ -1201,9 +1179,7 @@ class WorkflowExecutionContext:
         )
         self.append_turn_output(command_output)
 
-        response_text = ""
-        if command_output.command_responses:
-            response_text = command_output.command_responses[0].response or ""
+        response_text = command_output.command_response.response or ""
 
         params = command_output.command_parameters or {}
         if hasattr(params, "model_dump"):
@@ -1275,9 +1251,7 @@ class WorkflowExecutionContext:
         )
         self.append_turn_output(command_output)
 
-        response_text = ""
-        if command_output.command_responses:
-            response_text = command_output.command_responses[0].response or ""
+        response_text = command_output.command_response.response or ""
 
         if self._command_trace_queue is not None:
             self._command_trace_queue.put(

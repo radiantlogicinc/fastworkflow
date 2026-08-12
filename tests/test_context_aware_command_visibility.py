@@ -36,7 +36,6 @@ def todo_list_env():
     RoutingRegistry.clear_registry()
     fastworkflow.init(
         {
-            "SPEEDDICT_FOLDERNAME": "___workflow_contexts",
             "NOT_FOUND": "NOT_FOUND",
         }
     )

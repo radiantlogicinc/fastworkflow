@@ -98,7 +98,6 @@ class ResponseGenerator:
         response = f'Enhanced Response: {response_data}'
         
         return CommandOutput(
-            command_responses=[
+            command_response=
                 CommandResponse(response=response)
-            ]
         )

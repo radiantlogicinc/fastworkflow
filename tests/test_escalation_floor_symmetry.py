@@ -114,7 +114,7 @@ class Signature:
 @pytest.fixture(scope="module", autouse=True)
 def initialized_fastworkflow():
     """Real init; `Workflow.create` needs the context store configured."""
-    fastworkflow.init({"SPEEDDICT_FOLDERNAME": "___workflow_contexts"})
+    fastworkflow.init({})
     yield
     RoutingRegistry.clear_registry()
 

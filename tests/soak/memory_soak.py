@@ -200,7 +200,7 @@ def resolve_paths() -> Paths:
     for label, path in (("env", env_file), ("passwords", passwords_file)):
         if not os.path.isfile(path):
             raise SoakError(
-                f"{label} file missing at {path}. The server reads SPEEDDICT_FOLDERNAME "
+                f"{label} file missing at {path}. The server reads FASTWORKFLOW_STATE_ROOT "
                 f"and model/API settings from these; see fastworkflow/examples/fastworkflow.env."
             )
 
@@ -533,7 +533,7 @@ class ServerProcess:
         self.max_live_sessions_source: Optional[str] = None
         self.port = _free_port()
         self.tmpdir = tempfile.mkdtemp(prefix="fw_memory_soak_")
-        self.speeddict_dir = os.path.join(self.tmpdir, "speeddict")
+        self.context_dir = os.path.join(self.tmpdir, "workflow_contexts")
         self.env_file = os.path.join(self.tmpdir, "env")
         self.log_path = os.path.join(self.tmpdir, "server.log")
         self.proc: Optional[subprocess.Popen] = None
@@ -546,19 +546,18 @@ class ServerProcess:
     def _write_env_override(self) -> None:
         """Redirect every durable store into the temp dir.
 
-        SPEEDDICT_FOLDERNAME is read from the env FILE, and fastworkflow.get_env_var
+        FASTWORKFLOW_STATE_ROOT is read from the env FILE, and fastworkflow.get_env_var
         prefers the file over os.environ, so exporting the variable would be
-        silently ignored. The default value is the *relative* ``___workflow_contexts``,
-        which would otherwise land RocksDB directories inside the repo's workflow
-        fixtures and mix soak data into the committed test artifacts.
+        silently ignored. The default is ``~/.local/state/fastworkflow``, which
+        would otherwise mix soak data into the developer's real state tree.
         """
-        os.makedirs(self.speeddict_dir, exist_ok=True)
+        os.makedirs(self.context_dir, exist_ok=True)
         with open(self.paths.env_file, encoding="utf-8") as handle:
             lines = [
                 line for line in handle.read().splitlines()
-                if not line.strip().startswith("SPEEDDICT_FOLDERNAME=")
+                if not line.strip().startswith("FASTWORKFLOW_STATE_ROOT=")
             ]
-        lines.append(f"SPEEDDICT_FOLDERNAME={self.speeddict_dir}")
+        lines.append(f"FASTWORKFLOW_STATE_ROOT={self.context_dir}")
         with open(self.env_file, "w", encoding="utf-8") as handle:
             handle.write("\n".join(lines) + "\n")
 
@@ -807,7 +806,7 @@ class ServerProcess:
         actually occupies); apparent uses st_size (exactly reproducible, hence
         assertable).
         """
-        base = os.path.join(self.speeddict_dir, "channel_checkpoints")
+        base = self.workflow_state_subdir("checkpoints")
         files = apparent = physical = channels = generations = 0
 
         # The unit of measurement is one directory per record, matching
@@ -854,9 +853,24 @@ class ServerProcess:
             + _entries(os.path.join(base, "__reclaim__"), depth=3)
         )
 
+    def workflow_state_subdir(self, leaf: str) -> str:
+        """Path to one of this workflow's state subtrees under the state root.
+
+        State is namespaced at <state-root>/workflows/<id>/<leaf>; a soak server
+        drives exactly one workflow, so return that single namespace (or a
+        non-existent placeholder before anything has been written).
+        """
+        workflows_root = os.path.join(self.context_dir, "workflows")
+        if os.path.isdir(workflows_root):
+            for name in sorted(os.listdir(workflows_root)):
+                candidate = os.path.join(workflows_root, name, leaf)
+                if os.path.isdir(os.path.join(workflows_root, name)):
+                    return candidate
+        return os.path.join(workflows_root, "_pending_", leaf)
+
     def durable_store_metrics(self) -> dict[str, Any]:
         """Record count and physical bytes of the durable conversation store."""
-        conversations_dir = os.path.join(self.speeddict_dir, "channel_conversations")
+        conversations_dir = self.workflow_state_subdir("conversations")
         records = 0
         if os.path.isdir(conversations_dir):
             records = sum(
@@ -865,7 +879,7 @@ class ServerProcess:
         return {
             "records": records,
             "conversation_bytes": _dir_bytes(conversations_dir),
-            "speeddict_bytes": _dir_bytes(self.speeddict_dir),
+            "context_bytes": _dir_bytes(self.context_dir),
         }
 
     def stop(self) -> None:
@@ -1114,7 +1128,7 @@ class Probe:
     # Durable-store figures are read from the filesystem, so they exist for both trees.
     durable_records: int
     durable_conversation_bytes: int
-    durable_speeddict_bytes: int
+    durable_context_bytes: int
     # §16.5's durable-storage plateau gate reads these. Physical is the gated
     # number; apparent is carried alongside because it is exactly reproducible.
     checkpoint_bytes_physical: int
@@ -1259,7 +1273,7 @@ def read_probe(client: Client, server: ServerProcess, index: int,
         conversation_bytes=memory["conversations"]["approx_bytes"] if memory else None,
         durable_records=durable["records"],
         durable_conversation_bytes=durable["conversation_bytes"],
-        durable_speeddict_bytes=durable["speeddict_bytes"],
+        durable_context_bytes=durable["context_bytes"],
         checkpoint_bytes_physical=checkpoints["total_bytes_physical"],
         checkpoint_bytes_apparent=checkpoints["total_bytes_apparent"],
         checkpoint_channels=checkpoints["channels"],
@@ -1835,7 +1849,7 @@ def run_replicate(paths: Paths, fixture: Fixture, args, replicate_index: int) ->
                 # the one the samples above were read from.
                 result.checkpoint_accounting = verify_checkpoint_accounting(
                     paths, server.server_tree,
-                    os.path.join(server.speeddict_dir, "channel_checkpoints"),
+                    server.workflow_state_subdir("checkpoints"),
                 )
                 result.checkpoint_accounting["walk"] = server.checkpoint_metrics()
             return result
@@ -2573,7 +2587,7 @@ def analyze_durable_plateau(args, replicates: list[Replicate]) -> dict[str, Any]
     # Disk, not memory, is what actually stops a plateau run: the conversation store
     # is append-only and is not what retention reaps, so it keeps every payload.
     observed_durable = max(
-        (p.durable_speeddict_bytes for r in replicates for p in r.probes), default=0)
+        (p.durable_context_bytes for r in replicates for p in r.probes), default=0)
     observed_requests = max((len(r.samples) for r in replicates), default=0)
     projected_gib = (
         observed_durable / observed_requests * required_requests / (1024 ** 3)
@@ -2652,7 +2666,7 @@ def print_durable_plateau(analysis: dict[str, Any]) -> None:
               f"requests (to span {REAP_PASSES_FOR_PLATEAU} reap intervals).")
         if projected := analysis.get("projected_durable_gib_at_required_length"):
             print(f"    Budget ~{projected:.1f} GiB of free space under "
-                  f"SPEEDDICT_FOLDERNAME for that run: the conversation store keeps "
+                  f"FASTWORKFLOW_STATE_ROOT for that run: the conversation store keeps "
                   f"every payload and only the checkpoint namespace is reaped.")
     print("  The observed byte growth is deliberately NOT reported as a "
           "bytes-per-1,000-requests")

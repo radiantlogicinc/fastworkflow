@@ -88,7 +88,6 @@ class ResponseGenerator:
             response = f"Removed child work item under '{workitem.get_absolute_path()}'."
         
         return CommandOutput(
-            command_responses=[
+            command_response=
                 CommandResponse(response=response)
-            ]
         )

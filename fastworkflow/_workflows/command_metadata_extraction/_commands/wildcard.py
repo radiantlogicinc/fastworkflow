@@ -45,7 +45,7 @@ class ResponseGenerator:
             workflow_context["command"] = command
             workflow.context = workflow_context
             return CommandOutput(
-                command_responses=[
+                command_response=
                     CommandResponse(
                         response=(
                             f"Ambiguous intent error for command '{command}'\n"
@@ -53,7 +53,6 @@ class ResponseGenerator:
                         ),
                         success=False
                     )
-                ]
             )
         else:
             if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION and \
@@ -83,7 +82,7 @@ class ResponseGenerator:
                 nlu_pipeline_stage == fastworkflow.NLUPipelineStage.INTENT_DETECTION or
                 cnp_output.command_name == 'ErrorCorrection/abort'
             ):
-                command_output.command_responses[0].artifacts["command_handled"] = True     
+                command_output.command_response.artifacts["command_handled"] = True     
                 # Set the additional attributes
                 command_output.command_name = cnp_output.command_name
             return command_output
@@ -120,16 +119,15 @@ class ResponseGenerator:
                             command=command,
                         )
                         command_output = CommandExecutor.perform_action(workflow, startup_action)
-                        command_output.command_responses[0].artifacts["command_handled"] = True
+                        command_output.command_response.artifacts["command_handled"] = True
                         return command_output
 
                     return CommandOutput(
-                        command_responses=[
+                        command_response=
                             CommandResponse(
                                 response=cnp_output.error_msg,
                                 success=False
                             )
-                        ]
                     )
 
             # move to the parameter extraction stage
@@ -152,7 +150,7 @@ class ResponseGenerator:
         if not pe_output.parameters_are_valid:
             return CommandOutput(
                 command_name = command_name,
-                command_responses=[
+                command_response=
                     CommandResponse(
                         response=(
                             f"PARAMETER EXTRACTION ERROR FOR COMMAND '{command_name}'\n"
@@ -160,13 +158,12 @@ class ResponseGenerator:
                         ),
                         success=False
                     )
-                ]
             )
 
         workflow.end_command_processing()
 
         return CommandOutput(
-            command_responses=[
+            command_response=
                 CommandResponse(
                     response="",
                     artifacts={
@@ -175,5 +172,4 @@ class ResponseGenerator:
                         "cmd_parameters": pe_output.cmd_parameters,
                     },
                 )
-            ]
         ) 
