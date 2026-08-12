@@ -73,6 +73,11 @@ class CommandOutput(BaseModel):
     ``response`` holds the *user's answer*. ``success=False`` on an ask_user
     entry means the question is still unanswered, not that anything failed.
 
+    ``command_parameters`` honesty [A10]: in memory this is the typed Pydantic
+    params instance (or a ``str`` question for ask_user). Record serialization
+    emits ``model_dump()`` as a dict; restore therefore accepts ``dict`` as
+    well. Declared as ``Any`` so dump→validate round-trips do not lie as ``str``.
+
     As of v3.0, each command carries exactly one ``command_response``. Turn-level
     multiplicity lives on ``TurnOutput.command_outputs`` / ``TurnResult``. Passing
     the legacy ``command_responses=[...]`` keyword raises ``ValueError``.
@@ -82,7 +87,7 @@ class CommandOutput(BaseModel):
     workflow_name: str = ""
     context: str = ""
     command_name: str = ""
-    command_parameters: str = ""
+    command_parameters: Any = None  # typed model in memory; dict in records [A10]
     started_at: Optional[datetime] = None
     duration_ms: Optional[int] = None
 

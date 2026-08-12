@@ -230,8 +230,16 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     name = command_output.command_name
     params = command_output.command_parameters
 
-    # Handle parameter serialization
-    params_dict = params.model_dump() if params else None
+    # Live path: typed Pydantic instance. After cold-rehydrate of turn outputs,
+    # command_parameters is the dumped dict [A10]. Accept both.
+    if params is None:
+        params_dict = None
+    elif hasattr(params, "model_dump"):
+        params_dict = params.model_dump()
+    elif isinstance(params, dict):
+        params_dict = params
+    else:
+        params_dict = None
 
     # Extract response text
     response_text = ""

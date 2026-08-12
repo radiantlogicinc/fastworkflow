@@ -190,6 +190,49 @@ def test_turn_accumulator_survives_a_round_trip(
     restored.close()
 
 
+def test_turn_output_with_typed_params_survives_cold_rehydrate(
+    initialized_fastworkflow, todo_workflow_path
+):
+    """CommandExecutor assigns a Pydantic params instance to command_parameters.
+
+    The field was long declared ``str`` while the write path stored a model;
+    ``model_dump(mode="json")`` emitted a dict and ``model_validate`` on
+    cold-rehydrate rejected it (fix-fjh / A10 honesty). Typed in-memory,
+    dict-on-wire, and restore must all agree.
+    """
+    channel_id = f"params_{uuid.uuid4().hex[:8]}"
+    ctx = _make_ctx(todo_workflow_path, channel_id)
+    command_name = "TodoListManager/create_todo_list"
+    params_class = _params_class(ctx, command_name)
+    assert params_class is not None
+
+    ctx._begin_turn("create a todo list called groceries")
+    output = fastworkflow.CommandOutput(
+        command_name=command_name,
+        command_response=fastworkflow.CommandResponse(
+            response="created", success=True
+        ),
+        started_at=datetime.now(timezone.utc),
+    )
+    # Mirror CommandExecutor.invoke: assign the typed instance (no re-validate).
+    output.command_parameters = params_class(description="groceries")
+    ctx.append_turn_output(output)
+
+    blob = ctx.serialize_state(channel_id=channel_id)
+    ctx.close()
+
+    assert blob["turn"]["outputs"][0]["command_parameters"] == {
+        "description": "groceries"
+    }
+
+    restored = _make_ctx(todo_workflow_path, channel_id)
+    restored.apply_serialized_state(blob)
+
+    restored_params = restored._turn_outputs[0].command_parameters
+    assert restored_params == {"description": "groceries"}
+    restored.close()
+
+
 def test_ask_user_entry_is_still_completable_after_restore(
     initialized_fastworkflow, todo_workflow_path
 ):
