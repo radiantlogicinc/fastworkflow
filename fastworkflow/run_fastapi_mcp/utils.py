@@ -47,6 +47,12 @@ DEFAULT_MAX_LIVE_SESSIONS = 50
 # it, but an operator does not need a second dial to turn.
 CHECKPOINT_REAP_INTERVAL_SECONDS = 300.0
 
+# How long shutdown waits for in-flight turns before giving up on them. Also not a
+# knob; it is named, and lives here rather than at its one call site in
+# __main__.lifespan, so that the startup check comparing the topic-generation
+# budget against it cannot drift away from the value actually used.
+SHUTDOWN_DRAIN_SECONDS = 30
+
 
 def resolve_max_live_sessions() -> tuple[int, str]:
     """Resolve MAX_LIVE_SESSIONS with the process environment taking precedence.
@@ -515,15 +521,21 @@ async def _create_user_runtime(
 
     conv_id_to_restore = None
     if conv_id_to_restore := conversation_store.get_last_conversation_id():
-        conversation = conversation_store.get_conversation(conv_id_to_restore)
+        conversation = conversation_store.get_conversation_window(
+            conv_id_to_restore, MAX_CONVERSATION_TURNS_IN_MEMORY
+        )
         if not conversation:
             conv_id_to_restore = conv_id_to_restore - 1
-            conversation = conversation_store.get_conversation(conv_id_to_restore)
+            conversation = conversation_store.get_conversation_window(
+                conv_id_to_restore, MAX_CONVERSATION_TURNS_IN_MEMORY
+            )
         if conversation:
             # Restore the same window the running session keeps, not the whole
-            # conversation: the rest stays in the durable record.
+            # conversation: the rest stays in the durable record. The window comes
+            # from the read rather than from slicing a full hydration, so a long
+            # conversation is not resident in full to produce it.
             ctx._conversation_history = restore_history_from_turns(
-                conversation["turns"][-MAX_CONVERSATION_TURNS_IN_MEMORY:]
+                conversation["turns"]
             )
             logger.info(f"Restored conversation {conv_id_to_restore} for user {channel_id}")
         else:
@@ -896,6 +908,25 @@ class ChannelRuntime:
     execution_context: WorkflowExecutionContext
     lock: asyncio.Lock
     conversation_store: ConversationStore
+    # Serializes topic/summary generation for this channel. Deliberately NOT
+    # ``lock``: that one is a busy signal (busy_channel_ids reads
+    # lock.locked()), so holding it across an LLM round trip would put topic
+    # generation back inside the shutdown drain this whole change exists to keep
+    # it out of.
+    #
+    # THE GUARANTEE THIS BUYS, STATED HONESTLY (fix-dzs.6, R9): at most one
+    # topic generation per *writer*, not one per conversation. This is an
+    # asyncio.Lock, so it serializes only coroutines in THIS event loop. Per the
+    # ratified single-writer-per-channel invariant (R27 of the TurnResult review,
+    # docs/turn_result_design_review.md:1272-1285) a channel is expected to be
+    # served by one process at a time; where that expectation is broken - two
+    # pods serving one channel - both can generate a label for the same
+    # conversation. That is bounded waste, not corruption: each writes through
+    # update_conversation_topic_summary, whose self-excluding uniqueness check
+    # (fix-dzs.2) makes a rewrite idempotent, so the loser's title is simply
+    # replaced. Nothing here is a distributed lock and nothing should be built
+    # on it as if it were.
+    label_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     stream_format: str = "ndjson"
     workflow_path: str = ""
     startup_ran: bool = False
@@ -1423,5 +1454,194 @@ def save_last_turn_feedback(runtime: ChannelRuntime, extract_turns_func, logger)
         f"Updated latest durable turn of conversation "
         f"{runtime.active_conversation_id} for channel_id {runtime.channel_id}"
     )
+
+
+# ============================================================================
+# Conversation topic/summary labeling (lazy fill)
+# ============================================================================
+
+# How much a conversation has to grow before its label is regenerated. A
+# conversation is labeled the first time it holds a turn and then each time its
+# durable turn count reaches the next power of this factor - 1, 4, 16, 64, ... -
+# so a long thread costs O(log(turns)) LLM calls rather than one per turn.
+#
+# Why refresh at all: labeling once on the first chat turn and never again gives
+# a 40-turn thread the title of its first exchange, permanently. That is the same
+# error _conversation_turns_for_summary was written to avoid ("topic of the last
+# N turns"), reached from the other end, and it is worse than the shutdown
+# labeling it replaces, which at least saw the whole conversation. Why
+# geometrically rather than on every turn, or on a doubling: a fixed geometric
+# schedule is derivable from the durable turn count alone, so it needs no new
+# field on the stored record and no migration, and each refresh sees
+# proportionally more of the thread than the last one. Unbounded rather than a
+# fixed set of milestones, because any last milestone is a turn count past which
+# the title freezes again.
+CONVERSATION_LABEL_GROWTH_FACTOR = 4
+
+
+def _label_milestones_reached(turn_count: int) -> int:
+    """How many refresh milestones a conversation of this many turns has passed.
+
+    Counting rather than membership-testing is what makes the schedule immune to
+    a save that appends several turns at once (a restored session, or shutdown
+    persisting a backlog): the caller compares the count before and after, so a
+    milestone that was stepped over still fires.
+    """
+    reached = 0
+    milestone = 1
+    while milestone <= turn_count:
+        reached += 1
+        milestone *= CONVERSATION_LABEL_GROWTH_FACTOR
+    return reached
+
+
+def _label_is_due(stored_topic: str, durable_turns: int, turns_appended: int) -> bool:
+    """Should this conversation's topic and summary be (re)generated now?
+
+    ``turns_appended`` is how many turns the trigger just made durable, and is 0
+    for a trigger that appended nothing (activating a conversation).
+
+    A blank topic is "no successful title yet" (fix-dzs.3) and is filled by any
+    trigger, which is what makes the label appear promptly on the first chat turn
+    of a conversation this process has never labeled - including after a bounce,
+    where the durable turn count can sit anywhere.
+
+    THE COST DECISION THAT GOES WITH THAT (fix-dzs.6, R6): because "" also means
+    "generated and failed", a provider that keeps failing is retried on every
+    chat turn rather than only at milestones. That is deliberate. The retry is
+    one attempt per user message, bounded at the LLM client
+    (LLM_CONVERSATION_STORE_TIMEOUT_SECONDS x attempts, fix-dzs.4) and off the
+    turn's critical path, so it is self-limiting in exactly the way fix-dzs.3
+    relies on for every other trigger; and the alternative - waiting for the next
+    milestone - leaves the conversation with no title, which is what makes it
+    unreachable through /activate_conversation's topic lookup. Distinguishing
+    "never generated" from "generation failed" would need a new field on the
+    stored record, which is out of scope here and noted as the limitation on
+    update_conversation_topic_summary.
+    """
+    if durable_turns <= 0:
+        # Nothing recorded to summarize. Generating here would hand the model an
+        # empty list and store whatever it invented.
+        return False
+    if not stored_topic.strip():
+        return True
+    if turns_appended <= 0:
+        # Already labeled, and this trigger added nothing to label. Refreshing
+        # would spend a call to re-describe the same turns.
+        return False
+    return _label_milestones_reached(durable_turns) > _label_milestones_reached(
+        durable_turns - turns_appended
+    )
+
+
+async def ensure_topic_and_summary(
+    runtime: ChannelRuntime,
+    generate: Callable[[list[dict[str, Any]]], tuple[str, str]],
+    *,
+    turns: Optional[list[dict[str, Any]]] = None,
+    force: bool = False,
+    turns_appended: int = 0,
+) -> Optional[tuple[str, str]]:
+    """Label the runtime's active conversation, if it is due. One chokepoint.
+
+    Returns the generated ``(topic, summary)``, or None when nothing was
+    generated - which ``force`` with a non-empty ``turns`` never is, so that
+    caller can unpack the result.
+
+    RAISES whatever ``generate`` raises. Whether a missing label is fatal is the
+    caller's decision - a rotate treats it as fatal, an opportunistic fill does
+    not - and neither can tell the difference if this swallows the error. Callers
+    of the second kind use try_ensure_topic_and_summary below.
+
+    ``generate`` is injected rather than imported, following
+    save_conversation_incremental's ``extract_turns_func``: the topic-generation
+    entry point is the seam every call site's tests substitute, and resolving it
+    from the caller's module keeps that seam where the caller is.
+
+    ``turns`` is what to summarize, defaulting to the whole durable conversation.
+    The durable record, never the in-memory window, because the window would
+    silently produce "topic of the last N turns" (see
+    __main__._conversation_turns_for_summary, which is what the rotate path
+    passes in so it keeps its in-memory fallback for a conversation that has no
+    record yet).
+
+    The generation runs in an executor. DSPy is synchronous, so calling it from
+    here would stall the event loop - every other channel's request included -
+    for the length of an LLM round trip. There is deliberately no
+    asyncio.wait_for around that await: it would bound the wait and not the work,
+    leaving a default-executor thread that CPython then joins for up to
+    asyncio.constants.THREAD_JOIN_TIMEOUT (300 s) at exit. The bound lives at the
+    LLM client, inside generate_topic_and_summary.
+
+    The write goes through update_conversation_topic_summary so this inherits its
+    blank-topic policy (fix-dzs.3): a blank generated topic is not stored as a
+    title, the conversation stays retryable, and the operator gets one WARNING
+    naming it.
+    """
+    conv_id = runtime.active_conversation_id
+    store = runtime.conversation_store
+
+    if not force:
+        if conv_id == 0:
+            # No conversation to label. A reserved-but-unwritten id is the same
+            # case: there is no record, so there is nothing recorded to read.
+            return None
+        if runtime.label_lock.locked():
+            # Decline rather than queue. Whoever holds it is generating for this
+            # same channel, so waiting would either duplicate the call or add an
+            # LLM round trip to this trigger's latency for a label that is about
+            # to be written anyway. Safe to check-then-act: this is a plain read
+            # with no await before the acquire below, so nothing can take the
+            # lock in between (the same reasoning as TurnRegistry.has_active).
+            return None
+
+    async with runtime.label_lock:
+        if not force:
+            stored_topic, durable_turns = store.get_conversation_label_state(conv_id)
+            if not _label_is_due(stored_topic, durable_turns, turns_appended):
+                return None
+
+        if turns is None:
+            turns = store.get_conversation_summaries(conv_id) if conv_id else []
+        if not turns:
+            return None
+
+        loop = asyncio.get_running_loop()
+        topic, summary = await loop.run_in_executor(None, generate, turns)
+
+        if conv_id:
+            store.update_conversation_topic_summary(conv_id, topic, summary)
+        return topic, summary
+
+
+async def try_ensure_topic_and_summary(
+    runtime: ChannelRuntime,
+    generate: Callable[[list[dict[str, Any]]], tuple[str, str]],
+    *,
+    turns_appended: int = 0,
+) -> Optional[tuple[str, str]]:
+    """ensure_topic_and_summary for triggers where a missing label is not an error.
+
+    A label nobody asked for must never fail the thing that triggered it: a chat
+    turn still succeeded and an activated conversation is still activated. The
+    conversation keeps its blank topic, which is the sentinel that makes the next
+    eligible trigger try again, so the failure is retried rather than swallowed.
+
+    The exception is logged here rather than at each call site so that policy
+    lives in one place. Broad on purpose: a store read that fails must not take
+    down a turn either.
+    """
+    try:
+        return await ensure_topic_and_summary(
+            runtime, generate, turns_appended=turns_appended
+        )
+    except Exception as exc:
+        logger.warning(
+            f"Could not generate a topic/summary for conversation "
+            f"{runtime.active_conversation_id} on channel_id {runtime.channel_id} "
+            f"({type(exc).__name__}: {exc}); it stays unlabeled and will be "
+            "retried on the next eligible trigger"
+        )
+        return None
 
 

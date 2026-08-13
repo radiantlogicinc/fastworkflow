@@ -885,9 +885,12 @@ class ServerProcess:
     def stop(self) -> None:
         if self.proc is not None and self.proc.poll() is None:
             if self.graceful:
-                # Opt-in only. The graceful path calls generate_topic_and_summary()
-                # once per live session, i.e. one real provider call per channel —
-                # for arm A0 that is one LLM call per request in the run.
+                # Opt-in only. The graceful path used to call
+                # generate_topic_and_summary() once per live session — one real
+                # provider call per channel. It no longer does (fix-dzs.1):
+                # shutdown makes unsaved turns durable and leaves conversations
+                # with a blank topic, so this arm now costs no LLM calls. It stays
+                # opt-in because it still waits out the drain.
                 self._signal_group(signal.SIGTERM)
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     self.proc.wait(timeout=self.grace_seconds)

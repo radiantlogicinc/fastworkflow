@@ -1209,8 +1209,21 @@ class WorkflowExecutionContext:
             "response": response_text,
         }
 
+        # "conversation summary" has to identify the turn on its own: it is the
+        # only field generate_topic_and_summary and get_conversation_summaries
+        # read, and _refine_user_query feeds the last 5 of them to the LLM that
+        # refines the next query. The user-visible message leads, matching the
+        # agent path, so history reads the same whichever mode produced a turn;
+        # on the '/'-prefixed path it is also '/<command_name> <args>', so it
+        # names the command and keeps the arguments the resolved command_name
+        # would drop. Each part is sliced before joining and newlines are
+        # collapsed (the refine prompt is one "key: value" line per field), so
+        # the field stays under ~400 chars and never materializes a large
+        # command or response. parameters are deliberately absent -- they carry
+        # the request payload, which stays in conversation_traces below.
         self.append_conversation_turn(
-            "assistant_mode_command", json.dumps(record)
+            " ".join(f"{message[:200]} -> {response_text[:200]}".split()),
+            json.dumps(record),
         )
 
         self._maybe_enqueue_output(command_output)
@@ -1273,8 +1286,16 @@ class WorkflowExecutionContext:
             "response": response_text,
         }
 
+        # Same bound and one-line normalization as the deterministic path in
+        # _process_message, for the same consumers. A direct action carries no
+        # user text, so the command name is the only identity available; it is
+        # sliced too, so the bound holds without relying on the caller sending a
+        # short name. parameters stay out for the same reason as above.
         self.append_conversation_turn(
-            "process_action command", json.dumps(record)
+            " ".join(
+                f"{action.command_name[:200]} -> {response_text[:200]}".split()
+            ),
+            json.dumps(record),
         )
 
         self._maybe_enqueue_output(command_output)

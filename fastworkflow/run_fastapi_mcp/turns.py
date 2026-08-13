@@ -39,10 +39,11 @@ import json
 import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 import fastworkflow
 from fastworkflow.state_serialization import StateEncodingError
+from fastworkflow.turn import TurnStatus
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils.react import NoSuspendedAgentStateError
 
@@ -51,10 +52,14 @@ from .checkpoint import (
     STARTUP_SUCCEEDED,
     STARTUP_SUSPENDED,
 )
-from .conversation_store import extract_turns_from_history
+from .conversation_store import (
+    extract_turns_from_history,
+    generate_topic_and_summary,
+)
 from .utils import (
     collect_trace_events,
     save_conversation_incremental,
+    try_ensure_topic_and_summary,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids any import cycle
@@ -103,6 +108,29 @@ TURN_RETENTION_SECONDS = 300.0
 # README, so the read contract is preserved — what changed is that it is only
 # present while an accepted turn is running, and is never checkpointed.
 CREDENTIAL_CONTEXT_KEY = "http_bearer_token"
+
+# Turn kinds whose completion is a chat exchange worth naming a conversation
+# after. ``perform_action`` is a programmatic dispatch and
+# ``initialize_startup`` is the workflow greeting itself; a title generated from
+# either describes the client's wiring rather than anything the user said, and
+# a channel that only ever initializes must cost no LLM call at all.
+LABELABLE_TURN_KINDS = frozenset(
+    {"invoke_agent", "invoke_agent_stream", "invoke_assistant"}
+)
+
+# Turn outcomes a label may be generated from. An allow-list, so a status added
+# later spends no LLM call until somebody decides that it should.
+#
+# AWAITING_USER is absent, and that is the point of gating on status at all:
+# persistence below runs unconditionally once ``work_fn`` returns, including on
+# suspension, so a turn that stopped at ``ask_user`` has already recorded half an
+# exchange. Labeling there titles a conversation from a clarifying question.
+#
+# FAILED is present because it is terminal. Nothing will complete that turn
+# later, the exchange it did produce is durably recorded like any other, and
+# skipping it would leave a conversation whose first turn failed with no title
+# and no further trigger until its next refresh milestone.
+LABELABLE_TURN_STATUSES = frozenset({TurnStatus.COMPLETED, TurnStatus.FAILED})
 
 
 def _now() -> datetime:
@@ -420,6 +448,62 @@ def _persist_after_turn(
         session_manager.session_state_store.clear(runtime.channel_id)
 
 
+async def _label_conversation_after_turn(
+    runtime: "ChannelRuntime",
+    execn: TurnExecution,
+    turns_appended: int,
+) -> None:
+    """Fill this conversation's topic/summary, off the finished turn's critical path.
+
+    WHERE THIS RUNS, AND WHY IT IS NOT NEXT TO THE INCREMENTAL SAVE (fix-dzs.6,
+    R7). Callers invoke this as the very last act of the turn's own task: after
+    ``exec_state=DONE``, after the registry pointer has been cleared, and after
+    ``done_event`` is set. All three matter:
+
+      * the shutdown drain does not wait on it. ``busy_channel_ids`` is the union
+        of leases, the registry pointer and ``runtime.lock``; by this point the
+        channel holds none of them, so an LLM round trip started here is outside
+        the 30 s termination grace period that this epic exists to protect.
+      * the request that submitted the turn is already free to answer. The first
+        thing that can block below is an executor await, which hands the loop
+        back, so the response is produced while the generation runs.
+      * a concurrent request on this channel is not answered 409 for the length
+        of a round trip, because ``_reject_if_busy`` reads the same cleared
+        pointer.
+
+    The placement the upstream issue asked for - beside the incremental save,
+    inside ``runtime.lock``, before DONE - has none of those three properties.
+
+    WHAT THAT COSTS, AND WHY IT IS SAFE ANYWAY. Once the pointer is cleared,
+    nothing pins this runtime: ``trim_live_sessions`` may retire it and call
+    ``execution_context.close()`` while the generation is still running. Pinning
+    it instead - a session lease, or delaying the pointer clear - would put the
+    channel straight back into the drain and undo the paragraph above. So the
+    labeling path is built not to care: ``ensure_topic_and_summary`` reaches only
+    the durable conversation record, through ``runtime.conversation_store``, which
+    is a handle to a SQLite file that retirement neither owns nor closes, and the
+    conversation id it writes under is captured before it generates. A label
+    landing after its session was retired is correct - the conversation is
+    durable, the session was only a cache of it. Do NOT make this path read
+    ``runtime.execution_context``; that is the one thing retirement can pull out
+    from under it.
+    """
+    if execn.kind not in LABELABLE_TURN_KINDS:
+        return
+    result = execn.result
+    if execn.error is not None or result is None:
+        # The work raised (or, defensively, reported no outcome at all), so
+        # whatever reached the conversation is a fragment of an exchange that
+        # never finished, and there is no status to gate on.
+        return
+    if result.status not in LABELABLE_TURN_STATUSES:
+        return
+
+    await try_ensure_topic_and_summary(
+        runtime, generate_topic_and_summary, turns_appended=turns_appended
+    )
+
+
 @contextlib.contextmanager
 def installed_credential(runtime: "ChannelRuntime", token: Optional[str]):
     """Put the request's credential in shared workflow state for this turn only.
@@ -466,6 +550,10 @@ async def _run_turn(
     across suspension (the registry pointer, not the lock, carries the execution).
     """
     loop = asyncio.get_running_loop()
+    # How many turns this attempt made durable, read by the labeling hook in the
+    # finally to decide whether the conversation crossed a refresh milestone. A
+    # turn whose work raised never reaches the save and leaves this at 0.
+    turns_appended = 0
     try:
         async with runtime.lock:
             execn.exec_state = ExecState.RUNNING
@@ -485,7 +573,7 @@ async def _run_turn(
                 )
 
             # Persist BEFORE DONE so a poller never sees "done" with unsaved state.
-            save_conversation_incremental(
+            turns_appended = save_conversation_incremental(
                 runtime, extract_turns_from_history, logger
             )
             _persist_after_turn(session_manager, runtime, result)
@@ -511,6 +599,8 @@ async def _run_turn(
         execn.exec_state = ExecState.DONE
         await registry.clear_active(execn.channel_id, execn.turn_key)
         execn.done_event.set()
+        # Last, and outside everything above: see _label_conversation_after_turn.
+        await _label_conversation_after_turn(runtime, execn, turns_appended)
 
 
 async def run_owned_turn(
@@ -519,6 +609,7 @@ async def run_owned_turn(
     execn: TurnExecution,
     work: Callable[[], Any],
     session_manager: "ChannelSessionManager",
+    on_done: Optional[Callable[[], Awaitable[None]]] = None,
 ) -> None:
     """Own an *async* unit of work as a registered turn.
 
@@ -532,7 +623,20 @@ async def run_owned_turn(
     that times out or disconnects stops *reading*; this task keeps the registry
     pointer and the runtime lock until the work actually finishes, so nothing can
     snapshot or close the context underneath it.
+
+    A streaming turn is a chat turn, so it labels its conversation like any other
+    (see _label_conversation_after_turn).
+
+    ``on_done`` is awaited once the turn is observably finished and before that
+    labeling, and exists so a caller can close out its own delivery first. The
+    streaming endpoint passes the callback that flushes the end of its response
+    body: without it, EOF waited on the label, so an MCP client reading the whole
+    stream paid the generation in its tool call and a client with a short
+    idle-read timeout could fail a turn whose answer it had already received. It
+    is deliberately AFTER the error paths below, so a caller can still see
+    ``execn.error`` when deciding what to deliver.
     """
+    turns_appended = 0
     try:
         async with runtime.lock:
             execn.exec_state = ExecState.RUNNING
@@ -541,7 +645,7 @@ async def run_owned_turn(
             with installed_credential(runtime, execn.http_bearer_token):
                 execn.result = await work()
 
-            save_conversation_incremental(
+            turns_appended = save_conversation_incremental(
                 runtime, extract_turns_from_history, logger
             )
     except NoSuspendedAgentStateError as exc:
@@ -563,10 +667,28 @@ async def run_owned_turn(
         execn.exec_state = ExecState.DONE
         await registry.clear_active(execn.channel_id, execn.turn_key)
         execn.done_event.set()
+        if on_done is not None:
+            # Before the trim and the label, both of which do I/O the caller's
+            # client should not be waiting on. Its own try: a caller's delivery
+            # failing must not skip this function's housekeeping, and an exception
+            # escaping a finally would surface as a lost task exception rather
+            # than anything actionable.
+            try:
+                await on_done()
+            except Exception as exc:
+                logger.warning(
+                    f"on_done for turn {execn.turn_key} (kind={execn.kind}, "
+                    f"channel={execn.channel_id}) failed "
+                    f"({type(exc).__name__}: {exc})"
+                )
         # After the registry lock is released, never inside it: trimming does
         # store I/O, and holding that lock across a write would block turn
         # submission on every channel, not just this one.
         await session_manager.trim_live_sessions()
+        # And after the trim, not before: labeling can take an LLM round trip,
+        # and delaying the trim by that would hold the session cache over its
+        # target for the duration. Retirement cannot disturb the label anyway.
+        await _label_conversation_after_turn(runtime, execn, turns_appended)
 
 
 def _commit_startup_outcome(
