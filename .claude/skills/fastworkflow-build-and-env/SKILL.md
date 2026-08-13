@@ -64,7 +64,7 @@ cp fastworkflow/examples/fastworkflow.passwords.env passwords/.env
 "${EDITOR:-nano}" passwords/.env     # replace every <...> placeholder with a real key
                                      # one free Mistral key can fill every LITELLM_API_KEY_* slot
 
-# --- 4. Sanity: collection should report 495 tests (v2.22.2), ~15 s ---
+# --- 4. Sanity: collection should report ~1803 tests (v3.1.0), ~15 s ---
 python -m pytest --collect-only -q | tail -1
 
 # --- 5. The golden artifact: train hello_world ONCE (needs the real key from step 3) ---
@@ -74,7 +74,7 @@ fastworkflow train ./fastworkflow/examples/hello_world ./env/.env ./passwords/.e
 python -m pytest
 ```
 
-Expected outcomes on a fully provisioned box: step 4 prints `495 tests collected in ~14s`
+Expected outcomes on a fully provisioned box: step 4 prints `1803 tests collected in ~14s`
 (measured 13.94 s on the reference WSL2 box); step 6 baseline is **478 passed / 0 failed**
 (fix-0hb verification run, 2026-06-15; the remainder are deliberate skips). Full-suite wall
 time is not recorded anywhere — expect tens of minutes (there is a fixed ~4 min of per-test
@@ -285,8 +285,9 @@ platform-specific behavior is evidenced in the repo.
 
 1. **Never `git commit`/`git push` without the developer'sexplicit request in that turn**
    (2026-07-08 incident: auto-pushed private doc → public-repo history rewrite).
-2. **One bd (beads) write at a time; verify `.beads/issues.jsonl` after each; never trust
-   `bd close --reason` alone** (observed silent persistence failure, 2026-06-11).
+2. **One bd (beads) write at a time; verify `.beads/issues.jsonl` after each.** (`bd close
+   --reason` failed to persist on an older bd, 2026-06-11; it persists on 1.1.2, retested
+   2026-08-13.)
 3. **Never wipe `fastworkflow/examples/*/___command_info`** — fix-0hb, section 4.
 
 ## Provenance and maintenance
@@ -303,7 +304,7 @@ for every volatile fact:
 | gen-env.sh writes root `.env`, override/ wins, `--exclude` flag | `sed -n '85,120p' gen-env.sh` |
 | makefile parse-time `include ./.env` trap | `cp makefile /tmp/mt/ && cd /tmp/mt && make -n lint` (expect the include error) |
 | No `[tool.bandit]` section; bandit still runs | `grep -c tool.bandit pyproject.toml; .venv/bin/bandit -c pyproject.toml -r fastworkflow/utils/dspy_utils.py` |
-| 495 tests collected | `source .venv/bin/activate && python -m pytest --collect-only -q \| tail -1` |
+| ~1803 tests collected (v3.1.0) | `source .venv/bin/activate && python -m pytest --collect-only -q \| tail -1` |
 | 478-passed baseline + fix-0hb narrative | `bd show fix-0hb` (read-only) |
 | 4 model-dependent FastAPI tests + skip guards | `sed -n '15,40p' tests/test_fastapi_service.py; grep -n 'def test_' tests/test_fastapi_service.py` |
 | Golden-artifact contents & size | `ls fastworkflow/examples/hello_world/___command_info/global/; du -sh fastworkflow/examples/hello_world/___command_info` |

@@ -37,7 +37,7 @@ Task an independent reviewer (agent or human) explicitly to **refute** the desig
 
 Create one epic with one child issue per finding. The fix-vof epic description reads "review-only — no implementation. Work one finding at a time." 48 children (`fix-vof.1`–`.48`), all closed one at a time.
 
-bd discipline while doing this (memory `beads-flakiness-observed-2026-06-11`): one write at a time, verify `.beads/issues.jsonl` after each, never trust `bd close --reason`.
+bd discipline while doing this (memory `beads-flakiness-observed-2026-06-11`): one write at a time, verify `.beads/issues.jsonl` after each. (`bd close --reason` persists on bd 1.1.2, retested 2026-08-13; the 2026-06-11 failure was an older bd.)
 
 Working preference on record (memory, established 2026-06-10 during R11): give Dhar an ELI5 plain-language explanation of each finding BEFORE asking decision questions.
 

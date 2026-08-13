@@ -141,7 +141,7 @@ Verified state on c33b9a5 (2026-07-09):
 This mismatch dates to v2.7.0 and is **not fixed on main**; whether it is an accepted cost or an unnoticed
 regression is an open question for Dhar (also flagged in discovery). Do not "fix" it ad hoc — the correct check
 is a design decision (fingerprint vs mtime vs context list); file/attach a bd issue first (one bd write at a
-time, verify `.beads/issues.jsonl` after — bd's `close --reason` has silently failed to persist before, observed 2026-06-11).
+time, verify `.beads/issues.jsonl` after — bd's `close --reason` silently failed to persist on an older bd, observed 2026-06-11; it persists on 1.1.2, retested 2026-08-13).
 
 ### T4 — Parameter extraction NOT_FOUND loops
 
@@ -259,7 +259,7 @@ was supplied, returns the default without consulting `os.environ`**. Consequence
 
 ### T13 — test-suite gotchas (debugging context only; authoring → `fastworkflow-validation-and-qa`)
 
-- No pytest config anywhere; run `python -m pytest` from repo root in the venv. ~495 collected.
+- No pytest config anywhere; run `python -m pytest` from repo root in the venv. ~1803 collected, ~49 min (2026-08-13, v3.1.0).
 - Key-gated skips: FastAPI/topology-B/probes/MCP tests skip unless `./env/.env` AND `./passwords/.env` exist
   (`tests/test_fastapi_service.py:26-36` pattern) — a green run on a fresh clone is mostly skips.
 - 4 FastAPI tests additionally require a locally pre-trained hello_world example (T2 command). fix-0hb
@@ -287,8 +287,8 @@ was supplied, returns the default without consulting `os.environ`**. Consequence
 
 1. **Never `git commit`/`push` without the developer'sexplicit request in that turn** — rule established 2026-07-08 after a
    private doc was auto-pushed to this PUBLIC repo, forcing a history rewrite. No "session-close protocol" overrides it.
-2. **One bd write at a time**; verify `.beads/issues.jsonl` changed after each; don't trust `bd close --reason`
-   (observed silently failing to persist, 2026-06-11).
+2. **One bd write at a time**; verify `.beads/issues.jsonl` changed after each. `bd close --reason`
+   silently failed to persist on an older bd (2026-06-11); it persists on 1.1.2 (persisted 12/12 on bd 1.1.2, retested 2026-08-13 — see change-control Rule 2; verify the JSONL regardless).
 3. **Never wipe/train-into `fastworkflow/examples/*/___command_info`** (fix-0hb, commit fa97b48) — temp copies only.
 4. **tau-bench parity is sacred**: never modify tau-bench tools/tasks for benchmark runs; disclose any nonstandard
    trade (e.g. pinned simulator temperature) — never silent. (Benchmark debugging → `tau2-reliability-campaign`.)
