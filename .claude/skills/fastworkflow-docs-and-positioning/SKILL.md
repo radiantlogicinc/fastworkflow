@@ -275,7 +275,7 @@ Facts verified 2026-07-09 against v2.22.2 (commit c33b9a5). Re-verify volatile f
 | pyproject stale comment | `grep -rn _load_tokenizer fastworkflow/ pyproject.toml` |
 | Task Master still dead / beads live | `stat -c '%y' .taskmaster/tasks/tasks.json; grep -n "bd (beads)" AGENTS.md` |
 | Never-commit rule text | `bd memories never-git --json` |
-| beads close --reason hazard | `bd memories flakiness --json` |
+| beads close --reason hazard (retested working 2026-08-13, bd 1.1.2) | `bd memories flakiness --json`; change-control Rule 2 |
 | Supremacy clause intact | `sed -n 1,8p docs/turn_result_design_final.md` |
 | Resolution-commit exemplar | `git show --stat 42e9b3a` |
 | ecdsa item still open / bead still missing | `grep -n ecdsa SECURITY_VULNERABILITY_REPORT.md; grep -c fastworkflow-d8f .beads/issues.jsonl; bd search ecdsa --json` |

@@ -100,7 +100,7 @@ Issue-before-code is mandatory (AGENTS.md: "bd for ALL issue tracking... Do NOT 
 
 Discipline rules, learned the hard way (bd memory `beads-flakiness-observed-2026-06-11`):
 - **One bd write at a time; verify `.beads/issues.jsonl` after each write.**
-- **Never trust `bd close --reason=...`** — it reports success but has been observed to silently fail to persist. Bare `bd close` works; verify the JSONL either way.
+- **`bd close --reason=...`** was observed reporting success while silently failing to persist (2026-06-11, older bd); retested 2026-08-13 on bd 1.1.2 it persists 12/12. Verify the JSONL either way — that half never stops applying.
 - Patching `issues.jsonl` directly is safe (every command re-imports it as source of truth).
 - Likely collateral of ignoring this: `fix-7kp` is a duplicate of `fix-2jo` created 9 seconds apart; `fix-2jo` closed, `fix-7kp` still open.
 
@@ -189,7 +189,7 @@ Each of these was actually committed (by us or in the Articles) or is a live tem
 | 2 | **Declaring victory from disjoint pass sets / single runs** | 2/15 → 5/15 where the original 2 were not among the 5 — noise reported as progress (plan §2.2) | Rule 3: k≥5, CIs, variance floor under every number |
 | 3 | **Tuning on the eval set** | The 15 hard tasks have been the tuning set for months; re-running pass^3 and patching until a sweep lands is test-set optimization | Gate-3 protocol: freeze, pre-register, run ONCE, report, paired with the full ~115-task split (plan §3.3); the RSI loop is permanently firewalled from the Gate-3 run (rsi report) |
 | 4 | **Silent methodology trades** | Temptations on record: pinning sim temperature/seed; editing tau-bench tools "just for the run" | Rule 5: parity is sacred; any nonstandard condition is a disclosed trade in the report, never silent |
-| 5 | **Skipping the bd paper trail** | Undocumented work is unrecoverable after context loss; duplicate issues (fix-7kp/fix-2jo) came from unverified writes | Issue-before-code; one bd write at a time; verify `issues.jsonl`; never trust `bd close --reason` |
+| 5 | **Skipping the bd paper trail** | Undocumented work is unrecoverable after context loss; duplicate issues (fix-7kp/fix-2jo) came from unverified writes | Issue-before-code; one bd write at a time; verify `issues.jsonl` |
 | 6 | **"Open questions: none remaining"** — self-certifying a design | The TurnResult design said exactly that; the adversarial review found 48 findings incl. 4 contradictions, and the section was rewritten as a public admission (`docs/turn_result_design.md:769-777`) | Rule 2: a design is not done until adversarially reviewed against the actual codebase |
 | 7 | **Silent retirement** — letting an idea die on a branch | probabilistic-response-generation: spec on main, implementation abandoned, no death certificate | Stage 5b: bd close with reason + doc status line; negative results are results |
 | 8 | **Fixing the symptom the checklist would have caught** — merging on "we discussed it" | v2.21 nearly shipped with the origin bug still user-visible; only the explain-back teaching session caught it | Stage 4 step 7: post-implementation re-verification session before believing a bug is fixed |

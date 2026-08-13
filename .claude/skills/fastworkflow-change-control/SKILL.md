@@ -58,12 +58,14 @@ Each rule exists because something went wrong. Cite the incident when enforcing 
 - **Incident:** 2026-07-08 — a private planning doc was auto-committed and pushed to the public repo by an agent following a session-close routine. Recovery required a **git history rewrite** on a public repository. Recorded as a bd memory (`bd memories --json`, key `never-git-commit-or-push-anything-without-dhar`).
 - **Corollaries:** stage files by explicit path only, never `-A`/`.`; check `git status` for untracked private docs before any commit you *were* asked to make (see §7 for the do-not-commit list).
 
-### Rule 2 — One bd write at a time; verify the JSONL after each; never trust `bd close --reason`
+### Rule 2 — One bd write at a time; verify the JSONL after each
 
-- **Rule:** Serialize all bd write commands. After every write, confirm it landed: `grep '"id":"<issue-id>"' .beads/issues.jsonl` and check the field you changed. Use bare `bd close <id>` (works) and add the close note via a separate verified update — `bd close <id> --reason "..."` **reports success but silently fails to persist**.
+- **Rule:** Serialize all bd write commands. After every write, confirm it landed: `grep '"id":"<issue-id>"' .beads/issues.jsonl` and check the field you changed. **Verify by reading the file, not by trusting the command's output** — that is the durable half of this rule and it has never stopped being necessary.
 - **Rationale:** The bd backend (a Dolt SQL server; repo-root `config.yaml` is its config, port 3307) can wedge into a state where every command re-imports `issues.jsonl` into an empty DB and **async exports race and clobber each other**. `.beads/issues.jsonl` is the source of truth; when bd is wedged, patching the JSONL directly is safe because every command re-imports it.
 - **Incident:** observed 2026-06-11 during the fix-vof review epic; recorded as bd memory `beads-flakiness-observed-2026-06-11-in-the`. Likely collateral: epic `fix-7kp` is a duplicate (created seconds apart) of the closed `fix-2jo` — same title, one closed, one open.
-- **Doc-rot warning:** `AGENTS.md` (lines 42 and 68) still recommends `bd close bd-42 --reason "Completed" --json` — the exact invocation the memory says silently fails. The 2026-06-11 memory overrides the AGENTS.md boilerplate. Trust the memory.
+- **`--reason` — retested 2026-08-13 on bd 1.1.2, and it persists.** This rule used to say `bd close <id> --reason "..."` reports success but silently fails, and to add the close note through a separate verified update instead. Twelve consecutive closes with `--reason` (the fix-dzs epic and its eleven children) all landed, verified by reading `close_reason` out of the JSONL afterwards. So the workaround is no longer required. The 2026-06-11 observation is left standing rather than deleted: it was made on an older bd, and if the Dolt backend wedges again the symptom may return. Verify the write either way.
+- **Corollary, still true and cheaper to get wrong:** a `bd` write updates the Dolt DB, not `.beads/issues.jsonl`. Export with `bd export -o .beads/issues.jsonl` (the `-o` is required since 1.1.2; bare `bd export` writes to stdout) or the close is invisible to git. See `.cursor/skills/beads-workflow/SKILL.md`.
+- **What a stale-`old_value` chain in `.beads/interactions.jsonl` means:** the flakiness leaves a fingerprint — repeated identical transitions each reporting a prior state that is already out of date (e.g. `fix-16d`: `in_progress` four times, then `open` four times, then `closed` four times). A 2026-08-13 audit found 225 such discontinuities, clustered on 2026-06-11, 2026-08-02 and 2026-08-03, and **none** after that. They are harmless: `old_value` is a breadcrumb nothing consumes, and every actual status in `issues.jsonl` was correct. Do not "repair" that log — it is a truthful record of what bd emitted, and rewriting it would erase the only evidence those episodes left.
 
 ### Rule 3 — Never let tests or experiments wipe trained example models
 
@@ -166,7 +168,7 @@ Operational meaning:
 - **Never delete, `@pytest.mark.skip`, or comment out a test to make a change pass.** If a test blocks you, that is a finding — file a bd issue and ask. Permanent skips that exist today (11 markers, e.g. `tests/test_workflow_training.py:74,137` "takes too long") were each user-approved decisions.
 - **Reality check (doc-rot, documented, not license):** 11 test files already import `unittest.mock`/`MagicMock` (mostly to stub LLM/dspy calls while keeping workflows real). The no-mocks rule is aspirational in places — that is NOT permission to add new mocks; prefer the real test workflows `tests/example_workflow/`, `tests/hello_world_workflow/` (and note CLAUDE.md omits the on-disk `tests/todo_list_workflow/` naming — `tests/example_workflow` IS the todo-list app).
 - Changing a test's *assertion* to match new intended behavior is a normal T0/T1 change; removing its *coverage* is what needs approval.
-- CI runs only `tests/test_train_modern_stack.py` (single workflow `.github/workflows/train-modern-stack.yml`) — so a removed test will NOT be caught by CI. The full 495-test suite is local-only: `source .venv/bin/activate && python -m pytest`. Run it before release commits; Rule 3 applies to how training tests isolate themselves.
+- CI runs only `tests/test_train_modern_stack.py` (single workflow `.github/workflows/train-modern-stack.yml`) — so a removed test will NOT be caught by CI. The full suite is local-only: `source .venv/bin/activate && python -m pytest`. It is **1803 tests and ~49 minutes** as of 2026-08-13 / v3.1.0 (was 495 at v2.22.2). Run it before release commits; Rule 3 applies to how training tests isolate themselves.
 
 ---
 
@@ -182,12 +184,12 @@ The GitHub repo is **public** (Apache 2.0). Treat every commit as a press releas
 | RSI harness report | `docs/rsi_harness_agent_report.md` (untracked) | marked team-private |
 | Forge spec | `docs/forge_meta_workflow_spec.md` (untracked) | marked team-private |
 | Article PDFs 1–3 + Analysis docx | `docs/Article*.pdf`, `docs/Analysis and Recommendations...docx` (untracked) | pre-publication drafts |
-| **This skill library** | `.claude/skills/` (untracked) | team-private until Dhar decides; embeds the docs above |
+| **The team-private skills only** | `.claude/skills/{fastworkflow-proof-and-analysis-toolkit, fastworkflow-taubench-reference, tau2-reliability-campaign, fastworkflow-research-frontier}/` | These four embed the docs above and are **gitignored by exact path** (`.gitignore:219-237`) as of 2026-08-13. The rest of the library — 14 skill dirs plus `README.md` — was deliberately committed and is PUBLIC. Know which one you are editing: anything you add to a tracked skill is published. |
 | Secrets | `passwords/` (gitignored), any real `*.passwords.env` | API keys |
 
 **Sharp edges verified:**
 
-- `.claude/skills/` is untracked but **NOT gitignored** (`git check-ignore .claude/skills/...` matches nothing), and `.claude/rules/command-authoring.md` IS tracked — so `git add .claude` or `git add -A` would stage the private library. Stage by explicit file path only.
+- **The `git add -A` mechanism described here has been fixed, and by something better than tracking.** When this skill was written, `.claude/skills/` and the private `docs/` files were untracked-but-NOT-gitignored, so `git add -A` would have staged them. As of 2026-08-13 every team-private artifact is **gitignored by exact path** — the four skills at `.gitignore:219-237`, and the tau2 plan, RSI harness report and Forge spec verified gitignored under `docs/`. So `-A` can no longer publish them. Stage by explicit path anyway: it costs nothing, it survives someone adding a new private file before adding its ignore line, and it is what the 2026-07-08 incident actually argues for. Re-verify with `git check-ignore -v <path>` rather than assuming either state.
 - Untracked ≠ private-safe: the 2026-07-08 incident (Rule 1) was exactly an untracked private doc getting auto-committed.
 - `env/.env` IS tracked — deliberately: it holds model-name config only (verified: zero key/token/secret lines). Real keys belong in gitignored `passwords/`. The bundled template `fastworkflow/examples/fastworkflow.passwords.env` is tracked but contains a dead placeholder key.
 - **`gen-env.sh` foot-gun:** `make gen-env` (a dependency of `make publish`) merges **every `*.env` in the tree** — including gitignored password files — into root `.env`. Root `/.env` is gitignored, but never copy/rename/commit that merged file, and never widen the `.gitignore` negations (lines 141–143) without review.
@@ -213,7 +215,7 @@ Re-verification one-liners (run from repo root):
 | Release-subject convention | `git log --oneline -20 \| grep -E '^\w+ (fix\|feat): v'` |
 | Tags lag (last tag v2.22.0) | `git tag -l 'v2.*' \| sort -V \| tail -3` |
 | Epic statuses fix-yy1/fix-qtq/fix-7kp still open | `for i in fix-yy1 fix-qtq fix-7kp fix-2jo; do bd show $i --json \| python3 -c "import json,sys; d=json.load(sys.stdin); d=d[0] if isinstance(d,list) else d; print(d['id'],d['status'])"; done` |
-| `bd close --reason` still broken | do NOT test destructively; check `bd memories --json` for a newer memory superseding 2026-06-11, and check `bd version` |
+| `bd close --reason` persistence | non-destructive: close something you were going to close anyway with `--reason`, then read `close_reason` back out of `.beads/issues.jsonl`. Working as of bd 1.1.2 / 2026-08-13 |
 | AGENTS.md still recommends `--reason` (doc-rot) | `grep -n 'close bd-42' AGENTS.md` |
 | Test-removal rule text | `sed -n '1,12p' .cursor/rules/testing_rules.mdc` |
 | `.claude/skills` not ignored; only rules file tracked | `git check-ignore -v .claude/skills/x; git ls-files .claude` |

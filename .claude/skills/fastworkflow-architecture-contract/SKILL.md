@@ -292,8 +292,9 @@ Whether v3.0 is scheduled at all is an open question — do not claim it is.
 
 - **Never `git commit`/`push` without the developer'sexplicit request in that turn** (rule
   established 2026-07-08 after a private doc was auto-pushed to the public repo).
-- **One bd write at a time; verify `.beads/issues.jsonl` after each; never trust
-  `bd close --reason`** (silently fails to persist; observed 2026-06-11).
+- **One bd write at a time; verify `.beads/issues.jsonl` after each.** `bd close --reason`
+  silently failed to persist on an older bd (2026-06-11); it persists on 1.1.2, retested
+  2026-08-13 — see change-control Rule 2.
 - **Never let tests/experiments write into `fastworkflow/examples/*/___command_info`**
   (fix-0hb incident, commit fa97b48) — train into temp copies.
 - Big core changes follow the paper-first pattern of the TurnResult saga (design doc →

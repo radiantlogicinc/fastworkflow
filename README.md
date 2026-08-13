@@ -572,6 +572,7 @@ Two files per workflow (templates ship with `fastworkflow examples fetch`).
 | `LLM_PLANNER` | Model for the agent's task planner | `run` (agent) | `mistral/mistral-small-latest` |
 | `LLM_AGENT` | Model for the DSPy agent | `run` (agent) | `mistral/mistral-small-latest` |
 | `LLM_CONVERSATION_STORE` | Model for conversation topic/summary | FastAPI service | `mistral/mistral-small-latest` |
+| `LLM_CONVERSATION_STORE_TIMEOUT_SECONDS` | Per-attempt client-side deadline for the topic/summary call (2 attempts max) | Optional | `12` |
 | `LITELLM_PROXY_API_BASE` | LiteLLM Proxy URL | with `litellm_proxy/` models | *not set* |
 | `INTENT_DETECTION_TINY_MODEL` | HF id for the small intent model | `train` (optional) | `google/bert_uncased_L-4_H-128_A-2` |
 | `INTENT_DETECTION_LARGE_MODEL` | HF id for the large intent model | `train` (optional) | `distilbert-base-uncased` |

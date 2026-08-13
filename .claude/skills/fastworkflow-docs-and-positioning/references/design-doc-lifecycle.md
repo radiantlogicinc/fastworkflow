@@ -73,8 +73,9 @@ bd create "R1: <title>" --parent <epic>
 
 Work one finding at a time with the human. Review-only — no implementation inside the
 epic. Discipline (bd memory `beads-flakiness-observed-2026-06-11...`): one bd write at
-a time, verify `.beads/issues.jsonl` after each, never trust `bd close --reason`
-(silently fails to persist; use bare `bd close`).
+a time, verify `.beads/issues.jsonl` after each. `bd close --reason` was long held to
+silently fail to persist; retested 2026-08-13 on bd 1.1.2 it persists 12/12 (see
+change-control Rule 2). Verify the JSONL either way.
 
 ## Stage 4 — One docs commit per resolution
 

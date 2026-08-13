@@ -248,9 +248,10 @@ Three fixes in rapid succession, two of them on the same day (2026-06-15):
   exports raced/clobbered each other.
 - **Evidence:** bd memory `beads-flakiness-observed-2026-06-11-in-the` (read via
   `bd memories --json` — note `bd memories show <name>` is not a valid invocation).
-- **Status: permanent working discipline.** (1) One bd write at a time; (2) verify
-  `.beads/issues.jsonl` after each write; (3) never trust `bd close --reason` — use bare
-  `bd close`; (4) when the Dolt server wedges, patching issues.jsonl directly is safe because
+- **Status: partly superseded 2026-08-13.** (1) One bd write at a time; (2) verify
+  `.beads/issues.jsonl` after each write — both still permanent; (3) the `--reason`
+  workaround is retired: it persisted 12/12 on bd 1.1.2 when retested 2026-08-13 (the
+  symptom above was on an older bd and may return if Dolt wedges again); (4) when the Dolt server wedges, patching issues.jsonl directly is safe because
   every command re-imports it as source of truth. Possible collateral: the fix-2jo/fix-7kp
   identical-title pair (entry 6 — duplicate vs intentional extension unadjudicated).
 

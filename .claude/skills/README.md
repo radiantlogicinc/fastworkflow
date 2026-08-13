@@ -24,7 +24,7 @@ volatile facts (line numbers, issue statuses, flags).
 | `fastworkflow-build-and-env` | Recreate the dev environment from scratch: Python/poetry/extras, secret provisioning (env/.env + passwords/.env + gen-env.sh foot-gun), the golden hello_world trained artifact, known fresh-clone traps. |
 | `fastworkflow-run-and-operate` | CLI anatomy for all six subcommands, the bundled-examples learning progression, artifact conventions (`___command_info` etc.), the FastAPI+MCP server surface and its trusted-network-only security posture. |
 | `fastworkflow-config-and-flags` | Catalog of every env var and CLI flag: default, consumer, production/experimental/dead status, sharp edges (get_env_var precedence, subcommands that ignore env files), how to add a config axis. |
-| `fastworkflow-validation-and-qa` | What counts as evidence: the real state of the 495-test suite (env gating, skips, no-ops, the 0.5s sleep), CI truth, golden test workflows, how to add tests without violating the no-mock/no-removal rules. |
+| `fastworkflow-validation-and-qa` | What counts as evidence: the real state of the 1803-test suite (env gating, skips, no-ops), CI truth, golden test workflows, how to add tests without violating the no-mock/no-removal rules. |
 | `fastworkflow-diagnostics-and-tooling` | Measure instead of eyeball: working scripts (`inspect_command_info.py`, `check_cache_freshness.py`, `trace_turn.py`, `collect_model_metrics.py`) with interpretation guides, plus existing observability. |
 | `fastworkflow-docs-and-positioning` | Docs-of-record map with authority levels, the TWO colliding article series, house design-doc lifecycle template, external-claim discipline (benchmark provenance, DOI discrepancy, confidentiality boundary). |
 

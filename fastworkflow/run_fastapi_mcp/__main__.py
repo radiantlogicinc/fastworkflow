@@ -62,10 +62,13 @@ from .mcp_specific import setup_mcp
 from .utils import (
     get_channelconversations_dir,
     CHECKPOINT_REAP_INTERVAL_SECONDS,
+    SHUTDOWN_DRAIN_SECONDS,
     ChannelSessionManager,
     MAX_CONVERSATION_TURNS_IN_MEMORY,
+    ensure_topic_and_summary,
     save_conversation_incremental,
     save_last_turn_feedback,
+    try_ensure_topic_and_summary,
     InitializationRequest,
     TokenResponse,
     InitializeResponse,
@@ -105,6 +108,10 @@ from .conversation_store import (
     ConversationStore,
     ConversationSummary,
     generate_topic_and_summary,
+    resolve_topic_generation_timeout,
+    topic_generation_timeout_seconds,
+    TOPIC_GENERATION_MAX_RETRIES,
+    TOPIC_GENERATION_TIMEOUT_ENV_VAR,
     extract_turns_from_history,
     restore_history_from_turns
 )
@@ -360,6 +367,24 @@ async def lifespan(_app: FastAPI):
         resolved, source = session_manager.configure_max_live_sessions()
         logger.info(f"max_live_sessions={resolved} (source={source})")
 
+        # Same reasoning for the topic/summary deadline: resolved once here so a
+        # malformed value rejects startup instead of failing every rotate at
+        # runtime, and logged with its source so an operator can see whether
+        # their override was actually picked up.
+        timeout, timeout_source = resolve_topic_generation_timeout()
+        attempts = TOPIC_GENERATION_MAX_RETRIES + 1
+        logger.info(
+            f"{TOPIC_GENERATION_TIMEOUT_ENV_VAR}={timeout} "
+            f"(source={timeout_source}), attempts={attempts}"
+        )
+        if timeout * attempts >= SHUTDOWN_DRAIN_SECONDS:
+            logger.warning(
+                f"{TOPIC_GENERATION_TIMEOUT_ENV_VAR}={timeout} over {attempts} "
+                f"attempt(s) can exceed the {SHUTDOWN_DRAIN_SECONDS}s shutdown "
+                "drain, so a conversation rotate in flight when this process is "
+                "asked to stop may be killed part-way through"
+            )
+
         # Mark FastWorkflow as initialized for readiness probe
         readiness_state.set_initialized(True)
         
@@ -405,7 +430,28 @@ async def lifespan(_app: FastAPI):
         return remaining
 
     async def finalize_conversations_on_shutdown(skip_channel_ids: list[str]) -> None:
-        logger.info("Finalizing conversations with topic and summary...")
+        """Make each quiescent channel's unsaved turns durable. Never label them.
+
+        Shutdown generates no topics or summaries. That was one synchronous
+        LLM_CONVERSATION_STORE call per live channel, untimed and unbudgeted, in
+        front of the checkpoints stop_all_chat_sessions writes — so under a 30 s
+        termination grace period the process was killed part-way through
+        generating titles and lost everything each channel had accumulated since
+        its last eviction. Conversations are left with the blank placeholder
+        topic and summary the store already writes for them.
+
+        What is worth doing here is the durable save. A turn persists from inside
+        _run_turn's own try, so a turn whose work raised leaves in-memory history
+        that was never appended — including on a channel that never got as far as
+        reserving a conversation id. save_conversation_incremental is the same
+        chokepoint the turn path uses: it reserves that id when there is none,
+        appends only turns above the high-water mark, and creates the record with
+        the blank placeholders rather than inventing a topic to store.
+        """
+        logger.info(
+            "Persisting unsaved conversation turns at shutdown; conversations are "
+            "left with placeholder topic and summary (no topic generation)"
+        )
         skip = set(skip_channel_ids)
         for channel_id in list(session_manager._sessions.keys()):
             if channel_id in skip:
@@ -413,20 +459,17 @@ async def lifespan(_app: FastAPI):
             runtime = await session_manager.get_session(channel_id)
             if not runtime:
                 continue
-            if turns := _conversation_turns_for_summary(runtime):
-                try:
-                    topic, summary = generate_topic_and_summary(turns)
-                    if runtime.active_conversation_id > 0:
-                        runtime.conversation_store.update_conversation_topic_summary(
-                            runtime.active_conversation_id, topic, summary
-                        )
-                        logger.info(f"Finalized conversation {runtime.active_conversation_id} for user {channel_id} during shutdown")
-                    else:
-                        logger.warning(f"Conversation history exists but no active_conversation_id for user {channel_id} during shutdown")
-                        conv_id = runtime.conversation_store.save_conversation(topic, summary, turns)
-                        logger.info(f"Created conversation {conv_id} for user {channel_id} during shutdown")
-                except Exception as e:
-                    logger.error(f"Failed to finalize conversation for user {channel_id} during shutdown: {e}")
+            try:
+                if appended := save_conversation_incremental(
+                    runtime, extract_turns_from_history, logger
+                ):
+                    logger.info(
+                        f"Persisted {appended} unsaved turn(s) to conversation "
+                        f"{runtime.active_conversation_id} for user {channel_id} "
+                        "during shutdown"
+                    )
+            except Exception as e:
+                logger.error(f"Failed to finalize conversation for user {channel_id} during shutdown: {e}")
 
     async def reap_checkpoints_periodically() -> None:
         """Drive checkpoint and pending-state retention. Neither store has a timer.
@@ -537,7 +580,14 @@ async def lifespan(_app: FastAPI):
         reaper.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await reaper
-        still_busy = await wait_for_active_turns_to_complete(max_wait_seconds=30)
+        still_busy = await wait_for_active_turns_to_complete(
+            max_wait_seconds=SHUTDOWN_DRAIN_SECONDS
+        )
+        # Order between these two is no longer safety-critical: with topic
+        # generation gone both are bounded local SQLite writes, so neither can
+        # consume the termination grace period and leave the other unrun. It
+        # stays as it is because finalize reads the execution contexts that
+        # stop_all_chat_sessions closes.
         await finalize_conversations_on_shutdown(still_busy)
         await stop_all_chat_sessions(still_busy)
         logger.info("FastWorkflow FastAPI service shutdown complete")
@@ -1244,10 +1294,15 @@ async def invoke_agent_stream(
             return turn_output
 
         async def owned_turn(execn) -> None:
-            try:
-                await run_owned_turn(
-                    runtime, turn_registry, execn, streaming_work, session_manager
-                )
+            async def finish_stream() -> None:
+                """Deliver the terminal event, then end the body.
+
+                Handed to run_owned_turn as its on_done so the response completes
+                as soon as the turn does, instead of waiting on the post-turn
+                conversation labeling. The error event has to go out ahead of the
+                sentinel: the body's drain loop stops at the sentinel, so anything
+                emitted after it is never read.
+                """
                 if execn.error is not None:
                     await emit(
                         "error",
@@ -1258,7 +1313,23 @@ async def invoke_agent_stream(
                             )
                         },
                     )
+                await events.put(None)
+
+            try:
+                await run_owned_turn(
+                    runtime,
+                    turn_registry,
+                    execn,
+                    streaming_work,
+                    session_manager,
+                    on_done=finish_stream,
+                )
             finally:
+                # Kept as the guarantee, not the normal path: finish_stream has
+                # already ended the body. A second sentinel is harmless (the drain
+                # loop stopped at the first and never reads it), whereas a missing
+                # one - run_owned_turn raising before its finally, or finish_stream
+                # itself failing - would hang the client forever.
                 await events.put(None)
 
         try:
@@ -1497,8 +1568,15 @@ async def new_conversation(
 ) -> dict[str, str]:
     """
     Persist the current conversation and start a new one.
-    Generates topic and summary synchronously; on failure, does not rotate.
-    
+    Generates topic and summary off the event loop; on failure, does not rotate.
+
+    Rotate stays strict (fix-dzs.4). It is an explicit user action, and archiving
+    a thread the user can no longer find - /activate_conversation looks
+    conversations up by topic - is worse than telling them it did not happen.
+    What changes is that the failure is now prompt: the generation is bounded at
+    the LLM client, so this answers within that bound instead of hanging on an
+    unresponsive provider.
+
     Requires a valid JWT access token in the Authorization header (Bearer token format).
     """
     channel_id = session.channel_id
@@ -1513,20 +1591,86 @@ async def new_conversation(
             # Serialize ctx mutation with turns; reject if a turn is active (§3.4).
             _reject_if_busy(channel_id)
             async with runtime.lock:
+                # Persist before labeling (fix-dzs.9). A rotate clears the
+                # in-memory history, so anything not yet durable at that moment is
+                # gone - and a turn persists from inside _run_turn's own try, so a
+                # store failure there leaves history holding turns with no record
+                # and, if a previous rotate had already reserved an id, no way to
+                # write one. Labeling that state raised ValueError out of
+                # update_conversation_topic_summary AFTER paying for the
+                # generation, so the rotate that would have cleaned the state up
+                # was the one thing the user could not do. This is the same
+                # chokepoint shutdown uses: it reserves the id when there is none,
+                # appends only what is missing, and creates the record - which is
+                # what makes the label write below well-defined.
+                save_conversation_incremental(
+                    runtime, extract_turns_from_history, logger
+                )
+
                 # Summarize the whole conversation, not just the in-memory window
                 if turns := _conversation_turns_for_summary(runtime):
-                    # Generate topic and summary synchronously (turns already saved incrementally)
-                    topic, summary = generate_topic_and_summary(turns)
+                    # Through the shared helper, so a rotate and a lazy fill
+                    # cannot both be generating for this channel at once and both
+                    # inherit the blank-topic policy. force=True because a rotate
+                    # is an explicit user action: it labels whether or not the
+                    # refresh schedule says the label is due, and the turns are
+                    # passed in because this call site is the only one that can
+                    # summarize a conversation with no durable record yet.
+                    #
+                    # The generation happens in a worker thread inside the helper.
+                    # DSPy is synchronous, so calling it here stalled the whole
+                    # event loop - every other channel's request included - for
+                    # the length of an LLM round trip. There is deliberately no
+                    # asyncio.wait_for around it; see the helper's docstring.
+                    #
+                    # Still inside runtime.lock: this serializes conversation-state
+                    # mutation, and the rotate below depends on it.
+                    try:
+                        topic, summary = await ensure_topic_and_summary(
+                            runtime,
+                            generate_topic_and_summary,
+                            turns=turns,
+                            force=True,
+                        )
+                    except Exception as e:
+                        # "Labeling", not "generation": this covers the generation
+                        # AND the write that follows it, and saying the wrong one
+                        # sends an operator to the wrong place. The turns really are
+                        # safe here - the incremental save above ran before any of
+                        # this - so that half of the message is now a fact rather
+                        # than a hope.
+                        logger.error(
+                            f"Could not label the conversation for session {channel_id}, "
+                            f"not rotating: {type(e).__name__}: {e}"
+                        )
+                        raise HTTPException(
+                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail=(
+                                f"Could not label the conversation for channel_id: "
+                                f"{channel_id}; it was NOT rotated. Its turns are "
+                                f"durably recorded. Generation is given "
+                                f"{TOPIC_GENERATION_MAX_RETRIES + 1} attempt(s) of "
+                                f"{TOPIC_GENERATION_TIMEOUT_ENV_VAR}="
+                                f"{topic_generation_timeout_seconds()}s each "
+                                f"(LLM_CONVERSATION_STORE). "
+                                f"Cause: {type(e).__name__}: {e}"
+                            ),
+                        ) from e
 
-                    # Update topic/summary for the conversation (turns already persisted)
+                    # Topic/summary written by the helper above for the
+                    # conversation (turns already persisted)
                     if runtime.active_conversation_id > 0:
                         conv_id = runtime.active_conversation_id
-                        runtime.conversation_store.update_conversation_topic_summary(
-                            conv_id, topic, summary
-                        )
                         logger.info(f"Finalized conversation {conv_id} with topic and summary for session {channel_id}")
                     else:
-                        # Edge case: conversation history exists but no active ID (shouldn't happen with incremental saves)
+                        # Unreachable since the incremental save moved above this
+                        # (fix-dzs.9), and kept only as a belt-and-braces: reaching
+                        # `turns` non-empty requires either in-memory turns, in
+                        # which case that save reserved an id and wrote a record, or
+                        # a durable record, which needs an id already. Left in place
+                        # rather than deleted because it is the one branch that
+                        # would still persist turns if that reasoning is ever
+                        # invalidated, and the cost of keeping it is a log line.
                         logger.warning(f"Conversation history exists but no active_conversation_id for session {channel_id}")
                         conv_id = runtime.conversation_store.save_conversation(topic, summary, turns)
                         logger.info(f"Created conversation {conv_id} for session {channel_id}")
@@ -1681,7 +1825,18 @@ async def activate_conversation(
 ) -> dict[str, str]:
     """
     Activate a conversation by its conversation_id.
-    
+
+    A conversation that is still unlabeled is labeled here, from its stored turns.
+    This is the trigger that covers a conversation whose turns were recorded by a
+    process that died before labeling anything: opening it is the moment a title
+    becomes useful, since /activate_conversation is also how conversations are
+    looked up by topic. A conversation that already has a title is not
+    relabeled - that would spend an LLM call to re-describe the same turns.
+
+    Labeling never fails the activation: on a generation failure the conversation
+    is activated anyway and keeps its blank topic, which is the sentinel that
+    makes the next eligible trigger retry.
+
     Requires a valid JWT access token in the Authorization header (Bearer token format).
     """
     channel_id = session.channel_id
@@ -1693,8 +1848,11 @@ async def activate_conversation(
                     detail=f"User session not found: {channel_id}"
                 )
 
-            # Get conversation by ID
-            conv = runtime.conversation_store.get_conversation(request.conversation_id)
+            # Get conversation by ID, carrying only the window that is about to be
+            # restored: the rest of it would be deserialized and then dropped.
+            conv = runtime.conversation_store.get_conversation_window(
+                request.conversation_id, MAX_CONVERSATION_TURNS_IN_MEMORY
+            )
             if not conv:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
@@ -1709,13 +1867,23 @@ async def activate_conversation(
                 # Restore the newest window of the conversation; the rest stays in
                 # the durable record. Everything restored is already recorded, so
                 # the high-water mark moves with it and the next incremental save
-                # does not append the conversation a second time.
-                restored_history = restore_history_from_turns(
-                    conv["turns"][-MAX_CONVERSATION_TURNS_IN_MEMORY:]
-                )
+                # does not append the conversation a second time. The window came
+                # from the read above, so there is nothing left to slice here.
+                restored_history = restore_history_from_turns(conv["turns"])
                 runtime.execution_context._conversation_history = restored_history
                 runtime.durable_turn_count = len(restored_history.messages)
                 logger.info(f"Activated conversation {request.conversation_id} for session {channel_id}")
+
+                # After the activation, so the helper labels the conversation the
+                # user just opened, and inside runtime.lock for the same reason
+                # the rotate is: this serializes conversation-state mutation. The
+                # helper reads the whole durable conversation itself rather than
+                # reusing `conv` above, which now carries only the newest window -
+                # summarizing a window would silently produce "topic of the last
+                # N turns".
+                await try_ensure_topic_and_summary(
+                    runtime, generate_topic_and_summary
+                )
 
                 return {"status": "ok"}
 

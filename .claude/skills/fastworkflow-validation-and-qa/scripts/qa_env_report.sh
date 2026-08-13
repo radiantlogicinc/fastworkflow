@@ -65,7 +65,7 @@ echo "-- Suite size (slow: collects all tests) --"
 if [ "${1:-}" = "--collect" ] && [ -x .venv/bin/python ]; then
     .venv/bin/python -m pytest --collect-only -q 2>/dev/null | tail -1
 else
-    info "pass --collect to run 'pytest --collect-only -q' (expected: ~495 tests collected)"
+    info "pass --collect to run 'pytest --collect-only -q' (expected: ~1803 tests collected at v3.1.0)"
 fi
 echo
 echo "Done. This script wrote nothing."

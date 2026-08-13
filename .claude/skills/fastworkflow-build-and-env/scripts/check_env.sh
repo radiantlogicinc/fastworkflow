@@ -104,8 +104,8 @@ CME="fastworkflow/_workflows/command_metadata_extraction/___command_info"
 if [[ "${1:-}" == "--collect" && -n "$PY" ]]; then
     COUNT="$("$PY" -m pytest --collect-only -q 2>/dev/null | grep -oE '^[0-9]+ tests collected' | grep -oE '^[0-9]+' || true)"
     if [[ -n "$COUNT" ]]; then
-        pass "pytest collected $COUNT tests (495 expected at v2.22.2)"
-        [[ "$COUNT" -lt 400 ]] && warn "collection count unusually low — check for collection errors: $PY -m pytest --collect-only -q"
+        pass "pytest collected $COUNT tests (~1803 expected at v3.1.0)"
+        [[ "$COUNT" -lt 1400 ]] && warn "collection count unusually low — check for collection errors: $PY -m pytest --collect-only -q"
     else
         fail "pytest collection failed — run: source .venv/bin/activate && python -m pytest --collect-only -q"
     fi

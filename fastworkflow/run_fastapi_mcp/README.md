@@ -48,12 +48,22 @@ Configure in your environment (loaded at process startup via CLI args or env loa
 |----------|-------------|----------|---------|
 | `FASTWORKFLOW_STATE_ROOT` | Absolute root for all persistent state (conversations, suspended sessions, checkpoints) | No | `~/.local/state/fastworkflow` |
 | `FASTWORKFLOW_WORKFLOW_ID` | Overrides the per-workflow state namespace (defaults to the workflow folder name) | No | *workflow folder name* |
+| `LLM_CONVERSATION_STORE_TIMEOUT_SECONDS` | Per-attempt client-side deadline for the topic/summary call, in seconds. At most 2 attempts, so the wall-clock worst case is about twice this plus backoff — kept under the 30s shutdown drain on purpose | No | `12` |
 | `--expect_encrypted_jwt` | Enable full JWT signature verification (pass flag to require signed tokens) | No | False (no verification by default) |
+
+Set these in the workflow's `fastworkflow.env`, not as shell exports: values are read from the env files loaded at startup.
 
 Notes:
 - Conversation DBs are stored under `FASTWORKFLOW_STATE_ROOT/workflows/<workflow-id>/conversations` (directory is auto-created).
 - `/conversations` now accepts a `limit` query parameter (default `20`).
 - Shutdown waits up to 30 seconds for active turns (hard-coded).
+- Shutdown does **not** generate conversation topics or summaries. It makes any
+  unsaved turns durable and leaves the placeholder blank topic. A conversation is
+  labeled when it is used as a chat instead: on its first completed chat turn, on
+  `POST /activate_conversation` if still blank, and on `POST /new_conversation`.
+  Labels refresh as a thread grows, at turn counts 1, 4, 16, 64, … A blank `topic`
+  in `GET /conversations` means "no successful title yet" — a conversation that
+  only ever ran `/initialize` or `/perform_action` keeps it, by design.
 
 ## Auth Modes
 
