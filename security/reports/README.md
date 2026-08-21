@@ -1,9 +1,9 @@
-# Security HTML reports
+# Security reports
 
-Tracked outputs from the multi-scanner CVE automation:
+Tracked HTML summaries from the multi-scanner CVE automation:
 
-- `cve-report.html` — consolidated scanner status and findings
-- `human-review.html` — FIX/IGNORE recommendations for items that need code or process changes
+- `cve-report.html` — executive scan status across Trivy, Grype, Syft, osv-scanner, Dockle, Dive (Snyk/Scout when authenticated)
+- `human-review.html` — findings that need FIX vs IGNORE decisions with rationale
 
-Machine-readable JSON/SBOM artifacts are written to the `security-reports/` directory (ignored by Git) locally via `make security-scan`.
-OpenVEX acceptances live in `security/vex/fastworkflow.openvex.json`.
+Machine-readable raw outputs live under gitignored `security-reports/` at the repo root.
+OpenVEX statements: `security/vex/fastworkflow.openvex.json`.
