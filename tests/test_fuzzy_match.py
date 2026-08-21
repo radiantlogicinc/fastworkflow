@@ -6,6 +6,7 @@ unrelated one, and `DatabaseValidator.fuzzy_match` then reported that wrong
 candidate as a confident match.
 """
 import json
+import math
 import os
 
 import pytest
@@ -177,21 +178,30 @@ class TestFindBestMatchesBestWindow:
         assert distance == 0.0
 
     def test_floored_cutoff_does_not_drop_a_tying_candidate(self):
-        """(1/49)*49 is 0.999...; int() makes score_cutoff 0, so the second
-        one-edit candidate is abandoned and the first is reported unique.
-        1/7 does not catch this — that product is exactly 1.0 in IEEE."""
-        assert int((1 / 49) * 49) == 0
-        query = "a" * 49
-        left = "a" * 48 + "x"
-        right = "a" * 48 + "y"
+        """Equal-length one-edit candidates must tie in either order.
+
+        The running score_cutoff is an integer edit count taken from
+        max_normalized * max_length. That product is mathematically an
+        integer (1/n * n) but may sit a few ulps below it; flooring then
+        drops the later candidate. Length 49 is a convenient n; we only
+        require the product to be close to 1, not that a particular
+        runtime's int() undershoots.
+        """
+        length = 49
+        assert math.isclose((1 / length) * length, 1.0, rel_tol=0, abs_tol=1e-9)
+        query = "a" * length
+        left = "a" * (length - 1) + "x"
+        right = "a" * (length - 1) + "y"
+        expected = pytest.approx(1 / length)
         matches, distance = find_best_matches(
             query, [left, right], threshold=1.0, best_window=True)
         assert set(matches) == {left, right}
-        assert distance == pytest.approx(1 / 49)
+        assert distance == expected
 
-        reversed_matches, _ = find_best_matches(
+        reversed_matches, reversed_distance = find_best_matches(
             query, [right, left], threshold=1.0, best_window=True)
         assert set(reversed_matches) == {left, right}
+        assert reversed_distance == expected
 
 
 class TestFindBestMatchesContract:
