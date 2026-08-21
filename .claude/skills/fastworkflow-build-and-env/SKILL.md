@@ -64,7 +64,8 @@ cp fastworkflow/examples/fastworkflow.passwords.env passwords/.env
 "${EDITOR:-nano}" passwords/.env     # replace every <...> placeholder with a real key
                                      # one free Mistral key can fill every LITELLM_API_KEY_* slot
 
-# --- 4. Sanity: collection should report ~1803 tests (v3.1.0), ~15 s ---
+# --- 4. Sanity: collection should finish in ~10 s with no import errors ---
+#         (what the count should be: fastworkflow-validation-and-qa)
 python -m pytest --collect-only -q | tail -1
 
 # --- 5. The golden artifact: train hello_world ONCE (needs the real key from step 3) ---
@@ -304,7 +305,7 @@ for every volatile fact:
 | gen-env.sh writes root `.env`, override/ wins, `--exclude` flag | `sed -n '85,120p' gen-env.sh` |
 | makefile parse-time `include ./.env` trap | `cp makefile /tmp/mt/ && cd /tmp/mt && make -n lint` (expect the include error) |
 | No `[tool.bandit]` section; bandit still runs | `grep -c tool.bandit pyproject.toml; .venv/bin/bandit -c pyproject.toml -r fastworkflow/utils/dspy_utils.py` |
-| ~1803 tests collected (v3.1.0) | `source .venv/bin/activate && python -m pytest --collect-only -q \| tail -1` |
+| Collection succeeds with no import errors (the expected count lives in `fastworkflow-validation-and-qa`) | `source .venv/bin/activate && python -m pytest --collect-only -q \| tail -1` |
 | 478-passed baseline + fix-0hb narrative | `bd show fix-0hb` (read-only) |
 | 4 model-dependent FastAPI tests + skip guards | `sed -n '15,40p' tests/test_fastapi_service.py; grep -n 'def test_' tests/test_fastapi_service.py` |
 | Golden-artifact contents & size | `ls fastworkflow/examples/hello_world/___command_info/global/; du -sh fastworkflow/examples/hello_world/___command_info` |

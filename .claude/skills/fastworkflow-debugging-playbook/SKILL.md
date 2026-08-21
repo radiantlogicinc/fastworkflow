@@ -259,7 +259,7 @@ was supplied, returns the default without consulting `os.environ`**. Consequence
 
 ### T13 — test-suite gotchas (debugging context only; authoring → `fastworkflow-validation-and-qa`)
 
-- No pytest config anywhere; run `python -m pytest` from repo root in the venv. ~1803 collected, ~49 min (2026-08-13, v3.1.0).
+- No pytest config anywhere; run `python -m pytest` from repo root in the venv. It takes the better part of an hour — and the per-test thread drain below accounts for minutes of that — so a run you think has hung usually has not. Test count and the current full-run baseline: `fastworkflow-validation-and-qa`.
 - Key-gated skips: FastAPI/topology-B/probes/MCP tests skip unless `./env/.env` AND `./passwords/.env` exist
   (`tests/test_fastapi_service.py:26-36` pattern) — a green run on a fresh clone is mostly skips.
 - 4 FastAPI tests additionally require a locally pre-trained hello_world example (T2 command). fix-0hb

@@ -168,7 +168,11 @@ class ResponseGenerator:
 ```
 - Use `default="NOT_FOUND"` for parameters so missing values are detected, not hallucinated.
 - Use `Field` `description` + `examples` (and `pattern`/`min_length` where helpful) to drive accurate parameter extraction.
-- Optional hooks: `db_lookup(workflow_snapshot, command)`, `process_extracted_parameters(...)`.
+- Optional hooks: `db_lookup(workflow, field_name, field_value) -> tuple[bool, str | None, list[str]]`,
+  `process_extracted_parameters(...)`. `db_lookup` runs for fields marked
+  `json_schema_extra={'db_lookup': True}` and has three return states: `(True, value, [])`
+  overwrites the field, `(False, None, [suggestions])` fails validation, and
+  `(False, None, [])` does neither — use that last one for a value your hook does not own.
 - For LLM-generated responses, use `fastworkflow.utils.dspy_utils.dspySignature(Signature.Input, Signature.Output)` with `dspy.Predict`.
 
 ### Context model — `_commands/context_inheritance_model.json`

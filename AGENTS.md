@@ -38,10 +38,11 @@ running rather than a resource problem. If you are working alongside another age
 **serialise the suite runs**; a run measured against a tree another agent is still
 editing is worthless anyway, so waiting costs nothing.
 
-The suite takes ~49 minutes — 1803 tests, measured 2026-08-13 at v3.1.0 (1788
-passed, 15 skipped). It said ~24 minutes for a long time, from back when the suite
-was ~495 tests; if you budget against that number you will conclude a healthy run
-has hung. Budget for it rather than backgrounding it and hoping.
+The suite takes ~50 minutes — 1860 tests, measured 2026-08-20 at v3.1.1 (1846
+passed, 14 skipped); two runs that day, on adjacent trees, took 51:40 and 50:03.
+It said ~24 minutes for a long time, from back when the suite was ~495 tests; if
+you budget against that number you will conclude a healthy run has hung. Budget
+for it rather than backgrounding it and hoping.
 
 ## fastworkflow CLI
 

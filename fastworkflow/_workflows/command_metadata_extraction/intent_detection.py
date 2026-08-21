@@ -111,12 +111,29 @@ class CommandNamePrediction:
             command = command.replace(f"{tentative_command_name}", "").strip().replace("  ", " ")
         else:
             # Use Levenshtein distance for fuzzy matching with the full command part after @
+            # No match is ([], None), never (None, None) — len() here is safe.
             best_matched_commands, _ = find_best_matches(
                 command.replace(" ", "_"),
                 command_name_dict.keys(),
                 threshold=0.3  # Adjust threshold as needed
             )
-            if best_matched_commands:
+            if (
+                len(best_matched_commands) > 1
+                and nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION
+            ):
+                # Commands sharing a prefix tie at distance 0, because scoring
+                # compares only the leading len(input) characters, and
+                # command_name_dict iterates a set — so picking [0] would choose
+                # nondeterministically between them across processes. Leave the
+                # name unset so the classifier and its ambiguity prompt decide.
+                # The clarification stages are deliberately excluded: they have
+                # no classifier to fall back to.
+                logger.warning(
+                    f"Fuzzy pre-match tied across {best_matched_commands} for "
+                    f"utterance '{command}' in context '{command_context_name}'. "
+                    "Deferring to the classifier instead of picking one."
+                )
+            elif best_matched_commands:
                 command_name = best_matched_commands[0]
 
         if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION:

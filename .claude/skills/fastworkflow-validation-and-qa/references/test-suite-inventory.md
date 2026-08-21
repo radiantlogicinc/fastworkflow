@@ -1,14 +1,12 @@
 # fastWorkflow test-suite inventory (detail overflow from SKILL.md)
 
-> TEAM-PRIVATE: embeds content from uncommitted internal docs. Do not commit or publish this skill without the developer'sexplicit approval.
-
-Facts verified 2026-07-09 against v2.22.2 (commit c33b9a5); suite size and the full-run baseline re-measured 2026-08-13 against v3.1.0. Re-verification commands at the bottom of SKILL.md.
+Facts verified 2026-07-09 against v2.22.2 (commit c33b9a5); suite size and the full-run baseline re-measured 2026-08-20 against v3.1.1 (previously 2026-08-13 against v3.1.0). Re-verification commands at the bottom of SKILL.md.
 
 > The per-file breakdown below is the v2.22.2 shape and has NOT been re-inventoried — the suite has since roughly tripled. Trust the totals in SKILL.md; treat the file-by-file counts here as historical until someone re-walks them.
 
 ## 1. Suite shape
 
-- 1803 tests collected as of 2026-08-13 / v3.1.0. At v2.22.2 it was 495 across 79 `test_*.py` files (verified `find tests -name 'test_*.py' -not -path '*__pycache__*'`): 50 top-level in `tests/`, 25 under `tests/test_build/` (pure-Python AST/codegen — no keys, no network), 4 under `tests/test_simple_workflow_template/`.
+- 1860 tests collected as of 2026-08-20 / v3.1.1 (1803 at v3.1.0). At v2.22.2 it was 495 across 79 `test_*.py` files (verified `find tests -name 'test_*.py' -not -path '*__pycache__*'`): 50 top-level in `tests/`, 25 under `tests/test_build/` (pure-Python AST/codegen — no keys, no network), 4 under `tests/test_simple_workflow_template/`.
 - Phase coverage: build-time = `tests/test_build/`; train-time = `tests/test_train_modern_stack.py` (2 tests, key-gated) + `tests/test_workflow_training.py` (2 tests, permanently skipped); run-time = everything else (~375 tests).
 - `tests/conftest.py`:
   - lines 33-58: session autouse fixture injects `fastworkflow/examples/{retail_workflow, simple_workflow_template, hello_world}` into `sys.path` ("simulating what Workflow does in production").
@@ -114,5 +112,6 @@ Lines 36-38: `except Exception: contexts = {"*": []}  # Fallback to ensure tests
 | 2026-01-28 | 22/22 tests passing after CVE sweep (subset run) | SECURITY_VULNERABILITY_REPORT.md |
 | 2026-07-09 | 495 collected; spot run 9 passed / 1 skipped (test_context_model + test_command_directory) | this skill's authoring session |
 | 2026-08-13 | 1803 collected; **1788 passed / 15 skipped / 0 failed / 0 errors in 48:56**; `___command_info` checksummed either side — 10 build-cache JSONs rewritten, no model weights or thresholds touched, nothing deleted | v3.1.0 release verification (bd fix-dzs) |
+| 2026-08-20 | 1860 collected; **1846 passed / 14 skipped / 0 failed / 0 errors in 50:03**. A second full run the same day, on the tree with only fix-86c landed, was also 0 failures in 51:40 — two clean runs, but not consecutive on one tree, so not idempotence evidence. No checksum pass this time | v3.1.1 release verification (bd fix-86c, fix-0xn, fix-11r, fix-63k, fix-07b) |
 
-Unknowns to close (ask owner / measure): whether full-suite-before-tag is actually practiced for every release; monthly cost of a fully-keyed run. **Closed 2026-08-13:** full-suite wall time (~49 min) and the current full-run pass count (1788/15/0 at 1803 collected) — see the row above. Still open on that run: it was a SINGLE run, so the two-consecutive-clean-runs idempotence bar in SKILL.md was not met.
+Unknowns to close (ask owner / measure): whether full-suite-before-tag is actually practiced for every release; monthly cost of a fully-keyed run. **Closed 2026-08-13, refreshed 2026-08-20:** full-suite wall time (~50 min) and the current full-run pass count (1846/14/0 at 1860 collected) — see the rows above. Still open across both: no release has yet produced two consecutive clean runs on one tree, so the idempotence bar in SKILL.md remains unmet.
