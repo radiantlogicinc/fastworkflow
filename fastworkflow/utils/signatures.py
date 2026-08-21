@@ -667,7 +667,7 @@ Today's date is {today}.
 
                 if matched:
                     if corrected_value != field_value:
-                        logger.info(
+                        logger.debug(
                             f"db_lookup substituted {subject_command_name}.{field_name}: "
                             f"'{field_value}' -> '{corrected_value}'"
                         )

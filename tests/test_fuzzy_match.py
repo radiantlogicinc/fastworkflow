@@ -73,6 +73,20 @@ class TestBestWindowDistance:
     def test_empty_candidate(self):
         assert best_window_distance("garrison", "") == 1.0
 
+    def test_containment_on_a_long_candidate_is_zero(self):
+        """The quadratic path would score hundreds of windows; containment
+        must still report an exact interior match as distance 0.0."""
+        haystack = "x" * 400 + "garrison" + "y" * 400
+        assert best_window_distance("garrison", haystack) == 0.0
+
+    def test_one_edit_in_a_long_candidate_is_found(self):
+        haystack = "x" * 400 + "garrisen" + "y" * 400
+        assert best_window_distance("garrison", haystack) == pytest.approx(1 / 8)
+
+    def test_bound_that_nothing_beats_is_not_returned_as_a_tie(self):
+        """A score_cutoff miss must not look like a match at the bound."""
+        assert best_window_distance("garrison", "zzzzzzzz", max_normalized=0.0) > 0.0
+
 
 class TestFindBestMatchesLeadingWindow:
     """Default behaviour, which intent detection depends on. Do not widen it
@@ -137,6 +151,30 @@ class TestFindBestMatchesBestWindow:
             "zzzzzzzzzzzz", PEOPLE, threshold=0.1, best_window=True)
         assert matches == []
         assert distance is None
+
+    def test_running_cutoff_does_not_invent_ties(self):
+        """Later candidates that cannot beat the leader must not be reported
+        as tied with it because a truncated Levenshtein returned the cutoff."""
+        matches, distance = find_best_matches(
+            "abcd",
+            ["abce", "abxx", "zzzzzzzz"],
+            threshold=1.0,
+            best_window=True,
+        )
+        assert matches == ["abce"]
+        assert distance == pytest.approx(0.25)
+
+    def test_containment_short_circuits_the_rest_of_the_list(self):
+        """Once any candidate contains the input, only other containing
+        candidates may tie with it."""
+        matches, distance = find_best_matches(
+            "Garrison",
+            PEOPLE + ["x" * 400 + "unrelated" + "y" * 400],
+            threshold=0.7,
+            best_window=True,
+        )
+        assert matches == ["Aaron Garrison"]
+        assert distance == 0.0
 
 
 class TestFindBestMatchesContract:

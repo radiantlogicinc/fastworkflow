@@ -8,22 +8,61 @@ def normalize_text(text):
         """
         return re.sub(r'[@\s_]', '', str(text).lower())
 
-def normalized_levenshtein_distance(s1, s2):
-        """Calculate normalized Levenshtein distance"""
-        distance = Levenshtein.distance(s1, s2)
-        max_length = max(len(s1), len(s2))
-        return 0.0 if max_length == 0 else distance / max_length
+def normalized_levenshtein_distance(
+        s1, s2, max_normalized: Optional[float] = None):
+        """Calculate normalized Levenshtein distance.
 
-def best_window_distance(normalized_input: str, normalized_candidate: str) -> float:
+        ``max_normalized`` is an optional upper bound. Distances that cannot
+        beat it are not fully computed; a value strictly greater than
+        ``max_normalized`` is returned instead. Callers must treat that
+        sentinel as "worse", never as a tie at the bound.
+        """
+        max_length = max(len(s1), len(s2))
+        if max_length == 0:
+            return 0.0
+        if max_normalized is None:
+            return Levenshtein.distance(s1, s2) / max_length
+        cutoff = int(max_normalized * max_length)
+        distance = Levenshtein.distance(s1, s2, score_cutoff=cutoff)
+        if distance > cutoff:
+            return max_normalized + 1.0
+        return distance / max_length
+
+def best_window_distance(
+        normalized_input: str,
+        normalized_candidate: str,
+        max_normalized: float = 1.0,
+        ) -> float:
     """Smallest normalized distance between the input and any equal-length window
-    of the candidate."""
+    of the candidate.
+
+    Exact containment is distance 0.0 and returns immediately. Remaining
+    windows use Levenshtein's ``score_cutoff`` so a window that cannot beat
+    ``max_normalized`` (or the best window seen so far) is abandoned early.
+    If no window beats ``max_normalized``, a value strictly greater than it
+    is returned so the caller does not invent a tie at the bound.
+    """
+    if normalized_input in normalized_candidate:
+        return 0.0
+
     len_input = len(normalized_input)
-    return min(
-        normalized_levenshtein_distance(
-            normalized_input, normalized_candidate[i:i + len_input]
+    n_windows = max(len(normalized_candidate) - len_input, 0) + 1
+    best: Optional[float] = None
+    bound = max_normalized
+    for i in range(n_windows):
+        dist = normalized_levenshtein_distance(
+            normalized_input,
+            normalized_candidate[i:i + len_input],
+            max_normalized=bound,
         )
-        for i in range(max(len(normalized_candidate) - len_input, 0) + 1)
-    )
+        if dist > bound:
+            continue
+        if best is None or dist < best:
+            best = dist
+            bound = dist
+            if best == 0.0:
+                return 0.0
+    return best if best is not None else max_normalized + 1.0
 
 def find_best_matches(input_text: str, 
                     text_list: list[str], 
@@ -57,7 +96,10 @@ def find_best_matches(input_text: str,
     tuple[list[str], Optional[float]]
         A tuple containing the list of best-matching original strings
         and the corresponding distance. If the best distance exceeds
-        the ``threshold`` value, ``([], None)`` is returned.
+        the ``threshold`` value, or if ``text_list`` is empty,
+        ``([], None)`` is returned — never ``(None, None)``. Callers
+        must treat an empty list as "no match" (truthiness or ``len``);
+        ``best_matches is None`` is always false.
     """
 
     # Ensure we have a concrete list (e.g., when a generator is passed)
@@ -66,15 +108,28 @@ def find_best_matches(input_text: str,
     normalized_input = normalize_text(input_text)
     normalized_list = [normalize_text(text) for text in text_list]
 
-    # If empty list, return None
     if not normalized_list:
         return ([], None)
 
     if best_window:
-        normalized_distances = [
-            best_window_distance(normalized_input, normalized)
-            for normalized in normalized_list
+        # Containment is distance 0.0. Once any candidate contains the
+        # input, later candidates can only tie by also containing it —
+        # there is no need to slide windows over the rest of the list.
+        contained = [
+            text for text, normalized in zip(text_list, normalized_list)
+            if normalized_input in normalized
         ]
+        if contained:
+            return (contained, 0.0)
+
+        normalized_distances = []
+        best_so_far = 1.0
+        for normalized in normalized_list:
+            dist = best_window_distance(
+                normalized_input, normalized, max_normalized=best_so_far)
+            if dist < best_so_far:
+                best_so_far = dist
+            normalized_distances.append(dist)
     else:
         len_input = len(normalized_input)
         # Compute distances between the input and every candidate truncated to len of input

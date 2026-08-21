@@ -111,6 +111,7 @@ class CommandNamePrediction:
             command = command.replace(f"{tentative_command_name}", "").strip().replace("  ", " ")
         else:
             # Use Levenshtein distance for fuzzy matching with the full command part after @
+            # No match is ([], None), never (None, None) — len() here is safe.
             best_matched_commands, _ = find_best_matches(
                 command.replace(" ", "_"),
                 command_name_dict.keys(),
