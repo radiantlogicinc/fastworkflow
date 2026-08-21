@@ -6,6 +6,7 @@ unrelated one, and `DatabaseValidator.fuzzy_match` then reported that wrong
 candidate as a confident match.
 """
 import json
+import math
 import os
 
 import pytest
@@ -176,6 +177,32 @@ class TestFindBestMatchesBestWindow:
         assert matches == ["Aaron Garrison"]
         assert distance == 0.0
 
+    def test_floored_cutoff_does_not_drop_a_tying_candidate(self):
+        """Equal-length one-edit candidates must tie in either order.
+
+        The running score_cutoff is an integer edit count taken from
+        max_normalized * max_length. That product is mathematically an
+        integer (1/n * n) but may sit a few ulps below it; flooring then
+        drops the later candidate. Length 49 is a convenient n; we only
+        require the product to be close to 1, not that a particular
+        runtime's int() undershoots.
+        """
+        length = 49
+        assert math.isclose((1 / length) * length, 1.0, rel_tol=0, abs_tol=1e-9)
+        query = "a" * length
+        left = "a" * (length - 1) + "x"
+        right = "a" * (length - 1) + "y"
+        expected = pytest.approx(1 / length)
+        matches, distance = find_best_matches(
+            query, [left, right], threshold=1.0, best_window=True)
+        assert set(matches) == {left, right}
+        assert distance == expected
+
+        reversed_matches, reversed_distance = find_best_matches(
+            query, [right, left], threshold=1.0, best_window=True)
+        assert set(reversed_matches) == {left, right}
+        assert reversed_distance == expected
+
 
 class TestFindBestMatchesContract:
     def test_returns_empty_list_not_none_when_nothing_is_close(self):
@@ -227,6 +254,17 @@ class TestDatabaseValidatorFuzzyMatch:
 
     def test_empty_candidate_list_declines(self):
         assert DatabaseValidator.fuzzy_match("Garrison", []) == (False, None, [])
+
+    def test_tied_one_edit_candidates_are_ambiguous_not_auto_applied(self):
+        """The unique-winner path above would auto-apply: 1/49 <= 0.2."""
+        query = "a" * 49
+        left = "a" * 48 + "x"
+        right = "a" * 48 + "y"
+        matched, corrected, suggestions = DatabaseValidator.fuzzy_match(
+            query, [left, right])
+        assert matched is False
+        assert corrected is None
+        assert set(suggestions) == {left, right}
 
     def test_auto_apply_threshold_downgrades_a_typo_to_a_suggestion(self):
         """A caller for whom a wrong substitution is expensive can require an

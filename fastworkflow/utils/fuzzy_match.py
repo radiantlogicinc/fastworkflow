@@ -1,6 +1,18 @@
 import re
+import sys
 from typing import Optional
 import Levenshtein
+
+# Windows are the (normalized) input length. db_lookup scores catalogue
+# fields — names, emails, ids — tens to a few hundred characters, not
+# megabytes. Rounding error on max_normalized * max_length is about
+# sys.float_info.epsilon * max_length; at one million characters that is
+# still ~2e-10. The nudge must exceed that scaled error so a product one
+# ulp below an integer (e.g. (1/49)*49) is not floored, and stay << 1 so
+# a fractional edit count such as 0.8 (bound 0.2 on a 4-char window) is
+# not promoted to the next integer.
+_MAX_SCORED_WINDOW = 1_000_000
+_SCORE_CUTOFF_NUDGE = 8 * sys.float_info.epsilon * _MAX_SCORED_WINDOW
 
 def normalize_text(text):
         """
@@ -22,7 +34,7 @@ def normalized_levenshtein_distance(
             return 0.0
         if max_normalized is None:
             return Levenshtein.distance(s1, s2) / max_length
-        cutoff = int(max_normalized * max_length)
+        cutoff = int(max_normalized * max_length + _SCORE_CUTOFF_NUDGE)
         distance = Levenshtein.distance(s1, s2, score_cutoff=cutoff)
         if distance > cutoff:
             return max_normalized + 1.0
