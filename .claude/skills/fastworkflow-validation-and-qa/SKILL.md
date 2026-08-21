@@ -55,12 +55,12 @@ python -m pytest
 
 | Fact | Value (verified 2026-07-09) |
 |---|---|
-| Collected tests | **1803** (re-measured 2026-08-13 at v3.1.0; was 495 at v2.22.2 — this number moves fast, re-run rather than trusting it) |
+| Collected tests | **1860** (re-measured 2026-08-20 at v3.1.1; 1803 at v3.1.0, 495 at v2.22.2 — this number moves fast, re-run rather than trusting it) |
 | pytest / python | pytest 9.0.3 on venv Python 3.12.2 |
 | pytest config file | **None.** No `pytest.ini`/`setup.cfg`/`tox.ini`; `pyproject.toml` has no `[tool.pytest.ini_options]`. Markers `integration`/`slow` are registered dynamically in `tests/conftest.py:101-108` |
 | Makefile test target | **None** (targets: gen-env, lint, audit, audit-json, publish-testpypi, publish) |
 | Coverage | `pytest-cov` is installed; no coverage is configured or ever reported |
-| Last recorded full-suite baseline | **1788 passed / 15 skipped / 0 failed / 0 errors, 1803 collected, 48:56** — measured 2026-08-13 at v3.1.0 on the owner's provisioned WSL2 box. Supersedes the "unverified — run it and record it" note this row used to carry, and the older 478/0 at fa97b48 (2026-06-15). **Caveat: this is ONE run, so it does not meet the two-consecutive-runs bar below.** Checksums taken either side showed 10 build-cache JSONs (`command_directory.json`, `routing_definition.json` in five example workflows) rewritten by the build tests — no `.pth`, no `threshold.json`, nothing deleted — so the suite is not strictly byte-idempotent, though not in the way Rule 3 cares about |
+| Last recorded full-suite baseline | **1846 passed / 14 skipped / 0 failed / 0 errors, 1860 collected, 50:03** — measured 2026-08-20 at v3.1.1 on the owner's provisioned WSL2 box (bd fix-86c / fix-0xn / fix-11r / fix-63k). Supersedes the v3.1.0 figure (1788/15/0 at 1803 collected, 48:56) and the older 478/0 at fa97b48 (2026-06-15). **Caveat: this still does not meet the two-consecutive-runs bar below.** Two full runs were made that day, both 0 failures, at 51:40 and 50:03 — but on ADJACENT TREES (the first with only fix-86c landed, the second with all four), so they establish that wall time is stable and say nothing about idempotence. The v3.1.0 checksum finding was not re-checked: 10 build-cache JSONs (`command_directory.json`, `routing_definition.json` in five example workflows) rewritten by the build tests, no `.pth`, no `threshold.json`, nothing deleted — the suite is not strictly byte-idempotent, though not in the way Rule 3 cares about |
 | Fixed overhead | **Fixed 2026-08-13 — this row's old claim is obsolete.** It said an autouse fixture sleeps 0.5 s after *every* test (≈4 min of dead time at 495 tests, which would be ~15 min at 1803) and that the underlying thread-lifecycle issue was unfixed. `tests/conftest.py:151-169` now joins only when a `ChatWorker` is actually alive and falls back to the 0.5 s sleep just for a stubborn one; its own comment records that the blanket sleep cost ~4 minutes and that only a handful of tests start those threads. Do not reintroduce a blanket sleep |
 | Global-state warning | `tests/conftest.py:33-58` injects `fastworkflow/examples/{retail_workflow, simple_workflow_template, hello_world}` into `sys.path` for the whole session; tests also mutate `fastworkflow._env_vars` and drop `./___workflow_contexts` in CWD. Never assume a clean `os.environ` |
 
@@ -168,7 +168,7 @@ Checklist (all items verified against existing practice):
 
 ### For ordinary code changes (de-facto, from practice)
 
-- Full local suite on a fully provisioned box (both env files + pre-trained hello_world): the recorded standard is the fa97b48 commit message itself — "Verified: full suite 478 passed / 0 failed ... suite is now idempotent." Match that: **0 failures, and a SECOND consecutive full run also 0 failures** (idempotence is part of the bar because fix-0hb was invisible in single runs). At ~49 minutes a run, two runs is most of a two-hour block — budget it, and note that the v3.1.0 release did **not** meet this bar (one run only; see the baseline row above). A cheaper partial substitute for the idempotence half, used there, is to checksum `fastworkflow/examples/*/___command_info` either side of a single run.
+- Full local suite on a fully provisioned box (both env files + pre-trained hello_world): the recorded standard is the fa97b48 commit message itself — "Verified: full suite 478 passed / 0 failed ... suite is now idempotent." Match that: **0 failures, and a SECOND consecutive full run also 0 failures** (idempotence is part of the bar because fix-0hb was invisible in single runs). At ~50 minutes a run, two runs is most of a two-hour block — budget it, and note that **neither** the v3.1.0 nor the v3.1.1 release met this bar (v3.1.0: one run; v3.1.1: two runs, but on adjacent trees, which measures wall time rather than idempotence — see the baseline row above). A cheaper partial substitute for the idempotence half, used at v3.1.0, is to checksum `fastworkflow/examples/*/___command_info` either side of a single run.
 - CI green is necessary but nearly meaningless (section 1). Do not present it as evidence.
 - No formal written release-gate policy exists in the repo (**open** — the makefile `publish` target runs no tests). Until the owner writes one, treat "full suite green twice locally + affected-area tests run in verbose" as the minimum before any release tag.
 
@@ -189,13 +189,15 @@ Local pytest is NOT evidence of reliability. Defer to the campaign's gates (see 
 
 ## Provenance and maintenance
 
-Facts verified 2026-07-09 against v2.22.2 (commit c33b9a5), on the owner's provisioned WSL2 box (both env files present, hello_world pre-trained); test counts and the full-suite baseline re-measured 2026-08-13 at v3.1.0. Spot-run evidence: `pytest --collect-only -q` → 1803 collected (495 at v2.22.2); `pytest tests/test_context_model.py tests/test_command_directory.py -q` → 9 passed, 1 skipped.
+Facts verified 2026-07-09 against v2.22.2 (commit c33b9a5), on the owner's provisioned WSL2 box (both env files present, hello_world pre-trained); test counts and the full-suite baseline re-measured 2026-08-20 at v3.1.1 (previously 2026-08-13 at v3.1.0). Spot-run evidence: `pytest --collect-only -q` → 1860 collected in 9.4 s (1803 at v3.1.0, 495 at v2.22.2); `pytest tests/test_context_model.py tests/test_command_directory.py -q` → 9 passed, 1 skipped.
+
+**This skill owns the suite's numbers.** `fastworkflow-change-control`, `fastworkflow-build-and-env` and `fastworkflow-debugging-playbook` used to quote the test count and wall time in passing; those mentions were removed on 2026-08-20 and now point here, so a stale figure has only one place to hide.
 
 Re-verify volatile facts:
 
 | Fact | Command |
 |---|---|
-| Collected-test count (1803 at v3.1.0) | `source .venv/bin/activate && python -m pytest --collect-only -q \| tail -1` |
+| Collected-test count (1860 at v3.1.1) | `source .venv/bin/activate && python -m pytest --collect-only -q \| tail -1` |
 | No pytest config | `ls pytest.ini setup.cfg tox.ini 2>&1; grep -n '\[tool.pytest' pyproject.toml` |
 | 0.5 s sleep fixture lines | `grep -n 'time.sleep(0.5)' tests/conftest.py` |
 | Env-gate guards | `grep -n 'pytest.skip' tests/test_fastapi_service.py tests/test_train_modern_stack.py` |
