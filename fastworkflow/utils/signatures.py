@@ -68,8 +68,38 @@ class DatabaseValidator:
     """Generic validator for database lookups with fuzzy matching"""
     
     @staticmethod
-    def fuzzy_match(value: str, key_values: list[str], threshold: float = 0.2) -> Tuple[bool, Optional[str], List[str]]:
-        """Find the closest matching value in the specified database."""
+    def fuzzy_match(value: str, key_values: list[str], threshold: float = 0.6,
+                    suggest_threshold: float = 0.7,
+                    auto_apply_threshold: float = 0.2) -> Tuple[bool, Optional[str], List[str]]:
+        """Find the closest matching value in the specified database.
+
+        Three stages run in order, and each one short-circuits: a
+        case-insensitive exact match, then Levenshtein, then ``difflib``.
+
+        Parameters
+        ----------
+        threshold
+            ``difflib`` cutoff for the final suggestion-only stage. Only values
+            that no candidate came within ``suggest_threshold`` of reach it, so
+            a loose cutoff here yields unrelated suggestions rather than useful
+            ones — and because any non-empty suggestion list fails validation,
+            those unrelated suggestions reject values that are merely absent
+            from this particular candidate list.
+        suggest_threshold
+            Maximum Levenshtein distance at which a candidate is considered at
+            all. Beyond this the value falls through to ``difflib``.
+        auto_apply_threshold
+            Maximum Levenshtein distance at which a *unique* match is reported
+            as matched, which makes the framework overwrite the user's value.
+            Kept strict deliberately: the distance at which a real typo lands
+            and the distance at which an unrelated value lands are separable,
+            and being generous here silently substitutes non-members (``Batman``
+            scores 0.333 against a customer list). Note the metric is
+            edits/length, so a one-edit typo on a value shorter than about five
+            characters exceeds this and is offered as a suggestion instead.
+            Raise it per command if an extra clarification turn costs more than
+            a wrong substitution.
+        """
         global NOT_FOUND
         if not NOT_FOUND:
             NOT_FOUND = fastworkflow.get_env_var("NOT_FOUND")
@@ -84,10 +114,12 @@ class DatabaseValidator:
         if match is not None:
             return True, match, []
 
-        best_matches, _ = find_best_matches(value, key_values, threshold = 0.7)
-        if len(best_matches) == 1:
-            return True, best_matches[0], []
-        elif len(best_matches) > 1:
+        best_matches, best_distance = find_best_matches(
+            value, key_values, threshold = suggest_threshold, best_window = True)
+        if best_matches:
+            if len(best_matches) == 1 and best_distance <= auto_apply_threshold:
+                return True, best_matches[0], []
+            # Ambiguous, or close enough to offer but too far to apply unannounced.
             return False, None, best_matches
 
         lowercase_matches = get_close_matches(
@@ -634,6 +666,11 @@ Today's date is {today}.
                 # matched, corrected_value, field_suggestions = DatabaseValidator.fuzzy_match(field_value, key_values)
 
                 if matched:
+                    if corrected_value != field_value:
+                        logger.info(
+                            f"db_lookup substituted {subject_command_name}.{field_name}: "
+                            f"'{field_value}' -> '{corrected_value}'"
+                        )
                     setattr(cmd_parameters, field_name, corrected_value)
                 elif field_suggestions:
                     invalid_fields.append(f"{field_name} '{field_value}'")
