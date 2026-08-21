@@ -3,8 +3,8 @@
   "@id": "https://github.com/radiantlogicinc/fastworkflow/security/vex/fastworkflow.openvex.json",
   "author": "fastworkflow maintainers <drawal@radiantlogic.com>",
   "role": "document creator",
-  "timestamp": "2026-08-08T14:55:09Z",
-  "version": 2,
+  "timestamp": "2026-08-21T02:56:00Z",
+  "version": 6,
   "statements": [
     {
       "vulnerability": {
@@ -19,7 +19,7 @@
       "status": "not_affected",
       "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
       "impact_statement": "Alias CVE-2025-69872. fastWorkflow uses diskcache only as DSPy's on-disk LM response cache (via dspy.configure_cache). Exploitation requires an attacker to write attacker-controlled pickle bytes into the process-local DSPy cache directory (default under the service account home, e.g. ~/.dspy_cache) and then have the process deserialize them. Remote API/MCP clients cannot write that directory. An adversary who can already write arbitrary files as the service user has equivalent or greater privilege than pickle RCE would grant. There is no patched diskcache release on PyPI as of this VEX; the finding remains accepted under this justification.",
-      "status_notes": "Code review 2026-08-08 (Dependabot alert #48). diskcache is transitive via dspy; not imported directly by fastworkflow. Cache path is not a multi-tenant shared volume in supported deployments. Re-evaluate if a deployment mounts the DSPy disk cache directory as world-writable or shares it across trust boundaries. Dual-stated as CVE-2025-69872 below for scanners that key on CVE IDs."
+      "status_notes": "Code review 2026-08-08 (Dependabot alert #48); re-validated 2026-08-21 after v3.1.2 merge and datasets CVE-2026-66007 remediation. diskcache is transitive via dspy; not imported directly by fastworkflow. Cache path is not a multi-tenant shared volume in supported deployments. Re-evaluate if a deployment mounts the DSPy disk cache directory as world-writable or shares it across trust boundaries. Dual-stated as CVE-2025-69872 below for scanners that key on CVE IDs. PyPI latest remains 5.6.3 (no fixed release)."
     },
     {
       "vulnerability": {
