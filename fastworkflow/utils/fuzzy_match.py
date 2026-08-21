@@ -22,7 +22,11 @@ def normalized_levenshtein_distance(
             return 0.0
         if max_normalized is None:
             return Levenshtein.distance(s1, s2) / max_length
-        cutoff = int(max_normalized * max_length)
+        # score_cutoff is an integer edit count. Bare int() floors products
+        # such as (1/49)*49 == 0.999... to 0, which then abandons a later
+        # candidate that ties the bound. Nudge up by less than one edit so
+        # 0.999... becomes 1 and 0.8 stays 0.
+        cutoff = int(max_normalized * max_length + 1e-9)
         distance = Levenshtein.distance(s1, s2, score_cutoff=cutoff)
         if distance > cutoff:
             return max_normalized + 1.0

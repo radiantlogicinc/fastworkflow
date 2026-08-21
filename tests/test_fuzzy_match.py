@@ -176,6 +176,23 @@ class TestFindBestMatchesBestWindow:
         assert matches == ["Aaron Garrison"]
         assert distance == 0.0
 
+    def test_floored_cutoff_does_not_drop_a_tying_candidate(self):
+        """(1/49)*49 is 0.999...; int() makes score_cutoff 0, so the second
+        one-edit candidate is abandoned and the first is reported unique.
+        1/7 does not catch this — that product is exactly 1.0 in IEEE."""
+        assert int((1 / 49) * 49) == 0
+        query = "a" * 49
+        left = "a" * 48 + "x"
+        right = "a" * 48 + "y"
+        matches, distance = find_best_matches(
+            query, [left, right], threshold=1.0, best_window=True)
+        assert set(matches) == {left, right}
+        assert distance == pytest.approx(1 / 49)
+
+        reversed_matches, _ = find_best_matches(
+            query, [right, left], threshold=1.0, best_window=True)
+        assert set(reversed_matches) == {left, right}
+
 
 class TestFindBestMatchesContract:
     def test_returns_empty_list_not_none_when_nothing_is_close(self):
@@ -227,6 +244,17 @@ class TestDatabaseValidatorFuzzyMatch:
 
     def test_empty_candidate_list_declines(self):
         assert DatabaseValidator.fuzzy_match("Garrison", []) == (False, None, [])
+
+    def test_tied_one_edit_candidates_are_ambiguous_not_auto_applied(self):
+        """The unique-winner path above would auto-apply: 1/49 <= 0.2."""
+        query = "a" * 49
+        left = "a" * 48 + "x"
+        right = "a" * 48 + "y"
+        matched, corrected, suggestions = DatabaseValidator.fuzzy_match(
+            query, [left, right])
+        assert matched is False
+        assert corrected is None
+        assert set(suggestions) == {left, right}
 
     def test_auto_apply_threshold_downgrades_a_typo_to_a_suggestion(self):
         """A caller for whom a wrong substitution is expensive can require an
