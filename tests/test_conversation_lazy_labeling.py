@@ -253,20 +253,33 @@ async def _chat_turn(
 ):
     """Run one real turn through ``submit_turn`` and return its execution.
 
-    The work function records a conversation turn through the execution
-    context's own public API and reports the outcome as a real ``TurnOutput``,
-    which is what lets a test choose the status (a suspension, a failure) without
-    needing a trained workflow or a live agent. Everything downstream — the
-    incremental save, the persistence of suspended state, the registry
-    retirement, the labeling hook — is the production path.
+    The work function drives the execution context's own logical-turn lifecycle
+    — begin, record a conversation turn, finalize — and lets the test choose the
+    resulting status without needing a trained workflow or a live agent.
+    Everything downstream (the trim, the persistence of suspended state, the
+    registry retirement, the labeling hook) is the production path.
+
+    It has to reach ``_build_turn_result``, not just fabricate a ``TurnOutput``.
+    Since the Phase-7 consolidation the turn RECORD is what persists a
+    conversation, and it is written by the finalize chokepoint inside the turn;
+    a work function that skipped finalize would leave every conversation-memory
+    read empty and these assertions vacuous.
     """
     manager = manager or app_module.session_manager
 
     def work_fn() -> fastworkflow.TurnOutput:
-        runtime.execution_context.append_conversation_turn(f"{message} -> ok")
-        return fastworkflow.TurnOutput(
-            turn_key=fastworkflow.mint_turn_key(), status=status
+        ctx = runtime.execution_context
+        # A message during suspension resumes the same logical turn (A30.2),
+        # exactly as _execute_message decides it.
+        if not ctx.awaiting_user:
+            ctx._begin_turn(message)
+        ctx.append_conversation_turn(f"{message} -> ok")
+        ctx._awaiting_user = status is fastworkflow.TurnStatus.AWAITING_USER
+        command_output = fastworkflow.CommandOutput(
+            command_name="",
+            command_response=fastworkflow.CommandResponse(response="ok"),
         )
+        return ctx._build_turn_result(command_output).turn_output
 
     return await app_module.submit_turn(
         runtime,
@@ -282,30 +295,49 @@ async def _chat_turn(
 
 
 def _seed_conversation(runtime: ChannelRuntime, turn_count: int) -> int:
-    """A durable, unlabeled conversation of ``turn_count`` turns.
+    """A durable, unlabeled conversation of ``turn_count`` usable turns.
 
-    Written through the real store, because every lazy trigger reads the durable
+    Written through the real sink, because every lazy trigger reads the durable
     record rather than the in-memory window; a conversation that exists only in
-    memory would take a different branch entirely.
+    memory would take a different branch entirely. Emitting real TurnResults
+    rather than inserting rows is what makes the seeded turns *usable* — the
+    memory columns are stamped at finalize, and a row without them is a trace
+    that no conversation-memory read admits.
     """
-    conv_id = runtime.conversation_store.reserve_next_conversation_id()
-    runtime.conversation_store.append_conversation_turns(
-        conv_id,
-        [
-            {
-                "conversation summary": f"seeded exchange {i} -> ok",
-                "conversation_traces": None,
-                "feedback": None,
-            }
-            for i in range(turn_count)
-        ],
-    )
+    sink = runtime.execution_context.trace_sink
+    conv_id = sink.store.mint_conversation_id(runtime.channel_id)
+    for i in range(turn_count):
+        sink.emit_turn_record(
+            _memory_turn_result(
+                runtime.channel_id, conv_id, f"seeded exchange {i} -> ok"
+            )
+        )
+    assert sink.flush(), "the seeded turns never reached the store"
     return conv_id
 
 
+def _memory_turn_result(
+    channel_id: str, conversation_id: int, summary: str
+) -> fastworkflow.TurnResult:
+    """A completed TurnResult that carries a conversation-memory entry."""
+    return fastworkflow.TurnResult(
+        turn_output=fastworkflow.TurnOutput(
+            turn_key=fastworkflow.mint_turn_key(),
+            status=fastworkflow.TurnStatus.COMPLETED,
+            answer="ok",
+        ),
+        channel_id=channel_id,
+        conversation_id=conversation_id,
+        user_message="seeded",
+        conversation_summary=summary,
+        conversation_traces=None,
+    )
+
+
 def _label_state(runtime: ChannelRuntime, conv_id: Optional[int] = None):
-    return runtime.conversation_store.get_conversation_label_state(
-        conv_id if conv_id is not None else runtime.active_conversation_id
+    return runtime.observability_store.conversation_label_state(
+        runtime.channel_id,
+        conv_id if conv_id is not None else runtime.active_conversation_id,
     )
 
 
@@ -339,13 +371,17 @@ async def _auth_headers(client, channel_id: str) -> dict[str, str]:
 
 @contextlib.asynccontextmanager
 async def running_lifespan(app_module):
-    """Start the real app lifespan and expose its three shutdown steps.
+    """Start the real app lifespan and expose its two shutdown steps.
 
     Same approach as ``tests/test_manager_shutdown_matrix.py``: the shutdown
     steps are closures inside ``lifespan`` and the drain deadline is hardcoded at
     30 s at its single call site, so reading them off the suspended generator's
     frame is the only way to run the production functions with a deadline a test
     can afford. Nothing is replaced or reimplemented.
+
+    ``finalize_conversations_on_shutdown`` was the middle step until the Phase-7
+    consolidation retired it — sync-first turn records leave shutdown nothing to
+    persist.
     """
     cm = app_module.lifespan(app_module.app)
     await cm.__aenter__()
@@ -354,7 +390,6 @@ async def running_lifespan(app_module):
         name
         for name in (
             "wait_for_active_turns_to_complete",
-            "finalize_conversations_on_shutdown",
             "stop_all_chat_sessions",
         )
         if name not in locals_at_yield
@@ -366,7 +401,6 @@ async def running_lifespan(app_module):
     try:
         yield (
             locals_at_yield["wait_for_active_turns_to_complete"],
-            locals_at_yield["finalize_conversations_on_shutdown"],
             locals_at_yield["stop_all_chat_sessions"],
         )
     finally:
@@ -396,7 +430,7 @@ def test_initialize_only_channels_are_never_labeled(app_module, monkeypatch):
     seen: dict[str, Any] = {}
 
     async def body():
-        async with running_lifespan(app_module) as (drain, finalize, stop):
+        async with running_lifespan(app_module) as (drain, stop):
             async with asgi_client(app_module) as client:
                 for channel_id in channels:
                     resp = await client.post(
@@ -416,7 +450,6 @@ def test_initialize_only_channels_are_never_labeled(app_module, monkeypatch):
                     seen["states"][channel_id] = _label_state(runtime)
 
             seen["remaining"] = await drain(max_wait_seconds=5)
-            await finalize(seen["remaining"])
             await stop(seen["remaining"])
 
     asyncio.run(body())
@@ -471,14 +504,23 @@ def test_perform_action_does_not_label_the_conversation(app_module, monkeypatch)
 def test_a_turn_that_suspends_at_ask_user_is_not_labeled_until_it_completes(
     app_module, monkeypatch
 ):
-    """The reason the gate is on ``TurnStatus`` and not on "was it persisted".
+    """A clarifying question does not name a conversation. Twice over, now.
 
-    ``_run_turn`` persists unconditionally once ``work_fn`` returns, and a turn
-    that stopped to ask a clarifying question has already recorded half an
-    exchange. Labeling there titles a conversation after a question, and under a
-    schedule that refreshes geometrically that title is what a picker shows for a
-    long time. The second half of this test is the point: the label is deferred,
-    not lost.
+    Labeling after a question titles a conversation from half an exchange, and
+    under a schedule that refreshes geometrically that title is what a picker
+    shows for a long time. The gate is on the turn's ``TurnStatus``.
+
+    Since the Phase-7 consolidation the memory columns defer too: an
+    awaiting_user emission writes its row with NULL summary/traces and the
+    terminal upsert fills them (§2.1), so a suspended turn contributes ZERO
+    usable turns and there is nothing for a trigger to summarize even if the
+    status gate were removed. That is why the count below is 0 and not 1.
+
+    It is also why the completed count is 1 rather than 2: one logical turn is
+    one row across any number of suspensions, where the legacy store recorded
+    each half as its own turn.
+
+    The second half of this test is the point: the label is deferred, not lost.
     """
     labeler = _install(monkeypatch, app_module, _Labeler())
     channel_id = _channel("askuser")
@@ -505,8 +547,9 @@ def test_a_turn_that_suspends_at_ask_user_is_not_labeled_until_it_completes(
 
     assert seen["suspended_status"] is fastworkflow.TurnStatus.AWAITING_USER
     count, (topic, turn_count) = seen["after_suspension"]
-    assert turn_count == 1, (
-        "the suspended turn was not persisted, so nothing was gated"
+    assert turn_count == 0, (
+        "the suspended turn counted as usable conversation memory, so a trigger "
+        "could summarize half an exchange"
     )
     assert count == 0, "a conversation was titled from a clarifying question"
     assert topic == ""
@@ -514,7 +557,9 @@ def test_a_turn_that_suspends_at_ask_user_is_not_labeled_until_it_completes(
     count, (topic, turn_count) = seen["after_completion"]
     assert count == 1, "the label was lost rather than deferred"
     assert topic == "Topic 1"
-    assert turn_count == 2
+    assert turn_count == 1, (
+        "the resumed exchange was recorded as more than one conversation turn"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -599,7 +644,7 @@ def test_a_channel_labeling_a_conversation_is_not_held_open_at_sigterm(
     seen: dict[str, Any] = {}
 
     async def body():
-        async with running_lifespan(app_module) as (drain, _finalize, _stop):
+        async with running_lifespan(app_module) as (drain, _stop):
             runtime = await _create(app_module, channel_id)
             execn = await _chat_turn(app_module, runtime, message="where is my order")
 
@@ -773,7 +818,6 @@ def test_a_concurrent_activate_and_first_chat_generate_at_most_once(
             runtime = await app_module.session_manager.get_session(channel_id)
             conv_id = _seed_conversation(runtime, 5)
             runtime.active_conversation_id = conv_id
-            runtime.durable_turn_count = 0
 
             async def activate():
                 return await client.post(
@@ -1030,80 +1074,88 @@ def test_a_rotate_labels_even_when_the_refresh_schedule_says_it_is_not_due(
     assert seen["rotated_to"] > seen["conv_id"], "the rotate did not rotate"
 
 
-def test_a_rotate_persists_unsaved_turns_before_it_labels_them(
+def test_a_rotate_does_not_lose_a_turn_whose_record_degraded(
     app_module, monkeypatch
 ):
-    """Hazard: the one state a rotate could not escape, and the turn loss behind it.
+    """Hazard: a rotate clearing in-memory history that is not durable yet.
 
-    A turn persists from inside ``_run_turn``'s own try, so a store failure there
-    leaves in-memory turns with nothing recorded. If a previous rotate had already
-    reserved the next conversation id, the channel then holds turns, a nonzero
-    ``active_conversation_id``, and no record under it. Labeling that state paid
-    for a generation and then raised ``ValueError: Conversation N not found`` out
-    of ``update_conversation_topic_summary``, surfacing as a 500 — so the rotate
-    that would have cleaned the state up was the one operation unavailable, and
-    every retry bought another provider call to fail the same way.
+    The original shape of this: a turn persisted from inside ``_run_turn``'s own
+    try, so a store failure there left in-memory turns with nothing recorded,
+    and if a previous rotate had already reserved the next conversation id the
+    channel held turns, a nonzero ``active_conversation_id``, and no record
+    under it. Labeling that state paid for a generation and then raised out of
+    the legacy topic write, surfacing as a 500 — so the rotate that would have
+    cleaned the state up was the one operation unavailable.
 
-    Persisting before labeling closes both halves: the record exists, so the write
-    is well-defined, and the turns are durable before the rotate clears the
-    history that held them. This asserts the turns SURVIVE, not merely that the
-    request returns 200 — a rotate that answered 200 by discarding them would be
-    the worse bug.
+    Under sync-first turn records the write happens at finalize, so the rotate
+    has no persistence step left to sequence. The hazard did not disappear
+    though: the sync write can still fail, and then the row is only in the
+    sink's pending-retry ring (ruling I1). A rotate clears the history
+    regardless, so the ring is the ONLY thing standing between a wedged-then-
+    recovered DB and a permanently missing turn.
+
+    This trips the breaker so the turn's record degrades to the queue, rotates
+    on top of it, and asserts the turn is recorded anyway — and that the rotate
+    itself still succeeds rather than failing out of the degraded state.
     """
     labeler = _install(monkeypatch, app_module, _Labeler())
-    channel_id = _channel("unsaved")
+    channel_id = _channel("degraded")
     seen: dict[str, Any] = {}
 
     async def body():
         async with asgi_client(app_module) as client:
             headers = await _auth_headers(client, channel_id)
             runtime = await app_module.session_manager.get_session(channel_id)
-
-            # Reproduce the state directly: an id reserved with no record written
-            # (what a rotate leaves), plus a turn that never reached the store.
-            runtime.active_conversation_id = (
-                runtime.conversation_store.reserve_next_conversation_id()
-            )
-            runtime.durable_turn_count = 0
-            runtime.execution_context.append_conversation_turn(
-                "a turn whose persist never landed"
-            )
+            sink = runtime.execution_context.trace_sink
             conv_id = runtime.active_conversation_id
-            seen["record_before"] = runtime.conversation_store.get_conversation(conv_id)
+            seen["conv_id"] = conv_id
+            store = runtime.observability_store
+
+            # A wedged DB, as the sink sees it: the breaker open means every
+            # emit takes the degraded path.
+            sink._sync_breaker_until = time.monotonic() + 300
+            execn = await _chat_turn(app_module, runtime, message="one question")
+            await execn.task
+            seen["turn_error"] = execn.error
+            seen["stored_ack"] = runtime.execution_context.last_turn_record_stored
+            seen["ring_depth"] = sink.pending_retry_depth()
 
             resp = await client.post("/new_conversation", headers=headers)
             seen["rotate"] = (resp.status_code, resp.text)
-            seen["generates"] = labeler.count
-            seen["label_after"] = _label_state(runtime, conv_id)
-            stored = runtime.conversation_store.get_conversation(conv_id)
-            seen["turns_after"] = [
-                turn["conversation summary"] for turn in (stored or {}).get("turns", [])
-            ]
             seen["rotated_to"] = runtime.active_conversation_id
-            seen["conv_id"] = conv_id
+
+            # The writer lands the queued row (and the ring behind it) even
+            # though the history that held it is gone.
+            assert sink.flush()
+            seen["summaries_after"] = [
+                entry["conversation summary"]
+                for entry in store.get_memory_window(channel_id, conv_id, 50)
+            ]
+            seen["labels"] = labeler.count
 
     asyncio.run(body())
 
-    assert seen["record_before"] is None, (
-        "the reserved id already had a record, so this test is not exercising the "
-        "reserved-but-unwritten state it exists for"
+    assert seen["labels"] == 1, (
+        "the rotate did not label the degraded conversation, or labeled twice"
     )
+
+    assert seen["turn_error"] is None, "the degraded write failed the turn"
+    assert seen["stored_ack"] is False, (
+        "the emit reported the record as stored, so the degraded path this test "
+        "exists for was never taken"
+    )
+    assert seen["ring_depth"] >= 1, "the terminal record never entered the retry ring"
 
     status, body_text = seen["rotate"]
     assert status == 200, (
-        f"the rotate failed out of the reserved-but-unwritten state: {body_text}"
+        f"the rotate failed out of the degraded-write state: {body_text}"
     )
-
-    assert seen["turns_after"] == ["a turn whose persist never landed"], (
-        "the rotate cleared the in-memory history without recording the turn it "
-        "held, which is the loss persisting first exists to prevent"
-    )
-
-    topic, turn_count = seen["label_after"]
-    assert seen["generates"] == 1, "the rotate did not label, or labeled twice"
-    assert topic == "Topic 1"
-    assert turn_count == 1
     assert seen["rotated_to"] > seen["conv_id"], "the rotate did not rotate"
+
+    assert seen["summaries_after"] == ["one question -> ok"], (
+        "the rotate cleared the in-memory history and the turn it held was never "
+        "recorded, which is the loss the retry ring exists to prevent"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1134,12 +1186,16 @@ async def _streaming_turn(
     async def work():
         if fail:
             raise RuntimeError("the streaming work failed")
-        runtime.execution_context.append_conversation_turn(message)
-        return fastworkflow.TurnOutput(
-            turn_key=fastworkflow.mint_turn_key(),
-            status=fastworkflow.TurnStatus.COMPLETED,
-            answer="streamed",
+        # Same reason as _chat_turn: the turn record is written by the finalize
+        # chokepoint, so the work has to reach it for the conversation to exist.
+        ctx = runtime.execution_context
+        ctx._begin_turn(message)
+        ctx.append_conversation_turn(message)
+        command_output = fastworkflow.CommandOutput(
+            command_name="",
+            command_response=fastworkflow.CommandResponse(response="streamed"),
         )
+        return ctx._build_turn_result(command_output).turn_output
 
     async def owned(execn) -> None:
         # on_done_factory closes the callback over ``execn``, which is how the

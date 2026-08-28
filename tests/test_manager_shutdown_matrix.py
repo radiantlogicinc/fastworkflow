@@ -253,20 +253,25 @@ class _ShutdownSteps:
     """The real lifespan shutdown closures, callable with a test-sized deadline."""
 
     drain: Callable[..., Any]
-    finalize: Callable[[list[str]], Any]
     stop: Callable[[list[str]], Any]
 
 
 @contextlib.asynccontextmanager
 async def running_lifespan(app_module):
-    """Start the real app lifespan and expose its three shutdown steps.
+    """Start the real app lifespan and expose its two shutdown steps.
 
-    ``wait_for_active_turns_to_complete``, ``finalize_conversations_on_shutdown``
-    and ``stop_all_chat_sessions`` are closures inside ``lifespan`` and the drain
-    deadline is hardcoded at 30 s at the single call site, so there is no seam to
-    reach them through. Reading them off the suspended generator's frame runs the
-    production functions unmodified, with a deadline a test can afford; nothing
-    is replaced, stubbed or reimplemented.
+    ``wait_for_active_turns_to_complete`` and ``stop_all_chat_sessions`` are
+    closures inside ``lifespan`` and the drain deadline is hardcoded at 30 s at
+    the single call site, so there is no seam to reach them through. Reading
+    them off the suspended generator's frame runs the production functions
+    unmodified, with a deadline a test can afford; nothing is replaced, stubbed
+    or reimplemented.
+
+    There were three steps until the Phase-7 consolidation. The middle one,
+    ``finalize_conversations_on_shutdown``, appended turns the legacy
+    per-channel store had not recorded yet; turn records are now written
+    synchronously at finalize, so there is nothing left for shutdown to
+    persist and the step is gone rather than kept as a no-op.
     """
     cm = app_module.lifespan(app_module.app)
     await cm.__aenter__()
@@ -275,7 +280,6 @@ async def running_lifespan(app_module):
         name
         for name in (
             "wait_for_active_turns_to_complete",
-            "finalize_conversations_on_shutdown",
             "stop_all_chat_sessions",
         )
         if name not in locals_at_yield
@@ -286,7 +290,6 @@ async def running_lifespan(app_module):
     )
     steps = _ShutdownSteps(
         drain=locals_at_yield["wait_for_active_turns_to_complete"],
-        finalize=locals_at_yield["finalize_conversations_on_shutdown"],
         stop=locals_at_yield["stop_all_chat_sessions"],
     )
     try:
@@ -476,7 +479,6 @@ def test_a_still_busy_runtime_is_neither_finalized_nor_closed_past_the_deadline(
             execn = await _queued_turn(app_module, busy, gate)
 
             remaining = await steps.drain(max_wait_seconds=0)
-            await steps.finalize(remaining)
             await steps.stop(remaining)
 
             seen["remaining"] = remaining
@@ -530,7 +532,6 @@ def test_a_quiescent_runtime_is_still_finalized_and_closed_in_that_shutdown(
             seen["quiet_skipped"] = quiet in remaining
             seen["quiet_open_before"] = _is_open(quiet_runtime)
 
-            await steps.finalize(remaining)
             await steps.stop(remaining)
             seen["quiet_open_after"] = _is_open(quiet_runtime)
 
@@ -550,7 +551,7 @@ def test_a_quiescent_runtime_is_still_finalized_and_closed_in_that_shutdown(
     assert all(quiet not in m for m in deadline_errors)
 
 
-def test_shutdown_persists_unsaved_turns_without_generating_a_topic(app_module):
+def test_shutdown_generates_no_topic_and_has_no_turns_left_to_persist(app_module):
     """Hazard: up to `max_live_sessions` LLM calls in front of the checkpoint write.
 
     Shutdown used to label every live conversation — one synchronous
@@ -561,19 +562,21 @@ def test_shutdown_persists_unsaved_turns_without_generating_a_topic(app_module):
     everything a channel accumulated since its last eviction, were never written.
     What was lost was workflow context, not a title.
 
-    What has to survive removing that call is the durable save. A turn persists
-    from inside `_run_turn`'s own try, so a turn whose work raised leaves
-    in-memory history that was never appended, on a channel that may never have
-    reserved a conversation id at all. Driving the execution context directly is
-    that same shape: it appends a turn with nothing persisting it.
+    Shutdown then kept a durable-save step, because the legacy per-channel store
+    was written incrementally and a turn whose work raised could leave in-memory
+    history that was never appended. Under Phase-7 sync-first turn records that
+    step is gone too: the record is written on the caller thread at finalize, so
+    a turn is durable the moment it ends and shutdown has nothing to persist.
+
+    So this now pins both halves of that: shutdown makes no generation call, and
+    the turn driven here is ALREADY in the turns table before shutdown runs —
+    which is what makes removing the save step safe rather than lossy.
 
     On counting rather than asserting an absence: the counter is bound over the
-    module attribute the shutdown path resolves at call time, so re-adding the
-    call under that name fails here on the count. It returns a sentinel instead
-    of delegating, which covers the other direction too — re-adding it under some
-    other name never reaches the counter, but the stored topic then stops being
-    blank and the last two assertions fail. Nothing else is substituted: the
-    manager, the runtime, the store and the lifespan closures are all real.
+    module attribute the shutdown path resolves at call time, so re-adding a
+    labeling call under that name fails here on the count. Nothing else is
+    substituted: the manager, the runtime, the store and the lifespan closures
+    are all real.
     """
     channel_id = _channel("unsaved")
     seen: dict[str, Any] = {}
@@ -586,23 +589,36 @@ def test_shutdown_persists_unsaved_turns_without_generating_a_topic(app_module):
     async def body():
         async with running_lifespan(app_module) as steps:
             runtime = await _create(app_module, channel_id)
-            seen["conversation_id_before"] = runtime.active_conversation_id
+            store = runtime.observability_store
+            assert store is not None, "no observability store, so nothing is durable"
+            seen["conversation_id"] = runtime.active_conversation_id
 
-            output = runtime.execution_context.process_action(_add_action())
+            # process_action_turn, not process_action: the finalize chokepoint
+            # that writes the turn record lives on the *_turn variants, and the
+            # server's action path goes through this one. Driving the raw
+            # process_action would skip the write and prove nothing about it.
+            output = runtime.execution_context.process_action_turn(_add_action())
             assert output.success, "the action never ran, so no turn was appended"
             seen["turns_in_memory"] = len(
                 runtime.execution_context.conversation_history.messages
             )
-            seen["durable_before"] = runtime.durable_turn_count
+            # Before shutdown, not after: the point is that the write already
+            # happened at finalize.
+            seen["usable_before_shutdown"] = store.count_usable_turns(
+                channel_id, runtime.active_conversation_id
+            )
 
             remaining = await steps.drain(max_wait_seconds=0)
-            await steps.finalize(remaining)
             await steps.stop(remaining)
 
             seen["remaining"] = remaining
-            seen["conversation_id_after"] = runtime.active_conversation_id
-            seen["record"] = runtime.conversation_store.get_conversation(
-                runtime.active_conversation_id
+            seen["conversation"] = next(
+                iter(
+                    store.list_conversation_summaries(
+                        channel_id, limit=10
+                    )
+                ),
+                None,
             )
 
     original = app_module.generate_topic_and_summary
@@ -617,26 +633,20 @@ def test_shutdown_persists_unsaved_turns_without_generating_a_topic(app_module):
         "no LLM_CONVERSATION_STORE call at all"
     )
     assert seen["remaining"] == [], "the channel was busy, so it was skipped entirely"
-    assert seen["conversation_id_before"] == 0, (
-        "the channel already had a conversation id, so the no-id path this covers "
-        "was never reached"
-    )
+    assert seen["conversation_id"] > 0, "the channel never minted a conversation id"
     assert seen["turns_in_memory"] >= 1
-    assert seen["durable_before"] == 0, (
-        "the turn was already durable, so shutdown had nothing left to persist"
-    )
-    assert seen["conversation_id_after"] > 0, (
-        "shutdown reserved no conversation, so the unsaved turn had nowhere to go"
+    assert seen["usable_before_shutdown"] == seen["turns_in_memory"], (
+        "the turn was not durable before shutdown ran, so removing shutdown's "
+        "save step loses it"
     )
 
-    record = seen["record"]
-    assert record is not None, "shutdown left the unsaved turn undurable"
-    assert len(record["turns"]) == seen["turns_in_memory"], (
-        "the durable record does not hold every turn that was in memory"
+    conversation = seen["conversation"]
+    assert conversation is not None, "the conversation is not listed at all"
+    assert conversation["topic"] == "", (
+        f"shutdown invented a topic: {conversation['topic']!r}"
     )
-    assert record["topic"] == "", f"shutdown invented a topic: {record['topic']!r}"
-    assert record["summary"] == "", (
-        f"shutdown invented a summary: {record['summary']!r}"
+    assert conversation["summary"] == "", (
+        f"shutdown invented a summary: {conversation['summary']!r}"
     )
 
 

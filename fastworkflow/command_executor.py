@@ -1,4 +1,5 @@
 import fastworkflow
+from fastworkflow import tracing
 from fastworkflow.command_interfaces import CommandExecutorInterface
 
 from fastworkflow import Action, CommandOutput, ChatSession
@@ -37,6 +38,74 @@ class CommandExecutor(CommandExecutorInterface):
                     )
             )
 
+        # fw.command.execute boundary span (observability design §3.1, D3).
+        # chat_session is duck-typed (WEC, or ChatSession delegating to its
+        # core); with no sink or open turn the helpers no-op.
+        span = tracing.start_span(
+            chat_session,
+            tracing.SPAN_COMMAND_EXECUTE,
+            kind=tracing.KIND_TOOL,
+            attributes={"raw_command": command},
+        )
+        try:
+            # Bind the trace host for the deep NLU emission sites
+            # (fw.nlu.intent / fw.nlu.param_extraction) — they run several
+            # frames down with no reference to the session ([R28]; D3 as
+            # amended).
+            with tracing.host_scope(chat_session):
+                command_output = cls._invoke_command_impl(chat_session, command)
+        except BaseException as exc:
+            # CommandCancelledError/AskUserSuspend are BaseException control
+            # signals — close the span and always re-raise untouched.
+            from fastworkflow.workflow_execution_context import CommandCancelledError
+            tracing.end_span(
+                chat_session,
+                span,
+                status=(
+                    tracing.STATUS_CANCELLED
+                    if isinstance(exc, CommandCancelledError)
+                    else tracing.STATUS_ERROR
+                ),
+                attributes={"error_type": type(exc).__name__},
+            )
+            raise
+
+        # Attribute prep stays inside the never-raise boundary and runs only
+        # when a span was actually opened: a user-authored parameters model
+        # whose model_dump() raises must not fail the turn, and with tracing
+        # off this work must not run at all.
+        params_dict = None
+        if span is not None:
+            try:
+                params = command_output.command_parameters
+                if hasattr(params, "model_dump"):
+                    params_dict = params.model_dump()
+                elif isinstance(params, dict):
+                    params_dict = params
+            except Exception:
+                params_dict = None
+        tracing.end_span(
+            chat_session,
+            span,
+            status=(
+                tracing.STATUS_OK if command_output.success else tracing.STATUS_ERROR
+            ),
+            command_name=command_output.command_name or None,
+            context=command_output.context or None,
+            attributes={
+                "parameters": params_dict,
+                "response_text": command_output.command_response.response or "",
+                "success": bool(command_output.success),
+            },
+        )
+        return command_output
+
+    @classmethod
+    def _invoke_command_impl(
+        cls,
+        chat_session: 'fastworkflow.ChatSession',
+        command: str,
+    ) -> fastworkflow.CommandOutput:
         command_output = cls.perform_action(
             chat_session.cme_workflow, 
             Action(

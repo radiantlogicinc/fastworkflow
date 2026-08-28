@@ -113,6 +113,7 @@ fastWorkflow was benchmarked on [Tau Bench](https://github.com/sierra-research/t
 - [Quick Start: run an example in 5 minutes](#quick-start-run-an-example-in-5-minutes)
 - [AI-enable your own app (without restructuring it)](#ai-enable-your-own-app-without-restructuring-it)
 - [How complex workflows scale: context hierarchies](#how-complex-workflows-scale-context-hierarchies)
+- [Chat with it and debug it: `run_chatbot`](#chat-with-it-and-debug-it-run_chatbot)
 - [Production deployment](#production-deployment)
 - [Developer FAQ](#developer-faq)
 - [Key concepts (going deeper)](#key-concepts-going-deeper)
@@ -184,10 +185,10 @@ class OrderService:
 
 ### Recommended: let a coding agent wrap it for you
 
-The fastest path for a non-trivial app is the **[integrate-chat-agent](./fastworkflow/docs/integrate-chat-agent) skill** with Cursor or Claude Code:
+The fastest path for a non-trivial app is the **[integrate-chat-agent](./fastworkflow/skills_for_coding_fastworkflows/integrate-chat-agent) skill** with Cursor or Claude Code:
 
 ```text
-Open fastworkflow/docs/integrate-chat-agent/SKILL.md
+Open fastworkflow/skills_for_coding_fastworkflows/integrate-chat-agent/SKILL.md
 Prompt: "Integrate a fastWorkflow chat agent for OrderService in orders.py"
 ```
 
@@ -295,6 +296,88 @@ Context relationships live in **one file**, `context_inheritance_model.json` —
 ```
 
 This is what lets small models stay accurate as your app grows — and what keeps frontier models from drowning in tool definitions.
+
+---
+
+## Chat with it and debug it: `run_chatbot`
+
+When a turn does the wrong thing, the question is almost always *which stage* got it wrong: did intent detection pick the wrong command, did parameter extraction mis-fill an argument, or did the command itself fail? `run_chatbot` answers that without a debugger.
+
+Every run records what it did to a per-workflow SQLite database, `observability.sqlite3`, under `FASTWORKFLOW_STATE_ROOT/workflows/<workflow-id>/`. `run_chatbot` is a local browser UI over the workflow: a chat client for driving new turns, and a trace viewer for everything that already happened.
+
+```sh
+fastworkflow run_chatbot
+```
+
+One command opens the workflow picker, then starts the selected workflow's FastAPI server for you (loopback-only, stopped when the chatbot exits), picks a free port, and connects the chat — no server URL, token, channel, workflow path, or env-file CLI arguments to fill in. Env files are auto-detected in the workflow directory and, for bundled workflows, the shared `examples/` directory. If either is missing, choose existing files in the browser or create owner-only workflow-local copies from the bundled templates.
+
+```
+fastWorkflow Chatbot
+  pick a workflow in the browser (bundled examples
+  and local folders are listed; you can browse anywhere).
+
+  Open in your browser:
+
+    http://127.0.0.1:8901/?token=Bg4-uLpLdETJAsYbGzXbfRQdAEhitS6p8podPXmK25g
+```
+
+Use that printed URL. It carries a one-off token, and requests without it are refused — so one you leave running is not readable by anything else on the machine. Pass `--server-port` to skip spawning and use a FastAPI server already running on that port. The page opens with a workflow picker: bundled examples plus a directory browser, with a **Switch workflow** button to change later.
+
+### Debug mode: what a turn actually did
+
+Debug mode nests turns directly beneath their conversations (with a separate conversation-less group when needed), and opens any turn into a span tree — the nested record of the stages that ran, each with its duration, status, and attributes:
+
+```
+fw.turn                        the whole logical turn (stable across ask_user suspensions)
+├── fw.planner.plan            the agent's plan for the turn (fw.planner.replan on a re-plan)
+│   └── fw.llm.call            the planner's LLM request/response
+└── fw.agent.execute           the ReAct loop as a whole (attempts, final answer)
+    └── fw.agent.step          one reasoning step: thought, chosen tool, observation
+        ├── fw.llm.call        the step's reasoning LLM call (+ provider-native reasoning)
+        └── fw.agent.tool_call the agent invoking a command
+            └── fw.command.execute   resolution + your business logic running
+                ├── fw.nlu.intent            which matching layer decided, classifier
+                │                            confidence vs threshold, candidates on ambiguity
+                └── fw.nlu.param_extraction  extraction method, missing/invalid fields,
+                    │                        db_lookup outcomes, validation-hook verdict
+                    └── fw.llm.call          the LLM extraction call, when one ran
+fw.ask_user                    a clarifying question, and how long the user took
+
+(Deterministic "/"-mode turns skip the planner/agent layers: fw.command.execute
+sits directly under fw.turn.)
+```
+
+The diagnosis lives in the attributes of `fw.command.execute`. It records `raw_command` (the natural-language command the agent sent), `command_name` (what intent detection *resolved* it to), the extracted `parameters`, the `response_text`, and `success`. Comparing the first two is the whole trick:
+
+- **`raw_command` was reasonable but `command_name` is the wrong command** → an intent-detection miss. Add seed utterances for that command and retrain.
+- **`command_name` is right but `parameters` are wrong** → a parameter-extraction miss. Strengthen the `Field(description=…, examples=[…])` in that command's Signature.
+- **Both right, span status is `error`** → the bug is in your own code, and `response_text` usually says how.
+
+Two turn-level fields are worth knowing because they are deliberately independent. `status` is the turn's lifecycle (`completed`, `failed`, …) and `success` means every command in it succeeded. A turn that is `completed` but not `success` is the case worth hunting: a command failed and the agent wrote a confident answer over it.
+
+Coding agents can run this diagnosis directly against the database: the wheel-shipped [`debug-workflow-conversations`](fastworkflow/skills_for_coding_fastworkflows/debug-workflow-conversations/SKILL.md) skill carries the failure-triage decision tree, the full schema and span-attribute contract, and the routing table from each diagnosis to the fastWorkflow feature (and companion skill) that fixes it.
+
+The **Health** view reports the background writer's state and the database size, which is how you tell "no spans recorded" apart from "spans dropped under load."
+
+### Chat: drive the workflow from the browser
+
+The Chat tab is connected the moment the workflow's server is ready (the first start loads models, so give it a moment — the page tells you what it is waiting on). Every turn is recorded like any other, so you can send a message and immediately open its span tree via its **view trace** link or the Debug tab.
+
+Messages go to `/invoke_agent`; prefix one with `/` to force deterministic execution via `/invoke_assistant`, the same convention as the CLI prompt. **New conversation** in the header archives the current thread and starts a fresh one, like the CLI's `//new`. Sessions are single-developer by design: the chatbot manages one fixed private channel (`chatbot`), so there is nothing multi-user to configure and your history is in one place across launches.
+
+There is deliberately no box for a startup command or a per-session context: the session is driven by what you type, so pre-seeding it from a chat form makes no sense. Those stay launch-time decisions — `run_fastapi_mcp --startup_command`, or the `/initialize` request fields if you are calling the API yourself.
+
+A spawned server always binds `127.0.0.1`, has CORS pinned to loopback origins, and is stopped when the chatbot exits (SIGTERM included). It runs with unsigned dev JWTs — fine for a loopback-only dev server whose tokens the chatbot mints itself; pass `--expect-encrypted-jwt` to require signed tokens instead (then paste one in the chat's Advanced panel). Already have a server running? Launch with `--server-port <port>` and connect via the Advanced panel.
+
+Insights distillation (`fastworkflow run --generate_insights`) stays CLI-only by design, as do bind address and env-file choices for externally managed servers. The full capability comparison is in [`docs/run_chatbot_cli_parity.md`](docs/run_chatbot_cli_parity.md).
+
+### Retention and erasure
+
+Trace data grows. Spans and artifacts are pruned beyond a retention horizon; **turn records and conversations are never deleted by a default prune**, so history survives.
+
+Use **Clear conversations** in Debug mode for an explicit, confirmed reset. It removes conversation labels, turns, spans, artifacts, feedback, and legacy per-channel conversation files. Training runs, writer diagnostics, and monotonic conversation counters survive, so identities are never reused after a clear.
+
+To turn recording off entirely, set `FW_OBSERVABILITY=0`.
 
 ---
 
@@ -434,7 +517,7 @@ Deep-dive articles:
 
 ## Architecture overview
 
-fastWorkflow separates **build-time**, **train-time**, and **run-time**. At build-time you create a command interface from your code (recommended via the [integrate-chat-agent](./fastworkflow/docs/integrate-chat-agent) skill). `train` builds the NLP models; `run` executes the workflow. Your existing code is never modified — fastWorkflow sits as a layer on top.
+fastWorkflow separates **build-time**, **train-time**, and **run-time**. At build-time you create a command interface from your code (recommended via the [integrate-chat-agent](./fastworkflow/skills_for_coding_fastworkflows/integrate-chat-agent) skill). `train` builds the NLP models; `run` executes the workflow. Your existing code is never modified — fastWorkflow sits as a layer on top.
 
 ```mermaid
 graph LR
@@ -547,6 +630,12 @@ fastworkflow run <workflow_dir> <env_file> <passwords_file> --assistant   # dete
 fastworkflow run <workflow_dir> <env_file> <passwords_file> \
   --startup_command "your command" --keep_alive False
 
+# Browser chatbot + observability viewer (`run` is also spelled `run_cli`);
+# workflow, env files, and trace maintenance are chosen in the browser
+fastworkflow run_chatbot
+fastworkflow run_chatbot --server-port 8000        # pin the spawned server's port
+fastworkflow run_chatbot --expect-encrypted-jwt    # require signed tokens
+
 # Host as a FastAPI/MCP service
 python -m fastworkflow.run_fastapi_mcp --workflow_path ./wf --port 8000
 ```
@@ -576,6 +665,10 @@ Two files per workflow (templates ship with `fastworkflow examples fetch`).
 | `LITELLM_PROXY_API_BASE` | LiteLLM Proxy URL | with `litellm_proxy/` models | *not set* |
 | `INTENT_DETECTION_TINY_MODEL` | HF id for the small intent model | `train` (optional) | `google/bert_uncased_L-4_H-128_A-2` |
 | `INTENT_DETECTION_LARGE_MODEL` | HF id for the large intent model | `train` (optional) | `distilbert-base-uncased` |
+| `FW_OBSERVABILITY` | Master switch for trace recording. `0` disables it. On by default for `run`/`run_fastapi_mcp`; off by default when embedding the core as a library | Optional | `1` (fastWorkflow entry points) |
+| `FW_OBS_RETENTION_DAYS` | Age beyond which the automatic prune (run at recorder startup) drops spans/artifacts (turn records are exempt) | Optional | `30` |
+| `FW_OBS_DB_MAX_BYTES` | Size cap; the automatic prune evicts oldest spans first while over it | Optional | `1073741824` (1 GiB) |
+| `FW_OBS_CAPTURE_TRACEBACKS` | Persist exception tracebacks as artifacts. Off by default because tracebacks can carry sensitive values | Optional | `0` |
 
 ### `fastworkflow.passwords.env`
 
@@ -613,6 +706,8 @@ When a model uses the `litellm_proxy/` prefix, the per-role keys are ignored and
 > **Slow first training run** — the first run downloads BERT/DistilBERT from HuggingFace and makes LLM calls for synthetic-utterance generation. Set `HF_HOME=/path/to/cache` to control model storage; later runs skip the download. A small workflow trains in ~5–8 minutes on CPU.
 
 > **Commands not recognized** — a command module with an import/syntax error won't load and won't appear as an intent. Check your `_commands/*.py` files.
+
+> **The agent did something unexpected** — open the chatbot (`fastworkflow run_chatbot`, then pick the workflow) and read the turn's span tree. It shows which command intent detection chose, what parameters were extracted, and whether your command failed — usually enough to identify the stage at fault before reaching for a debugger.
 
 > [!tip]
 > To debug command files, set up a VSCode `launch.json` with `justMyCode: false`, add breakpoints, and run in debug mode.

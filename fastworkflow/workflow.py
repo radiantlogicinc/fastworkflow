@@ -30,12 +30,13 @@ from fastworkflow.utils.logging import logger
 # the live objects themselves (``_children``) so it is reclaimed with them.
 #
 # Durable cross-process state for the FastAPI service is owned separately by
-# SessionStateStore + ConversationStore; the CLI no longer resumes workflow
+# SessionStateStore (suspended turns) and the per-workflow observability DB
+# (conversations, turn records, feedback); the CLI no longer resumes workflow
 # context across process restarts (accepted trade-off).
 #
-# Remaining on-disk caches (enablecache below, ConversationStore, the NLU
-# clarification cache, and utterance/embedding matching) use stdlib sqlite3
-# via :class:`fastworkflow.kvstore.KVStore` / ``UtteranceCacheStore`` — JSON
+# Remaining on-disk caches (enablecache below, the NLU clarification cache, and
+# utterance/embedding matching) use stdlib sqlite3 via
+# :class:`fastworkflow.kvstore.KVStore` / ``UtteranceCacheStore`` — JSON
 # values, WAL mode, no process-exclusive LOCK.
 # ----------------------------------------------------------------------
 _STATE_LOCK = threading.RLock()

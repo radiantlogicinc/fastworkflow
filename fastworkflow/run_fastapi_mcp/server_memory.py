@@ -6,6 +6,13 @@ response cache defaulting to a million in-memory entries and a 30 GB disk cache.
 History and trace are turned off; the in-memory cache is bounded; the disk cache
 stays enabled (capped) so repeat prompts hit disk and skip provider calls.
 
+``install_policy(keep_history=True)`` selects a second mode for servers whose
+job is to be inspected — the one the chatbot spawns. Token usage, cost and
+cache-hit status reach the observability trace only through a history entry
+(DSPy hands the LM callback nothing but the completion text), so that server
+keeps history bounded rather than off: one entry per LM, and a global list
+replaced with one that trims itself. Both modes are proven the same way.
+
 This module installs that policy, and — because configuring is not evidence that
 a policy is in force — proves it structurally before the server accepts traffic,
 then keeps owning it:
@@ -60,6 +67,25 @@ POLICY_SETTINGS: dict[str, Any] = {
     "max_trace_size": 0,
 }
 
+# Inspect mode (``keep_history=True``): history ON, but bounded on both axes.
+# Turning history off costs the observability trace its token usage, cost and
+# cache-hit status — DSPy hands the LM callback only the completion text, and
+# every one of those fields is read from a history entry. A single-developer
+# debug server wants them, so this mode keeps the smallest history that still
+# carries them: ``max_history_size=1`` means each LM retains only the call the
+# callback is about to read.
+INSPECT_POLICY_SETTINGS: dict[str, Any] = {
+    "disable_history": False,
+    "max_history_size": 1,
+    "max_trace_size": 0,
+}
+
+# DSPy bounds its global history at MAX_HISTORY_SIZE (10_000) entries and
+# nothing else — max_history_size does not apply to it. At request-sized
+# payloads that is the retention this whole module exists to prevent, so
+# inspect mode replaces the list with one that trims itself to this many.
+SERVER_DSPY_HISTORY_ENTRIES = 20
+
 # Deep-size walk guard: the cache holds arbitrary provider objects.
 _MAX_SIZE_WALK_NODES = 200_000
 
@@ -68,12 +94,34 @@ class DSPyPolicyError(RuntimeError):
     """The DSPy memory policy could not be installed or proven to be in force."""
 
 
+class BoundedHistory(list):
+    """DSPy's ``GLOBAL_HISTORY``, self-trimming at a fixed entry count.
+
+    Replacing the list object is the only lever: ``update_history`` reads the
+    module global, and DSPy's own trim only fires at 10_000 entries.
+    """
+
+    def __init__(self, limit: int) -> None:
+        super().__init__()
+        self._limit = limit
+
+    def append(self, item: Any) -> None:
+        if self._limit <= 0:
+            return
+        while len(self) >= self._limit:
+            del self[0]
+        super().append(item)
+
+
 @dataclass
 class PolicyStatus:
     """What was installed, and what was actually proven about it."""
 
     dspy_version: str
+    keep_history: bool = False
     history_off: bool = False
+    history_bounded: bool = False
+    history_entries: int = 0
     trace_off: bool = False
     memory_cache_entries: int = SERVER_DSPY_MEMORY_CACHE_ENTRIES
     cache_bounded: bool = False
@@ -85,6 +133,9 @@ class PolicyStatus:
 
 _status: Optional[PolicyStatus] = None
 _reported_drift: Optional[str] = None
+# The settings this process actually installed — POLICY_SETTINGS or
+# INSPECT_POLICY_SETTINGS. Re-asserted on the readiness probe.
+_active_settings: dict[str, Any] = POLICY_SETTINGS
 
 
 def policy_status() -> Optional[PolicyStatus]:
@@ -138,6 +189,8 @@ def _effective(key: str) -> Any:
 
 def install_policy(
     memory_cache_entries: int = SERVER_DSPY_MEMORY_CACHE_ENTRIES,
+    keep_history: bool = False,
+    history_entries: int = SERVER_DSPY_HISTORY_ENTRIES,
 ) -> PolicyStatus:
     """Install the policy, prove it structurally, and claim the owning thread.
 
@@ -145,17 +198,24 @@ def install_policy(
     exists. Idempotent: a second call re-proves the policy rather than fighting
     over it.
 
+    ``keep_history`` selects inspect mode: history retained but bounded, so the
+    observability trace can record token usage and cache status. Opt-in, for
+    single-developer servers like the one the chatbot spawns.
+
     Raises DSPyPolicyError if the policy cannot be installed or if the installed
     DSPy does not actually honour it.
     """
-    global _status
+    global _status, _active_settings
 
     dspy_version = getattr(dspy, "__version__", "unknown")
+    settings = dict(INSPECT_POLICY_SETTINGS if keep_history else POLICY_SETTINGS)
 
     # Order matters. The helper cannot find arbitrary pre-existing per-LM
     # histories, so clear the global one first; and configure_cache REPLACES the
     # global cache object, so it has to happen before any LM is created.
     base_lm.GLOBAL_HISTORY.clear()
+    if keep_history:
+        base_lm.GLOBAL_HISTORY = BoundedHistory(history_entries)
 
     previous_cache = getattr(dspy, "cache", None)
     try:
@@ -165,7 +225,7 @@ def install_policy(
             enable_disk_cache=True,
             disk_size_limit_bytes=SERVER_DSPY_DISK_CACHE_LIMIT_BYTES,
         )
-        dspy.settings.configure(**POLICY_SETTINGS, trace=[])
+        dspy.settings.configure(**settings, trace=[])
     except Exception as exc:
         raise DSPyPolicyError(
             f"Could not install the DSPy memory policy on dspy {dspy_version}: {exc}"
@@ -175,9 +235,12 @@ def install_policy(
 
     status = PolicyStatus(
         dspy_version=dspy_version,
+        keep_history=keep_history,
+        history_entries=history_entries if keep_history else 0,
         memory_cache_entries=memory_cache_entries,
         disk_cache_off=not getattr(dspy.cache, "enable_disk_cache", True),
     )
+    _active_settings = settings
     _assert_policy_structurally(status)
     _status = status
     return status
@@ -207,9 +270,13 @@ def _assert_policy_structurally(status: PolicyStatus) -> None:
     logged "off". This is the difference between configuring and knowing.
     """
     probe_lm = _ProbeLM()
+    # Inspect mode must overflow its own bound to prove the trim actually
+    # fires; a single call looks identical on a bounded and an unbounded list.
+    probe_calls = status.history_entries + 3 if status.keep_history else 1
     try:
         with dspy.context(lm=probe_lm, adapter=dspy.ChatAdapter()):
-            dspy.Predict(_ProbeSignature)(question="memory policy probe")
+            for index in range(probe_calls):
+                dspy.Predict(_ProbeSignature)(question=f"memory policy probe {index}")
     except Exception as exc:
         raise DSPyPolicyError(
             f"DSPy memory policy probe failed on dspy {status.dspy_version}: {exc}"
@@ -220,16 +287,28 @@ def _assert_policy_structurally(status: PolicyStatus) -> None:
     trace = len(dspy.settings.trace or [])
     cache_maxsize = _memory_cache_maxsize()
 
-    status.history_off = global_history == 0 and lm_history == 0
+    if status.keep_history:
+        # An EMPTY history fails this mode as surely as a growing one: the
+        # whole reason to keep history is that the entry carrying usage and
+        # cache status exists for the callback to read.
+        status.history_bounded = (
+            0 < lm_history <= INSPECT_POLICY_SETTINGS["max_history_size"]
+            and 0 < global_history <= status.history_entries
+        )
+        history_ok = status.history_bounded
+    else:
+        status.history_off = global_history == 0 and lm_history == 0
+        history_ok = status.history_off
     status.trace_off = trace == 0
     # The cap is read back off the live cache rather than echoed from the
     # request: a release that ignored memory_max_entries would otherwise be
     # logged as bounded while holding a million entries.
     status.cache_bounded = cache_maxsize == status.memory_cache_entries
-    status.asserted = status.history_off and status.trace_off and status.cache_bounded
+    status.asserted = history_ok and status.trace_off and status.cache_bounded
     status.details = {
         "global_history_entries": global_history,
         "lm_history_entries": lm_history,
+        "probe_calls": probe_calls,
         "trace_entries": trace,
         "memory_cache_maxsize": cache_maxsize,
     }
@@ -237,11 +316,13 @@ def _assert_policy_structurally(status: PolicyStatus) -> None:
     if not status.asserted:
         raise DSPyPolicyError(
             f"DSPy {status.dspy_version} did not honour the memory policy "
-            f"{POLICY_SETTINGS} / {status.memory_cache_entries} cache entries: "
-            f"global_history={global_history}, lm_history={lm_history}, "
-            f"trace={trace}, memory_cache_maxsize={cache_maxsize}. This DSPy "
-            f"release retains request-sized data per call; pin a release that "
-            f"reads these keys."
+            f"{_active_settings} / {status.memory_cache_entries} cache entries"
+            + (f" / {status.history_entries} history entries" if status.keep_history else "")
+            + f": global_history={global_history} after {probe_calls} call(s), "
+            f"lm_history={lm_history}, trace={trace}, "
+            f"memory_cache_maxsize={cache_maxsize}. This DSPy release does not "
+            f"bound retention the way these keys promise; pin a release that "
+            f"reads them."
         )
 
     base_lm.GLOBAL_HISTORY.clear()
@@ -262,7 +343,7 @@ def claim_async_owner() -> bool:
         return False
 
     try:
-        dspy.settings.configure(**POLICY_SETTINGS)
+        dspy.settings.configure(**_active_settings)
     except RuntimeError as exc:
         raise DSPyPolicyError(
             f"Another owner already holds DSPy's global settings, so the server "
@@ -286,9 +367,13 @@ def check_policy_in_force() -> Optional[str]:
 
     drift = [
         f"{key}={_effective(key)!r} (expected {expected!r})"
-        for key, expected in POLICY_SETTINGS.items()
+        for key, expected in _active_settings.items()
         if _effective(key) != expected
     ]
+    if _status.keep_history and not isinstance(base_lm.GLOBAL_HISTORY, BoundedHistory):
+        # Something re-bound the module global back to a plain list, which
+        # silently restores DSPy's 10_000-entry ceiling.
+        drift.append("global history is no longer the bounded list")
     if not getattr(dspy.cache, "enable_disk_cache", True):
         drift.append("disk cache disabled")
     if _memory_cache_maxsize() != _status.memory_cache_entries:

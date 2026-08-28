@@ -8,17 +8,17 @@ bounded what they KEPT rather than what they READ. A turn record carries its ful
 payload, so at production payload sizes restoring a long conversation meant
 deserializing tens of megabytes to end up with twenty turns (fix-dzs.8).
 
-`get_conversation_window()` reads only the keys in the window. The distinction is
-invisible in the returned value — a slice returns the same turns — so the test that
-actually pins the behavior is the one counting deserializations
-(`test_the_excluded_turns_are_never_deserialized`). Everything else here guards the
-contracts the two call sites depend on: `None` for a missing record so the cold
-restore's fallback to the previous id still fires, and a truthy record with no
-turns for the reserved-but-empty state a rotate leaves behind.
+Ported from the legacy `ConversationStore.get_conversation_window` when the
+Phase-7 consolidation made the observability DB the single source of truth and
+that module was deleted (bead `fix-gxr`). The bound is now a SQL `LIMIT` in
+`ObservabilityStore.get_memory_window`, so "the excluded turns are never
+deserialized" stopped being a property a test has to police — the rows never
+leave SQLite. What still needs pinning is everything the two call sites depend
+on: the window is the NEWEST turns in chronological order, and an empty result
+is how the cold restore's step-back detects a reserved-but-empty conversation.
 
-Runs against a real SQLite-backed store under `tmp_path`, per the repo's
-integration-tests-only rule. No LLM and no mocks: the read counter wraps the real
-`KVStore.__getitem__` and delegates to it.
+Runs against a real SQLite store under `tmp_path`, per the repo's
+integration-tests-only rule.
 """
 
 from __future__ import annotations
@@ -27,172 +27,141 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow.kvstore import KVStore
-from fastworkflow.run_fastapi_mcp.conversation_store import ConversationStore
+import fastworkflow
+from fastworkflow import TurnStatus
+from fastworkflow import observability_store as obs
 
 # Big enough that reading an excluded turn would be obvious in memory terms, small
 # enough to keep the test fast. Production payloads are ~450 KB.
 PAYLOAD = "x" * 4096
 
+CHANNEL = "chan-window"
+
 
 @pytest.fixture
-def store(tmp_path: Path) -> ConversationStore:
-    return ConversationStore("chan-window", str(tmp_path / "conversations"))
+def store(tmp_path: Path) -> obs.ObservabilityStore:
+    return obs.ObservabilityStore(str(tmp_path / "observability.sqlite3"))
 
 
-def _conversation_of(store: ConversationStore, turn_count: int) -> int:
-    """A durable conversation whose turns are individually identifiable."""
-    conv_id = store.reserve_next_conversation_id()
-    store.append_conversation_turns(
-        conv_id,
-        [
-            {
-                "conversation summary": f"turn-{index}",
-                "conversation_traces": PAYLOAD,
-                "feedback": None,
-            }
-            for index in range(turn_count)
-        ],
+def _record_turn(store: obs.ObservabilityStore, conv_id: int, index: int) -> str:
+    """One usable turn carrying a request-sized payload. Returns its turn_key."""
+    turn_result = fastworkflow.TurnResult(
+        turn_output=fastworkflow.TurnOutput(
+            turn_key=fastworkflow.mint_turn_key(),
+            status=TurnStatus.COMPLETED,
+            answer="ok",
+        ),
+        channel_id=CHANNEL,
+        conversation_id=conv_id,
+        user_message="msg",
+        conversation_summary=f"turn-{index}",
+        conversation_traces=f"{index}:{PAYLOAD}",
     )
+    turn_row, artifact_rows = obs.serialize_turn_result(turn_result)
+    with store._connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        store.upsert_turn_row(conn, turn_row, artifact_rows, obs.Redactor())
+        conn.commit()
+    return turn_result.turn_output.turn_key
+
+
+def _conversation_of(store: obs.ObservabilityStore, turn_count: int) -> int:
+    conv_id = store.mint_conversation_id(CHANNEL)
+    for index in range(turn_count):
+        _record_turn(store, conv_id, index)
     return conv_id
 
 
-@pytest.fixture
-def read_keys(monkeypatch) -> list[str]:
-    """Every key the store actually deserializes, in order.
+def _summaries(window: list[dict]) -> list[str]:
+    return [entry["conversation summary"] for entry in window]
 
-    Wraps the real ``KVStore.__getitem__`` — the single point where a stored row
-    becomes a Python object — and delegates to it, so the store under test is
-    unchanged apart from being observed.
-    """
-    keys: list[str] = []
-    original = KVStore.__getitem__
-
-    def counting_getitem(self, key):
-        keys.append(str(key))
-        return original(self, key)
-
-    monkeypatch.setattr(KVStore, "__getitem__", counting_getitem)
-    return keys
-
-
-def _summaries(record: dict) -> list[str]:
-    return [turn["conversation summary"] for turn in record["turns"]]
-
-
-# ---------------------------------------------------------------------------
-# What comes back
-# ---------------------------------------------------------------------------
 
 def test_the_window_is_the_newest_turns_in_order(store):
-    conv_id = _conversation_of(store, 100)
+    """Newest N, but returned oldest-first: it is replayed as history."""
+    conv_id = _conversation_of(store, 10)
 
-    record = store.get_conversation_window(conv_id, 20)
+    window = store.get_memory_window(CHANNEL, conv_id, 3)
 
-    assert _summaries(record) == [f"turn-{i}" for i in range(80, 100)]
+    assert _summaries(window) == ["turn-7", "turn-8", "turn-9"]
 
 
 def test_a_window_wider_than_the_conversation_returns_all_of_it(store):
-    conv_id = _conversation_of(store, 3)
+    conv_id = _conversation_of(store, 4)
 
-    record = store.get_conversation_window(conv_id, 20)
+    window = store.get_memory_window(CHANNEL, conv_id, 50)
 
-    assert _summaries(record) == ["turn-0", "turn-1", "turn-2"]
-
-
-def test_the_record_shape_matches_the_full_read(store):
-    """The two getters must be interchangeable apart from how many turns come back.
-
-    Both call sites read metadata off this record, and one of them (activate)
-    only tests it for truthiness, so a differently-shaped record would fail
-    somewhere other than here.
-    """
-    conv_id = _conversation_of(store, 30)
-    store.update_conversation_topic_summary(conv_id, "Some Topic", "Some summary")
-
-    windowed = store.get_conversation_window(conv_id, 20)
-    full = store.get_conversation(conv_id)
-
-    assert set(windowed) == set(full)
-    assert windowed["topic"] == full["topic"] == "Some Topic"
-    assert windowed["summary"] == full["summary"] == "Some summary"
-    assert windowed["created_at"] == full["created_at"]
-    # Bookkeeping stays hidden, exactly as the full read hides it.
-    assert "appended_turn_count" not in windowed
+    assert _summaries(window) == [f"turn-{i}" for i in range(4)]
 
 
-# ---------------------------------------------------------------------------
-# The point of the change
-# ---------------------------------------------------------------------------
+def test_the_window_carries_the_canonical_three_key_shape(store):
+    """The restore feeds this straight into restore_history_from_turns."""
+    conv_id = _conversation_of(store, 2)
 
-def test_the_excluded_turns_are_never_deserialized(store, read_keys):
-    """THE test for this fix. A slice-based implementation fails only this one.
+    window = store.get_memory_window(CHANNEL, conv_id, 2)
 
-    Reading a 20-turn window out of a 100-turn conversation must deserialize the
-    conversation record plus 20 turn records, not 100.
-    """
-    conv_id = _conversation_of(store, 100)
-    read_keys.clear()
-
-    store.get_conversation_window(conv_id, 20)
-
-    turn_reads = [k for k in read_keys if ":turn:" in k]
-    assert len(turn_reads) == 20, (
-        f"read {len(turn_reads)} turn record(s) to return a window of 20; the "
-        "excluded turns are being deserialized and thrown away"
+    assert all(
+        set(entry) == {"conversation summary", "conversation_traces", "feedback"}
+        for entry in window
     )
-    assert turn_reads == [f"conv:{conv_id}:turn:{i}" for i in range(80, 100)]
-
-
-def test_the_full_read_still_returns_every_turn(store, read_keys):
-    """Regression guard: /admin/dump_all_conversations genuinely wants all of it."""
-    conv_id = _conversation_of(store, 40)
-    read_keys.clear()
-
-    record = store.get_conversation(conv_id)
-
-    assert _summaries(record) == [f"turn-{i}" for i in range(40)]
-    assert len([k for k in read_keys if ":turn:" in k]) == 40
-
-
-# ---------------------------------------------------------------------------
-# Contracts the two restore call sites depend on
-# ---------------------------------------------------------------------------
-
-def test_a_missing_record_is_none_so_the_cold_restore_can_fall_back(store):
-    """`_create_user_runtime` reads `not conversation` to mean "no record".
-
-    It then retries at `conv_id - 1`, which is how a session started right after a
-    rotate finds the conversation it should actually restore. Returning an empty
-    record instead of None would break that fallback silently.
-    """
-    assert store.get_conversation_window(999, 20) is None
-
-
-def test_a_reserved_but_empty_conversation_is_a_record_with_no_turns(store):
-    """Distinguishable from a missing record, which is the state a rotate leaves.
-
-    `reserve_next_conversation_id` moves the counter without writing a record, so
-    this asserts the boundary: still no record until a turn is appended, then a
-    truthy record whose window is empty.
-    """
-    conv_id = store.reserve_next_conversation_id()
-    assert store.get_conversation_window(conv_id, 20) is None
-
-    store.append_conversation_turns(
-        conv_id,
-        [{"conversation summary": "first", "conversation_traces": None, "feedback": None}],
-    )
-    record = store.get_conversation_window(conv_id, 20)
-    assert record is not None
-    assert _summaries(record) == ["first"]
+    assert window[0]["conversation_traces"].startswith("0:")
+    assert window[0]["feedback"] is None
 
 
 def test_a_zero_width_window_returns_no_turns_without_failing(store):
-    """Defensive: the callers pass a positive constant, but 0 must not read turns."""
+    conv_id = _conversation_of(store, 3)
+
+    assert store.get_memory_window(CHANNEL, conv_id, 0) == []
+
+
+def test_a_conversation_with_no_usable_turns_reads_empty(store):
+    """This is what the cold restore's step-back tests.
+
+    Emptiness has to be zero USABLE turns rather than an absent row: the store
+    mints a conversations row at reserve time, so a rotate leaves a row behind
+    and row-presence would never step back (ruling I7).
+    """
+    reserved = store.mint_conversation_id(CHANNEL)
+
+    assert store.get_memory_window(CHANNEL, reserved, 20) == []
+    assert store.count_usable_turns(CHANNEL, reserved) == 0
+    assert store.newest_conversation_ids(CHANNEL, limit=2) == [reserved]
+
+
+def test_an_unusable_turn_is_excluded_from_the_window(store):
+    """A cancelled turn has a row but no memory entry, so it is not history."""
+    conv_id = _conversation_of(store, 2)
+    cancelled = fastworkflow.TurnResult(
+        turn_output=fastworkflow.TurnOutput(
+            turn_key=fastworkflow.mint_turn_key(),
+            status=TurnStatus.CANCELLED,
+            answer="",
+        ),
+        channel_id=CHANNEL,
+        conversation_id=conv_id,
+        user_message="msg",
+    )
+    turn_row, artifact_rows = obs.serialize_turn_result(cancelled)
+    with store._connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        store.upsert_turn_row(conn, turn_row, artifact_rows, obs.Redactor())
+        conn.commit()
+
+    assert _summaries(store.get_memory_window(CHANNEL, conv_id, 20)) == [
+        "turn-0",
+        "turn-1",
+    ]
+    assert store.count_usable_turns(CHANNEL, conv_id) == 2
+
+
+def test_the_summary_read_projects_only_the_summary_field(store):
+    """Topic generation reads this; handing it whole turns would put a request
+    payload in front of an LLM and reintroduce the growth the window prevents."""
     conv_id = _conversation_of(store, 5)
 
-    record = store.get_conversation_window(conv_id, 0)
+    summaries = store.conversation_summaries(CHANNEL, conv_id)
 
-    assert record is not None
-    assert record["turns"] == []
+    assert [s["conversation summary"] for s in summaries] == [
+        f"turn-{i}" for i in range(5)
+    ]
+    assert all(set(s) == {"conversation summary"} for s in summaries)
+    assert len(str(summaries)) < 1024, "a turn payload reached the summary read"

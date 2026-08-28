@@ -12,12 +12,12 @@ Two types of insights are extracted:
   stored in `execution_agent_anti_patterns.md`
 
 Planning comparison uses the generated plans from `build_query_with_next_steps`.
-Execution comparison uses actual resolved command_name and parameters from action.jsonl.
+Execution comparison uses actual resolved command_name and parameters from the
+in-process WEC action log (`ctx.action_log`), snapshotted per pass.
 Full ReAct trajectories are passed to the insight extraction LLM for richer context.
 """
 
 import json
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,10 +27,6 @@ import dspy
 import fastworkflow
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_utils
-
-# Per-turn log of executed actions, written by the workflow agent and read back
-# here to compare teacher vs. student trajectories.
-_ACTION_LOG_FILE = "action.jsonl"
 
 
 def _announce(title: str, subtitle: str = "", style: str = "cyan") -> None:
@@ -48,12 +44,6 @@ def _announce(title: str, subtitle: str = "", style: str = "cyan") -> None:
         Console().print(Panel(line, style=style, expand=False))
     except Exception:
         print(f"\n=== {line} ===")
-
-
-def _reset_action_log() -> None:
-    """Remove the action log so the next agent pass starts from a clean slate."""
-    if os.path.exists(_ACTION_LOG_FILE):
-        os.remove(_ACTION_LOG_FILE)
 
 
 @dataclass
@@ -238,7 +228,10 @@ class DistillationSession:
             messages=self.chat_session._conversation_history.messages[:orig_len]
         )
 
-        _reset_action_log()
+        # Clear the in-process action log so the next pass starts from a clean
+        # slate. In-place clear on the WEC's live list — callers holding action
+        # snapshots (list(...)) are unaffected (ruling I8).
+        self.chat_session.clear_action_log()
 
     # ------------------------------------------------------------------
     # Trajectory helpers
@@ -302,7 +295,7 @@ class DistillationSession:
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
-    # Trajectory comparison (uses action.jsonl records)
+    # Trajectory comparison (uses in-process action-log records)
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -325,7 +318,7 @@ class DistillationSession:
         student_actions: list[dict],
     ) -> tuple[bool, str]:
         """
-        Compare teacher and student action lists from action.jsonl.
+        Compare teacher and student action lists (per-pass action-log snapshots).
 
         Each action is treated as a (command_name, parameters) unit.
         Instead of strict step-by-step ordering, this produces a human-readable
@@ -476,13 +469,13 @@ class DistillationSession:
         Run a full agent pass with the specified LLMs for planner and agent.
 
         Returns:
-            (command_output, trajectory_dict, actions_from_jsonl, planning_steps)
-            actions_from_jsonl: list of dicts from action.jsonl with keys
-                command, command_name, parameters, response
+            (command_output, trajectory_dict, actions, planning_steps)
+            actions: snapshot (copy) of the WEC's in-process action log for this
+                pass — dicts with keys command, command_name, parameters, response
             planning_steps: list of PlanningStep objects capturing planning decisions
         """
-        # Clean prior action log
-        _reset_action_log()
+        # Clean prior action log so this pass's records stand alone.
+        self.chat_session.clear_action_log()
 
         # Store raw message in workflow context (mirrors _process_agent_message)
         self.chat_session.get_active_workflow().context["raw_user_message"] = message
@@ -562,16 +555,11 @@ class DistillationSession:
                 self.chat_session.get_active_workflow().folderpath.split("/")[-1]
             )
 
-            # Read actions from the action log (actual resolved command_name + parameters)
-            actions = []
-            if os.path.exists(_ACTION_LOG_FILE):
-                with open(_ACTION_LOG_FILE, "r", encoding="utf-8") as f:
-                    for line in f:
-                        if line := line.strip():
-                            try:
-                                actions.append(json.loads(line))
-                            except json.JSONDecodeError:
-                                continue
+            # Snapshot the in-process action log (actual resolved command_name +
+            # parameters). MUST copy: the live list is cleared between passes,
+            # so holding it across a clear would empty this pass's actions
+            # (ruling I8 snapshot discipline).
+            actions = list(self.chat_session.action_log)
 
             # Capture the full ReAct trajectory
             trajectory = dict(agent.current_trajectory)
@@ -834,6 +822,12 @@ def distill_message(
     8. Return teacher's output
     """
     ds = DistillationSession(chat_session)
+
+    # Shed prior-turn action records at entry: the distillation branch bypasses
+    # _run_agent (the only other clearer), so without this the previous turn's
+    # actions would leak into the first pass (Phase 7 §2.7, ruling I8
+    # clear-point discipline; replaces the old cwd action.jsonl file reset).
+    chat_session.clear_action_log()
 
     teacher_model = fastworkflow.get_env_var("LLM_TEACHER_AGENT") or "LLM_TEACHER_AGENT"
     student_model = fastworkflow.get_env_var("LLM_STUDENT_AGENT") or "LLM_STUDENT_AGENT"

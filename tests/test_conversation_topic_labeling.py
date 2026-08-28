@@ -1,9 +1,8 @@
-"""Integration tests for how ConversationStore assigns conversation topics.
+"""Integration tests for how the observability store assigns conversation topics.
 
-Topics are the user-facing handle on a stored conversation: ``/activate_conversation``
-looks a conversation up by topic, so the topic must be unique per channel *and*
-stable across rewrites. Those two requirements pull against each other, and the
-collision helper is where they meet:
+Topics are the user-facing handle on a stored conversation, so the topic must be
+unique per channel *and* stable across rewrites. Those two requirements pull
+against each other, and the collision helper is where they meet:
 
 * **Uniqueness** — two different conversations on one channel must not end up
   sharing a topic, so the second one gets a numeric suffix. Matching is case- and
@@ -13,13 +12,16 @@ collision helper is where they meet:
   record's own stored topic as a collision made the topic oscillate between
   ``'T'`` and ``'T 1'`` on every refresh (fix-dzs.2).
 
-Both topic-writing entry points are covered: ``update_conversation_topic_summary``
-(the finalize/rotate path) and ``save_conversation`` with an explicit
-``conversation_id`` (which reuses the same helper and had the same defect).
+Ported from the legacy ``ConversationStore`` when the Phase-7 consolidation made
+the observability DB the single source of truth and that module was deleted
+(bead `fix-gxr`). The behaviour under test is unchanged — it moved to
+``ObservabilityStore.apply_label_txn``, the single label-write enforcement point,
+which does the comparison in Python because SQLite's ``lower()`` is ASCII-only
+(ruling I9).
 
-Everything runs against a real SQLite-backed store under ``tmp_path``, per the
-repo's integration-tests-only rule. No LLM is involved: topics are passed in
-directly rather than generated.
+Everything runs against a real SQLite store under ``tmp_path``, per the repo's
+integration-tests-only rule. No LLM is involved: topics are passed in directly
+rather than generated.
 
 Blank topics are covered as well. An empty or whitespace-only topic is a *failed
 generation*, not a title, and has to be stored as exactly ``""`` — the sentinel
@@ -32,35 +34,70 @@ such a conversation counted as labeled forever and a picker rendered it as ``' 1
 
 from __future__ import annotations
 
-import logging
-import time
 from pathlib import Path
 
 import pytest
 
-from fastworkflow.run_fastapi_mcp.conversation_store import ConversationStore
-from fastworkflow.utils.logging import logger as fastworkflow_logger
+import fastworkflow
+from fastworkflow import TurnStatus
+from fastworkflow import observability_store as obs
 
 
-def _conversation_with_a_turn(store: ConversationStore, summary: str) -> int:
-    """A durable conversation with one turn and the placeholder (blank) topic."""
-    conv_id = store.reserve_next_conversation_id()
-    store.append_conversation_turns(
-        conv_id,
-        [{"conversation summary": summary, "conversation_traces": None, "feedback": None}],
+@pytest.fixture
+def store(tmp_path: Path) -> obs.ObservabilityStore:
+    return obs.ObservabilityStore(str(tmp_path / "observability.sqlite3"))
+
+
+CHANNEL = "chan"
+
+
+def _conversation_with_a_turn(store: obs.ObservabilityStore, summary: str) -> int:
+    """A durable conversation with one usable turn and no title yet.
+
+    The turn is written through the real serializer so it carries the memory
+    columns; a row without them is a trace, not conversation memory, and the
+    label triggers would not see it (ruling I4).
+    """
+    conv_id = store.mint_conversation_id(CHANNEL)
+    turn_result = fastworkflow.TurnResult(
+        turn_output=fastworkflow.TurnOutput(
+            turn_key=fastworkflow.mint_turn_key(),
+            status=TurnStatus.COMPLETED,
+            answer="ok",
+        ),
+        channel_id=CHANNEL,
+        conversation_id=conv_id,
+        user_message="msg",
+        conversation_summary=summary,
     )
+    turn_row, artifact_rows = obs.serialize_turn_result(turn_result)
+    with store._connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        store.upsert_turn_row(conn, turn_row, artifact_rows, obs.Redactor())
+        conn.commit()
     return conv_id
 
 
-def _topic(store: ConversationStore, conv_id: int) -> str:
-    return store.get_conversation(conv_id)["topic"]
+def _topic(store: obs.ObservabilityStore, conv_id: int) -> str:
+    return store.conversation_label_state(CHANNEL, conv_id)[0]
+
+
+def _label(store: obs.ObservabilityStore, conv_id: int, topic: str, summary: str) -> str:
+    """Write a label the way the labeling path does: blank passes as None.
+
+    A blank generated topic must never be stored as a title, so the caller sends
+    None and the store preserves whatever is there. Returns the stored topic.
+    """
+    return store.record_conversation_label(
+        CHANNEL, conv_id, topic if topic.strip() else None, summary
+    )
 
 
 # ---------------------------------------------------------------------------
 # Stability: a conversation cannot collide with itself
 # ---------------------------------------------------------------------------
 
-def test_rewriting_a_conversations_own_topic_is_idempotent(tmp_path: Path):
+def test_rewriting_a_conversations_own_topic_is_idempotent(store):
     """Regenerating an unchanged topic must not add a suffix — nor take one off.
 
     The oscillation is the giveaway: counting the record's own topic as a
@@ -68,312 +105,187 @@ def test_rewriting_a_conversations_own_topic_is_idempotent(tmp_path: Path):
     matches (the stored topic is now ``'T 1'``) so the suffix disappears again.
     A single write is therefore not enough to catch this; three are.
     """
-    store = ConversationStore("stability", str(tmp_path))
-    conv_id = _conversation_with_a_turn(store, "where is my order")
+    conv_id = _conversation_with_a_turn(store, "asked about an order")
 
-    store.update_conversation_topic_summary(conv_id, "Order Status Question", "first")
-    assert _topic(store, conv_id) == "Order Status Question"
-
-    store.update_conversation_topic_summary(conv_id, "Order Status Question", "second")
-    assert _topic(store, conv_id) == "Order Status Question"
-
-    store.update_conversation_topic_summary(conv_id, "Order Status Question", "third")
-    assert _topic(store, conv_id) == "Order Status Question"
+    for _ in range(3):
+        _label(store, conv_id, "Order Status", "s")
+        assert _topic(store, conv_id) == "Order Status"
 
 
-def test_rewriting_own_topic_in_a_different_case_is_also_unsuffixed(tmp_path: Path):
-    """Exclusion is by conversation id, not by string equality with the old topic.
+def test_rewriting_own_topic_in_a_different_case_is_also_unsuffixed(store):
+    """Self-exclusion is by identity, not by string equality."""
+    conv_id = _conversation_with_a_turn(store, "asked about an order")
+    _label(store, conv_id, "Order Status", "s")
 
-    An LLM re-labelling the same conversation can return the same words in
-    different case or spacing. That is still the record's own topic, so it must
-    not be treated as somebody else's.
-    """
-    store = ConversationStore("recase", str(tmp_path))
-    conv_id = _conversation_with_a_turn(store, "where is my order")
-
-    store.update_conversation_topic_summary(conv_id, "Order Status Question", "first")
-    store.update_conversation_topic_summary(conv_id, "  order STATUS question ", "second")
-
-    assert _topic(store, conv_id) == "  order STATUS question "
+    _label(store, conv_id, "ORDER STATUS", "s2")
+    assert _topic(store, conv_id) == "ORDER STATUS"
 
 
-def test_a_legitimate_suffix_does_not_drift_on_rewrite(tmp_path: Path):
-    """A conversation that genuinely needed a suffix keeps the same one.
+def test_a_legitimate_suffix_does_not_drift_on_rewrite(store):
+    """A conversation that genuinely needed a suffix keeps the same one."""
+    first = _conversation_with_a_turn(store, "order one")
+    second = _conversation_with_a_turn(store, "order two")
 
-    Self-collision made this climb — ``'T 1'`` rewritten as ``'T'`` collided with
-    both ``'T'`` and its own ``'T 1'`` and became ``'T 2'``.
-    """
-    store = ConversationStore("drift", str(tmp_path))
-    first = _conversation_with_a_turn(store, "a")
-    second = _conversation_with_a_turn(store, "b")
+    _label(store, first, "Order Status", "s1")
+    _label(store, second, "Order Status", "s2")
+    assert _topic(store, second) == "Order Status 1"
 
-    store.update_conversation_topic_summary(first, "Support Topic", "s1")
-    store.update_conversation_topic_summary(second, "Support Topic", "s2")
-    assert _topic(store, second) == "Support Topic 1"
-
-    store.update_conversation_topic_summary(second, "Support Topic", "s2 again")
-    assert _topic(store, second) == "Support Topic 1"
-    assert _topic(store, first) == "Support Topic"
+    _label(store, second, "Order Status", "s3")
+    assert _topic(store, second) == "Order Status 1"
 
 
 # ---------------------------------------------------------------------------
-# Uniqueness: the feature the helper exists for
+# Uniqueness: two conversations must not share a topic
 # ---------------------------------------------------------------------------
 
-def test_a_different_conversation_with_the_same_topic_still_gets_suffixed(tmp_path: Path):
-    """The regression guard: excluding self must not disable collision handling."""
-    store = ConversationStore("collide", str(tmp_path))
-    first = _conversation_with_a_turn(store, "a")
-    second = _conversation_with_a_turn(store, "b")
-    third = _conversation_with_a_turn(store, "c")
+def test_a_different_conversation_with_the_same_topic_still_gets_suffixed(store):
+    first = _conversation_with_a_turn(store, "order one")
+    second = _conversation_with_a_turn(store, "order two")
 
-    store.update_conversation_topic_summary(first, "Order Status Question", "s1")
-    store.update_conversation_topic_summary(second, "Order Status Question", "s2")
-    store.update_conversation_topic_summary(third, "Order Status Question", "s3")
+    _label(store, first, "Order Status", "s1")
+    _label(store, second, "Order Status", "s2")
 
-    assert _topic(store, first) == "Order Status Question"
-    assert _topic(store, second) == "Order Status Question 1"
-    assert _topic(store, third) == "Order Status Question 2"
+    assert _topic(store, first) == "Order Status"
+    assert _topic(store, second) == "Order Status 1"
 
 
-def test_collision_detection_is_case_insensitive(tmp_path: Path):
-    """Lookup normalizes case, so a case-only difference is still a collision."""
-    store = ConversationStore("case", str(tmp_path))
-    first = _conversation_with_a_turn(store, "a")
-    second = _conversation_with_a_turn(store, "b")
+def test_collision_detection_is_case_insensitive(store):
+    first = _conversation_with_a_turn(store, "order one")
+    second = _conversation_with_a_turn(store, "order two")
 
-    store.update_conversation_topic_summary(first, "Order Status Question", "s1")
-    store.update_conversation_topic_summary(second, "order status question", "s2")
+    _label(store, first, "Order Status", "s1")
+    _label(store, second, "ORDER STATUS", "s2")
 
-    assert _topic(store, second) == "order status question 1"
+    assert _topic(store, second) == "ORDER STATUS 1"
 
 
-def test_collision_detection_is_whitespace_insensitive(tmp_path: Path):
-    """Leading/trailing whitespace is stripped for comparison only.
+def test_collision_detection_is_whitespace_insensitive(store):
+    """The suffix is appended to the candidate verbatim, so padding survives."""
+    first = _conversation_with_a_turn(store, "order one")
+    second = _conversation_with_a_turn(store, "order two")
 
-    The suffix is appended to the candidate verbatim, so the padding survives in
-    the stored topic; comparison is what ignores it.
-    """
-    store = ConversationStore("space", str(tmp_path))
-    first = _conversation_with_a_turn(store, "a")
-    second = _conversation_with_a_turn(store, "b")
+    _label(store, first, "Order Status", "s1")
+    _label(store, second, "  Order Status  ", "s2")
 
-    padded = "  Order Status Question  "
-    store.update_conversation_topic_summary(first, "Order Status Question", "s1")
-    store.update_conversation_topic_summary(second, padded, "s2")
-
-    assert _topic(store, second) == f"{padded} 1"
-    assert store.get_conversation_by_topic(padded)[0] == first
+    assert _topic(store, second) == "  Order Status   1"
 
 
-# ---------------------------------------------------------------------------
-# save_conversation shares the helper, so it shares both behaviours
-# ---------------------------------------------------------------------------
+def test_collisions_chain_past_an_existing_suffix(store):
+    """A third conversation cannot land on the second one's suffixed title."""
+    ids = [_conversation_with_a_turn(store, f"order {i}") for i in range(3)]
+    for conv_id in ids:
+        _label(store, conv_id, "Order Status", "s")
 
-def test_save_conversation_with_an_explicit_id_does_not_self_collide(tmp_path: Path):
-    """Re-saving a named conversation with its own topic keeps that topic."""
-    store = ConversationStore("explicit", str(tmp_path))
-    conv_id = store.reserve_next_conversation_id()
-    turns = [{"conversation summary": "a", "conversation_traces": None, "feedback": None}]
-
-    store.save_conversation("Refund Request", "s", turns, conversation_id=conv_id)
-    assert _topic(store, conv_id) == "Refund Request"
-
-    store.save_conversation("Refund Request", "s", turns, conversation_id=conv_id)
-    assert _topic(store, conv_id) == "Refund Request"
-
-    store.save_conversation("Refund Request", "s", turns, conversation_id=conv_id)
-    assert _topic(store, conv_id) == "Refund Request"
+    assert [_topic(store, conv_id) for conv_id in ids] == [
+        "Order Status",
+        "Order Status 1",
+        "Order Status 2",
+    ]
 
 
-def test_save_conversation_with_an_explicit_id_still_suffixes_a_real_collision(tmp_path: Path):
-    """A named conversation taking another conversation's topic is still a collision."""
-    store = ConversationStore("explicit_collide", str(tmp_path))
-    turns = [{"conversation summary": "a", "conversation_traces": None, "feedback": None}]
+def test_uniqueness_is_scoped_to_the_channel(store):
+    """Two channels are two namespaces; one user's title cannot suffix another's."""
+    mine = _conversation_with_a_turn(store, "order one")
+    _label(store, mine, "Order Status", "s")
 
-    first = store.reserve_next_conversation_id()
-    store.save_conversation("Refund Request", "s1", turns, conversation_id=first)
+    theirs = store.mint_conversation_id("other-chan")
+    stored = store.record_conversation_label(
+        "other-chan", theirs, "Order Status", "s"
+    )
 
-    second = store.reserve_next_conversation_id()
-    store.save_conversation("Refund Request", "s2", turns, conversation_id=second)
-
-    assert _topic(store, first) == "Refund Request"
-    assert _topic(store, second) == "Refund Request 1"
-
-
-def test_save_conversation_without_an_id_still_suffixes_a_real_collision(tmp_path: Path):
-    """The id-allocating path is unchanged: a fresh id has nothing to exclude."""
-    store = ConversationStore("allocating", str(tmp_path))
-    turns = [{"conversation summary": "a", "conversation_traces": None, "feedback": None}]
-
-    first = store.save_conversation("Widget Order", "s1", turns)
-    second = store.save_conversation("Widget Order", "s2", turns)
-
-    assert first != second
-    assert _topic(store, first) == "Widget Order"
-    assert _topic(store, second) == "Widget Order 1"
+    assert stored == "Order Status"
+    assert store.conversation_label_state("other-chan", theirs)[0] == "Order Status"
 
 
 # ---------------------------------------------------------------------------
-# A blank topic is a failed generation, not a title to be uniquified
+# Blank topics: the retry sentinel, exempt from uniqueness
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
-def fastworkflow_logs(caplog):
-    """caplog, wired to the logger that actually emits the blank-topic warning.
+def test_a_blank_topic_stays_blank_when_other_unlabeled_conversations_exist(store):
+    """Every unlabeled conversation stores ``""``, so uniquifying a blank would
+    collide with all of them and yield ``' 1'`` — neither a title nor the
+    sentinel a lazy-fill trigger watches for (fix-dzs.3)."""
+    _conversation_with_a_turn(store, "one")
+    _conversation_with_a_turn(store, "two")
+    conv_id = _conversation_with_a_turn(store, "three")
 
-    ``fastworkflow.utils.logging`` sets ``propagate = False``, so its records never
-    reach the root handler pytest installs and a plain ``caplog`` assertion would
-    see nothing at all. Attaching caplog's own handler to that logger is enough.
-    """
-    caplog.set_level(logging.WARNING, logger="fastWorkflow")
-    fastworkflow_logger.addHandler(caplog.handler)
-    try:
-        yield caplog
-    finally:
-        fastworkflow_logger.removeHandler(caplog.handler)
+    _label(store, conv_id, "", "a summary")
+
+    assert _topic(store, conv_id) == ""
 
 
-def _warnings(caplog) -> list[str]:
-    return [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+def test_a_whitespace_only_topic_is_treated_the_same_way(store):
+    conv_id = _conversation_with_a_turn(store, "one")
+    _label(store, conv_id, "   ", "a summary")
+    assert _topic(store, conv_id) == ""
 
 
-def test_a_blank_topic_stays_blank_when_other_unlabeled_conversations_exist(
-    tmp_path: Path, fastworkflow_logs
-):
-    """The fix-dzs.3 bug: an empty topic collided with every *other* blank one.
+def test_no_stored_topic_is_ever_a_bare_numeric_suffix(store):
+    """The failure mode this whole exemption exists for, stated directly."""
+    ids = [_conversation_with_a_turn(store, f"turn {i}") for i in range(5)]
+    for conv_id in ids:
+        _label(store, conv_id, "", "s")
 
-    A second unlabeled conversation is what makes this reproduce. Every unlabeled
-    conversation stores ``topic == ""``, so an empty candidate matched all of them
-    and came back suffixed as ``' 1'``. With only one conversation on the channel,
-    fix-dzs.2's self-exclusion already hides the defect, which is why that weaker
-    arrangement is not the test.
-
-    The warning is part of the contract: storing ``""`` silently would leave an
-    operator with no signal that generation is failing. It names the conversation
-    and the channel and nothing else — conversation content must not reach a log.
-    """
-    store = ConversationStore("blank", str(tmp_path))
-    target = _conversation_with_a_turn(store, "where is my order")
-    _conversation_with_a_turn(store, "still unlabeled")  # the collision partner
-
-    store.update_conversation_topic_summary(target, "", "a summary anyway")
-
-    assert _topic(store, target) == ""
-
-    warnings = _warnings(fastworkflow_logs)
-    assert len(warnings) == 1
-    assert str(target) in warnings[0]
-    assert "a summary anyway" not in warnings[0]
-
-
-def test_a_whitespace_only_topic_is_treated_the_same_way(tmp_path: Path):
-    """``'   '`` is not a title either, and must not survive as stored whitespace.
-
-    Stored whitespace would be a third state all over again: unusable as a title,
-    and not equal to ``""``, so a sentinel check for blank would skip right past it.
-    """
-    store = ConversationStore("whitespace", str(tmp_path))
-    target = _conversation_with_a_turn(store, "a")
-    _conversation_with_a_turn(store, "b")
-
-    store.update_conversation_topic_summary(target, "   ", "s")
-
-    assert _topic(store, target) == ""
-
-
-def test_no_stored_topic_is_ever_a_bare_numeric_suffix(tmp_path: Path):
-    """Across a mix of blank and real topics, nothing is stored as ``' 1'``.
-
-    Every conversation on the channel is checked, not just the one written, since
-    the suffix was produced by comparing a candidate against all the *others*.
-    """
-    store = ConversationStore("suffix", str(tmp_path))
-    ids = [_conversation_with_a_turn(store, s) for s in ("a", "b", "c", "d")]
-
-    store.update_conversation_topic_summary(ids[0], "", "s0")
-    store.update_conversation_topic_summary(ids[1], "  ", "s1")
-    store.update_conversation_topic_summary(ids[2], "Order Status Question", "s2")
-    store.update_conversation_topic_summary(ids[3], "Order Status Question", "s3")
-
-    stored = [_topic(store, i) for i in ids]
-    assert stored == ["", "", "Order Status Question", "Order Status Question 1"]
-    for topic in stored:
+    for conv_id in ids:
+        topic = _topic(store, conv_id)
         assert not topic.strip().isdigit(), f"stored topic is a bare suffix: {topic!r}"
 
 
-def test_a_blank_topic_leaves_the_conversation_retryable(tmp_path: Path):
-    """Blank is the retry sentinel, so a later real topic must land unsuffixed.
-
-    ``' 1'`` broke this twice over: the conversation no longer looked unlabeled to
-    whatever decides to regenerate, and the stored junk was itself what the next
-    write had to displace.
-    """
-    store = ConversationStore("retry", str(tmp_path))
-    target = _conversation_with_a_turn(store, "a")
-    _conversation_with_a_turn(store, "b")
-
-    store.update_conversation_topic_summary(target, "", "first attempt")
-    assert _topic(store, target) == ""
-
-    store.update_conversation_topic_summary(target, "Order Status Question", "second attempt")
-
-    assert _topic(store, target) == "Order Status Question"
-    assert store.get_conversation_by_topic("Order Status Question")[0] == target
-
-
-def test_the_summary_is_still_written_when_the_topic_is_blank(tmp_path: Path):
-    """Chosen policy: a failed title does not throw away a usable summary.
-
-    A summary stands on its own, and writing it does not disturb the blank topic
-    that preserves the retry. ``updated_at`` moves with it, because the record did
-    change and that field is what orders ``list_conversations()``.
-    """
-    store = ConversationStore("summary", str(tmp_path))
-    target = _conversation_with_a_turn(store, "a")
-    _conversation_with_a_turn(store, "b")
-
-    before = store.get_conversation(target)["updated_at"]
-    time.sleep(0.002)  # updated_at has millisecond resolution
-
-    store.update_conversation_topic_summary(target, "", "the conversation was about refunds")
-
-    conv = store.get_conversation(target)
-    assert conv["topic"] == ""
-    assert conv["summary"] == "the conversation was about refunds"
-    assert conv["updated_at"] > before
-
-
-def test_a_blank_topic_does_not_destroy_a_title_already_stored(tmp_path: Path):
-    """A failed regeneration must not demote a conversation that was labeled.
-
-    Overwriting the field with ``""`` would satisfy "leaves the stored topic
-    blank" for a fresh conversation while quietly losing the title of one already
-    labeled, and would push a conversation that needs no work back into the retry
-    pool. Declining to write the field at all does both jobs at once.
-    """
-    store = ConversationStore("keep", str(tmp_path))
-    target = _conversation_with_a_turn(store, "a")
-    _conversation_with_a_turn(store, "b")
-
-    store.update_conversation_topic_summary(target, "Order Status Question", "s1")
-    store.update_conversation_topic_summary(target, "", "s2")
-
-    assert _topic(store, target) == "Order Status Question"
-    assert store.get_conversation(target)["summary"] == "s2"
-
-
-def test_the_other_topic_writer_inherits_the_blank_exemption(tmp_path: Path):
-    """``save_conversation`` shares the helper, so it cannot suffix a blank either.
-
-    The policy above lives at the finalize call site; this is the structural half
-    of the fix. A caller reaching the store by another route still cannot produce
-    a suffixed blank topic — only ``""``.
-    """
-    store = ConversationStore("other_writer", str(tmp_path))
-    turns = [{"conversation summary": "a", "conversation_traces": None, "feedback": None}]
-    _conversation_with_a_turn(store, "already unlabeled")
-
-    conv_id = store.save_conversation("", "s", turns)
-
+def test_a_blank_topic_leaves_the_conversation_retryable(store):
+    """Blank is the sentinel, so a later real topic must land unsuffixed."""
+    conv_id = _conversation_with_a_turn(store, "one")
+    _label(store, conv_id, "", "s1")
     assert _topic(store, conv_id) == ""
+
+    _label(store, conv_id, "A Real Title", "s2")
+    assert _topic(store, conv_id) == "A Real Title"
+
+
+def test_the_summary_is_still_written_when_the_topic_is_blank(store):
+    """A summary is useful without a title, and storing it does not disturb the
+    blank topic that preserves the retry."""
+    conv_id = _conversation_with_a_turn(store, "one")
+    _label(store, conv_id, "", "a summary worth keeping")
+
+    rows = store.list_conversations(CHANNEL)
+    assert rows[0]["summary"] == "a summary worth keeping"
+    assert _topic(store, conv_id) == ""
+
+
+def test_a_blank_topic_does_not_destroy_a_title_already_stored(store):
+    """One failed generation must not cost a conversation its title."""
+    conv_id = _conversation_with_a_turn(store, "one")
+    _label(store, conv_id, "Good Title", "s1")
+
+    _label(store, conv_id, "   ", "s2")
+
+    assert _topic(store, conv_id) == "Good Title"
+
+
+# ---------------------------------------------------------------------------
+# Ruling I9: the write reports the topic it actually stored, so a caller
+# mirroring or logging the label propagates the SUFFIXED one, never its own
+# candidate.
+# ---------------------------------------------------------------------------
+
+def test_the_write_returns_the_stored_suffixed_topic(store):
+    first = _conversation_with_a_turn(store, "order one")
+    second = _conversation_with_a_turn(store, "order two")
+
+    assert _label(store, first, "Order Status", "s1") == "Order Status"
+    assert _label(store, second, "Order Status", "s2") == "Order Status 1"
+    assert _topic(store, second) == "Order Status 1"
+
+
+def test_the_write_returns_the_preserved_topic_on_a_blank_generation(store):
+    conv_id = _conversation_with_a_turn(store, "order one")
+    _label(store, conv_id, "Good Title", "s1")
+
+    # A failed (blank) generation keeps the stored title — and reports it, so a
+    # caller re-asserts the real title rather than clearing it.
+    assert _label(store, conv_id, "   ", "s2") == "Good Title"
+
+
+def test_the_write_returns_blank_for_a_conversation_that_has_no_title_yet(store):
+    conv_id = _conversation_with_a_turn(store, "order one")
+    assert _label(store, conv_id, "", "s") == ""

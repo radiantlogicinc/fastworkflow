@@ -9,6 +9,9 @@ from dspy.adapters.types.tool import Tool
 from dspy.primitives.module import Module
 from dspy.signatures.signature import ensure_signature
 
+from fastworkflow import tracing
+from fastworkflow.utils.dspy_logger import DSPyForward
+
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -158,6 +161,7 @@ class fastWorkflowReAct(Module):
         trajectory_signature = dspy.Signature(f"{', '.join(trajectory.keys())} -> x")
         return adapter.format_user_message_content(trajectory_signature, trajectory)
 
+    @DSPyForward.intercept
     def forward(self, **input_args):
         self.inputs = input_args
         self.clear_suspension()
@@ -242,7 +246,17 @@ class fastWorkflowReAct(Module):
         was reached without the agent selecting the `finish` tool.
         """
         self._exhausted_last_run = False
+        # Host for the fw.agent.step spans, bound by the caller around the whole
+        # agent run. None outside an observed turn, where every helper no-ops.
+        host = tracing.current_host()
         while True:
+            # Opened before the reasoning call so a step that fails to pick a
+            # tool is still a recorded step rather than a gap in the trace.
+            step_span = tracing.start_span(
+                host,
+                tracing.SPAN_AGENT_STEP,
+                attributes={"step_index": idx},
+            )
             try:
                 pred = self._call_with_potential_trajectory_truncation(
                     self.react, trajectory, **input_args
@@ -268,13 +282,42 @@ class fastWorkflowReAct(Module):
                 self.current_trajectory[f"observation_{idx}"] = recovery_obs
                 idx += 1
                 exception_count += 1
+                tracing.end_span(
+                    host,
+                    step_span,
+                    status=tracing.STATUS_ERROR,
+                    attributes={
+                        "observation": invalid_tool_obs,
+                        "recovered": exception_count <= 2,
+                    },
+                )
                 if exception_count > 2:
                     break
                 continue
+            except BaseException as err:
+                # Anything else from the reasoning call — AdapterParseError,
+                # provider errors, control signals. The caller's retry loop
+                # re-enters this method, and a step span left on the stack
+                # would parent the ENTIRE retried attempt under a phantom
+                # span that is never emitted. Close it, then propagate.
+                tracing.end_span(
+                    host,
+                    step_span,
+                    status=tracing.STATUS_ERROR,
+                    attributes={"error_type": type(err).__name__},
+                )
+                raise
 
             trajectory[f"thought_{idx}"] = pred.next_thought
             trajectory[f"tool_name_{idx}"] = pred.next_tool_name
             trajectory[f"tool_args_{idx}"] = pred.next_tool_args
+            step_status = tracing.STATUS_OK
+            step_attributes = {
+                "step_index": idx,
+                "thought": pred.next_thought,
+                "tool_name": pred.next_tool_name,
+                "tool_args": pred.next_tool_args,
+            }
 
             # Mirror the full step into current_trajectory (consumed by the planner
             # for replanning and by distillation as the agent trajectory). Keep the
@@ -290,6 +333,7 @@ class fastWorkflowReAct(Module):
                 observation = self.tools[pred.next_tool_name](**pred.next_tool_args)
                 trajectory[f"observation_{idx}"] = observation
                 self.current_trajectory[f"observation_{idx}"] = observation
+                step_attributes["observation"] = _as_text(observation)
             except AskUserSuspend as err:
                 self._suspended = {
                     "trajectory": trajectory,
@@ -298,6 +342,16 @@ class fastWorkflowReAct(Module):
                     "max_iters": max_iters,
                     "clarification": err.clarification_request,
                 }
+                # The step really did end here — the human wait that follows is
+                # fw.ask_user's to record, and this span must not stay open
+                # across a suspension that may resume in another process.
+                step_attributes["clarification"] = err.clarification_request
+                tracing.end_span(
+                    host,
+                    step_span,
+                    status=tracing.STATUS_AWAITING_USER,
+                    attributes=step_attributes,
+                )
                 return dspy.Prediction(
                     suspended=True,
                     clarification=err.clarification_request,
@@ -309,6 +363,24 @@ class fastWorkflowReAct(Module):
                 )
                 trajectory[f"observation_{idx}"] = error_observation
                 self.current_trajectory[f"observation_{idx}"] = error_observation
+                step_attributes["observation"] = error_observation
+                step_attributes["tool_error"] = type(err).__name__
+                step_status = tracing.STATUS_ERROR
+            except BaseException as err:
+                # Control signals from a tool (e.g. CommandCancelledError) end
+                # the run — close the step span so a cancelled turn keeps its
+                # last step record instead of leaking an open span.
+                tracing.end_span(
+                    host,
+                    step_span,
+                    status=tracing.STATUS_CANCELLED,
+                    attributes={**step_attributes, "error_type": type(err).__name__},
+                )
+                raise
+
+            tracing.end_span(
+                host, step_span, status=step_status, attributes=step_attributes
+            )
 
             # Step-completion callback for distillation: lets external code inspect
             # each completed step and stop execution early (e.g. on trajectory
@@ -399,6 +471,21 @@ class fastWorkflowReAct(Module):
             trajectory.pop(key)
 
         return trajectory
+
+
+def _as_text(value: Any) -> str:
+    """A span-safe rendering of a tool observation.
+
+    Tools return whatever their author chose; span attributes are serialized
+    to JSON by the store, so an exotic object would poison the write. The
+    trajectory keeps the real value — only the trace gets the text.
+    """
+    if isinstance(value, str):
+        return value
+    try:
+        return str(value)
+    except Exception:
+        return repr(type(value))
 
 
 def _fmt_exc(err: BaseException, *, limit: int = 5) -> str:

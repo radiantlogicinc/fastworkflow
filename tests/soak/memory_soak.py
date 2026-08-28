@@ -1092,7 +1092,7 @@ def make_action(fixture: Fixture, payload: str) -> dict:
     travels as an extra action parameter. That is the field that actually reaches
     the retention path under test: WorkflowExecutionContext._process_action puts
     ``action.parameters`` verbatim into the record it appends to conversation
-    history, which is also what the ConversationStore persists. The command
+    history, which is also what the turn record persists. The command
     itself ignores the extra key — hello_world's pydantic Input model drops it,
     and startup has no Input class at all — so the command still executes.
     """

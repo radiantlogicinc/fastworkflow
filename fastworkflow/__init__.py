@@ -63,6 +63,9 @@ class CommandTraceEvent:
     response_text: str | None
     success: bool | None
     timestamp_ms: int
+    # Logical-turn correlation key (additive, observability design §3.1 [X7]).
+    # None only for events emitted outside any logical turn.
+    turn_key: str | None = None
 
 class CommandOutput(BaseModel):
     """The result of one command execution.
@@ -343,3 +346,17 @@ _turn_types_namespace = {
 }
 TurnOutput.model_rebuild(_types_namespace=_turn_types_namespace)
 TurnResult.model_rebuild(_types_namespace=_turn_types_namespace)
+
+# Observability sinks (fastworkflow.tracing / fastworkflow.metrics, both
+# stdlib-only). Embedders implement TraceSink/MetricsSink and wire them via
+# WorkflowExecutionContext (observability design §3.1).
+from fastworkflow.tracing import (
+    Span as Span,
+    TraceSink as TraceSink,
+    NoOpTraceSink as NoOpTraceSink,
+)
+from fastworkflow.metrics import (
+    MetricsSink as MetricsSink,
+    NoOpMetricsSink as NoOpMetricsSink,
+    LoggingMetricsSink as LoggingMetricsSink,
+)

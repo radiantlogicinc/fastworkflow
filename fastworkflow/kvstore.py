@@ -88,7 +88,7 @@ class KVStore:
 
     def keys(self) -> Iterator[str]:
         # Materialise first so callers may mutate the store while iterating
-        # (conversation_store historically did this against Rdict).
+        # (the legacy conversation store historically did this against Rdict).
         return (r[0] for r in self._conn.execute("SELECT k FROM kv").fetchall())
 
     def close(self) -> None:

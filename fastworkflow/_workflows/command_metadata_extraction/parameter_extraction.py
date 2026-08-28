@@ -10,7 +10,7 @@ from pydantic_core import PydanticUndefined
 
 import fastworkflow
 from fastworkflow.utils.logging import logger
-from fastworkflow import ModuleType
+from fastworkflow import ModuleType, tracing
 
 from fastworkflow.utils.signatures import InputForParamExtraction
 
@@ -58,6 +58,43 @@ class ParameterExtraction:
         self.command = command
 
     def extract(self) -> "ParameterExtraction.Output":
+        """Extract, wrapped in a ``fw.nlu.param_extraction`` span (D3 as
+        amended). The span records the extraction method (stored-merge /
+        xml-regex / llm), whether this is a NOT_FOUND retry round, and the
+        STRUCTURED validation outcome from ``validate_parameters`` —
+        missing/invalid fields, per-field db_lookup events, and the
+        validate_extracted_parameters verdict. A failed extraction is a
+        conversational state, not a span error: status stays ok and
+        ``parameters_valid`` carries the signal; only an exception marks the
+        span error. Emission never affects extraction (no-op without a host).
+        """
+        host = tracing.current_host()
+        span = tracing.start_span(
+            host,
+            tracing.SPAN_NLU_PARAM_EXTRACTION,
+            command_name=self.command_name,
+            attributes={"command_name": self.command_name},
+        )
+        diagnostics: dict = {}
+        try:
+            output = self._extract_impl(diagnostics)
+        except BaseException:
+            tracing.end_span(
+                host, span, status=tracing.STATUS_ERROR, attributes=diagnostics
+            )
+            raise
+        tracing.end_span(
+            host,
+            span,
+            status=tracing.STATUS_OK,
+            attributes={
+                **diagnostics,
+                "parameters_valid": output.parameters_are_valid,
+            },
+        )
+        return output
+
+    def _extract_impl(self, diagnostics: dict) -> "ParameterExtraction.Output":
         app_workflow_folderpath = self.app_workflow.folderpath
         app_command_routing_definition = fastworkflow.RoutingRegistry.get_definition(app_workflow_folderpath)
 
@@ -78,8 +115,10 @@ class ParameterExtraction:
             self.command)
 
         # If we have missing fields (in parameter extraction error state), try to apply the command directly
+        diagnostics["retry_round"] = bool(stored_params)
         if stored_params:
             new_params = self._extract_and_merge_missing_parameters(stored_params, self.command)
+            diagnostics["extraction_method"] = "stored_merge"
         else:
             # Check if we're in agentic mode (not assistant mode command)
             is_agentic_mode = (
@@ -91,6 +130,7 @@ class ParameterExtraction:
             if is_agentic_mode:
                 # Try regex-based extraction first in agentic mode
                 new_params = self._extract_parameters_from_xml(self.command, command_parameters_class)
+                diagnostics["extraction_method"] = "xml_regex"
 
                 # If regex extraction fails, fall back to LLM-based extraction
                 if new_params is None:
@@ -98,16 +138,19 @@ class ParameterExtraction:
                         command_parameters_class,
                         self.command_name,
                         app_workflow_folderpath)
+                    diagnostics["extraction_method"] = "llm"
             else:
                 # Use LLM-based extraction for assistant mode
                 new_params = input_for_param_extraction.extract_parameters(
                     command_parameters_class,
                     self.command_name,
                     app_workflow_folderpath)
+                diagnostics["extraction_method"] = "llm"
 
         is_valid, error_msg, suggestions, missing_invalid_fields = \
             input_for_param_extraction.validate_parameters(
-            self.app_workflow, self.command_name, new_params
+            self.app_workflow, self.command_name, new_params,
+            diagnostics=diagnostics
         )
 
         # Set all the missing and invalid fields to appropriate sentinel values before storing

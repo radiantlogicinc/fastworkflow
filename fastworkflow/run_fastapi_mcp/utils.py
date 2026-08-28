@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import queue
 import time
@@ -33,8 +34,9 @@ from fastworkflow.checkpoint_store import (
     QuarantineReason,
     RetentionPolicy,
 )
+from fastworkflow.conversation_history_io import restore_history_from_turns
+from fastworkflow.observability_store import ObservabilityStore, SQLiteTraceSink
 from . import checkpoint
-from .conversation_store import ConversationStore, restore_history_from_turns
 from .jwt_manager import verify_token
 
 
@@ -120,6 +122,11 @@ class InitializationRequest(BaseModel):
     stream_format: Optional[str] = None  # "ndjson" | "sse" (default ndjson)
     startup_command: Optional[str] = None  # Mutually exclusive with startup_action
     startup_action: Optional[dict[str, Any]] = None  # Mutually exclusive with startup_command
+    # Per-session workflow context [R24]: overrides the server-level --context
+    # CLI arg for THIS session only. Additive — absent means current behavior
+    # (the server-level context, or none). Applied at session creation, so it
+    # only takes effect on the /initialize call that creates the session.
+    context: Optional[dict[str, Any]] = None
     # How long the request blocks for the startup turn before deferring (202).
     # Same shape/default as InvokeRequest/PerformActionRequest.timeout_seconds.
     timeout_seconds: int = 60
@@ -155,6 +162,9 @@ class InitializeResponse(BaseModel):
     startup_turn_key: Optional[str] = None  # Handle to poll the startup turn
     startup_exec_state: Optional[str] = None  # queued | running | done | lost
     startup_error: Optional[str] = None  # Present if the startup turn failed
+    # [R9] the startup turn's LOGICAL key (TurnOutput.turn_key), once known —
+    # the key GET /turns and the observability store are ultimately keyed by.
+    startup_logical_turn_key: Optional[str] = None
 
 
 class SessionData(BaseModel):
@@ -212,6 +222,21 @@ class ActivateConversationRequest(BaseModel):
     Requires channel_id to be passed in the Authorization header (via JWT token).
     """
     conversation_id: int
+
+
+class ConversationSummary(BaseModel):
+    """One row of GET /conversations.
+
+    Re-homed here from conversation_store.py when the observability DB became
+    the single source of truth (Phase 7 §2.8). The wire shape is unchanged —
+    NULL topic/summary project to "" and the timestamps stay ms epoch (ruling
+    C7) — so a client cannot tell which store answered.
+    """
+    conversation_id: int
+    topic: str
+    summary: str
+    created_at: int
+    updated_at: int
 
 
 class DumpConversationsRequest(BaseModel):
@@ -486,6 +511,59 @@ def _restore_from_checkpoint(
     )
 
 
+def _restore_conversation_memory(
+    ctx: WorkflowExecutionContext,
+    trace_sink: Optional[SQLiteTraceSink],
+    channel_id: str,
+) -> Optional[int]:
+    """Rebuild in-memory conversation history from the observability DB.
+
+    Gate 1 of the Phase-7 consolidation ([R3], §2.3): the memory window comes
+    from the turns table rather than the retired per-channel store. Only the
+    window the running session keeps is read, not the whole conversation — a
+    turn record carries its full payload, so hydrating a long conversation to
+    then discard all but the newest few is the memory spike the bounded window
+    exists to prevent.
+
+    Which conversation: the newest for the channel, stepping back one if it has
+    no usable turns yet (the reserved-but-empty state a rotate leaves behind).
+    Emptiness is zero USABLE turn rows, not an absent row — the store mints a
+    conversations row at reserve time, so row-presence would never step back
+    (ruling I7). The stepped-back conversation becomes the active one too, so
+    the next turn continues it rather than starting a third.
+
+    Returns the conversation id this session should be BOUND to, which is not
+    always one it restored history from. A newest-but-empty conversation is
+    reused rather than stepped over: it is what a rotate just reserved for the
+    next exchange, so minting again would strand it and add a conversations row
+    per cold start on an idle channel. None means there is nothing to reuse and
+    the caller should mint.
+    """
+    if trace_sink is None:
+        return None
+    store = trace_sink.store
+    reusable_empty: Optional[int] = None
+    for conv_id in store.newest_conversation_ids(channel_id, limit=2):
+        window = store.get_memory_window(
+            channel_id, conv_id, MAX_CONVERSATION_TURNS_IN_MEMORY
+        )
+        if not window:
+            if reusable_empty is None:
+                reusable_empty = conv_id
+            continue
+        ctx._conversation_history = restore_history_from_turns(window)
+        ctx.bind_last_completed_turn_key(
+            store.get_last_completed_turn_key(channel_id, conv_id)
+        )
+        logger.info(f"Restored conversation {conv_id} for user {channel_id}")
+        return conv_id
+    if reusable_empty is not None:
+        logger.info(
+            f"Reusing empty conversation {reusable_empty} for user {channel_id}"
+        )
+    return reusable_empty
+
+
 async def _create_user_runtime(
     channel_id: str,
     session_manager: "ChannelSessionManager",
@@ -501,10 +579,23 @@ async def _create_user_runtime(
     context = _merge_workflow_context(context, http_bearer_token)
     logger.info(f"Creating new Topology-B session for channel_id: {channel_id}")
 
-    conv_base_folder = get_channelconversations_dir(workflow_path)
-    conversation_store = ConversationStore(channel_id, conv_base_folder)
-
     ctx = WorkflowExecutionContext(run_as_agent=True, session_key=channel_id)
+    # Identity plumbing [R1]: the embedder binds channel identity before any
+    # turn so spans/turn records are attributable (conversation ids are minted
+    # by the observability store from Phase 2).
+    ctx.bind_observability_identity(
+        channel_id=channel_id,
+        # FastAPI mints conversation ids through reserve_conversation_id (the
+        # store's per-channel counter, ruling C2); WEC self-minting must stay
+        # off so a degraded eager mint cannot double-mint.
+        embedder_owns_conversations=True,
+    )
+    # Observability sink [R4]: run_fastapi_mcp is a fastworkflow entry point,
+    # so the SQLite sink defaults ON (FW_OBSERVABILITY=0 disables). One sink
+    # (one writer thread) per workflow DB, shared across channels.
+    from fastworkflow.observability_store import get_observability_sink
+    if (trace_sink := get_observability_sink(workflow_path)) is not None:
+        ctx.set_trace_sink(trace_sink)
     trace_queue: Queue = Queue()
     ctx.set_transport_queues(command_trace_queue=trace_queue)
 
@@ -519,27 +610,9 @@ async def _create_user_runtime(
         session_manager, channel_id, workflow_path, app_workflow, context
     )
 
-    conv_id_to_restore = None
-    if conv_id_to_restore := conversation_store.get_last_conversation_id():
-        conversation = conversation_store.get_conversation_window(
-            conv_id_to_restore, MAX_CONVERSATION_TURNS_IN_MEMORY
-        )
-        if not conversation:
-            conv_id_to_restore = conv_id_to_restore - 1
-            conversation = conversation_store.get_conversation_window(
-                conv_id_to_restore, MAX_CONVERSATION_TURNS_IN_MEMORY
-            )
-        if conversation:
-            # Restore the same window the running session keeps, not the whole
-            # conversation: the rest stays in the durable record. The window comes
-            # from the read rather than from slicing a full hydration, so a long
-            # conversation is not resident in full to produce it.
-            ctx._conversation_history = restore_history_from_turns(
-                conversation["turns"]
-            )
-            logger.info(f"Restored conversation {conv_id_to_restore} for user {channel_id}")
-        else:
-            conv_id_to_restore = None
+    conv_id_to_restore = _restore_conversation_memory(
+        ctx, trace_sink, channel_id
+    )
 
     loop = asyncio.get_running_loop()
     startup_state = restored.startup.get("state") or checkpoint.STARTUP_NOT_ATTEMPTED
@@ -580,23 +653,30 @@ async def _create_user_runtime(
                 f"Restored pending suspended session for channel_id {channel_id}"
             )
 
-    # Anything restored from a conversation is by definition already durable, so
-    # the next incremental save must not append it again.
-    durable_turn_count = (
-        len(ctx.conversation_history.messages) if conv_id_to_restore else 0
+    # A checkpointed active conversation wins over the one memory was restored
+    # from (ruling I7); otherwise the restore's choice — including its
+    # step-back — is the active conversation.
+    active_conversation_id = (
+        restored.runtime_fields.get("active_conversation_id")
+        if restored.applied
+        else conv_id_to_restore
     )
+    # [R1] conversation-id reservation moves ahead of the turn: a fresh session
+    # mints its first conversation id NOW, so the very first turn's records are
+    # conversation-attributed. Restored sessions keep their restored id.
+    if not active_conversation_id and trace_sink is not None:
+        active_conversation_id = _mint_conversation_id(trace_sink, channel_id)
+    if active_conversation_id:
+        ctx.bind_observability_identity(
+            conversation_id=int(active_conversation_id)
+        )
 
     # A restored record is authoritative for the fields the framework knows how
     # to restore; the request's stream_format only applies to a fresh session.
     await session_manager.create_session(
         channel_id=channel_id,
         execution_context=ctx,
-        conversation_store=conversation_store,
-        active_conversation_id=(
-            restored.runtime_fields.get("active_conversation_id")
-            if restored.applied
-            else conv_id_to_restore
-        ),
+        active_conversation_id=active_conversation_id,
         stream_format=(
             restored.runtime_fields.get("stream_format") or stream_format
             if restored.applied
@@ -604,7 +684,6 @@ async def _create_user_runtime(
         ),
         workflow_path=workflow_path,
         startup_ran=startup_ran,
-        durable_turn_count=durable_turn_count,
         session_incarnation=restored.session_incarnation,
         startup_state=startup_state,
         startup_idempotency_key=startup_key,
@@ -907,7 +986,6 @@ class ChannelRuntime:
     active_conversation_id: int
     execution_context: WorkflowExecutionContext
     lock: asyncio.Lock
-    conversation_store: ConversationStore
     # Serializes topic/summary generation for this channel. Deliberately NOT
     # ``lock``: that one is a busy signal (busy_channel_ids reads
     # lock.locked()), so holding it across an LLM round trip would put topic
@@ -922,10 +1000,10 @@ class ChannelRuntime:
     # served by one process at a time; where that expectation is broken - two
     # pods serving one channel - both can generate a label for the same
     # conversation. That is bounded waste, not corruption: each writes through
-    # update_conversation_topic_summary, whose self-excluding uniqueness check
-    # (fix-dzs.2) makes a rewrite idempotent, so the loser's title is simply
-    # replaced. Nothing here is a distributed lock and nothing should be built
-    # on it as if it were.
+    # ObservabilityStore.record_conversation_label, whose self-excluding
+    # uniqueness check (fix-dzs.2) makes a rewrite idempotent, so the loser's
+    # title is simply replaced. Nothing here is a distributed lock and nothing
+    # should be built on it as if it were.
     label_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     stream_format: str = "ndjson"
     workflow_path: str = ""
@@ -940,10 +1018,12 @@ class ChannelRuntime:
     # a different incarnation is a channel-id reuse, and is quarantined rather
     # than applied.
     session_incarnation: str = field(default_factory=checkpoint.new_session_incarnation)
-    # High-water mark: how many of the leading in-memory conversation turns are
-    # already durably recorded. Everything after it is what the next incremental
-    # save appends. Trimming the in-memory window lowers it by the number of
-    # turns dropped, so it stays an index into the live message list.
+    # DEAD FIELD, kept for checkpoint compatibility (Phase 7 ruling C5). It was
+    # the high-water mark for the legacy store's incremental turn save; under
+    # sync-first turn records there is nothing incremental to track, because
+    # every turn is recorded by the sink under its own turn_key at finalize.
+    # Still written to checkpoints (as 0) and still read without effect, so a
+    # checkpoint from before the cutover deserializes.
     durable_turn_count: int = 0
     # turn_key of the startup turn (if any), so the /initialize "already exists"
     # branch can return its three-state status (§3.3).
@@ -953,6 +1033,18 @@ class ChannelRuntime:
     def chat_session(self) -> WorkflowExecutionContext:
         """Backward-compatible alias for endpoints that referenced chat_session."""
         return self.execution_context
+
+    @property
+    def observability_store(self) -> Optional[ObservabilityStore]:
+        """The conversation record for this channel, or None when disabled.
+
+        Single source of truth since Phase 7: conversations, turns, memory
+        rebuild and feedback all live in this one per-workflow DB. None means
+        FW_OBSERVABILITY is off, in which case the session keeps in-memory
+        history only and nothing survives a restart.
+        """
+        sink = getattr(self.execution_context, "trace_sink", None)
+        return sink.store if isinstance(sink, SQLiteTraceSink) else None
 
 
 class ChannelSessionManager:
@@ -1312,12 +1404,10 @@ class ChannelSessionManager:
         self,
         channel_id: str,
         execution_context: WorkflowExecutionContext,
-        conversation_store: ConversationStore,
         active_conversation_id: Optional[int] = None,
         stream_format: str = "ndjson",
         workflow_path: str = "",
         startup_ran: bool = False,
-        durable_turn_count: int = 0,
         session_incarnation: Optional[str] = None,
         startup_state: str = checkpoint.STARTUP_NOT_ATTEMPTED,
         startup_idempotency_key: Optional[str] = None,
@@ -1329,11 +1419,9 @@ class ChannelSessionManager:
                 active_conversation_id=active_conversation_id or 0,
                 execution_context=execution_context,
                 lock=asyncio.Lock(),
-                conversation_store=conversation_store,
                 stream_format=stream_format,
                 workflow_path=workflow_path,
                 startup_ran=startup_ran,
-                durable_turn_count=durable_turn_count,
                 session_incarnation=(
                     session_incarnation or checkpoint.new_session_incarnation()
                 ),
@@ -1360,57 +1448,79 @@ class ChannelSessionManager:
 # Helper Functions
 # ============================================================================
 
-def save_conversation_incremental(runtime: ChannelRuntime, extract_turns_func, logger) -> int:
-    """
-    Save conversation turns incrementally after each turn (without generating topic/summary).
-    This provides crash protection - all turns except the last will be preserved.
+def _mint_conversation_id(sink: SQLiteTraceSink, channel_id: str) -> Optional[int]:
+    """Mint the next conversation id from the store's per-channel counter.
 
-    Only turns above the runtime's high-water mark are appended, then the
-    in-memory history is windowed. The order matters: a turn is durably recorded
-    before it can be dropped from memory, so trimming never shortens the durable
-    record. Returns the number of turns appended.
+    Never raises: minting is an observability concern, and a wedged or corrupt
+    DB must not fail /initialize or a turn (same posture as
+    ``get_observability_sink``). A channel that cannot mint runs with
+    active_conversation_id 0 and retries on its next rotate.
+
+    The Phase-A ``legacy_floor`` argument is gone with the legacy store. It
+    existed to stop a fresh observability DB re-issuing an id that already
+    named one of the channel's per-channel-DB conversations, which mattered
+    only while BOTH stores were being written — an aliased id meant new turns
+    appended into the user's oldest legacy conversation. Nothing reads those
+    files now, so the counter alone is authoritative (design §3: legacy-only
+    conversations become invisible, they do not become misattributed).
     """
-    turns = extract_turns_func(runtime.execution_context.conversation_history)
-    already_saved = runtime.durable_turn_count
-    if already_saved > len(turns):
-        # The mark outran the history, so it was established against some other
-        # history. Re-append everything: a duplicated turn is recoverable, a
-        # turn dropped from memory that was never recorded is not.
+    try:
+        return sink.store.mint_conversation_id(channel_id)
+    except Exception as exc:
         logger.warning(
-            f"Conversation high-water mark ({already_saved}) exceeds in-memory "
-            f"turns ({len(turns)}) for channel_id {runtime.channel_id}; "
-            "re-appending from the start rather than risking an unrecorded turn"
+            f"Conversation-id mint failed for channel_id {channel_id} "
+            f"({type(exc).__name__}: {exc}); the channel runs unattributed "
+            "until its next rotate"
         )
-        already_saved = 0
+        return None
 
-    if new_turns := turns[already_saved:]:
-        # Initialize conversation ID for first conversation if needed
-        if runtime.active_conversation_id == 0:
-            # This is the first conversation for this session
-            # Reserve ID 1 and use it
-            runtime.active_conversation_id = runtime.conversation_store.reserve_next_conversation_id()
-            logger.debug(f"Initialized first conversation with ID {runtime.active_conversation_id} for user {runtime.channel_id}")
 
-        runtime.conversation_store.append_conversation_turns(
-            runtime.active_conversation_id, new_turns
-        )
-        runtime.durable_turn_count = len(turns)
-        logger.debug(f"Incrementally saved {len(new_turns)} turn(s) to conversation {runtime.active_conversation_id}")
+def reserve_conversation_id(runtime: "ChannelRuntime") -> int:
+    """Mint the next conversation id for a channel — one chokepoint [R1].
 
-    trim_conversation_window(runtime, logger)
-    return len(new_turns)
+    The observability DB is the sole minting authority. Returns 0 when there is
+    no sink or the mint failed, which callers treat as "no active conversation"
+    exactly as they treated a never-reserved id. The freshly minted id is bound
+    onto the WEC so subsequent turn records and spans carry it.
+    """
+    ctx = runtime.execution_context
+    sink = getattr(ctx, "trace_sink", None)
+    conv_id = (
+        _mint_conversation_id(sink, runtime.channel_id)
+        if isinstance(sink, SQLiteTraceSink)
+        else None
+    )
+    conv_id = int(conv_id or 0)
+    if conv_id:
+        ctx.bind_observability_identity(conversation_id=conv_id)
+    return conv_id
 
 
 def trim_conversation_window(runtime: ChannelRuntime, logger) -> int:
-    """Window the in-memory conversation history, keeping the high-water mark aligned.
+    """Window the in-memory conversation history, once the record is durable.
 
-    Only safe to call once the turns being dropped are durably recorded.
+    GATED ON THE EMIT ACK (rulings I1/I2). Turn records are best-effort by
+    design, so trimming on a timer would silently punch permanent holes in
+    conversation memory: the turn leaves memory, its row never lands, and no
+    later read can tell that anything is missing. Deferring instead bounds the
+    damage to memory growth, which the pending-retry ring bounds in turn.
+
+    ``last_turn_record_stored`` is None when no sink is installed. That is not
+    a failed write — it means nothing is recording turns at all, so there is
+    nothing to wait for and the window is enforced as before.
     """
+    stored = runtime.execution_context.last_turn_record_stored
+    if stored is False:
+        logger.warning(
+            f"Deferring the conversation-window trim for channel_id "
+            f"{runtime.channel_id}: the last turn record is queued, not yet "
+            "durable, and trimming it out of memory now could lose it"
+        )
+        return 0
     trimmed = runtime.execution_context.trim_conversation_history(
         MAX_CONVERSATION_TURNS_IN_MEMORY
     )
     if trimmed:
-        runtime.durable_turn_count = max(0, runtime.durable_turn_count - trimmed)
         logger.debug(
             f"Trimmed {trimmed} in-memory conversation turn(s) for channel_id "
             f"{runtime.channel_id} (window={MAX_CONVERSATION_TURNS_IN_MEMORY})"
@@ -1418,41 +1528,39 @@ def trim_conversation_window(runtime: ChannelRuntime, logger) -> int:
     return trimmed
 
 
-def save_last_turn_feedback(runtime: ChannelRuntime, extract_turns_func, logger) -> None:
-    """Persist an edit to the newest conversation turn (feedback).
+def save_last_turn_feedback(runtime: ChannelRuntime, logger) -> None:
+    """Persist feedback against the turn it was given on (rulings I3/C4).
 
-    The append path cannot express a change to a turn that is already recorded,
-    so rewrite that one turn in place. If the turn is not durable yet, the normal
-    incremental save carries the edit with it.
+    Feedback is keyed by the turn_key the WEC recorded at terminal finalize,
+    never inferred from SQL. A max-ordinal query would attach it to whatever
+    row was written last, which after a suspended or cancelled turn is not the
+    turn the user was looking at when they clicked.
+
+    The feedback table is mutable by design [R3] and joined into the memory
+    window, so this stays a plain upsert while turn rows remain write-once. The
+    row may not exist yet if the turn record is still queued; the join reunites
+    them when it lands.
     """
-    if save_conversation_incremental(runtime, extract_turns_func, logger):
-        return
-
-    turns = extract_turns_func(runtime.execution_context.conversation_history)
-    if not turns or runtime.active_conversation_id == 0:
-        return
-
-    # Rewriting by position is only meaningful if this conversation is the one
-    # the mark was established against. A restored suspended session can leave
-    # the two disagreeing, and writing blind would overwrite an unrelated turn.
-    durable_turns = runtime.conversation_store.count_conversation_turns(
-        runtime.active_conversation_id
-    )
-    if not runtime.durable_turn_count or durable_turns < runtime.durable_turn_count:
+    turn_key = runtime.execution_context.last_completed_turn_key
+    store = runtime.observability_store
+    if store is None or not turn_key:
         logger.warning(
             f"Skipping feedback write for channel_id {runtime.channel_id}: "
-            f"conversation {runtime.active_conversation_id} holds {durable_turns} "
-            f"turn(s), which does not match the {runtime.durable_turn_count} "
-            "recorded in memory"
+            + (
+                "no conversation store is active"
+                if store is None
+                else "no completed turn to attach it to"
+            )
         )
         return
 
-    runtime.conversation_store.update_last_conversation_turn(
-        runtime.active_conversation_id, turns[-1]
-    )
+    messages = runtime.execution_context.conversation_history.messages
+    feedback = messages[-1].get("feedback") if messages else None
+    if feedback is None:
+        return
+    store.upsert_feedback(turn_key, json.dumps(feedback))
     logger.debug(
-        f"Updated latest durable turn of conversation "
-        f"{runtime.active_conversation_id} for channel_id {runtime.channel_id}"
+        f"Recorded feedback on turn {turn_key} for channel_id {runtime.channel_id}"
     )
 
 
@@ -1553,10 +1661,9 @@ async def ensure_topic_and_summary(
     not - and neither can tell the difference if this swallows the error. Callers
     of the second kind use try_ensure_topic_and_summary below.
 
-    ``generate`` is injected rather than imported, following
-    save_conversation_incremental's ``extract_turns_func``: the topic-generation
-    entry point is the seam every call site's tests substitute, and resolving it
-    from the caller's module keeps that seam where the caller is.
+    ``generate`` is injected rather than imported: the topic-generation entry
+    point is the seam every call site's tests substitute, and resolving it from
+    the caller's module keeps that seam where the caller is.
 
     ``turns`` is what to summarize, defaulting to the whole durable conversation.
     The durable record, never the in-memory window, because the window would
@@ -1573,13 +1680,15 @@ async def ensure_topic_and_summary(
     asyncio.constants.THREAD_JOIN_TIMEOUT (300 s) at exit. The bound lives at the
     LLM client, inside generate_topic_and_summary.
 
-    The write goes through update_conversation_topic_summary so this inherits its
-    blank-topic policy (fix-dzs.3): a blank generated topic is not stored as a
-    title, the conversation stays retryable, and the operator gets one WARNING
-    naming it.
+    The write goes through ObservabilityStore.record_conversation_label so this
+    inherits the blank-topic policy (fix-dzs.3): a blank generated topic is not
+    stored as a title, the conversation stays retryable, and the operator gets
+    one WARNING naming it.
     """
     conv_id = runtime.active_conversation_id
-    store = runtime.conversation_store
+    store = runtime.observability_store
+    if store is None:
+        return None
 
     if not force:
         if conv_id == 0:
@@ -1597,12 +1706,18 @@ async def ensure_topic_and_summary(
 
     async with runtime.label_lock:
         if not force:
-            stored_topic, durable_turns = store.get_conversation_label_state(conv_id)
-            if not _label_is_due(stored_topic, durable_turns, turns_appended):
+            stored_topic, usable_turns = store.conversation_label_state(
+                runtime.channel_id, conv_id
+            )
+            if not _label_is_due(stored_topic, usable_turns, turns_appended):
                 return None
 
         if turns is None:
-            turns = store.get_conversation_summaries(conv_id) if conv_id else []
+            turns = (
+                store.conversation_summaries(runtime.channel_id, conv_id)
+                if conv_id
+                else []
+            )
         if not turns:
             return None
 
@@ -1610,7 +1725,28 @@ async def ensure_topic_and_summary(
         topic, summary = await loop.run_in_executor(None, generate, turns)
 
         if conv_id:
-            store.update_conversation_topic_summary(conv_id, topic, summary)
+            # Written synchronously rather than through the sink's queue: this
+            # already runs off the turn's critical path, and a queued label is
+            # not visible to the very next _label_is_due read, which would
+            # spend another LLM call on a conversation that was just titled.
+            # Uniquification happens inside the write's own transaction either
+            # way (ruling I9) — this is the same enforcement point.
+            #
+            # A blank topic passes as None so a failed generation never
+            # clobbers a good title; the store reports back what it actually
+            # stored, which is what gets logged.
+            stored_topic = store.record_conversation_label(
+                runtime.channel_id,
+                conv_id,
+                topic if topic and topic.strip() else None,
+                summary,
+            )
+            if not (topic and topic.strip()):
+                logger.warning(
+                    f"Blank topic generated for conversation {conv_id} on channel "
+                    f"{runtime.channel_id}; leaving its topic as {stored_topic!r} "
+                    "so it is retried"
+                )
         return topic, summary
 
 

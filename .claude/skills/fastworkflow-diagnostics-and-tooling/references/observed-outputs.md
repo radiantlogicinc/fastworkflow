@@ -146,16 +146,42 @@ Verdict: snapshots are trusted as-is; no rebuild on next load.
 
 ## 3. trace_turn.py
 
-### Real action.jsonl (repo root, residue of a 2026-06-04 CLI agent run)
+### Real turn + span tree (a deterministic turn recorded into a temp observability DB)
 
 ```
-$ ... trace_turn.py actions        # reads ./action.jsonl
-action.jsonl — records for the LAST turn only:
+$ ... trace_turn.py turns --db /tmp/fwdb_npt1zpjk/observability.sqlite3
+/tmp/fwdb_npt1zpjk/observability.sqlite3 — 1 turn(s), newest first:
 
-[0] ask_user
-    agent asked : Pick A or B?
-    user replied: user picks option A
+20260825T204226.820492Z-a5390537d187  [completed/OK]  no conversation (CLI/one-off)
+    channel : (unbound)
+    started : 2026-08-25T20:42:26.820510+00:00  completed: 2026-08-25T20:42:26.820701+00:00
+    message : list_tasks please
+    answer  : ok:list_tasks please
+
+$ ... trace_turn.py turn 20260825T204226.820492Z-a5390537d187 --db ...
+turn_key : 20260825T204226.820492Z-a5390537d187
+status   : completed / OK
+channel  : (unbound)  no conversation (CLI/one-off)
+message  : list_tasks please
+answer   : ok:list_tasks please
+
+spans (2):
+- fw.turn [completed, 0.2ms]  context=*
+    turn_key: 20260825T204226.820492Z-a5390537d187
+    user_message: list_tasks please
+    status: completed
+    success: True
+  - fw.agent.tool_call [ok, 0.1ms]  command=list_tasks
+      raw_command: list_tasks please
+      response_text: ok:list_tasks please
+      success: True
 ```
+
+`channel : (unbound)` and "no conversation" are normal for a bare
+`WorkflowExecutionContext`: the CLI binds a synthetic `cli:<timestamp>` channel
+and the server binds the real one. Pre-Phase-7 this data came from a CWD
+`action.jsonl` holding only the last turn; that mirror is retired, and any copy
+still on disk (there is one in this repo root from 2026-06-04) is residue.
 
 ### Server turn response (SYNTHETIC body; field shape verified against turns.py render_turn_response and utils.py _format_trace_event)
 

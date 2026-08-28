@@ -51,7 +51,7 @@ notes: [references/docs-inventory.md](references/docs-inventory.md).
 | `fastworkflow-article-1..4.md` (repo root) | Published TUTORIAL series | Public | Live; see name-collision warning (§2) |
 | `docs/*.md` (git-tracked) | Design docs; per-doc supremacy clauses | Team | Mixed — some are ghosts (§3) |
 | `docs/turn_result_design_final.md` | Authoritative spec for TurnResult; explicit "this document wins" clause (lines 1–8) | Team | Live; v3.0 half unimplemented |
-| `fastworkflow/docs/integrate-chat-agent/` (SKILL.md + reference.md) | Wheel-shipped coding-agent skill; README:179 calls it "the fastest path for a non-trivial app" | Public + downstream devs | Live, git-tracked, ships in the wheel |
+| `fastworkflow/skills_for_coding_fastworkflows/` (integrate-chat-agent + 9 more skills; moved 2026-08-25 from `fastworkflow/docs/integrate-chat-agent/`) | Wheel-shipped coding-agent skill library; README calls integrate-chat-agent "the fastest path for a non-trivial app" | Public + downstream devs | Live, ships in the wheel (untracked in git as of the move — commit pending) |
 | `docs/` untracked files | TEAM-PRIVATE strategy docs (§5) | Team only | NEVER commit without the developer'sexplicit approval |
 | `SECURITY_VULNERABILITY_REPORT.md` | Point-in-time CVE remediation report (2026-01-28) | Team | Historical; one open item (ecdsa CVE-2024-23342, no patch exists). NB the report's own bead reference `fastworkflow-d8f` (line 86) is absent from `.beads/issues.jsonl` as of 2026-07-09 — the report has its own rot |
 | `WEC_learning_checklist.md`, `docs/turn_result_learning_checklist.md` | Mastery checklists (house style, §6) | Team | Living docs |

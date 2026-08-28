@@ -60,11 +60,35 @@ def app_module(hello_world_workflow_path, env_files):
     return main
 
 
-def test_generate_mcp_token_default_expiration(app_module):
+@pytest.fixture
+def admin_enabled(app_module):
+    """Serve the admin routes for the duration of one test (fix-24f.2).
+
+    ``/admin/generate_mcp_token`` mints year-long credentials for any channel
+    the caller names, so it is off unless the operator passed
+    ``--enable_admin_endpoints``, and needs a Bearer token even then.
+    """
+    app_module.ARGS.enable_admin_endpoints = True
+    app_module.app.openapi_schema = None
+    try:
+        yield app_module
+    finally:
+        app_module.ARGS.enable_admin_endpoints = False
+        app_module.app.openapi_schema = None
+
+
+def _admin_headers(client: TestClient, channel_id: str = "admin_caller") -> dict:
+    """A Bearer token from the public /initialize, which is how a caller gets one."""
+    resp = client.post("/initialize", json={"channel_id": channel_id})
+    assert resp.status_code == 200, resp.text
+    return {"Authorization": f"Bearer {resp.json()['access_token']}"}
+
+
+def test_generate_mcp_token_default_expiration(admin_enabled):
     """Test MCP token generation with default 365-day expiration"""
-    client = TestClient(app_module.app)
-    
-    response = client.post("/admin/generate_mcp_token", json={
+    client = TestClient(admin_enabled.app)
+
+    response = client.post("/admin/generate_mcp_token", headers=_admin_headers(client), json={
         "channel_id": "mcp_client_test",
         "expires_days": 365
     })
@@ -89,11 +113,11 @@ def test_generate_mcp_token_default_expiration(app_module):
     assert "workflow_info" not in data
 
 
-def test_generate_mcp_token_custom_expiration(app_module):
+def test_generate_mcp_token_custom_expiration(admin_enabled):
     """Test MCP token generation with custom expiration"""
-    client = TestClient(app_module.app)
-    
-    response = client.post("/admin/generate_mcp_token", json={
+    client = TestClient(admin_enabled.app)
+
+    response = client.post("/admin/generate_mcp_token", headers=_admin_headers(client), json={
         "channel_id": "mcp_client_custom",
         "expires_days": 30  # 30 days
     })
@@ -105,12 +129,12 @@ def test_generate_mcp_token_custom_expiration(app_module):
     assert data["expires_in"] == 30 * 24 * 60 * 60
 
 
-def test_mcp_token_works_for_protected_endpoints(app_module):
+def test_mcp_token_works_for_protected_endpoints(admin_enabled):
     """Test that generated MCP token can be used for protected endpoints"""
-    client = TestClient(app_module.app)
-    
+    client = TestClient(admin_enabled.app)
+
     # Generate MCP token
-    token_response = client.post("/admin/generate_mcp_token", json={
+    token_response = client.post("/admin/generate_mcp_token", headers=_admin_headers(client), json={
         "channel_id": "mcp_test_channel",
         "user_id": "mcp_test_user",
         "expires_days": 1  # Short-lived for test

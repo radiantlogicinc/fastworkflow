@@ -5,6 +5,7 @@ import os
 import json
 import shutil
 import time
+from datetime import datetime, timezone
 from dotenv import dotenv_values
 import importlib.util
 
@@ -31,6 +32,7 @@ from fastworkflow.train import (
     artifact_versioning,
     determinism,
     duplicate_detection,
+    metrics_persistence,
     param_example_cache,
     personas,
     selective_training,
@@ -365,6 +367,10 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
         )
         return
 
+    # Wall-clock start of this workflow's training work, persisted into the
+    # observability train_runs row at publication time (Phase 6, fix-kw7.7).
+    train_started_at = datetime.now(timezone.utc)
+
     duplicate_report = _validate_command_inputs(workflow_path)
 
     # Before anything that costs money. `train()` checks this too, but it is reached only
@@ -533,6 +539,20 @@ def train_workflow(workflow_path: str, regenerate_utterances: bool = False):
         artifact_versioning.retain_current_and_previous(
             workflow_path, previous_version)
     print(f"{Fore.GREEN}Training complete.{Style.RESET_ALL}")
+
+    # Persist this run's metrics into the observability store, AT publication
+    # time and only for a successful publish (design §4 "Train metrics
+    # unpersisted"). Both helpers are read-only over the just-published JSON
+    # artifacts and never raise — a metrics-persistence failure must never
+    # fail a training run that has already published.
+    metrics_persistence.persist_train_run_metrics(
+        workflow_path,
+        started_at=train_started_at,
+        completed_at=datetime.now(timezone.utc),
+        metrics=metrics_persistence.collect_train_metrics(
+            workflow_path, version_id=version_id
+        ),
+    )
 
     # Only after training has successfully (re)generated artifacts do we prune
     # leftovers from commands/contexts that no longer exist. Running this *after*

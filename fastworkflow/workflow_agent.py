@@ -3,7 +3,6 @@ Agent integration module for fastWorkflow.
 Provides workflow tool agent functionality for intelligent tool selection.
 """
 
-import json
 import time
 import traceback
 from datetime import datetime, timezone
@@ -11,6 +10,7 @@ from datetime import datetime, timezone
 import dspy
 
 import fastworkflow
+from fastworkflow import tracing
 from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_execution_context import CommandCancelledError
 from fastworkflow.utils import dspy_utils
@@ -27,16 +27,19 @@ class WorkflowAgentSignature(dspy.Signature):
     final_answer = dspy.OutputField(desc="Comprehensive final answer with supporting evidence to demonstrate that every user intent has been fully addressed.")
 
 def _append_action_record(chat_session_obj, record: dict) -> None:
-    """Append to session-scoped action log (WEC or ChatSession delegating to core)."""
+    """Append to session-scoped action log (WEC or ChatSession delegating to core).
+
+    Duck-typed like _append_turn_output; no-ops gracefully if neither exposes the
+    action log. The cwd action.jsonl fallback was retired in Phase 7 [R25] — the
+    in-process log is the only sink, and the observability DB is the post-mortem
+    record.
+    """
     if hasattr(chat_session_obj, "append_action_log"):
         chat_session_obj.append_action_log(record)
         return
     core = getattr(chat_session_obj, "_core", None)
     if core is not None and hasattr(core, "append_action_log"):
         core.append_action_log(record)
-        return
-    with open("action.jsonl", "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def _append_turn_output(chat_session_obj, command_output) -> None:
@@ -176,7 +179,18 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
         response_text=None,
         success=None,
         timestamp_ms=int(time.time() * 1000),
+        turn_key=tracing.get_turn_key(chat_session_obj),
         ))
+
+    # fw.agent.tool_call span — deliberately OUTSIDE the trace-queue guard:
+    # the sink is reached via the WEC/ChatSession core, not the transport-queue
+    # contract, so queue-less embedders still trace [R28].
+    span = tracing.start_span(
+        chat_session_obj,
+        tracing.SPAN_AGENT_TOOL_CALL,
+        kind=tracing.KIND_TOOL,
+        attributes={"raw_command": command},
+    )
 
     # Directly invoke the command without going through queues
     # This allows the agent to synchronously call workflow tools
@@ -188,6 +202,7 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
         # Suspension/cancellation signal — pass through untouched.
         # (AskUserSuspend subclasses BaseException, so `except Exception` below
         # never catches it either.)
+        tracing.end_span(chat_session_obj, span, status=tracing.STATUS_CANCELLED)
         raise
     except Exception as e:
         # Capture the failed tool call as a CommandOutput(success=False).
@@ -217,6 +232,12 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
             _append_turn_output(chat_session_obj, failure_output)
         except Exception:
             pass  # capture failed — swallow, never mask the original exception
+        tracing.end_span(
+            chat_session_obj,
+            span,
+            status=tracing.STATUS_ERROR,
+            attributes={"error_type": type(e).__name__},
+        )
         raise
 
     command_output.started_at = started
@@ -248,6 +269,18 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     else:
         response_text = "Command executed successfully but produced no output."
 
+    tracing.end_span(
+        chat_session_obj,
+        span,
+        status=tracing.STATUS_OK if command_output.success else tracing.STATUS_ERROR,
+        command_name=name or None,
+        context=command_output.context or None,
+        attributes={
+            "response_text": response_text,
+            "success": bool(command_output.success),
+        },
+    )
+
     if chat_session_obj.command_trace_queue is not None:
         chat_session_obj.command_trace_queue.put(fastworkflow.CommandTraceEvent(
             direction=fastworkflow.CommandTraceEventDirection.WORKFLOW_TO_AGENT,
@@ -257,9 +290,12 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
             response_text=response_text,
             success=bool(command_output.success),
             timestamp_ms=int(time.time() * 1000),
+            turn_key=tracing.get_turn_key(chat_session_obj),
         ))
 
-    # Append executed action to action.jsonl for external consumers (agent mode only)
+    # Append executed action to the session action log for external consumers
+    # (agent mode only): distillation compares teacher/student passes off it and
+    # final-answer synthesis summarizes it.
     record = {
         "command": command,
         "command_name": name,
@@ -297,6 +333,7 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
             f'{response_text}\n{abort_confirmation}',
             chat_session_obj, with_agent_inputs_and_trajectory=True,
             planning_insights=planning_insights, planner_lm=planner_lm,
+            trace_trigger="parameter_extraction_error",
         )
 
     # Clean up the context flag after command execution
@@ -399,6 +436,7 @@ def _post_ask_user_response(
         with_agent_inputs_and_trajectory=True,
         planning_insights=planning_insights,
         planner_lm=planner_lm,
+        trace_trigger="ask_user_response",
     )
 
 
@@ -552,7 +590,8 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
 
 def build_query_with_next_steps(user_query: str,
     chat_session_obj: fastworkflow.ChatSession, with_agent_inputs_and_trajectory: bool = False,
-    planning_insights: str | None = None, planner_lm = None) -> str:
+    planning_insights: str | None = None, planner_lm = None,
+    trace_trigger: str | None = None) -> str:
     """
     Generate a todo list.
     Return a string that combine the user query and todo list
@@ -564,6 +603,9 @@ def build_query_with_next_steps(user_query: str,
         planning_insights: Optional workflow-specific planning insights to append to
             the planner signature docstring (knowledge distillation)
         planner_lm: Optional planner LM to use (if None, uses LLM_PLANNER from env)
+        trace_trigger: What re-triggered planning mid-turn (e.g.
+            "ask_user_response", "parameter_extraction_error"). None means the
+            turn's initial plan; set, it marks the span fw.planner.replan.
     """
     base_docstring = """
     Carefully review the user_query and generate a next steps sequence based only on available commands.
@@ -601,42 +643,63 @@ def build_query_with_next_steps(user_query: str,
     if planner_lm is None:
         planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
     agent_adapter = CommandsSystemPreludeAdapter()
-    with dspy.context(lm=planner_lm, adapter=agent_adapter):
-        if with_agent_inputs_and_trajectory:
-            workflow_tool_agent = chat_session_obj.workflow_tool_agent
-            task_planner_func = dspy.ChainOfThought(TaskPlannerWithTrajectoryAndAgentInputsSignature)
-            cleaned_agent_inputs = {k: v for k, v in workflow_tool_agent.inputs.items() if k != "available_commands"}
-            prediction = task_planner_func(
-                agent_inputs = cleaned_agent_inputs,
-                agent_trajectory = workflow_tool_agent.current_trajectory,
-                user_response = user_query,
-                available_commands=available_commands) # Note that this is not part of the signature. It is extra metadata that will be picked up by the CommandsSystemPreludeAdapter
-        else:
-            task_planner_func = dspy.ChainOfThought(TaskPlannerSignature)
-            prediction = task_planner_func(
-                user_query=user_query,
-                available_commands=available_commands) # Note that this is not part of the signature. It is extra metadata that will be picked up by the CommandsSystemPreludeAdapter
 
-        if not prediction.next_steps:
-            return user_query
+    # fw.planner.plan for the turn's initial plan, fw.planner.replan for
+    # mid-turn re-planning (trace_trigger names what re-triggered it).
+    span = tracing.start_span(
+        chat_session_obj,
+        tracing.SPAN_PLANNER_REPLAN if trace_trigger else tracing.SPAN_PLANNER_PLAN,
+        kind=tracing.KIND_LLM,
+        attributes={
+            "model": getattr(planner_lm, "model", None),
+            "replan_trigger": trace_trigger,
+        },
+    )
+    try:
+        with dspy.context(lm=planner_lm, adapter=agent_adapter):
+            if with_agent_inputs_and_trajectory:
+                workflow_tool_agent = chat_session_obj.workflow_tool_agent
+                task_planner_func = dspy.ChainOfThought(TaskPlannerWithTrajectoryAndAgentInputsSignature)
+                cleaned_agent_inputs = {k: v for k, v in workflow_tool_agent.inputs.items() if k != "available_commands"}
+                prediction = task_planner_func(
+                    agent_inputs = cleaned_agent_inputs,
+                    agent_trajectory = workflow_tool_agent.current_trajectory,
+                    user_response = user_query,
+                    available_commands=available_commands) # Note that this is not part of the signature. It is extra metadata that will be picked up by the CommandsSystemPreludeAdapter
+            else:
+                task_planner_func = dspy.ChainOfThought(TaskPlannerSignature)
+                prediction = task_planner_func(
+                    user_query=user_query,
+                    available_commands=available_commands) # Note that this is not part of the signature. It is extra metadata that will be picked up by the CommandsSystemPreludeAdapter
+    except BaseException:
+        tracing.end_span(chat_session_obj, span, status=tracing.STATUS_ERROR)
+        raise
+    tracing.end_span(
+        chat_session_obj,
+        span,
+        attributes={"plan": prediction.next_steps or ""},
+    )
 
-        generated_plan = prediction.next_steps.split()
-        # Capture the generated plan for distillation when a capture list is present
-        # on the session (set only during a DistillationSession planning pass).
-        planning_capture = getattr(chat_session_obj, '_planning_steps_capture', None)
-        if planning_capture is not None:
-            from fastworkflow.distillation import PlanningStep
-            planning_capture.append(PlanningStep(
-                step_number=len(planning_capture),
-                user_query=user_query,
-                generated_plan=generated_plan,
-                reasoning=getattr(prediction, 'reasoning', ''),
-            ))
+    if not prediction.next_steps:
+        return user_query
 
-        steps_formatted = " ".join(generated_plan)
-        user_query_and_next_steps = f"{user_query}\n\nExecute these next steps:\n{steps_formatted}"
-        return (
-            f'User Query:\n{user_query_and_next_steps}'
-            if with_agent_inputs_and_trajectory else
-            user_query_and_next_steps
-        )
+    generated_plan = prediction.next_steps.split()
+    # Capture the generated plan for distillation when a capture list is present
+    # on the session (set only during a DistillationSession planning pass).
+    planning_capture = getattr(chat_session_obj, '_planning_steps_capture', None)
+    if planning_capture is not None:
+        from fastworkflow.distillation import PlanningStep
+        planning_capture.append(PlanningStep(
+            step_number=len(planning_capture),
+            user_query=user_query,
+            generated_plan=generated_plan,
+            reasoning=getattr(prediction, 'reasoning', ''),
+        ))
+
+    steps_formatted = " ".join(generated_plan)
+    user_query_and_next_steps = f"{user_query}\n\nExecute these next steps:\n{steps_formatted}"
+    return (
+        f'User Query:\n{user_query_and_next_steps}'
+        if with_agent_inputs_and_trajectory else
+        user_query_and_next_steps
+    )

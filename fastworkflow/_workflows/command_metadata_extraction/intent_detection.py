@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 import fastworkflow
 from fastworkflow.utils.logging import logger
-from fastworkflow import NLUPipelineStage
+from fastworkflow import NLUPipelineStage, tracing
 from fastworkflow.cache_matching import cache_match, store_utterance_cache
 from fastworkflow.kvstore import KVStore
 from fastworkflow.model_pipeline_training import (
@@ -40,6 +40,60 @@ class CommandNamePrediction:
         self.path = self._get_cache_path_cache(self.convo_path)
 
     def predict(self, command_context_name: str, command: str, nlu_pipeline_stage: NLUPipelineStage) -> "CommandNamePrediction.Output":
+        """Predict, wrapped in a ``fw.nlu.intent`` span (D3 as amended).
+
+        One span per prediction attempt — the wildcard command's parent-chain
+        walk calls this once per context, and each attempt is recorded with
+        the context it ran against. The span carries which matching layer
+        decided (exact prefix / fuzzy pre-match / embedding cache /
+        classifier), the classifier's confidence and threshold when it ran,
+        and the candidate set on an ambiguity. Emission never affects the
+        prediction: the helpers no-op without a bound host/sink.
+        """
+        host = tracing.current_host()
+        span = tracing.start_span(
+            host,
+            tracing.SPAN_NLU_INTENT,
+            attributes={
+                "context": command_context_name,
+                "stage": nlu_pipeline_stage.name,
+                "utterance": command,
+            },
+        )
+        nlu_trace: dict = {}
+        try:
+            output = self._predict_impl(
+                command_context_name, command, nlu_pipeline_stage, nlu_trace
+            )
+        except BaseException:
+            tracing.end_span(
+                host, span, status=tracing.STATUS_ERROR, attributes=nlu_trace
+            )
+            raise
+        tracing.end_span(
+            host,
+            span,
+            status=tracing.STATUS_OK,
+            attributes={
+                **nlu_trace,
+                "command_name": output.command_name,
+                "is_cme_command": output.is_cme_command,
+                "ambiguous": output.error_msg is not None,
+                # None = no local prediction; the caller walks up the context
+                # chain (or files a misunderstanding) — exactly the routing
+                # signal a debugging agent needs.
+                "resolved": output.command_name is not None,
+            },
+        )
+        return output
+
+    def _predict_impl(
+        self,
+        command_context_name: str,
+        command: str,
+        nlu_pipeline_stage: NLUPipelineStage,
+        nlu_trace: dict,
+    ) -> "CommandNamePrediction.Output":
         # sourcery skip: extract-duplicate-method
 
         model_artifact_path = f"{self.app_workflow_folderpath}/___command_info/{command_context_name}"
@@ -109,6 +163,7 @@ class CommandNamePrediction:
         if normalized_command_name in command_name_dict:
             command_name = normalized_command_name
             command = command.replace(f"{tentative_command_name}", "").strip().replace("  ", " ")
+            nlu_trace["matcher_layer"] = "exact_prefix"
         else:
             # Use Levenshtein distance for fuzzy matching with the full command part after @
             # No match is ([], None), never (None, None) — len() here is safe.
@@ -133,16 +188,24 @@ class CommandNamePrediction:
                     f"utterance '{command}' in context '{command_context_name}'. "
                     "Deferring to the classifier instead of picking one."
                 )
+                nlu_trace["fuzzy_prematch_tie"] = [str(c) for c in best_matched_commands]
             elif best_matched_commands:
                 command_name = best_matched_commands[0]
+                nlu_trace["matcher_layer"] = "fuzzy_prematch"
 
         if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION:
             if not command_name:
                 if cache_result := cache_match(self.path, command, modelpipeline, 0.85):
                     command_name = cache_result
+                    nlu_trace["matcher_layer"] = "embedding_cache"
+                    nlu_trace["cache_similarity_threshold"] = 0.85
                 else:
-                    predictions=command_router.predict(command)
+                    predictions, classifier_details = (
+                        command_router.predict_with_details(command)
+                    )
                     # predictions = majority_vote_predictions(command_router, command)
+                    nlu_trace["matcher_layer"] = "classifier"
+                    nlu_trace["classifier"] = classifier_details
 
                     if len(predictions)==1:
                         command_name = predictions[0].split('/')[-1]
@@ -158,11 +221,15 @@ class CommandNamePrediction:
                                 "will be prompted with the local candidates only and the "
                                 "'this belongs to an ancestor context' signal is dropped."
                             )
+                            nlu_trace["escalation_labels_discarded"] = [
+                                str(label) for label in escalation_signals
+                            ]
 
                         error_msg = self._formulate_ambiguous_command_error_message(
                             predictions, "run_as_agent" in self.app_workflow.context)
 
                         # Store suggested commands
+                        nlu_trace["candidates"] = [str(p) for p in predictions]
                         self._store_suggested_commands(self.path, predictions, 1)
                         return CommandNamePrediction.Output(error_msg=error_msg)
 
@@ -171,6 +238,7 @@ class CommandNamePrediction:
             NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION
         ) and not command_name:
             command_name = "what can i do?"
+            nlu_trace["matcher_layer"] = "clarification_default"
 
         fully_qualified_command_name = self.resolve_fully_qualified_command_name(
             command_name, command_name_dict)

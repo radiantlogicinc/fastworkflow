@@ -117,8 +117,14 @@ class ChatSession:
         """
         self._core = WorkflowExecutionContext(
             run_as_agent=run_as_agent,
-            mirror_action_log_to_file=True,
             generate_insights=generate_insights,
+        )
+        # CLI identity [R17]: a synthetic per-session channel so CLI turns are
+        # attributable in the observability store (conversation ids are minted
+        # by the store from Phase 2).
+        from datetime import datetime, timezone
+        self._core.bind_observability_identity(
+            channel_id=f"cli:{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%f')}Z"
         )
 
         # Create queues for user messages and command outputs (CLI transport)
@@ -371,8 +377,10 @@ class ChatSession:
             # Handle startup command/action
             if self._startup_command:
                 last_output = self._core._execute_message(self._startup_command)
+                self._core.finalize_turn_for_observability(last_output)
             elif self._startup_action:
                 last_output = self._core.process_action(self._startup_action)
+                self._core.finalize_turn_for_observability(last_output)
 
             while (
                 not self.workflow_is_complete or self._keep_alive
@@ -384,6 +392,9 @@ class ChatSession:
                         last_output = self._core.process_action(message)
                     else:
                         last_output = self._core._execute_message(message)
+                    # Emit the turn record/root-span close for observability;
+                    # the CLI transport itself still rides the queues.
+                    self._core.finalize_turn_for_observability(last_output)
 
                 except Empty:
                     continue

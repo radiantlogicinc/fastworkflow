@@ -59,6 +59,10 @@ def setup_mcp(
     # - perform_action: Low-level action execution (use invoke_agent/invoke_assistant instead)
     # - rest_invoke_agent: Non-streaming version (use "invoke_agent" streaming endpoint instead)
     # - refresh_token: JWT token refresh (not needed for MCP since MCP uses long-lived tokens)
+    # - get_turn / get_turn_trace: polling/replay surface for HTTP clients. The
+    #   85g design left MCP exposure of GET /turns as an explicit decision for
+    #   when it was built; resolved conservatively — MCP clients use the
+    #   streaming invoke_agent tool with a longer wait window and do not poll.
     #
     # Exposed MCP tools:
     # - invoke_agent (operation_id) → /invoke_agent_stream endpoint (streaming with NDJSON/SSE support)
@@ -75,7 +79,9 @@ def setup_mcp(
             "rest_initialize",
             "perform_action", 
             "rest_invoke_agent",
-            "refresh_token"
+            "refresh_token",
+            "get_turn",
+            "get_turn_trace"
         ]
     )
     mcp.mount_http()

@@ -4,7 +4,8 @@ description: >
   Load this skill when you need to MEASURE a fastWorkflow workflow instead of
   eyeballing it — inspect ___command_info trained artifacts, check whether
   cached command snapshots are stale (fingerprint FRESH/STALE), capture or read
-  a turn's command traces / action.jsonl, smoke-test intent-classifier accuracy,
+  a turn's command traces / turn records from observability.sqlite3,
+  smoke-test intent-classifier accuracy,
   configure LOG_LEVEL, inspect the DSPy LLM cache, or hit the server probe
   endpoints. Trigger phrases/symptoms: "why did it rebuild", "is this workflow
   trained", "what did the agent actually do", "traces are empty", "stale cache",
@@ -30,8 +31,9 @@ Use this skill when you need to:
   thresholds, model files, DSPy few-shot artifacts)
 - decide "rebuild vs stale vs fine" for `command_directory.json` /
   `routing_definition.json` (the v2.22.1 fingerprint)
-- capture or read a turn's command trace: live CLI traces, `action.jsonl`,
-  the server response's `traces` field, `TurnOutput`
+- capture or read a turn's command trace: live CLI traces, the per-workflow
+  `observability.sqlite3` (turns + spans + artifacts), the server response's
+  `traces` field, `TurnOutput`
 - get numbers on a trained intent classifier (per-command accuracy on seeds,
   confusion pairs, ambiguity/fallback rates)
 - control logging verbosity, inspect the DSPy cache, or use the K8s probes
@@ -73,7 +75,7 @@ walkthroughs: [references/observed-outputs.md](references/observed-outputs.md).
 |---|---|---|
 | `inspect_command_info.py <wf>` | what is in `___command_info/`: commands, utterance counts, parameterized?, `*_param_labeled.json` valid/rejected counts, per-context model files present/missing, trained threshold values, fingerprint FRESH/STALE | instant with `--no-fingerprint`, else +~7 s import |
 | `check_cache_freshness.py <wf>` | will the JSON snapshots be trusted or rebuilt, and why — recomputes the v2.22.1 fingerprint, prints verdict + the 5 most recently modified command sources (the usual culprit) | ~7 s (imports fastworkflow) |
-| `trace_turn.py {actions,response,explain}` | read `action.jsonl` / a saved server turn-response body; `explain` prints the capture recipes per topology | instant (stdlib only) |
+| `trace_turn.py {turns,turn,response,explain}` | list recorded turns / print one turn's span tree + artifacts from `observability.sqlite3`; read a saved server turn-response body; `explain` prints the capture recipes per topology | instant (stdlib only) |
 | `collect_model_metrics.py <wf> [--context C]` | per-command top-1 accuracy, confusion pairs, ambiguity rate, DistilBERT-fallback rate of a TRAINED context, scored on stored seed utterances with the exact runtime decision rule | ~10–60 s/context (loads 2 transformer models, CPU ok) |
 
 Copy-paste smoke test (works offline, no API keys, uses the bundled internal
@@ -124,13 +126,18 @@ Trace vocabulary, defined once:
   (`workflow_agent.py:130-139, 209-218`): AGENT_TO_WORKFLOW (raw command text
   the agent sent) then WORKFLOW_TO_AGENT (resolved command_name, parameters,
   response_text, success). A `None` sentinel terminates each turn's stream.
-- **action.jsonl** — CLI-only debug mirror in the CWD of `fastworkflow run`
-  (ChatSession constructs its context with `mirror_action_log_to_file=True`,
-  chat_session.py:118). **Deleted at every turn start**
-  (workflow_execution_context.py:711-713): it always holds only the LAST
-  turn. Two record shapes: tool call
+- **observability.sqlite3** — the per-workflow single source of truth since
+  Phase 7, at `$FASTWORKFLOW_STATE_ROOT/workflows/<workflow-id>/`. Holds
+  `turns` (one row per logical turn, keyed by `turn_key`), `spans`
+  (`trace_id` == `turn_key`), and `artifacts`. Written by `SQLiteTraceSink`
+  for every topology, CLI included, and it **keeps every turn** — read it with
+  `trace_turn.py turns` / `trace_turn.py turn <turn_key>`.
+- **`ctx.action_log`** — the in-process, per-turn list of tool-call
   `{command, command_name, parameters, response}` and ask_user
-  `{agent_query, user_response}`.
+  `{agent_query, user_response}` records. Cleared at turn start and between
+  distillation passes; live-only, so use it in-process and use the DB for
+  anything post-mortem. Its old CWD mirror, `action.jsonl`, was **retired in
+  Phase 7** — a copy still on disk is pre-Phase-7 residue, not current data.
 - **TurnOutput** — returned by `ctx.process_turn(message)`; carries `turn_key`
   (the developer observability handle for one logical turn, stable across
   ask_user suspensions), `status`, `failure_reason`, `answer`,
@@ -146,7 +153,8 @@ Trace vocabulary, defined once:
 | `failure_reason: max_iters_exhausted` | agent hit max_iters=25 | read traces for the loop |
 | empty `traces` on a retry | destructive drain already consumed them (fix-85g Step 2 open) | treat traces as read-once; persist the first response |
 | ask_user entry with `success: false` | question still unanswered, NOT an error (A7 role inversion: parameters=agent's question, response=user's answer, duration_ms=user think time) | resume the turn |
-| `action.jsonl` missing | not a CLI run, assistant (non-agent) turn, or already overwritten | use server `traces` / in-process `ctx.action_log` instead |
+| `action.jsonl` present in a CWD | pre-Phase-7 residue; the mirror is retired and nothing writes it now | ignore it; read `observability.sqlite3` via `trace_turn.py turns` |
+| `trace_turn.py turn` finds spans but no turn row | the turn-record write degraded, or the turn is still in flight | check writer health; re-read after the turn completes |
 
 ### Interpretation: collect_model_metrics.py
 
@@ -198,8 +206,9 @@ command + response), dim orange for failed steps. Methodology and event model:
 its event model and rendering rules match v2.22.2, but note the drift: the
 proposed `--no_agent_traces` flag and `FASTWORKFLOW_SHOW_AGENT_TRACES`
 override were never implemented (traces are always on; verified by grep), and
-action.jsonl records are appended by `workflow_agent.py`, not
-`command_executor.py` as §5 claims. Consumer loop:
+action-log records are appended by `workflow_agent.py`, not
+`command_executor.py` as §5 claims (§5 also describes the action.jsonl mirror,
+retired in Phase 7). Consumer loop:
 `fastworkflow/run/__main__.py:229-267`.
 Known open bug fix-5fv (code-reading evidence only, never reproduced): the CLI
 spinner may hang on agent-mode ask_user because the clarification is enqueued
@@ -216,8 +225,9 @@ ctx.set_transport_queues(command_trace_queue=trace_q) # queues are injected, not
 # ... start workflow ...
 out = ctx.process_turn("user message")                # TurnOutput
 out.turn_key, out.status, out.success, out.command_outputs
-ctx.action_log                                        # this turn's records
+ctx.action_log                                        # this turn's records (live only)
 # drain trace_q until the None sentinel for live events
+# post-mortem, by turn_key: trace_turn.py turn <out.turn_key>
 ```
 
 Duck-typing contract: anything passed to CommandExecutor/workflow_agent as
@@ -283,7 +293,8 @@ Re-verification one-liners for volatile facts:
 | param_labeled naming | `grep -n "param_labeled" fastworkflow/train/__main__.py` |
 | CommandRouter decision rule / thresholds | `sed -n '289,335p' fastworkflow/model_pipeline_training.py` |
 | trained-check semantics | `grep -n "def is_workflow_trained" -A 15 fastworkflow/model_pipeline_training.py` |
-| action.jsonl lifecycle | `grep -n "action.jsonl\|mirror_action_log" fastworkflow/workflow_execution_context.py fastworkflow/chat_session.py` |
+| action-log lifecycle + clear points | `grep -rn "clear_action_log\|append_action_log" fastworkflow/*.py` |
+| observability DB path + schema | `grep -n "def observability_db" -A 8 fastworkflow/state_paths.py; grep -n "_SCHEMA_STATEMENTS" -A 45 fastworkflow/observability_store.py` |
 | trace event emission sites | `grep -n "CommandTraceEvent" fastworkflow/workflow_agent.py fastworkflow/workflow_execution_context.py` |
 | server trace dict keys | `grep -n "_format_trace_event" -A 14 fastworkflow/run_fastapi_mcp/utils.py` |
 | turn response body keys | `grep -n "def render_turn_response" -A 40 fastworkflow/run_fastapi_mcp/turns.py` |
