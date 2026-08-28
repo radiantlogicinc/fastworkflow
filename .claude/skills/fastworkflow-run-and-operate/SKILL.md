@@ -4,7 +4,7 @@ description: >-
   Operate fastWorkflow at runtime: use when you need to run the CLI (examples/build/refine/
   train/run/run_fastapi_mcp), fetch or pick a bundled example workflow, do the quickstart,
   understand agent vs assistant vs "/" deterministic mode, identify or clean runtime artifacts
-  (___command_info, ___workflow_contexts, ___convo_info, action.jsonl, jwt_keys), launch or call
+  (___command_info, ___workflow_contexts, ___convo_info, observability.sqlite3, jwt_keys), launch or call
   the FastAPI+MCP server (endpoints, 202/409 turns semantics, JWT/security posture), or when you
   see symptoms like "workflow is not trained", HTTP 409 "turn already in progress", a hanging 202
   response, or "server extra not installed". Do NOT use for training internals or intent-model
@@ -163,14 +163,17 @@ the workflow dir unless marked "CWD" (created wherever the process was launched)
 | `___command_info/command_directory.json` | train / cache refresh | Includes `source_fingerprint` — a hash over the `_commands` source set; on mismatch the cache is rebuilt (v2.22.1 fix, commit b5747df; `compute_commands_source_fingerprint`, command_directory.py:627) | Covered above |
 | `___workflow_contexts/` (i.e. `SPEEDDICT_FOLDERNAME`, template default) | server + runtime | `channel_conversations/<channel_id>.rdb` (conversation history), `channel_session_state/` (suspended ask_user turns), `function_cache/` | Deleting loses conversation history and suspended turns. Safe only if you accept that. |
 | `___convo_info/` | CME intent pipeline at runtime | **Live** utterance-correction cache (1-shot adaptation of intent detection from user corrections; intent_detection.py:31-33, cache_matching.py) | Deleting loses learned intent corrections; otherwise safe. NOT a stale dir despite the name. |
-| `action.jsonl` (CWD) | CLI runs only | Debug mirror of the agent action log; appended per interaction, deleted at each turn start (workflow_execution_context.py:131-134, 712-713) | Yes, always. |
+| `observability.sqlite3` (state root, per workflow) | `SQLiteTraceSink`, every topology incl. CLI | Turn records, spans, artifacts — the single source of truth for what a turn did (state_paths.py:`observability_db`) | Deleting loses all turn history/traces; the workflow still runs. Prune instead. |
+| `action.jsonl` (CWD) | **nothing — retired in Phase 7** | Was a CLI-only debug mirror of the agent action log; superseded by `observability.sqlite3` (post-mortem) and the in-process `ctx.action_log` (live) | Yes, always — any copy on disk is pre-Phase-7 residue. |
 | `___user_conversations/` (repo root) | nothing current | Legacy pre-rename conversation dir; code only writes `channel_conversations` now (utils.py:400) | Yes — stale residue. |
 | `speedict/` (repo root) | nothing current | Empty stale dir; tests use `tmp_path/'speedict'` | Yes — stale residue. |
 | `jwt_keys/` (CWD) | run_fastapi_mcp on first use | RSA-2048 keypair (jwt_manager.py:59) in `./jwt_keys` (jwt_manager.py:29-31), `private_key.pem` chmod 600 (jwt_manager.py:94) | Regenerated on next launch; deleting invalidates previously issued **signed** tokens (only matters with `--expect_encrypted_jwt`). CWD-relative — launch the server from a stable directory. |
 
 Since v2.21.4 the **CLI does not resume workflow context across process restarts** (disk backend
-deliberately dropped); durability exists only in the FastAPI server via SessionStateStore +
-ConversationStore.
+deliberately dropped); resumable durability exists only in the FastAPI server via SessionStateStore
+and the conversation records. Note the Phase-7 nuance: CLI turns are now *recorded* in
+`observability.sqlite3` under a synthetic `cli:<timestamp>` channel, so they are readable
+after the fact — but recording is not resumption, and a new CLI process still starts cold.
 
 ## 6. The FastAPI+MCP server
 
@@ -278,8 +281,10 @@ question** recorded for Dhar; treat any hardening work as a change-control matte
 
 ## 8. The shipped integrate-chat-agent skill
 
-`fastworkflow/docs/integrate-chat-agent/` (SKILL.md + reference.md; skill name
-`integrate-fastworkflow-chat-agent`) is a git-tracked, **wheel-shipped** coding-agent skill that
+`fastworkflow/skills_for_coding_fastworkflows/integrate-chat-agent/` (SKILL.md + reference.md;
+skill name `integrate-fastworkflow-chat-agent`; moved 2026-08-25 from
+`fastworkflow/docs/integrate-chat-agent/` into the new coding-skills library, content revised in
+the move) is a **wheel-shipped** coding-agent skill that
 walks an application developer through AI-enabling their app: hand-written commands, training,
 hosting run_fastapi_mcp, and building a popup streaming chat UI. README.md positions it as the
 recommended integration path for non-trivial apps.
@@ -336,7 +341,8 @@ sed -n '40,65p' fastworkflow/run_fastapi_mcp/mcp_specific.py
 # '/' prefix + //exit //new
 grep -n "is_assistant_mode_command" fastworkflow/workflow_execution_context.py; grep -n '"//' fastworkflow/run/__main__.py
 # Artifact writers
-grep -n "action.jsonl" fastworkflow/workflow_execution_context.py
+grep -n "def observability_db" -A 8 fastworkflow/state_paths.py
+grep -rn "action.jsonl" fastworkflow/ --include=*.py   # expect only retirement comments
 grep -n "___convo_info" fastworkflow/_workflows/command_metadata_extraction/intent_detection.py
 grep -n "channel_conversations\|channel_session_state" fastworkflow/run_fastapi_mcp/utils.py
 # Fingerprint-based cache invalidation (v2.22.1)
@@ -344,7 +350,7 @@ grep -n "source_fingerprint\|compute_commands_source_fingerprint" fastworkflow/c
 # Trained-artifact inventory for one example
 ls fastworkflow/examples/hello_world/___command_info fastworkflow/examples/hello_world/___command_info/global
 # Shipped integrate-chat-agent skill + its untested contract
-ls fastworkflow/docs/integrate-chat-agent/; grep -rl "integrate-chat-agent" tests/ ; echo "expect no test hits"
+ls fastworkflow/skills_for_coding_fastworkflows/integrate-chat-agent/; grep -rl "integrate-chat-agent" tests/ ; echo "expect no test hits"
 # Stale README claims
 grep -n "uvicorn services.run_fastapi\|504\|two prompts\|registers two" fastworkflow/run_fastapi_mcp/README.md
 # Open-issue statuses cited here (read-only)

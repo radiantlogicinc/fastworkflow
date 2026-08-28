@@ -84,7 +84,21 @@ def _router_returning(predictions, modelpipeline=...):
             self.modelpipeline = self if modelpipeline is ... else modelpipeline
 
         def predict(self, command):
-            return predictions
+            return self.predict_with_details(command)[0]
+
+        def predict_with_details(self, command):
+            # Delegation direction mirrors the real CommandRouter, so the two
+            # methods cannot drift apart — that drift is what broke this
+            # double when production moved to predict_with_details.
+            #
+            # The details are deliberately empty rather than plausible-looking.
+            # The real router DERIVES its labels from confidence; this seam
+            # INJECTS labels, so there is no confidence here that is not
+            # invented, and an invented number is something a later assertion
+            # could pin as if it were true. Nothing reads these: the dict's
+            # only destination is nlu_trace["classifier"], which reaches a
+            # trace span that no-ops when no host is bound, as here.
+            return predictions, {}
 
     return PredictingRouter
 

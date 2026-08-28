@@ -244,10 +244,19 @@ class TurnResult(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     turn_output: "TurnOutput"
+    channel_id: Optional[str] = None
     conversation_id: Optional[int] = None
     ordinal: Optional[int] = None
     user_message: str
     refined_user_message: Optional[str] = None
+    # The conversation-history entry this turn appended, in the canonical 3-key
+    # shape's own terms. Populated at terminal finalize only when the turn
+    # actually grew the history; an awaiting_user emission leaves both None and
+    # the terminal upsert fills them. This is what makes a turn record usable as
+    # conversation memory rather than only as a trace
+    # (observability_phase7_consolidation_design.md §2.1).
+    conversation_summary: Optional[str] = None
+    conversation_traces: Optional[str] = None
     entry_workflow_name: str = ""
     entry_context: str = ""
     continuation_of: Optional[str] = None

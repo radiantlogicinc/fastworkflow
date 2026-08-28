@@ -268,7 +268,14 @@ def test_predict_mixed_topk_logs_suppressed_escalation_and_prompts_locally(
             self.modelpipeline = self
 
         def predict(self, command):
-            return predictions
+            return self.predict_with_details(command)[0]
+
+        def predict_with_details(self, command):
+            # Same shape as the double in test_intent_detection_fuzzy_tie.py:
+            # predict delegates so the two cannot drift, and the details stay
+            # empty because this seam injects labels rather than deriving them
+            # from a confidence the double does not have.
+            return predictions, {}
 
     monkeypatch.setattr(intent_detection, "CommandRouter", PredictingRouter)
     prediction = CommandNamePrediction(cme_workflow)

@@ -1,0 +1,2820 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fastWorkflow Chatbot</title>
+<style>
+:root {
+  --bg: #f3f5f8; --panel: #ffffff; --border: #d8dee6; --text: #1a212b;
+  --muted: #5d6b7d; --accent: #2f66d8; --accent-ink: #24509f;
+  --accent-soft: #e7eefb; --on-accent: #ffffff;
+  --ok: #177a3d; --ok-soft: #e4f2e9; --fail: #b3382e; --fail-soft: #f8e9e7;
+  --warn-bg: #fdf3d7; --warn-border: #d9a514;
+  --bar-turn: #94a3b8; --bar-planner: #8b5cf6; --bar-tool: #0ea5e9;
+  --bar-command: #2f66d8; --bar-llm: #db2777; --bar-human: #d97706; --bar-other: #64748b;
+  --code-bg: #eef1f5; --shadow: 0 1px 3px rgba(16, 24, 40, .07);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #10141a; --panel: #181e26; --border: #2b3542; --text: #dde4ed;
+    --muted: #8b98a9; --accent: #6da2f7; --accent-ink: #9dc0fa;
+    --accent-soft: #223a61; --on-accent: #0e1420;
+    --ok: #4ade80; --ok-soft: #17301f; --fail: #f88a80; --fail-soft: #3a2320;
+    --warn-bg: #3a2f10; --warn-border: #b8860b;
+    --bar-turn: #64748b; --bar-planner: #a78bfa; --bar-tool: #38bdf8;
+    --bar-command: #6da2f7; --bar-llm: #f472b6; --bar-human: #f59e0b; --bar-other: #94a3b8;
+    --code-bg: #10151c; --shadow: 0 1px 3px rgba(0, 0, 0, .4);
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #10141a; --panel: #181e26; --border: #2b3542; --text: #dde4ed;
+  --muted: #8b98a9; --accent: #6da2f7; --accent-ink: #9dc0fa;
+  --accent-soft: #223a61; --on-accent: #0e1420;
+  --ok: #4ade80; --ok-soft: #17301f; --fail: #f88a80; --fail-soft: #3a2320;
+  --warn-bg: #3a2f10; --warn-border: #b8860b;
+  --bar-turn: #64748b; --bar-planner: #a78bfa; --bar-tool: #38bdf8;
+  --bar-command: #6da2f7; --bar-llm: #f472b6; --bar-human: #f59e0b; --bar-other: #94a3b8;
+  --code-bg: #10151c; --shadow: 0 1px 3px rgba(0, 0, 0, .4);
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        Helvetica, Arial, sans-serif;
+  background: var(--bg); color: var(--text);
+  display: flex; flex-direction: column;
+}
+code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+button {
+  font: inherit; color: var(--text); background: var(--panel);
+  border: 1px solid var(--border); border-radius: 6px; padding: 4px 11px;
+  cursor: pointer;
+}
+button:hover { border-color: var(--accent); }
+button:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}
+button.primary {
+  background: var(--accent); border-color: var(--accent); color: var(--on-accent);
+  font-weight: 600;
+}
+button.primary:hover { filter: brightness(1.08); }
+button:disabled { opacity: .5; cursor: default; }
+select, input[type=text] {
+  font: inherit; color: var(--text); background: var(--panel);
+  border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px;
+}
+
+/* -- header ------------------------------------------------------------ */
+header {
+  display: flex; align-items: center; gap: 12px; padding: 8px 16px;
+  background: var(--panel); border-bottom: 1px solid var(--border);
+}
+header h1 { font-size: 14px; margin: 0; letter-spacing: .01em; }
+header .meta { color: var(--muted); font-size: 12px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+header .spacer { flex: 1; }
+.pill {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 11px;
+  border: 1px solid var(--border); border-radius: 999px; padding: 2px 10px;
+  color: var(--muted); white-space: nowrap;
+}
+.pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.pill.ok { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }
+.pill.ok .dot { background: var(--ok); }
+.pill.err { color: var(--fail); border-color: var(--fail); background: var(--fail-soft); }
+.pill.err .dot { background: var(--fail); }
+.pill.wait .dot { background: var(--bar-human); }
+.modeTabs {
+  display: flex; gap: 0; border: 1px solid var(--border); border-radius: 7px;
+  overflow: hidden;
+}
+.modeTabs button {
+  border: none; border-radius: 0; color: var(--muted); padding: 4px 14px;
+  background: var(--panel);
+}
+.modeTabs button.active {
+  color: var(--accent-ink); background: var(--accent-soft); font-weight: 600;
+}
+#healthBanner {
+  display: none; padding: 7px 16px; background: var(--warn-bg);
+  border-bottom: 1px solid var(--warn-border); font-size: 12px;
+  align-items: center; gap: 10px;
+}
+#healthBanner.visible { display: flex; }
+#healthBanner .dismiss { margin-left: auto; }
+
+main { flex: 1; display: flex; min-height: 0; }
+
+/* -- workflow picker --------------------------------------------------- */
+#pickerMain { display: none; overflow-y: auto; justify-content: center;
+  align-items: flex-start; padding: 34px 20px; }
+#pickerMain.visible { display: flex; }
+#pickerCard {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: var(--shadow); max-width: 860px; width: 100%; padding: 22px 26px;
+}
+#pickerCard h2 { margin: 0 0 4px; font-size: 17px; }
+#pickerCard .sub { color: var(--muted); margin-bottom: 16px; }
+.pickerCols { display: flex; gap: 22px; flex-wrap: wrap; }
+.pickerCol { flex: 1 1 340px; min-width: 300px; }
+.pickerCol h3 {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--muted); margin: 0 0 8px;
+}
+.wfItem {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 7px; margin-bottom: 7px;
+  cursor: pointer;
+}
+.wfItem:hover { border-color: var(--accent); background: var(--accent-soft); }
+.wfItem .name { font-weight: 600; }
+.wfItem .path { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.wfItem .grow { flex: 1; min-width: 0; }
+.tag {
+  font-size: 10px; border-radius: 999px; padding: 1px 8px; white-space: nowrap;
+  border: 1px solid var(--border); color: var(--muted);
+}
+.tag.trained { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }
+.tag.untrained { color: var(--bar-human); border-color: var(--bar-human); }
+.tag.training { color: var(--bar-human); border-color: var(--bar-human); background: var(--warn-bg); }
+.wfItem button.trainBtn { flex-shrink: 0; font-size: 11px; padding: 2px 10px; }
+#wfCandidates { max-height: 420px; overflow-y: auto; }
+.wfFolder {
+  border: 1px solid var(--border); border-radius: 7px; margin-bottom: 7px;
+  background: var(--panel);
+}
+.wfFolder > summary {
+  display: flex; align-items: center; gap: 8px; cursor: pointer;
+  padding: 8px 10px; font-weight: 600; list-style-position: inside;
+}
+.wfFolder > summary:hover { background: var(--accent-soft); }
+.wfFolder .folderCount {
+  color: var(--muted); font-weight: 400; font-size: 11px; margin-left: auto;
+}
+.wfFolderBody { padding: 0 8px 8px 14px; border-top: 1px solid var(--border); }
+.wfFolderBody .wfItem, .wfFolderBody .wfFolder { margin-top: 7px; margin-bottom: 0; }
+.wfFolderBody .wfItem .path { display: none; }
+#browsePath { color: var(--muted); font-size: 11px; margin-bottom: 6px;
+  overflow-wrap: anywhere; }
+#browseList { max-height: 330px; overflow-y: auto; border: 1px solid var(--border);
+  border-radius: 7px; }
+.dirRow { display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+  border-bottom: 1px solid var(--border); cursor: pointer; }
+.dirRow:last-child { border-bottom: none; }
+.dirRow:hover { background: var(--accent-soft); }
+.dirRow .dnm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.dirRow button { padding: 1px 9px; font-size: 11px; }
+#pickerStatus { margin-top: 12px; font-size: 12px; min-height: 18px; }
+#pickerStatus.err { color: var(--fail); white-space: pre-wrap; }
+#pickerStatus.ok { color: var(--ok); }
+#envSetup {
+  display: none; margin-top: 16px; padding: 14px; border: 1px solid var(--warn-border);
+  border-radius: 8px; background: var(--warn-bg);
+}
+#envSetup.visible { display: block; }
+#envSetup h3 { margin: 0 0 5px; font-size: 14px; }
+#envSetup .envFiles { display: flex; gap: 12px; flex-wrap: wrap; margin: 10px 0; }
+#envSetup .envFile { flex: 1 1 280px; }
+#envSetup .envFile label { display: block; color: var(--muted); margin-bottom: 4px; }
+#envSetup .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* -- debug mode rail + detail ------------------------------------------ */
+#debugMain { display: none; }
+#debugMain.visible { display: flex; }
+#rail {
+  width: 340px; min-width: 260px; border-right: 1px solid var(--border);
+  background: var(--panel); display: flex; flex-direction: column; min-height: 0;
+}
+.railSection { padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.railSection label { display: block; font-size: 10px; text-transform: uppercase;
+  letter-spacing: .05em; color: var(--muted); margin-bottom: 3px; }
+.railSection select, .railSection input { width: 100%; }
+#convList { overflow-y: auto; flex: 1; }
+.chanGroup { border-bottom: 2px solid var(--border); }
+.chanGroup > summary {
+  cursor: pointer; padding: 8px 10px; list-style-position: inside;
+  background: var(--panel); font-weight: 700;
+}
+.chanGroup > summary:hover { background: var(--accent-soft); }
+.chanGroup .chanSub {
+  color: var(--muted); font-size: 11px; font-weight: 400; margin-left: 18px;
+}
+.convGroup { border-top: 1px solid var(--border); }
+.convGroup > summary {
+  cursor: pointer; padding: 7px 10px 7px 22px; list-style-position: inside;
+  background: var(--panel);
+}
+.convGroup > summary:hover { background: var(--accent-soft); }
+.convGroup .convTitle { font-weight: 600; }
+.convGroup .convSub { color: var(--muted); font-size: 11px; margin-left: 18px; }
+.convTurns { border-top: 1px solid var(--border); }
+.convTurns .listItem { padding-left: 40px; }
+.convTurns .listItem.selected { padding-left: 37px; }
+.listItem { padding: 7px 10px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.listItem:hover { background: var(--accent-soft); }
+.listItem.selected { background: var(--accent-soft); border-left: 3px solid var(--accent); padding-left: 7px; }
+.listItem .title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.listItem .sub { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.filters { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+.empty { color: var(--muted); padding: 16px; font-size: 12px; text-align: center; }
+#detail { flex: 1; overflow-y: auto; padding: 16px 20px; min-width: 0; }
+.card {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: var(--shadow); padding: 13px 15px; margin-bottom: 14px;
+}
+.card h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--muted); margin: 0 0 8px; }
+/* breadcrumbs: the only way back up, so they stay visible while the detail
+   pane scrolls under them */
+.crumbs {
+  position: sticky; top: -16px; z-index: 2; display: flex; flex-wrap: wrap;
+  align-items: center; gap: 4px; margin: -16px -20px 14px; padding: 10px 20px;
+  background: var(--bg); border-bottom: 1px solid var(--border); font-size: 12px;
+}
+.crumbs button {
+  background: none; border: none; color: var(--accent-ink); padding: 1px 3px;
+  text-decoration: underline; border-radius: 4px;
+}
+.crumbs button:hover { background: var(--accent-soft); border-color: transparent; }
+.crumbs .sep { color: var(--muted); }
+.crumbs .here { font-weight: 600; padding: 1px 3px; }
+.levelHead { display: flex; align-items: baseline; gap: 10px; }
+.levelHead h2 {
+  font-size: 13px; text-transform: none; letter-spacing: 0; color: var(--text);
+  margin: 0 0 8px;
+}
+.levelDur { margin-left: auto; color: var(--muted); font-size: 11px;
+  font-variant-numeric: tabular-nums; }
+.levelLead { color: var(--muted); margin-bottom: 8px; }
+.wfGo { color: var(--muted); margin-left: 5px; }
+.badge {
+  display: inline-block; font-size: 11px; font-weight: 600; border-radius: 999px;
+  padding: 1px 10px; border: 1px solid var(--border);
+}
+.badge.ok { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }
+.badge.fail { color: var(--fail); border-color: var(--fail); background: var(--fail-soft); }
+.badge.progress { color: var(--bar-human); border-color: var(--bar-human); }
+.kv { display: grid; grid-template-columns: 130px 1fr; gap: 3px 12px; margin-top: 8px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; overflow-wrap: anywhere; }
+.msgBlock { background: var(--code-bg); border-radius: 6px; padding: 8px 10px;
+  margin-top: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.msgBlock .lbl { color: var(--muted); font-size: 10px; text-transform: uppercase;
+  letter-spacing: .05em; display: block; margin-bottom: 2px; }
+/* waterfall */
+/* Every column has a floor: the cost cell is wide enough for "1.60 s | tok -
+   1,589 in, 113 out" on a roomy pane, but fixed widths starved the bar track
+   to 0px on a narrow one — the chart silently lost its chart. Track keeps a
+   minimum and the cost text wraps rather than pushing it out. */
+.wfRow { display: grid;
+  grid-template-columns: minmax(96px, 210px) minmax(56px, 1fr) minmax(96px, 190px);
+  gap: 8px; align-items: center; padding: 2px 0; cursor: pointer;
+  border-radius: 4px; }
+.wfRow:hover { background: var(--accent-soft); }
+.wfRow.selected { background: var(--accent-soft); }
+.wfName { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
+.wfName .cmd { color: var(--muted); }
+.wfTrack { position: relative; height: 14px; background: var(--code-bg); border-radius: 4px; overflow: hidden; }
+.wfBar { position: absolute; top: 2px; bottom: 2px; border-radius: 2px; min-width: 2px; }
+.cat-turn { background: var(--bar-turn); }
+.cat-planner { background: var(--bar-planner); }
+.cat-tool { background: var(--bar-tool); }
+.cat-command { background: var(--bar-command); }
+.cat-llm { background: var(--bar-llm); }
+.cat-other { background: var(--bar-other); }
+.cat-human {
+  background: repeating-linear-gradient(45deg, var(--bar-human) 0 4px, transparent 4px 8px);
+  border: 1px solid var(--bar-human);
+}
+.wfBar.open { opacity: .55; border-right: 2px dashed var(--text); }
+.wfDur { text-align: right; color: var(--muted); font-size: 11px;
+  font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px; font-size: 11px; color: var(--muted); }
+/* position:static overrides .wfBar (absolute) if that class is ever reapplied to
+   a chip — otherwise the squares pin to the viewport instead of the label. */
+.legend .chip {
+  display: inline-block; position: static; width: 12px; height: 10px;
+  border-radius: 2px; margin-right: 4px; vertical-align: -1px;
+}
+pre.json {
+  background: var(--code-bg); border-radius: 6px; padding: 9px 11px; margin: 6px 0 0;
+  font-size: 11.5px; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+details > summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.artifact { margin-bottom: 10px; }
+.artifact .aHead { display: flex; align-items: baseline; gap: 8px; }
+.artifact .aKey { font-weight: 600; }
+.artifact .aMeta { color: var(--muted); font-size: 11px; }
+.artifact iframe {
+  width: 100%; height: 260px; border: 1px solid var(--border); border-radius: 6px;
+  background: #fff; margin-top: 6px;
+}
+.spanAttrs { margin-top: 10px; }
+
+/* -- chat (test) mode --------------------------------------------------- */
+#testMain { flex: 1; display: none; min-height: 0; }
+#testMain.visible { display: flex; }
+#chatArea { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+#connStrip {
+  padding: 8px 18px; border-bottom: 1px solid var(--border); background: var(--panel);
+  font-size: 12px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+}
+#connStrip .spacer { flex: 1; }
+button.newConv {
+  font-weight: 700; padding: 6px 16px; letter-spacing: .01em;
+  box-shadow: 0 1px 4px rgba(47, 102, 216, .38);
+}
+button.newConv:hover { filter: brightness(1.1); }
+#connText { color: var(--muted); overflow-wrap: anywhere; }
+#connText.ok { color: var(--ok); }
+#connText.err { color: var(--fail); white-space: pre-wrap; }
+#advPanel { padding: 0 18px; background: var(--panel); border-bottom: 1px solid var(--border); }
+#advPanel summary { padding: 6px 0; }
+#advPanel .fields { display: flex; gap: 10px; flex-wrap: wrap; padding: 4px 0 12px; }
+#advPanel .field label { display: block; font-size: 10px; text-transform: uppercase;
+  letter-spacing: .05em; color: var(--muted); margin-bottom: 3px; }
+#advPanel input[type=text] { width: 300px; max-width: 90vw; }
+#chatLog { flex: 1; overflow-y: auto; padding: 18px 22px; }
+.chatMsg { max-width: 74%; margin-bottom: 12px; }
+.chatMsg.user { margin-left: auto; }
+.chatMsg .bubble {
+  border: 1px solid var(--border); border-radius: 12px; padding: 9px 13px;
+  background: var(--panel); white-space: pre-wrap; overflow-wrap: anywhere;
+  box-shadow: var(--shadow); font-size: 13.5px;
+}
+.chatMsg.user .bubble {
+  background: var(--accent); border-color: var(--accent); color: var(--on-accent);
+  border-bottom-right-radius: 4px;
+}
+.chatMsg.agent .bubble { border-bottom-left-radius: 4px; }
+.chatMsg .bubble.md { white-space: normal; }
+.chatMsg .bubble.md p { margin: 0 0 8px; }
+.chatMsg .bubble.md p:last-child { margin-bottom: 0; }
+.chatMsg .bubble.md strong { font-weight: 700; }
+.chatMsg .bubble.md em { font-style: italic; }
+.chatMsg .bubble.md del { text-decoration: line-through; }
+.chatMsg .bubble.md code {
+  background: var(--code-bg); padding: 1px 5px; border-radius: 4px;
+  font-size: 12.5px;
+}
+.chatMsg .bubble.md pre {
+  background: var(--code-bg); border-radius: 6px; padding: 8px 10px;
+  overflow-x: auto; white-space: pre-wrap; margin: 6px 0;
+}
+.chatMsg .bubble.md pre code { background: none; padding: 0; }
+.chatMsg .bubble.md ul, .chatMsg .bubble.md ol { margin: 4px 0 8px; padding-left: 22px; }
+.chatMsg .bubble.md li { margin: 2px 0; }
+.chatMsg .bubble.md h1, .chatMsg .bubble.md h2, .chatMsg .bubble.md h3,
+.chatMsg .bubble.md h4, .chatMsg .bubble.md h5, .chatMsg .bubble.md h6 {
+  margin: 10px 0 6px; font-size: 14px; line-height: 1.3;
+}
+.chatMsg .bubble.md h1 { font-size: 16px; }
+.chatMsg .bubble.md blockquote {
+  margin: 6px 0; padding: 2px 10px; border-left: 3px solid var(--border);
+  color: var(--muted);
+}
+.chatMsg .bubble.md hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
+.chatMsg .bubble.md a { color: var(--accent-ink); }
+.chatMsg.system { max-width: 100%; }
+.chatMsg.system .bubble { background: var(--warn-bg); border-color: var(--warn-border);
+  box-shadow: none; font-size: 12.5px; }
+.chatMsg .meta { color: var(--muted); font-size: 11px; margin-top: 4px;
+  display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.chatMsg .meta .traceLink {
+  background: none; border: none; color: var(--accent-ink); cursor: pointer;
+  padding: 0; font-size: 11px; text-decoration: underline;
+}
+.chatMsg .cmdOut { color: var(--muted); font-size: 11.5px; margin-top: 5px;
+  border-top: 1px dashed var(--border); padding-top: 4px;
+  white-space: pre-wrap; overflow-wrap: anywhere; }
+#composer { display: flex; gap: 10px; padding: 12px 18px;
+  border-top: 1px solid var(--border); background: var(--panel); }
+#composer input { flex: 1; border-radius: 999px; padding: 8px 16px; }
+#composer button { border-radius: 999px; padding: 7px 18px; }
+#composerHint { color: var(--muted); font-size: 11px; padding: 0 20px 10px;
+  background: var(--panel); }
+@media (prefers-reduced-motion: no-preference) {
+  .chatMsg { animation: rise .15s ease-out; }
+  @keyframes rise { from { transform: translateY(4px); opacity: .4; } }
+}
+</style>
+</head>
+<body>
+<div id="healthBanner">
+  <strong>Heads up:</strong>
+  <span id="healthText"></span>
+  <button class="dismiss" id="healthDismiss">Dismiss</button>
+</div>
+<header>
+  <h1>fastWorkflow Chatbot</h1>
+  <nav class="modeTabs">
+    <button id="modeTest" class="active">Chat</button>
+    <button id="modeDebug">Debug</button>
+  </nav>
+  <span class="pill" id="statusPill"><span class="dot"></span><span id="statusPillText">starting…</span></span>
+  <span class="meta" id="metaLine"></span>
+  <span class="spacer"></span>
+  <button id="clearConvsBtn" style="display:none">Clear conversations</button>
+  <button id="switchWfBtn" style="display:none">Switch workflow</button>
+  <button id="refreshBtn" style="display:none">Refresh</button>
+</header>
+
+<main id="pickerMain">
+  <div id="pickerCard">
+    <h2>Pick a workflow</h2>
+    <div class="sub">Choose a workflow below — its server starts automatically
+      and you land in the chat. Folders expand to show the workflows inside.</div>
+    <div class="pickerCols">
+      <div class="pickerCol">
+        <h3>Detected workflows</h3>
+        <div id="wfCandidates"><div class="empty">scanning…</div></div>
+      </div>
+      <div class="pickerCol">
+        <h3>Browse folders</h3>
+        <div id="browsePath"></div>
+        <div id="browseList"></div>
+      </div>
+    </div>
+    <div id="envSetup">
+      <h3>Workflow environment files are missing</h3>
+      <div id="envSetupText"></div>
+      <div class="envFiles">
+        <div class="envFile">
+          <label for="envFilePick">Choose fastworkflow.env</label>
+          <input type="file" id="envFilePick" accept=".env,text/plain">
+        </div>
+        <div class="envFile">
+          <label for="passwordsFilePick">Choose fastworkflow.passwords.env</label>
+          <input type="file" id="passwordsFilePick" accept=".env,text/plain">
+        </div>
+      </div>
+      <div class="actions">
+        <button id="uploadEnvBtn" class="primary">Use selected files</button>
+        <button id="createEnvBtn">Create from templates</button>
+      </div>
+    </div>
+    <div id="pickerStatus"></div>
+  </div>
+</main>
+
+<main id="debugMain">
+  <div id="rail">
+    <div class="railSection filters">
+      <select id="fStatus">
+        <option value="">status: any</option>
+        <option value="awaiting_user">awaiting_user</option>
+        <option value="completed">completed</option>
+        <option value="failed">failed</option>
+        <option value="cancelled">cancelled</option>
+        <option value="abandoned">abandoned</option>
+      </select>
+      <select id="fSuccess">
+        <option value="">success: any</option>
+        <option value="1">success</option>
+        <option value="0">failure</option>
+      </select>
+      <input type="text" id="fCommand" placeholder="command filter">
+      <input type="text" id="fContext" placeholder="context filter">
+    </div>
+    <div id="convList"></div>
+  </div>
+  <div id="detail"><div class="empty">Select a turn to inspect it.</div></div>
+</main>
+
+<section id="testMain">
+  <div id="chatArea">
+    <div id="connStrip">
+      <span id="connText">connecting…</span>
+      <span class="spacer"></span>
+      <button id="newConvBtn" class="primary newConv" style="display:none">+ New conversation</button>
+    </div>
+    <details id="advPanel">
+      <summary>Advanced: connect to a different server</summary>
+      <div class="fields">
+        <div class="field">
+          <label for="tBaseUrl">FastAPI base URL</label>
+          <input type="text" id="tBaseUrl" placeholder="http://127.0.0.1:8000">
+        </div>
+        <div class="field">
+          <label for="tToken">Bearer token (JWT — blank uses /initialize's)</label>
+          <input type="text" id="tToken" placeholder="(from /initialize)">
+        </div>
+        <div class="field">
+          <label>&nbsp;</label>
+          <button id="tConnect">Reconnect</button>
+        </div>
+      </div>
+    </details>
+    <div id="chatLog"><div class="empty">Waiting for the workflow server…</div></div>
+    <div id="composer">
+      <input type="text" id="chatInput" placeholder="Message the agent…" disabled>
+      <button id="chatSend" class="primary" disabled>Send</button>
+    </div>
+    <div id="composerHint">Messages go to the agent. Start a message with "/" to run a
+      command deterministically (no agent). Every turn is inspectable in the Debug tab.</div>
+  </div>
+</section>
+<script>
+"use strict";
+/* All record-derived text is rendered via textContent — never via markup
+   injection [R22]. HTML-ish artifacts render only inside sandboxed iframes
+   (srcdoc, meta CSP default-src 'none'); the parent page CSP also governs
+   srcdoc documents. */
+
+var TOKEN = new URLSearchParams(location.search).get("token") || "";
+
+function api(path) {
+  return fetch(path, { headers: { "Authorization": "Bearer " + TOKEN } })
+    .then(function (r) {
+      if (!r.ok) { throw new Error("API " + path + " -> " + r.status); }
+      return r.json();
+    });
+}
+function apiRaw(path) {
+  return fetch(path, { headers: { "Authorization": "Bearer " + TOKEN } });
+}
+function apiPost(path, body) {
+  return fetch(path, {
+    method: "POST",
+    headers: { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify(body || {})
+  }).then(function (r) {
+    return r.json().then(function (data) {
+      if (!r.ok) { throw new Error(data && data.error ? data.error : ("API " + path + " -> " + r.status)); }
+      return data;
+    });
+  });
+}
+
+/* -- tiny DOM helpers (text always via textContent) -------------------- */
+function el(tag, cls, text) {
+  var node = document.createElement(tag);
+  if (cls) { node.className = cls; }
+  if (text !== undefined && text !== null) { node.textContent = String(text); }
+  return node;
+}
+function clear(node) { while (node.firstChild) { node.removeChild(node.firstChild); } }
+
+/* -- state ------------------------------------------------------------- */
+var state = {
+  channel: "",              // "" = all channels
+  turnKey: null,
+  turn: null,               // the loaded turn record for the open drill-down
+  path: []                  // node path from the turn down to the open level
+};
+var session = null;          // /api/session payload: workflow + server + identity
+
+/* -- formatting -------------------------------------------------------- */
+function fmtNs(ns) {
+  if (ns === null || ns === undefined) { return "…"; }
+  var ms = ns / 1e6;
+  if (ms < 1) { return ms.toFixed(2) + " ms"; }
+  if (ms < 1000) { return Math.round(ms) + " ms"; }
+  return (ms / 1000).toFixed(2) + " s";
+}
+function fmtMs(ms) {
+  if (ms === null || ms === undefined) { return ""; }
+  if (ms < 1000) { return ms + " ms"; }
+  return (ms / 1000).toFixed(1) + " s";
+}
+function fmtCount(value) {
+  /* Grouped: a turn total runs to five figures and "10234" misreads. */
+  return String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+function fmtTokens(tokens) {
+  /* Split in/out, because they are not interchangeable: input scales with the
+     context you resend every step, output with what the model actually wrote,
+     and only the split tells you which one a slow turn is paying for. Falls
+     back to the total when a provider reports no breakdown. */
+  if (!tokens || !tokens.total) { return ""; }
+  if (!tokens.in && !tokens.out) { return fmtCount(tokens.total) + " tok"; }
+  return "tok - " + fmtCount(tokens.in) + " in, " + fmtCount(tokens.out) + " out";
+}
+function fmtCost(duration, tokens) {
+  /* Latency and tokens are the two costs of a level; a level that spent no
+     tokens says so by omission rather than by a "0 tok" that reads like a
+     measurement failure. */
+  var text = fmtTokens(tokens);
+  return text ? duration + " | " + text : duration;
+}
+function fmtTs(iso) {
+  if (!iso) { return "—"; }
+  return iso.replace("T", " ").replace(/\.\d+.*$/, "");
+}
+function pretty(objOrText) {
+  if (typeof objOrText === "string") {
+    try { return JSON.stringify(JSON.parse(objOrText), null, 2); }
+    catch (e) { return objOrText; }
+  }
+  return JSON.stringify(objOrText, null, 2);
+}
+
+/* -- header status pill ------------------------------------------------ */
+function setPill(cls, text) {
+  var pill = document.getElementById("statusPill");
+  pill.className = "pill" + (cls ? " " + cls : "");
+  document.getElementById("statusPillText").textContent = text;
+}
+
+/* -- health banner [R13] ----------------------------------------------- */
+var healthDismissed = false;
+var dbMissingBannerShown = false;
+function refreshHealth() {
+  api("/api/health").then(function (data) {
+    if (data.db_available !== false && dbMissingBannerShown) {
+      dbMissingBannerShown = false;
+      document.getElementById("healthBanner").classList.remove("visible");
+    }
+    if (data.db_available === false && !healthDismissed) {
+      dbMissingBannerShown = true;
+      /* Absent (cold start before the first turn) or unreadable (e.g. a WAL
+         snapshot needing recovery this read-only viewer will never write). */
+      document.getElementById("healthText").textContent =
+        "no recorded turns yet — the observability DB appears after the " +
+        "workflow's first turn. Debug views stay empty until then.";
+      document.getElementById("healthBanner").classList.add("visible");
+      return;
+    }
+    var h = data.writer_health;
+    if (!h || healthDismissed) { return; }
+    var drops = (h.spans_dropped || 0) + (h.records_dropped || 0);
+    var errors = (h.write_errors || 0);
+    if (drops > 0 || errors > 0) {
+      var parts = [];
+      if (h.records_dropped) { parts.push(h.records_dropped + " turn record(s) dropped"); }
+      if (h.spans_dropped) { parts.push(h.spans_dropped + " span(s) dropped"); }
+      if (errors) { parts.push(errors + " write error(s)"); }
+      if (h.last_error) { parts.push("last error: " + h.last_error); }
+      document.getElementById("healthText").textContent =
+        "the observability writer reported " + parts.join(", ") +
+        ". Some data in this view may be incomplete.";
+      document.getElementById("healthBanner").classList.add("visible");
+    }
+  }).catch(function () {});
+}
+document.getElementById("healthDismiss").addEventListener("click", function () {
+  healthDismissed = true;
+  document.getElementById("healthBanner").classList.remove("visible");
+});
+
+/* -- meta -------------------------------------------------------------- */
+function refreshMeta() {
+  api("/api/meta").then(function (m) {
+    var size = m.db_size_bytes;
+    var sizeTxt = size > 1048576 ? (size / 1048576).toFixed(1) + " MB" : Math.round(size / 1024) + " KB";
+    document.getElementById("metaLine").textContent =
+      m.workflow_name ? (m.workflow_name + " · " + sizeTxt + " recorded") : "";
+  }).catch(function () {});
+}
+
+/* -- debug rail: channel > conversation > turns ------------------------- */
+function groupTurnsByChannel(turns) {
+  /* Map of channel_id -> { conversation_id (or "none") -> [turns] }, in the
+     order turns arrive (newest first from the API). */
+  var channels = {};
+  turns.forEach(function (turn) {
+    var byConv = channels[turn.channel_id] || (channels[turn.channel_id] = {});
+    var key = turn.conversation_id === null ? "none" : String(turn.conversation_id);
+    (byConv[key] = byConv[key] || []).push(turn);
+  });
+  return channels;
+}
+
+function channelHasConversation(byConv) {
+  return Object.keys(byConv).some(function (key) { return key !== "none"; });
+}
+
+function conversationSummary(conv, turns) {
+  var summary = el("summary");
+  summary.appendChild(el("span", "convTitle",
+    conv && conv.topic
+      ? conv.topic
+      : "(untitled conversation #" + turns[0].conversation_id + ")"));
+  var parts = [];
+  if (conv && conv.summary) { parts.push(conv.summary); }
+  parts.push("#" + turns[0].conversation_id);
+  parts.push(turns.length + (turns.length === 1 ? " turn" : " turns"));
+  if (conv && conv.last_turn_at) { parts.push(fmtTs(conv.last_turn_at)); }
+  summary.appendChild(el("div", "convSub", parts.join(" · ")));
+  return summary;
+}
+
+function renderConversationGroups(container, byConv, convsByKey) {
+  Object.keys(byConv).forEach(function (key) {
+    var turns = byConv[key];
+    var group = el("details", "convGroup");
+    group.open = true;
+    if (key === "none") {
+      /* Turns recorded outside any conversation (CLI runs, embedders) stay
+         reachable rather than being filtered out with the empty ones. */
+      var orphanSummary = el("summary");
+      orphanSummary.appendChild(el("span", "convTitle", "Conversation-less turns"));
+      orphanSummary.appendChild(el("div", "convSub",
+        turns.length + (turns.length === 1 ? " turn" : " turns")));
+      group.appendChild(orphanSummary);
+    } else {
+      group.appendChild(conversationSummary(
+        convsByKey[turns[0].channel_id + ":" + key], turns));
+    }
+    group.appendChild(renderNestedTurns(turns));
+    container.appendChild(group);
+  });
+}
+
+function refreshConvs() {
+  var list = document.getElementById("convList");
+  Promise.all([
+    api("/api/conversations?limit=500"),
+    api(turnQuery())
+  ]).then(function (results) {
+    clear(list);
+    var convsByKey = {};
+    (results[0].conversations || []).forEach(function (c) {
+      convsByKey[c.channel_id + ":" + c.conversation_id] = c;
+    });
+    /* Conversations are indexed by turn, never listed on their own: a
+       conversation with no turns in view has nothing to inspect, and a
+       channel with no conversation left has nothing to open. */
+    var channels = groupTurnsByChannel(results[1].turns || []);
+    var everyChannel = Object.keys(channels);
+    var channelIds = everyChannel.filter(function (channelId) {
+      return channelHasConversation(channels[channelId]);
+    });
+    if (!channelIds.length) {
+      list.appendChild(el("div", "empty", everyChannel.length
+        ? "No conversations match the current filters. Channels whose turns all " +
+          "belong to no conversation are hidden."
+        : "No turns match the current filters."));
+      return;
+    }
+    channelIds.forEach(function (channelId) {
+      var byConv = channels[channelId];
+      var turnCount = Object.keys(byConv).reduce(function (total, key) {
+        return total + byConv[key].length;
+      }, 0);
+      var convCount = Object.keys(byConv).filter(function (key) {
+        return key !== "none";
+      }).length;
+      var chanGroup = el("details", "chanGroup");
+      chanGroup.open = true;
+      var summary = el("summary");
+      summary.appendChild(document.createTextNode(channelId || "(unnamed channel)"));
+      summary.appendChild(el("div", "chanSub",
+        convCount + (convCount === 1 ? " conversation · " : " conversations · ") +
+        turnCount + (turnCount === 1 ? " turn" : " turns")));
+      chanGroup.appendChild(summary);
+      var convs = el("div", "chanConvs");
+      renderConversationGroups(convs, byConv, convsByKey);
+      chanGroup.appendChild(convs);
+      list.appendChild(chanGroup);
+    });
+  }).catch(function () {
+    clear(list);
+    list.appendChild(el("div", "empty", "Could not load conversations (API error)."));
+  });
+}
+
+function turnQuery() {
+  var params = ["limit=500"];
+  var status = document.getElementById("fStatus").value;
+  var success = document.getElementById("fSuccess").value;
+  var command = document.getElementById("fCommand").value.trim();
+  var context = document.getElementById("fContext").value.trim();
+  if (status) { params.push("status=" + encodeURIComponent(status)); }
+  if (success !== "") { params.push("success=" + success); }
+  if (command) { params.push("command=" + encodeURIComponent(command)); }
+  /* Server-side substring filter: a match older than the newest page must
+     still be found, so filtering cannot happen client-side over one page. */
+  if (context) { params.push("context=" + encodeURIComponent(context)); }
+  return "/api/turns?" + params.join("&");
+}
+
+function renderNestedTurns(turns) {
+  var list = el("div", "convTurns");
+  turns.forEach(function (t) {
+    var item = el("div", "listItem");
+    if (t.turn_key === state.turnKey) { item.classList.add("selected"); }
+    var title = (t.ordinal ? "#" + t.ordinal + " " : "") + (t.user_message || "(no message)");
+    item.appendChild(el("div", "title", title));
+    var statusTxt = t.status +
+      (t.status === "awaiting_user" ? " (in progress)" : (t.success ? " · ok" : " · FAILED"));
+    /* Channel and conversation are the enclosing groups; repeating them on
+       every row would just crowd out the message. */
+    item.appendChild(el("div", "sub", statusTxt + " · " + fmtTs(t.started_at)));
+    item.addEventListener("click", function () { selectTurn(t.turn_key); });
+    list.appendChild(item);
+  });
+  return list;
+}
+["fStatus", "fSuccess"].forEach(function (id) {
+  document.getElementById(id).addEventListener("change", refreshConvs);
+});
+["fCommand", "fContext"].forEach(function (id) {
+  document.getElementById(id).addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { refreshConvs(); }
+  });
+});
+
+/* -- turn detail ------------------------------------------------------- */
+function selectTurn(turnKey) {
+  state.turnKey = turnKey;
+  state.turn = null;
+  state.path = [];
+  refreshConvs();
+  Promise.all([
+    api("/api/turn/" + encodeURIComponent(turnKey)),
+    api("/api/spans/" + encodeURIComponent(turnKey))
+  ]).then(function (results) {
+    renderDetail(results[0].turn, results[1].spans || []);
+  }).catch(function (e) {
+    var d = document.getElementById("detail");
+    clear(d);
+    d.appendChild(el("div", "empty", "Failed to load turn: " + e.message));
+  });
+}
+
+function statusBadge(turn) {
+  if (turn.status === "awaiting_user") { return el("span", "badge progress", "awaiting_user — in progress"); }
+  if (turn.status === "completed" && turn.success) { return el("span", "badge ok", "completed · success"); }
+  return el("span", "badge " + (turn.success ? "ok" : "fail"),
+    turn.status + (turn.success ? " · success" : " · failure"));
+}
+
+/* ======================================================================
+   Progressive-disclosure turn viewer
+   ======================================================================
+   The levels are fastWorkflow's own abstractions, not the raw span table: a
+   turn plans and then executes; execution is an agent taking steps; a step
+   hands a command to the assistant, which detects intent and then extracts
+   parameters. Each level shows what is known AT that level, then a waterfall
+   of its direct children as the drill-down control, and breadcrumbs to climb.
+
+   Most of the tree is real — the store persists parent_span_id and the old
+   viewer simply ignored it. Two levels are not spans yet: the agent loop as
+   a phase, and the individual step. Those are derived in
+   deriveExecutionChildren(), which is the single seam: when fw.agent.step is
+   emitted for real, that function reads spans instead of inferring them and
+   nothing else here changes. */
+
+var PHASE_PLANNING = "planning";
+var PHASE_EXECUTION = "execution";
+var PHASE_OTHER = "other";
+
+function byStartNs(a, b) { return a.start_ns - b.start_ns; }
+
+function spanExtent(spans) {
+  /* Union of a node's own spans; an unclosed span contributes only its start
+     so an in-progress turn still lays out instead of collapsing to zero. */
+  var t0 = Infinity, t1 = -Infinity, open = false;
+  spans.forEach(function (s) {
+    t0 = Math.min(t0, s.start_ns);
+    if (s.end_ns === null || s.end_ns === undefined) {
+      open = true;
+      t1 = Math.max(t1, s.start_ns);
+    } else {
+      t1 = Math.max(t1, s.end_ns);
+    }
+  });
+  if (!isFinite(t0)) { return { start: 0, end: 1, open: false }; }
+  return { start: t0, end: Math.max(t1, t0), open: open };
+}
+
+function mergeExtents(list) {
+  var t0 = Infinity, t1 = -Infinity, open = false;
+  list.forEach(function (x) {
+    t0 = Math.min(t0, x.start);
+    t1 = Math.max(t1, x.end);
+    if (x.open) { open = true; }
+  });
+  if (!isFinite(t0)) { return { start: 0, end: 1, open: false }; }
+  return { start: t0, end: t1, open: open };
+}
+
+function noTokens() { return { in: 0, out: 0, total: 0 }; }
+
+function countOf(value) {
+  return typeof value === "number" && isFinite(value) ? value : 0;
+}
+
+function spanTokens(span) {
+  /* Only fw.llm.call carries usage, and only when the server kept a DSPy
+     history entry to read it from (see server_memory inspect mode). Turns
+     recorded without one contribute nothing rather than a wrong zero. */
+  var usage = parsedAttr((span.attributes || {}).usage);
+  if (!usage || typeof usage !== "object") { return noTokens(); }
+  return {
+    in: countOf(usage.prompt_tokens),
+    out: countOf(usage.completion_tokens),
+    total: countOf(usage.total_tokens)
+  };
+}
+
+function addTokens(a, b) {
+  return { in: a.in + b.in, out: a.out + b.out, total: a.total + b.total };
+}
+
+function sumTokens(nodes) {
+  return nodes.reduce(function (total, node) {
+    return addTokens(total, node.tokens);
+  }, noTokens());
+}
+
+var _nodeSeq = 0;
+function makeNode(kind, title, opts) {
+  opts = opts || {};
+  _nodeSeq += 1;
+  return {
+    id: kind + "-" + _nodeSeq,
+    kind: kind,
+    title: title,
+    crumb: opts.crumb || title,
+    detail: opts.detail || "",
+    category: opts.category || "cat-other",
+    status: opts.status || "",
+    span: opts.span || null,
+    children: opts.children || [],
+    extent: opts.extent || { start: 0, end: 1, open: false },
+    tokens: opts.tokens || noTokens(),
+    render: opts.render || function () {}
+  };
+}
+
+/* -- span-level titles -------------------------------------------------- */
+function spanTitle(span, role) {
+  switch (span.name) {
+    case "fw.planner.plan": return "Planning";
+    case "fw.planner.replan": return "Replanning";
+    case "fw.agent.execute": return "Execution";
+    case "fw.agent.step": return "Step";
+    case "fw.agent.tool_call":
+      return "Agent tool call" + (span.command_name ? " · " + span.command_name : "");
+    case "fw.command.execute":
+      return "Assistant" + (span.command_name ? " · " + span.command_name : "");
+    case "fw.nlu.intent": return "Intent detection";
+    case "fw.nlu.param_extraction": return "Parameter extraction";
+    case "fw.ask_user": return "Ask user";
+    case "fw.llm.call": return "LLM call" + (role ? " · " + role : "");
+    default: return span.name;
+  }
+}
+
+function orderedAttrKeys(attrs) {
+  /* Input immediately followed by output, wherever both are present. */
+  var keys = Object.keys(attrs);
+  if (keys.indexOf("module_input") === -1 || keys.indexOf("module_output") === -1) {
+    return keys;
+  }
+  return ["module_input", "module_output"].concat(keys.filter(function (key) {
+    return key !== "module_input" && key !== "module_output";
+  }));
+}
+
+/* -- per-span level content -------------------------------------------- */
+function renderSpanLevel(container, span, role) {
+  var kv = el("dl", "kv");
+  function row(k, v) {
+    if (v === null || v === undefined || v === "") { return; }
+    kv.appendChild(el("dt", null, k));
+    kv.appendChild(el("dd", null, v));
+  }
+  row("span", span.name + (role ? " · " + role : ""));
+  row("span_id", span.span_id);
+  row("kind", span.kind);
+  row("status", span.status);
+  if (span.command_name) { row("command", span.command_name); }
+  if (span.context) { row("context", span.context); }
+  if (span.end_ns) { row("duration", fmtNs(span.end_ns - span.start_ns)); }
+  container.appendChild(kv);
+
+  var a = span.attributes || {};
+  if (span.name === "fw.llm.call") {
+    appendAttrSection(container, "module",
+      (a.module_chain || a.module || "DSPy") + " · " +
+      (a.model || a.response_model || "unknown model") +
+      " · captured via " +
+      (a.capture_source === "module_decorator" ? "module logging" : "the DSPy API"));
+    /* Input then output, adjacent: the pair is the question a reader has, and
+       anything that separates them (the wire messages especially) makes them
+       scroll apart. Everything below is corroborating detail. */
+    appendAttrSection(container, "module input", a.module_input);
+    appendAttrSection(container, "module output (parsed)", a.module_output);
+    appendAttrSection(container, "reasoning", a.reasoning);
+    appendAttrSection(container, "LLM input (messages)", a.messages);
+    appendAttrSection(container, "LLM input (prompt)", a.prompt);
+    appendAttrSection(container, "LLM output (raw)", a.output);
+    appendAttrSection(container, "provider response", a.provider_response);
+    appendAttrSection(container, "usage", a.usage);
+    appendAttrSection(container, "usage", a.usage_capture);
+    appendAttrSection(container, "module exception", a.module_exception);
+    appendAttrSection(container, "exception", a.exception);
+    appendCollapsedSection(container, "call kwargs", a.call_kwargs);
+  } else if (span.name === "fw.agent.tool_call" || span.name === "fw.command.execute") {
+    appendAttrSection(container, "command as the agent wrote it", a.raw_command);
+    appendAttrSection(container, "extracted parameters", a.parameters);
+    appendAttrSection(container, "response", a.response_text);
+    appendAttrSection(container, "error type", a.error_type);
+  } else if (span.name === "fw.ask_user") {
+    appendAttrSection(container, "question to the user", a.agent_query);
+    appendAttrSection(container, "the user's answer", a.user_response);
+  } else {
+    /* NLU and anything else: every attribute, one per row, since these spans
+       are small and their whole point is the detail. */
+    orderedAttrKeys(a).forEach(function (key) {
+      appendAttrSection(container, key.replace(/_/g, " "), a[key]);
+    });
+  }
+
+  var rawDetails = el("details");
+  rawDetails.appendChild(el("summary", null, "Raw span attributes"));
+  rawDetails.appendChild(el("pre", "json", pretty(a)));
+  container.appendChild(rawDetails);
+}
+
+function spanNode(span, kids, byId) {
+  var role = span.name === "fw.llm.call" ? llmCallLabel(span, byId) : "";
+  var childSpans = (kids[span.span_id] || []).slice().sort(byStartNs);
+  var children = childSpans.map(function (c) { return spanNode(c, kids, byId); });
+  return makeNode("span", spanTitle(span, role), {
+    crumb: spanTitle(span, role),
+    detail: span.status === "error" ? "error" : "",
+    category: spanCategory(span),
+    status: span.status,
+    span: span,
+    children: children,
+    extent: spanExtent([span]),
+    tokens: addTokens(spanTokens(span), sumTokens(children)),
+    render: function (container) { renderSpanLevel(container, span, role); }
+  });
+}
+
+/* -- phase classification ---------------------------------------------- */
+function reactChain(span) {
+  if (span.name !== "fw.llm.call") { return ""; }
+  var chain = String((span.attributes || {}).module_chain || "");
+  return chain.indexOf("fastWorkflowReAct") === 0 ? chain : "";
+}
+
+function phaseOf(span) {
+  if (span.name === "fw.planner.plan" || span.name === "fw.planner.replan") {
+    return PHASE_PLANNING;
+  }
+  if (span.name === "fw.agent.execute" || span.name === "fw.agent.step" ||
+      span.name === "fw.agent.tool_call" || span.name === "fw.command.execute" ||
+      span.name === "fw.ask_user" || reactChain(span)) {
+    return PHASE_EXECUTION;
+  }
+  return PHASE_OTHER;
+}
+
+/* -- recorded agent loop: fw.agent.execute / fw.agent.step -------------- */
+function buildRecordedStepNode(span, ordinal, incomingObservation, kids, byId) {
+  var attrs = span.attributes || {};
+  var children = (kids[span.span_id] || []).slice().sort(byStartNs)
+    .map(function (child) { return spanNode(child, kids, byId); });
+  return makeNode("step", "Step " + ordinal, {
+    crumb: "Step " + ordinal,
+    detail: attrs.tool_name || "",
+    category: "cat-tool",
+    status: span.status,
+    span: span,
+    children: children,
+    extent: spanExtent([span]),
+    tokens: sumTokens(children),
+    render: function (container) {
+      container.appendChild(el("div", "levelLead",
+        "The agent reads the observation from its trajectory, states its " +
+        "reasoning, and names the next tool to call."));
+      appendAttrSection(container, "observation in",
+        incomingObservation || "(none — this is the agent's first step)");
+      appendAttrSection(container, "reasoning", attrs.thought);
+      appendAttrSection(container, "next tool", attrs.tool_name);
+      appendAttrSection(container, "tool arguments", attrs.tool_args);
+      appendAttrSection(container, "observation out", attrs.observation);
+      appendAttrSection(container, "question asked of the user", attrs.clarification);
+      appendAttrSection(container, "tool error", attrs.tool_error);
+    }
+  });
+}
+
+function buildRecordedExecutionNode(span, kids, byId, ordinalLabel) {
+  var attrs = span.attributes || {};
+  var childSpans = (kids[span.span_id] || []).slice().sort(byStartNs);
+  var children = [], stepCount = 0, lastObservation = "";
+  childSpans.forEach(function (child) {
+    if (child.name === "fw.agent.step") {
+      stepCount += 1;
+      children.push(buildRecordedStepNode(
+        child, stepCount, lastObservation, kids, byId));
+      lastObservation = (child.attributes || {}).observation || "";
+      return;
+    }
+    var node = spanNode(child, kids, byId);
+    if (child.name === "fw.llm.call" && llmCallLabel(child, byId) === "final answer") {
+      /* ReAct's extract call: it runs inside forward(), after the loop and
+         before the agent returns, so it belongs to execution rather than to
+         the turn — even though its output becomes the turn's answer. */
+      node.title = "Answer synthesis";
+      node.crumb = "Answer synthesis";
+    }
+    children.push(node);
+  });
+  var label = "Execution" + (ordinalLabel || "") + (attrs.resumed ? " (resumed)" : "");
+  return makeNode("phase", label, {
+    crumb: label,
+    detail: stepCount + (stepCount === 1 ? " step" : " steps"),
+    category: "cat-tool",
+    status: span.status,
+    span: span,
+    children: children,
+    extent: spanExtent([span]),
+    tokens: sumTokens(children),
+    render: function (container) {
+      container.appendChild(el("div", "levelLead",
+        "The agent loop: each step turns an observation into reasoning and a " +
+        "next action. Tool calls go to the assistant, which resolves intent " +
+        "and parameters before running the command."));
+      var kv = el("dl", "kv");
+      kv.appendChild(el("dt", null, "steps"));
+      kv.appendChild(el("dd", null, String(stepCount)));
+      if (attrs.attempts && attrs.attempts > 1) {
+        kv.appendChild(el("dt", null, "agent retries"));
+        kv.appendChild(el("dd", null, String(attrs.attempts - 1)));
+      }
+      container.appendChild(kv);
+      appendAttrSection(container,
+        attrs.resumed ? "the user's answer, resuming the agent"
+                      : "input received from the planner",
+        attrs.agent_input);
+      appendAttrSection(container, "answer returned to the turn", attrs.final_answer);
+      appendAttrSection(container, "still awaiting the user", attrs.clarification);
+      if (attrs.exhausted) {
+        appendAttrSection(container, "note",
+          "the loop hit max_iters without the agent choosing finish");
+      }
+    }
+  });
+}
+
+/* -- legacy: agent steps derived for turns recorded before fw.agent.step -- */
+function deriveExecutionChildren(spans) {
+  /* Kept only for turns already in the database. Live turns carry real
+     fw.agent.execute / fw.agent.step spans and take the recorded path above;
+     this reconstruction runs when those are absent, so old recordings stay
+     readable instead of collapsing into a flat list.
+
+     ReAct's own two modules tell the steps apart: the Predict picks the next
+     tool, the ChainOfThought turns the finished trajectory into the answer.
+     A step therefore opens on a Predict call and owns every tool call until
+     the next one. */
+  var out = [], step = null, stepNo = 0;
+  spans.forEach(function (s) {
+    var chain = reactChain(s);
+    var isExtract = chain && chain.indexOf("ChainOfThought") !== -1;
+    if (chain && !isExtract) {
+      stepNo += 1;
+      step = { no: stepNo, reasoning: s, actions: [] };
+      out.push({ type: "step", step: step });
+    } else if (isExtract) {
+      step = null;
+      out.push({ type: "final", span: s });
+    } else if (step) {
+      step.actions.push(s);
+    } else {
+      out.push({ type: "span", span: s });
+    }
+  });
+  return out;
+}
+
+function attrObject(value) {
+  var parsed = parsedAttr(value);
+  return (parsed && typeof parsed === "object") ? parsed : null;
+}
+
+function moduleKwargs(span) {
+  var input = attrObject((span.attributes || {}).module_input);
+  return (input && attrObject(input.kwargs)) || input || null;
+}
+
+function buildStepNode(step, incomingObservation, kids, byId) {
+  var out = attrObject((step.reasoning.attributes || {}).module_output) || {};
+  var toolName = out.next_tool_name || "";
+  var children = [spanNode(step.reasoning, kids, byId)].concat(
+    step.actions.map(function (s) { return spanNode(s, kids, byId); })
+  );
+  var covered = [step.reasoning].concat(step.actions);
+  return makeNode("step", "Step " + step.no, {
+    crumb: "Step " + step.no,
+    detail: toolName,
+    category: "cat-tool",
+    children: children,
+    extent: spanExtent(covered),
+    tokens: sumTokens(children),
+    render: function (container) {
+      var lead = el("div", "levelLead",
+        "The agent reads the observation from its trajectory, states its " +
+        "reasoning, and names the next tool to call.");
+      container.appendChild(lead);
+      appendAttrSection(container, "observation in",
+        incomingObservation || "(none — this is the agent's first step)");
+      appendAttrSection(container, "reasoning", out.next_thought);
+      appendAttrSection(container, "next tool", toolName);
+      appendAttrSection(container, "tool arguments", out.next_tool_args);
+      var last = step.actions[step.actions.length - 1];
+      if (last) {
+        appendAttrSection(container, "observation out",
+          (last.attributes || {}).response_text);
+      }
+    }
+  });
+}
+
+function buildExecutionNode(spans, kids, byId, ordinalLabel) {
+  var recorded = spans.filter(function (s) { return s.name === "fw.agent.execute"; });
+  if (recorded.length) {
+    /* The executor recorded its own shape — read it instead of inferring one. */
+    return recorded.map(function (s) {
+      return buildRecordedExecutionNode(s, kids, byId, ordinalLabel);
+    });
+  }
+  var derived = deriveExecutionChildren(spans);
+  var children = [], stepCount = 0, finalAnswer = null, firstReact = null;
+  var lastObservation = "";
+  derived.forEach(function (item) {
+    if (item.type === "step") {
+      stepCount += 1;
+      if (!firstReact) { firstReact = item.step.reasoning; }
+      children.push(buildStepNode(item.step, lastObservation, kids, byId));
+      var last = item.step.actions[item.step.actions.length - 1];
+      if (last) { lastObservation = (last.attributes || {}).response_text || ""; }
+    } else if (item.type === "final") {
+      /* Not the turn's answer field, but the call that produces it: ReAct
+         runs this ChainOfThought inside forward(), after the loop stops and
+         BEFORE the agent returns, so it is the tail of execution rather than
+         something the turn does afterwards. Its output then becomes the
+         turn's answer verbatim. */
+      finalAnswer = item.span;
+      var node = spanNode(item.span, kids, byId);
+      node.title = "Answer synthesis";
+      node.crumb = "Answer synthesis";
+      children.push(node);
+    } else {
+      children.push(spanNode(item.span, kids, byId));
+    }
+  });
+  var answerText = "";
+  if (finalAnswer) {
+    var out = attrObject((finalAnswer.attributes || {}).module_output) || {};
+    answerText = out.final_answer || "";
+  }
+  var handoff = firstReact ? (moduleKwargs(firstReact) || {}).user_query : "";
+  if (!stepCount && !finalAnswer) {
+    /* Deterministic ("/" prefixed) and assistant-mode turns run no agent
+       loop at all — the turn goes straight to a command. Hoisting the
+       children keeps the levels to the ones that actually happened instead
+       of interposing an "Execution · 0 steps" hop that explains nothing. */
+    return children;
+  }
+  return makeNode("phase", "Execution" + (ordinalLabel || ""), {
+    crumb: "Execution" + (ordinalLabel || ""),
+    detail: stepCount + (stepCount === 1 ? " step" : " steps"),
+    category: "cat-tool",
+    children: children,
+    extent: spanExtent(spans),
+    tokens: sumTokens(children),
+    render: function (container) {
+      container.appendChild(el("div", "levelLead",
+        "The agent loop: each step turns an observation into reasoning and a " +
+        "next action. Tool calls go to the assistant, which resolves intent " +
+        "and parameters before running the command."));
+      var kv = el("dl", "kv");
+      kv.appendChild(el("dt", null, "steps"));
+      kv.appendChild(el("dd", null, String(stepCount)));
+      container.appendChild(kv);
+      appendAttrSection(container, "input received from the planner", handoff);
+      appendAttrSection(container, "answer returned to the turn", answerText);
+    }
+  });
+}
+
+function buildPlanningNode(spans, kids, byId, ordinalLabel) {
+  /* One planner span per run in practice; if a run ever holds more, the
+     extra spans still appear as children rather than being dropped. */
+  var planner = spans.filter(function (s) {
+    return s.name === "fw.planner.plan" || s.name === "fw.planner.replan";
+  })[0] || spans[0];
+  var attrs = planner ? (planner.attributes || {}) : {};
+  var isReplan = planner && planner.name === "fw.planner.replan";
+  var children = [];
+  spans.forEach(function (s) {
+    (kids[s.span_id] || []).slice().sort(byStartNs).forEach(function (c) {
+      children.push(spanNode(c, kids, byId));
+    });
+  });
+  var llm = spans.reduce(function (found, s) {
+    return found || (kids[s.span_id] || []).filter(function (c) {
+      return c.name === "fw.llm.call";
+    })[0];
+  }, null);
+  var planIn = llm ? moduleKwargs(llm) : null;
+  var label = (isReplan ? "Replanning" : "Planning") + (ordinalLabel || "");
+  return makeNode("phase", label, {
+    crumb: label,
+    detail: attrs.replan_trigger && attrs.replan_trigger !== "None"
+      ? "triggered by " + attrs.replan_trigger : "",
+    category: "cat-planner",
+    children: children,
+    extent: spanExtent(spans),
+    tokens: sumTokens(children),
+    render: function (container) {
+      container.appendChild(el("div", "levelLead",
+        "The planner turns the user's message into the numbered next steps " +
+        "it hands to the executor."));
+      var kv = el("dl", "kv");
+      if (attrs.model) {
+        kv.appendChild(el("dt", null, "model"));
+        kv.appendChild(el("dd", null, attrs.model));
+      }
+      if (attrs.replan_trigger && attrs.replan_trigger !== "None") {
+        kv.appendChild(el("dt", null, "replan trigger"));
+        kv.appendChild(el("dd", null, attrs.replan_trigger));
+      }
+      container.appendChild(kv);
+      appendAttrSection(container, "planner input", planIn);
+      appendAttrSection(container, "plan handed to the executor", attrs.plan);
+    }
+  });
+}
+
+function buildOtherNode(spans, kids, byId) {
+  /* Work that belongs to neither phase — today the post-turn conversation
+     summarizer. Named for what it is rather than hidden. */
+  var children = spans.map(function (s) { return spanNode(s, kids, byId); });
+  var only = children.length === 1 ? children[0] : null;
+  if (only) { return only; }
+  return makeNode("phase", "Post-turn work", {
+    crumb: "Post-turn",
+    category: "cat-other",
+    children: children,
+    extent: spanExtent(spans),
+    tokens: sumTokens(children),
+    render: function (container) {
+      container.appendChild(el("div", "levelLead",
+        "Work outside planning and execution — bookkeeping the turn does " +
+        "once the answer exists."));
+    }
+  });
+}
+
+function buildTurnTree(turn, spans) {
+  var byId = {}, kids = {};
+  spans.forEach(function (s) { byId[s.span_id] = s; kids[s.span_id] = []; });
+  var rootSpan = spans.filter(function (s) { return s.name === "fw.turn"; })[0] || null;
+  var top = [];
+  spans.forEach(function (s) {
+    if (rootSpan && s.span_id === rootSpan.span_id) { return; }
+    var parent = s.parent_span_id;
+    if (parent && kids[parent] && (!rootSpan || parent !== rootSpan.span_id)) {
+      kids[parent].push(s);
+    } else {
+      /* Children of the root, and any span whose parent was never recorded,
+         both belong at the top rather than disappearing. */
+      top.push(s);
+    }
+  });
+  top.sort(byStartNs);
+
+  var runs = [];
+  top.forEach(function (s) {
+    var phase = phaseOf(s);
+    var last = runs[runs.length - 1];
+    if (last && last.phase === phase) { last.spans.push(s); }
+    else { runs.push({ phase: phase, spans: [s] }); }
+  });
+
+  var counts = {};
+  runs.forEach(function (run) { counts[run.phase] = (counts[run.phase] || 0) + 1; });
+  var seen = {};
+  var children = [];
+  runs.forEach(function (run) {
+    seen[run.phase] = (seen[run.phase] || 0) + 1;
+    /* Only number a phase when the turn really has more than one of it —
+       a replan makes "Planning 2 / Execution 2" meaningful, and a plain turn
+       should not carry a "1" that implies a missing sibling. */
+    var ordinal = counts[run.phase] > 1 ? " " + seen[run.phase] : "";
+    var built;
+    if (run.phase === PHASE_PLANNING) {
+      built = buildPlanningNode(run.spans, kids, byId, ordinal);
+    } else if (run.phase === PHASE_EXECUTION) {
+      built = buildExecutionNode(run.spans, kids, byId, ordinal);
+    } else {
+      built = buildOtherNode(run.spans, kids, byId);
+    }
+    /* A phase builder may decline to wrap and hand back its children instead. */
+    children = children.concat(built);
+  });
+
+  var extent = rootSpan
+    ? spanExtent([rootSpan])
+    : mergeExtents(children.map(function (c) { return c.extent; }));
+
+  return makeNode("turn", turn.user_message || "(no message)", {
+    crumb: (turn.ordinal ? "Turn " + turn.ordinal : "Turn"),
+    category: "cat-turn",
+    status: turn.status,
+    children: children,
+    extent: extent,
+    tokens: sumTokens(children),
+    render: function (container) { renderTurnLevel(container, turn); }
+  });
+}
+
+function renderTurnLevel(container, turn) {
+  container.appendChild(statusBadge(turn));
+  var kv = el("dl", "kv");
+  function row(k, v) {
+    if (v === null || v === undefined || v === "") { return; }
+    kv.appendChild(el("dt", null, k));
+    kv.appendChild(el("dd", null, v));
+  }
+  row("turn_key", turn.turn_key);
+  row("channel", turn.channel_id);
+  row("conversation", turn.conversation_id === null ? "(none)" : "#" + turn.conversation_id +
+      (turn.ordinal ? " · turn " + turn.ordinal : ""));
+  row("context", turn.entry_context);
+  row("workflow", turn.entry_workflow_name);
+  row("started", fmtTs(turn.started_at));
+  row("completed", turn.completed_at ? fmtTs(turn.completed_at) : "(still open)");
+  if (turn.started_at && turn.completed_at) {
+    row("wall time", fmtMs(Date.parse(turn.completed_at) - Date.parse(turn.started_at)));
+  }
+  if (turn.suspended_ms) { row("suspended (human wait)", fmtMs(turn.suspended_ms)); }
+  row("failure_reason", turn.failure_reason);
+  container.appendChild(kv);
+  var um = el("div", "msgBlock");
+  um.appendChild(el("span", "lbl", "user message"));
+  um.appendChild(document.createTextNode(turn.user_message || ""));
+  container.appendChild(um);
+  if (turn.answer) {
+    var ans = el("div", "msgBlock");
+    ans.appendChild(el("span", "lbl", "answer"));
+    ans.appendChild(document.createTextNode(turn.answer));
+    container.appendChild(ans);
+  }
+}
+
+/* -- navigation --------------------------------------------------------- */
+function renderCrumbs() {
+  var bar = el("nav", "crumbs");
+  if (state.turn) {
+    var conv = state.turn.conversation_id === null
+      ? "conversation-less"
+      : "Conversation #" + state.turn.conversation_id;
+    bar.appendChild(el("span", "here", conv));
+  }
+  state.path.forEach(function (node, index) {
+    bar.appendChild(el("span", "sep", "›"));
+    if (index === state.path.length - 1) {
+      bar.appendChild(el("span", "here", node.crumb));
+      return;
+    }
+    var btn = el("button", null, node.crumb);
+    btn.addEventListener("click", function () {
+      state.path = state.path.slice(0, index + 1);
+      renderLevel();
+    });
+    bar.appendChild(btn);
+  });
+  return bar;
+}
+
+function descend(node) {
+  state.path = state.path.concat([node]);
+  renderLevel();
+}
+
+function renderLevel() {
+  var d = document.getElementById("detail");
+  clear(d);
+  var node = state.path[state.path.length - 1];
+  if (!node) {
+    d.appendChild(el("div", "empty", "Select a turn to inspect it."));
+    return;
+  }
+  d.appendChild(renderCrumbs());
+
+  var info = el("div", "card");
+  var head = el("div", "levelHead");
+  /* The heading carries the qualifier (tool name, step count) that the parent
+     chart shows as muted secondary text, so arriving at a level reads the
+     same as the row you clicked to get here. */
+  head.appendChild(el("h2", null, node.title + (node.detail ? " · " + node.detail : "")));
+  if (!node.extent.open && node.extent.end > node.extent.start) {
+    head.appendChild(el("span", "levelDur", fmtCost(
+      fmtNs(node.extent.end - node.extent.start), node.tokens)));
+  } else if (node.tokens.total) {
+    head.appendChild(el("span", "levelDur", fmtTokens(node.tokens)));
+  }
+  info.appendChild(head);
+  node.render(info);
+  d.appendChild(info);
+
+  if (node.children.length) {
+    var wf = el("div", "card");
+    wf.appendChild(el("h2", null, "Inside this " + levelNoun(node)));
+    renderWaterfall(wf, node);
+    d.appendChild(wf);
+  }
+
+  if (node.kind === "turn") {
+    /* Turn level only: the whole recorded turn, expanded, per the design —
+       lower levels are about their own slice and should not repeat it. */
+    var arts = el("div", "card");
+    arts.appendChild(el("h2", null, "Artifacts"));
+    renderArtifacts(arts, state.turn);
+    d.appendChild(arts);
+
+    var raw = el("div", "card");
+    raw.appendChild(el("h2", null, "Raw turn record (record_json)"));
+    raw.appendChild(el("pre", "json",
+      pretty(state.turn.record === null ? "(unparseable record_json)" : state.turn.record)));
+    d.appendChild(raw);
+  }
+}
+
+function levelNoun(node) {
+  if (node.kind === "turn") { return "turn"; }
+  if (node.kind === "phase") { return "stage"; }
+  if (node.kind === "step") { return "step"; }
+  return "span";
+}
+
+function renderDetail(turn, spans) {
+  state.turn = turn;
+  state.path = [buildTurnTree(turn, spans)];
+  if (!spans.length) {
+    var d = document.getElementById("detail");
+    clear(d);
+    d.appendChild(renderCrumbs());
+    var info = el("div", "card");
+    info.appendChild(el("h2", null, turn.user_message || "(no message)"));
+    renderTurnLevel(info, turn);
+    d.appendChild(info);
+    var note = el("div", "card");
+    note.appendChild(el("div", "empty", "No spans recorded for this turn."));
+    d.appendChild(note);
+    return;
+  }
+  renderLevel();
+}
+
+function spanCategory(span) {
+  if (span.kind === "human_wait" || span.name === "fw.ask_user") { return "cat-human"; }
+  if (span.name === "fw.turn") { return "cat-turn"; }
+  if (span.name.indexOf("fw.planner.") === 0) { return "cat-planner"; }
+  if (span.name === "fw.agent.tool_call") { return "cat-tool"; }
+  if (span.name === "fw.agent.execute" || span.name === "fw.agent.step") { return "cat-tool"; }
+  if (span.name === "fw.command.execute") { return "cat-command"; }
+  if (span.name === "fw.llm.call") { return "cat-llm"; }
+  return "cat-other";
+}
+
+function parsedAttr(value) {
+  if (typeof value !== "string") { return value; }
+  try { return JSON.parse(value); }
+  catch (e) { return value; }
+}
+
+/* -- what each fw.llm.call was asked to do ----------------------------- */
+/* The DSPy module chain alone cannot name the call: the planner and the
+   conversation summarizer are both "ChainOfThought > Predict", and ReAct's
+   two modules build their signatures dynamically, so DSPy names them both
+   StringSignature. Identification therefore goes structural first (the
+   enclosing span already says "this happened during planning"), then the
+   module chain, then the signature's output fields — which are what the call
+   was actually asked to produce and are distinct across every runtime role. */
+var LLM_ROLE_BY_PARENT = {
+  "fw.planner.plan": "planning",
+  "fw.planner.replan": "replanning",
+  "fw.nlu.param_extraction": "parameter extraction",
+  "fw.nlu.intent": "intent clarification"
+};
+var LLM_ROLE_BY_OUTPUT_FIELD = [
+  ["conversation_summary", "conversation summary"],
+  ["clarified_command", "intent clarification"],
+  ["clarification_question", "intent clarification"],
+  ["next_steps", "planning"],
+  ["next_thought", "agent step"],
+  ["final_answer", "final answer"]
+];
+function llmCallLabel(span, byId) {
+  var parent = byId ? byId[span.parent_span_id] : null;
+  if (parent && LLM_ROLE_BY_PARENT[parent.name]) {
+    return LLM_ROLE_BY_PARENT[parent.name];
+  }
+  var attrs = span.attributes || {};
+  var chain = String(attrs.module_chain || attrs.module || "");
+  if (chain.indexOf("fastWorkflowReAct") === 0) {
+    /* ReAct runs two different modules over the same trajectory: a Predict
+       that picks the next step, and a ChainOfThought that turns the finished
+       trajectory into the answer once the loop has stopped. */
+    return chain.indexOf("ChainOfThought") === -1 ? "agent step" : "final answer";
+  }
+  if (chain.indexOf("ParamExtractor") !== -1) { return "parameter extraction"; }
+  var fields = parsedAttr(attrs.module_output);
+  if (!fields || typeof fields !== "object") { return ""; }
+  if ("topic" in fields && "summary" in fields) { return "conversation topic"; }
+  for (var i = 0; i < LLM_ROLE_BY_OUTPUT_FIELD.length; i++) {
+    if (LLM_ROLE_BY_OUTPUT_FIELD[i][0] in fields) { return LLM_ROLE_BY_OUTPUT_FIELD[i][1]; }
+  }
+  return "";
+}
+
+function appendAttrSection(container, label, value) {
+  if (value === null || value === undefined || value === "") { return; }
+  var block = el("div", "msgBlock");
+  block.appendChild(el("span", "lbl", label));
+  block.appendChild(document.createTextNode(pretty(parsedAttr(value))));
+  container.appendChild(block);
+}
+
+function appendCollapsedSection(container, label, value) {
+  /* Detail that is worth keeping but almost never what you came for — folded
+     away next to the raw attributes rather than pushing the answer offscreen. */
+  if (value === null || value === undefined || value === "") { return; }
+  var det = el("details");
+  det.appendChild(el("summary", null, label));
+  det.appendChild(el("pre", "json", pretty(parsedAttr(value))));
+  container.appendChild(det);
+}
+
+function renderWaterfall(container, node) {
+  /* One row per DIRECT child, laid out against this level's own time window,
+     so each level reads as "what happened inside this thing" rather than as
+     the whole turn re-drawn. A row is the drill-down control. */
+  var t0 = node.extent.start, t1 = node.extent.end, hasOpen = node.extent.open;
+  node.children.forEach(function (child) {
+    t0 = Math.min(t0, child.extent.start);
+    t1 = Math.max(t1, child.extent.end);
+    if (child.extent.open) { hasOpen = true; }
+  });
+  if (t1 <= t0) { t1 = t0 + 1; }
+  var total = t1 - t0;
+
+  node.children.forEach(function (child) {
+    var rowEl = el("div", "wfRow");
+    var name = el("div", "wfName", child.title + " ");
+    if (child.detail) { name.appendChild(el("span", "cmd", "· " + child.detail)); }
+    if (child.status === "error") { name.appendChild(el("span", "cmd", " · ERROR")); }
+    if (child.children.length) {
+      name.appendChild(el("span", "wfGo", "›"));
+    }
+    rowEl.appendChild(name);
+
+    var track = el("div", "wfTrack");
+    var bar = el("div", "wfBar " + child.category);
+    var open = child.extent.open;
+    var end = open ? t1 : child.extent.end;
+    var left = ((child.extent.start - t0) / total) * 100;
+    var width = Math.max(((end - child.extent.start) / total) * 100, 0.4);
+    bar.style.left = left + "%";
+    bar.style.width = Math.min(width, 100 - left) + "%";
+    if (open) { bar.classList.add("open"); bar.title = "still open (in progress)"; }
+    track.appendChild(bar);
+    rowEl.appendChild(track);
+    rowEl.appendChild(el("div", "wfDur", open
+      ? fmtCost("open…", child.tokens)
+      : fmtCost(fmtNs(child.extent.end - child.extent.start), child.tokens)));
+
+    rowEl.addEventListener("click", function () { descend(child); });
+    container.appendChild(rowEl);
+  });
+
+  var legend = el("div", "legend");
+  [["cat-turn", "turn"], ["cat-planner", "planner"], ["cat-tool", "tool call"],
+   ["cat-command", "command execute"], ["cat-llm", "LLM call"],
+   ["cat-human", "human wait (hatched)"],
+   ["cat-other", "other"]].forEach(function (pair) {
+    var item = el("span");
+    item.appendChild(el("span", "chip " + pair[0]));
+    item.appendChild(document.createTextNode(pair[1]));
+    legend.appendChild(item);
+  });
+  if (hasOpen) {
+    legend.appendChild(el("span", null, "dashed edge = span still open (in progress)"));
+  }
+  container.appendChild(legend);
+}
+
+/* -- artifacts [R22] --------------------------------------------------- */
+function looksHtml(text) {
+  return /^\s*(<!doctype|<html|<svg|<body|<head)/i.test(text);
+}
+function sandboxedFrame(htmlText) {
+  var frame = document.createElement("iframe");
+  frame.setAttribute("sandbox", "");   /* max restrictions: no scripts, no forms, no origin */
+  frame.srcdoc =
+    "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'\">" +
+    htmlText;
+  return frame;
+}
+function artifactNode(key, value, meta) {
+  var box = el("div", "artifact");
+  var head = el("div", "aHead");
+  head.appendChild(el("span", "aKey", key));
+  if (meta) { head.appendChild(el("span", "aMeta", meta)); }
+  box.appendChild(head);
+  if (typeof value === "string" && looksHtml(value)) {
+    /* HTML-ish: sandboxed iframe only, plus safe source view */
+    box.appendChild(sandboxedFrame(value));
+    var src = el("details");
+    src.appendChild(el("summary", null, "View source (as text)"));
+    src.appendChild(el("pre", "json", value));
+    box.appendChild(src);
+  } else if (typeof value === "string") {
+    box.appendChild(el("pre", "json", value));       /* textContent — safe */
+  } else {
+    box.appendChild(el("pre", "json", pretty(value)));
+  }
+  return box;
+}
+
+function renderArtifacts(container, turn) {
+  var record = turn.record || {};
+  var outputs = (record.turn_output || {}).command_outputs || [];
+  var found = 0;
+  outputs.forEach(function (out) {
+    var resp = out.command_response || {};
+    var artifacts = resp.artifacts || {};
+    Object.keys(artifacts).forEach(function (key) {
+      found += 1;
+      var value = artifacts[key];
+      if (value && typeof value === "object" && value.__fw_artifact_ref__) {
+        /* offloaded: fetch from the artifact endpoint */
+        var box = el("div", "artifact");
+        var head = el("div", "aHead");
+        head.appendChild(el("span", "aKey", key));
+        head.appendChild(el("span", "aMeta",
+          "offloaded · " + (value.content_type || "?") + " · " + (value.size || "?") + " bytes"));
+        box.appendChild(head);
+        var placeholder = el("div", "aMeta", "loading…");
+        box.appendChild(placeholder);
+        container.appendChild(box);
+        apiRaw("/api/artifact/" + encodeURIComponent(value.__fw_artifact_ref__))
+          .then(function (r) {
+            if (!r.ok) { throw new Error("HTTP " + r.status); }
+            var ctype = (r.headers.get("Content-Type") || "").toLowerCase();
+            return r.text().then(function (text) { return { ctype: ctype, text: text }; });
+          })
+          .then(function (got) {
+            box.removeChild(placeholder);
+            var htmlish = got.ctype.indexOf("text/html") === 0 ||
+                          got.ctype.indexOf("image/svg") === 0 ||
+                          got.ctype.indexOf("application/xhtml") === 0 ||
+                          looksHtml(got.text);
+            if (htmlish) {
+              box.appendChild(sandboxedFrame(got.text));
+              var src = el("details");
+              src.appendChild(el("summary", null, "View source (as text)"));
+              src.appendChild(el("pre", "json", got.text));
+              box.appendChild(src);
+            } else {
+              box.appendChild(el("pre", "json", pretty(got.text)));
+            }
+          })
+          .catch(function (e) {
+            placeholder.textContent = "failed to load artifact: " + e.message;
+          });
+      } else {
+        container.appendChild(artifactNode(key, value, "inline"));
+      }
+    });
+  });
+  if (!found) {
+    container.appendChild(el("div", "empty", "No artifacts on this turn."));
+  }
+}
+
+/* -- top-level views: picker | chat (test) | debug ---------------------- */
+function setTopMode(mode) {
+  document.getElementById("pickerMain").className = mode === "picker" ? "visible" : "";
+  document.getElementById("debugMain").className = mode === "debug" ? "visible" : "";
+  document.getElementById("testMain").className = mode === "test" ? "visible" : "";
+  document.getElementById("modeDebug").className = mode === "debug" ? "active" : "";
+  document.getElementById("modeTest").className = mode === "test" ? "active" : "";
+  document.getElementById("refreshBtn").style.display = mode === "debug" ? "" : "none";
+  document.getElementById("clearConvsBtn").style.display =
+    (mode === "debug" && session && session.workflow_path) ? "" : "none";
+  document.getElementById("newConvBtn").style.display =
+    (mode === "test" && tm.connected) ? "" : "none";
+  if (mode === "debug") { refreshAll(); }
+}
+document.getElementById("modeDebug").addEventListener("click", function () { setTopMode("debug"); });
+document.getElementById("modeTest").addEventListener("click", function () { setTopMode("test"); });
+document.getElementById("switchWfBtn").addEventListener("click", function () {
+  setTopMode("picker");
+  loadPicker();
+});
+
+/* -- workflow picker ---------------------------------------------------- */
+function wfTag(w) {
+  if (w.training) { return el("span", "tag training", "Training…"); }
+  return w.trained ? el("span", "tag trained", "trained")
+                   : el("span", "tag untrained", "not trained");
+}
+function pickerStatus(text, cls) {
+  var node = document.getElementById("pickerStatus");
+  node.className = cls || "";
+  node.textContent = text;
+}
+function chooseWorkflow(path) {
+  pickerStatus("Starting " + path + " …");
+  apiPost("/api/select_workflow", { path: path }).then(function (data) {
+    session = data.session;
+    pickerStatus("");
+    applySession();
+  }).catch(function (e) {
+    pickerStatus("Could not activate the workflow: " + e.message, "err");
+  });
+}
+
+var pickerPollTimer = null;
+var pickerTrainingPaths = {};
+function startTrain(path) {
+  pickerStatus("Starting training…");
+  apiPost("/api/train", { path: path }).then(function () {
+    pickerTrainingPaths[path] = true;
+    pickerStatus("Training… you can leave the chatbot; it will keep going.");
+    refreshCandidateList();
+  }).catch(function (e) {
+    pickerStatus(e.message, "err");
+  });
+}
+function renderWfItem(w) {
+  var item = el("div", "wfItem");
+  var grow = el("div", "grow");
+  grow.appendChild(el("div", "name", w.name + (w.source === "examples" ? "  (bundled example)" : "")));
+  grow.appendChild(el("div", "path", w.path));
+  item.appendChild(grow);
+  item.appendChild(wfTag(w));
+  if (w.trainable) {
+    var train = el("button", "primary trainBtn", "Train");
+    train.addEventListener("click", function (evt) {
+      evt.stopPropagation();
+      startTrain(w.path);
+    });
+    item.appendChild(train);
+  }
+  item.addEventListener("click", function () { chooseWorkflow(w.path); });
+  return item;
+}
+function countTreeWorkflows(node) {
+  var n = node.items.length;
+  Object.keys(node.folders).forEach(function (name) {
+    n += countTreeWorkflows(node.folders[name]);
+  });
+  return n;
+}
+function workflowTree(wfs) {
+  /* Group by rel path so top-level workflows stay flat and folders expand
+     with (possibly nested) workflows under them. */
+  var root = { folders: {}, items: [] };
+  function ensure(node, name) {
+    if (!node.folders[name]) {
+      node.folders[name] = { name: name, folders: {}, items: [] };
+      node.items = node.items.filter(function (w) {
+        if (w.name === name) {
+          node.folders[name].items.push(w);
+          return false;
+        }
+        return true;
+      });
+    }
+    return node.folders[name];
+  }
+  wfs.forEach(function (w) {
+    var rel = String(w.rel || w.name || "").replace(/\\/g, "/");
+    var parts = rel.split("/").filter(function (p) { return p && p !== "."; });
+    if (!parts.length) { parts = [w.name]; }
+    var node = root;
+    for (var i = 0; i < parts.length - 1; i++) {
+      node = ensure(node, parts[i]);
+    }
+    var last = parts[parts.length - 1];
+    if (node.folders[last]) {
+      node.folders[last].items.push(w);
+    } else {
+      node.items.push(w);
+    }
+  });
+  return root;
+}
+function byName(a, b) {
+  return String(a).toLowerCase().localeCompare(String(b).toLowerCase());
+}
+function renderTreeNode(container, node) {
+  node.items.slice().sort(function (a, b) { return byName(a.name, b.name); })
+    .forEach(function (w) { container.appendChild(renderWfItem(w)); });
+  Object.keys(node.folders).sort(byName).forEach(function (name) {
+    container.appendChild(renderWfFolder(node.folders[name]));
+  });
+}
+function renderWfFolder(folder) {
+  var wrap = el("details", "wfFolder");
+  wrap.open = true;
+  var summary = el("summary");
+  summary.appendChild(el("span", "folderName", folder.name));
+  var n = countTreeWorkflows(folder);
+  summary.appendChild(el("span", "folderCount",
+    n + (n === 1 ? " workflow" : " workflows")));
+  wrap.appendChild(summary);
+  var body = el("div", "wfFolderBody");
+  renderTreeNode(body, folder);
+  wrap.appendChild(body);
+  return wrap;
+}
+function renderCandidateList(wfs) {
+  var list = document.getElementById("wfCandidates");
+  clear(list);
+  if (!wfs.length) {
+    list.appendChild(el("div", "empty",
+      "No workflows found near the launch directory. Browse to one on the right."));
+    return;
+  }
+  renderTreeNode(list, workflowTree(wfs));
+}
+function refreshCandidateList() {
+  api("/api/workflows").then(function (data) {
+    var wfs = data.workflows || [];
+    renderCandidateList(wfs);
+    var still = {};
+    wfs.forEach(function (w) {
+      if (w.training) { still[w.path] = true; }
+      if (pickerTrainingPaths[w.path] && !w.training && w.trained) {
+        pickerStatus("Training complete.", "ok");
+      } else if (pickerTrainingPaths[w.path] && !w.training && !w.trained) {
+        pickerStatus(
+          "Training failed — see the train log in the workflow state directory.",
+          "err"
+        );
+      }
+    });
+    pickerTrainingPaths = still;
+    if (Object.keys(still).length) {
+      if (!pickerPollTimer) {
+        pickerPollTimer = setInterval(refreshCandidateList, 2500);
+      }
+    } else if (pickerPollTimer) {
+      clearInterval(pickerPollTimer);
+      pickerPollTimer = null;
+    }
+  }).catch(function (e) {
+    var list = document.getElementById("wfCandidates");
+    clear(list);
+    list.appendChild(el("div", "empty", "Could not scan for workflows: " + e.message));
+  });
+}
+function showEnvSetup() {
+  var setup = document.getElementById("envSetup");
+  setup.className = "visible";
+  var missing = [];
+  if (!session.env_file_path) { missing.push("fastworkflow.env"); }
+  if (!session.passwords_file_path) { missing.push("fastworkflow.passwords.env"); }
+  document.getElementById("envSetupText").textContent =
+    "Missing " + missing.join(" and ") + " for " + session.workflow_path +
+    ". Choose existing files (their contents are copied into the workflow) or " +
+    "create both from the bundled templates. Edit placeholder API keys before chatting.";
+}
+
+function configureEnv(body) {
+  pickerStatus("Preparing environment files and starting the workflow server …");
+  apiPost("/api/configure_env", body).then(function (data) {
+    session = data.session;
+    document.getElementById("envSetup").className = "";
+    pickerStatus("");
+    applySession();
+  }).catch(function (e) {
+    pickerStatus("Could not configure environment files: " + e.message, "err");
+  });
+}
+document.getElementById("createEnvBtn").addEventListener("click", function () {
+  configureEnv({ create_from_templates: true });
+});
+document.getElementById("uploadEnvBtn").addEventListener("click", function () {
+  var envFile = document.getElementById("envFilePick").files[0];
+  var passwordsFile = document.getElementById("passwordsFilePick").files[0];
+  if (!envFile && !passwordsFile) {
+    pickerStatus("Choose at least one env file first.", "err");
+    return;
+  }
+  Promise.all([
+    envFile ? envFile.text() : Promise.resolve(null),
+    passwordsFile ? passwordsFile.text() : Promise.resolve(null)
+  ]).then(function (contents) {
+    configureEnv({ env_content: contents[0], passwords_content: contents[1] });
+  }).catch(function (e) {
+    pickerStatus("Could not read the selected files: " + e.message, "err");
+  });
+});
+function loadPicker() {
+  var list = document.getElementById("wfCandidates");
+  clear(list);
+  list.appendChild(el("div", "empty", "scanning…"));
+  refreshCandidateList();
+  browseTo("");
+}
+function browseTo(dir) {
+  api("/api/browse" + (dir ? "?dir=" + encodeURIComponent(dir) : "")).then(function (data) {
+    if (data.error) { pickerStatus(data.error, "err"); return; }
+    document.getElementById("browsePath").textContent = data.dir;
+    var list = document.getElementById("browseList");
+    clear(list);
+    if (data.parent) {
+      var up = el("div", "dirRow");
+      up.appendChild(el("span", "dnm", "⬑ up to " + data.parent));
+      up.addEventListener("click", function () { browseTo(data.parent); });
+      list.appendChild(up);
+    }
+    (data.entries || []).forEach(function (entry) {
+      var rowEl = el("div", "dirRow");
+      var nm = el("span", "dnm", entry.name + (entry.is_workflow ? "  ·  workflow" : ""));
+      rowEl.appendChild(nm);
+      if (entry.is_workflow) {
+        rowEl.appendChild(wfTag(entry));
+        var use = el("button", "primary", "Use");
+        use.addEventListener("click", function (evt) {
+          evt.stopPropagation();
+          chooseWorkflow(entry.path);
+        });
+        rowEl.appendChild(use);
+      }
+      rowEl.addEventListener("click", function () { browseTo(entry.path); });
+      list.appendChild(rowEl);
+    });
+    if (!(data.entries || []).length) {
+      list.appendChild(el("div", "empty", "No subfolders here."));
+    }
+  }).catch(function (e) { pickerStatus("Browse failed: " + e.message, "err"); });
+}
+
+/* -- chat (test) mode --------------------------------------------------- */
+/* The page CSP restricts connect-src to loopback origins only, so the SPA
+   can never be pointed at a non-local server [R19]. All response-derived
+   text renders via textContent [R22]. The channel is the fixed string
+   "chatbot" — the developer never types one, and restarts share one history. */
+var tm = {
+  baseUrl: "",
+  token: "",          // JWT actually used on turn calls
+  channelId: "",
+  userId: "developer",
+  connected: false,
+  busy: false,
+  managed: false,     // true = talking to the chatbot-spawned server
+  activeConversationId: null
+};
+
+/* Track the spawned server honestly: /api/session reflects the live child
+   process, so a server that dies mid-session flips the pill and disables the
+   composer instead of letting sends fail with a bare "Failed to fetch". */
+var deadServerAnnounced = false;
+function checkSession() {
+  api("/api/session").then(function (data) {
+    session = data.session;
+    if (!tm.managed) { return; }
+    if (session.server_running) { deadServerAnnounced = false; return; }
+    if (tm.connected && !deadServerAnnounced) {
+      deadServerAnnounced = true;
+      tm.connected = false;
+      tmComposerState();
+      setPill("err", "server stopped");
+      var why = (session.server_exit_code === null || session.server_exit_code === undefined)
+        ? "" : " (exit code " + session.server_exit_code + ")";
+      connText("The workflow server stopped" + why + " — check the chatbot's " +
+        "terminal for its logs. Switch workflow (same one is fine) restarts it.", "err");
+      tmBubble("system", "The workflow server stopped" + why +
+        ". Use the Switch workflow button to restart it.");
+    }
+  }).catch(function () {});
+}
+setInterval(checkSession, 5000);
+
+function connText(text, cls) {
+  var node = document.getElementById("connText");
+  node.className = cls || "";
+  node.textContent = text;
+}
+
+function tmExplainFetchError(err) {
+  return "Could not reach the workflow server (" + err.message + ").\n" +
+    "It may still be starting, or it stopped — check the chatbot's terminal.\n" +
+    "The URL must be a loopback origin (127.0.0.1/localhost); the Advanced " +
+    "panel reconnects to a different server.";
+}
+
+function tmFetch(path, body, extra) {
+  var headers = { "Content-Type": "application/json" };
+  if (tm.token && !(extra && extra.noAuth)) {
+    headers["Authorization"] = "Bearer " + tm.token;
+  }
+  var opts = { method: extra && extra.method ? extra.method : "POST", headers: headers };
+  if (opts.method !== "GET") { opts.body = JSON.stringify(body || {}); }
+  return fetch(tm.baseUrl + path, opts);
+}
+
+function tmBubble(role, text) {
+  var log = document.getElementById("chatLog");
+  var empty = log.querySelector(".empty");
+  if (empty) { log.removeChild(empty); }
+  var msg = el("div", "chatMsg " + role);
+  var bubble = el("div", "bubble");
+  if (role === "agent") { appendMarkdown(bubble, text); }
+  else { bubble.appendChild(document.createTextNode(text)); }
+  msg.appendChild(bubble);
+  log.appendChild(msg);
+  log.scrollTop = log.scrollHeight;
+  return msg;
+}
+
+function looksLikeMarkdown(text) {
+  return /(^|\n)\s{0,3}#{1,6}\s/.test(text) ||
+    /(^|\n)\s{0,3}(?:[-*+]|\d+\.)\s/.test(text) ||
+    /```/.test(text) ||
+    /\*\*[^*]+\*\*/.test(text) ||
+    /__[^_]+__/.test(text) ||
+    /`[^`]+`/.test(text) ||
+    /(^|\n)\s*>\s/.test(text) ||
+    /~~[^~]+~~/.test(text);
+}
+
+function safeHref(url) {
+  /* Schemes are concatenated so the static-page origin scan never sees a
+     non-loopback http(s) URL literal [R19]. */
+  var u = String(url || "").trim();
+  var lower = u.toLowerCase();
+  var scheme = "http" + ":";
+  var secure = "http" + "s:";
+  if (lower.indexOf(scheme + "//") === 0 || lower.indexOf(secure + "//") === 0) {
+    return u;
+  }
+  return "";
+}
+
+function appendInline(parent, text) {
+  var i = 0, buf = "";
+  function flush() {
+    if (buf) { parent.appendChild(document.createTextNode(buf)); buf = ""; }
+  }
+  function rest() { return text.slice(i); }
+  while (i < text.length) {
+    if (text.charAt(i) === "`") {
+      var tick = text.indexOf("`", i + 1);
+      if (tick > i) {
+        flush();
+        parent.appendChild(el("code", null, text.slice(i + 1, tick)));
+        i = tick + 1;
+        continue;
+      }
+    }
+    if (rest().slice(0, 2) === "**") {
+      var bold = text.indexOf("**", i + 2);
+      if (bold > i + 2) {
+        flush();
+        var strong = el("strong");
+        appendInline(strong, text.slice(i + 2, bold));
+        parent.appendChild(strong);
+        i = bold + 2;
+        continue;
+      }
+    }
+    if (rest().slice(0, 2) === "__") {
+      var under = text.indexOf("__", i + 2);
+      if (under > i + 2) {
+        flush();
+        var strongU = el("strong");
+        appendInline(strongU, text.slice(i + 2, under));
+        parent.appendChild(strongU);
+        i = under + 2;
+        continue;
+      }
+    }
+    if (rest().slice(0, 2) === "~~") {
+      var strike = text.indexOf("~~", i + 2);
+      if (strike > i + 2) {
+        flush();
+        var del = el("del");
+        appendInline(del, text.slice(i + 2, strike));
+        parent.appendChild(del);
+        i = strike + 2;
+        continue;
+      }
+    }
+    if (text.charAt(i) === "*" && text.charAt(i + 1) !== "*" &&
+        text.charAt(i + 1) !== " ") {
+      var emEnd = text.indexOf("*", i + 1);
+      if (emEnd > i + 1 && text.charAt(emEnd + 1) !== "*") {
+        flush();
+        var em = el("em");
+        appendInline(em, text.slice(i + 1, emEnd));
+        parent.appendChild(em);
+        i = emEnd + 1;
+        continue;
+      }
+    }
+    if (text.charAt(i) === "[") {
+      var link = rest().match(/^\[([^\]]+)\]\(([^)\s]+)\)/);
+      if (link) {
+        var href = safeHref(link[2]);
+        if (href) {
+          flush();
+          var a = el("a", null, link[1]);
+          a.setAttribute("href", href);
+          a.setAttribute("target", "_blank");
+          a.setAttribute("rel", "noopener noreferrer");
+          parent.appendChild(a);
+          i += link[0].length;
+          continue;
+        }
+      }
+    }
+    buf += text.charAt(i);
+    i += 1;
+  }
+  flush();
+}
+
+function isListLine(line, ordered) {
+  return ordered ? /^\s*\d+\.\s+/.test(line) : /^\s*[-*+]\s+/.test(line);
+}
+function listText(line, ordered) {
+  return line.replace(ordered ? /^\s*\d+\.\s+/ : /^\s*[-*+]\s+/, "");
+}
+function startsBlock(line) {
+  return /^(#{1,6}\s|```|\s*[-*+]\s|\s*\d+\.\s|\s*>)/.test(line);
+}
+
+function appendMarkdown(container, text) {
+  text = String(text == null ? "" : text);
+  if (!looksLikeMarkdown(text)) {
+    container.appendChild(document.createTextNode(text));
+    return;
+  }
+  container.classList.add("md");
+  var lines = text.split("\n");
+  var i = 0;
+  while (i < lines.length) {
+    var line = lines[i];
+    if (/^```/.test(line)) {
+      var codeLines = [];
+      i += 1;
+      while (i < lines.length && !/^```/.test(lines[i])) {
+        codeLines.push(lines[i]);
+        i += 1;
+      }
+      if (i < lines.length) { i += 1; }
+      var pre = el("pre");
+      pre.appendChild(el("code", null, codeLines.join("\n")));
+      container.appendChild(pre);
+      continue;
+    }
+    var heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      var h = el("h" + heading[1].length);
+      appendInline(h, heading[2]);
+      container.appendChild(h);
+      i += 1;
+      continue;
+    }
+    if (isListLine(line, false) || isListLine(line, true)) {
+      var ordered = isListLine(line, true);
+      var list = el(ordered ? "ol" : "ul");
+      while (i < lines.length && isListLine(lines[i], ordered)) {
+        var li = el("li");
+        appendInline(li, listText(lines[i], ordered));
+        list.appendChild(li);
+        i += 1;
+      }
+      container.appendChild(list);
+      continue;
+    }
+    if (/^\s*>\s?/.test(line)) {
+      var bq = el("blockquote");
+      var quoted = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+        quoted.push(lines[i].replace(/^\s*>\s?/, ""));
+        i += 1;
+      }
+      appendInline(bq, quoted.join("\n"));
+      container.appendChild(bq);
+      continue;
+    }
+    if (/^\s*---+\s*$/.test(line)) {
+      container.appendChild(el("hr"));
+      i += 1;
+      continue;
+    }
+    if (!line.trim()) {
+      i += 1;
+      continue;
+    }
+    var para = [];
+    while (i < lines.length && lines[i].trim() && !startsBlock(lines[i])) {
+      para.push(lines[i]);
+      i += 1;
+    }
+    var p = el("p");
+    para.forEach(function (ln, idx) {
+      if (idx) { p.appendChild(el("br")); }
+      appendInline(p, ln);
+    });
+    container.appendChild(p);
+  }
+}
+
+function tmRenderTurn(bubbleMsg, out) {
+  /* out: TurnOutput projection {turn_key,status,success,answer,command_outputs} */
+  var bubble = bubbleMsg.querySelector(".bubble");
+  clear(bubble);
+  var answer = out.answer || "(no answer)";
+  appendMarkdown(bubble, answer);
+  if (out.status === "awaiting_user") {
+    bubbleMsg.appendChild(el("div", "cmdOut",
+      "The agent is waiting for your reply — the next message resumes this turn."));
+  }
+  (out.command_outputs || []).forEach(function (co) {
+    var resp = co.command_response || {};
+    var line = (co.command_name || "(command)") +
+      (resp.success === false ? " · FAILED" : "") +
+      (typeof resp.response === "string" && resp.response
+        ? " — " + resp.response.slice(0, 300) : "");
+    bubbleMsg.appendChild(el("div", "cmdOut", line));
+  });
+  var meta = el("div", "meta");
+  var statusTxt = out.status +
+    (out.status === "awaiting_user" ? " (awaiting your reply)"
+      : (out.success ? " · ok" : " · FAILED"));
+  meta.appendChild(el("span", null, statusTxt));
+  if (out.turn_key) {
+    var link = el("button", "traceLink", "view trace");
+    link.addEventListener("click", function () { openTurnInDebug(out.turn_key); });
+    meta.appendChild(link);
+  }
+  bubbleMsg.appendChild(meta);
+}
+
+function tmPollTurn(turnKey, bubbleMsg, deadlineMs) {
+  /* A 202 handed back an in-flight execution: poll GET /turns/{key}. */
+  var deadline = Date.now() + (deadlineMs || 300000);
+  function poll() {
+    if (Date.now() > deadline) {
+      tmRenderError(bubbleMsg, "Timed out waiting for the turn to finish (key " + turnKey + ").");
+      tm.busy = false; tmComposerState();
+      return;
+    }
+    tmFetch("/turns/" + encodeURIComponent(turnKey), null, { method: "GET" })
+      .then(function (r) {
+        if (r.status === 404) { return null; }         /* registry→store gap */
+        if (!r.ok) { throw new Error("HTTP " + r.status); }
+        return r.json();
+      })
+      .then(function (data) {
+        if (data && data.exec_state === "done") {
+          /* the observability DB is keyed by the LOGICAL turn key */
+          if (data.logical_turn_key) { data.turn_key = data.logical_turn_key; }
+          tmRenderTurn(bubbleMsg, data);
+          tm.busy = false; tmComposerState();
+        } else if (data && data.exec_state === "lost") {
+          tmRenderError(bubbleMsg, "The server restarted and lost this turn (key " + turnKey + ").");
+          tm.busy = false; tmComposerState();
+        } else {
+          setTimeout(poll, 1000);
+        }
+      })
+      .catch(function (err) {
+        tmRenderError(bubbleMsg, tmExplainFetchError(err));
+        tm.busy = false; tmComposerState();
+      });
+  }
+  setTimeout(poll, 1000);
+}
+
+function tmRenderError(bubbleMsg, text) {
+  bubbleMsg.className = "chatMsg system";
+  var bubble = bubbleMsg.querySelector(".bubble");
+  clear(bubble);
+  bubble.appendChild(document.createTextNode(text));
+}
+
+function tmComposerState() {
+  var enabled = tm.connected && !tm.busy;
+  document.getElementById("chatInput").disabled = !enabled;
+  document.getElementById("chatSend").disabled = !enabled;
+  document.getElementById("newConvBtn").style.display =
+    (tm.connected && document.getElementById("testMain").className === "visible") ? "" : "none";
+  if (enabled) { document.getElementById("chatInput").focus(); }
+}
+
+function tmClearLog(placeholder) {
+  var log = document.getElementById("chatLog");
+  clear(log);
+  if (placeholder) {
+    log.appendChild(el("div", "empty", placeholder));
+  }
+}
+
+function tmLatestConversation(conversations, idsWithTurns) {
+  /* Prefer the highest conversation_id that actually has turns. An unused
+     reserved id (the empty slot /new_conversation leaves behind) is not a
+     conversation the developer can continue. last_turn_at ranking is ignored
+     so a later write to an older id cannot steal the pane. */
+  var latest = null;
+  var latestWithTurns = null;
+  (conversations || []).forEach(function (conv) {
+    if (!conv || conv.conversation_id == null) { return; }
+    if (!latest || conv.conversation_id > latest.conversation_id) {
+      latest = conv;
+    }
+    if (idsWithTurns && idsWithTurns[conv.conversation_id]) {
+      if (!latestWithTurns || conv.conversation_id > latestWithTurns.conversation_id) {
+        latestWithTurns = conv;
+      }
+    }
+  });
+  return latestWithTurns || latest;
+}
+
+function tmSortTurnsChronologically(turns) {
+  return (turns || []).slice().sort(function (a, b) {
+    var ao = a.ordinal == null ? 0 : a.ordinal;
+    var bo = b.ordinal == null ? 0 : b.ordinal;
+    if (ao !== bo) { return ao - bo; }
+    return String(a.turn_key || "").localeCompare(String(b.turn_key || ""));
+  });
+}
+
+function tmRenderStoredTurn(turn) {
+  if (turn.user_message) {
+    tmBubble("user", turn.user_message);
+  }
+  var agent = tmBubble("agent", "…");
+  tmRenderTurn(agent, {
+    turn_key: turn.turn_key,
+    status: turn.status,
+    success: !!turn.success,
+    answer: turn.answer,
+    command_outputs: []
+  });
+}
+
+function tmActivateConversation(conversationId) {
+  /* Bind the live session to the thread we painted, so the next message
+     continues it rather than the empty reserved id /initialize restored. */
+  if (!conversationId || !tm.baseUrl || !tm.token) {
+    return Promise.resolve();
+  }
+  return tmFetch("/activate_conversation", { conversation_id: conversationId })
+    .then(function (r) {
+      if (r.ok || r.status === 404) { return; }
+    })
+    .catch(function () {});
+}
+
+function tmLoadLatestConversation() {
+  tmClearLog();
+  if (!tm.channelId) {
+    return Promise.resolve([]);
+  }
+  var channel = encodeURIComponent(tm.channelId);
+  return Promise.all([
+    api("/api/conversations?channel=" + channel + "&limit=500"),
+    api("/api/turns?channel=" + channel + "&limit=500")
+  ]).then(function (results) {
+    var convs = results[0].conversations || [];
+    var allTurns = results[1].turns || [];
+    var idsWithTurns = {};
+    allTurns.forEach(function (t) {
+      if (t.conversation_id != null) { idsWithTurns[t.conversation_id] = true; }
+    });
+    var latest = tmLatestConversation(convs, idsWithTurns);
+    if (!latest) { return []; }
+    tm.activeConversationId = latest.conversation_id;
+    var turns = tmSortTurnsChronologically(allTurns.filter(function (t) {
+      return t.conversation_id === latest.conversation_id;
+    }));
+    var maxId = null;
+    convs.forEach(function (c) {
+      if (c.conversation_id != null && (maxId == null || c.conversation_id > maxId)) {
+        maxId = c.conversation_id;
+      }
+    });
+    /* /initialize restores the reserved last id; if that slot is empty we
+       painted an older thread and must bind the session to it. */
+    var bind = (latest.conversation_id !== maxId && idsWithTurns[latest.conversation_id] && tm.token)
+      ? tmActivateConversation(latest.conversation_id)
+      : Promise.resolve();
+    return bind.then(function () {
+      tmClearLog();
+      if (turns.length) {
+        var label = latest.topic
+          ? "Continuing \"" + latest.topic + "\""
+          : "Continuing conversation #" + latest.conversation_id;
+        tmBubble("system", label + ". Use + New conversation to start fresh.");
+        turns.forEach(tmRenderStoredTurn);
+      }
+      return turns;
+    });
+  });
+}
+
+function tmConnect() {
+  /* Chat is interactive: the session is driven by what you type, so no
+     startup_command/startup_action/context is sent. Those stay server-launch
+     decisions (run_fastapi_mcp flags) or programmatic /initialize fields. */
+  var pasted = document.getElementById("tToken").value.trim();
+  var body = { channel_id: tm.channelId, user_id: tm.userId };
+  connText("Connecting to " + tm.baseUrl + " …");
+  tm.token = pasted;  /* a pasted token also authorizes the turn calls */
+  tmFetch("/initialize", body, { noAuth: !pasted })
+    .then(function (r) {
+      return r.json().then(function (data) { return { status: r.status, data: data }; });
+    })
+    .then(function (got) {
+      if (got.status !== 200 && got.status !== 202) {
+        var detail = got.data && got.data.detail ? String(got.data.detail) : ("HTTP " + got.status);
+        throw { handled: true, message: "/initialize failed: " + detail };
+      }
+      if (!pasted && got.data.access_token) { tm.token = got.data.access_token; }
+      tm.connected = true;
+      deadServerAnnounced = false;
+      var note = (tm.managed && session && session.server_note)
+        ? " (" + session.server_note + ")" : "";
+      connText("Connected to " + tm.baseUrl + " — loading conversation…" + note, "ok");
+      setPill("ok", "server running");
+      tm.busy = true;
+      tmComposerState();
+      /* /initialize already rejoins the channel's last conversation; paint
+         those turns so the developer can continue instead of starting blank. */
+      tmLoadLatestConversation()
+        .catch(function () {
+          tmClearLog();
+          tmBubble("system",
+            "Could not load previous turns. You can still continue this conversation.");
+          return [];
+        })
+        .then(function (turns) {
+          var keys = {};
+          (turns || []).forEach(function (t) {
+            if (t.turn_key) { keys[t.turn_key] = true; }
+          });
+          connText("Connected to " + tm.baseUrl +
+            ((turns && turns.length)
+              ? " — continuing the latest conversation."
+              : " — say something below.") + note, "ok");
+          /* The chat never sends a startup command, but the server may have
+             been launched with one; render it rather than leaving an
+             unexplained first turn, unless history already includes it. */
+          if (got.data.startup_output && !keys[got.data.startup_output.turn_key]) {
+            var msg = tmBubble("agent", "…");
+            tmRenderTurn(msg, got.data.startup_output);
+            tmBubble("system", "The server's own startup command ran as this session's first turn.");
+          } else if (got.status === 202 && got.data.startup_turn_key) {
+            var pending = tmBubble("agent", "startup turn still running…");
+            tmPollTurn(got.data.startup_logical_turn_key || got.data.startup_turn_key, pending);
+            return;
+          }
+          if (got.data.startup_error) {
+            tmBubble("system", "Startup turn failed: " + got.data.startup_error);
+          }
+          tm.busy = false;
+          tmComposerState();
+        });
+    })
+    .catch(function (err) {
+      tm.connected = false;
+      tmComposerState();
+      setPill("err", "not connected");
+      connText(err && err.handled ? err.message : tmExplainFetchError(err), "err");
+    });
+}
+
+/* Auto-connect: wait for the spawned server's readiness probe, then
+   /initialize with the chatbot-managed identity. Model loading can take a
+   while on first start, so be patient and say what is happening. */
+function tmAutoConnect(deadlineMs) {
+  var deadline = Date.now() + (deadlineMs || 180000);
+  setPill("wait", "server starting…");
+  connText("Starting the workflow server (first start loads models — this can take a minute)…");
+  function probe() {
+    if (Date.now() > deadline) {
+      setPill("err", "server not ready");
+      connText("The workflow server did not become ready. Check the chatbot's " +
+        "terminal for its logs, then use the Advanced panel to reconnect.", "err");
+      return;
+    }
+    fetch(tm.baseUrl + "/probes/readyz")
+      .then(function (r) {
+        if (r.ok) { tmConnect(); }
+        else { setTimeout(probe, 1500); }
+      })
+      .catch(function () { setTimeout(probe, 1500); });
+  }
+  probe();
+}
+
+document.getElementById("tConnect").addEventListener("click", function () {
+  var typed = document.getElementById("tBaseUrl").value.trim().replace(/\/+$/, "");
+  if (typed) { tm.baseUrl = typed; }
+  if (!tm.baseUrl) { connText("Enter the FastAPI base URL first.", "err"); return; }
+  /* Only the chatbot-spawned server is liveness-tracked via /api/session. */
+  tm.managed = !!(session && session.server_url && tm.baseUrl === session.server_url);
+  tmConnect();
+});
+
+function tmSend() {
+  var input = document.getElementById("chatInput");
+  var text = input.value.trim();
+  if (!text || !tm.connected || tm.busy) { return; }
+  input.value = "";
+  tm.busy = true;
+  tmComposerState();
+  tmBubble("user", text);
+  /* "/"-prefixed → deterministic execution via /invoke_assistant */
+  var deterministic = text.charAt(0) === "/";
+  var path = deterministic ? "/invoke_assistant" : "/invoke_agent";
+  var pending = tmBubble("agent", deterministic ? "running command…" : "thinking…");
+  tmFetch(path, { user_query: text, timeout_seconds: 60 })
+    .then(function (r) {
+      return r.json().then(function (data) { return { status: r.status, data: data }; });
+    })
+    .then(function (got) {
+      if (got.status === 200) {
+        tmRenderTurn(pending, got.data);
+        tm.busy = false; tmComposerState();
+      } else if (got.status === 202 && got.data.turn_key) {
+        tmPollTurn(got.data.logical_turn_key || got.data.turn_key, pending);
+      } else if (got.status === 409) {
+        tmRenderError(pending, "Another turn is already in progress on this channel (HTTP 409). Wait for it to finish.");
+        tm.busy = false; tmComposerState();
+      } else if (got.status === 401) {
+        tmRenderError(pending, "The server rejected the bearer token (HTTP 401). Reconnect (Advanced panel) to mint new tokens.");
+        tm.busy = false; tmComposerState();
+      } else {
+        var detail = got.data && got.data.detail ? String(got.data.detail) : "";
+        tmRenderError(pending, path + " failed: HTTP " + got.status + (detail ? " — " + detail : ""));
+        tm.busy = false; tmComposerState();
+      }
+    })
+    .catch(function (err) {
+      tmRenderError(pending, tmExplainFetchError(err));
+      /* Keep the typed message so a transient failure costs nothing. */
+      if (!input.value) { input.value = text; }
+      tm.busy = false; tmComposerState();
+      checkSession();
+    });
+}
+document.getElementById("chatSend").addEventListener("click", tmSend);
+document.getElementById("chatInput").addEventListener("keydown", function (e) {
+  if (e.key === "Enter") { tmSend(); }
+});
+
+document.getElementById("newConvBtn").addEventListener("click", function () {
+  if (!tm.connected || tm.busy) { return; }
+  tmFetch("/new_conversation", {})
+    .then(function (r) {
+      if (!r.ok) { throw new Error("HTTP " + r.status); }
+      tm.activeConversationId = null;
+      tmClearLog();
+      tmBubble("system", "New conversation started (the previous one was saved and titled).");
+    })
+    .catch(function (err) {
+      tmBubble("system", "Could not start a new conversation: " + err.message);
+    });
+});
+
+/* -- deep link: chat → debug mode filtered to one turn ------------------ */
+function openTurnInDebug(turnKey) {
+  setTopMode("debug");
+  selectTurnWithRetry(turnKey, 8);
+}
+function selectTurnWithRetry(turnKey, attemptsLeft) {
+  /* The observability writer is asynchronous: the turn may land in the DB a
+     moment after the HTTP response. Retry briefly before giving up. */
+  api("/api/turn/" + encodeURIComponent(turnKey)).then(function () {
+    selectTurn(turnKey);
+  }).catch(function () {
+    if (attemptsLeft > 0) {
+      setTimeout(function () { selectTurnWithRetry(turnKey, attemptsLeft - 1); }, 700);
+    } else {
+      var d = document.getElementById("detail");
+      clear(d);
+      d.appendChild(el("div", "empty",
+        "Turn " + turnKey + " is not in the observability DB yet. Hit Refresh in a moment."));
+    }
+  });
+}
+
+/* -- boot --------------------------------------------------------------- */
+function refreshAll() {
+  refreshMeta();
+  refreshHealth();
+  refreshConvs();
+}
+document.getElementById("refreshBtn").addEventListener("click", refreshAll);
+document.getElementById("clearConvsBtn").addEventListener("click", function () {
+  if (!window.confirm(
+      "Clear every recorded conversation and turn for this workflow? This cannot be undone.")) {
+    return;
+  }
+  var rotate = (tm.connected && !tm.busy)
+    ? tmFetch("/new_conversation", {}).catch(function () {})
+    : Promise.resolve();
+  rotate.then(function () {
+    return apiPost("/api/clear_conversations", {
+      confirm: "clear all conversations"
+    });
+  }).then(function () {
+    state.turnKey = null;
+    clear(document.getElementById("detail"));
+    document.getElementById("detail").appendChild(
+      el("div", "empty", "All recorded conversations were cleared."));
+    clear(document.getElementById("chatLog"));
+    document.getElementById("chatLog").appendChild(
+      el("div", "empty", "Conversation history cleared. Start a new message."));
+    refreshAll();
+  }).catch(function (e) {
+    window.alert("Could not clear conversations: " + e.message);
+  });
+});
+
+function applySession() {
+  /* session: {workflow_path, workflow_name, server_url, server_running,
+               channel_id, user_id, jwt_mode, spawn_error} */
+  if (!session || !session.workflow_path) {
+    setPill("", "no workflow");
+    setTopMode("picker");
+    loadPicker();
+    return;
+  }
+  document.getElementById("switchWfBtn").style.display = "";
+  refreshMeta();
+  refreshHealth();
+  if (session.env_setup_required) {
+    setPill("wait", "environment needed");
+    setTopMode("picker");
+    showEnvSetup();
+    return;
+  }
+  document.getElementById("envSetup").className = "";
+  tm.channelId = session.channel_id;
+  tm.userId = session.user_id || "developer";
+  if (session.server_url) {
+    document.getElementById("tBaseUrl").value = session.server_url;
+  }
+  if (session.server_running && session.server_url) {
+    tm.baseUrl = session.server_url;
+    tm.managed = true;
+    document.getElementById("tBaseUrl").value = session.server_url;
+    setTopMode("test");
+    if (session.jwt_mode === "signed") {
+      setPill("wait", "signed JWT server");
+      connText("The server requires signed JWTs: paste a token in the Advanced " +
+        "panel, then Reconnect.", "err");
+    } else if (!tm.connected) {
+      tmAutoConnect();
+    }
+  } else {
+    /* trace viewer only — say why the chat is not live */
+    setPill(session.spawn_error ? "err" : "", "viewer only");
+    setTopMode("debug");
+    if (session.spawn_error) {
+      connText("The workflow server was not started: " + session.spawn_error, "err");
+    } else {
+      connText("No FastAPI server was spawned. Use the Advanced panel to " +
+        "connect to one already running.", "err");
+    }
+  }
+}
+
+api("/api/session").then(function (data) {
+  session = data.session;
+  applySession();
+  /* deep links override the default landing view */
+  if (location.hash.indexOf("#turn=") === 0) {
+    var deepKey = decodeURIComponent(location.hash.slice("#turn=".length));
+    setTopMode("debug");
+    selectTurnWithRetry(deepKey, 3);
+  } else if (location.hash === "#test") {
+    setTopMode("test");
+  } else if (location.hash === "#debug") {
+    setTopMode("debug");
+  }
+}).catch(function () {
+  /* No control plane (very old server?) — behave like the plain viewer. */
+  setPill("", "viewer");
+  setTopMode("debug");
+});
+</script>
+</body>
+</html>

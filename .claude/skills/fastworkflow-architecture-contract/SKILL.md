@@ -246,7 +246,8 @@ Only the first is documented in CLAUDE.md / `.claude/rules/command-authoring.md`
 `_commands/TodoItem/_TodoItem.py` (`get_parent` returns `command_context_object.parent`),
 and `_commands/context_inheritance_model.json` (TodoList inherits TodoItem's commands).
 This is real, load-bearing runtime behavior, used by 10+ test files. It is a documented-
-nowhere-else feature; PRD at `fastworkflow/docs/context_modules_prd.txt`.
+nowhere-else feature; PRD at `docs/context_modules_prd.txt` (moved out of the
+package dir from `fastworkflow/docs/` on 2026-08-25).
 
 Also note: the CME workflow dir contains a root-level `command_context_model.json` that no
 package code reads (`grep -rn 'command_context_model.json' fastworkflow/ --include='*.py'`

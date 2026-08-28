@@ -8,8 +8,8 @@ Source of truth: `fastworkflow/run_fastapi_mcp/__main__.py` (routes),
 
 Do NOT trust `fastworkflow/run_fastapi_mcp/README.md` (stale: wrong launch command, obsolete 504
 semantics, false MCP-prompts claim) or the shipped
-`fastworkflow/docs/integrate-chat-agent/reference.md` (untested contract; will drift on the
-fix-qtq wire change).
+`fastworkflow/skills_for_coding_fastworkflows/integrate-chat-agent/reference.md` (untested
+contract; will drift on the fix-qtq wire change).
 
 ## Launch
 

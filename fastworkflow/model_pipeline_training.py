@@ -387,16 +387,34 @@ class CommandRouter:
         """
         if we are confident we will return a single label otherwise we will return a list
         """
+        return self.predict_with_details(command)[0]
+
+    def predict_with_details(self, command: str) -> tuple[list[str], dict]:
+        """``predict`` plus the numbers behind the decision, for observability
+        (fw.nlu.intent span attributes — D3 as amended).
+
+        The details dict is JSON-safe: {model_tier, confidence,
+        ambiguous_threshold, confident, top_label, topk_labels}. The behavior
+        of ``predict`` is unchanged — it delegates here.
+        """
         results = predict_single_sentence(self.modelpipeline, command, self.label_encoder_path)
-        if (
-            results['used_distil']
-            and results['confidence'] > self.large_ambiguous_confidence_threshold
-            or not results['used_distil']
-            and results['confidence'] > self.tiny_ambiguous_confidence_threshold
-        ):
-            return [results['label']]
-        else:
-            return results['topk_labels']
+        used_distil = bool(results['used_distil'])
+        ambiguous_threshold = (
+            self.large_ambiguous_confidence_threshold
+            if used_distil
+            else self.tiny_ambiguous_confidence_threshold
+        )
+        confident = results['confidence'] > ambiguous_threshold
+        labels = [results['label']] if confident else results['topk_labels']
+        details = {
+            "model_tier": "large" if used_distil else "tiny",
+            "confidence": float(results['confidence']),
+            "ambiguous_threshold": float(ambiguous_threshold),
+            "confident": confident,
+            "top_label": str(results['label']),
+            "topk_labels": [str(label) for label in results['topk_labels']],
+        }
+        return list(labels), details
             
         
 class ModelPipeline:

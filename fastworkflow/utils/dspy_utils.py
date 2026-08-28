@@ -5,6 +5,7 @@ from typing import Type, Optional, Dict, Any, Union, get_args, get_origin, Tuple
 import fastworkflow
 from fastworkflow.utils.logging import logger
 
+
 def get_lm(model_env_var: str, api_key_env_var: Optional[str] = None, **kwargs):
     """
     Get the dspy LM object.
@@ -60,13 +61,22 @@ def get_lm(model_env_var: str, api_key_env_var: Optional[str] = None, **kwargs):
         logger.debug(f"Routing {model_env_var} through LiteLLM Proxy at {proxy_api_base}")
         
         if proxy_api_key:
-            return dspy.LM(model=model, api_base=proxy_api_base, api_key=proxy_api_key, **kwargs)
+            return dspy.LM(
+                model=model,
+                api_base=proxy_api_base,
+                api_key=proxy_api_key,
+                **kwargs,
+            )
         else:
             return dspy.LM(model=model, api_base=proxy_api_base, **kwargs)
     
     # Direct provider call (existing behavior)
     api_key = fastworkflow.get_env_var(api_key_env_var) if api_key_env_var else None
-    return dspy.LM(model=model, api_key=api_key, **kwargs) if api_key else dspy.LM(model=model, **kwargs)
+    return (
+        dspy.LM(model=model, api_key=api_key, **kwargs)
+        if api_key
+        else dspy.LM(model=model, **kwargs)
+    )
 
 def _process_field(field_info, is_input: bool) -> Tuple[Any, Any, bool]:
     """Process a single field and return its type, DSPy field, and optional status."""

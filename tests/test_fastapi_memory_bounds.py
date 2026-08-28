@@ -33,14 +33,49 @@ from fastapi.testclient import TestClient
 import fastworkflow
 from fastworkflow.conversation_history_io import extract_turns_from_history
 from fastworkflow.run_fastapi_mcp import server_memory
-from fastworkflow.run_fastapi_mcp.conversation_store import ConversationStore
 from fastworkflow.run_fastapi_mcp.turns import TurnRegistry, submit_turn
 from fastworkflow.run_fastapi_mcp.utils import (
     MAX_CONVERSATION_TURNS_IN_MEMORY,
-    save_conversation_incremental,
     save_last_turn_feedback,
+    trim_conversation_window,
 )
 from fastworkflow.utils.logging import logger
+
+
+def _record_turn(runtime, summary: str, traces: str | None = None) -> None:
+    """One recorded conversation turn, the way a real turn records itself.
+
+    Since the Phase-7 consolidation there is no incremental save to call: the
+    turn record IS the durable conversation, and it is written by the finalize
+    chokepoint inside the turn. So this drives a real logical turn — begin,
+    append the history entry, finalize — and then windows memory exactly as
+    ``turns._run_turn`` does after the work returns.
+    """
+    ctx = runtime.execution_context
+    ctx._begin_turn(summary)
+    ctx.append_conversation_turn(summary, traces)
+    ctx._build_turn_result(
+        fastworkflow.CommandOutput(
+            command_name="",
+            command_response=fastworkflow.CommandResponse(response="ok"),
+        )
+    )
+    trim_conversation_window(runtime, logger)
+
+
+def _durable_summaries(runtime, conv_id: int | None = None) -> list[str]:
+    """Every usable turn of a conversation, oldest first, as summaries."""
+    store = runtime.observability_store
+    assert store is not None, "no observability store, so nothing is durable"
+    runtime.execution_context.trace_sink.flush()
+    return [
+        entry["conversation summary"]
+        for entry in store.get_memory_window(
+            runtime.channel_id,
+            conv_id if conv_id is not None else runtime.active_conversation_id,
+            1_000_000,
+        )
+    ]
 
 
 @pytest.fixture
@@ -318,45 +353,46 @@ def test_identical_completed_turns_are_not_deduplicated(app_module):
     assert len(calls) == 2
 
 
-class _LockAwareConversationStore(ConversationStore):
-    """A real store that records whether the registry lock was held during its I/O."""
-
-    def __init__(self, channel_id: str, base_folder: str, registry: TurnRegistry):
-        super().__init__(channel_id, base_folder)
-        self._registry = registry
-        self.io_operations = 0
-        self.io_under_registry_lock = 0
-
-    def _get_db(self):
-        self.io_operations += 1
-        if self._registry._lock.locked():
-            self.io_under_registry_lock += 1
-        return super()._get_db()
-
-
 def test_no_store_io_while_the_registry_lock_is_held(app_module):
-    """Store I/O under the registry lock would block turn submission on every channel."""
+    """Store I/O under the registry lock would block turn submission on every channel.
+
+    The turn record is written synchronously on the caller thread now (Phase 7
+    §2.4), which makes this sharper than it was against the legacy store: the
+    write is squarely on the turn path, so holding the registry lock across it
+    would serialize every channel's submissions behind one channel's disk.
+    """
     registry = TurnRegistry()
     channel_id = _channel("lockio")
+    io = {"operations": 0, "under_registry_lock": 0}
 
     async def body():
         runtime = await _build_runtime(app_module, channel_id)
-        watched = _LockAwareConversationStore(
-            channel_id, runtime.conversation_store.db_path.rsplit(os.sep, 1)[0], registry
-        )
-        runtime.conversation_store = watched
-        runtime.execution_context.append_conversation_turn("a turn worth saving")
+        store = runtime.observability_store
+        assert store is not None
+        original_connect = store._connect
 
-        await _run_one_turn(
-            app_module, runtime, registry, kind="initialize_startup",
-            idempotency_key="lockio-1",
-        )
-        return watched
+        def watched_connect(*args, **kwargs):
+            io["operations"] += 1
+            if registry._lock.locked():
+                io["under_registry_lock"] += 1
+            return original_connect(*args, **kwargs)
 
-    watched = asyncio.run(body())
+        store._connect = watched_connect
+        try:
+            await _run_one_turn(
+                app_module, runtime, registry, kind="initialize_startup",
+                idempotency_key="lockio-1",
+                # The work has to reach the finalize chokepoint, because that is
+                # what does the store I/O this test is watching for.
+                work=lambda: _record_turn(runtime, "a turn worth saving"),
+            )
+        finally:
+            store._connect = original_connect
 
-    assert watched.io_operations > 0, "the turn did no store I/O at all"
-    assert watched.io_under_registry_lock == 0
+    asyncio.run(body())
+
+    assert io["operations"] > 0, "the turn did no store I/O at all"
+    assert io["under_registry_lock"] == 0
 
 
 def test_creation_locks_do_not_accumulate(app_module):
@@ -390,8 +426,7 @@ def test_durable_conversation_keeps_turns_the_memory_window_dropped(app_module):
     async def body():
         runtime = await _build_runtime(app_module, channel_id)
         for i in range(total_turns):
-            runtime.execution_context.append_conversation_turn(f"turn-{i}")
-            save_conversation_incremental(runtime, extract_turns_from_history, logger)
+            _record_turn(runtime, f"turn-{i}")
         return runtime
 
     runtime = asyncio.run(body())
@@ -400,86 +435,41 @@ def test_durable_conversation_keeps_turns_the_memory_window_dropped(app_module):
     assert len(messages) == MAX_CONVERSATION_TURNS_IN_MEMORY
     assert messages[-1]["conversation summary"] == f"turn-{total_turns - 1}"
 
-    durable = runtime.conversation_store.get_conversation(
-        runtime.active_conversation_id
-    )
-    assert [t["conversation summary"] for t in durable["turns"]] == [
+    assert _durable_summaries(runtime) == [
         f"turn-{i}" for i in range(total_turns)
     ]
 
 
-class _CountingKVStore:
-    """Forwards to a real KVStore and tallies the JSON bytes handed to it."""
-
-    def __init__(self, db, tally: dict):
-        self._db = db
-        self._tally = tally
-
-    def __setitem__(self, key, value):
-        self._tally["bytes_written"] += len(json.dumps(value).encode("utf-8"))
-        self._tally["writes"] += 1
-        self._db[key] = value
-
-    def __getitem__(self, key):
-        return self._db[key]
-
-    def __delitem__(self, key):
-        del self._db[key]
-
-    def __contains__(self, key):
-        return key in self._db
-
-    def get(self, key, default=None):
-        return self._db.get(key, default)
-
-    def close(self):
-        self._db.close()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        self.close()
-
-
-class _CountingConversationStore(ConversationStore):
-    """A real store whose write volume can be measured."""
-
-    def __init__(self, channel_id: str, base_folder: str):
-        super().__init__(channel_id, base_folder)
-        self.tally = {"bytes_written": 0, "writes": 0}
-
-    def _get_db(self):
-        return _CountingKVStore(super()._get_db(), self.tally)
-
-
-def test_incremental_save_writes_only_the_new_turns(app_module, tmp_path):
+def test_recording_a_turn_writes_only_that_turn(app_module):
     """Write volume over N turns is linear, not quadratic.
 
-    Replacing the whole turn list per save made turn n rewrite turns 1..n-1 — a
-    latency and durable-growth defect on its own, before any memory argument.
-    The old full-replace path is measured alongside so the bound is a comparison
-    rather than a magic constant.
+    The legacy store's full-replace save made turn n rewrite turns 1..n-1 — a
+    latency and durable-growth defect on its own, before any memory argument. It
+    was fixed there by an incremental append, and is now structural: a turn is
+    one row keyed by its own turn_key, and turn rows are write-once, so nothing
+    can rewrite a turn that has already landed.
+
+    Pinned by row identity rather than by counting bytes, because that is what
+    the property actually is now.
     """
-    turn_count = 40
-    turns = [_payload_turn(i) for i in range(turn_count)]
-    payload_bytes = sum(len(json.dumps(t).encode("utf-8")) for t in turns)
+    channel_id = _channel("linear")
+    turn_count = 12
 
-    appending = _CountingConversationStore("appending", str(tmp_path))
-    for turn in turns:
-        appending.append_conversation_turns(1, [turn])
+    async def body():
+        runtime = await _build_runtime(app_module, channel_id)
+        for i in range(turn_count):
+            _record_turn(runtime, f"turn-{i}", traces="x" * 4096)
+        runtime.execution_context.trace_sink.flush()
+        return runtime
 
-    replacing = _CountingConversationStore("replacing", str(tmp_path))
-    for i, turn in enumerate(turns):
-        replacing.save_conversation_turns(1, turns[: i + 1])
+    runtime = asyncio.run(body())
+    store = runtime.observability_store
+    rows = store.list_turns(channel_id=channel_id, limit=1000)
 
-    assert [t["conversation summary"] for t in appending.get_conversation(1)["turns"]] == [
-        t["conversation summary"] for t in turns
-    ]
-    # Linear: each turn's bytes, plus a small metadata record per save.
-    assert appending.tally["bytes_written"] < 2 * payload_bytes
-    # Quadratic: ~N/2 times the payload. The point is the growth rate, not the ratio.
-    assert replacing.tally["bytes_written"] > 8 * appending.tally["bytes_written"]
+    assert len(rows) == turn_count, "a turn wrote more than its own row"
+    assert len({row["turn_key"] for row in rows}) == turn_count
+    # Ordinals are dense from 1, so no turn was written twice under two keys.
+    assert sorted(row["ordinal"] for row in rows) == list(range(1, turn_count + 1))
 
 
 def test_conversation_summary_reads_the_durable_record_not_the_window(app_module):
@@ -490,8 +480,8 @@ def test_conversation_summary_reads_the_durable_record_not_the_window(app_module
     async def body():
         runtime = await _build_runtime(app_module, channel_id)
         for i in range(total_turns):
-            runtime.execution_context.append_conversation_turn(f"turn-{i}")
-            save_conversation_incremental(runtime, extract_turns_from_history, logger)
+            _record_turn(runtime, f"turn-{i}")
+        runtime.execution_context.trace_sink.flush()
         return runtime
 
     runtime = asyncio.run(body())
@@ -506,8 +496,16 @@ def test_conversation_summary_reads_the_durable_record_not_the_window(app_module
     assert for_summary[0]["conversation summary"] == "turn-0"
 
 
-def test_activate_conversation_restores_the_window_and_the_high_water_mark(app_module):
-    """A restored conversation is already durable; re-appending it would duplicate it."""
+def test_activate_conversation_restores_the_window_without_duplicating_it(app_module):
+    """A restored conversation is already durable; re-recording it would duplicate it.
+
+    The high-water mark this used to assert on is gone (ruling C5): a turn is
+    recorded under its own turn_key at finalize, so there is no index into the
+    live message list that a restore has to keep aligned. What still has to hold
+    is the outcome that mark existed for — activating a conversation must not
+    append a second copy of it — and it now holds structurally, because nothing
+    re-records a turn that already has a key.
+    """
     channel_id = _channel("activate")
     total_turns = MAX_CONVERSATION_TURNS_IN_MEMORY + 12
 
@@ -518,11 +516,10 @@ def test_activate_conversation_restores_the_window_and_the_high_water_mark(app_m
 
     async def seed():
         runtime = await app_module.session_manager.get_session(channel_id)
-        conv_id = runtime.conversation_store.reserve_next_conversation_id()
-        runtime.conversation_store.append_conversation_turns(
-            conv_id, [_payload_turn(i, size_bytes=64) for i in range(total_turns)]
-        )
-        return conv_id
+        for i in range(total_turns):
+            _record_turn(runtime, f"turn-{i}", traces="x" * 64)
+        runtime.execution_context.trace_sink.flush()
+        return runtime.active_conversation_id
 
     conv_id = asyncio.run(seed())
 
@@ -536,23 +533,15 @@ def test_activate_conversation_restores_the_window_and_the_high_water_mark(app_m
         assert len(runtime.execution_context.conversation_history.messages) == (
             MAX_CONVERSATION_TURNS_IN_MEMORY
         )
-        assert runtime.durable_turn_count == MAX_CONVERSATION_TURNS_IN_MEMORY
+        # Windowing straight after activation must not change the record.
+        trim_conversation_window(runtime, logger)
+        assert len(_durable_summaries(runtime, conv_id)) == total_turns
 
-        # A save straight after activation must be a no-op, not a second copy.
-        appended = save_conversation_incremental(
-            runtime, extract_turns_from_history, logger
-        )
-        assert appended == 0
-        assert runtime.conversation_store.count_conversation_turns(conv_id) == total_turns
-
-        # A genuinely new turn still appends, exactly once.
-        runtime.execution_context.append_conversation_turn("brand new")
-        assert save_conversation_incremental(
-            runtime, extract_turns_from_history, logger
-        ) == 1
-        durable = runtime.conversation_store.get_conversation(conv_id)
-        assert len(durable["turns"]) == total_turns + 1
-        assert durable["turns"][-1]["conversation summary"] == "brand new"
+        # A genuinely new turn still lands, exactly once.
+        _record_turn(runtime, "brand new")
+        summaries = _durable_summaries(runtime, conv_id)
+        assert len(summaries) == total_turns + 1
+        assert summaries[-1] == "brand new"
 
     asyncio.run(check())
 
@@ -565,10 +554,7 @@ def test_in_memory_conversation_bytes_plateau(app_module):
     async def body():
         runtime = await _build_runtime(app_module, channel_id)
         for i in range(240):
-            runtime.execution_context.append_conversation_turn(
-                f"turn-{i}", conversation_traces="x" * 4096
-            )
-            save_conversation_incremental(runtime, extract_turns_from_history, logger)
+            _record_turn(runtime, f"turn-{i}", traces="x" * 4096)
             if i in (79, 159, 239):
                 samples[i] = server_memory.conversation_memory_metrics([runtime])
         return runtime
@@ -581,13 +567,17 @@ def test_in_memory_conversation_bytes_plateau(app_module):
     assert samples[239]["approx_bytes"] == pytest.approx(
         samples[79]["approx_bytes"], rel=0.05
     )
-    assert runtime.conversation_store.count_conversation_turns(
-        runtime.active_conversation_id
-    ) == 240
+    store = runtime.observability_store
+    runtime.execution_context.trace_sink.flush()
+    assert store.count_usable_turns(channel_id, runtime.active_conversation_id) == 240
 
 
 def test_feedback_on_an_already_durable_turn_is_persisted(app_module):
-    """Feedback edits a recorded turn, which the append path cannot express."""
+    """Feedback edits a recorded turn, which a write-once turn row cannot express.
+
+    Hence the separate ``feedback`` table, joined into the memory window: turn
+    rows stay write-once while feedback stays mutable [R3].
+    """
     channel_id = _channel("feedback")
 
     client = TestClient(app_module.app)
@@ -598,8 +588,8 @@ def test_feedback_on_an_already_durable_turn_is_persisted(app_module):
     async def seed():
         runtime = await app_module.session_manager.get_session(channel_id)
         for i in range(3):
-            runtime.execution_context.append_conversation_turn(f"turn-{i}")
-            save_conversation_incremental(runtime, extract_turns_from_history, logger)
+            _record_turn(runtime, f"turn-{i}")
+        runtime.execution_context.trace_sink.flush()
         return runtime.active_conversation_id
 
     conv_id = asyncio.run(seed())
@@ -613,119 +603,289 @@ def test_feedback_on_an_already_durable_turn_is_persisted(app_module):
 
     async def check():
         runtime = await app_module.session_manager.get_session(channel_id)
-        durable = runtime.conversation_store.get_conversation(conv_id)
-        assert len(durable["turns"]) == 3, "feedback must not duplicate the turn"
-        assert durable["turns"][-1]["feedback"]["nl_feedback"] == "useful"
-        assert durable["turns"][0]["feedback"] is None
+        runtime.execution_context.trace_sink.flush()
+        window = runtime.observability_store.get_memory_window(
+            channel_id, conv_id, 1_000_000
+        )
+        assert len(window) == 3, "feedback must not duplicate the turn"
+        assert window[-1]["feedback"]["nl_feedback"] == "useful"
+        assert window[0]["feedback"] is None
 
     asyncio.run(check())
 
 
-def test_a_stale_inline_turns_field_is_ignored(app_module, tmp_path):
-    """After the sqlite migration, only per-turn keys are authoritative.
+def test_an_undurable_turn_is_not_trimmed_out_of_memory(app_module):
+    """The successor to the stale-high-water-mark guard (rulings I1/I2).
 
-    Pre-migration RocksDB stores could keep an inline ``turns`` list. New
-    ``.sqlite3`` stores ignore that field so a poisoned inline list cannot
-    duplicate or reorder the durable per-turn entries.
+    The old hazard: a mark that outran the history certified unrecorded turns as
+    durable, and the trim then dropped them. There is no mark now — the trim
+    asks the sink whether the last record actually landed. So the hazard becomes
+    "the write degraded and we trimmed anyway", and the answer is to defer: the
+    turn stays in memory, and the pending-retry ring still owes it to the store.
     """
-    from fastworkflow.kvstore import KVStore
-
-    store = ConversationStore("rollback", str(tmp_path))
-    conv_id = store.reserve_next_conversation_id()
-    for i in range(3):
-        store.append_conversation_turns(conv_id, [_payload_turn(i, size_bytes=32)])
-
-    db = KVStore(store.db_path)
-    conv = db[f"conv:{conv_id}"]
-    conv["turns"] = [_payload_turn(i, size_bytes=32) for i in range(4)]
-    db[f"conv:{conv_id}"] = conv
-    db.close()
-
-    summaries = [t["conversation summary"] for t in store.get_conversation(conv_id)["turns"]]
-    assert summaries == [f"turn-{i}" for i in range(3)]
-    assert store.count_conversation_turns(conv_id) == 3
-
-    store.append_conversation_turns(conv_id, [_payload_turn(3, size_bytes=32)])
-    summaries = [t["conversation summary"] for t in store.get_conversation(conv_id)["turns"]]
-    assert summaries == [f"turn-{i}" for i in range(4)]
-
-
-def test_summary_read_never_materializes_turn_payloads(app_module, tmp_path):
-    """Loading a whole conversation to compute a topic string reintroduces the growth."""
-    store = ConversationStore("summaries", str(tmp_path))
-    conv_id = store.reserve_next_conversation_id()
-    store.append_conversation_turns(
-        conv_id, [_payload_turn(i, size_bytes=8192) for i in range(5)]
-    )
-
-    summaries = store.get_conversation_summaries(conv_id)
-
-    assert [s["conversation summary"] for s in summaries] == [
-        f"turn-{i}" for i in range(5)
-    ]
-    assert all(set(s) == {"conversation summary"} for s in summaries)
-    assert len(json.dumps(summaries)) < 1024
-
-
-def test_a_stale_high_water_mark_re_appends_rather_than_dropping_turns(app_module):
-    """A mark that outran the history must not certify unrecorded turns as durable."""
     channel_id = _channel("stalemark")
+    seen: dict = {}
 
     async def body():
         runtime = await _build_runtime(app_module, channel_id)
-        for i in range(3):
-            runtime.execution_context.append_conversation_turn(f"turn-{i}")
-            save_conversation_incremental(runtime, extract_turns_from_history, logger)
-
-        # A mark established against some other history: the guard must fall back
-        # to re-appending, because a duplicate is recoverable and a loss is not.
-        runtime.durable_turn_count = 99
-        runtime.execution_context.append_conversation_turn("must-not-be-lost")
-        appended = save_conversation_incremental(
-            runtime, extract_turns_from_history, logger
+        for i in range(MAX_CONVERSATION_TURNS_IN_MEMORY + 3):
+            _record_turn(runtime, f"turn-{i}")
+        seen["trimmed_while_healthy"] = len(
+            runtime.execution_context.conversation_history.messages
         )
-        return runtime, appended
 
-    runtime, appended = asyncio.run(body())
+        # A wedged DB, as the sink sees it.
+        sink = runtime.execution_context.trace_sink
+        sink._sync_breaker_until = time.monotonic() + 300
+        _record_turn(runtime, "must-not-be-lost")
+        seen["ack"] = runtime.execution_context.last_turn_record_stored
+        seen["in_memory_after"] = [
+            m["conversation summary"]
+            for m in runtime.execution_context.conversation_history.messages
+        ]
+        seen["ring_depth"] = sink.pending_retry_depth()
+        return runtime
 
-    assert appended == 4
-    durable = runtime.conversation_store.get_conversation(
-        runtime.active_conversation_id
+    runtime = asyncio.run(body())
+
+    assert seen["trimmed_while_healthy"] == MAX_CONVERSATION_TURNS_IN_MEMORY, (
+        "the window was not being enforced at all, so deferring proves nothing"
     )
-    assert "must-not-be-lost" in [
-        t["conversation summary"] for t in durable["turns"]
+    assert seen["ack"] is False, "the degraded path was never taken"
+    assert "must-not-be-lost" in seen["in_memory_after"]
+    assert len(seen["in_memory_after"]) == MAX_CONVERSATION_TURNS_IN_MEMORY + 1, (
+        "the trim ran on a turn that was not durable yet, which is the loss the "
+        "ack gate exists to prevent"
+    )
+    assert seen["ring_depth"] >= 1, "the record never entered the retry ring"
+    # And the ring settles it: the turn reaches the store regardless.
+    assert "must-not-be-lost" in _durable_summaries(runtime)
+
+
+def test_a_cold_restore_rebuilds_memory_from_the_turns_table(app_module):
+    """Gate 1 ([R3], §2.3): memory comes from the observability DB now.
+
+    The window is bounded by the read, not by slicing a full hydration, so a
+    long conversation is never resident in full just to produce twenty turns.
+    """
+    channel_id = _channel("coldrestore")
+    total_turns = MAX_CONVERSATION_TURNS_IN_MEMORY + 8
+
+    async def seed():
+        runtime = await _build_runtime(app_module, channel_id)
+        for i in range(total_turns):
+            _record_turn(runtime, f"turn-{i}")
+        runtime.execution_context.trace_sink.flush()
+        return runtime.active_conversation_id
+
+    conv_id = asyncio.run(seed())
+
+    async def restore():
+        # Evict without clearing durable state, then create cold.
+        await app_module.session_manager.evict_live_session(channel_id)
+        runtime = await _build_runtime(app_module, channel_id)
+        return runtime
+
+    runtime = asyncio.run(restore())
+
+    messages = runtime.execution_context.conversation_history.messages
+    assert runtime.active_conversation_id == conv_id, (
+        "the cold restore started a new conversation instead of continuing one"
+    )
+    assert len(messages) == MAX_CONVERSATION_TURNS_IN_MEMORY, (
+        "the restore read the whole conversation rather than the window"
+    )
+    assert [m["conversation summary"] for m in messages] == [
+        f"turn-{i}" for i in range(total_turns - MAX_CONVERSATION_TURNS_IN_MEMORY, total_turns)
     ]
+    # And feedback given right after a restore has a turn to attach to.
+    assert runtime.execution_context.last_completed_turn_key is not None
+
+
+def test_a_cold_restore_reuses_an_empty_conversation_instead_of_minting(app_module):
+    """An idle channel must not accumulate a conversation row per cold start.
+
+    /initialize mints a conversation id eagerly so the first turn's records are
+    attributed. A channel that never sends a message and is then evicted has
+    exactly one conversation, with no turns. Minting again on the next cold
+    start strands that one and does it again on every restore after that.
+
+    This is the case where NOTHING has turns; when something does, the
+    step-back rules (ruling I7) apply instead and the conversation with turns
+    wins — the test below covers that.
+    """
+    channel_id = _channel("emptyreuse")
+
+    async def seed():
+        runtime = await _build_runtime(app_module, channel_id)
+        assert runtime.active_conversation_id > 0, "no id was minted eagerly"
+        return runtime.active_conversation_id
+
+    reserved = asyncio.run(seed())
+
+    async def restore():
+        await app_module.session_manager.evict_live_session(channel_id)
+        return await _build_runtime(app_module, channel_id)
+
+    runtime = asyncio.run(restore())
+
+    assert runtime.active_conversation_id == reserved, (
+        f"the restore minted {runtime.active_conversation_id} instead of reusing "
+        f"the reserved-but-empty {reserved}"
+    )
+    assert runtime.execution_context.conversation_history.messages == [], (
+        "an empty conversation restored history from somewhere"
+    )
+
+
+def test_a_cold_restore_steps_back_to_the_last_conversation_with_turns(app_module):
+    """The step-back binds the stepped-back conversation as the active one.
+
+    Legacy parity, ratified as ruling I7: a conversation with turns outranks a
+    newer empty one, and whichever is restored is also the one bound, so the
+    next turn continues it rather than being recorded against a third.
+    """
+    channel_id = _channel("stepback")
+
+    async def seed():
+        runtime = await _build_runtime(app_module, channel_id)
+        store = runtime.observability_store
+        _record_turn(runtime, "conversation with content")
+        with_turns = runtime.active_conversation_id
+        # Two empties on top, so the newest has nothing and the step-back has to
+        # look past it.
+        store.mint_conversation_id(channel_id)
+        runtime.execution_context.trace_sink.flush()
+        return with_turns
+
+    with_turns = asyncio.run(seed())
+
+    async def restore():
+        await app_module.session_manager.evict_live_session(channel_id)
+        return await _build_runtime(app_module, channel_id)
+
+    runtime = asyncio.run(restore())
+
+    summaries = [
+        m["conversation summary"]
+        for m in runtime.execution_context.conversation_history.messages
+    ]
+    assert summaries == ["conversation with content"], (
+        "the step-back did not restore the conversation that had turns"
+    )
+    assert runtime.active_conversation_id == with_turns, (
+        "memory was restored from one conversation while another was bound, so "
+        "the next turn would be recorded somewhere else"
+    )
+
+
+def test_feedback_after_an_activation_lands_on_the_activated_conversation(app_module):
+    """Activating a conversation moves the feedback target with it (ruling I3).
+
+    Feedback is keyed by ``last_completed_turn_key``, which names the turn this
+    process ran last. An activation replaces the in-memory history with another
+    conversation's, so leaving that key alone would file the user's feedback
+    against a turn of the conversation they just navigated away from.
+    """
+    channel_id = _channel("activatefeedback")
+
+    client = TestClient(app_module.app)
+    init = client.post("/initialize", json={"channel_id": channel_id})
+    assert init.status_code == 200
+    headers = {"Authorization": f"Bearer {init.json()['access_token']}"}
+
+    async def seed():
+        runtime = await app_module.session_manager.get_session(channel_id)
+        store = runtime.observability_store
+        # Conversation A, then rotate to B and record a turn there, so the
+        # process's last completed turn belongs to B while A is activated.
+        _record_turn(runtime, "conversation A turn")
+        conv_a = runtime.active_conversation_id
+        runtime.active_conversation_id = store.mint_conversation_id(channel_id)
+        runtime.execution_context.bind_observability_identity(
+            conversation_id=runtime.active_conversation_id
+        )
+        runtime.execution_context.clear_conversation_history()
+        _record_turn(runtime, "conversation B turn")
+        conv_b = runtime.active_conversation_id
+        runtime.execution_context.trace_sink.flush()
+        return conv_a, conv_b
+
+    conv_a, conv_b = asyncio.run(seed())
+
+    resp = client.post(
+        "/activate_conversation", headers=headers, json={"conversation_id": conv_a}
+    )
+    assert resp.status_code == 200
+
+    resp = client.post(
+        "/post_feedback",
+        headers=headers,
+        json={"binary_or_numeric_score": 1, "nl_feedback": "about A"},
+    )
+    assert resp.status_code == 200
+
+    async def check():
+        runtime = await app_module.session_manager.get_session(channel_id)
+        runtime.execution_context.trace_sink.flush()
+        store = runtime.observability_store
+        window_a = store.get_memory_window(channel_id, conv_a, 100)
+        window_b = store.get_memory_window(channel_id, conv_b, 100)
+        return window_a, window_b
+
+    window_a, window_b = asyncio.run(check())
+
+    assert [entry["feedback"] for entry in window_b] == [None], (
+        "the feedback landed on the conversation the user navigated away from"
+    )
+    assert len(window_a) == 1
+    assert window_a[0]["feedback"]["nl_feedback"] == "about A"
 
 
 def test_feedback_is_not_written_into_a_mismatched_conversation(app_module):
-    """Rewriting by position needs the mark and the conversation to be the same one."""
+    """Feedback follows the turn it was given on, not the active conversation.
+
+    Keying by turn_key (ruling I3/C4) is what makes this structural rather than
+    guarded: repointing the runtime at another conversation cannot move the
+    feedback, because the key names a row, not a position.
+    """
     channel_id = _channel("mismatch")
+    seen: dict = {}
 
     async def body():
         runtime = await _build_runtime(app_module, channel_id)
         for i in range(2):
-            runtime.execution_context.append_conversation_turn(f"turn-{i}")
-            save_conversation_incremental(runtime, extract_turns_from_history, logger)
+            _record_turn(runtime, f"turn-{i}")
+        seen["original_conv"] = runtime.active_conversation_id
+        seen["fed_turn_key"] = runtime.execution_context.last_completed_turn_key
 
-        # Point the runtime at a different, shorter conversation while the mark
-        # still describes the one it was reading.
-        other_id = runtime.conversation_store.reserve_next_conversation_id()
-        runtime.conversation_store.append_conversation_turns(
-            other_id, [_payload_turn(0, size_bytes=32)]
-        )
+        # Point the runtime at a different, shorter conversation after the turn
+        # the feedback belongs to has already been recorded.
+        store = runtime.observability_store
+        other_id = store.mint_conversation_id(channel_id)
         runtime.active_conversation_id = other_id
         runtime.execution_context.conversation_history.messages[-1]["feedback"] = {
             "nl_feedback": "belongs to the other conversation"
         }
 
-        save_last_turn_feedback(runtime, extract_turns_from_history, logger)
-        return runtime, other_id
+        save_last_turn_feedback(runtime, logger)
+        runtime.execution_context.trace_sink.flush()
+        seen["other_window"] = store.get_memory_window(channel_id, other_id, 100)
+        seen["original_window"] = store.get_memory_window(
+            channel_id, seen["original_conv"], 100
+        )
+        return runtime
 
-    runtime, other_id = asyncio.run(body())
+    asyncio.run(body())
 
-    other = runtime.conversation_store.get_conversation(other_id)
-    assert len(other["turns"]) == 1
-    assert other["turns"][0]["feedback"] is None
+    assert seen["other_window"] == [], (
+        "the other conversation gained a turn it never had"
+    )
+    fed = [entry for entry in seen["original_window"] if entry["feedback"]]
+    assert len(fed) == 1, "the feedback did not land on exactly one turn"
+    assert fed[0]["conversation summary"] == "turn-1", (
+        "the feedback landed on the wrong turn of the original conversation"
+    )
 
 
 def test_readiness_probe_reports_memory_metrics_on_demand(app_module):

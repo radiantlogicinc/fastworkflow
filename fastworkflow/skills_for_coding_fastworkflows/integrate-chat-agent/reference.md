@@ -113,7 +113,9 @@ Execute a specific command directly, bypassing intent + parameter extraction.
 - `GET /probes/healthz` → `{"status":"alive"}` (liveness).
 - `GET /probes/readyz` → `200 {"status":"ready", …}` or `503 {"status":"not_ready", …}` (readiness).
 
-### Admin (public; restrict in production)
+### Admin (off by default; `--enable_admin_endpoints` + auth)
+Both routes 404 unless the server was started with `--enable_admin_endpoints`,
+and require a Bearer token when it was. Neither is exposed as an MCP tool.
 - `POST /admin/dump_all_conversations` `{ "output_folder": "…" }` → dumps all conversations to JSONL.
 - `POST /admin/generate_mcp_token` `{ "channel_id":"…", "user_id":"…", "expires_days":365 }` → long-lived token for MCP clients.
 

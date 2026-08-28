@@ -219,6 +219,58 @@ print(json.dumps({
 """
 
 
+_INSPECT_POLICY_SCRIPT = """
+import json
+
+import dspy
+from dspy.clients import base_lm
+from litellm.types.utils import Usage
+
+from fastworkflow.run_fastapi_mcp import server_memory
+
+status = server_memory.install_policy(keep_history=True)
+
+
+class _UsageProbeLM(server_memory._ProbeLM):
+    \"\"\"The probe LM, plus the usage block a real provider returns.\"\"\"
+
+    def forward(self, prompt=None, messages=None, **kwargs):
+        response = super().forward(prompt=prompt, messages=messages, **kwargs)
+        response.usage = Usage(prompt_tokens=11, completion_tokens=7, total_tokens=18)
+        return response
+
+
+calls = server_memory.SERVER_DSPY_HISTORY_ENTRIES + 5
+lm = _UsageProbeLM()
+lm_history_lengths = []
+with dspy.context(lm=lm, adapter=dspy.ChatAdapter()):
+    for index in range(calls):
+        dspy.Predict(server_memory._ProbeSignature)(
+            question=f"unique inspect question {index}"
+        )
+        lm_history_lengths.append(len(lm.history))
+
+entry = lm.history[-1]
+
+print(json.dumps({
+    "asserted": status.asserted,
+    "keep_history": status.keep_history,
+    "history_bounded": status.history_bounded,
+    "details": status.details,
+    "calls": calls,
+    "max_lm_history": max(lm_history_lengths),
+    "global_history": len(base_lm.GLOBAL_HISTORY),
+    "global_history_limit": server_memory.SERVER_DSPY_HISTORY_ENTRIES,
+    "global_history_type": type(base_lm.GLOBAL_HISTORY).__name__,
+    "trace": len(dspy.settings.trace or []),
+    "entry_usage": entry.get("usage"),
+    "effective_disable_history": dspy.settings.disable_history,
+    "effective_max_history_size": dspy.settings.max_history_size,
+    "drift": server_memory.check_policy_in_force(),
+}))
+"""
+
+
 _ASYNC_OWNER_SCRIPT = """
 import asyncio
 import json
@@ -449,12 +501,45 @@ def test_install_policy_asserts_dspy_actually_reads_both_keys():
     assert observed["details"] == {
         "global_history_entries": 0,
         "lm_history_entries": 0,
+        "probe_calls": 1,
         "trace_entries": 0,
         "memory_cache_maxsize": server_memory.SERVER_DSPY_MEMORY_CACHE_ENTRIES,
     }
     assert observed["policy_settings"] == {"disable_history": True, "max_trace_size": 0}
     assert observed["effective_disable_history"] is True
     assert observed["effective_max_trace_size"] == 0
+
+
+def test_inspect_mode_retains_a_bounded_history_carrying_usage():
+    """keep_history=True trades retention for the usage the trace cannot otherwise get.
+
+    Off-history servers lose token usage, cost and cache-hit status entirely:
+    DSPy hands the LM callback the completion text and nothing else, so every
+    one of those fields is read back off a history entry. This mode keeps the
+    smallest history that still carries them, and the retention it costs is
+    bounded on BOTH axes — DSPy's own ceiling for the global list is 10_000
+    request-sized entries, which is the leak the default policy exists to stop.
+    """
+    observed = _run_in_venv(_INSPECT_POLICY_SCRIPT)
+
+    assert observed["asserted"] is True
+    assert observed["keep_history"] is True
+    assert observed["history_bounded"] is True
+    assert observed["effective_disable_history"] is False
+    assert observed["effective_max_history_size"] == 1
+
+    # Per-LM: never more than the single entry the callback reads back.
+    assert observed["max_lm_history"] == 1
+    # Global: the list trims itself, which only shows once the calls exceed it.
+    assert observed["calls"] > observed["global_history_limit"]
+    assert observed["global_history"] == observed["global_history_limit"]
+    assert observed["global_history_type"] == "BoundedHistory"
+    # The trace stays off in both modes.
+    assert observed["trace"] == 0
+
+    # The whole point: usage is present on the entry the trace reads.
+    assert observed["entry_usage"]["total_tokens"] == 18
+    assert observed["drift"] is None
 
 
 def test_repeated_lifespans_claim_the_async_owner_exactly_once(server_argv_preamble):

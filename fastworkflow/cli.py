@@ -256,8 +256,17 @@ def add_train_parser(subparsers):
 
 
 def add_run_parser(subparsers):
-    """Add subparser for the 'run' command."""
-    parser_run = subparsers.add_parser("run", help="Run a workflow's interactive assistant.")
+    """Add subparser for the 'run' command (alias: 'run_cli').
+
+    The alias names the transport the way its siblings do — run_cli /
+    run_chatbot / run_fastapi_mcp — while 'run' stays valid for existing
+    scripts and docs.
+    """
+    parser_run = subparsers.add_parser(
+        "run",
+        aliases=["run_cli"],
+        help="Run a workflow's interactive assistant in this terminal.",
+    )
     parser_run.add_argument("workflow_path", help="Path to the workflow folder")
     
     # Default env files will be determined at runtime based on the workflow path
@@ -288,6 +297,50 @@ def add_run_parser(subparsers):
     )
     parser_run.set_defaults(func=lambda args: run_with_defaults(args))
 
+def add_run_chatbot_parser(subparsers):
+    """Add subparser for the 'run_chatbot' command (browser chat + observability viewer)."""
+    parser_run_chatbot = subparsers.add_parser(
+        "run_chatbot",
+        help="Run a workflow's browser chatbot: a localhost UI to chat with the "
+             "workflow and inspect what each turn did (observability viewer).",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    # Test mode [R19 as amended]: the workflow's FastAPI server is spawned
+    # AUTOMATICALLY (loopback-only, CORS pinned to loopback origins, stopped
+    # when the chatbot exits) so the chat works out of the box. Passing
+    # --server-port skips the spawn and means an existing server on that port.
+    parser_run_chatbot.add_argument(
+        "--start-server", action="store_true", default=False,
+        help=argparse.SUPPRESS,  # historical opt-in; auto-start is now the default
+    )
+    parser_run_chatbot.add_argument(
+        "--server-port", type=int, default=None,
+        help="Do not spawn a FastAPI server; use one already running on this "
+             "port (Advanced panel). Omit to spawn a loopback server "
+             "automatically (prefers port 8000).",
+    )
+    parser_run_chatbot.add_argument(
+        "--allow-unsigned-jwt", action="store_true", default=False,
+        help=argparse.SUPPRESS,  # historical opt-in; unsigned dev JWTs are now the
+                                 # default for the loopback-only auto-spawned server
+    )
+    parser_run_chatbot.add_argument(
+        "--expect-encrypted-jwt", action="store_true", default=False,
+        dest="expect_encrypted_jwt",
+        help="Spawn the server with JWT signature verification enabled (the "
+             "chat tab then needs a signed token pasted into its Advanced "
+             "connection panel)",
+    )
+    def _run_chatbot_main_wrapper(args):
+        # Lazy import: the chatbot server is stdlib-only [R23] but pulls in the
+        # fastworkflow package for state paths / the store. Env-file
+        # auto-detection happens inside run_chatbot_main (per selected
+        # workflow — the workflow may be chosen in the UI, after launch).
+        from .run_chatbot.server import run_chatbot_main as _run_chatbot_main
+        sys.exit(_run_chatbot_main(args))
+
+    parser_run_chatbot.set_defaults(func=_run_chatbot_main_wrapper)
+
 def add_run_fastapi_mcp_parser(subparsers):
     """Add subparser for the 'run_fastapi_mcp' command."""
     parser_run_fastapi_mcp = subparsers.add_parser("run_fastapi_mcp", help="Run a workflow as a FastAPI server with MCP support.")
@@ -312,6 +365,10 @@ def add_run_fastapi_mcp_parser(subparsers):
     parser_run_fastapi_mcp.add_argument("--project_folderpath", help="Optional path to project folder containing application code", default=None)
     parser_run_fastapi_mcp.add_argument("--port", type=int, default=8000, help="Port to run the FastAPI server on (default: 8000)")
     parser_run_fastapi_mcp.add_argument("--host", default="0.0.0.0", help="Host to bind the FastAPI server to (default: 0.0.0.0)")
+    parser_run_fastapi_mcp.add_argument(
+        "--cors_origin", default=None,
+        help="Pin CORS to exactly this origin (no wildcard). Default: allow all origins.",
+    )
     parser_run_fastapi_mcp.set_defaults(func=lambda args: run_fastapi_mcp_with_defaults(args))
 
 def train_with_defaults(args):  # sourcery skip: extract-duplicate-method
@@ -480,7 +537,9 @@ def run_fastapi_mcp_with_defaults(args):  # sourcery skip: extract-duplicate-met
         cmd.extend(['--startup_action', args.startup_action])
     if args.project_folderpath:
         cmd.extend(['--project_folderpath', args.project_folderpath])
-    
+    if getattr(args, 'cors_origin', None):
+        cmd.extend(['--cors_origin', args.cors_origin])
+
     # Run the subprocess
     return subprocess.run(cmd).returncode
 
@@ -512,6 +571,7 @@ def main():
     add_train_parser(subparsers)
     add_run_parser(subparsers)
     add_run_fastapi_mcp_parser(subparsers)
+    add_run_chatbot_parser(subparsers)
 
     try:
         args = parser.parse_args()

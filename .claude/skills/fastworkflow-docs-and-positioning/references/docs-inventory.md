@@ -79,12 +79,16 @@ Disposition: undecided by owner. The tau2 plan supersedes the PDFs' analysis whe
 conflict; E19 (publish fork + artifacts) is the planned path to making the RLM work
 publicly citable.
 
-## Package-shipped docs (`fastworkflow/docs/` — inside the wheel)
+## Package-shipped docs (inside the wheel)
+
+`fastworkflow/docs/` was dissolved 2026-08-25: the skill moved into the new public
+coding-skills library `fastworkflow/skills_for_coding_fastworkflows/`, the PRD to
+repo-level `docs/`.
 
 | File | Role |
 |---|---|
-| `integrate-chat-agent/SKILL.md` + `reference.md` | Coding-agent skill for downstream app developers (added 1d3a6aa, 2026-06-16). README positions it as the recommended integration path (README.md:179, 407). Mandates hand-written command files over `fastworkflow build`, and beads tracking for downstream devs. Known gap: does not document `context_hierarchy_model.json` or `_<ContextName>.py` context classes |
-| `context_modules_prd.txt` | PRD for per-context callback modules (`_<ContextName>.py` with `Context.get_parent`) — a live feature whose only in-tree example is `tests/todo_list_workflow/_commands/TodoItem/_TodoItem.py`, and which CLAUDE.md and command-authoring.md do not mention |
+| `fastworkflow/skills_for_coding_fastworkflows/integrate-chat-agent/` (SKILL.md + reference.md) | Coding-agent skill for downstream app developers (added 1d3a6aa, 2026-06-16; moved + revised 2026-08-25). README positions it as the recommended integration path. Mandates hand-written command files over `fastworkflow build`, and beads tracking for downstream devs. Known gap: does not document `context_hierarchy_model.json` or `_<ContextName>.py` context classes |
+| `docs/context_modules_prd.txt` (repo docs/, no longer wheel-shipped) | PRD for per-context callback modules (`_<ContextName>.py` with `Context.get_parent`) — a live feature whose only in-tree example is `tests/todo_list_workflow/_commands/TodoItem/_TodoItem.py`, and which CLAUDE.md and command-authoring.md do not mention |
 
 ## Agent-rules surfaces
 
@@ -107,6 +111,7 @@ publicly citable.
 
 Other hygiene backlog (do not delete unilaterally): root `redoc.html` (stale, Oct 2025),
 `fastworkflow/run_fastapi_mcp/redoc_2_standalone_html.py` (broken for the current layout),
-root `examples/` gitignored fetch copies, empty tracked `passwords.env` (deliberate —
-keeps `gen-env` merging working), `docs/chats/` empty dir, `___user_conversations/`
-legacy runtime residue.
+root `examples/` gitignored fetch copies, `docs/chats/` empty dir,
+`___user_conversations/` legacy runtime residue. (The empty tracked root
+`passwords.env` was deleted 2026-08-26 — the "keeps gen-env merging working"
+rationale recorded here was wrong: gen-env.sh merges by glob.)

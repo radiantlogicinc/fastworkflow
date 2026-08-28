@@ -19,6 +19,7 @@ from fastworkflow.utils.logging import logger
 from fastworkflow.model_pipeline_training import get_route_layer_filepath_model
 from fastworkflow.utils.fuzzy_match import find_best_matches
 from fastworkflow.utils import dspy_utils
+from fastworkflow.utils.dspy_logger import DSPyForward
 from fastworkflow.command_directory import CommandDirectory
 
 MISSING_INFORMATION_ERRMSG = None
@@ -298,7 +299,8 @@ Today's date is {today}.
             def __init__(self, signature):
                 super().__init__()
                 self.predictor = dspy.ChainOfThought(signature)
-                
+
+            @DSPyForward.intercept
             def forward(self, command=None):
                 return self.predictor(statement=command)
         
@@ -347,11 +349,21 @@ Today's date is {today}.
         return model_class.model_construct(**param_dict)  # type: ignore[arg-type]
     
     def validate_parameters(self,
-                            app_workflow: fastworkflow.Workflow, 
+                            app_workflow: fastworkflow.Workflow,
                             subject_command_name: str,
-                            cmd_parameters: BaseModel) -> Tuple[bool, str, Dict[str, List[str]], List[str]]:
+                            cmd_parameters: BaseModel,
+                            diagnostics: Optional[Dict[str, Any]] = None
+                            ) -> Tuple[bool, str, Dict[str, List[str]], List[str]]:
         """
         Check if the parameters are valid in the current context, including database lookups.
+
+        ``diagnostics`` (optional, additive): a caller-owned dict this method
+        fills with STRUCTURED validation outcomes — db_lookup events (field,
+        input value, correction applied / suggestions offered), the
+        validate_extracted_parameters hook's verdict, and the missing/invalid
+        field lists. The observability layer attaches it to the
+        fw.nlu.param_extraction span so debugging agents read fields instead
+        of parsing the prose error message. Passing None changes nothing.
         """
         global MISSING_INFORMATION_ERRMSG, INVALID_INFORMATION_ERRMSG, NOT_FOUND
         if not MISSING_INFORMATION_ERRMSG:
@@ -662,8 +674,27 @@ Today's date is {today}.
                 matched, corrected_value, field_suggestions = (
                     self.input_for_param_extraction_class.db_lookup(
                         app_workflow, field_name, field_value)
-                ) 
+                )
                 # matched, corrected_value, field_suggestions = DatabaseValidator.fuzzy_match(field_value, key_values)
+
+                if diagnostics is not None:
+                    # The three-state contract, recorded structurally:
+                    # applied (value possibly rewritten), rejected (suggestions
+                    # offered), declined (no opinion — value left alone).
+                    diagnostics.setdefault("db_lookup", []).append({
+                        "field": field_name,
+                        "input_value": str(field_value),
+                        "outcome": (
+                            "applied" if matched
+                            else "rejected" if field_suggestions
+                            else "declined"
+                        ),
+                        "corrected_value": (
+                            str(corrected_value) if matched else None
+                        ),
+                        "corrected": bool(matched) and corrected_value != field_value,
+                        "suggestions": [str(s) for s in (field_suggestions or [])],
+                    })
 
                 if matched:
                     if corrected_value != field_value:
@@ -686,14 +717,33 @@ Today's date is {today}.
 
             try:
                 is_valid, message = self.input_for_param_extraction_class.validate_extracted_parameters(app_workflow, subject_command_name, cmd_parameters)
+                if diagnostics is not None:
+                    diagnostics["validation_hook"] = {
+                        "ran": True,
+                        "is_valid": bool(is_valid),
+                        "message": None if is_valid else str(message),
+                    }
             except Exception as e:
                 message = f"Exception in {subject_command_name}'s validate_extracted_parameters function: {str(e)}"
-                logger.critical(message)                    
+                logger.critical(message)
+                if diagnostics is not None:
+                    diagnostics["validation_hook"] = {
+                        "ran": True,
+                        "is_valid": False,
+                        "message": message,
+                        "raised": type(e).__name__,
+                    }
                 return (False, message, {}, [])
 
             if is_valid:
                 return (True, "All required parameters are valid.", {}, [])
             return (False, message, {}, [])
+
+        if diagnostics is not None:
+            diagnostics["missing_fields"] = list(missing_fields)
+            diagnostics["invalid_fields"] = [
+                field.split(" '")[0].strip() for field in invalid_fields
+            ]
 
         message = ''
         if missing_fields:

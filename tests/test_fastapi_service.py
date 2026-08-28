@@ -68,20 +68,46 @@ def app_module(hello_world_workflow_path, env_files, tmp_path):
         restore_fastapi_env(previous_env)
 
 
-def test_fastapi_imports(app_module):
-    """Test that main module and ConversationStore import successfully"""
+@pytest.fixture
+def admin_enabled(app_module):
+    """Serve the admin routes for the duration of one test (fix-24f.2).
+
+    The schema is invalidated on both edges because custom_openapi caches it,
+    and the cached copy encodes whether the admin paths were published.
+    """
+    app_module.ARGS.enable_admin_endpoints = True
+    app_module.app.openapi_schema = None
     try:
-        from fastworkflow.run_fastapi_mcp.conversation_store import (
-            ConversationStore,
-            ConversationSummary,
-            generate_topic_and_summary,
-        )
+        yield app_module
+    finally:
+        app_module.ARGS.enable_admin_endpoints = False
+        app_module.app.openapi_schema = None
+
+
+def test_fastapi_imports(app_module):
+    """Test that the main module and its conversation components import."""
+    try:
+        from fastworkflow.conversation_labeling import generate_topic_and_summary
+        from fastworkflow.observability_store import ObservabilityStore
+        from fastworkflow.run_fastapi_mcp.utils import ConversationSummary
+
         assert app_module.app is not None
-        assert ConversationStore is not None
+        assert ObservabilityStore is not None
         assert ConversationSummary is not None
         assert generate_topic_and_summary is not None
     except ImportError as e:
         pytest.fail(f"Failed to import service components: {e}")
+
+
+def test_the_legacy_conversation_store_is_gone(app_module):
+    """The Phase-7 retirement is structural, not just unreferenced (fix-gxr).
+
+    A module nothing imports is one import away from coming back, and the whole
+    point of the consolidation is that there is exactly one place conversations
+    live. This fails the moment someone re-adds it.
+    """
+    with pytest.raises(ImportError):
+        importlib.import_module("fastworkflow.run_fastapi_mcp.conversation_store")
 
 
 def test_root_endpoint(app_module):
@@ -268,14 +294,18 @@ def test_initialize_rejects_an_empty_channel_id(app_module):
     )
 
 
-def test_generate_mcp_token_rejects_an_empty_channel_id(app_module):
+def test_generate_mcp_token_rejects_an_empty_channel_id(admin_enabled, unique_user_id):
     """The other endpoint that mints a token from a client-supplied channel id.
 
     Closing both is what keeps SessionData.channel_id non-empty without a check
     of its own: it is read out of a JWT this server issued, never off the wire.
     """
-    client = TestClient(app_module.app)
-    resp = client.post("/admin/generate_mcp_token", json={"channel_id": ""})
+    client = TestClient(admin_enabled.app)
+    init = _initialize(client, unique_user_id)
+    headers = _authorize(client, init["access_token"])
+    resp = client.post(
+        "/admin/generate_mcp_token", headers=headers, json={"channel_id": ""}
+    )
 
     assert resp.status_code == 422
 
@@ -445,13 +475,14 @@ def test_activate_conversation_endpoint(app_module, unique_user_id):
     assert response.status_code == 404
 
 
-def test_dump_all_conversations_endpoint(app_module, unique_user_id):
+def test_dump_all_conversations_endpoint(admin_enabled, unique_user_id):
     # sourcery skip: extract-method
     """Test POST /admin/dump_all_conversations endpoint"""
-    client = TestClient(app_module.app)
-    _initialize(client, unique_user_id)
+    client = TestClient(admin_enabled.app)
+    init = _initialize(client, unique_user_id)
+    headers = _authorize(client, init["access_token"])
     with tempfile.TemporaryDirectory() as tmpdir:
-        response = client.post("/admin/dump_all_conversations", json={
+        response = client.post("/admin/dump_all_conversations", headers=headers, json={
             "output_folder": tmpdir,
         })
         assert response.status_code == 200
@@ -459,6 +490,70 @@ def test_dump_all_conversations_endpoint(app_module, unique_user_id):
         assert "file_path" in data
         assert os.path.exists(data["file_path"])
         assert data["file_path"].endswith(".jsonl")
+
+
+def test_generate_mcp_token_endpoint(admin_enabled, unique_user_id):
+    """The token mint works, and only for an authenticated caller (fix-24f.2)."""
+    client = TestClient(admin_enabled.app)
+    init = _initialize(client, unique_user_id)
+    headers = _authorize(client, init["access_token"])
+    response = client.post("/admin/generate_mcp_token", headers=headers, json={
+        "channel_id": unique_user_id,
+    })
+    assert response.status_code == 200
+    assert response.json()["access_token"]
+
+
+@pytest.mark.parametrize(
+    "path, payload",
+    [
+        ("/admin/dump_all_conversations", {"output_folder": "/tmp"}),
+        ("/admin/generate_mcp_token", {"channel_id": "anyone"}),
+    ],
+)
+def test_admin_endpoints_are_404_without_the_optin(app_module, path, payload):
+    """Both admin routes are absent unless --enable_admin_endpoints was passed.
+
+    404 rather than 401/403: the disabled server must not confirm the route
+    exists, which is also why the flag is checked before the bearer scheme
+    gets to reject the missing header (fix-24f.2).
+    """
+    client = TestClient(app_module.app)
+    assert client.post(path, json=payload).status_code == 404
+
+
+@pytest.mark.parametrize(
+    "path, payload",
+    [
+        ("/admin/dump_all_conversations", {"output_folder": "/tmp"}),
+        ("/admin/generate_mcp_token", {"channel_id": "anyone"}),
+    ],
+)
+def test_admin_endpoints_require_a_token_when_enabled(admin_enabled, path, payload):
+    """Opting in serves the routes but does not make them anonymous (fix-24f.2)."""
+    client = TestClient(admin_enabled.app)
+    assert client.post(path, json=payload).status_code in (401, 403)
+    bad = {"Authorization": "Bearer not-a-real-token"}
+    assert client.post(path, headers=bad, json=payload).status_code == 401
+
+
+def test_admin_endpoints_absent_from_openapi_when_disabled(app_module):
+    """A scanner reads the schema before it starts guessing paths (fix-24f.2)."""
+    app_module.app.openapi_schema = None
+    paths = app_module.app.openapi()["paths"]
+    for path in app_module.ADMIN_ENDPOINT_PATHS:
+        assert path not in paths
+
+    app_module.ARGS.enable_admin_endpoints = True
+    app_module.app.openapi_schema = None
+    try:
+        paths = app_module.app.openapi()["paths"]
+        for path in app_module.ADMIN_ENDPOINT_PATHS:
+            assert path in paths
+            assert paths[path]["post"]["security"] == [{"BearerAuth": []}]
+    finally:
+        app_module.ARGS.enable_admin_endpoints = False
+        app_module.app.openapi_schema = None
 
 
 def test_leading_slash_stripping(app_module):

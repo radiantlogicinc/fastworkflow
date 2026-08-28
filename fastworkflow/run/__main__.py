@@ -183,7 +183,38 @@ def run_main(args):
         run_as_agent=run_as_agent,
         generate_insights=getattr(args, "generate_insights", False),
     )
-    
+
+    # Observability [R4]: `fastworkflow run` is an entry point, so the SQLite
+    # sink defaults ON (FW_OBSERVABILITY=0 disables). The CLI channel is the
+    # synthetic cli:<start> id ChatSession bound; each CLI session starts a
+    # fresh conversation, and //new mints another [R17].
+    from fastworkflow.observability_store import get_observability_sink
+    obs_sink = get_observability_sink(args.workflow_path)
+
+    def _bind_fresh_cli_conversation() -> None:
+        """Mint a new CLI conversation id and bind it — never fails the CLI.
+
+        A wedged/corrupt observability DB degrades to conversation-less turn
+        records. The chatbot groups its rail by conversation, so those rows are
+        reachable only through the channel's conversation-less group [R17].
+        """
+        core = fastworkflow.chat_session._core
+        try:
+            core.bind_observability_identity(
+                conversation_id=obs_sink.store.mint_conversation_id(
+                    core.observability_channel_id
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                f"Could not mint a CLI conversation id ({type(exc).__name__}: "
+                f"{exc}); this session's turns are recorded without a conversation"
+            )
+
+    if obs_sink is not None:
+        fastworkflow.chat_session._core.set_trace_sink(obs_sink)
+        _bind_fresh_cli_conversation()
+
     # Start the workflow within the chat session
     fastworkflow.chat_session.start_workflow(
         args.workflow_path, 
@@ -227,6 +258,9 @@ def run_main(args):
             break
         if user_command.startswith("//new"):
             fastworkflow.chat_session.clear_conversation_history()
+            if obs_sink is not None:
+                # //new starts a new logical conversation [R17]
+                _bind_fresh_cli_conversation()
             console.print("[bold]Agent >[/bold] New conversation started!\n", end="")
             user_command = prompt_session.prompt()
 
@@ -269,6 +303,11 @@ def run_main(args):
 
         if command_output:
             print_command_output(command_output)
+
+    # Flush the observability writer so the session's last turn is never lost
+    # [R7] (atexit also covers abnormal exits).
+    if obs_sink is not None:
+        obs_sink.close()
 
 if __name__ == "__main__":
     print("Loading fastWorkflow...\n")

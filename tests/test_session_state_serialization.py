@@ -83,7 +83,7 @@ def test_serialize_restore_resume_across_contexts(
     monkeypatch.setattr(
         "fastworkflow.workflow_agent.build_query_with_next_steps",
         lambda user_query, session, with_agent_inputs_and_trajectory=False,
-        planning_insights=None, planner_lm=None: user_query,
+        planning_insights=None, planner_lm=None, **kwargs: user_query,
     )
     monkeypatch.setattr(
         "fastworkflow.workflow_agent._what_can_i_do",

@@ -55,7 +55,7 @@ import pytest
 from dotenv import dotenv_values
 
 import fastworkflow
-from fastworkflow.run_fastapi_mcp.conversation_store import (
+from fastworkflow.conversation_labeling import (
     DEFAULT_TOPIC_GENERATION_TIMEOUT_SECONDS,
     TOPIC_GENERATION_MAX_RETRIES,
     TOPIC_GENERATION_TIMEOUT_ENV_VAR,
@@ -399,25 +399,34 @@ async def _auth_headers(client, channel_id: str) -> dict[str, str]:
 async def _seed_conversation(app_module, channel_id: str):
     """A durable conversation with one turn, so the rotate has something to label.
 
-    Written through the real store: `/new_conversation` summarizes the durable
+    Written through the real sink: `/new_conversation` summarizes the durable
     record rather than the in-memory window, so a conversation that exists only
     in memory would take the endpoint's empty-turns branch and never generate.
+    The turn is emitted as a real ``TurnResult`` carrying its memory columns,
+    because a row without them is a trace that no conversation-memory read
+    admits (Phase 7 ruling I4).
     """
     runtime = await app_module.session_manager.get_session(channel_id)
     assert runtime is not None
-    runtime.active_conversation_id = (
-        runtime.conversation_store.reserve_next_conversation_id()
+    sink = runtime.execution_context.trace_sink
+    conv_id = runtime.active_conversation_id or sink.store.mint_conversation_id(
+        channel_id
     )
-    runtime.conversation_store.append_conversation_turns(
-        runtime.active_conversation_id,
-        [
-            {
-                "conversation summary": "user asked where their order is",
-                "conversation_traces": None,
-                "feedback": None,
-            }
-        ],
+    runtime.active_conversation_id = conv_id
+    sink.emit_turn_record(
+        fastworkflow.TurnResult(
+            turn_output=fastworkflow.TurnOutput(
+                turn_key=fastworkflow.mint_turn_key(),
+                status=fastworkflow.TurnStatus.COMPLETED,
+                answer="ok",
+            ),
+            channel_id=channel_id,
+            conversation_id=conv_id,
+            user_message="where is my order",
+            conversation_summary="user asked where their order is",
+        )
     )
+    assert sink.flush(), "the seeded turn never reached the store"
     return runtime
 
 
@@ -545,9 +554,9 @@ def test_a_failed_generation_fails_the_rotate_and_explains_itself(app_module):
             seen["status"] = resp.status_code
             seen["detail"] = resp.json().get("detail", "")
             seen["conversation_id_after"] = runtime.active_conversation_id
-            seen["record"] = runtime.conversation_store.get_conversation(
-                runtime.active_conversation_id
-            )
+            seen["topic"] = runtime.observability_store.conversation_label_state(
+                channel_id, runtime.active_conversation_id
+            )[0]
 
     asyncio.run(body())
 
@@ -556,7 +565,7 @@ def test_a_failed_generation_fails_the_rotate_and_explains_itself(app_module):
         "the rotate went ahead after generation failed, archiving a conversation "
         "with no topic"
     )
-    assert seen["record"]["topic"] == "", "a failed generation still wrote a topic"
+    assert seen["topic"] == "", "a failed generation still wrote a topic"
 
     detail = seen["detail"]
     assert "TimeoutError" in detail, f"the cause is not in the 500 detail: {detail}"

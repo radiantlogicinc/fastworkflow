@@ -5,8 +5,8 @@ Every durable turn is the 3-key shape ``{"conversation summary",
 The deterministic and direct-action paths used to hardcode that field to the
 constants ``"assistant_mode_command"`` and ``"process_action command"``, which
 made it useless to the three consumers that read it and only it:
-``ConversationStore.generate_topic_and_summary``,
-``ConversationStore.get_conversation_summaries``, and
+``conversation_labeling.generate_topic_and_summary``,
+``ObservabilityStore.conversation_summaries``, and
 ``WorkflowExecutionContext._refine_user_query``. ``POST /initialize`` routes
 through exactly those two paths, so turn 0 of an initialize-only conversation
 carried no information at all.

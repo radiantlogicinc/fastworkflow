@@ -95,6 +95,22 @@ with strong `Field` descriptions, examples, and a `default="NOT_FOUND"` so missi
 detected rather than hallucinated. See [reference.md](reference.md) for the command-file structure
 and context-model format.
 
+Strong field descriptions are the floor, not the finish. Four colocated skills cover the features
+that decide whether the agent can actually complete a multi-step task, and are worth reading before
+writing the first command rather than after the first bad demo:
+
+| Read | For |
+|---|---|
+| [declare-parameter-producers](../declare-parameter-producers/SKILL.md) | `available_from` hints. Any parameter that is an id, uid or code the user cannot invent needs one, or the planner cannot work out what to call first. This is the single highest-value thing in this step. |
+| [validate-command-parameters](../validate-command-parameters/SKILL.md) | The `validate_extracted_parameters` hook — cross-field rules, context preconditions, and normalising a value in place so a near-miss does not cost a round trip. |
+| [resolve-parameter-values](../resolve-parameter-values/SKILL.md) | `db_lookup`, for any parameter naming a real-world entity the user types by hand. Turns a spelling mismatch into a correction or a "did you mean", instead of a not-found. |
+| [design-context-models](../design-context-models/SKILL.md) | How to group commands into contexts. Read it once the tree is more than a handful of commands, or as soon as intent routing starts confusing two of them. |
+
+The first three form one pipeline per parameter: `available_from` says where a **missing** value
+comes from, `db_lookup` fixes one that arrived **nearly right**, and
+`validate_extracted_parameters` rejects or normalises one that arrived **unusable**. A parameter
+worth taking is usually worth declaring in at least one of the three.
+
 ### Step 4: Set up env files — PAUSE for API keys
 
 Copy `fastworkflow.env` and `fastworkflow.passwords.env` into the workflow directory. The service

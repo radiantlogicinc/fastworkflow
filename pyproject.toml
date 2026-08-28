@@ -9,7 +9,7 @@ repository = "https://github.com/radiantlogicinc/fastworkflow"
 
 [tool.poetry]
 name = "fastworkflow"
-version = "3.1.2"
+version = "3.2.0"
 description = "A framework for rapidly building large-scale, deterministic, interactive workflows with a fault-tolerant, conversational UX"
 authors = ["Dhar Rawal <drawal@radiantlogic.com>"]
 license = "Apache-2.0"
@@ -18,7 +18,10 @@ keywords = ["fastworkflow", "ai", "workflow", "llm", "openai"]
 include = [
     "fastworkflow/examples/fastworkflow.env",
     "fastworkflow/examples/fastworkflow.passwords.env",
-    "fastworkflow/_commands/.gitkeep"
+    "fastworkflow/_commands/.gitkeep",
+    # fastWorkflow chatbot SPA — must ship in the wheel [R23]; a wheel-content
+    # assertion test (tests/test_run_chatbot_server.py) fails the build if missing.
+    "fastworkflow/run_chatbot/static/index.html"
 ]
 exclude = [
     "**/___command_info",

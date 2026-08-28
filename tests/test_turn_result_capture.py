@@ -84,7 +84,7 @@ def _make_agent_ctx(todo_workflow_path, monkeypatch):
     monkeypatch.setattr(
         "fastworkflow.workflow_agent.build_query_with_next_steps",
         lambda user_query, session, with_agent_inputs_and_trajectory=False,
-        planning_insights=None, planner_lm=None: user_query,
+        planning_insights=None, planner_lm=None, **kwargs: user_query,
     )
     monkeypatch.setattr(
         "fastworkflow.workflow_agent._what_can_i_do",
@@ -748,6 +748,179 @@ class TestInternalTurnResult:
         assert captured.started_at is not None
         assert captured.duration_ms is not None
         assert captured.duration_ms >= 0
+
+
+# ----------------------------------------------------------------------
+# 14a: Conversation-memory columns (fix-24f.1; Phase-7 design §2.1, ruling I5)
+#
+# The turns table is only usable as conversation memory if a turn record
+# carries the history entry that turn produced. These are the cases that decide
+# whether a row is memory or merely a trace.
+# ----------------------------------------------------------------------
+
+
+class TestConversationMemoryStamping:
+    def test_deterministic_turn_stamps_the_entry_it_appended(
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
+    ):
+        ctx, _wf = _make_assistant_ctx(todo_workflow_path, monkeypatch)
+
+        command_output = ctx._execute_message("list my todo lists")
+        turn_result = ctx._build_turn_result(command_output)
+
+        newest = ctx.conversation_history.messages[-1]
+        assert turn_result.conversation_summary == newest["conversation summary"]
+        assert turn_result.conversation_traces == newest["conversation_traces"]
+        assert turn_result.conversation_summary
+
+    def test_agent_turn_stamps_the_summarized_entry(
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
+    ):
+        ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch)
+
+        def run(*args, **kwargs):
+            # _run_agent clears the action log at turn start, so the actions
+            # that select the LLM-summary path have to arrive during the run.
+            ctx.append_action_log({"command_name": "x", "response": "y"})
+            return SimpleNamespace(
+                final_answer="done", suspended=False, exhausted=False
+            )
+
+        agent = MagicMock(side_effect=run)
+        _set_agents(ctx, agent)
+
+        command_output = ctx._execute_message("do the thing")
+        turn_result = ctx._build_turn_result(command_output)
+
+        assert turn_result.conversation_summary == "summary"
+        assert turn_result.conversation_traces == "{}"
+
+    def test_turn_that_appends_nothing_leaves_the_columns_empty(
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
+    ):
+        """A pre-existing entry must not be attributed to this turn.
+
+        The row is write-once, so stamping the newest entry unconditionally
+        would permanently record the previous turn's summary against this one.
+        """
+        ctx, _wf = _make_assistant_ctx(todo_workflow_path, monkeypatch)
+        ctx.append_conversation_turn("an earlier turn", "{}")
+
+        ctx._begin_turn("a turn that appends nothing")
+        turn_result = ctx._build_turn_result(
+            fastworkflow.CommandOutput(
+                command_name="x",
+                command_response=fastworkflow.CommandResponse(response="ok"),
+            )
+        )
+
+        assert turn_result.conversation_summary is None
+        assert turn_result.conversation_traces is None
+
+    def test_restored_turn_baselines_on_the_restored_history(
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
+    ):
+        """Ruling I5: a cross-process resume rebuilds the baseline from the
+        restored history, so the entry that arrived with the history is not
+        re-attributed to the resumed turn."""
+        ctx, _wf = _make_assistant_ctx(todo_workflow_path, monkeypatch)
+        ctx._begin_turn("original message")
+        state = ctx.serialize_state(channel_id="chan")
+        state["conversation_history_turns"] = [
+            {
+                "conversation summary": "history that came back with the restore",
+                "conversation_traces": "{}",
+                "feedback": None,
+            }
+        ]
+
+        resumed, _wf2 = _make_assistant_ctx(todo_workflow_path, monkeypatch)
+        resumed.apply_serialized_state(state)
+        assert len(resumed.conversation_history.messages) == 1
+
+        turn_result = resumed._build_turn_result(
+            fastworkflow.CommandOutput(
+                command_name="x",
+                command_response=fastworkflow.CommandResponse(response="ok"),
+            )
+        )
+        assert turn_result.conversation_summary is None
+
+        resumed.append_conversation_turn("appended after resume", "{}")
+        turn_result = resumed._build_turn_result(
+            fastworkflow.CommandOutput(
+                command_name="x",
+                command_response=fastworkflow.CommandResponse(response="ok"),
+            )
+        )
+        assert turn_result.conversation_summary == "appended after resume"
+
+    def test_last_completed_turn_key_names_the_turn_feedback_belongs_to(
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
+    ):
+        """Ruling I3: feedback keys off a real turn, never off max(ordinal).
+
+        Only a turn that both completed and contributed a memory entry can carry
+        feedback — the memory window filters on exactly that, so any other row
+        would file the feedback where no reader joins it.
+        """
+        ctx, _wf = _make_assistant_ctx(todo_workflow_path, monkeypatch)
+        assert ctx.last_completed_turn_key is None
+
+        command_output = ctx._execute_message("list my todo lists")
+        turn_result = ctx._build_turn_result(command_output)
+        assert ctx.last_completed_turn_key == turn_result.turn_output.turn_key
+        assert ctx.last_turn_added_memory is True
+
+        # A turn that appends nothing must not steal the key from the turn that
+        # did, or feedback moves to a turn the user never saw.
+        first_key = ctx.last_completed_turn_key
+        ctx._begin_turn("a turn that appends nothing")
+        ctx._build_turn_result(
+            fastworkflow.CommandOutput(
+                command_name="x",
+                command_response=fastworkflow.CommandResponse(response="ok"),
+            )
+        )
+        assert ctx.last_completed_turn_key == first_key
+        assert ctx.last_turn_added_memory is False
+
+    def test_last_completed_turn_key_survives_a_cross_process_resume(
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
+    ):
+        ctx, _wf = _make_assistant_ctx(todo_workflow_path, monkeypatch)
+        command_output = ctx._execute_message("list my todo lists")
+        expected = ctx._build_turn_result(command_output).turn_output.turn_key
+
+        state = ctx.serialize_state(channel_id="chan")
+        assert state["last_completed_turn_key"] == expected
+
+        resumed, _wf2 = _make_assistant_ctx(todo_workflow_path, monkeypatch)
+        resumed.apply_serialized_state(state)
+        assert resumed.last_completed_turn_key == expected
+
+    def test_history_read_through_the_property_survives_a_swap(
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
+    ):
+        """Distillation replaces the history object and truncates it back to a
+        pre-pass length; the guard must not stamp off a stale list."""
+        import dspy
+
+        ctx, _wf = _make_assistant_ctx(todo_workflow_path, monkeypatch)
+        ctx.append_conversation_turn("before", "{}")
+        ctx._begin_turn("a turn whose history gets rolled back")
+        ctx.append_conversation_turn("during", "{}")
+        ctx._conversation_history = dspy.History(
+            messages=list(ctx.conversation_history.messages[:1])
+        )
+
+        turn_result = ctx._build_turn_result(
+            fastworkflow.CommandOutput(
+                command_name="x",
+                command_response=fastworkflow.CommandResponse(response="ok"),
+            )
+        )
+        assert turn_result.conversation_summary is None
 
 
 # ----------------------------------------------------------------------

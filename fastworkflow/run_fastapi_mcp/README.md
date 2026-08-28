@@ -311,6 +311,13 @@ At least one of `binary_or_numeric_score` or `nl_feedback` must be provided.
 
 ## Admin Endpoints (REST-only; not exposed via MCP)
 
+`POST /admin/dump_all_conversations` and `POST /admin/generate_mcp_token` are
+**served only when the server is started with `--enable_admin_endpoints`**, and
+require a Bearer token when they are. Without the flag both return 404 and are
+absent from the OpenAPI schema. The dump reads every channel on the server, and
+the token mint issues year-long credentials for any `channel_id`, so neither is
+something a loopback binding should be the only thing standing in front of.
+
 ### `POST /admin/dump_all_conversations`
 Export all conversations to JSONL.
 
