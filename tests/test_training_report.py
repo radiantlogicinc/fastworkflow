@@ -337,14 +337,18 @@ def test_below_the_row_floor_is_flagged_separately_from_a_fallback(workflow):
 
     report = tr.build_report(workflow)
 
-    assert _row(report, APP_COMMAND).status is tr.RowStatus.BELOW_FLOOR
+    starved_row = _row(report, APP_COMMAND)
+    assert starved_row.status is tr.RowStatus.BELOW_FLOOR
+    assert starved_row.is_blocking is False
+    assert tr.RowStatus.BELOW_FLOOR not in tr.BLOCKING_STATUSES
     assert _row(report, FRAMEWORK_COMMAND).status is tr.RowStatus.OK
-    assert report.has_blocking_problems is True
+    assert starved_row not in report.blocking_rows
 
     rendered = tr.format_report(report)
     assert "BELOW ROW FLOOR" in rendered
-    # The floor's derivation travels with the number, so a reader is never left to
-    # assume it was measured.
+    assert "does not block publication" in rendered
+    # The floor's derivation travels with the number, so a reader knows exactly what
+    # was skipped rather than mistaking it for an accuracy threshold.
     assert "class-aware" in rendered
 
 
@@ -436,8 +440,8 @@ def test_hand_written_utterances_without_a_generator_call_are_not_missing(workfl
     assert row.row_count == 4
 
 
-def test_hand_written_utterances_below_the_floor_still_block(workflow):
-    """Exempting them from the provenance gate must not exempt them from the floor."""
+def test_hand_written_utterances_below_the_floor_train_unmeasured(workflow):
+    """A real row trains even when there is no second row to evaluate."""
     recorder = ProvenanceRecorder(workflow)
     recorder.record_context(
         context_name="*",
@@ -450,7 +454,7 @@ def test_hand_written_utterances_below_the_floor_still_block(workflow):
     row = _row(tr.build_report(workflow, min_rows=2, min_seeds=8), APP_COMMAND)
 
     assert row.status is tr.RowStatus.BELOW_FLOOR
-    assert row.is_blocking is True
+    assert row.is_blocking is False
 
 
 # ---------------------------------------------------------------------------

@@ -39,10 +39,11 @@ available at the end of a training run and can be retained with its artifacts.
 
 The two floors, and how much to trust them
 ------------------------------------------
-See `DEFAULT_MIN_TRAINING_ROWS` and `DEFAULT_MIN_SEED_UTTERANCES`. One is derived
-from a structural property of the training code; the other is an observation from
-a single workflow. They are labelled differently in the output on purpose, and
-only the structural floor can prevent publication.
+See `DEFAULT_MIN_TRAINING_ROWS` and `DEFAULT_MIN_SEED_UTTERANCES`. The row floor is
+derived from the minimum needed to both train and evaluate a label; falling below it
+means that label trains without evaluation coverage. The seed floor is an observation
+from a single workflow. Both are advisory because neither makes the trained label
+unusable.
 
 `TrainingReport.has_blocking_problems` rejects structurally unusable data before
 publication; fallback and seed-count findings remain advisory.
@@ -148,7 +149,8 @@ class RowStatus(str, Enum):
     #: Generation degraded (R3a fallback). The command trained on its command name
     #: plus hand-written seeds plus whatever arrived before the failure.
     FELL_BACK = "fell_back"
-    #: Fewer rows than the floor. May or may not have fallen back.
+    #: Fewer rows than the train-and-evaluate floor. The rows still train, but the
+    #: label has no evaluation coverage and is therefore reported as unmeasured.
     BELOW_FLOOR = "below_floor"
     #: The command has `Signature.Input`, but its generator returned no rows in at
     #: least one context. This is an explicit trainer skip, not missing provenance.
@@ -185,13 +187,12 @@ _STATUS_SEVERITY: dict[RowStatus, int] = {
     RowStatus.OK: 7,
 }
 
-#: Statuses that make a training dataset structurally unusable. EXCLUDED and
-#: THIN_SEEDS are deliberately absent: the first is a design choice, the second rests
-#: on one workflow's curve and is too weak a basis for rejecting a run. FELL_BACK is
-#: reported loudly but does not fail when enough rows remain.
+#: Statuses that make a training dataset structurally unusable. EXCLUDED is a design
+#: choice. THIN_SEEDS and BELOW_FLOOR are advisory: the former rests on one workflow's
+#: curve, while the latter means the label trained but could not also contribute an
+#: evaluation row. FELL_BACK is reported loudly but does not fail when rows remain.
 BLOCKING_STATUSES: frozenset[RowStatus] = frozenset(
     {
-        RowStatus.BELOW_FLOOR,
         RowStatus.NO_UTTERANCES,
         RowStatus.MISSING,
     }
@@ -1078,11 +1079,11 @@ def format_report(report: TrainingReport) -> str:
             f"  BELOW ROW FLOOR ({len(below_floor)}) — fewer than {report.min_rows} rows."
         )
         lines.append(
-            "  The class-aware split needs at least one row for training and one for "
-            "evaluation."
+            "  These labels trained, but the class-aware split could not also reserve "
+            "an evaluation row."
         )
         lines.append(
-            "  A label below that floor cannot be learned and evaluated in the same run."
+            "  They are unmeasured on the routing axis; this does not block publication."
         )
         lines.extend(_detail_lines(below_floor, width))
 
@@ -1227,7 +1228,7 @@ def format_report(report: TrainingReport) -> str:
 
     lines.append("")
     lines.append(
-        f"  Floors: rows >= {report.min_rows} (structural — one train and one "
+        f"  Floors: rows >= {report.min_rows} (evaluation coverage — one train and one "
         f"evaluation row per label),"
     )
     lines.append(
@@ -1235,9 +1236,7 @@ def format_report(report: TrainingReport) -> str:
         f"one workflow's"
     )
     lines.append("  observation). These are trainer policy, not workflow configuration.")
-    lines.append(
-        "  Structural failures stop publication; advisory findings do not."
-    )
+    lines.append("  Missing or empty training data stops publication; advisory findings do not.")
     lines.append(rule)
     return "\n".join(lines)
 
