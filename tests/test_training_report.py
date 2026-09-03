@@ -15,15 +15,19 @@ hand-written approximation of them.
 
 import importlib.util
 import json
+import logging
 import os
 import shutil
 
+import numpy as np
 import pytest
 from dotenv import dotenv_values
+from rich.console import Console
 
 import litellm
 
 import fastworkflow
+from fastworkflow.utils.logging import logger as fastworkflow_logger
 from fastworkflow.model_pipeline_training import TrainingDataError, split_training_data
 from fastworkflow.nlu_labels import PARAMETER_VALUE_LABEL, WILDCARD_LABEL
 from fastworkflow.train import heldout_evaluation
@@ -90,6 +94,39 @@ def workflow(tmp_path):
     for name in (tr.COMMAND_DIRECTORY_FILENAME, tr.ROUTING_DEFINITION_FILENAME):
         shutil.copy2(os.path.join(EXAMPLE_COMMAND_INFO, name), info / name)
     return str(folder)
+
+
+class _LogSink(logging.Handler):
+    """Collects real `LogRecord`s off the real logger.
+
+    The `fastWorkflow` logger sets ``propagate = False``, so pytest's `caplog`, whose
+    handler lives on the root logger, never sees these records. Attaching a stdlib
+    handler is not a mock: the records are the ones production emits.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.DEBUG)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+    def messages(self, level: int) -> list[str]:
+        return [r.getMessage() for r in self.records if r.levelno == level]
+
+
+@pytest.fixture
+def log_sink():
+    """Capture fastWorkflow log records for the duration of one test."""
+    sink = _LogSink()
+    previous_level = fastworkflow_logger.level
+    fastworkflow_logger.setLevel(logging.DEBUG)
+    fastworkflow_logger.addHandler(sink)
+    try:
+        yield sink
+    finally:
+        fastworkflow_logger.removeHandler(sink)
+        fastworkflow_logger.setLevel(previous_level)
 
 
 def _save_provenance(workflow_folderpath: str, *records: UtteranceProvenance) -> str:
@@ -374,6 +411,48 @@ def test_a_command_that_should_have_generated_but_did_not_is_reported_missing(wo
     assert "NO PROVENANCE" in tr.format_report(report)
 
 
+def test_hand_written_utterances_without_a_generator_call_are_not_missing(workflow):
+    """Only `generate_diverse_utterances` writes an `UtteranceProvenance` record.
+
+    A command whose `generate_utterances` returns hand-written rows directly never
+    calls the generator, so it has nothing to record - the same reasoning
+    NOT_APPLICABLE already applies to reserved labels. The trainer's own context
+    provenance proves it trained and carries the row count, so an absent generation
+    record must not block publication.
+    """
+    recorder = ProvenanceRecorder(workflow)
+    recorder.record_context(
+        context_name="*",
+        command_name=APP_COMMAND,
+        status=ContextTrainingStatus.INCLUDED,
+        row_count=4,
+    )
+    recorder.save()
+
+    row = _row(tr.build_report(workflow, min_rows=2, min_seeds=8), APP_COMMAND)
+
+    assert row.status is not tr.RowStatus.MISSING
+    assert row.is_blocking is False
+    assert row.row_count == 4
+
+
+def test_hand_written_utterances_below_the_floor_still_block(workflow):
+    """Exempting them from the provenance gate must not exempt them from the floor."""
+    recorder = ProvenanceRecorder(workflow)
+    recorder.record_context(
+        context_name="*",
+        command_name=APP_COMMAND,
+        status=ContextTrainingStatus.INCLUDED,
+        row_count=1,
+    )
+    recorder.save()
+
+    row = _row(tr.build_report(workflow, min_rows=2, min_seeds=8), APP_COMMAND)
+
+    assert row.status is tr.RowStatus.BELOW_FLOOR
+    assert row.is_blocking is True
+
+
 # ---------------------------------------------------------------------------
 # Reserved labels are not commands
 # ---------------------------------------------------------------------------
@@ -515,30 +594,70 @@ def test_class_aware_split_keeps_every_label_in_train_and_evaluation():
     assert {label for _, label in evaluation_rows} == {0, 1}
 
 
-def test_class_aware_split_fails_before_fitting_a_one_row_label():
-    # Matched against the constant rather than the spelled-out "two": the floor is
-    # now shared with the persona split (heldout_evaluation.MIN_TRAINING_ROWS_PER_LABEL)
-    # so the two modules cannot disagree, and the message interpolates it. Hard-coding
-    # the English here would break the moment the floor is retuned.
+def test_a_one_row_label_trains_unmeasured_instead_of_failing_the_run():
+    """A thin label costs its evaluation coverage, not the whole run.
+
+    The persona split already returns starved labels to train and records that they
+    have no held-out coverage. Aborting here instead spent the run's entire LLM and GPU
+    budget and then published nothing.
+    """
+    train_rows, evaluation_rows = split_training_data([
+        ("alpha one", 0),
+        ("alpha two", 0),
+        ("beta only", 1),
+    ])
+
+    assert ("beta only", 1) in train_rows, "the thin label must still reach the model"
+    assert 1 not in {label for _, label in evaluation_rows}, "and stay unmeasured"
+    assert 0 in {label for _, label in evaluation_rows}
+
+
+def test_a_one_row_label_is_named_in_a_warning_not_an_exception(log_sink):
+    split_training_data(
+        [("alpha one", 0), ("alpha two", 0), ("beta only", 1)],
+        lambda encoded: f"Ctx/command_{encoded}",
+    )
+
+    warnings = log_sink.messages(logging.WARNING)
+    assert any("Ctx/command_1" in message for message in warnings), (
+        "a developer cannot map label id 1 to a command without the LabelEncoder"
+    )
+    assert not any("Ctx/command_0" in message for message in warnings)
+
+
+def test_unmeasured_labels_are_named_as_plain_text_not_a_list_repr(log_sink):
+    """Regression: the report prints through a rich console.
+
+    `decode_label` returns a numpy string, so a list repr renders as
+    `[np.str_('cmd')]`; rich reads that bracketed run as markup and deletes it, which
+    silently dropped the one detail the message exists to carry.
+    """
+    split_training_data(
+        [("alpha one", 0), ("alpha two", 0), ("beta only", 1)],
+        lambda encoded: np.str_(f"Ctx/command_{encoded}"),
+    )
+
+    message = "\n".join(log_sink.messages(logging.WARNING))
+    assert "Ctx/command_1" in message
+    assert "np.str_" not in message
+    assert "[" not in message and "]" not in message
+    assert Console(width=200).render_str(message).plain.strip().endswith(
+        "Ctx/command_1"
+    ), "the label must survive a rich console"
+
+
+def test_a_dataset_where_nothing_can_be_measured_still_fails():
+    """No evaluation set at all is a different failure from one thin label.
+
+    Matched against the constant rather than the spelled-out "two": the floor is
+    shared with the persona split (heldout_evaluation.MIN_TRAINING_ROWS_PER_LABEL) so
+    the two modules cannot disagree, and the message interpolates it. Hard-coding the
+    English here would break the moment the floor is retuned.
+    """
     with pytest.raises(
-        TrainingDataError, match=f"at least {MIN_TRAINING_ROWS_PER_LABEL} rows"
+        TrainingDataError, match=f"{MIN_TRAINING_ROWS_PER_LABEL} rows"
     ):
-        split_training_data([
-            ("alpha one", 0),
-            ("alpha two", 0),
-            ("beta only", 1),
-        ])
-
-
-def test_class_aware_split_error_names_the_command_not_its_encoded_id():
-    """A developer cannot map label id 1 to a command without the LabelEncoder."""
-    with pytest.raises(TrainingDataError) as excinfo:
-        split_training_data(
-            [("alpha one", 0), ("alpha two", 0), ("beta only", 1)],
-            lambda encoded: f"Ctx/command_{encoded}",
-        )
-
-    assert "Ctx/command_1" in str(excinfo.value)
+        split_training_data([("alpha only", 0), ("beta only", 1)])
 
 
 def test_floor_environment_variables_are_ignored(workflow):

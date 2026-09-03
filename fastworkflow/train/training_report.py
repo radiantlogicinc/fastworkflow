@@ -153,9 +153,11 @@ class RowStatus(str, Enum):
     #: The command has `Signature.Input`, but its generator returned no rows in at
     #: least one context. This is an explicit trainer skip, not missing provenance.
     NO_UTTERANCES = "no_utterances"
-    #: The command should have generated utterances but has no provenance record.
-    #: Either it was never reached (a training run that died part-way) or provenance
-    #: was lost. Distinct from EXCLUDED, which is by design.
+    #: The command has no provenance record AND no context provenance showing it was
+    #: trained: either it was never reached (a training run that died part-way) or
+    #: provenance was lost. Distinct from EXCLUDED, which is by design, and from a
+    #: command that supplies hand-written utterances without calling the generator -
+    #: that one has nothing to record and is judged on its row count.
     MISSING = "missing"
     #: No `Signature.Input`, so `model_pipeline_training._requires_utterances` returns
     #: False and the command is deliberately not an intent-detection label at all. It
@@ -671,6 +673,9 @@ def _classify_status(
     put a non-command at the top of a list of broken commands. A reserved label that
     genuinely fell back is still surfaced, because a degraded escalation class
     degrades the workflow like anything else.
+
+    Absent generation provenance is only a defect when nothing else shows the command
+    trained; see the comment on the `has_provenance` branch below.
     """
     if kind is CommandKind.RESERVED and not fell_back:
         return RowStatus.NOT_APPLICABLE
@@ -690,7 +695,17 @@ def _classify_status(
     if not has_provenance:
         if trains_as_label is False:
             return RowStatus.EXCLUDED
-        return RowStatus.MISSING
+        if not has_included_context:
+            # No generation record AND no sign the trainer ever reached this command:
+            # the run died part-way or provenance was lost. That is what MISSING means.
+            return RowStatus.MISSING
+        # An `UtteranceProvenance` record describes *generation*, and only
+        # `generate_diverse_utterances` writes one. A command whose `generate_utterances`
+        # returns hand-written rows directly never calls the generator, so it has nothing
+        # to record - exactly the reasoning `NOT_APPLICABLE` already applies to reserved
+        # labels. The trainer's own context provenance proves this command trained, and
+        # carries the row counts, so judge it on the floor like anything else instead of
+        # blocking publication over a record that was never owed.
     if rows_by_context and any(
         context_rows < min_rows for context_rows in rows_by_context.values()
     ):

@@ -1,5 +1,5 @@
 import os
-from typing import Callable, ClassVar, Optional
+from typing import Callable, ClassVar, Iterable, Optional
 from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification
 from torch.optim import AdamW
 from sklearn.decomposition import PCA
@@ -55,50 +55,91 @@ class TrainingDataError(ValueError):
     """Raised before model fitting when a label cannot be trained and evaluated."""
 
 
+def _name_labels(
+    labels: Iterable[int],
+    decode_label: Optional[Callable[[int], str]] = None,
+) -> str:
+    """Render labels as a plain comma-separated list, sorted for a stable message.
+
+    Deliberately not a list repr. `decode_label` returns a numpy string, so a repr
+    renders as `[np.str_('cmd')]`, and the report prints through a rich console that
+    reads a bracketed run with no spaces as console markup and deletes it - which
+    silently dropped the one detail these messages exist to carry.
+    """
+    names = sorted(
+        str(decode_label(label)) if decode_label else str(label) for label in labels
+    )
+    return ", ".join(names)
+
+
 def split_training_data(
     dataset: list[tuple[str, int]],
     decode_label: Optional[Callable[[int], str]] = None,
 ) -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
     """Create a deterministic, class-aware train/evaluation split.
 
-    Every label must contribute at least one row to both sets. This replaces the
-    unstratified 25% split that could randomly put every row for a small class in the
-    evaluation set, leaving the classifier unable to learn that command.
+    Every label that *can* appear on both sides does. A label with fewer rows than
+    `heldout_evaluation.MIN_TRAINING_ROWS_PER_LABEL` cannot be stratified, so it trains
+    and goes unmeasured rather than failing the run: that is already what the persona
+    holdout does when its own split would starve a label, and aborting here instead
+    spends the entire LLM and GPU budget only to publish nothing - over a label whose
+    evaluation coverage the developer may never have wanted. Being unmeasured is
+    reported, not fatal.
+
+    Splitting still replaces the unstratified 25% split that could randomly put every
+    row for a small class in the evaluation set, leaving the classifier unable to learn
+    that command.
 
     ``decode_label`` turns the encoded label back into its command name for the
-    error message. Without it the abort names labels the developer cannot map to
-    commands without reverse-engineering the LabelEncoder, which is the state
-    this argument exists to prevent.
+    warning and error messages. Without it those messages name labels the developer
+    cannot map to commands without reverse-engineering the LabelEncoder, which is the
+    state this argument exists to prevent.
     """
     label_counts = Counter(label for _, label in dataset)
-    starved = sorted(
+    unmeasurable = {
         label
         for label, count in label_counts.items()
         if count < heldout_evaluation.MIN_TRAINING_ROWS_PER_LABEL
-    )
-    if starved:
-        named = [decode_label(label) for label in starved] if decode_label else starved
-        raise TrainingDataError(
-            f"Each intent label needs at least "
-            f"{heldout_evaluation.MIN_TRAINING_ROWS_PER_LABEL} rows (one for training "
-            f"and one for evaluation); labels with fewer rows: {named}"
+    }
+    # Partition rather than filter, so the unmeasurable rows still reach the model. They
+    # are appended in dataset order to keep the split reproducible.
+    splittable = [row for row in dataset if row[1] not in unmeasurable]
+    unmeasured_rows = [row for row in dataset if row[1] in unmeasurable]
+    if unmeasurable:
+        logger.warning(
+            f"{len(unmeasurable)} intent label(s) have fewer than "
+            f"{heldout_evaluation.MIN_TRAINING_ROWS_PER_LABEL} rows, so they train "
+            f"without an evaluation row and are unmeasured on the routing axis: "
+            f"{_name_labels(unmeasurable, decode_label)}"
         )
 
+    label_counts = Counter(label for _, label in splittable)
     label_count = len(label_counts)
-    test_size = max((len(dataset) + 3) // 4, label_count)
-    if len(dataset) - test_size < label_count:
+    if not label_count:
+        # Nothing can be measured, so there is no evaluation set to tune a threshold
+        # against and no score to publish. That is a different failure from one thin
+        # label and stays fatal.
         raise TrainingDataError(
-            f"Cannot split {len(dataset)} rows across {label_count} labels while keeping "
-            "at least one row per label in both training and evaluation sets."
+            f"No intent label has the "
+            f"{heldout_evaluation.MIN_TRAINING_ROWS_PER_LABEL} rows needed to form an "
+            f"evaluation set; every label is below the floor: "
+            f"{_name_labels(unmeasurable, decode_label)}"
+        )
+
+    test_size = max((len(splittable) + 3) // 4, label_count)
+    if len(splittable) - test_size < label_count:
+        raise TrainingDataError(
+            f"Cannot split {len(splittable)} rows across {label_count} labels while "
+            "keeping at least one row per label in both training and evaluation sets."
         )
 
     train_data, test_data = train_test_split(
-        dataset,
+        splittable,
         test_size=test_size,
         random_state=42,
-        stratify=[label for _, label in dataset],
+        stratify=[label for _, label in splittable],
     )
-    return list(train_data), list(test_data)
+    return list(train_data) + unmeasured_rows, list(test_data)
 
 
 def save_label_encoder(filepath):
