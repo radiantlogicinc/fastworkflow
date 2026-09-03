@@ -9,6 +9,7 @@ testable without torch, a trained model, network access, or API keys.
 """
 
 import json
+import logging
 
 import pytest
 
@@ -20,6 +21,7 @@ from fastworkflow.model_pipeline_training import (
     _score_heldout_context,
     split_training_data,
 )
+from fastworkflow.utils.logging import logger as fastworkflow_logger
 from fastworkflow.nlu_labels import WILDCARD_LABEL
 from fastworkflow.train.selective_training import _recompute_heldout_totals
 from fastworkflow.train.heldout_evaluation import (
@@ -1120,15 +1122,45 @@ def test_rescue_threshold_matches_the_trainers_floor():
     assert any("floor" in note for note in split.notes)
 
 
+class _WarningSink(logging.Handler):
+    """Collects real `LogRecord`s off the real logger.
+
+    The `fastWorkflow` logger sets ``propagate = False``, so pytest's `caplog`, whose
+    handler lives on the root logger, never sees these records.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.DEBUG)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.levelno == logging.WARNING:
+            self.messages.append(record.getMessage())
+
+
 def test_split_training_data_names_commands_not_encoded_ids():
-    """A developer cannot map label id 3 to a command without the LabelEncoder."""
+    """A developer cannot map label id 3 to a command without the LabelEncoder.
+
+    The thin label is now a warning rather than an abort - it trains unmeasured, the
+    way this module's own persona split already rescues a starved label - so the name
+    has to travel on the warning.
+    """
     dataset = [("only row", 3), ("a", 11), ("b", 11)]
 
-    with pytest.raises(TrainingDataError) as excinfo:
-        split_training_data(dataset, lambda encoded: f"TodoList/cmd_{encoded}")
+    sink = _WarningSink()
+    fastworkflow_logger.addHandler(sink)
+    try:
+        train_rows, evaluation_rows = split_training_data(
+            dataset, lambda encoded: f"TodoList/cmd_{encoded}"
+        )
+    finally:
+        fastworkflow_logger.removeHandler(sink)
 
-    assert "TodoList/cmd_3" in str(excinfo.value)
-    assert "[3]" not in str(excinfo.value)
+    assert ("only row", 3) in train_rows
+    assert 3 not in {label for _, label in evaluation_rows}
+    message = "\n".join(sink.messages)
+    assert "TodoList/cmd_3" in message
+    assert "[3]" not in message
 
 
 def test_report_discloses_which_model_was_evaluated(tmp_path):
