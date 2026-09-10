@@ -2,73 +2,107 @@
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
-<title>fastWorkflow vulnerability human review — 2026-08-21 02:56 UTC</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>fastWorkflow Human Review — Vulnerabilities Requiring Judgment</title>
 <style>
-body { margin:0; font-family:"IBM Plex Sans","Source Sans 3","Segoe UI",sans-serif; color:#1a1d23; background:linear-gradient(180deg,#f3efe8,#f7f8fa); }
-header { padding:2.5rem 2rem 1.25rem; background:#fff; border-bottom:1px solid #d8dee6; }
-h1 { margin:0 0 .4rem; font-size:1.7rem; }
-.sub { color:#5c6570; max-width:70ch; line-height:1.45; }
-main { padding:1.5rem 2rem 3rem; display:grid; gap:1rem; }
-article { background:#fff; border:1px solid #d8dee6; border-radius:12px; padding:1.2rem 1.4rem; }
-.rec { display:inline-block; font-weight:700; letter-spacing:.04em; padding:.25rem .65rem; border-radius:6px; margin-bottom:.6rem; }
-h3 { margin:.2rem 0 .6rem; }
-h4 { margin:1rem 0 .35rem; font-size:.95rem; color:#3b4450; }
-p { margin:.35rem 0; line-height:1.5; }
-.meta { color:#5c6570; font-size:.92rem; }
-.legend { display:flex; gap:1rem; margin-top:1rem; flex-wrap:wrap; }
-.legend span { padding:.2rem .55rem; border-radius:6px; font-weight:600; font-size:.8rem; }
+  :root { --bg:#0f1419; --card:#1a2332; --text:#e7ecf3; --muted:#9aa7b8; --ok:#3ecf8e; --warn:#f0b429; --bad:#f07178; --fix:#5ccfe6; --ignore:#c3a6ff; --border:#2a3548; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: "IBM Plex Sans", "Segoe UI", sans-serif; background: linear-gradient(160deg,#0f1419 0%,#15202b 50%,#0f1419 100%); color:var(--text); line-height:1.55; }
+  header { padding:2.5rem 2rem 1.5rem; border-bottom:1px solid var(--border); }
+  header h1 { margin:0 0 .35rem; font-size:1.75rem; font-weight:600; }
+  header p { margin:0; color:var(--muted); max-width:52rem; }
+  main { padding:1.5rem 2rem 3rem; max-width:960px; }
+  .item { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:1.25rem 1.35rem; margin:1rem 0; }
+  .item h2 { margin:0 0 .5rem; font-size:1.1rem; }
+  .meta { color:var(--muted); font-size:.88rem; margin-bottom:.75rem; }
+  .rec { display:inline-block; font-weight:700; letter-spacing:.06em; font-size:.8rem; padding:.2rem .55rem; border-radius:4px; margin-bottom:.75rem; }
+  .rec-ignore { background:rgba(195,166,255,.18); color:var(--ignore); }
+  .rec-fix { background:rgba(92,207,230,.18); color:var(--fix); }
+  h3 { margin:1rem 0 .35rem; font-size:.9rem; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; font-weight:500; }
+  p, li { font-size:.95rem; }
+  ul { margin:.35rem 0 .75rem; padding-left:1.2rem; }
+  code { font-family:"IBM Plex Mono", ui-monospace, monospace; font-size:.85em; background:rgba(255,255,255,.06); padding:.1rem .35rem; border-radius:3px; }
+  footer { padding:1rem 2rem 2rem; color:var(--muted); font-size:.85rem; border-top:1px solid var(--border); }
+  .note { border-left:3px solid var(--ok); padding-left:.9rem; margin:1.5rem 0; color:var(--muted); }
 </style>
 </head>
 <body>
 <header>
-  <h1>Vulnerabilities requiring human review</h1>
-  <p class="sub">Findings that cannot be closed by an easy <code>pyproject.toml</code> version bump alone, plus documentation of the bump that <em>was</em> applied. Each item has a recommendation of <strong>FIX</strong> or <strong>IGNORE</strong> with documented rationale. Generated 2026-08-21 02:56 UTC (post PR #68 / v3.1.2; remediation PR bumps to v3.1.3).</p>
-  <div class="legend">
-    <span style="background:#e5f6ec;color:#0b6b3a">IGNORE = accept / already VEX’d / out of product scope</span>
-    <span style="background:#fde8e8;color:#9b1c1c">FIX = code or process change required</span>
-  </div>
+  <h1>Human review queue</h1>
+  <p>Findings that cannot be cleared by a simple dependency floor bump alone. Each item has a recommended <strong>FIX</strong> or <strong>IGNORE</strong> decision with rationale. Date: 2026-09-10 (post PR #82).</p>
 </header>
 <main>
 
-    <article>
-      <div class="rec" style="background:#e5f6ec;color:#0b6b3a">IGNORE</div>
-      <h3>Unsafe pickle deserialization in DiskCache</h3>
-      <p class="meta"><strong>ID:</strong> CVE-2025-69872 / GHSA-w8v5-vhqr-4h9v / PYSEC-2026-2447<br/>
-      <strong>Component:</strong> diskcache 5.6.3 (transitive via dspy)</p>
-      <h4>Why a code / process change (not pyproject alone)</h4>
-      <p>No patched PyPI release exists (latest still 5.6.3 as of 2026-08-21 02:56 UTC). A pyproject.toml bump cannot remediate. Mitigation would require application changes (disable DSPy disk cache, relocate/harden cache dir permissions, or wait for upstream non-pickle default).</p>
-      <h4>Rationale</h4>
-      <p>Already documented in security/vex/fastworkflow.openvex.json (version 6) as not_affected with justification vulnerable_code_cannot_be_controlled_by_adversary. Exploitation requires write access to the process-local DSPy cache directory; remote API/MCP clients cannot write that path. An adversary who can write as the service user already has equivalent privilege to pickle RCE. Re-evaluate if cache directory is shared across trust boundaries or world-writable. When upstream ships a fix, add a floor constraint in pyproject.toml.</p>
-    </article>
+  <div class="note">
+    Easy dependency remediations (httpx2 ≥2.12.0 / httpcore2 2.12.0 / idna ≥3.18) were applied in this PR and are <em>not</em> listed below.
+  </div>
 
-    <article>
-      <div class="rec" style="background:#e5f6ec;color:#0b6b3a">IGNORE</div>
-      <h3>6 Critical / 12 High unique OS CVEs on proxy scan image</h3>
-      <p class="meta"><strong>ID:</strong> Proxy base image OS CVEs (Trivy on python:3.13-slim-bookworm)<br/>
-      <strong>Component:</strong> Debian bookworm packages in python:3.13-slim-bookworm (not shipped by this repo)</p>
-      <h4>Why a code / process change (not pyproject alone)</h4>
-      <p>This repository has no Dockerfile. Image CVEs are in distro packages (perl, libc, sqlite, openssl, etc.) and cannot be fixed via pyproject.toml. Remediation would mean publishing and maintaining a hardened runtime image, then refreshing base tags / applying distro patches.</p>
-      <h4>Rationale</h4>
-      <p>fastWorkflow is distributed as a PyPI package, not a container image. Proxy image scan was performed only to exercise Dockle/Dive/Trivy-image as required by the automation. Do not treat these OS CVEs as product vulnerabilities until a first-party image is published. If/when a Dockerfile is added, pin a maintained base and rebuild on distro security updates. Note: proxy-image setuptools 70.3.0 / CVE-2025-47273 is also not product — poetry.lock already floors setuptools &gt;=83.0.0.</p>
-    </article>
+  <article class="item" id="diskcache">
+    <span class="rec rec-ignore">IGNORE</span>
+    <h2>diskcache 5.6.3 — pickle RCE (GHSA-w8v5-vhqr-4h9v / CVE-2025-69872 / PYSEC-2026-2447)</h2>
+    <div class="meta">Severity: Medium (CVSS ~5.2) · Ecosystem: PyPI · Fixed version: <em>none on PyPI</em> (latest still 5.6.3) · OpenVEX v9: <code>not_affected</code></div>
+    <h3>Why this needs human judgment</h3>
+    <p>No patched release exists. Clearing the alert would require replacing DSPy’s on-disk cache backend, vendoring a fork, or disabling disk cache — all application/process changes, not a <code>pyproject.toml</code> bump.</p>
+    <h3>Recommendation rationale — IGNORE</h3>
+    <ul>
+      <li>fastWorkflow does not import diskcache directly; it arrives transitively via <code>dspy</code> for LM response caching (<code>dspy.configure_cache</code>).</li>
+      <li>Exploitation needs write access to the process-local cache directory (e.g. <code>~/.dspy_cache</code>) plus subsequent deserialization. Remote MCP/API clients cannot write that path in supported deployments.</li>
+      <li>An attacker who can already write arbitrary files as the service user already has equivalent-or-greater privilege than pickle RCE would grant (<code>vulnerable_code_cannot_be_controlled_by_adversary</code>).</li>
+      <li>Documented in <code>security/vex/fastworkflow.openvex.json</code>; Trivy suppresses with <code>--vex</code>.</li>
+    </ul>
+    <h3>Re-evaluate when</h3>
+    <ul>
+      <li>PyPI publishes a fixed diskcache (or DSPy switches cache backends).</li>
+      <li>A deployment mounts the DSPy cache as world-writable or shared across trust boundaries.</li>
+    </ul>
+  </article>
 
-    <article>
-      <div class="rec" style="background:#e5f6ec;color:#0b6b3a">IGNORE</div>
-      <h3>Container runs as root; no HEALTHCHECK; content trust unset</h3>
-      <p class="meta"><strong>ID:</strong> Dockle CIS-DI-0001 (and related INFO findings)<br/>
-      <strong>Component:</strong> python:3.13-slim-bookworm proxy image</p>
-      <h4>Why a code / process change (not pyproject alone)</h4>
-      <p>Requires Dockerfile USER/HEALTHCHECK instructions and deployment content-trust policy — not addressable in pyproject.toml.</p>
-      <h4>Rationale</h4>
-      <p>Findings apply to the proxy base image used for scanner coverage, not a shipped fastWorkflow image. Track as image-hardening requirements when a first-party Dockerfile is introduced.</p>
-    </article>
+  <article class="item" id="proxy-image-os">
+    <span class="rec rec-ignore">IGNORE</span>
+    <h2>Proxy base image OS CVEs — python:3.13-slim-bookworm (5 Critical / 18 High unique)</h2>
+    <div class="meta">Scanners: Trivy image · Target is <em>not</em> a first-party Dockerfile (repo has none) · Critical examples: CVE-2025-7458 (sqlite), CVE-2026-13221/8376/42496 (perl), CVE-2023-45853 (zlib)</div>
+    <h3>Why this needs human judgment</h3>
+    <p>Debian bookworm packages in the public Python slim image often lack fixed versions in-distro (<code>affected</code> / <code>fix_deferred</code>). Addressing them requires maintaining a custom hardened image or switching bases — outside pyproject scope.</p>
+    <h3>Recommendation rationale — IGNORE</h3>
+    <ul>
+      <li>fastWorkflow ships as a PyPI library/CLI, not a container product; no Dockerfile is owned in-tree.</li>
+      <li>Findings characterize a third-party reference image used only for Dockle/Dive/Trivy completeness in this automation.</li>
+      <li>Consumers who containerize should choose and patch their own base images (or rebuild when Debian publishes fixes).</li>
+    </ul>
+    <h3>Optional future FIX (out of scope for this PR)</h3>
+    <ul>
+      <li>If the project later publishes an official image: pin a minimal distroless/chainguard base, non-root user, and track image CVEs in CI.</li>
+    </ul>
+  </article>
 
-<section style="background:#fff;border:1px solid #d8dee6;border-radius:12px;padding:1.2rem 1.4rem">
-  <h3>pyproject.toml easy-fix outcome</h3>
-  <p><strong>Applied:</strong> bump optional <code>datasets</code> from <code>^4.0.0</code> to <code>^5.0.1</code> (locked 5.0.1) to close <strong>CVE-2026-66007 / PYSEC-2026-3716</strong>. Usage in-tree is limited to <code>load_dataset(...)</code> for PersonaHub personas during training; API smoke-checked on 5.0.1. Package version bumped to <strong>v3.1.3</strong>.</p>
-  <p>No other third-party package vulnerability in the locked graph had a fixed version available on PyPI. Prior release work already raised floors for litellm, python-multipart, starlette, cryptography, aiohttp, urllib3, requests, setuptools, and related packages.</p>
-  <p class="meta">Optional follow-ups (not done here): add <code>SNYK_TOKEN</code> / Docker Hub auth for Scout; publish a first-party runtime Dockerfile if container CVEs should become product backlog. Refresh after merge of PR #68 (v3.1.2).</p>
-</section>
+  <article class="item" id="dockle-cis">
+    <span class="rec rec-ignore">IGNORE</span>
+    <h2>Dockle CIS findings on proxy image (CIS-DI-0001 WARN + info)</h2>
+    <div class="meta">WARN: container runs as root · INFO: content trust, missing HEALTHCHECK, setuid binaries</div>
+    <h3>Recommendation rationale — IGNORE</h3>
+    <ul>
+      <li>Same non-product proxy image; CIS hardening applies to images the project builds and distributes.</li>
+      <li>No actionable in-repo Dockerfile change until an official image exists.</li>
+    </ul>
+  </article>
+
+  <article class="item" id="snyk-scout">
+    <span class="rec rec-fix">FIX</span>
+    <h2>Scanner coverage gap — Snyk and Docker Scout not authenticated</h2>
+    <div class="meta">Snyk CLI 1.1307.2 → 401 without token · Scout 1.24.0 → requires docker login</div>
+    <h3>Why this needs human judgment</h3>
+    <p>Not a package CVE, but a process gap: two of the eight requested scanners cannot contribute findings in this environment.</p>
+    <h3>Recommendation rationale — FIX (ops / secrets)</h3>
+    <ul>
+      <li>Provide <code>SNYK_TOKEN</code> (and optionally org) to the automation environment.</li>
+      <li>Provide Docker Hub credentials (or a PAT) so <code>docker scout cves</code> can run against the lock export / any future image.</li>
+      <li>Until then, Trivy + Grype + OSV + Syft remain the authoritative PyPI signal for this repo.</li>
+    </ul>
+  </article>
+
 </main>
+<footer>
+  See also <a href="cve-report.html">cve-report.html</a> for full scanner matrix. OpenVEX: <code>security/vex/fastworkflow.openvex.json</code>.
+</footer>
 </body>
 </html>
