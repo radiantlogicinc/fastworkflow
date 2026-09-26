@@ -11,11 +11,13 @@ from fastworkflow.observation_offloading.archive import RuntimeHandleArchive, Ru
 from fastworkflow.observation_offloading.labels import (
     alias_line,
     annotated_observation,
+    command_response,
     estimated_tokens,
     is_offload_label,
     label_alias,
     offload_label,
     offload_saving_bytes,
+    owns_line,
     printed_alias,
     printed_context,
     replacement_saves_space,
@@ -112,6 +114,32 @@ def execute_ordinals(
     return found
 
 
+def record_foreign_line(
+    reader: str,
+    step_index: int,
+    text: str,
+    expected_alias: str,
+    scope: Optional[RuntimeHandleScope] = None,
+) -> None:
+    """Record a line shaped like ours that a reader refused to trust.
+
+    Every annotated step's backend look-alike is escaped, so on the normal path
+    this never fires; a count above zero means a step reached a reader without
+    its handle line, which is worth knowing before it is worth a wrong answer.
+    """
+    printed = printed_alias(text) or label_alias(text)
+    record_event(
+        {
+            "kind": "foreign_line_ignored",
+            "scope_id": getattr(scope, "scope_id", None),
+            "reader": reader,
+            "step_index": step_index,
+            "printed_alias": printed,
+            "expected_alias": expected_alias,
+        }
+    )
+
+
 def _command_response(text: str, alias: str) -> str:
     """The exact command response inside an observation slot.
 
@@ -120,7 +148,7 @@ def _command_response(text: str, alias: str) -> str:
     backend's own text: stripping it would drop a line of the
     response from the archive, its digest and every search of it.
     """
-    return strip_alias_line(text) if printed_alias(text) == alias else text
+    return command_response(text, alias)
 
 
 def annotate_execute_observations(
@@ -268,8 +296,10 @@ def archive_execute_observations(
             continue
         alias = f"O{ordinal}"
         if is_offload_label(shown):
-            mark_offloaded(selected_scope, alias)
-            continue
+            if owns_line(shown, alias):
+                mark_offloaded(selected_scope, alias)
+                continue
+            record_foreign_line("archive", step_index, shown, alias, selected_scope)
         original = _command_response(shown, alias)
         digest = hashlib.sha256(original.encode("utf-8")).hexdigest()
         if archived_digest(selected_scope, alias) == digest:
@@ -453,7 +483,7 @@ def compact_trajectory(
             "estimated_tokens": estimated_tokens(original),
         }
         recency_protected = ordinal >= protected_from
-        already_label = is_offload_label(response)
+        already_label = is_offload_label(response) and owns_line(response, alias)
         decision = {
             "alias": alias,
             "step_index": step_index,

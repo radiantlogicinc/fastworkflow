@@ -34,7 +34,8 @@ DEFAULT_PAGE_BYTES = 4096
 SEARCH_MEMORY_MAX_PAGES = 3
 # A search answer is model output capped only by the 2,048-token completion
 # limit (~8 KB), it is a non-execute observation that compaction never offloads,
-# and the replan skeleton carries it into every later segment in full. So it is
+# so it stays in the trajectory for every later segment, and every replan
+# skeleton hands it to the planner in full. So it is
 # given the same 3 KB presentation budget a listing observation has, measured
 # over the whole observation - header and bounded marking included, not just the
 # answer body. Recorded answers are far below this (max 1,855 B over 27 answers

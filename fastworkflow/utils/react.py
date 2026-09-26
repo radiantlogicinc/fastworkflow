@@ -602,11 +602,13 @@ class fastWorkflowReAct(Module):
             }
         )
         try:
+            pairs = getattr(self, "execute_ordinal_pairs", None)
             rehydrated, report = answer_rehydration.rehydrate(
                 trajectory,
                 scope=scope,
                 archive=getattr(self, "observation_archive", None),
                 budget=budget,
+                executes=pairs(trajectory) if callable(pairs) else None,
             )
         except Exception as error:  # noqa: BLE001
             logger.warning(

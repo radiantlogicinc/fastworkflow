@@ -1,4 +1,4 @@
-"""Segmented ReAct with greedy-28k planner skeleton (Arm D)."""
+"""Segmented ReAct with a greedy planner skeleton bounded by the trajectory budget (Arm D)."""
 from __future__ import annotations
 
 import hashlib
@@ -15,13 +15,17 @@ from fastworkflow.observation_offloading.compact import (
     EXECUTE_TOOL_NAME,
     execute_ordinals,
     min_offload_saving_bytes_from_env,
+    record_foreign_line,
     step_indexes,
 )
 from fastworkflow.observation_offloading.labels import (
+    command_response,
     is_offload_label,
     label_alias,
     offload_label,
     offload_saving_bytes,
+    owns_line,
+    printed_alias,
     replacement_saves_space,
     strip_alias_line,
 )
@@ -43,8 +47,11 @@ DEFAULT_CONTINUATION_PLAN = "Continue unfinished requested work."
 #: continuation design, not a deployment setting.
 MAX_FORCED_REPLANS = 2
 MAX_REPLAN_CHARS = 2_000
-#: The replan skeleton is the next segment's trajectory, so it gets the
-#: trajectory's budget. The constant is the value at the reference context
+#: The replan skeleton is the continuation planner's view of the trajectory,
+#: and it gets the trajectory's budget. It is not the next segment's
+#: trajectory: ``_force_replan`` hands the skeleton only to the planner, and the
+#: next segment continues on the trajectory it had, with the replan artifact
+#: appended. The constant is the value at the reference context
 #: window; ``replan_trajectory_skeleton`` resolves the effective one per call.
 REPLAN_OBSERVATION_MAX_BYTES = context_budget.REFERENCE_TRAJECTORY_MAX_BYTES
 
@@ -109,7 +116,16 @@ def replan_trajectory_skeleton(
             index = -1
         text = str(value)
         alias = execute_aliases.get(key, f"S{index}" if index >= 0 else f"S-{suffix}")
-        if is_offload_label(text):
+        # On an execute step only a line of ours naming the step's ledger alias
+        # is ours; a look-alike on a step that was never annotated is response.
+        is_execute = key in execute_aliases
+        foreign = is_execute and (
+            (is_offload_label(text) or printed_alias(text) is not None)
+            and not owns_line(text, alias)
+        )
+        if foreign:
+            record_foreign_line("replan", index, text, alias, scope)
+        if is_offload_label(text) and not foreign:
             alias = label_alias(text) or alias
             skeleton[key] = text
         else:
@@ -117,7 +133,7 @@ def replan_trajectory_skeleton(
             command = str(args.get("command") or "execute_workflow_query")
             # The printed handle line is presentation; label text, its authored
             # description lookup and the savings rule all use the exact response.
-            original = strip_alias_line(text)
+            original = command_response(text, alias) if is_execute else strip_alias_line(text)
             label = offload_label(alias=alias, command_name=command, response=original,
                                  description=describe_output(command, original) if describe_output else "")
             worth_labelling = (
@@ -147,11 +163,13 @@ def replan_trajectory_skeleton(
     persistence_failures: list[str] = []
     for key in execute_keys:
         shown = str(trajectory[key])
-        if skeleton[key] == shown or is_offload_label(shown):
+        if skeleton[key] == shown or (
+            is_offload_label(shown) and owns_line(shown, execute_aliases[key])
+        ):
             continue
         suffix = key.removeprefix("observation_")
         command = str((trajectory.get(f"tool_args_{suffix}") or {}).get("command") or "execute_workflow_query")
-        text = strip_alias_line(shown)
+        text = command_response(shown, execute_aliases[key])
         try:
             store = store or archive()
             store.persist(selected_scope, alias=execute_aliases[key],
@@ -164,11 +182,15 @@ def replan_trajectory_skeleton(
             record_event({"kind": "replan_offload_refused", "alias": execute_aliases[key],
                           "scope_id": selected_scope.scope_id, "error": type(error).__name__})
     measured_bytes = sum(len(str(skeleton[key]).encode("utf-8")) for key in observation_keys)
-    inlined_keys = [key for key in execute_keys if not is_offload_label(str(skeleton[key]))]
+    inlined_keys = [
+        key for key in execute_keys
+        if not (is_offload_label(str(skeleton[key]))
+                and owns_line(str(skeleton[key]), execute_aliases[key]))
+    ]
     inlined_aliases = [execute_aliases[key] for key in execute_keys if key in inlined_keys]
     labeled_aliases = [execute_aliases[key] for key in execute_keys if key not in inlined_keys]
     metadata = {
-        "policy": "greedy_28k",
+        "policy": "greedy_trajectory_budget",
         "inlined_aliases": inlined_aliases,
         "labeled_aliases": labeled_aliases,
         "measured_bytes": measured_bytes,
@@ -189,7 +211,7 @@ def _next_step_index(trajectory: Mapping[str, Any]) -> int:
 
 
 class StructuredContinuationReAct(fastWorkflowReAct):
-    """Three segments of max_iters with at most two greedy-28k replans.
+    """Three segments of max_iters with at most two greedy, trajectory-budget replans.
 
     ``scope_factory`` is called once per ``forward`` so the handle scope (and
     with it the ``O{n}`` alias namespace) belongs to the turn being run, not to

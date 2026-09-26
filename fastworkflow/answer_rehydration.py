@@ -43,10 +43,12 @@ from fastworkflow.observation_offloading.archive import (
     RuntimeHandleArchive,
     RuntimeHandleScope,
 )
+from fastworkflow.observation_offloading.compact import record_foreign_line
 from fastworkflow.observation_offloading.labels import (
     annotated_observation,
     is_offload_label,
     label_alias,
+    owns_line,
     printed_alias,
 )
 from fastworkflow.observation_offloading.state import (
@@ -169,7 +171,11 @@ def _step_indexes(trajectory: Mapping[str, Any]) -> list[int]:
     return sorted(indexes)
 
 
-def _candidates(trajectory: Mapping[str, Any]) -> list[tuple[int, str, str]]:
+def _candidates(
+    trajectory: Mapping[str, Any],
+    executes: Optional[list[tuple[int, int]]] = None,
+    scope: Optional[RuntimeHandleScope] = None,
+) -> list[tuple[int, str, str]]:
     """``(step_index, alias, text)`` for every aliased execute observation.
 
     Most recent first. The alias comes off the observation itself -- the printed
@@ -177,7 +183,14 @@ def _candidates(trajectory: Mapping[str, Any]) -> list[tuple[int, str, str]]:
     ordinals or know how many steps the loop truncated away. An execute step with
     no alias on it (an error string, a refusal) is not a candidate: there is
     nothing stored to put back.
+
+    When the agent's execute ledger is given (``executes``), a step whose line
+    names any alias but its own is not a candidate either: on a step that was
+    never annotated that line is the backend's text, and resolving it would put
+    another observation's evidence in this step's place. Without the ledger the
+    alias read off the text is taken as it stands.
     """
+    ledger = {index: f"O{ordinal}" for index, ordinal in (executes or [])}
     found: list[tuple[int, str, str]] = []
     for index in _step_indexes(trajectory):
         if str(trajectory.get(f"tool_name_{index}") or "") != "execute_workflow_query":
@@ -187,6 +200,10 @@ def _candidates(trajectory: Mapping[str, Any]) -> list[tuple[int, str, str]]:
             continue
         alias = label_alias(text) if is_offload_label(text) else printed_alias(text)
         if not alias:
+            continue
+        expected = ledger.get(index)
+        if expected is not None and not owns_line(text, expected):
+            record_foreign_line("rehydration", index, text, expected, scope)
             continue
         found.append((index, alias, text))
     found.reverse()
@@ -266,8 +283,13 @@ def rehydrate(
     scope: Optional[RuntimeHandleScope] = None,
     archive: Optional[RuntimeHandleArchive] = None,
     budget: Optional[int] = None,
+    executes: Optional[list[tuple[int, int]]] = None,
 ) -> tuple[dict[str, Any], RehydrationReport]:
     """The extractor's copy of *trajectory*, with the evidence behind it put back.
+
+    ``executes`` is the agent's own ``(step_index, ordinal)`` ledger. With it, a
+    line on an execute step that names any alias but that step's own is never
+    resolved (see ``_candidates``); without it behaviour is unchanged.
 
     Returns ``(trajectory_copy, report)``. The input mapping is never mutated:
     the copy is what the extract call receives, so the ReAct loop keeps the
@@ -291,7 +313,7 @@ def rehydrate(
     report.bytes_before = trajectory_bytes(trajectory)
     used = report.bytes_before
     seen_labels: set[str] = set()
-    candidates = _candidates(trajectory)
+    candidates = _candidates(trajectory, executes, selected_scope)
     stopped = False
 
     for position, (index, alias, text) in enumerate(candidates):

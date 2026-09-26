@@ -189,6 +189,30 @@ def observation_alias(text: str) -> tuple[str | None, str | None]:
     return (alias, ALIAS_SOURCE_LABEL) if alias is not None else (None, None)
 
 
+def owns_line(text: str, alias: str) -> bool:
+    """Whether *text* opens with a line of ours naming *alias*, the step's own.
+
+    A step's alias comes from the agent's execute ledger, never from its text.
+    Once a step is annotated, a backend line shaped like ours is always escaped,
+    so this is true of every handle line and label the framework wrote. It is
+    false for such a line on a step that was never annotated -- a trajectory
+    built outside the loop, or one whose compaction failed before the handle
+    line was printed -- where the line is the backend's text and names nothing.
+    Every reader that strips a handle line or resolves a label asks this first.
+    """
+    return observation_alias(text)[0] == alias
+
+
+def command_response(text: str, alias: str) -> str:
+    """The exact command response in the observation slot of step *alias*.
+
+    Only a handle line naming *alias* is presentation, so only that line is
+    removed; any other first line is the response's own and stays in the
+    archive, its digest and every search of it.
+    """
+    return strip_alias_line(text) if printed_alias(text) == alias else text
+
+
 def canonical_response(text: str) -> str | None:
     """The command response an observation slot carries, byte for byte, or None.
 
