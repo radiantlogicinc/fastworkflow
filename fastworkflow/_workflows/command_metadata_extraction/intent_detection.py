@@ -149,11 +149,15 @@ def foreign_context_hint(
             + ", ".join(f"'{c}'" for c in commands) + "."
             for context_name, commands in declared
         )
+    if entry:
+        step = f"{entry} Then run '{command_name}' there."
+    else:
+        where = "that context" if len(owner_contexts) == 1 else "one of those contexts"
+        step = f" Move into {where} first, then run '{command_name}' there."
     return (
         f"'{command_name}' is a command of the {owners} {plural}, which this "
-        f"context and its parents do not provide.{entry} Then run "
-        f"'{command_name}' there. Use 'what_can_i_do' to list the commands "
-        f"available where you are now."
+        f"context and its parents do not provide.{step} Use 'what_can_i_do' to "
+        f"list the commands available where you are now."
     )
 
 

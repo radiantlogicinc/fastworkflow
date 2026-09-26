@@ -677,6 +677,25 @@ class TestTheHintTextItself:
         assert "Enter it with" not in hint
         assert "what_can_i_do" in hint
 
+    def test_without_a_declaration_it_never_says_then_after_nothing(self):
+        """'Then run it there' needs an entry instruction before it; with no
+        declaration the hint says where to go instead."""
+        hint = foreign_context_hint("list_permissions", ["Account"], {})
+        assert "Then run" not in hint
+        assert "Move into that context first, then run 'list_permissions' there." in hint
+
+    def test_several_undeclared_owners_are_one_of_those_contexts(self):
+        hint = foreign_context_hint("who_has_access_to", ["Directory", "DirectoryExplorer"], {})
+        assert "Then run" not in hint
+        assert "Move into one of those contexts first" in hint
+
+    def test_a_declared_entry_still_reads_enter_then_run(self):
+        hint = foreign_context_hint(
+            "list_permissions", ["Account"],
+            {"Account": ["open_account_by_uid <account_uid>"]})
+        assert ("Enter it with: 'open_account_by_uid <account_uid>'. "
+                "Then run 'list_permissions' there.") in hint
+
 
 class TestTheHintIsComposedAndRecorded:
     def test_the_guard_records_the_hint_on_its_own_span(
