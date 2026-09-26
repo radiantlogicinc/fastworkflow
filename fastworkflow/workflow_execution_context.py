@@ -129,8 +129,11 @@ class WorkflowExecutionContext:
                          never the transport queues. When omitted, the context
                          opens the app workflow's own sink when a workflow is
                          bound (``bind_app_workflow``). A sink passed here --
-                         including an explicit ``tracing.NoOpTraceSink()``, the
-                         code-level way to record nothing -- is always kept.
+                         including an explicit ``tracing.NoOpTraceSink()``,
+                         which records no spans or turn records -- is always
+                         kept. Observation offloading still writes its
+                         evidence, subjects and events to the workflow's
+                         observability database whatever the sink.
         """
         self._session_key = session_key
         self._run_as_agent = run_as_agent
@@ -254,8 +257,9 @@ class WorkflowExecutionContext:
 
         ``None`` hands the choice back to the context: the sink becomes the
         automatic one again, opened for the bound app workflow now or at the
-        next ``bind_app_workflow``. To record nothing, pass
-        ``tracing.NoOpTraceSink()``.
+        next ``bind_app_workflow``. To record no spans or turn records, pass
+        ``tracing.NoOpTraceSink()``; observation offloading still writes its
+        evidence to the workflow's observability database.
         """
         if sink is None:
             self._trace_sink = tracing.NoOpTraceSink()

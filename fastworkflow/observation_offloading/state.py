@@ -15,6 +15,7 @@ from fastworkflow.observation_offloading.archive import (
     clear_live_raw,
     release_live_raw,
 )
+from fastworkflow.observability import store as observability_store
 
 from fastworkflow import context_budget
 
@@ -59,6 +60,8 @@ _default_archive: Optional[RuntimeHandleArchive] = None
 #: durable subject rows in the same file without re-creating the schema on
 #: every call.
 _archives_by_path: dict[str, RuntimeHandleArchive] = {}
+#: Database paths ``prune_once`` has already pruned in this process.
+_pruned_paths: set[str] = set()
 _default_scope = RuntimeHandleScope(
     store_identity=f"process-{os.getpid()}",
     channel_id=f"process-{os.getpid()}",
@@ -88,6 +91,33 @@ def archive_for_path(db_path: str) -> RuntimeHandleArchive:
     created = RuntimeHandleArchive(key)
     with _lock:
         return _archives_by_path.setdefault(key, created)
+
+
+def prune_once(db_path: str) -> bool:
+    """Prune the observability database at *db_path*, at most once per process.
+
+    Pruning is otherwise triggered only by a trace sink starting on the store,
+    and the offload archive writes evidence whether or not a sink ever opened
+    it: a context built with ``tracing.NoOpTraceSink()`` would grow its offload
+    tables without bound. The agent builds a new archive object per agent, so
+    the guard is per PATH, or every build would re-prune a large database on
+    its first turn. Where a sink already pruned at startup this second pass
+    finds nothing to delete. Returns whether this call ran the prune; a failure
+    is logged and never raised, because an agent must still be built.
+    """
+    key = os.path.abspath(os.path.expanduser(str(db_path)))
+    with _lock:
+        if key in _pruned_paths:
+            return False
+        _pruned_paths.add(key)
+    try:
+        observability_store.ObservabilityStore(key).prune()
+    except Exception as error:  # noqa: BLE001 - a prune must not stop an agent
+        logger.warning(
+            "could not prune observability database %s: %s: %s",
+            key, type(error).__name__, error,
+        )
+    return True
 
 
 def durable_archive(selected_archive: Any = None) -> Any:
@@ -652,6 +682,7 @@ def reset_observation_state() -> None:
         _routes.clear()
         _default_archive = None
         _archives_by_path.clear()
+        _pruned_paths.clear()
     clear_live_raw()
     clear_default_cold_records()
 

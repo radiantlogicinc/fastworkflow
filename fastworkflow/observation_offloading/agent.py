@@ -22,6 +22,7 @@ from fastworkflow.observation_offloading.continuation import (
 from fastworkflow.observation_offloading.manifest import install_span_policy
 from fastworkflow.observation_offloading.search import search_memory
 from fastworkflow.observation_offloading.state import (
+    prune_once,
     record_event,
     scope_for_host,
 )
@@ -110,7 +111,7 @@ def open_handle_archive(
     ordinary write-degradation record and say the same thing per observation.
     """
     try:
-        return RuntimeHandleArchive(archive_path)
+        opened = RuntimeHandleArchive(archive_path)
     except Exception as error:  # noqa: BLE001
         unavailable = UnavailableHandleArchive(archive_path, error)
         logger.warning(
@@ -129,6 +130,8 @@ def open_handle_archive(
             }
         )
         return unavailable
+    prune_once(opened.db_path)
+    return opened
 
 
 def current_search_reasoning(agent: Any) -> str:

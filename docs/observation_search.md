@@ -539,16 +539,21 @@ carried over.
 
 **Pruning runs once per process start.** The evidence is pruned on the store's
 own age horizon and size cap (`FW_OBS_RETENTION_DAYS`, `FW_OBS_DB_MAX_BYTES`),
-one whole turn at a time, and that prune is triggered when a trace sink opens
-the store. A long-lived process does not prune again while it runs.
+one whole turn at a time. That prune is triggered when a trace sink opens the
+store, and again the first time the offloading archive opens a database in a
+process, so a database no sink ever opened is still bounded. A long-lived
+process does not prune again while it runs.
 
 **A program that embeds the library gets the same record.** A
 `WorkflowExecutionContext` built without a sink opens the bound app workflow's
 own sink when `bind_app_workflow()` runs — the same sink, and so the same
 prune, fastWorkflow's entry points open — and moves it to the new workflow's
 database when it is rebound to another workflow. A sink the caller passes, to
-the constructor or to `set_trace_sink()`, is always kept; passing
-`tracing.NoOpTraceSink()` is the code-level way to record nothing.
+the constructor or to `set_trace_sink()`, is always kept. Passing
+`tracing.NoOpTraceSink()` records no spans and no turn records, but it does
+not turn offloading off: the evidence, subjects and events above are still
+written (redacted as configured) to the workflow's `observability.sqlite3`,
+under `FASTWORKFLOW_STATE_ROOT`, and pruned when the archive opens it.
 
 **Worst-case agent work in one turn.** A turn runs at most three segments of 25
 decisions each, plus the two continuation-planner calls that open the second and
