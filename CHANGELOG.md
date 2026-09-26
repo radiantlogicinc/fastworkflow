@@ -91,8 +91,10 @@ labels themselves.
   given no sink opens the bound app workflow's sink in `bind_app_workflow()`,
   and follows a rebind to another workflow's database. A sink passed to the
   constructor or to `set_trace_sink()` is never replaced, and an explicit
-  `tracing.NoOpTraceSink()` records nothing; `set_trace_sink(None)` returns the
-  context to its automatic sink.
+  `tracing.NoOpTraceSink()` records no spans or turn records;
+  `set_trace_sink(None)` returns the context to its automatic sink. Offloading
+  evidence is written to the workflow's database whatever the sink, and the
+  offloading archive prunes that database once per process when it opens it.
 - The `search_memory` input bound has no tuning override; it is derived from the
   search model's context window only.
 - **An observability database from an older schema version is replaced, not
@@ -119,6 +121,23 @@ labels themselves.
   the current context as the foreign owner.
 - A failure while releasing the previous turn's process-local evidence no
   longer aborts the turn that is starting.
+- An observability database that no trace sink ever opens -- a context built
+  with `tracing.NoOpTraceSink()` -- is now pruned too: the offloading archive
+  prunes each database once per process when it first opens it. Its offload
+  tables used to grow without bound.
+- The finish-time roster nudge no longer fires in a workflow whose contexts
+  declare no instance identity, where every named item looked untouched, and
+  it no longer tells the agent that nothing about those items was retrieved;
+  it says only that they were never the subject of a command.
+- The foreign-context hint no longer ends with "Then run it there" when no
+  entry command is declared; it says to move into the owning context first.
+- Replanning and answer-time rehydration apply the agent's own execute
+  numbering to a handle line or offload label, as compaction already did, so a
+  command response shaped like one on a step that was never annotated is kept
+  as response and never resolved to another observation's evidence. Each such
+  line is recorded as a `foreign_line_ignored` event.
+- The replan skeleton's policy label is `greedy_trajectory_budget`; it named
+  a fixed 28 KB bound it does not use outside the reference window.
 - A reply to `you_misunderstood` that matches none of the current context's
   commands now lists what can be done there. It used to raise
   `KeyError: 'what can i do?'`, because the fallback it substitutes was
@@ -143,7 +162,9 @@ labels themselves.
   the same owner-only, pruned record as the entry points; to keep it elsewhere,
   set `FASTWORKFLOW_STATE_ROOT`. A `WorkflowExecutionContext` built without a
   sink now records into its workflow's database on its own; pass
-  `trace_sink=tracing.NoOpTraceSink()` where a context must record nothing.
+  `trace_sink=tracing.NoOpTraceSink()` where a context must record no spans or
+  turn records. That does not stop observation offloading, which still writes
+  its evidence, subjects and events to the same database.
 - The offloading runtime's events are not written to a separate file; read them
   with `ObservabilityStore.offload_events(turn_key=..., channel_id=..., kind=...)`.
 - To correct the `search_memory` input bound, set `FW_MODEL_CONTEXT_TOKENS` or
