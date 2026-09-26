@@ -27,9 +27,13 @@ Rules this module does not bend:
   the request; nothing is said about what its value would have been.
 * **Absence of evidence is never asserted.** The note says an item was never a
   subject, which is a fact about the run. It never says data about the item
-  does not exist. When no clause was recorded at all, the note says nothing,
-  because "never a subject" would then be a statement about the archive rather
-  than about the run.
+  does not exist, nor that nothing about it was retrieved: a name can arrive
+  as a row of somebody else's listing without ever being a subject. When no
+  clause was recorded at all, the note says nothing, because "never a subject"
+  would then be a statement about the archive rather than about the run. The
+  same holds when clauses were recorded but none of them names an instance:
+  a workflow that declares no instance identity prints context names alone,
+  so no named item could ever be found in them.
 * **It is a note, not a gate.** ``build_nudge`` returns text and a
   ``NudgeReport``; the caller decides. Nothing here edits, rejects or retries
   an answer.
@@ -402,6 +406,26 @@ def subject_corpus(
     be the reason a name is called retrieved, and it never is -- it is read only
     to decide whether the agent has yet turned to that subject.
     """
+    return normalise("\n".join(subject_clauses(scope=scope, archive=archive)))
+
+
+def clause_names_instance(clause: str) -> bool:
+    """Whether *clause* carries an instance identity, not just a context name.
+
+    ``labels.context_clause`` prints ``<ContextName> <instance label>`` and a
+    context that declares no identity as its name alone, and context names are
+    class names, so a space is what separates the two shapes -- the same test
+    the ``context_line`` event records as ``has_instance``.
+    """
+    return " " in " ".join(str(clause or "").split())
+
+
+def subject_clauses(
+    *,
+    scope: Optional[RuntimeHandleScope] = None,
+    archive: Optional[RuntimeHandleArchive] = None,
+) -> list[str]:
+    """The non-empty context clauses recorded for this turn's observations."""
     selected = scope or default_scope()
     if archive is None:
         from fastworkflow.observation_offloading import state as offload_state
@@ -424,7 +448,7 @@ def subject_corpus(
         context_clause_of(selected, alias, selected_archive=archive) or ""
         for alias in aliases
     ]
-    return normalise("\n".join(parts))
+    return [part for part in parts if part.strip()]
 
 
 #: ``ido-mng``. A rendered result page states the query in its own header --
@@ -512,7 +536,7 @@ NUDGE_MIN_ITERS_LEFT = 2
 NUDGE_HEAD = (
     "Harness check before this turn ends. You selected finish, and this run "
     "has not made the following named items of the request the subject of any "
-    "command, so nothing about them has been retrieved: "
+    "command: "
 )
 NUDGE_TAIL = (
     ". You have {left} more actions available before this turn ends - the "
@@ -587,7 +611,7 @@ def build_nudge(
     iterations_left: int,
     scope: Optional[RuntimeHandleScope] = None,
     archive: Optional[RuntimeHandleArchive] = None,
-    clauses: Optional[str] = None,
+    clauses: Optional[str | Iterable[str]] = None,
 ) -> tuple[str, NudgeReport]:
     """``(text, report)``. ``text`` is ``""`` when nothing should be injected.
 
@@ -595,6 +619,9 @@ def build_nudge(
     call and a branch. Nothing here calls a model, reads a backend or consults
     the user; it reads the request by the same regex ``build_statement`` uses
     and the same context clauses the archive already holds.
+
+    *clauses* overrides the archive: a list of recorded clauses, or one string
+    taken as a single clause.
     """
     report = NudgeReport(iterations_left=int(iterations_left))
     if int(iterations_left) < NUDGE_MIN_ITERS_LEFT:
@@ -607,16 +634,25 @@ def build_nudge(
     if not instructed:
         report.reason = "the request names no items"
         return "", report
-    haystack = (
-        clauses if clauses is not None
-        else subject_corpus(scope=scope, archive=archive)
-    )
+    if clauses is None:
+        recorded = subject_clauses(scope=scope, archive=archive)
+    elif isinstance(clauses, str):
+        recorded = [clauses] if clauses.strip() else []
+    else:
+        recorded = [str(clause) for clause in clauses if str(clause).strip()]
+    haystack = normalise("\n".join(recorded))
     report.clause_bytes = len(haystack.encode("utf-8"))
     if not haystack:
         # No clause was recorded at all, so "never the subject of a command" is
         # a statement about the archive rather than about the run. Say nothing,
         # exactly as build_statement names nothing on an incomplete archive.
         report.reason = "no context clauses recorded"
+        return "", report
+    if not any(clause_names_instance(clause) for clause in recorded):
+        # Clauses exist but every one is a bare context name: this workflow
+        # declares no instance identity, so no named item can ever appear in
+        # them, and reporting them all missing would be a false note.
+        report.reason = "no recorded clause names an instance"
         return "", report
     _, missing = split_by_presence(instructed, haystack)
     report.subjects_missing = [entity.text for entity in missing]
@@ -645,11 +681,13 @@ __all__ = [
     "NudgeReport",
     "PLAN_MARKER",
     "build_nudge",
+    "clause_names_instance",
     "named_entities",
     "normalise",
     "nudge_block",
     "request_text",
     "split_by_presence",
     "strip_query_echoes",
+    "subject_clauses",
     "subject_corpus",
 ]

@@ -451,6 +451,39 @@ class SubjectOfACommand(unittest.TestCase):
         self.assertFalse(report.fired)
         self.assertEqual(report.subjects_missing, [])
 
+    def test_a_workflow_that_declares_no_instance_identity_is_never_nudged(self) -> None:
+        # Every person was opened, but the contexts declare no instance label,
+        # so each clause is a bare context name that no name can ever match.
+        self._archive("O1", "1 identity.\nuid-1  Alan Cooper", "DirectoryExplorer")
+        self._archive("O2", "29 permissions.", "Identity")
+        self._archive("O3", "4 accounts.", "Account")
+        text, report = build_nudge(
+            user_query=CARD, iterations_left=10,
+            scope=self.scope, archive=self.archive,
+        )
+        self.assertEqual(text, "")
+        self.assertFalse(report.fired)
+        self.assertEqual(report.reason, "no recorded clause names an instance")
+
+    def test_one_labelled_clause_is_enough_to_judge_the_others(self) -> None:
+        text, report = build_nudge(
+            user_query=CARD, iterations_left=10,
+            clauses=["DirectoryExplorer", "Identity 28c5  Alan Cooper"],
+        )
+        self.assertTrue(report.fired)
+        self.assertNotIn("Alan Cooper", text)
+        self.assertIn("Brandon Miller", text)
+
+    def test_the_note_claims_only_that_an_item_was_never_a_subject(self) -> None:
+        text, report = build_nudge(
+            user_query=CARD, iterations_left=10,
+            clauses=["Identity 28c5  Alan Cooper"],
+        )
+        self.assertTrue(report.fired)
+        self.assertIn("the subject of any command", text)
+        self.assertNotIn("nothing about them has been retrieved", text)
+        self.assertNotIn("has been retrieved", text)
+
     def test_no_recorded_clause_says_nothing(self) -> None:
         text, report = build_nudge(
             user_query=CARD, iterations_left=10,
