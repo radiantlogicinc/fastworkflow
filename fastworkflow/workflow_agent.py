@@ -23,6 +23,9 @@ class WorkflowAgentSignature(dspy.Signature):
     """
     Carefully review the user request, then execute the next steps using available tools for building the final answer.
     Every user intent must be fully addressed before returning the final answer.
+    A command output offloaded to memory is not lost: every observation of this turn is restored in full
+    when the final answer is written. Search memory only for a value you need to choose your next step,
+    never to collect rows for the final answer.
     """
     user_query = dspy.InputField(desc="The natural language user query.")
     final_answer = dspy.OutputField(desc="Comprehensive final answer with supporting evidence to demonstrate that every user intent has been fully addressed.")

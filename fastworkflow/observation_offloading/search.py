@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from fractions import Fraction
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 import hashlib
 import re
 import time
@@ -14,6 +14,8 @@ from fastworkflow.utils.dspy_utils import get_lm
 from fastworkflow import context_budget
 from fastworkflow.observation_offloading.archive import RuntimeHandleArchive, RuntimeHandleScope
 from fastworkflow.observation_offloading.labels import is_search_answer_key, search_answer_key
+from fastworkflow.observation_offloading.listing import parse_table, served_rows
+from fastworkflow.observation_offloading.search_router import SearchRouter
 from fastworkflow.observation_offloading.state import (
     archive,
     context_clause_of,
@@ -30,6 +32,8 @@ from fastworkflow.observation_offloading.state import (
 #: contract -- it is the REFERENCE VALUE of ``SEARCH_OBSERVATION`` below, which
 #: reproduces it exactly at the reference window and scales it with the search
 #: model everywhere else.
+#: (Since 2026-09-27 the bound is a quarter of the window, see
+#: ``SEARCH_OBSERVATION``; one page remains its floor.)
 DEFAULT_PAGE_BYTES = 4096
 SEARCH_MEMORY_MAX_PAGES = 3
 # A search answer is model output capped only by the 2,048-token completion
@@ -63,14 +67,22 @@ SEARCH_MODEL_ENV = "LLM_OBSERVATION_SEARCH"
 #: not read a single page of evidence, which is not a search. It has no tuning
 #: override: the search model's window is the only input, and
 #: ``FW_MODEL_CONTEXT_TOKENS`` is how a deployment corrects that window.
+#:
+#: Raised to a quarter of the window (fix-ufot follow-up, 2026-09-27): 131,072
+#: bytes at the reference window. The page geometry above is the FORMER value
+#: and no longer equals this bound. No recorded ido search came near either
+#: (largest observation 5.4 KB), so the change only matters for workflows with
+#: large unpaginated observations, which it lets be read whole instead of as a
+#: prefix. Hex-heavy text tokenizes below 4 bytes/token; a quarter still leaves
+#: room in the window, and a refusal degrades to the typed over-window outcome.
 SEARCH_OBSERVATION = context_budget.BudgetSpec(
     name="search_observation_max_bytes",
-    fraction=Fraction(3, 128),
+    fraction=Fraction(1, 4),
     override_env=None,
     floor=DEFAULT_PAGE_BYTES,
     what="one archived observation handed to the observation-search model",
 )
-REFERENCE_SEARCH_OBSERVATION_MAX_BYTES = SEARCH_OBSERVATION.reference_bytes  # 12,288
+REFERENCE_SEARCH_OBSERVATION_MAX_BYTES = SEARCH_OBSERVATION.reference_bytes  # 12,288 before 2026-09-27; now 131,072
 
 #: The marker that types a search observation whose EVIDENCE was cut, and the
 #: marker that types the over-window outcome. Both are checked by
@@ -187,6 +199,110 @@ def text_page(text: str, start_byte: int, max_bytes: int) -> dict[str, Any]:
         "has_more": end_byte < len(payload),
         "total_bytes": len(payload),
     }
+
+
+#: An archived observation at or under this many UTF-8 bytes is returned
+#: verbatim instead of searched. It is lossless: the search model would read
+#: exactly these bytes. In recorded runs (fix-cj7t) such handles were
+#: navigation replies ("Context is now 'DirectoryExplorer'") or one-line
+#: failures picked by mistake, 21 of 23 times.
+SHORT_OBSERVATION_BYTES = 256
+SHORT_OBSERVATION_MARK = "[search_memory SHORT OBSERVATION:"
+RELATED_HANDLES_SHOWN = 3
+_RELATED_STOPWORDS = frozenset({
+    "the", "and", "for", "of", "a", "an", "to", "in", "on", "is", "are", "what", "which",
+    "with", "list", "all", "their", "its", "this", "that", "from", "by", "show", "provide",
+    "give", "label", "uid", "listed", "returned", "output", "observation", "corresponding",
+    "value", "was", "were", "get", "find", "open"})
+
+
+def _fold_word(word: str) -> str:
+    return word[:-1] if len(word) > 3 and word.endswith("s") and not word.endswith("ss") else word
+
+
+def _related_words(text: str) -> set[str]:
+    return {_fold_word(w) for w in re.findall(r"[a-z0-9]+", (text or "").lower())
+            if len(w) > 1 and w not in _RELATED_STOPWORDS}
+
+
+def related_handles(
+    question: str,
+    exclude: str,
+    scope: RuntimeHandleScope,
+    store: RuntimeHandleArchive,
+    limit: int = RELATED_HANDLES_SHOWN,
+) -> list[tuple[str, str, Optional[str]]]:
+    """``(alias, command, clause)`` of the turn's handles that best match *question*.
+
+    Scored on the question's words against each handle's command name and
+    recorded subject clause, most recent first on ties. Short handles and
+    search-answer records are never offered: they are not something to search.
+    Chosen from the archive's summaries, so no stored text is loaded; subjects
+    come from the process cache after their first read.
+    """
+    wanted = _related_words(question)
+    scored = []
+    for row in store.list_summaries(scope):
+        alias = str(row.get("alias") or "")
+        if alias == exclude or is_search_answer_key(alias):
+            continue
+        if int(row.get("utf8_bytes") or 0) <= SHORT_OBSERVATION_BYTES:
+            continue
+        command = str(row.get("command") or "")
+        verb = re.split(r"[\s<(]", command.strip(), maxsplit=1)[0]
+        clause = context_clause_of(scope, alias, selected_archive=store)
+        score = (3 * len(wanted & _related_words(verb.replace("_", " ")))
+                 + 2 * len(wanted & _related_words(clause or "")))
+        if score:
+            scored.append(((score, int(row.get("offload_order") or 0)), alias, verb, clause))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [(alias, verb, clause) for _, alias, verb, clause in scored[:limit]]
+
+
+def short_observation_answer(
+    *, alias: str, command: str, text: str,
+    related: list[tuple[str, str, Optional[str]]],
+) -> str:
+    """The whole of a short observation, and where the answer more likely is."""
+    ran = f" of {command}" if command else ""
+    if related:
+        where = "; ".join(f"{a} ({c}{', in ' + cl if cl else ''})" for a, c, cl in related)
+        hint = (f"If it does not answer the question, observations in this turn that "
+                f"match it better are: {where}. Search one of those instead.")
+    else:
+        hint = ("No other observation in this turn matches the question's words; run "
+                "the command that produces what you need.")
+    return (f"{SHORT_OBSERVATION_MARK} {alias} is the complete response{ran}, shown "
+            f"verbatim because it is too short to search]\n{text}\n{hint}")
+
+
+NO_NARROWING = "NONE"
+NARROWING_DESCRIPTION_CHARS = 160
+
+
+def narrowing_inputs(
+    command: str, describe_inputs: Optional[Callable[[str], list[dict[str, Any]]]],
+) -> str:
+    """The producing command's optional, non-selecting inputs, for the search model.
+
+    An input declared with ``available_from`` picks a record to open rather than
+    narrowing a listing, and a required input was already given, so neither is
+    offered. Anything that goes wrong reads as NONE: the answer then describes
+    the narrowing instead of naming an input.
+    """
+    if not command or describe_inputs is None:
+        return NO_NARROWING
+    try:
+        inputs = describe_inputs(command) or []
+    except Exception:  # noqa: BLE001 - metadata must never stop a search
+        return NO_NARROWING
+    # The metadata reports a required field's default as None too, so
+    # optionality is read from the declared type.
+    lines = [f"{field['name']}: {str(field.get('description') or '')[:NARROWING_DESCRIPTION_CHARS]}"
+             for field in inputs
+             if field.get("name") and not field.get("available_from")
+             and ("Optional" in str(field.get("type")) or "None" in str(field.get("type")))]
+    return "\n".join(lines) or NO_NARROWING
 
 
 #: What the subject field says when the framework recorded no subject for the
@@ -551,6 +667,17 @@ class ObservationSearchSignature(dspy.Signature):
     different subject. When it says the subject was NOT RECORDED, the subject
     is unknown: say so, answer only what the rows themselves establish, and do
     not adopt the subject the question assumes.
+
+    When the observation says it is not the whole result -- rows remain, it
+    is incomplete, a page of a larger set -- say so with its numbers and never
+    call what is shown the full list. If the question needs what is not shown
+    (a named item absent from the shown rows, rows past them, or all of them),
+    end with exactly one line starting `To reach them:`. When the narrowing
+    field lists inputs of the command that produced the observation, name the
+    command and the one input that narrows to what the question needs, with
+    the value taken from the question (`To reach them: <command> <input>=<value>`).
+    When it is NONE, say that the producing command must be re-run narrowed to
+    that item, without inventing an input name.
     """
 
     question: str = dspy.InputField(desc="Current agent reasoning followed by its question")
@@ -559,6 +686,9 @@ class ObservationSearchSignature(dspy.Signature):
     observation: str = dspy.InputField(
         desc="Leading bytes of the single selected observation; may be a bounded "
              "prefix, in which case the text itself says so")
+    narrowing: str = dspy.InputField(
+        desc="Optional inputs of the command that produced the observation which "
+             "narrow its output, one 'name: description' per line; or NONE")
     answer: str = dspy.OutputField(desc="Evidence-grounded answer, or an explicit evidence gap")
 
 
@@ -621,8 +751,20 @@ def search_memory(
     reasoning: str = "",
     scope: Optional[RuntimeHandleScope] = None,
     selected_archive: Optional[RuntimeHandleArchive] = None,
+    router: Optional[SearchRouter] = None,
+    describe_inputs: Optional[Callable[[str], list[dict[str, Any]]]] = None,
+    trace_host: Any = None,
 ) -> str:
-    """Answer from one mandatory O<number> handle; never search other handles."""
+    """Answer from one mandatory O<number> handle; never search other handles.
+
+    ``router`` (optional) decides whether a search of a listing wants every row,
+    which are then copied instead of asked of the model. ``describe_inputs``
+    (optional) returns the declared inputs of the command that produced the
+    observation, so an answer about an incomplete listing can name a real
+    narrowing input rather than a guessed one. ``trace_host`` (optional) is the
+    session a routing call is traced under.
+    """
+    began = time.monotonic()
     wanted = alias.strip()
     if re.fullmatch(r"O[1-9]\d*", wanted) is None:
         raise ValueError("observation key must be O followed by a positive integer, e.g. O8")
@@ -649,6 +791,40 @@ def search_memory(
                       "alias": wanted, "status": "missing", "still_inline": still_inline})
         return f"search_memory: no matching offloaded handle {wanted} in this turn."
     query = f"{reasoning.strip().rstrip('.')}. {question.strip()}" if reasoning.strip() else question.strip()
+    command = str(handle.get("command") or "")
+    verb = re.split(r"[\s<(]", command.strip(), maxsplit=1)[0]
+    base_event = {"kind": "search_memory", "scope_id": selected_scope.scope_id,
+                  "alias": wanted, "tier": tier, "still_inline": still_inline,
+                  "question": question, "reasoning": reasoning,
+                  "observation_bytes": len(handle["text"].encode("utf-8")),
+                  "text_sha256": handle["text_sha256"]}
+
+    def elapsed_ms() -> int:
+        return round((time.monotonic() - began) * 1000)
+
+    if base_event["observation_bytes"] <= SHORT_OBSERVATION_BYTES:
+        related = related_handles(question, wanted, selected_scope, store)
+        text = short_observation_answer(alias=wanted, command=verb,
+                                        text=handle["text"], related=related)
+        record_event({**base_event, "status": "short_verbatim",
+                      "related": [alias for alias, _, _ in related],
+                      "observation_utf8_bytes": len(text.encode("utf-8")),
+                      "latency_ms": elapsed_ms()})
+        return text
+    table = parse_table(handle["text"])
+    route = (router.route(question, reasoning, handle["text"], host=trace_host)
+             if (router and table) else None)
+    if router is not None and router.wants_all_rows(route):
+        header = answer_header(wanted, tier)
+        text, shown, total = served_rows(
+            wanted, table, search_answer_max_bytes_from_env() - len(header.encode("utf-8")))
+        record_event({**base_event, "status": "rows_served", "router": route,
+                      "listing_shape": table["shape"],
+                      "rows_shown": shown, "rows_total": total,
+                      "observation_utf8_bytes": len((header + text).encode("utf-8")),
+                      "latency_ms": elapsed_ms()})
+        return header + text
+    narrowing = narrowing_inputs(verb, describe_inputs)
     # The evidence is cut to the search model's own budget BEFORE the call, not
     # hoped to fit it. An execute observation that used no result handles is
     # archived at full size, so without this an arbitrarily large text is sent
@@ -692,6 +868,8 @@ def search_memory(
              "subject": subject,
              "subject_recorded": not subject_is_unknown(subject),
              "subject_utf8_bytes": subject_bytes,
+             "router": route,
+             "narrowing_inputs": narrowing != NO_NARROWING,
              "text_sha256": handle["text_sha256"]}
     # A deployment that never declared the search role gets the agent's model
     # and credential rather than a failed search: the window half already falls
@@ -709,7 +887,8 @@ def search_memory(
         with dspy.context(lm=lm, disable_history=False, max_history_size=1):
             prediction = dspy.Predict(ObservationSearchSignature)(
                 question=query, subject=subject,
-                observation=evidence_for_search_model(evidence))
+                observation=evidence_for_search_model(evidence),
+                narrowing=narrowing)
         history = lm.history[-1] if lm.history else {}
         if completion_was_truncated(history):
             record_event({**event, "status": "incomplete", "reason": "completion_limit"})

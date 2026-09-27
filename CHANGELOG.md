@@ -32,6 +32,22 @@ labels themselves.
 - **Context budgets** (`fastworkflow.context_budget`): one input — the model's
   context window — and every byte budget derived from it as a fixed fraction.
   `budget_provenance()` returns the input, its source and every budget.
+- **Searches answered without the search model.** An archived observation of at
+  most 256 bytes is returned verbatim with up to three better-matching handles
+  of the turn (status `short_verbatim`). A request for every row of a listing is
+  answered by copying the rows (`observation_offloading/listing.py`: aligned,
+  markdown and tab-separated listings, served only when the parse is provably
+  complete), cut at the answer bound with a line saying how many were shown
+  (status `rows_served`).
+- **Optional search router** (`observation_offloading/search_router.py`, the
+  `router` extra): a decision-model call (TypeSafe Jev) that decides whether a
+  search over a listing wants every row. Off unless `FW_SEARCH_ROUTER=jev` and
+  `JEV_API_KEY` are set; what it sends is redacted by the capture policy; one
+  attempt, a 2-second timeout, and it fails open to the search model. Every
+  search event records its verdict. A workflow may add examples in
+  `search_router_examples.json`.
+- **`fw.search.route` span** (contract v1) for each routing call under a traced
+  turn: the verdict, latency and tokens, never the question or the evidence.
 
 ### Changed
 
@@ -63,7 +79,21 @@ labels themselves.
   attributes are gone with the two-step dispatch that wrote them.
 - The aggregate span-contract version is 5. Version 4's note named
   auto-navigation keys that `SPAN_CONTRACTS` does not contain; 5 is the number
-  that matches those contracts.
+  that matches those contracts. It is now 6: `fw.search.route` was added and no
+  existing span changed.
+- **Offload labels say the evidence comes back.** A label reads "Offloaded
+  observation O… returned by … It is restored in full when the final answer is
+  written, so search it with search_memory only for a value you need for your
+  next step", and the agent's instructions say the same. The earlier wording,
+  which opened with an instruction to search, is still recognised. In recorded
+  runs this cut requests to search whole tables by 70-95%.
+- **Answers about an incomplete listing name a real narrowing input.** The
+  search signature gains a `narrowing` input listing the producing command's
+  optional, non-selecting inputs; an answer that needs rows not shown ends with
+  `To reach them: <command> <input>=<value>`, or says a narrower re-run is
+  needed when the command declares none.
+- **Continuation allows 3 forced replans** (4 segments, a 100-step ceiling),
+  up from 2 (3 segments, 75 steps).
 - **Intent `signal_version`** no longer carries a threshold-semantics segment.
   It now reads `intent-classifier/<artifact version>/...`, so a version string
   identifies the artifact behind a signal and nothing else.
@@ -96,7 +126,8 @@ labels themselves.
   evidence is written to the workflow's database whatever the sink, and the
   offloading archive prunes that database once per process when it opens it.
 - The `search_memory` input bound has no tuning override; it is derived from the
-  search model's context window only.
+  search model's context window only. It is a quarter of that window (131,072
+  bytes at the reference window), up from 3/128 (12,288 bytes).
 - **An observability database from an older schema version is replaced, not
   refused.** The store has not shipped in a release before, so such a file can
   only be a local development database: opening it with the writer deletes it

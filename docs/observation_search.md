@@ -384,8 +384,8 @@ budget on a value that is not a valid integer or is below its minimum:
 Observation offloading itself has no switch: `build_tool_agent` always returns a
 `StructuredContinuationReAct` with `search_memory` in its tools, and the forced
 replan bound is the module constant
-`observation_offloading.continuation.MAX_FORCED_REPLANS` (2, therefore 3
-segments). The observation archive always lives in the workflow's own
+`observation_offloading.continuation.MAX_FORCED_REPLANS` (3, therefore 4
+segments; 2 and 3 until 2026-09-27). The observation archive always lives in the workflow's own
 observability database. So do the offloading runtime's diagnostic events: they
 are kept in process in a ring of the newest 2,000 (`snapshot_events()`) and
 stored as rows of `offload_events`, read back with
@@ -431,10 +431,12 @@ agent's final conclusion is correct.
 
 The observation handed to the search model **is** paged, and to that model's own
 window rather than the agent's: `search_observation_max_bytes()` resolves
-`LLM_OBSERVATION_SEARCH`'s context window and takes 3/128 of it as bytes, which
-is 12,288 B at the 131,072-token reference window — exactly the declared
-geometry of `DEFAULT_PAGE_BYTES` (4,096) x `SEARCH_MEMORY_MAX_PAGES` (3) — with
-a floor of one page. It has no tuning override: the search model's window is
+`LLM_OBSERVATION_SEARCH`'s context window and takes a quarter of it as bytes,
+which is 131,072 B at the 131,072-token reference window, with a floor of one
+page. (Until 2026-09-27 it took 3/128, 12,288 B, the declared geometry of
+`DEFAULT_PAGE_BYTES` (4,096) x `SEARCH_MEMORY_MAX_PAGES` (3). No recorded ido
+search came near either bound; the quarter lets a large unpaginated
+observation be read whole rather than as a prefix.) It has no tuning override: the search model's window is
 the only input, and `FW_MODEL_CONTEXT_TOKENS` is how a deployment corrects that
 window. The subject metadata is paid for out of that same budget, so nothing
 travelling to the model escapes the bound the model's window imposes. Without
@@ -476,6 +478,30 @@ credentials.
 The search event carries `observation_bytes`, `observation_sent_bytes`,
 `observation_bounded`, `observation_max_bytes` and `evidence_max_bytes`, so the
 share of searches answered from a prefix is measurable rather than inferred.
+
+### Answers that never reach the search model
+
+Two kinds of search are answered in code:
+
+- **A short observation** (at most `SHORT_OBSERVATION_BYTES`, 256 B) is
+  returned verbatim, with up to three handles in the turn whose command and
+  subject match the question better. Event status `short_verbatim`.
+- **A request for every row of a listing** is answered by copying the rows
+  (`observation_offloading/listing.py`), as many whole rows as fit the answer
+  bound, with a closing line stating how many were shown. A listing is served
+  only when its parse is provably complete. Event status `rows_served`.
+
+Whether a request wants every row is decided by an optional decision-model
+router (`observation_offloading/search_router.py`). It is off unless
+`FW_SEARCH_ROUTER=jev` and `JEV_API_KEY` are both set, because it sends the
+question, the agent's reasoning and the observation's first four lines,
+redacted by the capture policy, to TypeSafe. It makes one attempt with a
+2-second timeout and fails open to the search model. Every search event
+records its `router` verdict (choice, `p_all_rows`, `for_report`,
+`latency_ms`, usage or error). When the turn is traced, each routing call is
+also an `fw.search.route` span. A workflow can add examples to the router's
+question in `<workflow>/search_router_examples.json`. Install with the
+`router` extra.
 
 ## Retention, redaction and known limits
 
@@ -555,10 +581,11 @@ not turn offloading off: the evidence, subjects and events above are still
 written (redacted as configured) to the workflow's `observability.sqlite3`,
 under `FASTWORKFLOW_STATE_ROOT`, and pruned when the archive opens it.
 
-**Worst-case agent work in one turn.** A turn runs at most three segments of 25
-decisions each, plus the two continuation-planner calls that open the second and
-third segment: 75 tool-or-finish decisions and two extra model calls before the
-turn is forced to answer. Size provider spend and request timeouts against that
+**Worst-case agent work in one turn.** A turn runs at most four segments of 25
+decisions each, plus the three continuation-planner calls that open the second,
+third and fourth segment: 100 tool-or-finish decisions and three extra model
+calls before the turn is forced to answer. (Three segments, 75 decisions and two
+planner calls until 2026-09-27.) Size provider spend and request timeouts against that
 ceiling rather than against a typical turn.
 
 **A garbled model reply after a tool has run fails the turn.** When the provider

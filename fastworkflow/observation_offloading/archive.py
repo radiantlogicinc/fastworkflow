@@ -391,6 +391,26 @@ class RuntimeHandleArchive:
             rows = conn.execute(query, params).fetchall()
         return [self._read(scope, row) for row in rows]
 
+    def list_summaries(self, scope: RuntimeHandleScope) -> list[dict[str, Any]]:
+        """``alias``, ``command``, ``offload_order`` and ``utf8_bytes`` of every row.
+
+        The stored text is measured in SQL and never loaded, for callers that
+        choose among a turn's handles without reading them.
+        """
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT alias, command_name, offload_order, length(CAST(text_utf8 AS BLOB))
+                FROM offload_evidence
+                WHERE turn_key = ?
+                ORDER BY offload_order, alias
+                """,
+                (scope.turn_key,),
+            ).fetchall()
+        return [{"alias": alias, "command": command, "offload_order": order,
+                 "utf8_bytes": int(size or 0)}
+                for alias, command, order, size in rows]
+
     # -- diagnostic events ---------------------------------------------------
 
     def persist_event(self, scope: RuntimeHandleScope, event: Mapping[str, Any]) -> None:
@@ -602,6 +622,9 @@ class UnavailableHandleArchive:
         return None
 
     def list(self, scope: RuntimeHandleScope, alias: str = "") -> list[dict[str, Any]]:
+        return []
+
+    def list_summaries(self, scope: RuntimeHandleScope) -> list[dict[str, Any]]:
         return []
 
     def persist_event(self, scope: RuntimeHandleScope, event: Mapping[str, Any]) -> None:

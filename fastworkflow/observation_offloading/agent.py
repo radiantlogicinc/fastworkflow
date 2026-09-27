@@ -21,6 +21,7 @@ from fastworkflow.observation_offloading.continuation import (
 )
 from fastworkflow.observation_offloading.manifest import install_span_policy
 from fastworkflow.observation_offloading.search import search_memory
+from fastworkflow.observation_offloading.search_router import router_for_workflow
 from fastworkflow.observation_offloading.state import (
     prune_once,
     record_event,
@@ -168,6 +169,29 @@ def describe_command_output(chat_session: Any, command: str, response: str) -> s
         return ""
 
 
+def describe_command_inputs(chat_session: Any, command: str) -> list[dict[str, Any]]:
+    """Declared inputs of the command most recently run under the name *command*.
+
+    *command* is the bare command word the archive recorded (``show_holders``);
+    the action log maps it to the qualified command that actually ran.
+    """
+    core = getattr(chat_session, "_core", chat_session)
+    records = getattr(core, "action_log", [])
+    record = next((r for r in reversed(records)
+                   if str(r.get("command_name") or "").rsplit("/", 1)[-1] == command), None)
+    if record is None:
+        return []
+    try:
+        workflow = chat_session.get_active_workflow()
+        routing = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
+        metadata = CommandMetadataAPI._extract_signature_info(
+            record["command_name"], routing, routing)
+        return list(metadata.get("inputs", []))
+    except Exception:
+        # Missing metadata must never prevent a search.
+        return []
+
+
 def build_tool_agent(
     chat_session: Any,
     signature: Any,
@@ -199,6 +223,7 @@ def build_tool_agent(
     # failures, and this is the one storage failure that used to happen too
     # early for it to catch.
     selected_archive = open_handle_archive(archive_path, scope=scope)
+    router = router_for_workflow(workflow_path)
     turn_runtime = build_turn_runtime(scope, archive=selected_archive)
     agent: Any = None
 
@@ -237,7 +262,7 @@ def build_tool_agent(
 
         The READ is bounded: at most a budget of the observation's LEADING
         UTF-8 bytes reaches the search model, derived from that model's own
-        context window (12,288 bytes at the reference window). A long
+        context window (a quarter of it: 131,072 bytes at the reference window). A long
         observation is therefore searched as a prefix, not in full. An answer
         produced from a partial read says so and states the bytes it did not
         read; nothing missing from it is thereby absent from the observation.
@@ -253,12 +278,26 @@ def build_tool_agent(
         trajectory, says so, and reports how many bytes it left out. That one
         IS worth asking again on the same observation with a narrower question,
         because the evidence was read and only its presentation was cut.
+
+        Do not search to collect rows for the final answer. Every observation
+        of this turn, offloaded or not, is restored in full when the final
+        answer is written, so a table you only need to REPORT needs no search.
+        Search for the specific values you need to choose your NEXT step: a uid
+        to open, whether a named item is present, a count, one field. A request
+        for a whole table is usually declined or cut and costs a step.
+
+        An observation short enough to print whole is returned verbatim instead
+        of searched, together with the observations in this turn that match the
+        question better.
         """
 
         current = getattr(agent, "continuation_scope", None) or scope
         return search_memory(
             question, alias, reasoning=current_search_reasoning(agent),
-            scope=current, selected_archive=selected_archive
+            scope=current, selected_archive=selected_archive,
+            router=router,
+            describe_inputs=lambda command: describe_command_inputs(chat_session, command),
+            trace_host=chat_session,
         )
 
     scoped_search_memory.__name__ = "search_memory"

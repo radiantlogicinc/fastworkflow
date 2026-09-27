@@ -217,7 +217,11 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # taxonomy. fw.command.execute v3 has no composed-step attributes.
 # fw.nlu.intent v3 keeps the known-name keys and does not carry
 # auto_navigation_enabled. Auto-navigation was removed.
-SPAN_CONTRACT_VERSION = 5
+#
+# v6: fw.search.route added -- the optional decision-model call that routes a
+# search_memory request over a listing (observation_offloading/search_router.py).
+# No existing span changed.
+SPAN_CONTRACT_VERSION = 6
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -265,6 +269,14 @@ SPAN_TRAIN_PREFIX = "fw.train."
 RESERVED_V2_SPAN_NAMES = frozenset(
     {SPAN_NLU_INTENT, SPAN_NLU_PARAM_EXTRACTION, SPAN_LLM_CALL, SPAN_TRAIN_PREFIX}
 )
+
+# The decision-model call that may route one search_memory request over a
+# listing. A model call of its own, so kind "llm"; not fw.llm.call, which is the
+# DSPy callback's record and what cost and cut-at-limit readers key on. It
+# carries the verdict and its cost, never the question or the observation --
+# those are on the search's offload event, and copying them here would put them
+# in a second store.
+SPAN_SEARCH_ROUTE = "fw.search.route"
 
 
 # ----------------------------------------------------------------------
@@ -493,6 +505,21 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "provider_response",
                 "usage_capture",
                 "exception",
+            }
+        ),
+    ),
+    SPAN_SEARCH_ROUTE: SpanContract(
+        version=1,
+        attributes=frozenset(
+            {
+                "model",
+                "choice",
+                "p_all_rows",
+                "for_report",
+                "latency_ms",
+                "input_tokens",
+                "output_tokens",
+                "error_type",
             }
         ),
     ),

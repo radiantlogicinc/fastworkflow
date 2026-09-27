@@ -152,6 +152,12 @@ inferred:
 |---|---|---|
 | `fw.agent.execute` | `WEC._call_agent_with_retry` — the one choke point both the fresh forward and the resume pass through | agent_input, resumed, model, attempts, final_answer, suspended, clarification, exhausted |
 | `fw.agent.step` | each iteration of `fastWorkflowReAct._run_loop` | step_index, thought, tool_name, tool_args, observation, clarification, tool_error |
+| `fw.search.route` | `SearchRouter.route` (`observation_offloading/search_router.py`), inside a `search_memory` step, only when routing is enabled (`FW_SEARCH_ROUTER=jev`) and the observation holds a listing. Kind `llm`; added in span contract v6 | model, choice, p_all_rows, for_report, latency_ms, input_tokens, output_tokens, error_type |
+
+`fw.search.route` records the verdict and its cost, never the question or the
+observation (those stay on the search's offload event). It is not
+`fw.llm.call`, so the cost and cut-at-limit readers keyed on that name do not
+count it.
 
 `fw.agent.execute` is the executor as a phase, sibling to `fw.planner.plan`
 under `fw.turn`; it is **not** `fw.command.execute`, which is one command inside

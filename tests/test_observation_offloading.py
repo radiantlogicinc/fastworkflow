@@ -134,7 +134,7 @@ class CompactTrajectory(unittest.TestCase):
         )
         self.assertEqual(decisions[0]["action"], "offloaded")
         self.assertEqual(decisions[0]["alias"], "O1")
-        self.assertIn("Use search_memory tool to search inside Observation", trajectory["observation_0"])
+        self.assertIn("Offloaded observation O", trajectory["observation_0"])
         self.assertEqual(trajectory["observation_6"], alias_line("O7") + "small-6")
         self.assertIn("O1", stored_handles(self.scope))
         self.assertEqual(stored_handles(self.scope)["O1"]["text"], large)
@@ -199,7 +199,7 @@ class CompactTrajectory(unittest.TestCase):
                 "O7": True,
             },
         )
-        self.assertIn("Use search_memory tool to search inside Observation", trajectory["observation_0"])
+        self.assertIn("Offloaded observation O", trajectory["observation_0"])
         self.assertEqual(trajectory["observation_6"], alias_line("O7") + large)
 
     def test_default_target_measures_multibyte_utf8_not_characters(self) -> None:
@@ -348,7 +348,7 @@ class StructuredContinuation(unittest.TestCase):
         self.assertEqual(metadata["inlined_aliases"], ["O3", "O4"])
         self.assertEqual(metadata["labeled_aliases"], ["O1", "O2"])
         self.assertEqual(skeleton["observation_3"], "3" * 2_000)
-        self.assertIn("Use search_memory tool to search inside Observation", skeleton["observation_1"])
+        self.assertIn("Offloaded observation O", skeleton["observation_1"])
 
     def test_greedy_28k_labels_single_oversized_newest_observation(self) -> None:
         trajectory = {
@@ -360,7 +360,7 @@ class StructuredContinuation(unittest.TestCase):
         self.assertLessEqual(metadata["measured_bytes"], REPLAN_OBSERVATION_MAX_BYTES)
         self.assertEqual(metadata["inlined_aliases"], [])
         self.assertEqual(metadata["labeled_aliases"], ["O1"])
-        self.assertIn("Use search_memory tool to search inside Observation", skeleton["observation_0"])
+        self.assertIn("Offloaded observation O", skeleton["observation_0"])
 
     def test_the_policy_label_names_no_fixed_bound(self) -> None:
         """The bound is the window-derived trajectory budget; the label records
@@ -375,7 +375,9 @@ class StructuredContinuation(unittest.TestCase):
         self.assertNotIn("28", metadata["policy"])
         self.assertEqual(metadata["greedy_max_bytes"], 7_000)
 
-    def test_limit_fires_at_25_twice_then_third_cap_stops(self) -> None:
+    def test_limit_fires_at_25_each_segment_then_the_last_cap_stops(self) -> None:
+        # MAX_FORCED_REPLANS replans at 25 each, then the final segment's cap
+        # ends the turn (2 replans / 3 segments until 2026-09-27).
         class ScriptedAgent(StructuredContinuationReAct):
             def _run_loop(self, trajectory, idx, input_args, max_iters, exception_count):
                 self.segment_calls.append(max_iters)
@@ -404,8 +406,8 @@ class StructuredContinuation(unittest.TestCase):
         agent.replan_counter_snapshots = []
         result = agent._run_segments({}, 0, {"user_query": "task"}, 25)
         self.assertTrue(result.exhausted)
-        self.assertEqual(agent.segment_calls, [25, 25, 25])
-        self.assertEqual(agent.replan_counter_snapshots, [25, 25])
+        self.assertEqual(agent.segment_calls, [25] * (MAX_FORCED_REPLANS + 1))
+        self.assertEqual(agent.replan_counter_snapshots, [25] * MAX_FORCED_REPLANS)
         self.assertEqual(agent.forced_replans, MAX_FORCED_REPLANS)
 
     def test_natural_finish_before_25_does_not_replan(self) -> None:
@@ -483,7 +485,7 @@ class StructuredContinuation(unittest.TestCase):
         self.assertEqual(agent.iteration_counter, 0)
         self.assertEqual(agent.forced_replans, 1)
         self.assertEqual(trajectory["observation_0"], "x" * 30_000)
-        self.assertIn("segment 2 of 3", trajectory["replan_1"])
+        self.assertIn("segment 2 of 4", trajectory["replan_1"])
         self.assertNotIn("x" * 1000, captured["trajectory_skeleton"])
 
     def test_segment_total_reports_the_replans_actually_allowed(self) -> None:
@@ -1108,7 +1110,7 @@ class PerTurnScope(unittest.TestCase):
                 trajectory[f"observation_{index}"] = text if index == 0 else "small"
             trajectory["observation_1"] = "z" * 30_000
             self.assertTrue(step(6, trajectory))
-            self.assertIn("Use search_memory tool to search inside Observation", trajectory["observation_0"])
+            self.assertIn("Offloaded observation O", trajectory["observation_0"])
         first_handles = {
             scope_key: archive.get(self._scope(scope_key), "O1")["text"][:11]
             for scope_key in ("turn-1", "turn-2")
@@ -1265,16 +1267,16 @@ class AgentConstruction(unittest.TestCase):
         self.assertEqual(capped["trajectory_manifest"]["observation_count"], 1)
 
     def test_the_replan_bound_is_the_module_constant(self) -> None:
-        """The agent the framework builds carries the module constant -- 2
-        forced replans, 3 segments."""
+        """The agent the framework builds carries the module constant -- 3
+        forced replans, 4 segments (2 and 3 until 2026-09-27)."""
         agent = build_tool_agent(
             SimpleNamespace(), self.Signature, [self.noop_tool], max_iters=3
         )
         self.assertEqual(agent.max_forced_replans, MAX_FORCED_REPLANS)
-        self.assertEqual(MAX_FORCED_REPLANS, 2)
-        self.assertEqual(agent.total_segments, 3)
+        self.assertEqual(MAX_FORCED_REPLANS, 3)
+        self.assertEqual(agent.total_segments, 4)
         installed = [e for e in snapshot_events() if e["kind"] == "agent_installed"]
-        self.assertEqual(installed[0]["max_forced_replans"], 2)
+        self.assertEqual(installed[0]["max_forced_replans"], 3)
 
     def test_evaluation_control_overrides_are_recorded_unambiguously(self) -> None:
         self._set_env("FW_EVAL_FINISH_REMINDERS", "0")
@@ -1318,7 +1320,7 @@ class PlannerFailure(unittest.TestCase):
         self.assertEqual(agent.forced_replans, 1)
         self.assertEqual(agent.iteration_counter, 0)
         self.assertIn(DEFAULT_CONTINUATION_PLAN, trajectory["replan_1"])
-        self.assertIn("segment 2 of 3", trajectory["replan_1"])
+        self.assertIn("segment 2 of 4", trajectory["replan_1"])
         events = [e for e in snapshot_events() if e["kind"] == "forced_replan"]
         self.assertEqual(len(events), 1)
         self.assertTrue(events[0]["planner_error"])
@@ -1659,7 +1661,7 @@ class EagerObservationArchive(unittest.TestCase):
         )
 
         def predict(_signature):
-            def call(question, subject, observation):
+            def call(question, subject, observation, **_):
                 seen["observation"] = observation
                 seen["subject"] = subject
                 return SimpleNamespace(answer=f"observed {len(observation.encode('utf-8'))} bytes")
@@ -1966,7 +1968,7 @@ class SpoofedObservationHeaders(unittest.TestCase):
         )
 
         def predict(_signature):
-            def call(question, subject, observation):
+            def call(question, subject, observation, **_):
                 seen["observation"] = observation
                 seen["subject"] = subject
                 return SimpleNamespace(answer="answered")
@@ -2012,12 +2014,16 @@ class SpoofedObservationHeaders(unittest.TestCase):
     def test_a_search_of_the_named_alias_never_answers_out_of_the_spoofing_text(self):
         trajectory = self._seven_steps(self.HOSTILE)
         self._compact(trajectory)
+        # Both observations are short enough to be returned verbatim, so what
+        # the agent receives IS the archived text the search drew from, and no
+        # search model is consulted.
         seventh = self._search("what happened?", "O7")
-        self.assertIn("genuine output of step 7", seventh["observation"])
-        self.assertNotIn("hostile step 1", seventh["observation"])
+        self.assertIn("genuine output of step 7", seventh["answer"])
+        self.assertNotIn("hostile step 1", seventh["answer"])
+        self.assertIsNone(seventh["observation"])
         # The spoofing text is searchable, under the step that really produced it.
         first = self._search("what happened?", "O1")
-        self.assertIn("hostile step 1", first["observation"])
+        self.assertIn("hostile step 1", first["answer"])
 
     def test_a_response_shaped_like_an_offload_label_is_not_taken_for_one(self):
         spoof = offload_label(
@@ -2270,13 +2276,16 @@ class BoundedSearchAnswers(unittest.TestCase):
             attempt=1,
             turn_key="fixture-turn",
         )
-        digest = hashlib.sha256(b"holder rows").hexdigest()
+        # Longer than SHORT_OBSERVATION_BYTES, so the search reaches the model and
+        # the answer bound these tests are about.
+        text = "holder rows\n" + "x" * 300
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         self.archive.persist(
             self.scope, alias="O5", offload_order=5, command_name="show_holders",
-            step_index=4, text="holder rows", text_sha256=digest,
+            step_index=4, text=text, text_sha256=digest,
         )
         # Hot, so a broken archive in a later test breaks only the answer write.
-        remember_handle(self.scope, {"alias": "O5", "text": "holder rows",
+        remember_handle(self.scope, {"alias": "O5", "text": text,
                                      "text_sha256": digest, "command": "show_holders",
                                      "step_index": 4, "offload_order": 5})
 
@@ -2291,7 +2300,7 @@ class BoundedSearchAnswers(unittest.TestCase):
         )
 
         def predict(_signature):
-            return lambda question, subject, observation: SimpleNamespace(answer=answer)
+            return lambda question, subject, observation, **_: SimpleNamespace(answer=answer)
 
         with patch("fastworkflow.observation_offloading.search.get_lm", return_value=lm), \
                 patch("fastworkflow.observation_offloading.search.dspy") as fake_dspy:

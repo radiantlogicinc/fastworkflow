@@ -5,8 +5,13 @@ import math
 import re
 
 CHARS_PER_TOKEN = 4
-OFFLOAD_MARK = "Use search_memory tool to search inside Observation "
-LABEL_RE = re.compile(r"^Use search_memory tool to search inside Observation (O[1-9]\d*) returned by ")
+OFFLOAD_MARK = "Offloaded observation "
+#: The earlier label wording opened with an instruction to search, read at the
+#: exact moment the agent decides whether to; it is still matched so a
+#: trajectory recorded before the change resumes.
+LABEL_RE = re.compile(
+    r"^(?:Offloaded observation |Use search_memory tool to search inside Observation )"
+    r"(O[1-9]\d*) returned by ")
 #: The A1 handle line, with the ido-8ps.13 context clause optional. The clause
 #: can never contain a parenthesis or a newline (``context_clause`` removes
 #: both), so the closing ``)`` is unambiguous and a line printed before the
@@ -260,7 +265,9 @@ def offload_label(*, alias: str, command_name: str, response: str,
     description = description.strip() or output_description(response)
     return (
         f"{OFFLOAD_MARK}{alias} returned by {command_name}. "
-        f"It was offloaded to memory and contains {description.rstrip('.')}. "
+        f"It contains {description.rstrip('.')}. "
+        f"It is restored in full when the final answer is written, so search it with "
+        f"search_memory only for a value you need for your next step."
     ).rstrip()
 
 

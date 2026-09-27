@@ -42,10 +42,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_ITERS = 25
 DEFAULT_CONTINUATION_PLAN = "Continue unfinished requested work."
 #: How many times the harness may force a replan before the turn stops making
-#: segments. 2 forced replans is 3 segments, which at ``DEFAULT_MAX_ITERS`` is a
-#: 75-step ceiling. A constant since ``ido-pyw.1``: it is a property of the
+#: segments. 3 forced replans is 4 segments, which at ``DEFAULT_MAX_ITERS`` is a
+#: 100-step ceiling. A constant since ``ido-pyw.1``: it is a property of the
 #: continuation design, not a deployment setting.
-MAX_FORCED_REPLANS = 2
+#: (2 forced replans / 3 segments / 75 steps until 2026-09-27. Raised because
+#: the ido review-then-audit task needs 2-3 segments: two attempts failed at the
+#: 3-segment wall, while three attempts with no practical limit finished in 2, 3
+#: and 3 segments -- fix-uykd.)
+MAX_FORCED_REPLANS = 3
 MAX_REPLAN_CHARS = 2_000
 #: The replan skeleton is the continuation planner's view of the trajectory,
 #: and it gets the trajectory's budget. It is not the next segment's
