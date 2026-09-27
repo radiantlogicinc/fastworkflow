@@ -152,9 +152,15 @@ class fastWorkflowReAct(Module):
         # True when the most recent _run_loop ended because max_iters was
         # reached without the agent selecting the `finish` tool.
         self._exhausted_last_run = False
-        # ido-8ps.27: how many roster nudges this TURN has injected. The cap is
-        # one, so a turn can be reminded and can then still decide it is done.
-        self._roster_nudges_fired = 0
+        # How many finish-check notes this TURN has injected (ido-8ps.27's roster
+        # nudge until fix-4dsr). The cap is one, so a turn can be reminded and
+        # can then still decide it is done.
+        self._finish_notes_fired = 0
+        # Attached by the builder (observation_offloading/agent.py): the
+        # finish-time execution check and where to read the turn's plan. None
+        # means no check.
+        self.finish_checker = None
+        self.plan_source = None
         # How many times the context-window fallback has truncated a trajectory
         # in this process. Only read as a delta around one call (ido-8ps.18, to
         # tell an extract that overflowed from one that did not); it changes
@@ -184,7 +190,7 @@ class fastWorkflowReAct(Module):
             "max_iters": self._suspended["max_iters"],
             "clarification": self._suspended.get("clarification"),
             "iteration_counter": self.iteration_counter,
-            "roster_nudges_fired": getattr(self, "_roster_nudges_fired", 0),
+            "finish_notes_fired": getattr(self, "_finish_notes_fired", 0),
         }
 
     def import_suspended(self, data: dict[str, Any]) -> None:
@@ -197,7 +203,11 @@ class fastWorkflowReAct(Module):
             "clarification": data.get("clarification"),
         }
         self.iteration_counter = data.get("iteration_counter", 0)
-        self._roster_nudges_fired = data.get("roster_nudges_fired", 0)
+        # A suspension exported before the roster nudge was replaced carries its
+        # count under the old key; the cap it enforces is the same.
+        self._finish_notes_fired = data.get(
+            "finish_notes_fired", data.get("roster_nudges_fired", 0)
+        )
 
     def _format_trajectory(self, trajectory: dict[str, Any]):
         adapter = dspy.settings.adapter or dspy.ChatAdapter()
@@ -215,7 +225,7 @@ class fastWorkflowReAct(Module):
         # working `trajectory` below (which is what gets stashed in _suspended),
         # so mirroring into it never corrupts suspend/resume bookkeeping.
         self.current_trajectory = {}
-        self._roster_nudges_fired = 0
+        self._finish_notes_fired = 0
 
         trajectory: dict[str, Any] = {}
         max_iters = input_args.pop("max_iters", self.max_iters)
@@ -422,20 +432,20 @@ class fastWorkflowReAct(Module):
                 )
                 raise
 
-            # ido-8ps.27: the one interception point. The finish action has
-            # been recognised and its "Completed." observation written, the
-            # answer has NOT been extracted yet, and the loop is by definition
-            # not exhausted. If named items of the request were never the
-            # subject of any command and there is budget to reach them, the
-            # observation of this step becomes a bounded note saying so and the
-            # loop continues. At most one per turn; never on exhaustion; never
-            # an ask_user round.
+            # ido-8ps.27 / fix-4dsr: the one interception point. The finish action has been
+            # recognised and its "Completed." observation written, the answer
+            # has NOT been extracted yet, and the loop is by definition not
+            # exhausted. If the finish check finds plan steps the turn's record
+            # shows no command carrying out, and there is budget to reach them,
+            # the observation of this step becomes a bounded note naming them
+            # and the loop continues. At most one per turn; never on
+            # exhaustion; never an ask_user round.
             nudge = ""
             if pred.next_tool_name == "finish":
                 nudge = self._intercept_finish(trajectory, idx, input_args, max_iters)
                 if nudge:
                     step_attributes["observation"] = nudge
-                    step_attributes["roster_nudge"] = True
+                    step_attributes["finish_check_note"] = True
 
             tracing.end_span(
                 host, step_span, status=step_status, attributes=step_attributes
@@ -466,18 +476,18 @@ class fastWorkflowReAct(Module):
     def _intercept_finish(self, trajectory, idx, input_args, max_iters) -> str:
         """The finish action's one interception point, for BOTH loops.
 
-        The nudge, and the rule that a fired nudge REPLACES this step's
+        The note, and the rule that a fired note REPLACES this step's
         observation and returns control to the loop, used to live inline in
         ``_run_loop`` -- so ``aforward`` recognised finish and broke with no
-        nudge and no ``_roster_nudges_fired`` bookkeeping: two loops, two
-        different behaviours for the same rule.
+        note and no fired-note bookkeeping: two loops, two different
+        behaviours for the same rule.
         The note and the trajectory writes are here; what stays with each loop
         is what only that loop has -- the sync loop's step span attributes.
 
         Returns the note, or ``""`` when there is none, which is what each loop
         tests to decide whether to break on the finish action.
         """
-        nudge = self._roster_nudge(input_args, max_iters)
+        nudge = self._finish_check_note(input_args, max_iters)
         if nudge:
             trajectory[f"observation_{idx}"] = nudge
             self.current_trajectory[f"observation_{idx}"] = nudge
@@ -486,12 +496,12 @@ class fastWorkflowReAct(Module):
     async def aforward(self, **input_args):
         trajectory = {}
         max_iters = input_args.pop("max_iters", self.max_iters)
-        # The per-TURN state the nudge's "at most one" is counted in, reset here
+        # The per-TURN state the note's "at most one" is counted in, reset here
         # for the same reason `forward` resets it (ido-dpx/F15): this call is a
         # logical turn, and a turn inherits neither the previous turn's mirror
-        # nor its nudge count.
+        # nor its note count.
         self.current_trajectory = {}
-        self._roster_nudges_fired = 0
+        self._finish_notes_fired = 0
         for idx in range(max_iters):
             try:
                 pred = await self._async_call_with_potential_trajectory_truncation(self.react, trajectory, **input_args)
@@ -515,7 +525,7 @@ class fastWorkflowReAct(Module):
                     trajectory, idx, input_args, max_iters
                 ):
                     break
-            # What `_roster_nudge` reads to know how much room is left. The sync
+            # What `_finish_check_note` reads to know how much room is left. The sync
             # loop has always counted its steps here; without the same count the
             # async loop would offer a note on a turn with nothing left to do.
             self.iteration_counter += 1
@@ -523,58 +533,34 @@ class fastWorkflowReAct(Module):
         extract = await self._async_extract_prediction(trajectory, **input_args)
         return dspy.Prediction(trajectory=trajectory, **extract)
 
-    def _roster_nudge(self, input_args, max_iters) -> str:
-        """The bounded roster note, or ``""``.
+    def _finish_check_note(self, input_args, max_iters) -> str:
+        """The finish-time execution check's note, or ``""``.
 
-        Called from ``_run_loop`` at the one place a finish action is
-        recognised, before answer extraction.
+        Called from ``_intercept_finish``, the one place a finish action is
+        recognised, before answer extraction. The check itself
+        (``fastworkflow.observation_offloading.finish_check``) is attached by whoever builds the agent
+        as ``finish_checker``; without one, or with it switched off, there is no
+        note and the turn finishes as it always did.
 
         ``iterations_left`` is what the agent would still have AFTER spending
         this step on the note: the loop increments the counter once more and
-        stops at ``max_iters``. ``build_nudge`` refuses below
-        ``NUDGE_MIN_ITERS_LEFT``, which is how "never on exhaustion" is kept --
-        a turn with no room is a turn the note cannot help.
+        stops at ``max_iters``. The check declines below its minimum, which is
+        how "never on exhaustion" is kept -- a turn with no room is a turn the
+        note cannot help.
         """
-        from fastworkflow import answer_coverage
-
-        if not getattr(self, "finish_reminders_enabled", True):
+        checker = getattr(self, "finish_checker", None)
+        if checker is None or not getattr(self, "finish_reminders_enabled", True):
             return ""
-
-        if getattr(self, "_roster_nudges_fired", 0) >= 1:
+        if getattr(self, "_finish_notes_fired", 0) >= 1:
             return ""
-
-        from fastworkflow.observation_offloading.state import record_event
-
-        scope = getattr(self, "continuation_scope", None)
-        scope_id = getattr(scope, "scope_id", None)
         left = int(max_iters) - int(getattr(self, "iteration_counter", 0)) - 1
         try:
-            text, report = answer_coverage.build_nudge(
-                user_query=input_args.get("user_query"),
-                iterations_left=left,
-                scope=scope,
-                archive=getattr(self, "observation_archive", None),
-            )
-        except Exception as error:  # noqa: BLE001 - a nudge must never fail a turn
-            logger.warning(
-                "roster nudge skipped: %s: %s", type(error).__name__, error
-            )
-            record_event(
-                {
-                    "kind": "roster_nudge_failed",
-                    "scope_id": scope_id,
-                    "error": type(error).__name__,
-                    "detail": str(error)[:300],
-                }
-            )
+            text = checker.note(self, input_args, iterations_left=left)
+        except Exception as error:  # noqa: BLE001 - a note must never fail a turn
+            logger.warning("finish check skipped: %s: %s", type(error).__name__, error)
             return ""
-        record_event(
-            {"kind": "roster_nudge", "scope_id": scope_id, **report.as_event()}
-        )
         if text:
-            self._roster_nudges_fired = (
-                getattr(self, "_roster_nudges_fired", 0) + 1
-            )
+            self._finish_notes_fired = getattr(self, "_finish_notes_fired", 0) + 1
         return text
 
     def _rehydrate_for_extract(self, trajectory):
@@ -733,14 +719,15 @@ class fastWorkflowReAct(Module):
 
         Users can override this method to implement their own truncation logic.
         """
-        from fastworkflow.answer_coverage import COVERAGE_KEY
-
         # The coverage statement is a rule ABOUT the trajectory, not a step of
         # it, and it is the one key whose whole job is to be read. Dropping it as
         # "the oldest tool call information" would be a bug. It exists only on
         # the extractor's copy and only with the flag on, so with the flag off
         # this line selects exactly the keys it always did.
-        keys = [key for key in trajectory if key != COVERAGE_KEY]
+        # (The coverage statement and its key were removed with
+        # answer_coverage in fix-4dsr; nothing writes such a key any more, so
+        # every key is a step key.)
+        keys = list(trajectory)
         if len(keys) < 4:
             # Every tool call has 4 keys: thought, tool_name, tool_args, and observation.
             raise ValueError(

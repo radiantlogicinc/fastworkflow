@@ -8,6 +8,8 @@ import traceback
 from datetime import datetime, timezone
 
 import dspy
+from dspy.utils.exceptions import AdapterParseError
+from pydantic import ValidationError
 
 import fastworkflow
 from fastworkflow import tracing
@@ -18,6 +20,16 @@ from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.utils.react import AskUserSuspend
 from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
 from fastworkflow.observation_offloading.agent import build_tool_agent
+from fastworkflow.observation_offloading.finish_check import checker_from_env
+from fastworkflow.turn_plan import (
+    STRUCTURED_PLAN_GUIDE,
+    PlanStep,
+    PlanSubject,
+    TurnPlan,
+    parse_text_plan,
+    render,
+    workflow_command_names,
+)
 
 class WorkflowAgentSignature(dspy.Signature):
     """
@@ -693,12 +705,31 @@ def build_query_with_next_steps(user_query: str,
     else:
         enhanced_docstring = base_docstring
 
+    structured_docstring = f"{enhanced_docstring}\n{STRUCTURED_PLAN_GUIDE}"
+    steps_desc = "the plan's steps in order, each one short sentence"
+    subjects_desc = "the specific named items the request asks about (people, accounts, records...), each once"
+
     class TaskPlannerSignature(dspy.Signature):
+        __doc__ = structured_docstring
+        user_query: str = dspy.InputField()
+        subjects: list[PlanSubject] = dspy.OutputField(desc=subjects_desc)
+        steps: list[PlanStep] = dspy.OutputField(desc=steps_desc)
+
+    class TaskPlannerWithTrajectoryAndAgentInputsSignature(dspy.Signature):
+        __doc__ = structured_docstring
+        agent_inputs: dict = dspy.InputField()
+        agent_trajectory: dict = dspy.InputField()
+        user_response: str = dspy.InputField()
+        subjects: list[PlanSubject] = dspy.OutputField(desc=subjects_desc)
+        steps: list[PlanStep] = dspy.OutputField(desc=steps_desc)
+
+    # The plain-text planner, used only when the structured call fails.
+    class TaskPlannerTextSignature(dspy.Signature):
         __doc__ = enhanced_docstring
         user_query: str = dspy.InputField()
         next_steps: str = dspy.OutputField(desc="task descriptions as a numbered list of short sentences separated by line breaks")
 
-    class TaskPlannerWithTrajectoryAndAgentInputsSignature(dspy.Signature):
+    class TaskPlannerTextWithTrajectoryAndAgentInputsSignature(dspy.Signature):
         __doc__ = enhanced_docstring
         agent_inputs: dict = dspy.InputField()
         agent_trajectory: dict = dspy.InputField()
@@ -728,35 +759,74 @@ def build_query_with_next_steps(user_query: str,
             "replan_trigger": trace_trigger,
         },
     )
+    # The turn's INITIAL plan is what the finish check verifies; a replan
+    # (trace_trigger set) never replaces it. Cleared first so a turn whose
+    # planning fails is never checked against the previous turn's plan.
+    if trace_trigger is None:
+        chat_session_obj._turn_plan = None
+
+    def plan_with(structured: bool):
+        if with_agent_inputs_and_trajectory:
+            workflow_tool_agent = chat_session_obj.workflow_tool_agent
+            task_planner_func = dspy.ChainOfThought(
+                TaskPlannerWithTrajectoryAndAgentInputsSignature if structured
+                else TaskPlannerTextWithTrajectoryAndAgentInputsSignature)
+            cleaned_agent_inputs = {k: v for k, v in workflow_tool_agent.inputs.items() if k != "available_commands"}
+            return task_planner_func(
+                agent_inputs = cleaned_agent_inputs,
+                agent_trajectory = workflow_tool_agent.current_trajectory,
+                user_response = user_query,
+                available_commands=available_commands) # Note that this is not part of the signature. It is extra metadata that will be picked up by the CommandsSystemPreludeAdapter
+        task_planner_func = dspy.ChainOfThought(
+            TaskPlannerSignature if structured else TaskPlannerTextSignature)
+        return task_planner_func(
+            user_query=user_query,
+            available_commands=available_commands) # Note that this is not part of the signature. It is extra metadata that will be picked up by the CommandsSystemPreludeAdapter
+
+    # The structured plan exists for the finish check, and costs the planner
+    # call real time (measured with cerebras/gpt-oss-120b on three todo-list
+    # requests: median 12.1 s structured against 3.7 s plain text). A
+    # deployment without the check keeps the plain-text planner it always had.
+    structured = checker_from_env() is not None
+    turn_plan: TurnPlan | None = None
+    plan_text = ""
     try:
         with dspy.context(lm=planner_lm, adapter=agent_adapter):
-            if with_agent_inputs_and_trajectory:
-                workflow_tool_agent = chat_session_obj.workflow_tool_agent
-                task_planner_func = dspy.ChainOfThought(TaskPlannerWithTrajectoryAndAgentInputsSignature)
-                cleaned_agent_inputs = {k: v for k, v in workflow_tool_agent.inputs.items() if k != "available_commands"}
-                prediction = task_planner_func(
-                    agent_inputs = cleaned_agent_inputs,
-                    agent_trajectory = workflow_tool_agent.current_trajectory,
-                    user_response = user_query,
-                    available_commands=available_commands) # Note that this is not part of the signature. It is extra metadata that will be picked up by the CommandsSystemPreludeAdapter
-            else:
-                task_planner_func = dspy.ChainOfThought(TaskPlannerSignature)
-                prediction = task_planner_func(
-                    user_query=user_query,
-                    available_commands=available_commands) # Note that this is not part of the signature. It is extra metadata that will be picked up by the CommandsSystemPreludeAdapter
+            if structured:
+                try:
+                    prediction = plan_with(structured=True)
+                    turn_plan = TurnPlan(steps=list(prediction.steps or []),
+                                         subjects=list(prediction.subjects or []))
+                    plan_text = render(turn_plan.steps)
+                # Only an answer that does not parse into the structure falls
+                # back; a provider error (rate limit, timeout, auth) propagates
+                # as it did before, rather than doubling the calls to a provider
+                # that failed.
+                except (AdapterParseError, ValidationError, ValueError, TypeError) as structured_error:
+                    logger.warning(
+                        f"structured planner failed ({type(structured_error).__name__}); "
+                        "using the plain-text planner")
+            if turn_plan is None:
+                prediction = plan_with(structured=False)
+                plan_text = prediction.next_steps or ""
+                turn_plan = parse_text_plan(
+                    plan_text, workflow_command_names(current_workflow.folderpath))
     except BaseException:
         tracing.end_span(chat_session_obj, span, status=tracing.STATUS_ERROR)
         raise
     tracing.end_span(
         chat_session_obj,
         span,
-        attributes={"plan": prediction.next_steps or ""},
+        attributes={"plan": plan_text},
     )
 
-    if not prediction.next_steps:
+    if not plan_text:
         return user_query
 
-    generated_plan = prediction.next_steps.split()
+    if trace_trigger is None:
+        chat_session_obj._turn_plan = turn_plan
+
+    generated_plan = plan_text.split()
     # Capture the generated plan for distillation when a capture list is present
     # on the session (set only during a DistillationSession planning pass).
     planning_capture = getattr(chat_session_obj, '_planning_steps_capture', None)

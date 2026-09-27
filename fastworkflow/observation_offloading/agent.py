@@ -22,6 +22,7 @@ from fastworkflow.observation_offloading.continuation import (
 from fastworkflow.observation_offloading.manifest import install_span_policy
 from fastworkflow.observation_offloading.search import search_memory
 from fastworkflow.observation_offloading.search_router import router_for_workflow
+from fastworkflow.observation_offloading.finish_check import checker_from_env
 from fastworkflow.observation_offloading.state import (
     prune_once,
     record_event,
@@ -313,6 +314,10 @@ def build_tool_agent(
     agent.observation_archive = selected_archive
     agent.turn_runtime = turn_runtime
     agent.describe_output = lambda command, response: describe_command_output(chat_session, command, response)
+    # The finish-time execution check, when a deployment turns it on; it reads
+    # the turn's initial plan, which the planner stores on the session.
+    agent.finish_checker = checker_from_env()
+    agent.plan_source = lambda: getattr(chat_session, "_turn_plan", None)
     if agent.evaluation_control_overrides:
         record_event(
             {
@@ -327,6 +332,7 @@ def build_tool_agent(
             "kind": "agent_installed",
             "max_iters": agent.max_iters,
             "max_forced_replans": MAX_FORCED_REPLANS,
+            "finish_check": agent.finish_checker is not None,
             "tools": sorted(agent.tools),
             "scope_id": scope.scope_id,
         }

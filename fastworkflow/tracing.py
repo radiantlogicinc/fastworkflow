@@ -221,7 +221,11 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # v6: fw.search.route added -- the optional decision-model call that routes a
 # search_memory request over a listing (observation_offloading/search_router.py).
 # No existing span changed.
-SPAN_CONTRACT_VERSION = 6
+#
+# v7: fw.finish_check added -- the optional finish-time execution check
+# (fastworkflow/observation_offloading/finish_check.py) -- and fw.agent.step v3 replaces the
+# `roster_nudge` attribute with `finish_check_note` (the roster nudge was removed).
+SPAN_CONTRACT_VERSION = 7
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -277,6 +281,12 @@ RESERVED_V2_SPAN_NAMES = frozenset(
 # those are on the search's offload event, and copying them here would put them
 # in a second store.
 SPAN_SEARCH_ROUTE = "fw.search.route"
+
+# The finish-time execution check: the decision-model calls that judge, when the
+# agent chooses finish, which plan steps the turn's record shows executed. It
+# carries counts, cost and the outcome; the flagged steps themselves are on the
+# check's offload event, not here.
+SPAN_FINISH_CHECK = "fw.finish_check"
 
 
 # ----------------------------------------------------------------------
@@ -401,8 +411,10 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # request were never the subject of a command has its "Completed."
     # observation replaced by a bounded harness note and the loop continues, so
     # a reader counting tool results would otherwise count that note as one.
+    # v3: the same marker, renamed `finish_check_note`: the note now comes from
+    # the finish-time execution check (fix-4dsr), which replaced the roster nudge.
     SPAN_AGENT_STEP: SpanContract(
-        version=2,
+        version=3,
         attributes=frozenset(
             {
                 "step_index",
@@ -414,7 +426,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "recovered",
                 "tool_error",
                 "error_type",
-                "roster_nudge",
+                "finish_check_note",
             }
         ),
     ),
@@ -519,6 +531,25 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "latency_ms",
                 "input_tokens",
                 "output_tokens",
+                "error_type",
+            }
+        ),
+    ),
+    SPAN_FINISH_CHECK: SpanContract(
+        version=1,
+        attributes=frozenset(
+            {
+                "model",
+                "plan_source",
+                "steps",
+                "subjects",
+                "questions",
+                "requests",
+                "splits",
+                "input_tokens",
+                "latency_ms",
+                "flagged",
+                "fired",
                 "error_type",
             }
         ),

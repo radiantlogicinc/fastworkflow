@@ -503,6 +503,29 @@ also an `fw.search.route` span. A workflow can add examples to the router's
 question in `<workflow>/search_router_examples.json`. Install with the
 `router` extra.
 
+## Finish-time execution check
+
+When the agent chooses `finish`, an optional check
+(`observation_offloading/finish_check.py`) asks the same decision model, for
+every step of the turn's initial plan and every subject the request names,
+whether the turn's record shows the step executed. It reads a ledger built from
+the turn's full trajectory -- one row per step with its command, the context it
+ran in and the context it left, identifiers resolved to the labels retrieved
+listings gave them, the subjects found in its full output (from the archive),
+its outcome and the first 200 bytes of its output -- all passed through the
+capture policy before sending. Steps it judges unexecuted are listed in one note
+that replaces the finish observation; the agent may act on it or finish anyway.
+One note per turn, never with fewer than two iterations left, never for optional
+or user-gated steps. It needs the planner's structured plan, which the planner
+produces only while the check is on.
+
+Off unless `FW_FINISH_CHECK=jev` and `JEV_API_KEY` are both set;
+`FW_FINISH_CHECK_MODEL` pins the model (default `jev-1.13.0`). Each call has a
+4-second timeout and the whole check an 8-second budget; any failure means no
+note. Every finish records a `finish_check` event (reason, questions, requests,
+tokens, latency, the flagged steps and their probabilities) and, when traced,
+an `fw.finish_check` span. Install with the `jev` extra.
+
 ## Retention, redaction and known limits
 
 Offloading writes evidence to disk and bounds several things by bytes. What

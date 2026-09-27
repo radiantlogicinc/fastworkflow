@@ -208,28 +208,32 @@ class _Tool:
         return self.text
 
 
-class _Report:
-    def as_event(self):
-        return {"fired": True, "subjects_total": 1}
+class _FixedChecker:
+    """Stands in for the finish check: always has the same thing to say."""
+
+    def __init__(self, note):
+        self.text = note
+        self.calls = 0
+
+    def note(self, agent, input_args, *, iterations_left):
+        self.calls += 1
+        return self.text
 
 
-NOTE = "Harness check before this turn ends: Brandon Miller."
+NOTE = "Before you finish: this turn's record shows no command carrying out step 3."
 
 
 def _looping_agent(predictions, monkeypatch, note=NOTE):
-    """A bare agent whose predictor replays *predictions* and whose coverage
-    check always has the same thing to say. The nudge's CONTENT is
-    answer_coverage's business (tests/test_answer_coverage.py); what is under
-    test here is what each loop does with it."""
-    from fastworkflow import answer_coverage
-
-    monkeypatch.setattr(
-        answer_coverage, "build_nudge", lambda **kwargs: (note, _Report()))
-
+    """A bare agent whose predictor replays *predictions* and whose finish
+    check always has the same thing to say. The note's CONTENT is the check's
+    business (tests/test_finish_check.py); what is under test here is what
+    each loop does with it."""
     agent = _bare_react_agent(
         finish=_Tool("Completed."), a_tool=_Tool("observed more"))
+    agent.finish_checker = _FixedChecker(note)
+    agent.finish_reminders_enabled = True
     agent.max_iters = 12
-    agent._roster_nudges_fired = 0
+    agent._finish_notes_fired = 0
     agent._exhausted_last_run = False
     agent.continuation_scope = None
     agent.observation_archive = None
@@ -258,9 +262,9 @@ def _pred(tool_name):
 SCRIPT = [_pred("finish"), _pred("a_tool"), _pred("finish")]
 
 
-def test_the_async_loop_fires_the_roster_nudge_and_returns_control(monkeypatch):
-    """`aforward` must not recognise finish and break out with no nudge and no
-    `_roster_nudges_fired` bookkeeping, which would leave the sync and async
+def test_the_async_loop_fires_the_finish_check_note_and_returns_control(monkeypatch):
+    """`aforward` must not recognise finish and break out with no note and no
+    `_finish_notes_fired` bookkeeping, which would leave the sync and async
     loops implementing the same rule differently."""
     import asyncio
 
@@ -272,7 +276,7 @@ def test_the_async_loop_fires_the_roster_nudge_and_returns_control(monkeypatch):
     assert trajectory["tool_name_1"] == "a_tool"
     assert trajectory["tool_name_2"] == "finish"
     assert trajectory["observation_2"] == "Completed."
-    assert agent._roster_nudges_fired == 1
+    assert agent._finish_notes_fired == 1
 
 
 def test_both_loops_agree_on_the_finish_action(monkeypatch):
@@ -292,26 +296,26 @@ def test_both_loops_agree_on_the_finish_action(monkeypatch):
             "observation_2")
     assert ({k: sync_trajectory[k] for k in keys}
             == {k: async_trajectory[k] for k in keys})
-    assert sync_agent._roster_nudges_fired == async_agent._roster_nudges_fired == 1
+    assert sync_agent._finish_notes_fired == async_agent._finish_notes_fired == 1
 
 
-def test_the_async_loop_nudges_at_most_once_a_turn(monkeypatch):
-    """The cap is the nudge's own (`_roster_nudge`); what the loop owes it is
+def test_the_async_loop_notes_at_most_once_a_turn(monkeypatch):
+    """The cap is the note's own (`_finish_check_note`); what the loop owes it is
     the per-turn reset, which `aforward` never did."""
     import asyncio
 
     agent = _looping_agent([_pred("finish")] * 4, monkeypatch)
-    agent._roster_nudges_fired = 7  # a previous turn's count, left behind
+    agent._finish_notes_fired = 7  # a previous turn's count, left behind
     trajectory = asyncio.run(
         agent.aforward(user_query="who holds it", max_iters=12)).trajectory
 
     assert trajectory["observation_0"] == NOTE
     assert trajectory["observation_1"] == "Completed."
     assert "tool_name_2" not in trajectory
-    assert agent._roster_nudges_fired == 1
+    assert agent._finish_notes_fired == 1
 
 
-def test_a_silent_coverage_check_ends_the_async_loop_at_finish(monkeypatch):
+def test_a_silent_finish_check_ends_the_async_loop_at_finish(monkeypatch):
     """No note is the ordinary case, and it must leave the loop as it was."""
     import asyncio
 
@@ -321,4 +325,35 @@ def test_a_silent_coverage_check_ends_the_async_loop_at_finish(monkeypatch):
 
     assert trajectory["observation_0"] == "Completed."
     assert "tool_name_1" not in trajectory
-    assert agent._roster_nudges_fired == 0
+    assert agent._finish_notes_fired == 0
+
+
+class _BrokenChecker:
+    def note(self, agent, input_args, *, iterations_left):
+        raise RuntimeError("decision model unreachable")
+
+
+def test_a_failing_finish_check_ends_the_turn_as_if_there_were_none(monkeypatch):
+    """The check fails open: an exception inside it is a finish with no note."""
+    import asyncio
+
+    agent = _looping_agent(list(SCRIPT), monkeypatch)
+    agent.finish_checker = _BrokenChecker()
+    trajectory = asyncio.run(
+        agent.aforward(user_query="who holds it", max_iters=12)).trajectory
+
+    assert trajectory["observation_0"] == "Completed."
+    assert "tool_name_1" not in trajectory
+    assert agent._finish_notes_fired == 0
+
+
+def test_no_finish_check_attached_means_no_note(monkeypatch):
+    import asyncio
+
+    agent = _looping_agent(list(SCRIPT), monkeypatch)
+    agent.finish_checker = None
+    trajectory = asyncio.run(
+        agent.aforward(user_query="who holds it", max_iters=12)).trajectory
+
+    assert trajectory["observation_0"] == "Completed."
+    assert agent._finish_notes_fired == 0

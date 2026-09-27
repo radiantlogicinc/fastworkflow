@@ -29,6 +29,28 @@ labels themselves.
   rather than over pointers.
 - **Finish reminder**: a `finish` action that never opened a named item of the
   request goes back to the loop once, and only while iterations remain.
+  (Replaced in this release by the finish-time execution check below; the
+  roster nudge that implemented it, `fastworkflow.answer_coverage`, is removed.)
+- **Finish-time execution check** (`observation_offloading/finish_check.py`,
+  fix-4dsr): when the agent chooses `finish`, a decision model judges, for
+  every step of the turn's initial plan and every subject the request names,
+  whether the turn's record shows the step carried out; unexecuted steps are
+  named in one note and the agent returns to the loop -- once per turn, only
+  with iterations left, and it may finish anyway. It checks execution, not
+  whether the request was answered. Off unless `FW_FINISH_CHECK=jev` and
+  `JEV_API_KEY` are both set (it sends the request, the plan and a redacted
+  summary of every step to TypeSafe); fails open to an unchecked finish; one
+  `finish_check` offload event per finish and an `fw.finish_check` span.
+  Measured offline on 82 recorded ido attempts it was not tuned on (910
+  labelled step x subject pairs, pre-registered): precision 0.77, recall 0.89.
+  Install with the `jev` extra.
+- **Structured plan** (`fastworkflow.turn_plan`): with the finish check on, the
+  planner returns its steps (commands, sub-steps, optional and user-gated
+  flags) and the request's subjects as data, and the agent still reads a
+  numbered list. A plan that does not parse falls back to the plain-text
+  planner. Without the check the planner is unchanged, because the structured
+  call is slower (median 12.1 s against 3.7 s on three todo-list requests with
+  `cerebras/gpt-oss-120b`).
 - **Context budgets** (`fastworkflow.context_budget`): one input — the model's
   context window — and every byte budget derived from it as a fixed fraction.
   `budget_provenance()` returns the input, its source and every budget.
@@ -159,7 +181,8 @@ labels themselves.
 - The finish-time roster nudge no longer fires in a workflow whose contexts
   declare no instance identity, where every named item looked untouched, and
   it no longer tells the agent that nothing about those items was retrieved;
-  it says only that they were never the subject of a command.
+  it says only that they were never the subject of a command. (The roster
+  nudge was then removed in favour of the finish-time execution check.)
 - The foreign-context hint no longer ends with "Then run it there" when no
   entry command is declared; it says to move into the owning context first.
 - Replanning and answer-time rehydration apply the agent's own execute
@@ -200,6 +223,11 @@ labels themselves.
   with `ObservabilityStore.offload_events(turn_key=..., channel_id=..., kind=...)`.
 - To correct the `search_memory` input bound, set `FW_MODEL_CONTEXT_TOKENS` or
   point `LLM_OBSERVATION_SEARCH` at the intended model.
+- The roster nudge is gone: without `FW_FINISH_CHECK=jev` and `JEV_API_KEY` a
+  `finish` is never interrupted. `FW_EVAL_FINISH_REMINDERS=0` still turns the
+  note off when the check is on. `fastworkflow.answer_coverage` no longer
+  exists, and a step span marks a note with `finish_check_note` where it used to
+  say `roster_nudge` (`fw.agent.step` v3; span contract 7).
 
 ### Known limits
 
