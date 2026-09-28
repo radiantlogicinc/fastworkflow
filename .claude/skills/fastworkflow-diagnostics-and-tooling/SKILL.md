@@ -194,8 +194,9 @@ question (candidate work item for the tau2 program).
 - Noise policy: DSPy/LiteLLM/httpx/etc. loggers are force-quieted at
   `utils/logging.py:104-114` (LiteLLM to CRITICAL). If you need LLM-call
   detail, raise those explicitly in your harness.
-- `FW_EAGER_ARTIFACT_VALIDATION=0` (OS env, read at `turn.py:155`) silences
-  the v3.0 artifact-serializability deprecation warnings.
+- The v3.0 artifact-serializability deprecation warnings cannot be silenced by
+  configuration: the validator is unconditional. Fix the artifact, or filter
+  the warning.
 
 ### Live CLI traces (agent mode)
 

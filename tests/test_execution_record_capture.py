@@ -221,8 +221,12 @@ def test_prose_path_records_nested_child_calls(
 def test_no_sink_means_no_execution_records(
     initialized_fastworkflow, todo_workflow_path, tmp_path
 ):
-    """Capture projections are sink-gated; the id on CommandOutput is not."""
-    context = _make_ctx(todo_workflow_path, tmp_path, sink=None)
+    """Capture projections are sink-gated; the id on CommandOutput is not.
+
+    The no-op sink is passed explicitly: a context given no sink at all opens
+    its workflow's own observability sink.
+    """
+    context = _make_ctx(todo_workflow_path, tmp_path, sink=tracing.NoOpTraceSink())
     try:
         context.process_action_turn(_action())
         assert context._turn_outputs[-1].command_call_id

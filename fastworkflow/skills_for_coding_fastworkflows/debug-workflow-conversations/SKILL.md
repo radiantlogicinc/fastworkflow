@@ -47,9 +47,10 @@ store = ReadOnlyObservabilityStore(db_path)
 ```
 
 **Never instantiate `ObservabilityStore` to inspect a database.** That class is
-the writer: constructing it can create the file and write-probe it. Current stores use a fresh
-schema; incompatible stores are refused, not migrated. Preserve older evidence and read it
-with the matching framework version rather than altering its schema.
+the writer: constructing it can create the file and write-probe it, and it DELETES a populated
+database from an older schema version and recreates it empty (there is no migration). A
+database from a newer version is refused. Preserve older evidence by copying it first, and read
+it with the matching framework version rather than altering its schema.
 `ReadOnlyObservabilityStore` opens `mode=ro` connections
 and cannot mutate anything. Raw SQL is equally fine (the schema is documented
 in [reference.md](reference.md)):

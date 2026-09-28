@@ -633,6 +633,14 @@ def test_the_aggregate_is_kept_beside_the_map_not_replaced_by_it():
     assert provenance.span_contract_versions
 
 
+def test_the_aggregate_number_moves_only_on_purpose():
+    """Every other check here compares against `tracing.SPAN_CONTRACT_VERSION`
+    itself, so a bump -- or an accidental revert -- passes them all. Pinning the
+    literal makes a change to the aggregate a deliberate edit to this test, next
+    to the history comment in `tracing.py` that says what moved."""
+    assert tracing.SPAN_CONTRACT_VERSION == 9
+
+
 def test_a_provenance_record_written_before_the_map_still_validates():
     """`ObservabilityProvenance` is frozen with `extra="forbid"`, so the new field
     had to be optional: a required one would reject every already-serialized
@@ -857,8 +865,10 @@ def test_stamping_costs_nothing_when_nothing_is_recording(
     initialized_fastworkflow, todo_workflow_path, tmp_path
 ):
     """The stamp lives in the emit funnel, which a turn with no sink never
-    reaches — so this is additive recording rather than work every turn pays for."""
-    context = _make_ctx(todo_workflow_path, tmp_path, sink=None)
+    reaches — so this is additive recording rather than work every turn pays for.
+    The no-op sink is passed explicitly: a context given no sink at all opens
+    its workflow's own observability sink."""
+    context = _make_ctx(todo_workflow_path, tmp_path, sink=tracing.NoOpTraceSink())
     try:
         turn = context.process_action_turn(_action())
         assert turn.success

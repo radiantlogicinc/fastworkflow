@@ -2,7 +2,7 @@
 
 Design invariants (docs/fastworkflow_observability_studio_design.md §3.4):
 
-- Access control [R5][R18]: binds 127.0.0.1 only; a per-launch random bearer
+- Access control: binds 127.0.0.1 only; a per-launch random bearer
   token (``secrets.token_urlsafe``) embedded in the printed URL (Jupyter
   pattern) is required on EVERY request (Authorization header or ``?token=``),
   compared in constant time (``hmac.compare_digest``); a strict Host/Origin
@@ -11,15 +11,15 @@ Design invariants (docs/fastworkflow_observability_studio_design.md §3.4):
   forwarders (WSL relays, IDE port forwards) legitimately re-expose the
   server on a different local port — while the loopback-only rule is what
   defeats DNS rebinding, and the token stays the authentication.
-- Rendering safety [R22]: the SPA page ships with a restrictive CSP
+- Rendering safety: the SPA page ships with a restrictive CSP
   (inline script allowed only via its own sha256 hashes — the page is one
   self-contained file); artifact responses carry
   ``default-src 'none'; sandbox`` so direct navigation is inert; the read
   layer only calls ObservabilityStore methods (parameterized queries).
-- Read discipline [R12]: per-request store reads — every ObservabilityStore
+- Read discipline: per-request store reads — every ObservabilityStore
   method opens its own short-lived connection, no held cursors — so WAL
   checkpointing by the writer never starves.
-- Packaging [R23]: stdlib-only. This module must never import
+- Packaging: stdlib-only. This module must never import
   fastapi/uvicorn or any third-party HTTP dependency.
 """
 
@@ -197,7 +197,7 @@ def annotate_turn_rows(
 
     The spans for the whole page come from one bulk read, not one query per
     listed turn: the rail asks for up to 500 turns and refreshes on a timer,
-    so per-turn reads meant ~500 round trips a refresh (fix-tk5). The stamps
+    so per-turn reads meant ~500 round trips a refresh. The stamps
     themselves are unchanged -- `turn_span_stamps` still sees exactly the rows
     `get_spans` would have handed it for that turn.
     """
@@ -306,7 +306,7 @@ def _workspace_span_cache(
     workspace: ObservabilityWorkspace, refs: Iterable[tuple[Any, Any]]
 ) -> dict[tuple[str, str], list[dict[str, Any]]]:
     """``{(store_id, logical_turn_key): spans}`` for many refs, one bulk read
-    per store instead of one `trace` call per ref (fix-tk5).
+    per store instead of one `trace` call per ref.
 
     Refs missing either half are dropped here rather than raising: the caller
     already treats an unresolvable ref as "nothing to tally", and a store that
@@ -330,7 +330,7 @@ def annotate_workspace_attempts(
 ) -> None:
     """The workspace twin of `annotate_attempt_rows`, over scoped trace reads.
 
-    Every ref on every row is read in one pass per store (fix-tk5); the stamps
+    Every ref on every row is read in one pass per store; the stamps
     are the ones `trace` would have produced ref by ref."""
     spans_by_ref = _workspace_span_cache(
         workspace,
@@ -363,8 +363,8 @@ def annotate_projected_attempts(
     """Projected history rows: tally the resolved turns once each, and badge
     every resolved source with the verdict its own store persisted.
 
-    The spans behind those tallies are read in one pass per store up front
-    (fix-tk5); a projection that resolves the same turn from several sources
+    The spans behind those tallies are read in one pass per store up front;
+    a projection that resolves the same turn from several sources
     then costs one lookup, not one query, per mention."""
 
     def _resolved_turns(row: Mapping[str, Any]) -> Iterator[Any]:
@@ -528,7 +528,7 @@ def execution_ledger(
     never restated; a dispatch with no span has no status and says so.
 
     A resumed turn is one ledger, not a restart: the recorder is per process
-    (workflow_execution_context, fix-ajv.20), so the terminal record lists
+    (see ``workflow_execution_context``), so the terminal record lists
     only the dispatches since the last resume, while the earlier ones persist
     as spans under the same trace. Rows are ordered by their span's start
     time, a span-less child directly after its parent, and record-only rows
@@ -1254,7 +1254,7 @@ def provenance_differences(
 
 
 def load_index_html() -> bytes:
-    """The single self-contained SPA page, shipped as package data [R23]."""
+    """The single self-contained SPA page, shipped as package data."""
     resource = (
         importlib.resources.files("fastworkflow.run_chatbot") / "static" / "index.html"
     )
@@ -1485,7 +1485,7 @@ def _declares_workspace_schema(path: str) -> bool:
 
     The picker used to offer every ``*.json`` in the browsed directory, so
     from a project root it filled with score dumps and trajectory files that
-    cannot be opened (fix-o8s). The cheap, honest discriminator is the one key
+    cannot be opened. The cheap, honest discriminator is the one key
     `ObservabilityWorkspace.load` itself insists on: ``schema`` (or the older
     ``schema_version``) equal to :data:`WORKSPACE_SCHEMA`.
 
@@ -1530,7 +1530,7 @@ def _local_workspace_manifests(base: str, name: str) -> list[dict[str, str]]:
     and reports why -- or when its head declares the workspace schema, which
     covers a manifest someone renamed. Everything else is omitted entirely:
     not offered and not labelled, because a row the picker cannot open is
-    worse than no row (fix-o8s).
+    worse than no row.
     """
     if not name.lower().endswith(".json"):
         return []
@@ -1779,7 +1779,7 @@ class ChatbotServer:
     def open_store(self) -> Optional[ReadOnlyObservabilityStore]:
         """Per-request READ-ONLY store handle, or None while the DB is absent
         or unopenable. The viewer never creates, migrates, or writes the DB
-        it inspects [R12] — a missing DB (e.g. test-mode cold start before the
+        it inspects — a missing DB (e.g. test-mode cold start before the
         first turn) serves empty views instead of an error.
         """
         if not self.db_path:
@@ -4116,16 +4116,16 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         path: str,
         q: Any,
     ) -> None:
-        """The `/api/experiment*` GET surface (`fix-bn1.5`, `[XR9]`).
+        """The `/api/experiment*` GET surface.
 
         The noun choice is deliberate: this surface never calls an experiment
         attempt a "run". An experiment has tasks, a task has attempts, and an
         attempt resolves to the channel/conversation/turn keys the existing
         trace views already render — so nothing here re-implements a viewer.
 
-        `[DR29]`'s posture: a DB written before the experiment tables existed
-        404s with a reason a human can act on, rather than raising `no such
-        table` behind a generic 500.
+        A DB written before the experiment tables existed 404s with a reason a
+        human can act on, rather than raising `no such table` behind a generic
+        500.
         """
         if not store.has_feature(FEATURE_EXPERIMENTS_V1):
             self._error(404, "this database predates experiment recording")
@@ -4311,7 +4311,7 @@ class _ChatbotRequestHandler(BaseHTTPRequestHandler):
         """Offloaded artifact content, with its stored content-type.
 
         HTML-ish content is only ever *rendered* inside a sandboxed iframe by
-        the SPA [R22]; the raw response is additionally neutralized with
+        the SPA; the raw response is additionally neutralized with
         ``CSP: default-src 'none'; sandbox`` so navigating to the URL directly
         cannot run scripts either.
         """
@@ -4401,7 +4401,7 @@ def _open_in_browser(url: str) -> None:
 
 
 def run_prune(db_path: str) -> dict[str, int]:
-    """Library maintenance utility [R12]: bounded prune + vacuum.
+    """Library maintenance utility: bounded prune + vacuum.
 
     Not wired to any CLI flag or HTTP route — pruning runs automatically at
     sink startup; this exists for scripts/tests that need it on demand.
@@ -4412,7 +4412,7 @@ def run_prune(db_path: str) -> dict[str, int]:
 def run_forget_channel(
     db_path: str, channel_id: str, workflow_path: str = ""
 ) -> dict[str, int]:
-    """Library erasure utility [R21]: delete one channel everywhere.
+    """Library erasure utility: delete one channel everywhere.
 
     Not wired to any CLI flag or HTTP route — the chatbot UI exposes the
     all-channel Clear-conversations action instead; this remains the
@@ -4420,7 +4420,12 @@ def run_forget_channel(
     one API channel). Also deletes the LEGACY per-channel conversation DB
     (``conversations/<channel_id>.sqlite3`` + sidecars) while the Phase-A
     dual-write period lasts — without this, "forgotten" conversations remain
-    fully readable in the legacy store (Phase-7 ruling C1).
+    fully readable in the legacy store.
+
+    The channel's offload evidence -- the archived execute responses its
+    turns produced -- lives in the same database and is erased by
+    ``forget_channel`` in the same transaction as its turn records, experiment
+    runs included; there is no second evidence file to sweep.
     """
     deleted = ObservabilityStore(db_path).forget_channel(channel_id)
     if workflow_path and channel_id == os.path.basename(channel_id):
@@ -4439,7 +4444,13 @@ def run_forget_channel(
 
 
 def run_clear_conversations(db_path: str, workflow_path: str = "") -> dict[str, int]:
-    """Erase all conversation/turn observability for one workflow."""
+    """Erase all conversation/turn observability for one workflow.
+
+    Including every offload evidence row -- the archived execute responses
+    of the conversations being cleared, and of experiment runs, whose
+    experiment records are cleared too. ``clear_conversations`` deletes them
+    in the same transaction as the turn records.
+    """
     deleted = ObservabilityStore(db_path).clear_conversations()
     if workflow_path:
         legacy_dir = state_paths.conversations_dir(workflow_path)

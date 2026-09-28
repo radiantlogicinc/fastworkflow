@@ -377,7 +377,7 @@ Trace data grows. Spans and artifacts are pruned beyond a retention horizon; **t
 
 Use **Clear conversations** in Debug mode for an explicit, confirmed reset. It removes conversation labels, turns, spans, artifacts, feedback, and legacy per-channel conversation files. Training runs, writer diagnostics, and monotonic conversation counters survive, so identities are never reused after a clear.
 
-To turn recording off entirely, set `FW_OBSERVABILITY=0`.
+There is no switch to turn recording off. fastWorkflow always keeps this local record, including when you embed the core as a library rather than using `run`, `run_fastapi_mcp` or `run_chatbot`: one SQLite database per workflow at `<FASTWORKFLOW_STATE_ROOT>/workflows/<workflow-id>/observability.sqlite3` (the state root defaults to `~/.local/state/fastworkflow`), created readable by its owner only (the file `0600`, its directory `0700`). It is pruned automatically when the recorder starts: `FW_OBS_RETENTION_DAYS` sets the age horizon and `FW_OBS_DB_MAX_BYTES` the size cap (see [Environment variables reference](#environment-variables-reference)). Point `FASTWORKFLOW_STATE_ROOT` elsewhere to keep it on a different disk.
 
 Phase 0 capture/tracing overhead (bead `fix-49m.2`, not a CI gate) was measured with a stubbed LM on hello-world `add_two_numbers` turns, observability on, no network: command-gap p50 **+0.7%** and turn-wall p50 **+1.6%** vs fork `9904df5` (change 4 `5b1e85e` in between). Reports and method: https://gist.github.com/dharrawal/2e123360ace2e948a138c52ce9f00601
 
@@ -509,6 +509,14 @@ prediction = dspy.Predict(dspy_sig)(command_parameters)
 fastworkflow run my_workflow/ .env passwords.env \
   --startup_command "process daily report" --keep_alive False
 ```
+
+**Long agent turns: observation offloading and `search_memory`** — A tool agent's trajectory grows with every command result, so a long turn ends up spending its context window on output it has already read. fastWorkflow archives every command result to a SQLite file beside the workflow, replaces older ones in the prompt with a short label, and gives the agent a `search_memory` tool that answers questions inside one archived result; at answer time the evidence behind the labels is put back for the extract call. This is framework behaviour, not a mode you switch on.
+
+Setting `LLM_OBSERVATION_SEARCH` and `LITELLM_API_KEY_OBSERVATION_SEARCH` to a dedicated search model is recommended but optional — when they are unset, search runs on `LLM_AGENT` and the credential configured for it.
+
+- [CHANGELOG.md](CHANGELOG.md) — what shipped, and what to change when upgrading.
+- [docs/observation_search.md](docs/observation_search.md) — the archive, the `O` namespace, `search_memory`, and the retention, redaction and known limits.
+- [docs/context_budget.md](docs/context_budget.md) — the one input every byte budget is derived from.
 
 Deep-dive articles:
 - [From functions to classes: building stateful AI agents](fastworkflow-article-2.md)
@@ -655,7 +663,7 @@ Two files per workflow (templates ship with `fastworkflow examples fetch`).
 
 | Variable | Purpose | When needed | Default |
 |:---|:---|:---|:---|
-| `FASTWORKFLOW_STATE_ROOT` | Absolute root for all persistent state (conversations, suspended sessions, checkpoints, function caches) | Optional | `~/.local/state/fastworkflow` |
+| `FASTWORKFLOW_STATE_ROOT` | Absolute root for all persistent state (conversations, suspended sessions, checkpoints, function caches, and the always-on observability record — for `run`/`run_fastapi_mcp`/`run_chatbot` and library embedders alike, an owner-only (`0600` file, `0700` directory) SQLite database at `workflows/<workflow-id>/observability.sqlite3`, pruned automatically by `FW_OBS_RETENTION_DAYS` and `FW_OBS_DB_MAX_BYTES`) | Optional | `~/.local/state/fastworkflow` |
 | `FASTWORKFLOW_WORKFLOW_ID` | Overrides the per-workflow state namespace (defaults to the workflow folder name) | Optional | *workflow folder name* |
 | `LOG_LEVEL` | Log level (`DEBUG`…`CRITICAL`) | Optional | `INFO` |
 | `LLM_SYNDATA_GEN` | Model for synthetic utterance generation | `train` | `mistral/mistral-small-latest` |
@@ -667,7 +675,6 @@ Two files per workflow (templates ship with `fastworkflow examples fetch`).
 | `LITELLM_PROXY_API_BASE` | LiteLLM Proxy URL | with `litellm_proxy/` models | *not set* |
 | `INTENT_DETECTION_TINY_MODEL` | HF id for the small intent model | `train` (optional) | `google/bert_uncased_L-4_H-128_A-2` |
 | `INTENT_DETECTION_LARGE_MODEL` | HF id for the large intent model | `train` (optional) | `distilbert-base-uncased` |
-| `FW_OBSERVABILITY` | Master switch for trace recording. `0` disables it. On by default for `run`/`run_fastapi_mcp`; off by default when embedding the core as a library | Optional | `1` (fastWorkflow entry points) |
 | `FW_OBS_RETENTION_DAYS` | Age beyond which the automatic prune (run at recorder startup) drops spans/artifacts (turn records are exempt) | Optional | `30` |
 | `FW_OBS_DB_MAX_BYTES` | Size cap; the automatic prune evicts oldest spans first while over it | Optional | `1073741824` (1 GiB) |
 | `FW_OBS_CAPTURE_TRACEBACKS` | Persist exception tracebacks as artifacts. Off by default because tracebacks can carry sensitive values | Optional | `0` |

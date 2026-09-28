@@ -62,7 +62,7 @@ echo "$templated"
 
 section "DRIFT: consumed but NOT templated"
 comm -23 <(echo "$consumed") <(echo "$templated") \
-  | grep -vE '^(LOG_LEVEL|FW_EAGER_ARTIFACT_VALIDATION|SESSION_STATE_STORE|SESSION_STATE_REDIS_URL|REDIS_URL|LITELLM_PROXY_API_BASE|LITELLM_PROXY_API_KEY|INTENT_DETECTION_TINY_MODEL|INTENT_DETECTION_LARGE_MODEL)$' \
+  | grep -vE '^(LOG_LEVEL|SESSION_STATE_STORE|SESSION_STATE_REDIS_URL|REDIS_URL|LITELLM_PROXY_API_BASE|LITELLM_PROXY_API_KEY|INTENT_DETECTION_TINY_MODEL|INTENT_DETECTION_LARGE_MODEL)$' \
   | sed 's/^/  /'
 echo "  (vars with code defaults / deliberate non-template status are filtered; edit the"
 echo "   grep -vE list above if you promote one to the template)"

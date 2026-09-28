@@ -6,7 +6,6 @@ from fastworkflow.nlu_labels import PARAMETER_VALUE_PLACEHOLDERS
 from ..intent_detection import CommandNamePrediction
 from ..parameter_extraction import ParameterExtraction
 
-
 class Signature:
     # These are the PARAMETER_EXTRACTION stage's bare-value literals. They belong
     # to nlu_labels.PARAMETER_VALUE_LABEL, not to this command's INTENT_DETECTION
@@ -96,6 +95,11 @@ class ResponseGenerator:
                 app_workflow.current_command_context
 
             if cnp_output.command_name is None:
+                # The hint the first declining context composed.
+                # Every context on the chain declines the same token for the
+                # same reason, so the first one is the whole story; it is kept
+                # rather than recomputed because the walk overwrites cnp_output.
+                routing_hint = cnp_output.routing_hint
                 while not cnp_output.command_name and \
                     app_workflow.command_context_for_response_generation is not None and \
                         not app_workflow.is_command_context_for_response_generation_root:
@@ -104,8 +108,38 @@ class ResponseGenerator:
                     cnp_output = predictor.predict(
                         fastworkflow.Workflow.get_command_context_name(app_workflow.command_context_for_response_generation), 
                         command, nlu_pipeline_stage)
+                    routing_hint = routing_hint or cnp_output.routing_hint
             
                 if cnp_output.command_name is None:
+                    # The misunderstanding stage is included: its reply is
+                    # matched against this context's full command set, so a
+                    # real command owned elsewhere is declined there too, and
+                    # the hint ends that stage the same way.
+                    if nlu_pipeline_stage in (
+                            NLUPipelineStage.INTENT_DETECTION,
+                            NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION,
+                    ) and routing_hint:
+                        # The name IS a command of this workflow; the walk simply
+                        # never passed a context that owns it. "Nothing matched"
+                        # is true and useless here, so say where it lives and how
+                        # to get there. A hint only: nothing below navigates, and
+                        # navigating on a guess about what was meant would change
+                        # the workflow's state on the strength of that guess.
+                        #
+                        # Not a misunderstanding either, so no clarification
+                        # stage: that stage matches the next message against this
+                        # context's commands only, and the entering command the
+                        # hint names usually lives elsewhere. Ending command
+                        # processing routes that next message normally.
+                        workflow.end_command_processing()
+                        return CommandOutput(
+                            command_response=CommandResponse(
+                                response=routing_hint,
+                                success=False,
+                                artifacts={"command_handled": True},
+                            )
+                        )
+
                     if nlu_pipeline_stage == NLUPipelineStage.INTENT_DETECTION:
                         # out of scope commands
                         workflow_context = workflow.context

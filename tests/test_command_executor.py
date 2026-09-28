@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import uuid
 from contextlib import suppress
 from pathlib import Path

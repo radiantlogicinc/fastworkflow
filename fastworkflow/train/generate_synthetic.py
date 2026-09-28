@@ -1,4 +1,4 @@
-"""LLM-written synthetic utterances for intent training (spec R2/R3/R6, F2/F3/F12).
+"""LLM-written synthetic utterances for intent training.
 
 What is digested into the utterance-cache key, and why
 ------------------------------------------------------
@@ -12,7 +12,7 @@ them, in two groups:
 * **WHICH personas do the asking** — `derived_seed`, `select_persona_indices`,
   `personas.resolve_personas` and `personas.PersonaSource.select`. The persona *ids*
   are deliberately absent from the key, because computing them would require the
-  200k-row PersonaHub download the cache exists to avoid (decision D6). That makes
+  200k-row PersonaHub download the cache exists to avoid. That makes
   the selection CODE the only thing standing between an edit to persona sampling and
   a cache full of entries written by personas a fresh run would no longer pick — so
   it has to be in here. Editing any of them invalidates every entry once, which is
@@ -25,7 +25,7 @@ third component of `personas.active_persona_source_label`. That input is already
 function of the installed source, so covering the source there costs nothing, whereas
 naming those methods here would make every workflow in existence regenerate because a
 keyword filter that only a workflow with a ``personas.json`` can reach was edited. See
-`personas.pool_source_digest` (bd fix-6r5).
+`personas.pool_source_digest`.
 
 Nothing else in this module belongs in the key: the fallback and reporting helpers
 run only when generation has already failed, and a fallen-back run is never cached.
@@ -190,8 +190,7 @@ def select_persona_indices(
     Driven by a private `random.Random` seeded from `(seed, command_name)`, not the
     global `random` module. With the global module the result depends on how many
     random draws happened earlier in the process, so the same command sampled
-    different personas depending on which contexts were trained before it - the
-    free-running sampling of finding F2.
+    different personas depending on which contexts were trained before it.
     """
     if not dataset_size or not num_personas or num_personas <= 0:
         return []
@@ -227,7 +226,7 @@ def _attribute_utterance(
     `utterance_personas` is keyed by utterance text, so two personas producing the
     same wording collide. Overwriting would silently hand the text to whichever
     persona happened to come last, and the downstream evaluation split holds out
-    WHOLE personas (R1/D1) - so a text produced by both a held-out and a training
+    WHOLE personas - so a text produced by both a held-out and a training
     persona would look like a generalisation success while actually being trained
     on. Instead:
 
@@ -283,8 +282,8 @@ def _resolve_persona_id(
 def _announce_fallback(command_name: str, reason: str, final_count: int) -> None:
     """Report a degraded command loudly enough to survive a tqdm-flooded log.
 
-    F3's root cause was not the missing retry, it was that the one `logger.error`
-    line was invisible among tens of thousands of progress-bar lines. The banner
+    A single `logger.error` line is invisible among tens of thousands of
+    progress-bar lines, which is how degraded commands went unnoticed. The banner
     goes to stdout as well so it survives log-level configuration.
     """
     banner = "!" * 78
@@ -385,7 +384,7 @@ def generate_utterances_for_personas(
     loop can be exercised against a supplied `completion_fn` without a network call
     and without a PersonaHub download. Mutates *provenance* in place: persona
     attribution, and `fell_back` / `fallback_reason` when a batch exhausts its
-    retries or is rejected for what its prompt contains. Returns only the generated
+    retries or is refused for what its prompt contains. Returns only the generated
     utterances (no seeds, no command name).
 
     Never raises for a failure that is scoped to this one command. Account- and
@@ -487,8 +486,17 @@ def generate_utterances_for_personas(
                     model=model,  # Corrected model name
                     messages=messages,
                     max_tokens=1000,
+                    # Temperature only. Sending `temperature` and `top_p` together is
+                    # rejected outright by the current Bedrock Claude models -- "`temperature`
+                    # and `top_p` cannot both be specified for this model. Please use only
+                    # one." -- which made every utterance-generation call a hard
+                    # BadRequestError and blocked training entirely (found 16 Sep 2026,
+                    # ido-8ps.25). The API forces a choice and temperature is the one that
+                    # carries the intent here: this call wants diverse phrasings of a known
+                    # request, which is what temperature 1.0 asks for, while nucleus
+                    # truncation at 0.9 was only trimming the tail of that same
+                    # distribution.
                     temperature=1.0,
-                    top_p=0.9,
                     stop=["<|end_of_text|>"]
                 ),
                 description=(
@@ -671,7 +679,7 @@ def _apply_cached_entry(
     Re-runs `_attribute_utterance` rather than copying the stored map wholesale, so a
     reused utterance that happens to duplicate a hand-written seed is absorbed into
     `SEED_PERSONA_ID` exactly as it would have been on a fresh generation. Without
-    that, a whole-persona holdout (R1/D1) would treat it as held-out-able and score a
+    that, a whole-persona holdout would treat it as held-out-able and score a
     memorised row as a generalisation success.
 
     An entry written before attribution existed, or one whose attribution is missing
@@ -711,7 +719,7 @@ def generate_diverse_utterances_with_provenance(
     Same behaviour and return list as `generate_diverse_utterances`; the extra
     return value is what the trainer persists so a run can be reproduced.
 
-    When the trainer has installed an `UtteranceCache` (R6) and an entry matches this
+    When the trainer has installed an `UtteranceCache` and an entry matches this
     command's fingerprint at this seed, the LLM is not called at all — and neither is
     the PersonaHub download, which is why the cache lookup happens BEFORE the
     `datasets`-availability check. Reuse is what makes two runs at the same seed train

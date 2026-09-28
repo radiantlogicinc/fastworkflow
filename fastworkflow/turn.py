@@ -16,7 +16,6 @@ the bottom of ``fastworkflow/__init__.py`` via ``TurnResult.model_rebuild``.
 
 from __future__ import annotations
 
-import os
 import uuid
 import warnings
 from datetime import datetime, timezone
@@ -61,7 +60,7 @@ def merge_artifact_responses_into(
 def collect_artifact_responses(
     command_outputs: list["CommandOutput"],
 ) -> list["CommandResponse"]:
-    """Flatten every command response that carries artifacts, in turn order. [A9][A20]
+    """Flatten every command response that carries artifacts, in turn order.
 
     Returns the subset of command responses (across every ``command_output``)
     whose ``artifacts`` dict is non-empty, projected to the flat
@@ -71,7 +70,7 @@ def collect_artifact_responses(
 
     The framework does not interpret artifact keys or values — it only preserves
     structured outputs that would otherwise be dropped. Which keys are meaningful
-    (and how to render them) is entirely the consuming client's concern. [Topic 5]
+    (and how to render them) is entirely the consuming client's concern.
     """
     return [
         command_output.command_response
@@ -81,7 +80,7 @@ def collect_artifact_responses(
 
 
 class TurnStatus(str, Enum):
-    """Terminal (or suspended) status of a logical turn. [A3]"""
+    """Terminal (or suspended) status of a logical turn."""
 
     COMPLETED = "completed"
     AWAITING_USER = "awaiting_user"
@@ -94,7 +93,7 @@ def mint_turn_key(now: Optional[datetime] = None, uuid_hex: Optional[str] = None
     """Mint a new turn key: ``YYYYMMDDTHHMMSS.ffffffZ-<uuid4 hex, 12 chars>``.
 
     Colon-free and lexicographically sortable; the timestamp is the logical
-    turn start in UTC. [A22][A24][A26]
+    turn start in UTC.
 
     Args:
         now: Injectable timestamp (UTC) for deterministic tests.
@@ -146,13 +145,9 @@ def validate_artifacts_serializable(command_output: "CommandOutput") -> list[str
 def warn_on_unserializable_artifacts(command_output: "CommandOutput") -> None:
     """Warn (never raise) if a command output carries unserializable artifacts.
 
-    Controlled by the ``FW_EAGER_ARTIFACT_VALIDATION`` environment variable
-    (on by default; set to ``"0"`` to disable). In v2.21 this only emits a
-    ``warnings.warn``; from v3.0 the same problems are rejected when the turn
-    record is filed. [X3a]
+    Runs for every turn. In v2.21 this only emits a ``warnings.warn``; from
+    v3.0 the same problems are refused when the turn record is filed.
     """
-    if os.environ.get("FW_EAGER_ARTIFACT_VALIDATION", "1") == "0":
-        return
     if problems := validate_artifacts_serializable(command_output):
         warnings.warn(
             "Unserializable command artifacts detected: "
@@ -193,7 +188,7 @@ class TurnOutput(BaseModel):
     @computed_field
     @property
     def success(self) -> bool:
-        """Whether every command in the turn reported success. [A6][A42]
+        """Whether every command in the turn reported success.
 
         ``success`` is purely ``all(command_outputs succeeded)`` — **orthogonal**
         to ``status`` and ``failure_reason``. The agent always phrases its final
@@ -216,7 +211,7 @@ class TurnOutput(BaseModel):
 
     @property
     def command_outputs_with_artifacts(self) -> list:
-        """Command outputs carrying artifacts, in turn order. [A9][A20]
+        """Command outputs carrying artifacts, in turn order.
 
         The subset of ``command_outputs`` where any command response has a
         non-empty ``artifacts`` dict — i.e. the outputs that carry structured
@@ -245,8 +240,8 @@ class TurnOutput(BaseModel):
 # ``ExecutionRecord`` "is a contract, not a new table — its fields land as
 # versioned attributes on the extended ``fw.command.execute``/
 # ``fw.agent.tool_call`` spans and the turn record, with ``command_call_id`` as
-# the join key", and the EXP-003 epic retired ``execution_record.py`` as a
-# standalone module. Copying those fields onto the turn record as well would
+# the join key", which is why ``execution_record.py`` is not a standalone
+# module. Copying those fields onto the turn record as well would
 # give each of them two homes that can disagree, which is the outcome that note
 # exists to prevent.
 #
@@ -271,10 +266,10 @@ class TurnOutput(BaseModel):
 # internal CME hop dispatches a command that produces no ``CommandOutput`` at
 # all, so that execution appears nowhere in the turn record.
 #
-# Phase 0 populates neither list. The ``CommandDispatcher`` choke point that
-# will is fix-ajv.3's, and it does not exist in this tree; both fields default
-# to empty, so every existing constructor call and every already-serialized
-# record keeps validating unchanged.
+# Nothing populates either list yet: the ``CommandDispatcher`` choke point that
+# would do it does not exist in this tree. Both fields default to empty, so
+# every existing constructor call and every already-serialized record keeps
+# validating unchanged.
 
 # Version of the two contracts below — their field sets and the vocabularies
 # their enums admit. Deliberately ONE number for both, on the same terms as
@@ -403,7 +398,7 @@ class RoutingEvent(_CapturedRecord):
 
 
 class TurnResult(BaseModel):
-    """The complete internal capture of one logical turn. [A22]
+    """The complete internal capture of one logical turn.
 
     Composes the consumer-facing ``turn_output`` plus internal-only
     observability/persistence fields. ``process_turn()`` returns the

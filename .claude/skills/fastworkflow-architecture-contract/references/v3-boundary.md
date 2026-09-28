@@ -61,14 +61,13 @@ Big-bang cutover, mixed fleets forbidden:
 ## Config inventory already reserved (spec §12)
 
 Defaults were chosen so a 2.20→2.21 upgrade needs ZERO config changes. Names reserved by
-the spec (only `FW_EAGER_ARTIFACT_VALIDATION` is consumed in code today, `turn.py:155`):
+the spec (none of them is consumed in code today; the artifact validator is unconditional):
 `FW_ARTIFACT_OFFLOAD_THRESHOLD_BYTES=4096`, `FW_MAX_INLINE_ARTIFACT_BYTES=10485760`,
 `FW_MAX_TURN_ARTIFACT_BLOBS=64` / `FW_MAX_TURN_ARTIFACT_BYTES=52428800`,
 `FW_MAX_TRAJECTORY_BYTES=262144`, `FW_PENDING_TURN_TTL_SECONDS=604800`,
 `FW_MEMORY_PROJECTION_TURNS=10`, `FW_CONVERSATION_MAX_TURNS=200` (0 = off),
 `FW_ALLOW_DISK_STORES`. Do not repurpose these names.
-(Verified: `grep -rn "FW_" fastworkflow/ --include='*.py' | grep os.environ` finds only
-`FW_EAGER_ARTIFACT_VALIDATION` consumed today.)
+(Verified at 3.4.0: none of the reserved names above is read anywhere in `fastworkflow/`.)
 
 ## Open forks deliberately left standing (do not silently resolve them)
 

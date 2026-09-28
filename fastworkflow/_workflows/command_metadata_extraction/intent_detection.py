@@ -22,6 +22,17 @@ from fastworkflow.model_pipeline_training import (
     CommandRouter,
     GLOBAL_CONTEXT_FOLDER,
 )
+# `entry_declarations` owns the entry-command declaration contract: one
+# canonical source for "which command enters this context", read here by the
+# foreign-context hint. Nothing in the routing definition or the context model
+# records the fact, and inferring it from a command's NAME would bake one
+# workflow's spelling conventions into the framework.
+# `CONTEXT_ENTER_COMMAND_ATTRS` is re-exported because this module is where the
+# foreign-context callers already look for it.
+from fastworkflow.entry_declarations import (
+    CONTEXT_ENTER_COMMAND_ATTRS,
+    declared_entry_commands,
+)
 from fastworkflow.nlu_labels import is_escalation, is_non_routable
 from fastworkflow.train.artifact_versioning import VERSIONS_DIRNAME
 
@@ -74,7 +85,15 @@ _FUZZY_PREMATCH_MAX_DISTANCE = 0.3  # Adjust threshold as needed
 # changing the field name.
 _FUZZY_MATCHER_VERSION = "levenshtein-leading-window/1"
 
-# Reported when the classifier artifacts are not under the R4 versioned layout. A
+# The matching layer between the context-scoped exact-name match and the fuzzy
+# pre-match: the first token names a real command of this workflow, and this
+# context is not one that owns it. Recorded as its own layer
+# rather than folded into "no matcher claimed it", because the two are opposite
+# facts -- this one is a deterministic refusal to answer, and a span that says
+# so is how a misroute is counted after the fact.
+MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT = "known_name_foreign_context"
+
+# Reported when the classifier artifacts are not under the versioned layout. A
 # tree that has never been trained under versioning has no version to report, and
 # saying so is better than inventing one that would look comparable across runs.
 _UNVERSIONED_ARTIFACT = "unversioned"
@@ -83,6 +102,63 @@ _UNVERSIONED_ARTIFACT = "unversioned"
 # defaulted to "tiny", because a signal_version that claims the wrong tier is worse
 # than one that admits it does not know.
 _UNKNOWN_MODEL_TIER = "unknown-tier"
+
+
+def foreign_context_hint(
+    command_name: str,
+    owner_contexts: list[str],
+    enter_commands: dict[str, list[str]],
+) -> str:
+    """What to say when a real command name reaches a context that cannot run it.
+
+    The foreign-context matcher returns None for such a name and the parent walk
+    carries it up; when no context on that chain owns it either, the walk used to
+    end at `you_misunderstood`, which says only that nothing matched. That is true
+    and useless: the name IS a command, the runtime knows exactly which contexts
+    have it, and the caller is one navigation away from being able to run it. The
+    CME wildcard command now returns this hint as the whole response instead.
+
+    A hint, never an action: this composes text and nothing here navigates. The
+    difference matters because auto-navigating on a misrouted call would change
+    the workflow's state on the strength of a guess about what was meant.
+
+    Generic by construction. The owning contexts come from the routing
+    definition, and the entering command only from a context's own
+    `enter_command` declaration -- never from the shape of a command's name.
+
+    *enter_commands* is keyed by owning context. With one owner the entering
+    commands are simply listed; with several, each is named beside the context
+    it enters, because a merged list cannot say which command opens which.
+    Owners that declare nothing are left out of the entry text, and still named
+    among the owners.
+    """
+    owners = ", ".join(owner_contexts)
+    plural = "contexts" if len(owner_contexts) > 1 else "context"
+    declared = [
+        (context_name, enter_commands[context_name])
+        for context_name in owner_contexts
+        if enter_commands.get(context_name)
+    ]
+    entry = ""
+    if len(owner_contexts) == 1 and declared:
+        entry = " Enter it with: " + ", ".join(
+            f"'{c}'" for c in declared[0][1]) + "."
+    elif declared:
+        entry = "".join(
+            f" Enter {context_name} with: "
+            + ", ".join(f"'{c}'" for c in commands) + "."
+            for context_name, commands in declared
+        )
+    if entry:
+        step = f"{entry} Then run '{command_name}' there."
+    else:
+        where = "that context" if len(owner_contexts) == 1 else "one of those contexts"
+        step = f" Move into {where} first, then run '{command_name}' there."
+    return (
+        f"'{command_name}' is a command of the {owners} {plural}, which this "
+        f"context and its parents do not provide.{step} Use 'what_can_i_do' to "
+        f"list the commands available where you are now."
+    )
 
 
 def escalation_outcome_of(predictions: list[str]) -> str:
@@ -113,8 +189,9 @@ def _classifier_signal_version(model_artifact_path: str, model_tier: str) -> str
     confidence of 0.8 from the next, and FW-REQ-021 clause 13 requires thresholds
     be re-validated when the producing artifact changes.
 
-    Under R4 versioning the per-context entry in ``___command_info`` is a
-    compatibility link into ``___command_info/versions/<version>/<context>``, so one
+    Under the versioned artifact layout the per-context entry in
+    ``___command_info`` is a compatibility link into
+    ``___command_info/versions/<version>/<context>``, so one
     ``realpath`` recovers the published version without importing the trainer's
     resolver or re-reading its pointer file on every prediction. The ``*`` to
     ``global`` mapping mirrors ``CommandRouter.__init__``, which does the same
@@ -129,7 +206,10 @@ def _classifier_signal_version(model_artifact_path: str, model_tier: str) -> str
         if os.path.basename(versions_parent) == VERSIONS_DIRNAME
         else _UNVERSIONED_ARTIFACT
     )
-    return f"intent-classifier/{version}/{os.path.basename(resolved)}/{model_tier}"
+    return (
+        f"intent-classifier/{version}"
+        f"/{os.path.basename(resolved)}/{model_tier}"
+    )
 
 
 def _topk_margin_signals(
@@ -164,8 +244,7 @@ def command_identity_uncertainty(nlu_trace: dict) -> DecisionUncertainty:
     A pure function of the facts ``_predict_impl`` recorded, and deliberately
     one-way: it reads the capture bag and writes nothing back, so the resolution
     path cannot come to depend on what is being measured about it. That is the
-    EXP-003 exit criterion and the architecture §17.3 stop condition — capture
-    only, no threshold, no branch.
+    architecture §17.3 stop condition — capture only, no threshold, no branch.
 
     It reads ``matcher_layer``, which is the name of the branch that has already
     run, not a measurement of it. No confidence, distance, count, or assembled
@@ -178,7 +257,17 @@ def command_identity_uncertainty(nlu_trace: dict) -> DecisionUncertainty:
     # do not enumerate resolved to exactly one command, or to none at all.
     candidate_count = nlu_trace.get("candidate_count", 1)
 
-    if matcher_layer == "exact_prefix":
+    if matcher_layer == MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT:
+        # The first token is a command name this workflow owns elsewhere. That
+        # is a lookup against an inventory, not a measurement: there is no
+        # confidence, distance or candidate set behind it, and the decision it
+        # produced was "decline, let the parent chain answer". Reporting it as
+        # deterministic keeps it out of every calibration curve, where a
+        # confidence of 1.0 (or an uncaptured-measurement marker) would both be
+        # false.
+        signals_absent_reason = "deterministic-resolution"
+        candidate_count = 0
+    elif matcher_layer == "exact_prefix":
         # An exact command-name match has nothing to be unsure about. Emitting
         # confidence 1.0 here would enter a calibration curve as a real
         # measurement of a classifier that never ran.
@@ -216,12 +305,12 @@ def command_identity_uncertainty(nlu_trace: dict) -> DecisionUncertainty:
         # computed. There is no second-best probability to subtract, and inventing
         # one is worse than its absence.
         #
-        # Amendment (fix-ajv.12): it no longer is. `predict_single_sentence` now
-        # carries `top_k_scores` through to `predict_with_details`, so the
-        # second-best probability is a fact the same forward pass already produced.
-        # It stays absent when the details dict does not carry it — a stubbed
-        # router, or a record written before this — which is why the helper returns
-        # a list instead of raising on a missing key.
+        # That is no longer true: `predict_single_sentence` carries `top_k_scores`
+        # through to `predict_with_details`, so the second-best probability is a
+        # fact the same forward pass already produced. It stays absent when the
+        # details dict does not carry it — a stubbed router, or an older record —
+        # which is why the helper returns a list instead of raising on a missing
+        # key.
         signals.extend(
             _topk_margin_signals(nlu_trace["classifier"], signal_version)
         )
@@ -282,6 +371,12 @@ class CommandNamePrediction:
         command_name: Optional[str] = None
         error_msg: Optional[str] = None
         is_cme_command: bool = False
+        # Set only when the first token names a command this context does not
+        # own. The walk carries the hint so the failure message at the end of
+        # the chain can say where the command actually lives; a resolved
+        # prediction leaves them None and nothing reads them.
+        known_name_owner_contexts: Optional[list[str]] = None
+        routing_hint: Optional[str] = None
 
     def __init__(self, cme_workflow: fastworkflow.Workflow):
         self.cme_workflow = cme_workflow
@@ -292,6 +387,10 @@ class CommandNamePrediction:
         self.convo_path = os.path.join(self.app_workflow_folderpath, "___convo_info")
         self.cache_path = self._get_cache_path(self.app_workflow_id, self.convo_path)
         self.path = self._get_cache_path_cache(self.convo_path, self.app_workflow_id)
+        # Built once per predictor and reused across the parent-chain walk,
+        # which asks the same question in every context it visits.
+        self._command_inventory: Optional[dict[str, tuple[str, ...]]] = None
+        self._enter_commands: dict[str, list[str]] = {}
 
     def predict(self, command_context_name: str, command: str, nlu_pipeline_stage: NLUPipelineStage) -> "CommandNamePrediction.Output":
         """Predict, wrapped in a ``fw.nlu.intent`` span (D3 as amended).
@@ -352,6 +451,87 @@ class CommandNamePrediction:
         )
         return output
 
+    def command_inventory(self) -> dict[str, tuple[str, ...]]:
+        """Every command name this app workflow owns, and the contexts owning it.
+
+        Keyed on the lowercased simple name, which is what the exact-name
+        matcher compares against, and valued with the context names so a span
+        can say where the call should have gone. Reserved labels (`wildcard`,
+        `parameter_value`) name no command and are left out.
+
+        Read from the same `RoutingDefinition` the per-context candidate set is
+        built from (`RoutingRegistry` caches it per workflow folder), so there
+        is no second source of truth to drift: this is that definition read
+        across every context instead of one.
+        """
+        if self._command_inventory is None:
+            app_crd = fastworkflow.RoutingRegistry.get_definition(
+                self.app_workflow_folderpath)
+            owners: dict[str, set[str]] = {}
+            for context_name, qualified_names in app_crd.contexts.items():
+                for qualified_name in qualified_names:
+                    simple_name = qualified_name.split('/')[-1]
+                    if is_non_routable(simple_name):
+                        continue
+                    owners.setdefault(simple_name.lower(), set()).add(context_name)
+            self._command_inventory = {
+                name: tuple(sorted(contexts)) for name, contexts in owners.items()
+            }
+        return self._command_inventory
+
+    def enter_commands_for(self, context_name: str) -> list[str]:
+        """The command(s) a workflow declares as entering *context_name*.
+
+        Read through `entry_declarations.declared_entry_commands`, which owns the
+        declaration contract; the context's own callback class is the only
+        place the fact is recorded. Empty when the workflow declares nothing,
+        when the context has no callback class, or when loading it fails -- a
+        hint that names the context alone is worth more than a failed turn, so
+        nothing here is allowed to raise.
+        """
+        if context_name in self._enter_commands:
+            return self._enter_commands[context_name]
+        declared = declared_entry_commands(self.app_workflow_folderpath, context_name)
+        self._enter_commands[context_name] = declared
+        return declared
+
+    def routing_hint_for(self, command_name: str, owner_contexts: list[str]) -> str:
+        """The hint for one foreign known name, entering commands resolved."""
+        enter_commands = {
+            context_name: self.enter_commands_for(context_name)
+            for context_name in owner_contexts
+        }
+        return foreign_context_hint(command_name, owner_contexts, enter_commands)
+
+    def foreign_owner_contexts(
+        self,
+        normalized_command_name: str,
+        command_name_dict: dict[str, str],
+        command_context_name: str,
+    ) -> list[str]:
+        """Contexts owning *normalized_command_name*, when this one does not.
+
+        Empty when the token names no command of this workflow (ordinary free
+        text, which is what the classifier is for) and empty when this
+        context's own candidate set contains it (already matched above). A
+        non-empty result is the foreign-context condition: a real command name,
+        reached in a context that cannot execute it.
+
+        Compared in lowercase on both sides: the inventory is keyed on the
+        lowercased name while `command_name_dict` keeps each command's own
+        spelling, so a case-sensitive test would call a context's own
+        mixed-case command foreign. The current context is dropped from the
+        owners for the same reason -- a context may never refuse a name as
+        belonging somewhere else when the somewhere else is itself.
+        """
+        if normalized_command_name in {name.lower() for name in command_name_dict}:
+            return []
+        return [
+            context_name
+            for context_name in self.command_inventory().get(normalized_command_name, ())
+            if context_name != command_context_name
+        ]
+
     def _predict_impl(
         self,
         command_context_name: str,
@@ -396,9 +576,13 @@ class CommandNamePrediction:
             for fully_qualified_command_name in valid_command_names
         }
 
-        if nlu_pipeline_stage == NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION:
-            # what_can_i_do is special in INTENT_AMBIGUITY_CLARIFICATION
+        if nlu_pipeline_stage in (
+                NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
+                NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION):
+            # what_can_i_do is special in both clarification stages
             # We will not predict, just match plain utterances with exact or fuzzy match
+            # Both stages also fall back to the plain utterance 'what can i do?'
+            # when nothing matches (below), so it must be a key in both.
             command_name_dict |= {
                 plain_utterance: 'IntentDetection/what_can_i_do'
                 for plain_utterance in crd.command_directory.map_command_2_utterance_metadata[
@@ -426,14 +610,70 @@ class CommandNamePrediction:
                 ].plain_utterances
             }
 
-        # See if the command starts with a command name followed by a space or a '('
-        tentative_command_name = command.split(" ", 1)[0].split("(", 1)[0]
+        # A command name ends at whitespace or a '(' -- ANY whitespace, not a
+        # space alone: `list_permissions\n<scope>all</scope>` otherwise makes the
+        # whole line the tentative name, so neither the matcher nor the foreign-
+        # name guard sees one (F31/ido-nx6). "" splits to [], hence the guard.
+        tentative_command_name = (
+            command.split(None, 1)[0].split("(", 1)[0] if command.strip() else "")
         normalized_command_name = tentative_command_name.lower()
+        # The typed token is lowercased, but `command_name_dict` keeps each
+        # command's own spelling, so the exact match looks the token up by its
+        # lowercase form and resolves to the key as spelled.
+        exact_key = {
+            name.lower(): name for name in command_name_dict
+        }.get(normalized_command_name)
         command_name = None
-        if normalized_command_name in command_name_dict:
-            command_name = normalized_command_name
+        if exact_key is not None:
+            command_name = exact_key
             command = command.replace(f"{tentative_command_name}", "").strip().replace("  ", " ")
             nlu_trace["matcher_layer"] = "exact_prefix"
+        elif (
+            nlu_pipeline_stage in (
+                NLUPipelineStage.INTENT_DETECTION,
+                NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION)
+            and (owner_contexts := self.foreign_owner_contexts(
+                normalized_command_name, command_name_dict, command_context_name))
+        ):
+            # R1 (ido-8ps.8): a known command name may not be answered by a
+            # context that does not own it. The exact-name matcher above is
+            # scoped to THIS context's command set, so a root ('*') or sibling
+            # command typed verbatim -- `fetch_result_page <handle>O9</handle>`,
+            # `show_holders <filter>...`, `list_permissions` -- is invisible to
+            # layers 1 and 2 here and would be adjudicated by this context's
+            # classifier, which answered four of them with a confident
+            # "No permissions found." (ido-8ps.6.1 section 4.2: 69 silent
+            # misroutes across 31 stored runs).
+            #
+            # None is already the signal that drives the parent-chain walk
+            # (`_commands/wildcard.py`), so returning it here carries the
+            # call up to the context that does own the name, where the
+            # deterministic matcher resolves it. Nothing below this line runs:
+            # no fuzzy candidates, no embedding cache, no classifier. A name
+            # whose owner is not on this chain now reaches the routing hint
+            # below instead of a lucky classifier guess -- loud instead of silent.
+            #
+            # INTENT_DETECTION and INTENT_MISUNDERSTANDING_CLARIFICATION only.
+            # The ambiguity stage matches against a constrained suggestion set,
+            # where "not in this context's set" is the normal case rather than
+            # a misroute. The misunderstanding stage matches this context's
+            # full command set, the same set intent detection uses, so a real
+            # command name missing from it is the same misroute there; without
+            # the guard it fell to the 'what can i do?' default and the owner
+            # was never named.
+            hint = self.routing_hint_for(normalized_command_name, owner_contexts)
+            nlu_trace["matcher_layer"] = MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT
+            nlu_trace["known_name_foreign_context"] = True
+            nlu_trace["known_name_owner_contexts"] = owner_contexts
+            # On the span beside the event it belongs to, so a summary can count
+            # how often the hint was given and how often the next call followed
+            # it, without re-deriving the text from the inventory.
+            nlu_trace["known_name_foreign_context_hint"] = hint
+            return CommandNamePrediction.Output(
+                command_name=None,
+                known_name_owner_contexts=owner_contexts,
+                routing_hint=hint,
+            )
         else:
             # Use Levenshtein distance for fuzzy matching with the full command part after @
             # No match is ([], None), never (None, None) — len() here is safe.
@@ -599,15 +839,14 @@ class CommandNamePrediction:
         Shared across sessions by default, which is the point of the cache: a
         disambiguation learned in one session helps the next.
 
-        `FW_UTTERANCE_CACHE_SCOPE=workflow` shards it by workflow id instead
-        (`fix-bn1` `[XR16]`). A pass^k experiment must not have correlated
-        attempts, and this file is read on the runtime turn path
-        (`cache_match`) and written on it (`store_utterance_cache`) while being
-        keyed on nothing -- so attempt 2 would inherit attempt 1's
-        disambiguation decisions, and a treatment arm would inherit the
-        baseline arm's, both arms running against the same workflow folder.
-        The sibling `_get_cache_path` is already sharded this way; this is the
-        same treatment, opt-in so ordinary runs keep their shared cache.
+        `FW_UTTERANCE_CACHE_SCOPE=workflow` shards it by workflow id instead.
+        Repeated independent runs must not have correlated attempts, and this
+        file is read on the runtime turn path (`cache_match`) and written on it
+        (`store_utterance_cache`) while being keyed on nothing -- so a second
+        run would inherit the first run's disambiguation decisions whenever
+        both run against the same workflow folder. The sibling
+        `_get_cache_path` is already sharded this way; this is the same
+        treatment, opt-in so ordinary runs keep their shared cache.
         """
         base_dir = convo_path
         # Create directory if it doesn't exist

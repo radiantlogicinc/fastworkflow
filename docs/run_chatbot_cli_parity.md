@@ -31,7 +31,7 @@ They remain server-launch decisions (`run_fastapi_mcp` flags) and programmatic
 | JWT posture | `run_fastapi_mcp --expect_encrypted_jwt` | The auto-spawned loopback server runs unsigned dev JWTs by default (owner decision amending [R19] — the chatbot mints its own tokens via `/initialize`); `run_chatbot --expect-encrypted-jwt` restores signed mode (paste a token in the Advanced panel) | |
 | Training | `fastworkflow train` | Yes — the picker's **Train** button (`POST /api/train`) spawns a detached `fastworkflow train` for a local workflow (refused for bundled examples; one run at a time; survives chatbot exit; log + pid under the workflow's state dir) | Train metrics land in the observability store (Phase 6) |
 | Build / refine | `fastworkflow build/refine` | **CLI-only** | Out of scope |
-| Store maintenance | `run_chatbot` has no maintenance flags | **Clear conversations** removes all conversation, turn, span, artifact, and feedback records after explicit confirmation | Training runs, diagnostics, and monotonic conversation counters are preserved |
+| Store maintenance | `run_chatbot` has no maintenance flags | **Clear conversations** removes all conversation, turn, span, artifact, and feedback records, and the observation-offloading evidence and events of those turns (experiment runs included), after explicit confirmation | Training runs, diagnostics, and monotonic conversation counters are preserved |
 
 ## Launching
 

@@ -1,4 +1,4 @@
-"""TurnResult capture on WorkflowExecutionContext (v2.21, bead fix-yy1.5).
+"""TurnResult capture on WorkflowExecutionContext.
 
 Mirrors the fixtures/patterns of tests/test_execution_context_agent.py (real
 todo_list_workflow, MagicMock only at the agent/LLM boundary) and
@@ -214,7 +214,7 @@ class TestCommandOutputShape:
 
 
 # ----------------------------------------------------------------------
-# 5-6, 9: Deterministic path (process_turn / process_message / A30 reset)
+# 5-6, 9: Deterministic path (process_turn / process_message / turn-key reset)
 # ----------------------------------------------------------------------
 
 
@@ -445,7 +445,7 @@ class TestSuspendResumeTurnCapture:
 
         second = ctx.process_turn("the urgent one")
 
-        # Resume continues the SAME logical turn — no reset [A30.2]
+        # Resume continues the SAME logical turn — no turn-key reset
         assert second.turn_key == first.turn_key
         assert second.status == TurnStatus.COMPLETED
         assert not ctx.awaiting_user
@@ -675,20 +675,26 @@ class TestArtifactValidation:
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch
     ):
         ctx, _wf = _make_assistant_ctx(todo_workflow_path, monkeypatch)
-        monkeypatch.delenv("FW_EAGER_ARTIFACT_VALIDATION", raising=False)
 
         with pytest.warns(UserWarning, match="Unserializable command artifacts"):
             ctx.append_turn_output(self._bad_output())
 
-    def test_warning_suppressed_when_validation_disabled(
+    def test_a_serializable_output_warns_about_nothing(
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch
     ):
+        """Validation is what `append_turn_output` always does. What is left to
+        pin is that it is quiet on artifacts it can serialize, and that the
+        output is appended either way."""
         ctx, _wf = _make_assistant_ctx(todo_workflow_path, monkeypatch)
-        monkeypatch.setenv("FW_EAGER_ARTIFACT_VALIDATION", "0")
+        good = CommandOutput(
+            command_name="good_cmd",
+            command_response=
+                CommandResponse(response="x", artifacts={"ok": [1, "two", None]}),
+        )
 
         with warnings.catch_warnings():
             warnings.simplefilter("error")  # any warning becomes a failure
-            ctx.append_turn_output(self._bad_output())
+            ctx.append_turn_output(good)
 
         assert len(ctx._turn_outputs) == 1  # still appended
 
@@ -756,7 +762,7 @@ class TestInternalTurnResult:
 
 
 # ----------------------------------------------------------------------
-# 14a: Conversation-memory columns (fix-24f.1; Phase-7 design §2.1, ruling I5)
+# 14a: Conversation-memory columns
 #
 # The turns table is only usable as conversation memory if a turn record
 # carries the history entry that turn produced. These are the cases that decide
@@ -1018,7 +1024,7 @@ class TestTurnOutput:
 class TestAskUserMarkerIsStructural:
     """`is_ask_user` was `command_name == "ask_user"`.
 
-    Since fix-ajv.16 a failure output carries the real routed command name with
+    A failure output carries the real routed command name with
     `success=False` — byte-identical to an unanswered question — and root-context
     command names are UNQUALIFIED. So a workflow defining a root command called
     `ask_user` made its failures collectible by `complete_ask_user_entry`, which

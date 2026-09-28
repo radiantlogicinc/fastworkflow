@@ -1053,7 +1053,7 @@ def test_a_capped_pass_answer_and_plan_keep_a_visible_prefix(
     original length, or a reader compares two passes on the first 64 bytes of
     each and never learns that is what they are looking at.
     """
-    monkeypatch.setenv("FW_OBS_MAX_ATTR_BYTES", "64")
+    monkeypatch.setattr(tracing, "MAX_ATTR_BYTES", 64)
     long_answer = "I checked every list and here is the full rundown: " + "x" * 400
     long_plan = "step one, at considerable length: " + "y" * 400
     turn_key = _run_distillation_turn(
@@ -1105,7 +1105,7 @@ def test_a_long_pass_answer_and_plan_are_withheld_even_though_capped_first(
     its presence anywhere in the database is unambiguous.
     """
     monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
-    monkeypatch.setenv("FW_OBS_MAX_ATTR_BYTES", "32")
+    monkeypatch.setattr(tracing, "MAX_ATTR_BYTES", 32)
     sentinel = WITHHELD_SENTINEL
     long_answer = sentinel * 20
     turn_key = _run_distillation_turn(
@@ -1465,7 +1465,7 @@ def pass_world(initialized_fastworkflow, todo_workflow_path, tmp_path, monkeypat
     # prunes by age and takes them with it. Ordering is cheaper than dating the
     # seed against a clock the retention window also reads.
     monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
-    monkeypatch.setenv("FW_OBS_MAX_ATTR_BYTES", "32")
+    monkeypatch.setattr(tracing, "MAX_ATTR_BYTES", 32)
     try:
         _run_distillation_turn(
             monkeypatch,
@@ -1491,7 +1491,7 @@ def pass_world(initialized_fastworkflow, todo_workflow_path, tmp_path, monkeypat
         )
     finally:
         monkeypatch.delenv(obs.CAPTURE_PROFILE_VAR, raising=False)
-        monkeypatch.delenv("FW_OBS_MAX_ATTR_BYTES", raising=False)
+        monkeypatch.setattr(tracing, "MAX_ATTR_BYTES", tracing._DEFAULT_MAX_ATTR_BYTES)
 
     # Attempt 2, stamped but undescribed. Written the way a recorder writes,
     # through the store's own row upserts.

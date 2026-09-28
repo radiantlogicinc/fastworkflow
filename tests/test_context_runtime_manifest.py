@@ -45,6 +45,7 @@ from fastworkflow.runtime_manifest import (
     CommandDeclaration,
     ContextDeclaration,
     EffectContract,
+    FingerprintVerification,
     ManifestConformanceError,
     NavigationEffect,
     RuntimeManifest,
@@ -242,12 +243,11 @@ def test_derived_and_secret_trees_are_excluded_from_the_fingerprint(tmp_path):
 
 
 def test_generator_bookkeeping_files_are_out_of_scope(tmp_path):
-    """fix-oxr: a dot-prefixed file is tool bookkeeping, not source.
+    """A dot-prefixed file is tool bookkeeping, not source.
 
-    IDO's `.generated_manifest.json` carried a `generated_at` timestamp, which
-    made this hash time-dependent on an IDO workflow — the exact property §7.1
-    says it must not have. Excluding the class is what stops the next
-    bookkeeping file from doing it again.
+    A generated manifest carrying a `generated_at` timestamp makes this hash
+    time-dependent — the exact property §7.1 says it must not have. Excluding
+    the class is what stops the next bookkeeping file from doing it again.
     """
     root = _write_workflow(tmp_path / "wf", {"_commands/a.py": "x = 1\n"})
     before = workflow_content_hash(root)
@@ -336,13 +336,12 @@ def test_fingerprint_verification_is_opt_in_at_startup(tmp_path):
 
 
 def test_a_manifest_may_declare_the_scope_rule_that_produced_its_fingerprint():
-    """fix-ijf: the field has to be modelled before a generator can emit it.
+    """The field has to be modelled before a generator can emit it.
 
     `_Strict` forbids unknown keys, so a generator declaring a field this class
-    does not carry has its manifest rejected by name and every startup
-    conformance check on that workflow fails. Until this landed the IDO
-    generator was holding the value internally because it could not write it
-    down.
+    does not carry has its manifest refused by name and every startup
+    conformance check on that workflow fails. Without the field modelled here a
+    generator can only hold the value internally.
     """
     manifest = _manifest(workflow_fingerprint="sha256:abc", workflow_scope_rule_version=1)
     assert manifest.workflow_scope_rule_version == 1
@@ -389,8 +388,8 @@ def test_an_unversioned_manifest_is_still_held_to_the_current_rule(tmp_path):
 
 def test_matching_digests_are_a_pass_whatever_the_rule_versions_say(tmp_path):
     """Equal digests mean the two selections produced identical bytes on this
-    tree, which is a genuine pass. Failing it on a version mismatch would be the
-    false alarm on a healthy workflow that fix-ijf was filed to avoid."""
+    tree, which is a genuine pass. Failing it on a version mismatch would be a
+    false alarm on a healthy workflow."""
     root = _write_workflow(tmp_path / "wf", {"_commands/a.py": "x = 1\n"})
     verification = verify_workflow_fingerprint(
         root,
@@ -405,7 +404,7 @@ def test_matching_digests_are_a_pass_whatever_the_rule_versions_say(tmp_path):
 
 
 def test_framework_artifact_directories_are_excluded_by_prefix(tmp_path):
-    """fix-ijf: the artifact directories are a class, not three names.
+    """The artifact directories are a class, not three names.
 
     Naming ``___command_info``, ``___workflow_contexts`` and ``___convo_info``
     closes the instances that exist. A framework that adds a fourth would fold
@@ -479,11 +478,17 @@ _IDO_EXCLUDED_FILES = (
     "fastworkflow.env.example",
     "fastworkflow.passwords.env.example",
 )
+_IDO_EXCLUDED_ROOT_TREES = ("benchmarks",)
+_IDO_RUNTIME_STORE_PREFIX = "observability.sqlite3"
 _IDO_SUFFIXES = (".py", ".json", ".md")
 _IDO_CRUFT_DIRNAMES = frozenset({"__pycache__", ".pytest_cache"})
 _IDO_FRAMEWORK_ARTIFACT_PREFIX = "___"
 
-IDO_GENERATOR = "/home/drawal/rl/ido/gen_ido_scaffold.py"
+#: Root of a sibling IDO checkout, named by ``FW_TEST_IDO_ROOT``. The cases
+#: below compare fastWorkflow's file-selection rule against IDO's own, so they
+#: need IDO's source on disk; they skip when the variable is unset.
+IDO_ROOT = os.environ.get("FW_TEST_IDO_ROOT", "")
+IDO_GENERATOR = os.path.join(IDO_ROOT, "gen_ido_scaffold.py") if IDO_ROOT else ""
 
 
 @functools.lru_cache(maxsize=1)
@@ -497,6 +502,8 @@ def _import_ido_generator():
     importing it runs no generation. Cached because the filter is checked once
     per contract case.
     """
+    if not IDO_GENERATOR:
+        pytest.skip("set FW_TEST_IDO_ROOT to a sibling ido checkout to run this")
     directory = os.path.dirname(IDO_GENERATOR)
     spec = importlib.util.spec_from_file_location("gen_ido_scaffold", IDO_GENERATOR)
     module = importlib.util.module_from_spec(spec)
@@ -517,13 +524,18 @@ def _ido_fingerprint_included(relpath):
     """Transcribed from ``gen_ido_scaffold._fingerprint_included``.
 
     Their ``os.sep`` split and their loop shape are kept, so a future diff
-    against their source stays readable. The rule: excluded tree names and
-    cruft names match at any depth, a dot prefix excludes a file or a
-    directory, ``___`` excludes a directory segment only, the excluded-file
-    list matches the whole root-relative path, and what survives must carry a
-    content suffix.
+    against their source stays readable. The rule: a ``benchmarks`` directory
+    directly under the root and a root file named after the runtime store are
+    excluded (scope rule v2), excluded tree names and cruft names match at any
+    depth, a dot prefix excludes a file or a directory, ``___`` excludes a
+    directory segment only, the excluded-file list matches the whole
+    root-relative path, and what survives must carry a content suffix.
     """
     segments = relpath.split(os.sep)
+    if len(segments) > 1 and segments[0] in _IDO_EXCLUDED_ROOT_TREES:
+        return False
+    if len(segments) == 1 and segments[0].startswith(_IDO_RUNTIME_STORE_PREFIX):
+        return False
     for position, segment in enumerate(segments):
         if segment in _IDO_EXCLUDED_TREES or segment in _IDO_CRUFT_DIRNAMES:
             return False
@@ -609,6 +621,29 @@ _SCOPE_CASES: dict[str, bool] = {
     # for is worth marking as such rather than counting as coverage.
     "fastworkflow.env": False,
     "_commands/notes.txt": False,
+    # Scope rule v2. The benchmark corpus directly under the root is what a
+    # workflow is measured with rather than what it is, and on the tree that
+    # forced this decision most of it was git-ignored - so a fingerprint over it
+    # could not be reproduced from a clean clone.
+    "benchmarks/g2e-tuning/v1.json": False,
+    "benchmarks/ad-admin-selfcompact-pilot/analysis.json": False,
+    # Root-relative, unlike every other exclusion here. A command package called
+    # ``benchmarks`` is source like any other, and dropping it would be the
+    # invisible direction of error: a hash that holds still while behaviour
+    # moves.
+    "_commands/benchmarks/case.py": True,
+    # The runtime observability store. Neither of these has a content suffix, so
+    # both sides drop them whatever the prefix rule says - marked as such rather
+    # than counted as coverage of it.
+    "observability.sqlite3": False,
+    "observability.sqlite3-wal": False,
+    # The case the prefix rule is actually for: a sidecar written beside the
+    # store in a format the suffix rule would otherwise admit.
+    "observability.sqlite3.offload-handles.json": False,
+    # Near misses, so the rule cannot grow into "anything called observability"
+    # or follow the store's name into a subdirectory.
+    "observability.md": True,
+    "_commands/observability.sqlite3.notes.md": True,
 }
 
 
@@ -672,21 +707,81 @@ def test_the_scope_rule_version_agrees_with_ido():
     assert generator.FRAMEWORK_ARTIFACT_PREFIX == FRAMEWORK_ARTIFACT_PREFIX
 
 
+def test_a_benchmarks_tree_is_excluded_at_the_root_and_kept_below_it(tmp_path):
+    """Scope rule v2, stated on its own rather than only inside the table.
+
+    Two assertions in one test because the pair is the rule: excluding at the
+    root is the decision, and keeping it below the root is what stops the
+    decision from eating source.
+    """
+    root = _write_workflow(
+        tmp_path / "wf",
+        {
+            "benchmarks/corpus/case.json": "measured with\n",
+            "_commands/benchmarks/case.py": "measured by\n",
+        },
+    )
+    assert _fw_selection(root) == {"_commands/benchmarks/case.py"}
+
+
+def test_the_runtime_store_and_its_sidecars_are_excluded_at_the_root(tmp_path):
+    """The prefix rule, on the names the store actually takes.
+
+    ``.json`` because that is the only one of these the suffix rule would admit
+    on its own; the others are here to say that one store under four names is
+    one exclusion.
+    """
+    root = _write_workflow(
+        tmp_path / "wf",
+        {
+            "observability.sqlite3": "store\n",
+            "observability.sqlite3-wal": "sidecar\n",
+            "observability.sqlite3-shm": "sidecar\n",
+            "observability.sqlite3.offload-handles.json": "sidecar\n",
+            "observability.md": "documentation\n",
+            "README.md": "source\n",
+        },
+    )
+    assert _fw_selection(root) == {"observability.md", "README.md"}
+
+
+def test_a_fingerprint_declared_under_the_previous_rule_is_incomparable():
+    """What the bump to v2 buys the records already written.
+
+    Every provenance record written before the benchmark corpus left the scope
+    declares a v1 digest over a larger file set. Under v2 those digests differ,
+    and the difference is not evidence that the workflow drifted - so the reader
+    declines the comparison instead of reporting a stale manifest, which is the
+    whole reason the selection carries a version.
+    """
+    assert WORKFLOW_SCOPE_RULE_VERSION > 1
+    verification = FingerprintVerification(
+        declared="sha256:" + "a" * 64,
+        computed="sha256:" + "b" * 64,
+        declared_scope_rule_version=1,
+    )
+    assert not verification.matches
+    assert verification.incomparable
+    assert "different questions" in verification.problem()
+
+
 def test_scope_rules_select_the_same_files_on_the_live_ido_tree():
     """The agreement ``verify_workflow_fingerprint`` rests on, as a set.
 
-    134 files on both sides, measured 28 August. The hash equality next door
-    already implies this; stating it as a set means a future divergence arrives
-    naming the files that moved instead of as two unequal digests.
+    The same file set on both sides. The hash equality next door already
+    implies this; stating it as a set means a future divergence arrives naming
+    the files that moved instead of as two unequal digests.
 
     Necessary and nowhere near sufficient: the live tree contains none of the
     divergent classes, which is precisely why the two scopes agreed on it for
     as long as they did while differing in seven ways. The contract table is
     what covers those.
     """
-    ido = "/home/drawal/rl/ido/ido_workflow"
+    if not IDO_ROOT:
+        pytest.skip("set FW_TEST_IDO_ROOT to a sibling ido checkout to run this")
+    ido = os.path.join(IDO_ROOT, "ido_workflow")
     if not os.path.isdir(ido):
-        pytest.skip("sibling ido repo not present")
+        pytest.skip(f"no ido_workflow under FW_TEST_IDO_ROOT ({IDO_ROOT})")
     assert _fw_selection(ido) == _ido_selection(ido)
 
 

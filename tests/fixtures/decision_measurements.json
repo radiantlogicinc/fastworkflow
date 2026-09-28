@@ -1,0 +1,400 @@
+{
+  "schema_version": 1,
+  "about": "Offline measurements behind the published precision and recall of the finish-time execution check and the search_memory router. Evidence is NOT in the repo: each evidence group names where its files are kept and their sha256. tests/test_decision_measurements.py pins the question wording to wording.sha256.",
+  "wording": {
+    "arguments": {
+      "k": 2,
+      "j": 1,
+      "part": "open the identity",
+      "name": "Alan Cooper",
+      "kind": "person",
+      "step": "Open Alan's identity"
+    },
+    "serialization": "YesNo -> {instructions, true, false}; OneOf -> {instructions, choices: [[label, description], ...] in asked order}; json.dumps(ensure_ascii=False, separators=(',', ':')), key order as rendered; sha256 of UTF-8",
+    "verified_against_offline": {
+      "finish_check.exec": "same digest as 4dsr-offline jev_v4.exec_question",
+      "finish_check.exec_without_part": "same digest as 4dsr-offline jev_v4.exec_question(part=None)",
+      "finish_check.any": "same digest as 4dsr-offline jev_v4.any_question",
+      "finish_check.part_applies": "same digest as 4dsr-offline jev_v4.part_applies_question",
+      "finish_check.action": "same text as 4dsr-offline jev_replay.applies_questions x{k} (compared as rendered)",
+      "finish_check.applies": "same text as 4dsr-offline jev_replay.applies_questions a{k}_{si} (compared as rendered)",
+      "search_router.wants": "same text and choice order as ufot-offline jev/classify.py WANTS_V4 (compared as rendered); a workflow's search_router_examples.json suffix ('Also, in this workflow: ...') is not part of the measured wording",
+      "search_router.for_report": "same text as ufot-offline jev/classify.py FOR_REPORT (compared as rendered)"
+    },
+    "templates": {
+      "finish_check.action": "9b70a108faec84183df83026111bec5d2399a3937df8097a40f2802e787a41f5",
+      "finish_check.applies": "f4e46d9811bc4a8a99998e216490f2c34b377316f5df6ec092508c5276f63a10",
+      "finish_check.part_applies": "6f89036d2ce24452d806bdda32977a41fa5b3c98cfd634a0664ce0c9e63b780a",
+      "finish_check.exec": "6db158166039445d40ed1c45d2543553bc106c426d95222380d398d870052daa",
+      "finish_check.exec_without_part": "4795c3297e6b83b325d51f3bcfc56041490159729ecf4a81fc841c420b67328d",
+      "finish_check.any": "fcc326a9d580fa2a9a2f3c45013e3336d700f7ec18dca7c14a1e90a4a24807e3",
+      "search_router.wants": "057196aaa8ecc52730b4712a724b5ecc15c7dcef1b32c05f75cf749817f509fe",
+      "search_router.for_report": "e6bd12fe26d39aa302b5ea2a996d345cadd871da9a3a48978968f1a6490346d4"
+    },
+    "sha256": "6112889e0db86b37ebdaacda275d974de1089e2b466dceced5ae3c0afc57ff07"
+  },
+  "finish_check": {
+    "calibration": "ido-v7-2026-09",
+    "model": "jev-1.13.0",
+    "version_measured": "v7 (PREREG_large.md)",
+    "thresholds": {
+      "FLAG_MIN": 0.5,
+      "ASK_MIN": 0.3
+    },
+    "data": "82 recorded ido attempts none of the versions was tuned on; 910 hand-labelled step x subject pairs (stratified, re-weighted: 674 weighted positives of 11538) and 129 subject-less steps; labels blind to scores, LABELING_RULES_v2.md",
+    "metrics": [
+      {
+        "name": "precision",
+        "value": 0.767,
+        "ci95": [
+          0.722,
+          0.81
+        ],
+        "n": 910,
+        "n_unit": "pairs",
+        "clusters": 82,
+        "interval_method": "95% attempt-cluster bootstrap, 2000 resamples, seed 20260926"
+      },
+      {
+        "name": "recall",
+        "value": 0.888,
+        "ci95": [
+          0.832,
+          0.936
+        ],
+        "n": 910,
+        "n_unit": "pairs",
+        "clusters": 82,
+        "interval_method": "95% attempt-cluster bootstrap, 2000 resamples, seed 20260926"
+      },
+      {
+        "name": "f1",
+        "value": 0.823,
+        "ci95": [
+          0.783,
+          0.858
+        ],
+        "n": 910,
+        "n_unit": "pairs",
+        "clusters": 82,
+        "interval_method": "95% attempt-cluster bootstrap, 2000 resamples, seed 20260926"
+      },
+      {
+        "name": "f1_baseline_v3",
+        "value": 0.745,
+        "ci95": [
+          0.682,
+          0.796
+        ],
+        "n": 910,
+        "n_unit": "pairs",
+        "clusters": 82,
+        "interval_method": "95% attempt-cluster bootstrap, 2000 resamples, seed 20260926"
+      },
+      {
+        "name": "subjectless_unexecuted_flagged",
+        "value": 1.0,
+        "ci95": [
+          0.701,
+          1.0
+        ],
+        "n": 9,
+        "n_unit": "unexecuted subject-less steps (of 129); 9 flagged, 0 false flags",
+        "interval_method": "Wilson 95%"
+      }
+    ],
+    "hypotheses": {
+      "v7_minus_v3_f1": {
+        "median": 0.077,
+        "ci95": [
+          0.037,
+          0.123
+        ]
+      },
+      "v7_minus_v4_f1": {
+        "median": 0.011,
+        "ci95": [
+          0.001,
+          0.026
+        ]
+      }
+    },
+    "annotator_agreement": {
+      "pairs": 88,
+      "raw": 1.0,
+      "cohen_kappa": 1.0
+    },
+    "evidence": [
+      {
+        "archive_location": "/home/drawal/rl/4dsr-offline",
+        "files": [
+          {
+            "role": "pre_registration",
+            "path": "PREREG_large.md",
+            "sha256": "16bff81cddc1f07ca7bd9142510cf31b9795e9fb8baef928dd2cdcdda67b99b5"
+          },
+          {
+            "role": "labelling_rules",
+            "path": "LABELING_RULES.md",
+            "sha256": "75d1431d9c5ab9efe5fad12429df14b1c910d8d441298fc7ed03cda2407f3731"
+          },
+          {
+            "role": "labelling_rules",
+            "path": "LABELING_RULES_v2.md",
+            "sha256": "931729b8581da90e50d505b37f3f39e7741cb27216e8ec9f5936e426742e3150"
+          },
+          {
+            "role": "script",
+            "path": "load.py",
+            "sha256": "444470614ccd4bb37d1b63abfe827ef74ef926c45a76af333f50273f22dffdf4"
+          },
+          {
+            "role": "script",
+            "path": "fixes.py",
+            "sha256": "d7a31d8403f96595763150b522b89ea8dfc8d7e63260794c15ecddd12e192d32"
+          },
+          {
+            "role": "script",
+            "path": "jev_replay.py",
+            "sha256": "75ec4fd4418b6599ebfe0e485cfebbd6929d0d81c2af57194eb05639606a9a47"
+          },
+          {
+            "role": "script",
+            "path": "jev_v4.py",
+            "sha256": "95d07ad8f3c2dfc58915077d60f9b77c72acd998d6dec27a36adf8721f770fad"
+          },
+          {
+            "role": "script",
+            "path": "jev_v7.py",
+            "sha256": "6b915b54d9f10c8cbd4dd8942576aaf953f9878614502e4758df3780a95b9951"
+          },
+          {
+            "role": "script",
+            "path": "verdicts.py",
+            "sha256": "a42bf20e1179a3f73d57d1867ca6ccfef855f50b0dfa206df50546f0d9bb1415"
+          },
+          {
+            "role": "script",
+            "path": "sample_large.py",
+            "sha256": "5a49156f29ab2b931ef35ea2f34f345a2741c7b238031d470c451595671a4bc7"
+          },
+          {
+            "role": "script",
+            "path": "score_large.py",
+            "sha256": "8c16dceed7835a72ec60c2c49d95c4b542e58942ea9ee28191a926bf3aaf991e"
+          },
+          {
+            "role": "labels",
+            "path": "large_labels/batch_0.txt",
+            "sha256": "f45472522c4b93f65bb3060d7031a85d1aa8c516160a2ded94799c2df3b5816b"
+          },
+          {
+            "role": "labels",
+            "path": "large_labels/batch_1.txt",
+            "sha256": "6e44ebd5f6607674464a9eec5810483715b5b4b9e7432f98fda4d88fdd199e82"
+          },
+          {
+            "role": "labels",
+            "path": "large_labels/batch_2.txt",
+            "sha256": "15288bb5dff5589ba47712f8d0716ea97d0a81618ff3a97c51fc5eed2cee1afb"
+          },
+          {
+            "role": "labels",
+            "path": "large_labels/batch_3.txt",
+            "sha256": "75cff7f5cc824856ff7882e1f4d8bf524a38d5f7a01367536d84e23697f606a4"
+          },
+          {
+            "role": "labels",
+            "path": "large_labels/batch_4.txt",
+            "sha256": "6312a520badadbab3ac7e2fa1d0970389a85203afefdd3ef9ad9228dc3bf9e25"
+          },
+          {
+            "role": "labels",
+            "path": "large_labels/batch_5.txt",
+            "sha256": "7fb4d7453abce58a9836bc7cee7a4d7cf3139a09648d96471714217f3971c31e"
+          },
+          {
+            "role": "labels",
+            "path": "large_labels/batch_6.txt",
+            "sha256": "42872850d7c760d3291e88c7959e9c26d44d04146b5154dc538c492633e69b56"
+          },
+          {
+            "role": "labels",
+            "path": "large_labels/batch_7.txt",
+            "sha256": "30908afeae6231c4e7b2bbc274c6cf3f032e4a77602b3526a81292d584f78a8c"
+          },
+          {
+            "role": "labels",
+            "path": "large_labels/batch_8.txt",
+            "sha256": "256f41d19e9c05f338205b5d7868b82775d08bc236c1fa2f0f356a7bd5acd1c0"
+          },
+          {
+            "role": "labels",
+            "path": "large_labels/overlap.txt",
+            "sha256": "52d8c001ea9106c056fdb4dcdfd38644758e5e49e2b308d4e05afed1ed3addce"
+          },
+          {
+            "role": "key",
+            "path": "large_key.json",
+            "sha256": "e6ffe358761161eaaea11d591a2fd7545a7fcf3220aee6d4d6cbd9348ac5442c"
+          },
+          {
+            "role": "results",
+            "path": "v7.log",
+            "sha256": "d2437fd7f42960490a0bbb406ce2cb4492c96bbb89d4ac16cade0b0dd774a756"
+          },
+          {
+            "role": "results",
+            "path": "cache/",
+            "sha256": "98484dfc25b7cfa48c8cb38629308b357b63cf3b7dc39e0f12b65c7d44728afe",
+            "files": 363,
+            "digest_rule": "sha256 of the sorted lines '<name> <sha256>' of its files"
+          },
+          {
+            "role": "results",
+            "path": "cache_v7/",
+            "sha256": "1a4283a08d64e0041c174f677c3128de42251766f5629f436c0ea2ff11dfa19a",
+            "files": 118,
+            "digest_rule": "sha256 of the sorted lines '<name> <sha256>' of its files"
+          }
+        ]
+      },
+      {
+        "archive_location": "/home/drawal/rl/4dsr-offline/replay",
+        "about": "the manifest-gate replay (read-only steps only) on the same labels, cached answers",
+        "files": [
+          {
+            "role": "script",
+            "path": "hfbr_replay.py",
+            "sha256": "35b849f41499dcde49a028ceef629f0346052b8f1b67bae01e65b1aabfb1c128"
+          },
+          {
+            "role": "script",
+            "path": "hfbr_effect_replay.py",
+            "sha256": "d5c87a90bb87b539110f5c56f0a07459b3b52f99d69c21cae35f1f536340ba5b"
+          },
+          {
+            "role": "generator",
+            "path": "8ee5_make_manifest.py",
+            "sha256": "d29cf072f1692b6f1712c4b55d865351b7182979c89796b41daa3802ded0700b"
+          }
+        ]
+      }
+    ],
+    "manifest_gate_replay": {
+      "metrics_reported": {
+        "precision": 0.8,
+        "recall": 0.87,
+        "f1": 0.83,
+        "recall_delta_ci95": [
+          -0.018,
+          0.0
+        ],
+        "flags_on_write_steps": {
+          "before": 7,
+          "after": 0
+        }
+      },
+      "n": 910,
+      "note": "point estimates from replay/hfbr_effect_replay.py; no interval was computed for P/R"
+    }
+  },
+  "search_router": {
+    "model": "jev-1.13.0",
+    "wording_version_measured": "WANTS_V4 (ufot-offline jev/classify.py)",
+    "thresholds": {
+      "ROUTE_ALL_ROWS_MIN": 0.5
+    },
+    "data": "180 hand-labelled recorded search_memory questions: jev/sample.json ids 0-119 and the held-out jev/holdout.json ids 200-259, labelled before any run on it (jev/labels.py)",
+    "metrics": [
+      {
+        "name": "all_rows_precision_at_0.5",
+        "value": 1.0,
+        "ci95": [
+          0.97,
+          1.0
+        ],
+        "n": 126,
+        "n_unit": "searches the router sent to all-rows (126 of 126 correct)",
+        "interval_method": "Wilson 95%"
+      },
+      {
+        "name": "all_rows_recall_at_0.5",
+        "value": 0.962,
+        "ci95": [
+          0.914,
+          0.984
+        ],
+        "n": 131,
+        "n_unit": "truly all-rows searches",
+        "interval_method": "Wilson 95%"
+      },
+      {
+        "name": "all_rows_recall_at_0.5_sample",
+        "value": 0.953,
+        "ci95": [
+          0.886,
+          0.982
+        ],
+        "n": 86,
+        "n_unit": "truly all-rows searches in sample.json",
+        "interval_method": "Wilson 95%"
+      },
+      {
+        "name": "all_rows_recall_at_0.5_holdout",
+        "value": 0.978,
+        "ci95": [
+          0.884,
+          0.996
+        ],
+        "n": 45,
+        "n_unit": "truly all-rows searches in holdout.json",
+        "interval_method": "Wilson 95%"
+      }
+    ],
+    "evidence": [
+      {
+        "archive_location": "/home/drawal/rl/ufot-offline",
+        "files": [
+          {
+            "role": "script",
+            "path": "jev/classify.py",
+            "sha256": "3c8ed64eb0ccf10c907e0d091a19970e13a33048e19266dbb320a2f0d0246925"
+          },
+          {
+            "role": "labels",
+            "path": "jev/labels.py",
+            "sha256": "fbe41d51e4f8aa4f0a41662855dedd5190d869711e4b8d121b4c0053d81e9edc"
+          },
+          {
+            "role": "key",
+            "path": "jev/sample.json",
+            "sha256": "aea9a2fc2191b0269c5ad679fba6336c4f23700ccfb772e4d98d872ac143d570"
+          },
+          {
+            "role": "key",
+            "path": "jev/holdout.json",
+            "sha256": "279e70c28e72c6aba5e1965b7e9387e5fe4d33655fee251cb1705352d17b5aff"
+          },
+          {
+            "role": "key",
+            "path": "data/searches.json",
+            "sha256": "9e55f4fac88c72d96a6d5829a901b8bc95919cb55fd50db48a674b9838aefb76"
+          },
+          {
+            "role": "results",
+            "path": "jev/results.json",
+            "sha256": "9e29d49bf94a24e714a62d9e2469a902340a01a6c0d6d6bc7f37484842889a34"
+          },
+          {
+            "role": "results",
+            "path": "jev/cache_v4/",
+            "sha256": "f53765d025e80cc0b16d7fd0bad1689711d6b151d3dae672eb8f53dbc0d1799b",
+            "files": 180,
+            "digest_rule": "sha256 of the sorted lines '<name> <sha256>' of its files"
+          }
+        ]
+      }
+    ]
+  }
+}

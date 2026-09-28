@@ -120,10 +120,11 @@ def observe_dspy_host(host: Any):
     including module-level events, which DSPy only dispatches to callbacks
     registered in settings.
 
-    With no live sink (FW_OBSERVABILITY=0, or the no-op default) this binds
-    nothing: the callback would otherwise JSON-project every prompt on every
-    LM call before discovering there is nowhere to send it — a per-call cost
-    the disabled path must not pay. One cheap check per turn instead.
+    With no live sink (a store that could not be opened, or a host built with
+    the no-op default) this binds nothing: the callback would otherwise
+    JSON-project every prompt on every LM call before discovering there is
+    nowhere to send it — a per-call cost the sinkless path must not pay. One
+    cheap check per turn instead.
     """
     if tracing.get_sink(host) is None:
         yield

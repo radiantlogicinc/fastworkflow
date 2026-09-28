@@ -211,8 +211,8 @@ def run_main(args):
         generate_insights=getattr(args, "generate_insights", False),
     )
 
-    # Observability [R4]: `fastworkflow run` is an entry point, so the SQLite
-    # sink defaults ON (FW_OBSERVABILITY=0 disables). The CLI channel is the
+    # Observability [R4]: recording is always on, so the SQLite sink is opened
+    # here for the CLI's turns. The CLI channel is the
     # synthetic cli:<start> id ChatSession bound; each CLI session starts a
     # fresh conversation, and //new mints another [R17].
     from fastworkflow.observability.store import get_observability_sink

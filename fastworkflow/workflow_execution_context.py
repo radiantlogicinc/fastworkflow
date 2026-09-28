@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import time
 import sqlite3
 import uuid
@@ -35,11 +36,29 @@ import fastworkflow.turn
 from fastworkflow import active_workflow, metrics, tracing
 from fastworkflow.session_state_store import SCHEMA_VERSION, IncompatibleSessionState
 from fastworkflow.state_serialization import validate_state
+from fastworkflow.observability import store as observability_store
 from fastworkflow.observability.execution_recorder import ExecutionRecorder, record_execution
 from fastworkflow.turn import TurnResult, TurnStatus, mint_turn_key
+from fastworkflow.turn_plan import TurnPlan
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_logger, dspy_utils
 from fastworkflow.utils.react import NoSuspendedAgentStateError
+
+#: Why the turn has the plan it has. The finish check records the cause of a
+#: missing plan as ``no_plan_cause``.
+TURN_PLAN_PLANNED = "planned"
+#: The planner returned no plan at all.
+TURN_PLAN_PLANNER_EMPTY = "planner_empty"
+#: The planner returned a plan the check could not read steps out of.
+TURN_PLAN_UNREADABLE = "plan_unreadable"
+#: The turn was resumed from a session state written without its plan.
+TURN_PLAN_LOST_ON_RESUME = "lost_on_resume"
+#: No plan was made for the check: it was not active, or the turn was not planned.
+TURN_PLAN_NOT_PLANNED = "not_planned"
+TURN_PLAN_STATUSES = frozenset({
+    TURN_PLAN_PLANNED, TURN_PLAN_PLANNER_EMPTY, TURN_PLAN_UNREADABLE,
+    TURN_PLAN_LOST_ON_RESUME, TURN_PLAN_NOT_PLANNED,
+})
 
 
 def _agent_result_attributes(result: Any, attempts: int) -> dict[str, Any]:
@@ -115,7 +134,7 @@ class WorkflowExecutionContext:
         Args:
             session_key: Stable id (e.g. channel_id) for cme/app workflow persistence.
                          When omitted, cme uses an ephemeral uuid (CLI one-off sessions).
-            mirror_action_log_to_file: DEPRECATED no-op (Phase 7 [R25]). The cwd
+            mirror_action_log_to_file: DEPRECATED no-op. The cwd
                          action.jsonl debug mirror was retired; use the in-process
                          ``action_log`` property (live) or the observability DB
                          (post-mortem) instead. Kept one release for external
@@ -123,8 +142,15 @@ class WorkflowExecutionContext:
             generate_insights: If True, enable teacher/student distillation on each
                          agent turn (Topology A / CLI only).
             trace_sink: Observability sink for boundary spans and turn records
-                         (observability design §3.1). Defaults to a no-op sink;
-                         reached via this context, never the transport queues [R28].
+                         (observability design §3.1), reached via this context,
+                         never the transport queues. When omitted, the context
+                         opens the app workflow's own sink when a workflow is
+                         bound (``bind_app_workflow``). A sink passed here --
+                         including an explicit ``tracing.NoOpTraceSink()``,
+                         which records no spans or turn records -- is always
+                         kept. Observation offloading still writes its
+                         evidence, subjects and events to the workflow's
+                         observability database whatever the sink.
         """
         self._session_key = session_key
         self._run_as_agent = run_as_agent
@@ -157,9 +183,23 @@ class WorkflowExecutionContext:
         self._planning_insights: Optional[str] = None
         self._execution_insights: Optional[str] = None
 
+        # The turn's initial plan, which the finish-time execution check
+        # verifies, and why there is none when there is none: one of
+        # TURN_PLAN_STATUSES. Written by the planner at the start of a turn and
+        # carried across a cross-process ask_user resume by serialize_state.
+        self._turn_plan: Optional[TurnPlan] = None
+        self._turn_plan_status: str = TURN_PLAN_NOT_PLANNED
+
         # Observability (design §3.1): sink + identity + span bookkeeping.
         # The sink is a per-context attribute, not transport state [R28].
         self._trace_sink: tracing.TraceSink = trace_sink or tracing.NoOpTraceSink()
+        #: Whether the caller chose the sink (here or via ``set_trace_sink``).
+        #: A chosen sink is never replaced; only an automatic one follows the
+        #: bound app workflow. Tracked explicitly because a caller may choose
+        #: the no-op sink, which must stay chosen.
+        self._trace_sink_supplied: bool = trace_sink is not None
+        #: The workflow folder the automatic sink records into, when there is one.
+        self._auto_sink_folder: Optional[str] = None
         self._metrics_sink: metrics.MetricsSink = metrics.NoOpMetricsSink()
         self._channel_id: Optional[str] = None
         self._conversation_id: Optional[int] = None
@@ -237,8 +277,50 @@ class WorkflowExecutionContext:
         return self._trace_sink
 
     def set_trace_sink(self, sink: Optional[tracing.TraceSink]) -> None:
-        """Wire an observability sink (None restores the no-op default)."""
+        """Wire an observability sink chosen by the caller; it is never replaced.
+
+        ``None`` hands the choice back to the context: the sink becomes the
+        automatic one again, opened for the bound app workflow now or at the
+        next ``bind_app_workflow``. To record no spans or turn records, pass
+        ``tracing.NoOpTraceSink()``; observation offloading still writes its
+        evidence to the workflow's observability database.
+        """
+        if sink is None:
+            self._trace_sink = tracing.NoOpTraceSink()
+            self._trace_sink_supplied = False
+            self._auto_sink_folder = None
+            if self._app_workflow is not None:
+                self._open_auto_sink(self._app_workflow)
+            return
+        self._trace_sink = sink
+        self._trace_sink_supplied = True
+        self._auto_sink_folder = None
+
+    def _open_auto_sink(self, workflow: fastworkflow.Workflow) -> None:
+        """Open the app workflow's observability sink for a context given none.
+
+        Recording is always on, so a context an embedder builds without a sink
+        records into the bound workflow's own DB, owner-only and pruned when
+        the sink opens, exactly as fastWorkflow's entry points do. Rebinding to
+        another workflow moves the automatic sink to that workflow's DB. The
+        internal command-metadata workflow is never a recording target.
+        ``get_observability_sink`` never raises: a store that cannot be opened
+        leaves the context on the no-op sink.
+        """
+        folder = str(getattr(workflow, "folderpath", "") or "")
+        if not folder:
+            return
+        resolved = os.path.realpath(folder)
+        internal_root = os.path.dirname(os.path.realpath(
+            fastworkflow.get_internal_workflow_path("command_metadata_extraction")
+        ))
+        if resolved == internal_root or resolved.startswith(internal_root + os.sep):
+            return
+        if self._auto_sink_folder == resolved and tracing.get_sink(self) is not None:
+            return
+        sink = observability_store.get_observability_sink(folder)
         self._trace_sink = sink or tracing.NoOpTraceSink()
+        self._auto_sink_folder = resolved if sink is not None else None
 
     @property
     def metrics_sink(self) -> metrics.MetricsSink:
@@ -257,10 +339,10 @@ class WorkflowExecutionContext:
         task_id: Optional[str] = None,
         attempt: Optional[int] = None,
     ) -> None:
-        """Bind channel/conversation identity BEFORE the turn [R1].
+        """Bind channel/conversation identity BEFORE the turn.
 
         The embedder owns identity: FastAPI binds its channel_id, the CLI a
-        synthetic ``cli:<session-start>`` channel [R17]. Stamped onto every
+        synthetic ``cli:<session-start>`` channel. Stamped onto every
         span and TurnResult this context produces. A None argument leaves
         the corresponding binding unchanged (conversation ids rotate without
         re-binding the channel).
@@ -268,7 +350,7 @@ class WorkflowExecutionContext:
         ``embedder_owns_conversations=True`` (additive) disables the WEC's
         own conversation self-minting for this context. FastAPI passes it:
         its minting chokepoint carries the legacy-store floor and syncs it
-        back (ruling C2), so a WEC self-mint on its degraded path would mint
+        back, so a WEC self-mint on its degraded path would mint
         a floor-less id that can alias a legacy conversation and split the
         session across two ids once the chokepoint's own mint succeeds.
         """
@@ -334,7 +416,7 @@ class WorkflowExecutionContext:
         task_id: Optional[str],
         attempt: Optional[int],
     ) -> None:
-        """Validate and bind the experiment triple (`fix-bn1` `[XR17]`).
+        """Validate and bind the experiment triple.
 
         All three or none. A turn labelled with an experiment but no task
         belongs to an experiment and to no task: it contributes to a numerator
@@ -345,7 +427,7 @@ class WorkflowExecutionContext:
         SQLite's INTEGER is a type AFFINITY, not a constraint -- a string bound
         to it that cannot be losslessly converted is stored as TEXT -- so the
         column's declared type protects nothing on its own. This is what makes
-        `attempt` safe to leave unpoliced (`[XR7]`).
+        `attempt` safe to leave otherwise unpoliced.
         """
         resolved = self._validate_experiment_labels(
             experiment_id if experiment_id is not None else self._experiment_id,
@@ -458,10 +540,10 @@ class WorkflowExecutionContext:
     # ------------------------------------------------------------------
 
     def _begin_turn(self, user_message: str) -> None:
-        """Atomic turn start [A30]: reset accumulator, mint key, stamp started_at.
+        """Atomic turn start: reset accumulator, mint key, stamp started_at.
 
         Never called while awaiting_user — a message during suspension is the
-        resume answer and continues the same logical turn [A30.2].
+        resume answer and continues the same logical turn.
         """
         self.assert_experiment_claim_current()
         self._ensure_observability_conversation()
@@ -529,13 +611,13 @@ class WorkflowExecutionContext:
         fastworkflow.turn.warn_on_unserializable_artifacts(command_output)
 
     def append_ask_user_entry(self, question: str) -> fastworkflow.CommandOutput:
-        """Append an unanswered ask_user exchange entry [A7] and return it.
+        """Append an unanswered ask_user exchange entry and return it.
 
         Role inversion: command_parameters holds the agent's question; the
         response holds the user's answer ("" + success=False while unanswered).
 
         Also opens the fw.ask_user human-wait span (deterministic id per
-        attempt [R6]; emitted at open so the wait is visible while the turn
+        attempt; emitted at open so the wait is visible while the turn
         is suspended). Both topologies funnel through here: Topology A via
         _ask_user_tool, Topology B via _note_agent_suspension.
         """
@@ -572,13 +654,13 @@ class WorkflowExecutionContext:
     def complete_ask_user_entry(self, answer: str) -> None:
         """Fill the last unanswered ask_user entry with the user's answer.
 
-        duration_ms is the user's think time [A38]. No-op when there is no
+        duration_ms is the user's think time. No-op when there is no
         unanswered ask_user entry.
 
         Closes the matching fw.ask_user span. The span is rebuilt from the
         entry rather than held in memory, so the close is an idempotent upsert
         that also works when the answer arrives in a different process than
-        the question ([R6]).
+        the question.
         """
         for index in range(len(self._turn_outputs) - 1, -1, -1):
             entry = self._turn_outputs[index]
@@ -600,7 +682,7 @@ class WorkflowExecutionContext:
     def _close_ask_user_span(
         self, entry_index: int, entry: fastworkflow.CommandOutput, answer: str
     ) -> None:
-        """Emit the closed fw.ask_user span for a just-answered entry [R6]."""
+        """Emit the closed fw.ask_user span for a just-answered entry."""
         if not self._turn_key or tracing.get_sink(self) is None:
             return
         attempt = sum(
@@ -923,6 +1005,14 @@ class WorkflowExecutionContext:
             "attempt": self._attempt,
             "claim_epoch": self._claim_epoch,
             "server_incarnation": self._server_incarnation,
+            # Additive keys, read with .get: a blob written before them resumes
+            # a suspended turn with no plan, recorded as lost on resume. The
+            # plan is null whenever the finish check is off.
+            "turn_plan": (
+                self._turn_plan.model_dump(mode="json")
+                if self._turn_plan is not None else None
+            ),
+            "turn_plan_status": self._turn_plan_status,
         }
         # No default=str round-trip. This is the first serializer, so coercing
         # here is what made every downstream strictness check vacuous: an
@@ -997,6 +1087,31 @@ class WorkflowExecutionContext:
             self._ensure_agent_initialized()
             if self._workflow_tool_agent is not None:
                 self._workflow_tool_agent.import_suspended(react_blob)
+            # The suspended turn's plan, which only the finish check reads.
+            # Advisory, so it never fails a restore: a plan that does not
+            # validate is a plan lost on resume, like one in a blob written
+            # without the key. Only for an ACTIVE check
+            # (``workflow_agent.finish_check_active``): one switched off by
+            # FW_EVAL_FINISH_REMINDERS=0 restores nothing.
+            agent = self._workflow_tool_agent
+            if (getattr(agent, "finish_checker", None) is not None
+                    and bool(getattr(agent, "finish_reminders_enabled", True))):
+                plan: Optional[TurnPlan] = None
+                status = TURN_PLAN_LOST_ON_RESUME
+                if "turn_plan" in state:
+                    raw_plan = state.get("turn_plan")
+                    raw_status = state.get("turn_plan_status")
+                    try:
+                        plan = TurnPlan.model_validate(raw_plan) if raw_plan is not None else None
+                    except ValueError:
+                        plan = None
+                    else:
+                        status = raw_status if raw_status in TURN_PLAN_STATUSES else (
+                            TURN_PLAN_PLANNED if plan is not None else TURN_PLAN_NOT_PLANNED)
+                    if plan is None and status == TURN_PLAN_PLANNED:
+                        status = TURN_PLAN_LOST_ON_RESUME
+                self._turn_plan = plan
+                self._turn_plan_status = status
 
         saved_context_name = state.get("current_command_context_name")
         if (
@@ -1196,9 +1311,17 @@ class WorkflowExecutionContext:
         return conversation_summary, conversation_traces
 
     def bind_app_workflow(self, workflow: fastworkflow.Workflow) -> None:
-        """Bind the app workflow for NLU (Path 1) and execution (Path 2)."""
+        """Bind the app workflow for NLU (Path 1) and execution (Path 2).
+
+        A context whose caller chose no sink opens the workflow's own sink here
+        (see ``_open_auto_sink``).
+        """
         self._app_workflow = workflow
         self._cme_workflow.context["app_workflow"] = workflow
+        # getattr: a context built through ``__new__`` without ``__init__`` has
+        # no flag, and is treated as having chosen its sink.
+        if not getattr(self, "_trace_sink_supplied", True):
+            self._open_auto_sink(workflow)
 
     def _on_app_context_change(self) -> None:
         """Context-change observer: refresh the ReAct agent's available_commands."""
@@ -1217,6 +1340,8 @@ class WorkflowExecutionContext:
             self._app_workflow.remove_context_change_listener(listener)
             self._context_change_listener = None
 
+        self._reclaim_offloading_scope()
+
         if self._cme_workflow is None:
             return True
         try:
@@ -1225,6 +1350,64 @@ class WorkflowExecutionContext:
             # Child cme workflows should not occur; ignore if mis-invoked.
             logger.debug("WorkflowExecutionContext.close: cme_workflow is not a root session")
             return False
+
+    def _reclaim_offloading_scope(self) -> None:
+        """Release this session's offloading state.
+
+        ``close`` is the one production signal that a session is over in this
+        process: the fleet's session cache calls it when it retires or removes a
+        channel, and an embedder calls it when its session ends. Until this, the
+        offloading runtime's per-scope registries -- the archive memo, the
+        context clauses, the hot observations, the raw in-flight copies of
+        redacted evidence and the turn's diagnostic events -- only ever grew,
+        for the lifetime of the process.
+
+        Two turns are NOT reclaimed. A turn suspended on ask_user is still
+        resumable: its scope is the one the resume writes and reads handles
+        under, and an eviction is precisely the case where it is expected to
+        come back. And nothing per-agent is touched at all -- the execute
+        numbering ledger, the suspended trajectory and the truncated-execute
+        count are the agent's own memory, they die with it, and a resume
+        rebuilds them from the suspension payload.
+
+        Evidence is redacted when it is written, and this process keeps the
+        raw text of redacted observations only while their turn is live, so
+        its own reads stay exact. Releasing the scope is what ends that: after
+        it, a read of the turn's evidence returns the stored text. A suspended
+        turn keeps its raw copies, by the same test as it keeps the rest.
+
+        Best effort by construction: failing to reclaim memory must never turn
+        a session close into an error the caller has to handle.
+        """
+        # getattr, not plain attribute access: ``close`` is reachable on a
+        # context built through ``__new__`` without ``__init__`` -- the
+        # context-change listener test constructs one exactly that way -- so
+        # neither attribute is guaranteed to exist. A context with no agent has
+        # no scope to reclaim, which is the same answer as an agent with no
+        # scope. A context that cannot say whether it is awaiting the user is
+        # assumed to be mid-turn, because declining to reclaim costs memory
+        # while reclaiming early would take a live turn's raw evidence copies.
+        agent = getattr(self, "_workflow_tool_agent", None)
+        scope = getattr(agent, "continuation_scope", None)
+        if scope is None:
+            return
+        try:
+            if getattr(self, "_awaiting_user", True) or agent.export_suspended() is not None:
+                return
+            runtime = getattr(agent, "turn_runtime", None)
+            if runtime is None:
+                from fastworkflow.agent_runtime import build_turn_runtime
+
+                runtime = build_turn_runtime(
+                    scope, archive=getattr(agent, "observation_archive", None)
+                )
+                agent.turn_runtime = runtime
+            runtime.finish_scope(scope)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "WorkflowExecutionContext.close: could not reclaim "
+                f"offloading state ({type(exc).__name__}: {exc})"
+            )
 
     # ------------------------------------------------------------------
     # Active workflow stack (contextvar)
@@ -1251,7 +1434,7 @@ class WorkflowExecutionContext:
         Execute one user message synchronously and return the public TurnOutput.
 
         Shares dispatch with _execute_message(); additionally captures every
-        command execution of the logical turn (including ask_user exchanges) [A22]. The
+        command execution of the logical turn (including ask_user exchanges). The
         full internal TurnResult is built and projected onto the slim public
         TurnOutput (see docs/turn_result_design_final.md section 1a).
         """
@@ -1453,8 +1636,8 @@ class WorkflowExecutionContext:
         safe_* wrappers swallow sink failures).
 
         On AWAITING_USER the root span is updated in place (still open) and
-        the record is emitted so the suspended turn is visible ([R2]); the
-        terminal finalize closes the same deterministic span id ([R6]) —
+        the record is emitted so the suspended turn is visible; the
+        terminal finalize closes the same deterministic span id —
         including after a cross-process resume, where the in-memory span
         object is rebuilt from the restored accumulator.
         """
@@ -1544,9 +1727,10 @@ class WorkflowExecutionContext:
         if tracing.get_sink(self) is None and isinstance(
             self._metrics_sink, metrics.NoOpMetricsSink
         ):
-            # Observability fully off: nothing consumes the TurnResult, so
-            # skip building it — this path runs after EVERY CLI turn and must
-            # cost ~nothing when FW_OBSERVABILITY=0.
+            # No sink and no metrics sink (a store that could not be opened,
+            # or a host built without either): nothing consumes the
+            # TurnResult, so skip building it — this path runs after EVERY
+            # turn and must cost ~nothing when there is nowhere to send it.
             return
         self._build_turn_result(command_output)
 
@@ -1575,7 +1759,7 @@ class WorkflowExecutionContext:
         Execute one direct action synchronously and return the public TurnOutput.
 
         Mirror of process_turn() for the direct-action path: same dispatch as
-        process_action() (each direct action is its own logical turn [A30]),
+        process_action() (each direct action is its own logical turn),
         additionally building the full internal TurnResult and projecting it onto
         the slim public TurnOutput. This lets callers (e.g. the run_fastapi_mcp
         turn registry) store exactly one result type across both the message and
@@ -1702,7 +1886,7 @@ class WorkflowExecutionContext:
         through, so it is where the executor phase is recorded: fw.agent.execute
         wraps the whole loop (retries included), and ``host_scope`` binds this
         context so ReAct's per-iteration fw.agent.step spans — several frames
-        down, with no reference to the WEC — reach the same sink ([R28]).
+        down, with no reference to the WEC — reach the same sink.
         """
         from dspy.utils.exceptions import AdapterParseError
 
@@ -1729,6 +1913,14 @@ class WorkflowExecutionContext:
                             result = agent_call()
                     except AdapterParseError:
                         if attempt == max_retries - 1:
+                            raise
+                        # A tool already ran: its side effects and its archived
+                        # evidence rows exist under this turn's keys, which a
+                        # retry would reuse. A resumed turn always qualifies,
+                        # because resume writes the observation key first.
+                        mirror = getattr(
+                            self._workflow_tool_agent, "current_trajectory", None) or {}
+                        if any(str(key).startswith("observation_") for key in mirror):
                             raise
                         continue
                     tracing.end_span(
@@ -1909,9 +2101,9 @@ class WorkflowExecutionContext:
     # owe §12.1.1's shared capture, so the projection lives here once rather than
     # being written twice and drifting. Everything below is additive recording:
     # no fastWorkflow control flow reads a context handle or a consequence class,
-    # which is EXP-003's exit criterion and arch §17.3's stop condition.
+    # which arch §17.3 requires.
     #
-    # Amendment (fix-ajv.8): "here" is now `tracing`, because workflow_agent.py
+    # "Here" is in fact `tracing`, because workflow_agent.py
     # opens the same span from a third site and owes the same record. These two
     # methods stay as the WEC-shaped entry points — they supply the app-workflow
     # fallback that the free functions cannot know about — but the projection

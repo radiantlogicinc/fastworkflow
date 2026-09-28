@@ -282,7 +282,7 @@ Rules:
   `CommandCancelledError`) through untouched `[A5.1][X9f]`.
 - **Eager artifact validation** `[X3a]`: at the `invoke_command` return boundary, a cheap
   type-walk validates artifact serializability and **raises at the author's stack frame**
-  (on by default; disable with `FW_EAGER_ARTIFACT_VALIDATION=0` for production hot paths).
+  (always on).
   Turn-filing rejection remains the backstop.
 - ask_user exchanges append at ask/suspend time (unanswered convention) and are completed in
   `_post_ask_user_response` `[A7]`.
@@ -475,8 +475,6 @@ Store-selection vars mirror the existing unprefixed convention; new feature knob
 | `FW_PENDING_TURN_TTL_SECONDS` | `604800` (7 d) | abandonment TTL `[A5.3]` |
 | `FW_MEMORY_PROJECTION_TURNS` | `10` | restore projection cap `[X2]` |
 | `FW_CONVERSATION_MAX_TURNS` | `200` (`0` = off) | auto-rotation `[X2]` |
-| `FW_EAGER_ARTIFACT_VALIDATION` | `1` | dev-time validator `[X3a]` |
-
 `fastworkflow/examples/fastworkflow.env` gains a commented persistence section listing all
 of the above (including the previously undocumented `SESSION_STATE_STORE`).
 

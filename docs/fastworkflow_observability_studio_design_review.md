@@ -12,6 +12,14 @@ accepted finding.
 
 Severity index: **5 critical** (R1–R5), **20 major** (R6–R25), **3 minor** (R26–R28).
 
+> Errata (2026-09-24): R4's resolution direction ("default ON only when the
+> operator invoked the framework directly … opt-in for library embedders") was
+> reversed in 3.4.0 by an owner decision: recording is always on, embedders
+> included; the 0700/0600 posture R4 asked for
+> stands. The opt-in had stopped keeping command output off disk once
+> observation offloading persisted responses regardless of it. The finding below
+> is kept as written, as the record of the review.
+
 ---
 
 ## Critical
@@ -70,7 +78,7 @@ fields) for conversation_summary/conversation_traces, plus a separate mutable
 as the carrier and drop "verbatim" reuse of `restore_history_from_turns`.
 
 ### R4 — on-by-default capture persists end-user PII to world-readable files [security]
-`FW_OBSERVABILITY=1` converts every CLI run and library embedder into a persistent
+Capture that is on by default converts every CLI run and library embedder into a persistent
 recorder of user messages, post-extraction parameters, response text, and
 artifacts. Today the CLI persists nothing; parameters are PII in the flagship
 example (`retail_workflow/_commands/find_user_id_by_email.py:22-24`, name+zip,
