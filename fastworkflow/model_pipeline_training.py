@@ -173,7 +173,7 @@ def get_label_encoder(filepath) -> LabelEncoder:
     another context's command name. Also spares every prediction an unpickle
     from disk, which the previous ``load_label_encoder`` call per prediction
     paid. The cache key is the artefact's (st_mtime_ns, st_size), so a retrain
-    in the same process is not served a stale encoder. fix-ajv.15.
+    in the same process is not served a stale encoder.
     """
     stat = os.stat(filepath)
     identity = (stat.st_mtime_ns, stat.st_size)
@@ -366,6 +366,186 @@ def analyze_model_confidence(model, test_loader, device, model_name=""):
     }
     return stats, all_confidences, all_predictions, all_labels, failed_cases
 
+# ---------------------------------------------------------------------------
+# R3 (ido-8ps.25): tier threshold vs ambiguity threshold must not collapse.
+#
+# `ModelPipeline.predict` escalates to the large model when
+# `confidence < confidence_threshold` (the TIER threshold), and
+# `CommandRouter.predict_with_details` then reports a single confident label when
+# `confidence > ambiguous_threshold`. If the tiny tier's ambiguity threshold is at
+# or below its tier threshold, every prediction the tiny tier keeps is by
+# construction above the ambiguity threshold, so the tier can never report an
+# ambiguity: it either escalates or resolves outright, and a wrong resolution is
+# silent. Measured on IDO's published router 20260905T132341Z-a0605e this held in
+# ALL 18 trained contexts (7 of them with the two files byte-identical), because
+# `find_optimal_threshold` sweeps upward from `tiny_stats['failed']['mean']` while
+# the writer used that same failed-mean as the ambiguity threshold.
+#
+# The fix gives the tiny tier a real ambiguity band by placing its ambiguity
+# threshold strictly above the tier threshold, and refuses single-label resolution
+# below an absolute floor at either tier.
+#
+# MARGIN — the preferred separation is the midpoint of the interval the tier sweep
+# itself ran over, `(failed_mean + successful_mean) / 2`: the sweep's own endpoints
+# are the model's measured "typically wrong" and "typically right" confidences, so
+# the midpoint is the point the training data says stops being evidence for the top
+# label and is not a constant invented from outside. `TIER_AMBIGUITY_MIN_SEPARATION`
+# is the fallback when the sweep picked a tier threshold at or above that midpoint;
+# 0.05 is far above float noise and narrow enough not to undo a deliberately high
+# tier threshold.
+#
+# CEILING (ido-ik6) — `MAX_AMBIGUITY_THRESHOLD` exists so a context can still resolve
+# a single label: an ambiguity threshold at 1.0 would make `confidence >
+# ambiguous_threshold` unsatisfiable. It is a *resolvability* cap, not a second
+# invariant, so it must never be allowed to pull the ambiguity threshold down to or
+# below the tier threshold. `find_optimal_threshold` sweeps up to the tiny tier's
+# measured successful mean, so a confidently separated context legitimately picks a
+# tier threshold at or above 0.99; clamping to a flat 0.99 there collapsed the pair
+# and aborted the whole workflow's training from inside `train()`'s per-context loop.
+# Above that point the cap becomes the midpoint of the headroom that is actually
+# left, `(tier + 1) / 2`: still strictly above the tier threshold, still strictly
+# below certainty, and it halves the resolvable band rather than deleting it. The
+# tier threshold itself is never rewritten to fit the cap, because that number is
+# consumed as the escalation point (`ModelPipeline.predict_batch`: `need_distil =
+# tiny_confidence < self.confidence_threshold`) and was chosen by the sweep to
+# balance F1, NDCG and DistilBERT usage; the ambiguity threshold is consumed only by
+# `CommandRouter.predict_with_details` to choose one label over a candidate list.
+# Moving the cap changes how loudly a very confident tier reports ambiguity; moving
+# the tier would silently re-route traffic between the two models.
+#
+# CERTAIN TIER — a tier threshold of exactly 1.0 is reachable too: float32 softmax
+# rounds the top probability to 1.0 once the logit gap passes about 17, so a context
+# whose correct held-out rows all saturate has a successful mean of exactly 1.0, and
+# that is the top point of the sweep. At that tier the tiny model keeps only
+# predictions whose confidence is exactly 1.0, where every other label has zero mass.
+# No ambiguity threshold can sit above 1.0 and still be satisfiable, and none is
+# needed, so the separation invariant is waived there and the flat cap is written.
+#
+# FLOOR — `SINGLE_LABEL_RESOLUTION_FLOOR = 0.5` is the point at which the model
+# stops putting more posterior mass on the winning label than on everything else
+# combined. Below it a "confident" single label is not supported by the model's own
+# distribution, so the runtime must show candidates instead. It is applied to the
+# large tier as well, because the rule is about single-label resolution, not about
+# which tier produced it. The cost is deliberate: more ambiguity turns, traded for
+# the silent misroutes this band makes loud. DistilBERT usage does not change,
+# because escalation reads only the tier threshold, which none of this moves.
+# ---------------------------------------------------------------------------
+TIER_AMBIGUITY_MIN_SEPARATION = 0.05
+SINGLE_LABEL_RESOLUTION_FLOOR = 0.5
+MAX_AMBIGUITY_THRESHOLD = 0.99
+CERTAIN_TIER_THRESHOLD = 1.0
+
+
+def keeps_only_certain_predictions(tier_threshold) -> bool:
+    """Whether *tier_threshold* leaves the tiny tier only confidence-1.0 predictions."""
+    return tier_threshold is not None and float(tier_threshold) == CERTAIN_TIER_THRESHOLD
+
+
+def resolvable_ambiguity_ceiling(tier_threshold) -> float:
+    """The highest ambiguity threshold that still leaves a context able to resolve.
+
+    `MAX_AMBIGUITY_THRESHOLD` normally, which is what every tier threshold below it
+    has always been clamped to. For a tier threshold at or above that constant — which
+    the sweep can legitimately pick for a well separated context — the flat cap would
+    sit at or under the tier and collapse the pair, so the ceiling becomes the midpoint
+    of the remaining headroom, `(tier + 1) / 2`. That is strictly above any tier below
+    1.0 and strictly below 1.0, so both the separation invariant and resolvability
+    survive. A tier of exactly 1.0 is what a float32-saturated sweep produces; it
+    keeps the flat cap, because `(1 + 1) / 2` would be an unsatisfiable 1.0 and the
+    only predictions that tier keeps are certain ones. A tier above 1.0 is not
+    something any sweep over softmax probabilities can produce; the ceiling then falls
+    at or below it and `write_ambiguity_thresholds` raises, which is the intended
+    treatment of a genuinely collapsed pair.
+    """
+    if tier_threshold is None or keeps_only_certain_predictions(tier_threshold):
+        return MAX_AMBIGUITY_THRESHOLD
+    tier = float(tier_threshold)
+    # `tier != tier` is the NaN test: a NaN tier keeps the flat cap it has always had
+    # rather than propagating into the written threshold.
+    if tier != tier or tier < 0 or tier < MAX_AMBIGUITY_THRESHOLD:
+        return MAX_AMBIGUITY_THRESHOLD
+    return (tier + 1.0) / 2.0
+
+
+def separated_tiny_ambiguous_threshold(tier_threshold, tiny_stats) -> float:
+    """The tiny tier's ambiguity threshold, guaranteed strictly above *tier_threshold*.
+
+    Returns the largest of the sweep-interval midpoint, `tier_threshold +
+    TIER_AMBIGUITY_MIN_SEPARATION` and `SINGLE_LABEL_RESOLUTION_FLOOR`, clamped below
+    `resolvable_ambiguity_ceiling(tier_threshold)` so a context can still resolve
+    something. A missing statistic (no failures, or no successes, in the held-out
+    split) drops that term rather than the whole computation; the floor is always
+    present, so the result is a usable threshold even when `find_optimal_threshold`
+    returned its -1 sentinel.
+    """
+    failed_mean = tiny_stats['failed']['mean']
+    successful_mean = tiny_stats['successful']['mean']
+
+    candidates = [SINGLE_LABEL_RESOLUTION_FLOOR]
+    if tier_threshold is not None and tier_threshold >= 0:
+        candidates.append(float(tier_threshold) + TIER_AMBIGUITY_MIN_SEPARATION)
+    if failed_mean is not None and successful_mean is not None:
+        candidates.append((float(failed_mean) + float(successful_mean)) / 2.0)
+
+    return min(max(candidates), resolvable_ambiguity_ceiling(tier_threshold))
+
+
+def floored_large_ambiguous_threshold(large_stats) -> float:
+    """The large tier's ambiguity threshold, never below the single-label floor."""
+    failed_mean = large_stats['failed']['mean']
+    measured = 0.0 if failed_mean is None else float(failed_mean)
+    return min(max(measured, SINGLE_LABEL_RESOLUTION_FLOOR), MAX_AMBIGUITY_THRESHOLD)
+
+
+def write_ambiguity_thresholds(
+    context_artifacts_dir, tier_threshold, tiny_stats, large_stats
+) -> tuple:
+    """Write both ambiguity thresholds for one context and return ``(tiny, large)``.
+
+    Takes the context's artifact directory rather than a workflow path so the
+    invariant it establishes -- ``tiny_ambiguous > tier`` and both ambiguity
+    thresholds at or above `SINGLE_LABEL_RESOLUTION_FLOOR` -- can be exercised over
+    real files for every context without loading a model or a routing definition.
+    Raises `ValueError` rather than publishing a collapsed pair: a collapsed pair
+    makes "confident" structurally unfalsifiable at that tier, and because nothing
+    downstream notices, it can sit unnoticed in a published artifact set. The guard
+    is reserved for a pair no legitimate sweep could produce — a tier threshold
+    above certainty, or a margin computation that stopped separating. A tier threshold the sweep
+    can actually pick, including one at or above `MAX_AMBIGUITY_THRESHOLD`, is always
+    published, because aborting `train()` for the whole workflow is a far worse answer
+    to a well separated context than a narrow ambiguity band is. That includes a tier
+    of exactly 1.0, which keeps only certain predictions and so needs no band.
+    """
+    tiny_ambiguous_threshold = separated_tiny_ambiguous_threshold(tier_threshold, tiny_stats)
+    large_ambiguous_threshold = floored_large_ambiguous_threshold(large_stats)
+
+    if (
+        tier_threshold is not None
+        and not keeps_only_certain_predictions(tier_threshold)
+        and tiny_ambiguous_threshold <= tier_threshold
+    ):
+        raise ValueError(
+            f"tiny ambiguity threshold {tiny_ambiguous_threshold} does not sit above "
+            f"tier threshold {tier_threshold}: the tiny tier could never report an "
+            f"ambiguity in {context_artifacts_dir}"
+        )
+    if min(tiny_ambiguous_threshold, large_ambiguous_threshold) < SINGLE_LABEL_RESOLUTION_FLOOR:
+        raise ValueError(
+            f"ambiguity threshold below the single-label floor "
+            f"{SINGLE_LABEL_RESOLUTION_FLOOR} in {context_artifacts_dir}"
+        )
+
+    os.makedirs(context_artifacts_dir, exist_ok=True)
+    for filename, value in (
+        ("tiny_ambiguous_threshold.json", tiny_ambiguous_threshold),
+        ("large_ambiguous_threshold.json", large_ambiguous_threshold),
+    ):
+        with open(os.path.join(context_artifacts_dir, filename), 'w') as f:
+            json.dump({'confidence_threshold': value}, f)
+
+    return tiny_ambiguous_threshold, large_ambiguous_threshold
+
+
 def find_optimal_threshold(tiny_stats, test_loader, pipeline):
     # Generate threshold range based on confidence statistics
     min_threshold = tiny_stats['failed']['mean']
@@ -472,18 +652,18 @@ class CommandRouter:
         return self.predict_with_details(command)[0]
 
     def predict_with_details(self, command: str) -> tuple[list[str], dict]:
-        """``predict`` plus the numbers behind the decision, for observability
-        (fw.nlu.intent span attributes — D3 as amended).
+        """``predict`` plus the numbers behind the decision, for the
+        ``fw.nlu.intent`` span attributes.
 
         The details dict is JSON-safe: {model_tier, confidence,
-        ambiguous_threshold, confident, top_label, topk_labels}. The behavior
-        of ``predict`` is unchanged — it delegates here.
+        ambiguous_threshold, confident, top_label, topk_labels, topk_scores}.
+        The behavior of ``predict`` is unchanged — it delegates here.
 
-        Amendment (fix-ajv.12): ``topk_scores`` joins the list, positionally
-        aligned with ``topk_labels``. It is the probability behind each ranked
-        label, which is what a top-k margin is the difference of; the winning
-        label's own probability is ``confidence``, so the first score is that same
-        number rather than a second measurement of it.
+        ``topk_scores`` is positionally aligned with ``topk_labels``. It is the
+        probability behind each ranked label, which is what a top-k margin is
+        the difference of; the winning label's own probability is
+        ``confidence``, so the first score is that same number rather than a
+        second measurement of it.
         """
         results = predict_single_sentence(self.modelpipeline, command, self.label_encoder_path)
         used_distil = bool(results['used_distil'])
@@ -790,8 +970,9 @@ def set_active_artifact_version(workflow_folderpath: str, version_id: Optional[s
     """Route `get_artifact_path` writes for *workflow_folderpath* into *version_id*.
 
     Pass ``None`` to clear. The trainer installs this for the duration of a run so a
-    retrain assembles a NEW version instead of overwriting the live one in place (R4 /
-    finding F5). Keeping it here rather than threading a parameter through means the six
+    retrain assembles a NEW version instead of overwriting the live one in place, which
+    would leave a failed run with neither the old artifacts nor a complete new set.
+    Keeping it here rather than threading a parameter through means the six
     existing `get_artifact_path` call sites need no changes.
     """
     key = str(Path(workflow_folderpath).resolve())
@@ -810,8 +991,8 @@ def get_artifact_path(workflow_folderpath: str, context_name: str, filename: str
     at ``<workflow>/___command_info/<context_name>/``.
 
     When no version is active and none has been published (a workflow that has never been
-    trained under R4) this falls back to the historical unversioned path, so a partially
-    migrated tree keeps working.
+    trained under the versioned layout) this falls back to the historical unversioned
+    path, so a partially migrated tree keeps working.
 
     The directory is created if it does not yet exist. The special context name "*" is
     mapped to GLOBAL_CONTEXT_FOLDER.
@@ -1185,7 +1366,7 @@ def cache_context_command_utterances(
     branch that only ran when the cached branch produced nothing at all. A context
     previously visited as an ancestor has a cache holding only
     `context_model.commands()`, so the cached branch dropped every core command for it
-    -- making those commands unroutable in that context (AR5 / bd fix-9mo).
+    -- making those commands unroutable in that context.
 
     The returned mapping is restricted to the labels asked for, so an entry an earlier
     ancestor visit left behind for some other command can never become a label this
@@ -1246,15 +1427,15 @@ def select_escalation_rows(
 ) -> EscalationSelection:
     """Choose the escalation-class rows for one context, and report every denominator.
 
-    Extracted from `train()` so the whole R7.2 decision is one callable. It reads the
-    shared utterance cache, which every other context in the run also writes, so it is
+    Extracted from `train()` so the whole escalation-row decision is one callable. It
+    reads the shared utterance cache, which every other context in the run also writes, so it is
     where a visit-order dependence can show up in the training rows -- and a test that
     drives this drives the shipped decision, where one that reimplements the arithmetic
     does not.
 
     `core_command_names` is passed to `group_ancestor_utterances` as `skip_commands`, so
     a core command is never an escalation source no matter which path filled the cache
-    (bd fix-4ej; the derivation is in `class_balance`'s module docstring).
+    (the derivation is in `class_balance`'s module docstring).
 
     WILDCARD_LABEL is the ESCALATION signal: "an ancestor context can serve this". It is
     emitted only where that can be true. In a context with no ancestors the class would
@@ -1310,8 +1491,8 @@ def select_escalation_rows(
     # makes the ratio mean "multiplier on this context's own training cost".
     # 1.0 is the fixed cost invariant: escalation may add at most as many rows
     # as the context's real commands, so reserved rows can at most double cost.
-    # It is not an accuracy-tuned value; R7.3 weighting measured null and is
-    # intentionally not shipped.
+    # It is not an accuracy-tuned value; weighting the reserved rows measured
+    # null and is intentionally not shipped.
     budget = class_balance.reserved_class_budget(
         own_row_count,
         coverage_floor,
@@ -1461,7 +1642,8 @@ def preflight_benchmark(
         if metadata := cmd_dir.get_utterance_metadata(command_key):
             seed_utterances_by_command[command_key] = list(metadata.plain_utterances)
     # Deliberately NOT caught: an unnoticed leak silently turns the whole evaluation
-    # into a memorisation score, which is the failure R1 exists to remove.
+    # into a memorisation score, which is the failure this disjointness check
+    # exists to remove.
     heldout_evaluation.assert_benchmark_disjoint_from_seeds(
         benchmark_cases, seed_utterances_by_command)
     # A close-but-not-equal match is a judgement call, so it is reported, not enforced.
@@ -1505,7 +1687,7 @@ def train(
 ):
     """Train intent-classification models **per command context**.
 
-    ``contexts_to_train`` is R5's selective-retraining hook. ``None`` trains every
+    ``contexts_to_train`` is the selective-retraining hook. ``None`` trains every
     context. Automatic planning passes a set when unchanged contexts can safely be
     carried forward. A set restricts the run
     to those contexts, and the CALLER then becomes responsible for carrying every other
@@ -1549,7 +1731,8 @@ def train(
 
     # Get contexts specific to this workflow (not from command_metadata_extraction)
     # The set itself is computed by `selective_training.contexts_for_training` so that the
-    # R5 planner and this loop cannot disagree about which contexts exist. A context the
+    # selective-retraining planner and this loop cannot disagree about which contexts
+    # exist. A context the
     # planner never considered would be neither retrained nor carried forward, and that
     # presents as part of a workflow silently becoming untrained.
     context_set_for_training = contexts_for_training(workflow_folderpath)
@@ -2013,23 +2196,16 @@ def train(
 
 
         
-        if large_stats['failed']['mean'] is not None:
-            large_ambiguous_threshold = large_stats['failed']['mean']
-        else:
-            large_ambiguous_threshold = 0.0
-        # Save paths updated to use context-specific folders
-        large_ambiguous_threshold_path = get_artifact_path(workflow_folderpath, ctx_name, "large_ambiguous_threshold.json")
-        with open(large_ambiguous_threshold_path, 'w') as f:
-            json.dump({'confidence_threshold': large_ambiguous_threshold}, f)
-        
-        if tiny_stats['failed']['mean'] is not None:
-            tiny_ambiguous_threshold = tiny_stats['failed']['mean']
-        else:
-            tiny_ambiguous_threshold = 0.0
-        # Save paths updated to use context-specific folders
-        tiny_ambiguous_threshold_path = get_artifact_path(workflow_folderpath, ctx_name, "tiny_ambiguous_threshold.json")
-        with open(tiny_ambiguous_threshold_path, 'w') as f:
-            json.dump({'confidence_threshold': tiny_ambiguous_threshold}, f)
+        # R3: one writer for both ambiguity thresholds, so the separation invariant is
+        # established where the files are produced rather than asserted afterwards.
+        tiny_ambiguous_threshold, large_ambiguous_threshold = write_ambiguity_thresholds(
+            os.path.dirname(threshold_path), threshold, tiny_stats, large_stats
+        )
+        print(
+            f"Ambiguity thresholds (R3): tier={threshold:.4f} "
+            f"tiny_ambiguous={tiny_ambiguous_threshold:.4f} "
+            f"large_ambiguous={large_ambiguous_threshold:.4f}"
+        )
 
     
         text = "list commands"

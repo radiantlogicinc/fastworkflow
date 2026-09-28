@@ -20,6 +20,7 @@ import pytest
 import fastworkflow
 from fastworkflow import TurnStatus, metrics, tracing, workflow_agent
 from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.observability import store as obs
 from fastworkflow.utils.react import AskUserSuspend, fastWorkflowReAct
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
@@ -306,10 +307,24 @@ class TestAssistantPathEmission:
         assert len(trace_events) == 2  # AGENT_TO_WORKFLOW + WORKFLOW_TO_AGENT
         assert all(e.turn_key == turn_output.turn_key for e in trace_events)
 
-    def test_default_sink_is_no_op_and_turn_unaffected(
+    def test_default_sink_is_the_workflows_own_and_turn_unaffected(
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch
     ):
+        """A context given no sink records into its workflow's own DB."""
         ctx, _wf = _make_assistant_ctx(todo_workflow_path, monkeypatch)
+        turn_output = ctx.process_turn("list_todos")
+        assert turn_output.success
+        assert isinstance(ctx.trace_sink, obs.SQLiteTraceSink)
+        assert ctx.trace_sink.store.db_path == fastworkflow.state_paths.observability_db(
+            todo_workflow_path
+        )
+
+    def test_an_explicit_no_op_sink_stays_no_op_and_turn_unaffected(
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
+    ):
+        ctx, _wf = _make_assistant_ctx(
+            todo_workflow_path, monkeypatch, sink=tracing.NoOpTraceSink()
+        )
         turn_output = ctx.process_turn("list_todos")
         assert turn_output.success
         assert isinstance(ctx.trace_sink, tracing.NoOpTraceSink)
@@ -487,7 +502,7 @@ class TestSuspensionRootSpan:
 
 
 class TestPlannerSpans:
-    def _plan(self, ctx, wf, monkeypatch, trace_trigger=None):
+    def _plan(self, ctx, wf, monkeypatch, trace_trigger=None, prediction=None):
         import dspy
 
         from fastworkflow import workflow_agent
@@ -506,7 +521,7 @@ class TestPlannerSpans:
             dspy,
             "ChainOfThought",
             lambda signature: (
-                lambda **kwargs: SimpleNamespace(
+                lambda **kwargs: prediction or SimpleNamespace(
                     next_steps="1. step one\n2. step two", reasoning=""
                 )
             ),
@@ -545,7 +560,34 @@ class TestPlannerSpans:
         assert plans[0].attributes["model"] == "test-model"
         assert plans[0].attributes["replan_trigger"] is None
         assert "step one" in plans[0].attributes["plan"]
+        assert plans[0].attributes["plan_source"] == "text"
+        assert plans[0].attributes["subjects"] == []
         assert not sink.named(tracing.SPAN_PLANNER_REPLAN)
+
+    @pytest.mark.skip(reason="structured planning disabled 2026-09-28 (owner decision)")
+    def test_structured_plan_span_carries_source_and_subjects(
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
+    ):
+        from fastworkflow.turn_plan import PlanStep, PlanSubject
+
+        # The structured planner runs only when the agent's finish check is active.
+        sink = RecordingTraceSink()
+        ctx, wf = _make_assistant_ctx(todo_workflow_path, monkeypatch, sink=sink)
+        ctx._workflow_tool_agent = SimpleNamespace(
+            finish_checker=object(), finish_reminders_enabled=True)
+        ctx._begin_turn("do the thing")
+
+        self._plan(ctx, wf, monkeypatch, prediction=SimpleNamespace(
+            steps=[PlanStep(text="List Alan Cooper's todo items", commands=["list_todos"])],
+            subjects=[PlanSubject(name="Alan Cooper", kind="person")],
+            reasoning="",
+        ))
+
+        plan, = sink.named(tracing.SPAN_PLANNER_PLAN)
+        assert plan.attributes["plan_source"] == "structured"
+        assert plan.attributes["subjects"] == ["Alan Cooper"]
+        assert "List Alan Cooper's todo items" in plan.attributes["plan"]
+        assert ctx._turn_plan.subjects[0].name == "Alan Cooper"
 
     def test_replan_span_carries_trigger(
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch
@@ -977,15 +1019,18 @@ class TestDisabledObservabilityDspyCost:
     def test_observe_dspy_host_is_inert_without_a_sink(
         self, initialized_fastworkflow, todo_workflow_path
     ):
-        """FW_OBSERVABILITY=0 must cost ~nothing per LM call: with no live
-        sink the DSPy callback is never bound, so on_lm_start's per-call
-        prompt JSON projection never runs."""
+        """A host with no live sink must cost ~nothing per LM call: the DSPy
+        callback is never bound, so on_lm_start's per-call prompt JSON
+        projection never runs."""
         from fastworkflow.utils import dspy_logger
 
         wf = fastworkflow.Workflow.create(
             todo_workflow_path, workflow_id_str=f"nosink-{uuid.uuid4().hex}"
         )
-        ctx = WorkflowExecutionContext(run_as_agent=False)  # NoOp sink
+        # Explicitly no-op: a context given no sink opens its workflow's own.
+        ctx = WorkflowExecutionContext(
+            run_as_agent=False, trace_sink=tracing.NoOpTraceSink()
+        )
         ctx.bind_app_workflow(wf)
         with dspy_logger.observe_dspy_host(ctx):
             assert dspy_logger._active_observability_host.get() is None

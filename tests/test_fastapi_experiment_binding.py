@@ -68,7 +68,6 @@ def binding_harness(tmp_path, monkeypatch):
 
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
     monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
-    monkeypatch.setenv("FW_OBSERVABILITY", "1")
     sys.argv = ["pytest", "--workflow_path", workflow_path]
     import fastworkflow.run_fastapi_mcp.__main__ as main
 
@@ -309,7 +308,7 @@ def test_ordinary_initialize_never_claims_and_remains_compatible(
     assert runtime.execution_context.observability_experiment_claim == {}
 
 
-def test_bootstrap_refused_when_observability_is_disabled(
+def test_bootstrap_refused_when_the_observability_store_cannot_open(
     binding_harness, monkeypatch
 ):
     bootstrap = binding_harness.register()
@@ -321,6 +320,9 @@ def test_bootstrap_refused_when_observability_is_disabled(
     response = binding_harness.initialize(bootstrap)
 
     assert response.status_code == 503
+    detail = response.json()["detail"]
+    assert "could not be opened" in detail
+    assert "enabled" not in detail
     assert bootstrap.channel_id not in binding_harness.main.session_manager._sessions
 
 

@@ -13,6 +13,16 @@ Prior art this document implements/reconciles: `docs/turn_result_design_final.md
 Where this document conflicts with `turn_result_design_final.md`, that spec's
 decisions stand unless a §9 ruling explicitly supersedes them with rationale.
 
+> Errata (2026-09-24): the capture default of `[R4]` (§3 "File posture and
+> capture default" and the R4 entry of the decision log) is superseded in
+> 3.4.0: recording is always on, for fastWorkflow's entry points and library
+> embedders alike. The 0700 directory / 0600 file posture and automatic
+> pruning are unchanged. The opt-in for embedders stopped protecting anything
+> once observation offloading began writing command responses to disk
+> regardless of it. Offloading evidence, subjects and events now live in
+> this same DB and are erased and pruned with their turn; see
+> `docs/observation_search.md`, "Retention, redaction and known limits".
+
 ---
 
 ## 0. Origin: the problem
@@ -124,7 +134,7 @@ through their channel's conversation-less group.
 | Span name | Where emitted | Key attributes |
 |---|---|---|
 | `fw.turn` (root) | `process_turn` begin/finalize | turn_key, channel_id, conversation_id, user_message, status, success, failure_reason, suspended_ms |
-| `fw.planner.plan` / `.replan` | around the task-planner calls (`workflow_agent.py`) | plan text (capped), replan trigger, model name |
+| `fw.planner.plan` / `.replan` | around the task-planner calls (`workflow_agent.py`) | plan text (capped), replan trigger, model name; since per-span v2 (aggregate contract 8) `plan_source` (`structured` / `text` / `text_fallback` / `none`) and redacted `subjects` |
 | `fw.agent.tool_call` | the CommandTraceEvent emission sites — **outside** the `command_trace_queue is not None` guards; the sink is reached via WEC/config, not the transport-queue contract `[R28]` | raw agent command text |
 | `fw.command.execute` | `CommandExecutor.invoke_command` boundary | context, command_name, parameters, response text (capped), success, duration_ms |
 | `fw.ask_user` | ask_user suspend/resume (A7 semantics) | agent_query, user_response, human wait |
@@ -141,7 +151,24 @@ inferred:
 | Span name | Where emitted | Key attributes |
 |---|---|---|
 | `fw.agent.execute` | `WEC._call_agent_with_retry` — the one choke point both the fresh forward and the resume pass through | agent_input, resumed, model, attempts, final_answer, suspended, clarification, exhausted |
-| `fw.agent.step` | each iteration of `fastWorkflowReAct._run_loop` | step_index, thought, tool_name, tool_args, observation, clarification, tool_error |
+| `fw.agent.step` | each iteration of `fastWorkflowReAct._run_loop` | step_index, thought, tool_name, tool_args, observation, clarification, tool_error; `finish_check_note` (per-span v3, aggregate contract 7; replaced `roster_nudge`) marks the `finish` step whose observation is the finish check's note rather than a tool result |
+| `fw.search.route` | `SearchRouter.route` (`observation_offloading/search_router.py`), inside a `search_memory` step, only when routing is enabled (`FW_SEARCH_ROUTER=jev`, or since 2026-09-27 the name of a registered decision provider) and the observation holds a listing. Not started once the turn's routing calls (3) or vendor time (10 s) are spent: that search records the router error `router_budget` on its offload event, with no span. Kind `llm`; added in span contract v6 | model, choice, p_all_rows, for_report, latency_ms, input_tokens, output_tokens, error_type |
+| `fw.finish_check` | `FinishChecker.note` (`observation_offloading/finish_check.py`), inside the agent's `finish` step, only when the check is enabled (`FW_FINISH_CHECK=jev`, or since 2026-09-27 the name of a registered decision provider), a plan has a checked step and at least two iterations are left (and, since 2026-09-27, the turn's ledger is complete: a `ledger incomplete` finish opens no span). Kind `llm`; added in span contract v7 | model, plan_source, steps, subjects (a count), questions, requests, splits, input_tokens, latency_ms, flagged, fired, error_type |
+
+`fw.search.route` records the verdict and its cost, never the question or the
+observation (those stay on the search's offload event). It is not
+`fw.llm.call`, so the cost and cut-at-limit readers keyed on that name do not
+count it. The same holds for `fw.finish_check`: its tokens are outside every
+`fw.llm.call` total, and which steps it flagged is on the `finish_check` offload
+event (by step and subject index), not the span.
+
+Neither span's attributes nor its contract version changed on 2026-09-27. The
+diagnostics added then -- `provider`, `vendor_ms`, `error_status`,
+`error_request_id`, `error_code`, `error_stage`, and on the finish check
+`calibration`, `user_replies`, `no_plan_cause`, `subjects_capped`,
+`ledger_bytes` and `ledger_rows_trimmed` -- are on the offload events only
+(`search_memory`'s `router` field and `finish_check`); see
+[observation_search.md](observation_search.md#finish-time-execution-check).
 
 `fw.agent.execute` is the executor as a phase, sibling to `fw.planner.plan`
 under `fw.turn`; it is **not** `fw.command.execute`, which is one command inside
@@ -235,8 +262,8 @@ identical-content retry verifies and claims idempotent success.
 **Size policy — one mechanism `[R10]`:** at serialization time, any artifact
 value over `FW_OBS_INLINE_ARTIFACT_BYTES` is replaced **inside `record_json`**
 by a placeholder/ref envelope (per final spec `[A10]`); the `artifacts` table
-is the only value holder. Individual span attributes are capped at
-`FW_OBS_MAX_ATTR_BYTES` (truncation is lossy-and-counted: truncated attrs
+is the only value holder. Individual span attributes are capped at the
+constant `tracing.MAX_ATTR_BYTES` (16,384; truncation is lossy-and-counted: truncated attrs
 carry `truncated: true` + original length + sha256 — no silent truncation).
 `record_json` stores the internal `TurnResult` (full capture is the
 observability value), post-envelope and post-redaction.
@@ -267,9 +294,9 @@ text; traceback artifacts persist only when `FW_OBS_CAPTURE_TRACEBACKS=1`.
   persist-before-DONE); spans/artifacts stay fire-and-forget.
 
 **File posture and capture default `[R4]`:** DB directory 0700, DB files 0600,
-set explicitly. `FW_OBSERVABILITY` defaults ON only under fastWorkflow's own
-entry points (`fastworkflow run`, `studio`, `run_fastapi_mcp`, `train`);
-library embedders are opt-in (`FW_OBSERVABILITY=1`).
+set explicitly. Recording is always on, under fastWorkflow's own entry points
+(`fastworkflow run`, `studio`, `run_fastapi_mcp`, `train`) and for library
+embedders alike.
 
 **Erasure `[R21]`:** `channel_id` on spans/artifacts plus a first-class
 forget-channel operation (store API + `fastworkflow studio --forget-channel
@@ -432,11 +459,9 @@ Not absorbed: fix-85g.11 (backpressure/TTL), fix-85g.13 (distributed store).
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `FW_OBSERVABILITY` | `1` under fastworkflow entry points; `0` for embedders `[R4]` | master switch for the SQLite sink |
 | `FW_OBS_DB_MAX_BYTES` | `1073741824` | soft cap incl. `-wal` `[R12]` |
 | `FW_OBS_RETENTION_DAYS` | `30` | prune horizon — spans/artifacts; conversations exempt post-Phase B `[R16]` |
 | `FW_OBS_INLINE_ARTIFACT_BYTES` | `262144` | inline vs envelope-in-artifacts-table `[R10]` |
-| `FW_OBS_MAX_ATTR_BYTES` | `16384` | per-attribute cap, lossy-and-counted `[R10]` |
 | `FW_OBS_QUEUE_MAX` | `10000` | span/artifact queue bound (turn-record queue is separate and small) `[R13]` |
 | `FW_OBS_SYNC_WRITE_TIMEOUT_S` | `5` | busy timeout for in-request synchronous store writes (conversation-id minting; Phase-7 ruling C9's fail-fast principle) |
 | `FW_OBS_CAPTURE_TRACEBACKS` | `0` | persist traceback artifacts `[R20]` |
@@ -498,7 +523,7 @@ spawned server always passes it.
 | R7 | Daemon writer + explicit close() on CLI exit/atexit |
 | R8 | timeout=30, BEGIN IMMEDIATE, bounded turn-record retries; local-fs only |
 | R9 | Registry-first GET /turns; 202 returns logical key; mapping recorded |
-| R10 | Single envelope mechanism inside record_json; FW_OBS_MAX_ATTR_BYTES; lossy-and-counted |
+| R10 | Single envelope mechanism inside record_json; fixed per-attribute cap; lossy-and-counted |
 | R11 | PRAGMA user_version + refuse-newer/migrate-forward; spec conversation columns added |
 | R12 | auto_vacuum INCREMENTAL at creation; startup prune + studio --prune; count -wal |
 | R13 | Two queues; bounded-timeout turn-record put; writer health visible in DB/Studio |

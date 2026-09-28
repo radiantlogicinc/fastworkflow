@@ -78,8 +78,8 @@ the team owns fastWorkflow (design.md §"Why this is architectural, not a mappin
   duration = user think time. Anyone rendering history misreads ask_user entries without this.
 - **X3 — the A10×A28 contradiction.** Strict serialization rejection × best-effort record
   writes = a bad artifact deterministically fails every retry = silent permanent record loss.
-  Fix: eager dev-time validation at the author's stack frame (`FW_EAGER_ARTIFACT_VALIDATION`,
-  warn-only in v2.21, hard rejection at v3.0) + placeholder envelopes at persistence
+  Fix: eager dev-time validation at the author's stack frame (warn-only in v2.21,
+  unconditional since `ido-pyw.1`/3.4.0, hard rejection at v3.0) + placeholder envelopes at persistence
   boundaries so the record is ALWAYS written.
 - **X1 — reversed A23.1.** "No write-time index" meant Redis SCAN MATCH over the entire
   keyspace; independently flagged by three of the ten review agents as "the worst

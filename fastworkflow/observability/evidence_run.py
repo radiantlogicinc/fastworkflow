@@ -85,7 +85,11 @@ def capture_observability_provenance(
     """
     config = observability_store.observability_config()
     return ObservabilityProvenance(
-        enabled=observability_store.observability_enabled(default_on=True),
+        # Recording has no switch, so the regime is always "on". The field
+        # stays because every provenance record already written carries it;
+        # whether a writer actually opened the store is checked separately,
+        # from writer health.
+        enabled=True,
         capture_profile=config[observability_store.CAPTURE_PROFILE_VAR],
         capture_policy_version=capture_policy.CAPTURE_POLICY_VERSION,
         span_contract_version=tracing.SPAN_CONTRACT_VERSION,
@@ -319,11 +323,6 @@ def evidence_run(
             "sink and the database has no persisted writer-health row, so no "
             "writer has opened this store and no drop could have been detected "
             "by this run"
-        )
-    if not provenance.enabled:
-        run.extra_problems.append(
-            "observability is disabled (FW_OBSERVABILITY), so this run recorded no "
-            "trace evidence at all"
         )
     if require_evidence_profile and provenance.capture_profile != "evidence":
         run.extra_problems.append(

@@ -254,9 +254,10 @@ class TestAdditiveSchema:
         assert "runtime_snapshot_json" in attempt_cols
         assert "archived" in experiment_cols
 
-    def test_a_pre_v6_db_fails_fast_instead_of_migrating(self, db_path):
-        """No legacy support: a populated v1 store is refused on open with a
-        reason a human can act on, and is left untouched (not migrated).
+    def test_a_pre_v6_db_is_replaced_instead_of_migrated(self, db_path):
+        """No legacy support: a populated v1 store is never migrated. The writer
+        deletes it and creates a fresh store in its place; the read-only view
+        refuses it and leaves it untouched.
 
         Built with the pre-`fix-bn1` CREATE TABLE statements at user_version 1.
         There is no ALTER/migration path at all any more (fresh schema,
@@ -300,8 +301,9 @@ class TestAdditiveSchema:
         conn.commit()
         conn.close()
 
+        # A reader never alters what it inspects.
         with pytest.raises(obs.IncompatibleObservabilityDB) as excinfo:
-            obs.ObservabilityStore(db_path)
+            obs.ReadOnlyObservabilityStore(db_path)
         message = str(excinfo.value)
         assert "schema v1" in message
         assert "requires v6" in message
@@ -335,6 +337,22 @@ class TestAdditiveSchema:
         assert "experiments" not in tables
         assert row["user_message"] == "hi"
         assert features == {"distillation_v1"}
+
+        # The writer replaces it: the legacy row is gone and the file is a
+        # current store.
+        store = obs.ObservabilityStore(db_path)
+        assert store.has_feature(obs.FEATURE_EXPERIMENTS_V1)
+        conn = sqlite3.connect(db_path)
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+            assert conn.execute(
+                "SELECT count(*) FROM turns WHERE turn_key='legacy'"
+            ).fetchone()[0] == 0
+            assert "experiment_id" in {
+                r[1] for r in conn.execute("PRAGMA table_info(turns)")
+            }
+        finally:
+            conn.close()
 
     def test_the_marker_row_is_the_only_source_of_features(self, db_path):
         """fix-9zb: the column-sniffing fallback is gone, and must stay gone.
@@ -2063,18 +2081,21 @@ class TestRuntimeSnapshotStamp:
         _, data = _request(experiment_server, "/api/experiment/exp-a/attempts?task=t1")
         assert [a["runtime_snapshot"] for a in data["attempts"]] == [None, None]
 
-    def test_a_v2_store_is_refused_on_open_not_migrated(self, db_path):
-        """The column is create-time only; a populated v2 store fails fast
-        through the existing gate, with the reason."""
+    def test_a_v2_store_is_replaced_on_open_not_migrated(self, db_path):
+        """The column is create-time only; a populated v2 store is recreated
+        rather than altered, so the column exists afterwards."""
         obs.ObservabilityStore(db_path)
         conn = sqlite3.connect(db_path)
         conn.execute("PRAGMA user_version = 2")
         conn.commit()
         conn.close()
 
-        with pytest.raises(obs.IncompatibleObservabilityDB) as excinfo:
-            obs.ObservabilityStore(db_path)
-        message = str(excinfo.value)
-        assert "schema v2" in message
-        assert "requires v6" in message
-        assert "runtime_snapshot_json" in message
+        obs.ObservabilityStore(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+            assert "runtime_snapshot_json" in {
+                r[1] for r in conn.execute("PRAGMA table_info(experiment_attempts)")
+            }
+        finally:
+            conn.close()

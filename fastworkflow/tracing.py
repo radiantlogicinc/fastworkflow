@@ -6,19 +6,19 @@ protocol with a no-op default, the v1 span taxonomy, and safe emission
 helpers that NEVER raise to the caller — a broken sink degrades to a log
 line, not a failed turn.
 
-Spans are OTel-*aligned* records, not wire-conformant OTel (decision D4):
+Spans are OTel-*aligned* records, not wire-conformant OTel:
 ``trace_id`` is the logical turn_key, span ids are opaque strings, and the
-translation to real OTel ids is an external script's contract ([R26]).
+translation to real OTel ids is an external script's contract.
 
 Sink discovery is duck-typed off the host object (WorkflowExecutionContext,
 or ChatSession delegating to its core) via ``trace_sink`` /
 ``current_turn_key`` / ``trace_span_stack`` — deliberately NOT the
-transport-queue contract, so queue-less embedders still trace ([R28]).
+transport-queue contract, so queue-less embedders still trace.
 
 This module is stdlib-only by design: it is imported by core runtime
 modules and must never pull torch/dspy/transformers.
 
-Amendment (EXP-003 capture slice, arch §12.0 deltas 1/2/4): this module now also
+For the decision-signal capture slice (arch §12.0 deltas 1/2/4) this module also
 imports ``capture_policy`` and ``decision_signals``, which are architecture §22
 leaf modules — standard library, Pydantic, and ``runtime_manifest`` only. The
 invariant the paragraph above protects is unchanged: nothing on this import path
@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterator, Optional, Protocol, runtime_checkable
 
 from fastworkflow import runtime_manifest
-from fastworkflow.observability import capture_policy, decision_signals
+from fastworkflow.observability import capture_policy, decision_signals, enrichment
 
 logger = logging.getLogger(__name__)
 
@@ -207,7 +207,31 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # fw.agent.tool_call gained the §12.1.1 capture keys at its third emission site
 # (workflow_agent.py, previously the only unmigrated one); and fw.nlu.intent's
 # `classifier` attribute gained `topk_scores`.
-SPAN_CONTRACT_VERSION = 3
+#
+# v4: routing. fw.nlu.intent's known-name refusal keys were declared here.
+# The emitter had already been writing them. An intermediate draft of this
+# same number also named an auto-navigation flag and four fw.command.execute
+# keys for a composed step. Those keys did not remain in the contracts.
+#
+# v5: the aggregate moves so this number and SPAN_CONTRACTS describe the same
+# taxonomy. fw.command.execute v3 has no composed-step attributes.
+# fw.nlu.intent v3 keeps the known-name keys and does not carry
+# auto_navigation_enabled. Auto-navigation was removed.
+#
+# v6: fw.search.route added -- the optional decision-model call that routes a
+# search_memory request over a listing (observation_offloading/search_router.py).
+# No existing span changed.
+#
+# v7: fw.finish_check added -- the optional finish-time execution check
+# (fastworkflow/observation_offloading/finish_check.py) -- and fw.agent.step v3 replaces the
+# `roster_nudge` attribute with `finish_check_note` (the roster nudge was removed).
+#
+# v8: fw.planner.plan / fw.planner.replan v2 -- `plan` may be the structured plan
+# rendered with "(optional)" / "(needs the user)" flags, and the span gains
+# `plan_source` and the redacted `subjects`.
+# Structured planning is disabled (2026-09-28): the keys are unchanged, so the
+# version is too; `plan_source` is now only "text" or "none" and `subjects` [].
+SPAN_CONTRACT_VERSION = 8
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -255,6 +279,20 @@ SPAN_TRAIN_PREFIX = "fw.train."
 RESERVED_V2_SPAN_NAMES = frozenset(
     {SPAN_NLU_INTENT, SPAN_NLU_PARAM_EXTRACTION, SPAN_LLM_CALL, SPAN_TRAIN_PREFIX}
 )
+
+# The decision-model call that may route one search_memory request over a
+# listing. A model call of its own, so kind "llm"; not fw.llm.call, which is the
+# DSPy callback's record and what cost and cut-at-limit readers key on. It
+# carries the verdict and its cost, never the question or the observation --
+# those are on the search's offload event, and copying them here would put them
+# in a second store.
+SPAN_SEARCH_ROUTE = "fw.search.route"
+
+# The finish-time execution check: the decision-model calls that judge, when the
+# agent chooses finish, which plan steps the turn's record shows executed. It
+# carries counts, cost and the outcome; the flagged steps themselves are on the
+# check's offload event, not here.
+SPAN_FINISH_CHECK = "fw.finish_check"
 
 
 # ----------------------------------------------------------------------
@@ -313,8 +351,11 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
             {"agent_query", "attempt", "user_response", "human_wait_ms"}
         ),
     ),
+    # v3: the four auto-navigation keys (v2, ido-8ps.9) are gone with the
+    # two-step dispatch that wrote them. Every execute step is now a step the
+    # agent typed, so there is no composed-step shape to tell apart.
     SPAN_COMMAND_EXECUTE: SpanContract(
-        version=1,
+        version=3,
         attributes=frozenset(
             {
                 "raw_command",
@@ -371,8 +412,15 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
             }
         ),
     ),
+    # v2: `roster_nudge` (ido-8ps.27) marks the one step whose observation is
+    # not a tool result at all. A finish action taken while named items of the
+    # request were never the subject of a command has its "Completed."
+    # observation replaced by a bounded harness note and the loop continues, so
+    # a reader counting tool results would otherwise count that note as one.
+    # v3: the same marker, renamed `finish_check_note`: the note now comes from
+    # the finish-time execution check (fix-4dsr), which replaced the roster nudge.
     SPAN_AGENT_STEP: SpanContract(
-        version=1,
+        version=3,
         attributes=frozenset(
             {
                 "step_index",
@@ -384,6 +432,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "recovered",
                 "tool_error",
                 "error_type",
+                "finish_check_note",
             }
         ),
     ),
@@ -391,22 +440,38 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # .plan when it was re-triggered mid-turn. Same keys, so same version, and
     # `replan_trigger` is on both — None on a first plan says "this was the first
     # plan", where an absent key would only say "older record".
+    # v2: `plan` is the structured plan rendered as a numbered list with
+    # "(optional)" / "(needs the user)" flags when the finish check is on;
+    # `plan_source` says which planner produced it ("structured", "text",
+    # "text_fallback" after a failed or empty structured call, "none" for no
+    # plan) and `subjects` holds the structured plan's subject names, redacted
+    # by the capture policy.
+    # Structured planning is disabled (2026-09-28): new spans carry only
+    # `plan_source` "text" or "none" and `subjects` []; older records may still
+    # hold "structured" / "text_fallback".
     SPAN_PLANNER_PLAN: SpanContract(
-        version=1,
-        attributes=frozenset({"model", "replan_trigger", "plan"}),
+        version=2,
+        attributes=frozenset({"model", "replan_trigger", "plan", "plan_source", "subjects"}),
     ),
     SPAN_PLANNER_REPLAN: SpanContract(
-        version=1,
-        attributes=frozenset({"model", "replan_trigger", "plan"}),
+        version=2,
+        attributes=frozenset({"model", "replan_trigger", "plan", "plan_source", "subjects"}),
     ),
+    # v2: the known-name refusal keys. The emitter wrote the three
+    # `known_name_*` keys before they were declared here.
+    # v3: `auto_navigation_enabled` is absent. Auto-navigation was removed, so
+    # there is no flag and no composed step for a measured run to carry.
     SPAN_NLU_INTENT: SpanContract(
-        version=1,
+        version=3,
         attributes=frozenset(
             {
                 "context",
                 "stage",
                 "utterance",
                 "matcher_layer",
+                "known_name_foreign_context",
+                "known_name_owner_contexts",
+                "known_name_foreign_context_hint",
                 "escalation_outcome",
                 "fuzzy_distance",
                 "fuzzy_threshold",
@@ -470,6 +535,40 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
             }
         ),
     ),
+    SPAN_SEARCH_ROUTE: SpanContract(
+        version=1,
+        attributes=frozenset(
+            {
+                "model",
+                "choice",
+                "p_all_rows",
+                "for_report",
+                "latency_ms",
+                "input_tokens",
+                "output_tokens",
+                "error_type",
+            }
+        ),
+    ),
+    SPAN_FINISH_CHECK: SpanContract(
+        version=1,
+        attributes=frozenset(
+            {
+                "model",
+                "plan_source",
+                "steps",
+                "subjects",
+                "questions",
+                "requests",
+                "splits",
+                "input_tokens",
+                "latency_ms",
+                "flagged",
+                "fired",
+                "error_type",
+            }
+        ),
+    ),
 }
 
 # `fw.train.*` is a reserved PREFIX with no emitter — nothing in the package opens
@@ -500,7 +599,14 @@ STATUS_ERROR = "error"
 STATUS_CANCELLED = "cancelled"
 STATUS_AWAITING_USER = "awaiting_user"
 
-_DEFAULT_MAX_ATTR_BYTES = 16384
+#: The cap on ONE span-attribute value written to the observability store, in
+#: UTF-8 bytes. A constant since ``ido-pyw.1``: it bounds a database row, not a
+#: model prompt, so it is not one of the context-window budgets in
+#: ``fastworkflow.context_budget`` and does not scale with a model.
+MAX_ATTR_BYTES = 16384
+#: The pre-``ido-pyw.1`` name, kept as an alias for readers of the provenance
+#: record.
+_DEFAULT_MAX_ATTR_BYTES = MAX_ATTR_BYTES
 
 
 def is_control_signal(exc: BaseException) -> bool:
@@ -524,7 +630,7 @@ def status_for_dispatch_exception(exc: BaseException) -> str:
     """The span status for an exception that ended a command dispatch.
 
     ONE mapping in ONE place, because five sites used to each carry their own
-    isinstance check and they did not agree (fix-ajv.19). The same
+    isinstance check and they did not agree. The same
     AskUserSuspend closed as `error` in three of them, `awaiting_user` in a
     fourth, and escaped a fifth without closing its span at all — so an
     ordinary pause for input drew as a red ERROR node in the chatbot waterfall
@@ -617,7 +723,7 @@ class NoOpTraceSink:
 
 def deterministic_span_id(turn_key: str, span_name: str, attempt: int = 0) -> str:
     """Deterministic span id for spans that must close in a different process
-    than the one that opened them (fw.turn, fw.ask_user) — [R6]."""
+    than the one that opened them (fw.turn, fw.ask_user)."""
     digest = hashlib.sha256(f"{turn_key}|{span_name}|{attempt}".encode()).hexdigest()
     return digest[:32]
 
@@ -627,23 +733,16 @@ def root_span_id(turn_key: str) -> str:
     return deterministic_span_id(turn_key, SPAN_TURN, 0)
 
 
-def _max_attr_bytes() -> int:
-    try:
-        return int(os.environ.get("FW_OBS_MAX_ATTR_BYTES", "") or _DEFAULT_MAX_ATTR_BYTES)
-    except ValueError:
-        return _DEFAULT_MAX_ATTR_BYTES
-
-
 def cap_attr_value(value: Any) -> Any:
-    """Cap one attribute value at FW_OBS_MAX_ATTR_BYTES.
+    """Cap one attribute value at ``MAX_ATTR_BYTES``.
 
-    Truncation is lossy-and-counted ([R10]): an over-limit string becomes an
+    Truncation is lossy-and-counted: an over-limit string becomes an
     envelope carrying ``truncated: True``, the original byte length, and the
     sha256 of the original — never a silent prefix.
     """
     if not isinstance(value, str):
         return value
-    limit = _max_attr_bytes()
+    limit = MAX_ATTR_BYTES
     raw = value.encode("utf-8")
     if len(raw) <= limit:
         return value
@@ -658,7 +757,9 @@ def cap_attr_value(value: Any) -> Any:
 def _capped(attributes: Optional[dict[str, Any]]) -> dict[str, Any]:
     if not attributes:
         return {}
-    return {key: cap_attr_value(value) for key, value in attributes.items()}
+    capped = {key: cap_attr_value(value) for key, value in attributes.items()}
+    enrichment._apply(attributes, capped)
+    return capped
 
 
 # ----------------------------------------------------------------------
@@ -744,7 +845,7 @@ def start_span(
 
     Short-lived spans are emitted once, at ``end_span``; pass
     ``emit_open=True`` for long-lived spans (fw.turn, fw.ask_user) whose open
-    event must be visible before — and closable after — a suspension ([R6]).
+    event must be visible before — and closable after — a suspension.
     ``use_stack=False`` keeps a span off the parenting stack (fw.turn and
     fw.ask_user: children reach the root via its deterministic id, which
     survives suspension where the in-memory stack does not).

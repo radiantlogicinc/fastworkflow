@@ -1,7 +1,7 @@
-"""The five persisted surfaces neither protection layer used to reach (fix-ajv.9).
+"""The five persisted surfaces neither protection layer reaches on its own.
 
-`observability_store` has two independent protections, and until this change they
-between them missed five write paths:
+`observability_store` has two independent protections, and between them they
+can miss five write paths:
 
 * `Redactor` — an unconditional, profile-independent scrub of credential shapes
   and loaded secret env values, applied at the sink boundary.
@@ -11,9 +11,10 @@ between them missed five write paths:
 Both are wired into the TurnResult pipeline. Conversation labels written through
 the SYNC store path, feedback, train-run metrics, writer diagnostics, and the
 scalar columns beside a span's (already scrubbed) attributes JSON do not go
-through that pipeline, so they reached SQLite verbatim under every profile.
+through that pipeline, so without their own protection they reach SQLite
+verbatim under every profile.
 
-Item 5 — the sync label path — is the one that was live rather than latent:
+Item 5 — the sync label path — is the one that is live rather than latent:
 `run_fastapi_mcp/utils.ensure_topic_and_summary` calls
 `ObservabilityStore.record_conversation_label` directly, and a topic and summary
 are LLM output generated from a real user's conversation. The tests for it
@@ -24,9 +25,10 @@ that was already protected and proving nothing about production.
 Three properties are load-bearing here and are asserted for every surface:
 
 1. **A planted credential does not survive to the DB**, under either profile.
-2. **Withholding leaves a badge, never silence** (§12.0 delta 3): a viewer must be
-   able to say "a value was here, this is its class, size and digest".
-3. **The `debug` profile is byte-identical to 3.2.0.** EXP-003 is a Phase 0 slice.
+2. **Withholding leaves a badge, never silence**: a viewer must be able to say
+   "a value was here, this is its class, size and digest".
+3. **The `debug` profile writes the same bytes it always did**, so turning
+   capture policy on changes nothing for existing debug stores.
 
 Two of the five are deliberately scrub-only, and the tests pin those decisions
 rather than leaving them to be re-litigated by whoever reads the code next:
@@ -400,9 +402,9 @@ class TestSpanScalarColumns:
 
         `forget_channel` deletes spans with `WHERE channel_id=?`. Digesting this
         column — which is what the `identifier` default would do — would narrow
-        first-class erasure [R21] to whatever the `trace_id IN (...)` fallback
-        still covers. Reducing exposure by weakening erasure is not a trade a
-        Phase 0 slice gets to make.
+        first-class erasure to whatever the `trace_id IN (...)` fallback still
+        covers. Reducing exposure by weakening erasure is not a trade worth
+        making.
         """
         span = _span()
         _write_span(db_path, span)
@@ -420,8 +422,8 @@ class TestSpanScalarColumns:
         assert row["command_name"] is None
 
     def test_span_attributes_are_still_scrubbed(self, db_path, planted_credentials):
-        """The pre-existing [R20] protection, re-asserted because this change
-        rewrote the tuple bound around it."""
+        """The span-attribute scrub, re-asserted because the capture-policy
+        work rewrote the tuple bound around it."""
         row = _write_span(db_path, _span(attributes={"leak": f"key {ENV_SECRET}"}))
         assert ENV_SECRET not in row["attributes"]
         assert REDACTED in row["attributes"]
@@ -478,9 +480,8 @@ class TestFeedback:
         result straight into `dspy.History` — it is the agent's memory of being
         corrected, not evidence about the agent. Under `evidence` a badge would
         still parse, so the agent would silently receive an envelope dict where
-        its feedback used to be and behave differently. That is a behavior
-        change, which is out of scope for a Phase 0 slice; it belongs with
-        fix-cj4's conversation-memory redaction, which has to leave memory
+        its feedback used to be and behave differently. Redacting this column
+        belongs with conversation-memory redaction, which has to leave memory
         usable. If this test ever fails, the agent just got quieter.
         """
         monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, profile)
@@ -578,7 +579,7 @@ class TestTrainRunMetrics:
 
 class TestDiagnostics:
     def test_a_provider_error_body_is_scrubbed(self, db_path, planted_credentials):
-        """The [R20] scenario the redactor was written for: a LiteLLM
+        """The scenario the redactor was written for: a LiteLLM
         `AuthenticationError` whose body echoes the key, arriving here as
         `repr(exc)` in `writer_health.last_error`."""
         store = obs.ObservabilityStore(db_path)
@@ -778,8 +779,15 @@ def test_every_declared_policy_path_is_reachable_from_a_write_site():
         obs.POLICY_PATH_CONVERSATION_TOPIC,
         obs.POLICY_PATH_CONVERSATION_SUMMARY,
         obs.POLICY_PATH_TRAIN_METRICS,
+        # ido-zlm. The sixth surface is not a column of this database at all:
+        # the offload evidence sidecar's raw command response, written by
+        # `observation_offloading.archive.persist` through
+        # `protect_offload_observation`. It is listed here for the same reason
+        # as the other five -- a deployment re-admitting it under the evidence
+        # profile has to be able to spell the path.
+        obs.POLICY_PATH_OFFLOAD_OBSERVATION,
     }
-    assert len(paths) == 6
+    assert len(paths) == 7
     # The turn-column paths `_policed_column` builds must not collide with them.
     turn_paths = {f"turn.{column}" for column, _ in obs._POLICED_TURN_COLUMNS}
     assert not paths & turn_paths

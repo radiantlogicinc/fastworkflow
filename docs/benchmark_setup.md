@@ -95,7 +95,10 @@ structured analysis remains readable. The HTTP analysis endpoints also accept
 JSON-native structured values inside an `{"analysis": ...}` envelope.
 
 This change introduces observability schema v4. The repository's fresh-schema
-policy applies: v3 evidence is preserved, not migrated. Benchmark definitions and
+policy applies: v3 evidence is not migrated. Opening an older-schema database
+with the writer deletes it and starts a fresh store in its place (the read-only
+viewer refuses it and leaves it untouched), so copy or seal anything you need
+before running the new build against it. Benchmark definitions and
 registrations do not need recreating; create a new experiment and record it into
 a fresh database to use feedback. Restart `run_chatbot` to load the new UI. Do not
 reuse the old experiment ID or overwrite a sealed collection to refresh its schema.

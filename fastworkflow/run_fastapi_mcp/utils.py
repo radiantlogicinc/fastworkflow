@@ -425,8 +425,8 @@ def _claim_registered_attempt(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=(
-                "experiment bootstrap requires enabled observability and an "
-                "installed experiment-claim store"
+                "experiment bootstrap requires the observability store, "
+                "which could not be opened"
             ),
         )
 
@@ -815,9 +815,9 @@ async def _create_user_runtime(
         # off so a degraded eager mint cannot double-mint.
         embedder_owns_conversations=True,
     )
-    # Observability sink [R4]: run_fastapi_mcp is a fastworkflow entry point,
-    # so the SQLite sink defaults ON (FW_OBSERVABILITY=0 disables). One sink
-    # (one writer thread) per workflow DB, shared across channels.
+    # Observability sink [R4]: recording is always on. One sink (one writer
+    # thread) per workflow DB, shared across channels; it is None only when
+    # the store could not be opened.
     if trace_sink is not None:
         ctx.set_trace_sink(trace_sink)
     if claim is not None:
@@ -1310,12 +1310,12 @@ class ChannelRuntime:
 
     @property
     def observability_store(self) -> Optional[ObservabilityStore]:
-        """The conversation record for this channel, or None when disabled.
+        """The conversation record for this channel, or None when unavailable.
 
         Single source of truth since Phase 7: conversations, turns, memory
         rebuild and feedback all live in this one per-workflow DB. None means
-        FW_OBSERVABILITY is off, in which case the session keeps in-memory
-        history only and nothing survives a restart.
+        the store could not be opened, in which case the session keeps
+        in-memory history only and nothing survives a restart.
         """
         sink = getattr(self.execution_context, "trace_sink", None)
         return sink.store if isinstance(sink, SQLiteTraceSink) else None

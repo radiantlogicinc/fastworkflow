@@ -215,7 +215,7 @@ def _save_run_provenance(
     """Persist this run's provenance and stamp a copy into its artifact version.
 
     Written twice, deliberately. The top-level copy is the stable path the per-command
-    training report (fix-551.4) reads. The copy inside the version is what makes a
+    training report reads. The copy inside the version is what makes a
     version self-describing: without it the next train overwrites the top-level file and
     an older version can no longer say which personas and seed produced its utterances,
     which is most of what rolling back to it is worth.
@@ -759,6 +759,7 @@ def is_fast_workflow_trained(fastworkflow_folderpath: str):
                 return False
 
     return True
+
 
 def train_main(args):
     """Main function to train the workflow."""

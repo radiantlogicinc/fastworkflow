@@ -231,7 +231,6 @@ def loopback_observability(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root_b.mkdir()
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(root_a))
     monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
-    monkeypatch.setenv("FW_OBSERVABILITY", "1")
     monkeypatch.setenv("FW_OBS_INLINE_ARTIFACT_BYTES", "1")
     monkeypatch.setattr(
         sys, "argv", ["pytest", "--workflow_path", workflow_path]

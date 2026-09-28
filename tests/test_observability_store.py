@@ -153,36 +153,85 @@ class TestSchema:
         assert dir_mode == 0o700
 
     def test_refuses_newer_schema(self, db_path):
+        """A DB from a newer build is refused and never touched [R11]."""
         obs.ObservabilityStore(db_path)
         conn = sqlite3.connect(db_path)
         conn.execute("PRAGMA user_version = 99")
+        conn.execute("INSERT INTO diagnostics VALUES ('newer-build-row', 'kept', 'x')")
         conn.commit()
         conn.close()
-        with pytest.raises(obs.IncompatibleObservabilityDB):
+        before = open(db_path, "rb").read()
+        with pytest.raises(obs.IncompatibleObservabilityDB, match="newer"):
             obs.ObservabilityStore(db_path)  # [R11]
+        assert open(db_path, "rb").read() == before
+        conn = sqlite3.connect(db_path)
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 99
+            assert conn.execute(
+                "SELECT value FROM diagnostics WHERE key='newer-build-row'"
+            ).fetchone()[0] == "kept"
+        finally:
+            conn.close()
 
-    def test_refuses_older_schema(self, db_path):
-        """Fresh schema (fix-49m.3): a populated store from an older build is
-        refused with a reason, never migrated."""
+    def test_replaces_an_older_populated_store(self, db_path, caplog):
+        """Fresh schema (fix-49m.3): never migrated. The store never shipped in a
+        release, so an older populated DB is a developer's local file: it is
+        deleted and recreated empty at the current version, owner-only, with a
+        warning naming the path and both versions."""
         obs.ObservabilityStore(db_path)
         conn = sqlite3.connect(db_path)
+        conn.execute("INSERT INTO diagnostics VALUES ('older-build-row', 'gone', 'x')")
         conn.execute(f"PRAGMA user_version = {obs.SCHEMA_VERSION - 1}")
         conn.commit()
         conn.close()
-        with pytest.raises(obs.IncompatibleObservabilityDB) as excinfo:
-            obs.ObservabilityStore(db_path)
-        message = str(excinfo.value)
-        assert f"requires v{obs.SCHEMA_VERSION}" in message
-        assert "carries no migration" in message
-        # Left untouched: the version was not silently rewritten.
+        with caplog.at_level("WARNING"):
+            store = obs.ObservabilityStore(db_path)
+        warning = "\n".join(record.getMessage() for record in caplog.records)
+        assert db_path in warning
+        assert f"v{obs.SCHEMA_VERSION - 1}" in warning
+        assert f"v{obs.SCHEMA_VERSION}" in warning
         conn = sqlite3.connect(db_path)
         try:
             assert (
                 conn.execute("PRAGMA user_version").fetchone()[0]
-                == obs.SCHEMA_VERSION - 1
+                == obs.SCHEMA_VERSION
             )
+            assert conn.execute(
+                "SELECT count(*) FROM diagnostics WHERE key='older-build-row'"
+            ).fetchone()[0] == 0
+            assert conn.execute("PRAGMA auto_vacuum").fetchone()[0] == 2
         finally:
             conn.close()
+        assert stat.S_IMODE(os.stat(db_path).st_mode) == 0o600
+        assert stat.S_IMODE(os.stat(os.path.dirname(db_path)).st_mode) == 0o700
+        assert store.has_feature(obs.FEATURE_OFFLOAD_EVIDENCE_V1)
+
+    def test_an_older_store_that_cannot_be_deleted_is_refused(self, db_path):
+        """If replacement is impossible the old refusal stands, and nothing is lost.
+
+        A directory where the ``-shm`` file would be cannot be removed with
+        ``os.remove``, and the companions go before the main file, so the main
+        file must be left exactly as it was. The older DB is switched to a
+        rollback journal, which never opens ``-shm``, so it can still be read
+        with that directory in the way.
+        """
+        obs.ObservabilityStore(db_path)
+        conn = sqlite3.connect(db_path)
+        conn.execute("PRAGMA journal_mode=DELETE")
+        conn.execute(f"PRAGMA user_version = {obs.SCHEMA_VERSION - 1}")
+        conn.commit()
+        conn.close()
+        for companion in (f"{db_path}-wal", f"{db_path}-shm"):
+            if os.path.exists(companion):
+                os.remove(companion)
+        os.makedirs(f"{db_path}-shm")
+        before = open(db_path, "rb").read()
+        try:
+            with pytest.raises(obs.IncompatibleObservabilityDB, match="could not delete"):
+                obs.ObservabilityStore(db_path)
+            assert open(db_path, "rb").read() == before
+        finally:
+            os.rmdir(f"{db_path}-shm")
 
     def test_an_empty_file_is_treated_as_fresh(self, db_path):
         """A file that was only touched has no tables and initialises like a
@@ -241,17 +290,19 @@ class TestSchema:
         assert "PRAGMA table_info" not in source
         assert "schema_features" in source
 
-    def test_read_only_store_refuses_an_older_schema_the_same_way(self, db_path):
-        """The read-only view applies the same rule as the writable store
-        (fix-49m.3 adjustment b): an older store is refused up front with the
-        reason, instead of failing later on a column the reader assumes."""
+    def test_read_only_store_refuses_an_older_schema_and_never_deletes_it(self, db_path):
+        """The read-only view refuses an older store up front with the reason
+        (fix-49m.3 adjustment b), instead of failing later on a column the
+        reader assumes -- and, unlike the writer, never replaces it."""
         obs.ObservabilityStore(db_path)
         conn = sqlite3.connect(db_path)
         conn.execute(f"PRAGMA user_version = {obs.SCHEMA_VERSION - 1}")
         conn.commit()
         conn.close()
+        before = open(db_path, "rb").read()
         with pytest.raises(obs.IncompatibleObservabilityDB, match="carries no migration"):
             obs.ReadOnlyObservabilityStore(db_path)
+        assert open(db_path, "rb").read() == before
         # And the current version still opens read-only.
         conn = sqlite3.connect(db_path)
         conn.execute(f"PRAGMA user_version = {obs.SCHEMA_VERSION}")
@@ -835,27 +886,65 @@ class TestMaintenance:
 
 
 # ----------------------------------------------------------------------
-# Factory / FW_OBSERVABILITY gating [R4]
+# Factory: recording is always on [R4]
 # ----------------------------------------------------------------------
 
 
 class TestFactory:
-    def test_gating(self, tmp_path, monkeypatch):
+    def test_every_caller_gets_one_cached_sink(self, tmp_path, monkeypatch):
         monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "root"))
         workflow_path = str(tmp_path / "wf")
         os.makedirs(workflow_path, exist_ok=True)
 
-        monkeypatch.setenv("FW_OBSERVABILITY", "0")
-        assert obs.get_observability_sink(workflow_path) is None
-
-        monkeypatch.delenv("FW_OBSERVABILITY", raising=False)
-        # Entry points default ON; embedders default OFF
-        assert obs.get_observability_sink(workflow_path, entry_point=False) is None
         sink = obs.get_observability_sink(workflow_path)
         try:
             assert sink is not None
-            # Cached: same sink per DB path
+            # Cached: same sink per DB path.
             assert obs.get_observability_sink(workflow_path) is sink
+            # The entry-point distinction is gone.
+            assert not hasattr(obs, "observability_enabled")
+            with pytest.raises(TypeError):
+                obs.get_observability_sink(workflow_path, entry_point=False)
+        finally:
+            if sink is not None:
+                sink.close()
+
+    def test_an_embedder_records_privately(self, tmp_path, monkeypatch):
+        """A library caller, not an entry point: the sink and its DB exist anyway.
+
+        No fastWorkflow CLI or server is involved -- the embedder opens the
+        sink itself, binds it to its own execution context, and records a
+        turn. The DB is owner-only in an owner-only directory.
+        """
+        monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "root"))
+        workflow_path = str(tmp_path / "embedded_wf")
+        os.makedirs(workflow_path, exist_ok=True)
+
+        sink = obs.get_observability_sink(workflow_path)
+        try:
+            assert sink is not None
+            ctx = WorkflowExecutionContext(run_as_agent=False)
+            ctx.set_trace_sink(sink)
+            assert tracing.get_sink(ctx) is sink
+            turn_output = fastworkflow.TurnOutput(
+                turn_key=fastworkflow.mint_turn_key(),
+                status=TurnStatus.COMPLETED,
+                answer="done",
+                command_outputs=[],
+            )
+            sink.emit_turn_record(fastworkflow.TurnResult(
+                turn_output=turn_output, channel_id="embedded-channel",
+                user_message="embedded",
+            ))
+            assert sink.flush()
+
+            db = fastworkflow.state_paths.observability_db(workflow_path)
+            assert stat.S_IMODE(os.stat(db).st_mode) == 0o600
+            assert stat.S_IMODE(os.stat(os.path.dirname(db)).st_mode) == 0o700
+            turns = _rows(db, "SELECT turn_key, channel_id FROM turns")
+            assert [(row["turn_key"], row["channel_id"]) for row in turns] == [
+                (turn_output.turn_key, "embedded-channel")
+            ]
         finally:
             if sink is not None:
                 sink.close()

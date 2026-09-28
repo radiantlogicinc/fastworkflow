@@ -161,8 +161,13 @@ def runtime_readiness_snapshot(
         ),
         "workflow_model_version": workflow_model_version(workflow_path),
         "workflow_model_legacy_layout": workflow_model_legacy_layout(workflow_path),
-        "observability_enabled": observability_store.observability_enabled(
-            default_on=True
+        # Recording has no switch. What can still differ between processes is
+        # whether this one holds a live writer for the workflow's store -- a
+        # store that could not be opened degrades to none -- so that is what
+        # this key, kept for the stored snapshot's shape, reports.
+        "observability_enabled": (
+            observability_store.existing_observability_sink(workflow_path)
+            is not None
         ),
         "pruning_suppressed": observability_store.pruning_suppressed(),
         "pid": os.getpid(),
@@ -177,7 +182,6 @@ def runtime_readiness_snapshot(
 def snapshot_env_names() -> tuple[str, ...]:
     """Every environment name the snapshot consults. Pinned by test."""
     return (
-        "FW_OBSERVABILITY",
         observability_store.CAPTURE_PROFILE_VAR,
         observability_store.SUPPRESS_PRUNE_VAR,
     )

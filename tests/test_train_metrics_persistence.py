@@ -25,10 +25,9 @@ from fastworkflow.train import metrics_persistence
 
 @pytest.fixture
 def state_root(tmp_path, monkeypatch):
-    """Real tmp state root; observability defaults ON for the train entry point."""
+    """Real tmp state root; observability recording is always on."""
     root = tmp_path / "state"
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(root))
-    monkeypatch.delenv("FW_OBSERVABILITY", raising=False)
     fastworkflow.init({"FASTWORKFLOW_STATE_ROOT": str(root)})
     return root
 
@@ -105,25 +104,7 @@ def test_persist_is_idempotent_per_run_id(state_root, workflow_dir):
 
 
 # ---------------------------------------------------------------------------
-# (b) FW_OBSERVABILITY=0 -> no row, no error
-# ---------------------------------------------------------------------------
-
-
-def test_disabled_writes_nothing(state_root, workflow_dir, monkeypatch):
-    monkeypatch.setenv("FW_OBSERVABILITY", "0")
-    run_id = metrics_persistence.persist_train_run_metrics(
-        workflow_dir,
-        started_at=datetime.now(timezone.utc),
-        completed_at=datetime.now(timezone.utc),
-        metrics={"totals": {}},
-    )
-    assert run_id is None
-    # The gate short-circuits before the store is even opened.
-    assert not os.path.exists(_db_path(workflow_dir))
-
-
-# ---------------------------------------------------------------------------
-# (c) broken DB -> warns and returns None without raising
+# (b) broken DB -> warns and returns None without raising
 # ---------------------------------------------------------------------------
 
 
@@ -153,7 +134,7 @@ def test_broken_db_warns_and_returns_none(state_root, workflow_dir, caplog):
 
 
 # ---------------------------------------------------------------------------
-# (d) collect_train_metrics against a fixture ___command_info layout
+# (c) collect_train_metrics against a fixture ___command_info layout
 # ---------------------------------------------------------------------------
 
 

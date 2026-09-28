@@ -314,10 +314,10 @@ def test_the_snapshot_carries_no_value_from_any_secret_looking_env_var(
 
 
 def test_the_env_names_the_snapshot_consults_are_pinned():
-    """Three flag/profile names and nothing else. A new env read must be
-    added here deliberately, with its credential-freeness argued."""
+    """Two profile/pruning names and nothing else. A new env read must be
+    added here deliberately, with its credential-freeness argued. The
+    retired recording switch is not among them: recording is always on."""
     assert snapshot_env_names() == (
-        "FW_OBSERVABILITY",
         obs.CAPTURE_PROFILE_VAR,
         obs.SUPPRESS_PRUNE_VAR,
     )
@@ -325,3 +325,21 @@ def test_the_env_names_the_snapshot_consults_are_pinned():
         not any(word in name for word in ("KEY", "SECRET", "TOKEN", "PASSWORD"))
         for name in snapshot_env_names()
     )
+
+
+def test_observability_enabled_reports_whether_a_writer_is_live(tmp_path, monkeypatch):
+    """The key stays in the stored snapshot; its value is now a fact, not a switch.
+
+    Recording is always on, so the only thing that can differ is whether this
+    process holds a live writer for the workflow's store.
+    """
+    monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "root"))
+    workflow = tmp_path / "wf"
+    workflow.mkdir()
+    assert runtime_readiness_snapshot(str(workflow))["observability_enabled"] is False
+    sink = obs.get_observability_sink(str(workflow))
+    try:
+        assert sink is not None
+        assert runtime_readiness_snapshot(str(workflow))["observability_enabled"] is True
+    finally:
+        obs.close_all_sinks()

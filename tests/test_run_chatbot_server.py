@@ -13,7 +13,10 @@ and the SPA packaging assertion [R23].
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
+import re
 import signal
 import sqlite3
 import threading
@@ -373,6 +376,25 @@ class TestPage:
         assert "'sha256-" in csp
         assert "script-src 'self' 'unsafe-inline'" not in csp
 
+    def test_the_csp_hashes_every_inline_script_the_page_serves(self, server):
+        """Hashes are derived from the served bytes, so an edited page still runs."""
+        status, headers, body = _get(server, "/")
+        assert status == 200
+        scripts = re.findall(rb"<script\b[^>]*>(.*?)</script>", body, re.DOTALL)
+        assert scripts
+        csp = headers["Content-Security-Policy"]
+        for script in scripts:
+            digest = base64.b64encode(hashlib.sha256(script).digest()).decode()
+            assert f"'sha256-{digest}'" in csp
+
+    def test_clear_conversations_reports_what_the_server_deleted(self, server):
+        """The message is built from the response's counts, never a fixed claim."""
+        page = server.index_html
+        assert b"All recorded conversations were cleared." not in page
+        assert b"function clearedSummary(data)" in page
+        assert b"There was nothing to clear." in page
+        assert b'mutationRequest("/api/clear_conversations", "POST"' in page
+
     def test_page_never_uses_innerhtml(self, server):
         # [R22]: record-derived text renders via textContent only.
         assert b"innerHTML" not in server.index_html
@@ -531,6 +553,21 @@ class TestApi:
         # Clearing data never rewinds conversation identity.
         assert obs.ObservabilityStore(seeded_db).mint_conversation_id("chan1") == 2
 
+    def test_clearing_an_empty_store_reports_zero_counts(self, server, seeded_db):
+        """What lets the page say there was nothing to clear."""
+        for _ in range(2):
+            status, body = _post(
+                server,
+                "/api/clear_conversations",
+                {"confirm": "clear all conversations"},
+            )
+            assert status == 200
+        counted = {
+            key: value for key, value in body["deleted"].items()
+            if key != "offload_scopes_released"
+        }
+        assert counted and set(counted.values()) == {0}
+
 
 # ----------------------------------------------------------------------
 # Read-only guarantee
@@ -589,7 +626,10 @@ class TestCliPaths:
 
     def test_run_prune_returns_counts(self, seeded_db):
         deleted = run_chatbot_server.run_prune(seeded_db)
-        assert set(deleted) == {"spans", "artifacts"}
+        assert set(deleted) == {
+            "spans", "artifacts", "offload_evidence", "offload_subjects",
+            "offload_events",
+        }
         # Everything seeded is recent; nothing crosses the retention horizon.
         assert deleted["spans"] == 0
         counts = _row_counts(seeded_db)

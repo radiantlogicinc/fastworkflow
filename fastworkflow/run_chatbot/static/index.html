@@ -1159,7 +1159,10 @@ function mutationRequest(path, method, body, successMessage) {
   return fetch(path, options).then(function (response) {
     return response.json().catch(function () { return {}; }).then(function (data) {
       if (!response.ok) { throw new Error(data.error || "Request failed (" + response.status + "). Please try again."); }
-      showNotice(successMessage || actionSuccess(path, method));
+      /* A caller may pass a function when the right wording depends on what
+         the server reports it actually did. */
+      var message = typeof successMessage === "function" ? successMessage(data) : successMessage;
+      showNotice(message || actionSuccess(path, method));
       return data;
     });
   }).catch(function (error) {
@@ -5929,6 +5932,25 @@ document.getElementById("refreshBtn").addEventListener("click", function () {
     .catch(function (error) { showNotice("Could not refresh", "error", error.message); })
     .finally(function () { button.disabled = false; button.removeAttribute("aria-busy"); });
 });
+function clearedSummary(data) {
+  /* The server returns clear_conversations()'s per-table delete counts under
+     `deleted`, or an empty object when there was no store to clear. The
+     process-cache count is not a deletion, so it does not make a clear count
+     as having removed something. */
+  var deleted = (data && data.deleted) || {};
+  var total = 0;
+  Object.keys(deleted).forEach(function (key) {
+    if (key !== "offload_scopes_released") { total += Number(deleted[key]) || 0; }
+  });
+  if (!total) { return "There was nothing to clear."; }
+  var convs = Number(deleted.conversations) || 0;
+  var turns = Number(deleted.turns) || 0;
+  if (!convs && !turns) {
+    return "No conversations or turns were recorded; the remaining trace data was cleared.";
+  }
+  return "Cleared " + fmtCount(convs) + (convs === 1 ? " conversation" : " conversations") +
+    " and " + fmtCount(turns) + (turns === 1 ? " turn." : " turns.");
+}
 document.getElementById("clearConvsBtn").addEventListener("click", function () {
   if (!window.confirm(
       "Clear every recorded conversation and turn for this workflow? This cannot be undone.")) {
@@ -5938,14 +5960,14 @@ document.getElementById("clearConvsBtn").addEventListener("click", function () {
     ? tmFetch("/new_conversation", {}).catch(function () {})
     : Promise.resolve();
   rotate.then(function () {
-    return apiPost("/api/clear_conversations", {
+    return mutationRequest("/api/clear_conversations", "POST", {
       confirm: "clear all conversations"
-    });
-  }).then(function () {
+    }, clearedSummary);
+  }).then(function (data) {
     state.turnKey = null;
     clear(document.getElementById("detail"));
     document.getElementById("detail").appendChild(
-      el("div", "empty", "All recorded conversations were cleared."));
+      el("div", "empty", clearedSummary(data)));
     clear(document.getElementById("chatLog"));
     document.getElementById("chatLog").appendChild(
       el("div", "empty", "Conversation history cleared. Start a new message."));

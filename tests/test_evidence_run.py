@@ -45,7 +45,6 @@ from fastworkflow.observability.evidence_run import (
 @pytest.fixture
 def workflow_path(tmp_path, monkeypatch) -> str:
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "root"))
-    monkeypatch.setenv("FW_OBSERVABILITY", "1")
     fastworkflow.init({})
     path = tmp_path / "wf"
     path.mkdir(parents=True, exist_ok=True)
@@ -398,7 +397,6 @@ def test_provenance_records_defaults_nobody_set(workflow_path):
         "FW_OBS_DB_MAX_BYTES",
         "FW_OBS_INLINE_ARTIFACT_BYTES",
         "FW_OBS_QUEUE_MAX",
-        "FW_OBS_MAX_ATTR_BYTES",
         obs.CAPTURE_PROFILE_VAR,
     ):
         assert config.get(name), name
@@ -445,20 +443,6 @@ def test_the_run_record_is_serializable(workflow_path, tmp_path):
 # ----------------------------------------------------------------------
 # Preconditions and raising behavior
 # ----------------------------------------------------------------------
-
-
-def test_disabled_observability_is_reported_as_a_problem(tmp_path, monkeypatch):
-    monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "root"))
-    monkeypatch.setenv("FW_OBSERVABILITY", "0")
-    fastworkflow.init({})
-    path = tmp_path / "wf"
-    path.mkdir(parents=True, exist_ok=True)
-
-    with evidence_run(str(path), run_id="run-off") as run:
-        pass
-
-    assert run.valid is False
-    assert any("observability is disabled" in problem for problem in run.problems())
 
 
 def test_dspy_history_off_is_reported_as_a_problem(workflow_path):

@@ -10,10 +10,10 @@ training publication. This module is the seam between the train pipeline and
   (threshold files, heldout_evaluation.json, training_report.json, the version
   manifest). It never trains, never loads models, and degrades to a partial
   dict on any per-artifact read failure.
-- ``persist_train_run_metrics`` writes the row, gated on ``FW_OBSERVABILITY``
-  (train is a fastworkflow entry point, so the default is ON [R4]). Durability
-  class [R14] applies: a persistence failure must never fail the training run,
-  so every failure path is a ``logger.warning`` and a ``None`` return.
+- ``persist_train_run_metrics`` writes the row; recording is always on [R4].
+  Durability class [R14] applies: a persistence failure must never fail the
+  training run, so every failure path is a ``logger.warning`` and a ``None``
+  return.
 """
 
 from __future__ import annotations
@@ -196,18 +196,15 @@ def persist_train_run_metrics(
 ) -> Optional[str]:
     """Write one ``train_runs`` row for a just-published training run.
 
-    Gated on ``FW_OBSERVABILITY`` (default ON — train is a fastworkflow entry
-    point [R4]). Never raises: any failure is a warning and a ``None`` return,
-    because metrics persistence must never fail the training run [R14].
+    Recording is always on [R4]. Never raises: any failure is a warning and a
+    ``None`` return, because metrics persistence must never fail the training
+    run [R14].
 
-    Returns the run_id written, or None when disabled or on failure.
+    Returns the run_id written, or None on failure.
     """
     try:
         from fastworkflow import state_paths
         from fastworkflow.observability import store as observability_store
-
-        if not observability_store.observability_enabled(default_on=True):
-            return None
 
         if completed_at is None:
             completed_at = datetime.now(timezone.utc)

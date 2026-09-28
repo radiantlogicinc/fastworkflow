@@ -105,8 +105,7 @@ def _flush_observability(workflow_path: str) -> None:
     from fastworkflow.observability.store import get_observability_sink
 
     sink = get_observability_sink(workflow_path)
-    if sink is None:
-        pytest.skip("observability disabled (FW_OBSERVABILITY=0)")
+    assert sink is not None, "the observability store could not be opened"
     assert sink.flush(), "observability writer failed to flush"
 
 
