@@ -49,7 +49,46 @@ DEFAULT_CONTINUATION_PLAN = "Continue unfinished requested work."
 #: the ido review-then-audit task needs 2-3 segments: two attempts failed at the
 #: 3-segment wall, while three attempts with no practical limit finished in 2, 3
 #: and 3 segments -- fix-uykd.)
+#: (The "not a deployment setting" sentence held until 2026-09-27: the default
+#: is still this constant, but ``FW_MAX_FORCED_REPLANS`` may now move it within
+#: ``[MIN_FORCED_REPLANS_OVERRIDE, MAX_FORCED_REPLANS_OVERRIDE]``.)
+#: Provenance, stated neutrally: the default of 3 rests on that one task in one
+#: workflow, not on a measured segment tail across workflows. It raises the
+#: worst-case step ceiling of every workflow from 75 to 100, which is why it is
+#: overridable and why ``forced_replan`` / ``forced_replan_wall`` events carry
+#: ``reached_limit``: the rate at which turns hit it is what should decide it.
 MAX_FORCED_REPLANS = 3
+MAX_FORCED_REPLANS_ENV = "FW_MAX_FORCED_REPLANS"
+MIN_FORCED_REPLANS_OVERRIDE = 0
+MAX_FORCED_REPLANS_OVERRIDE = 10
+_forced_replans_warned: set[str] = set()
+
+
+def max_forced_replans_from_env() -> int:
+    """``MAX_FORCED_REPLANS``, unless ``FW_MAX_FORCED_REPLANS`` says otherwise.
+
+    An override is clamped to ``[0, 10]``; one that is not an integer is
+    ignored. Either correction is warned about once per raw value.
+    """
+    raw = context_budget.env_value(MAX_FORCED_REPLANS_ENV)
+    if not raw:
+        return MAX_FORCED_REPLANS
+    try:
+        value = int(raw)
+    except ValueError:
+        if raw not in _forced_replans_warned:
+            _forced_replans_warned.add(raw)
+            logger.warning("%s=%r is not an integer; using the default %d",
+                           MAX_FORCED_REPLANS_ENV, raw, MAX_FORCED_REPLANS)
+        return MAX_FORCED_REPLANS
+    clamped = min(MAX_FORCED_REPLANS_OVERRIDE, max(MIN_FORCED_REPLANS_OVERRIDE, value))
+    if clamped != value and raw not in _forced_replans_warned:
+        _forced_replans_warned.add(raw)
+        logger.warning("%s=%d is outside [%d, %d]; using %d", MAX_FORCED_REPLANS_ENV,
+                       value, MIN_FORCED_REPLANS_OVERRIDE, MAX_FORCED_REPLANS_OVERRIDE, clamped)
+    return clamped
+
+
 MAX_REPLAN_CHARS = 2_000
 #: The replan skeleton is the continuation planner's view of the trajectory,
 #: and it gets the trajectory's budget. It is not the next segment's
@@ -244,11 +283,20 @@ class StructuredContinuationReAct(fastWorkflowReAct):
         #: steps. Entries for truncated steps stay, because the next ordinal is
         #: one past the highest ever issued.
         self.execute_ordinal_by_step: dict[int, int] = {}
+        #: The finish check's record of which execute steps reached a command:
+        #: str(step index) -> "ran" or "not_run" (``finish_check.record_dispatch``),
+        #: written only with a check attached. String keys, because it rides
+        #: the suspension blob.
+        self.dispatch_outcomes: dict[str, str] = {}
+        #: True when this turn resumed from a suspension whose mirror had to be
+        #: seeded from a working trajectory the context-window fallback had
+        #: already cut: the finish check then skips with "ledger incomplete".
+        self.ledger_incomplete = False
         self.continuation_scope: RuntimeHandleScope | None = None
         self.continuation_scope_id: str | None = None
         self._scope_factory = scope_factory
         self.turn_runtime = turn_runtime
-        self.max_forced_replans = MAX_FORCED_REPLANS
+        self.max_forced_replans = max_forced_replans_from_env()
 
     @property
     def total_segments(self) -> int:
@@ -318,12 +366,27 @@ class StructuredContinuationReAct(fastWorkflowReAct):
             scope = getattr(self, "continuation_scope", None)
             if scope is not None:
                 data["continuation_scope"] = asdict(scope)
+            # Only ever written with a finish check attached, so a blob
+            # without one is exactly what it was.
+            outcomes = getattr(self, "dispatch_outcomes", None)
+            if outcomes:
+                data["dispatch_outcomes"] = {str(k): str(v) for k, v in outcomes.items()}
         return data
 
     def import_suspended(self, data: dict[str, Any]) -> None:
         super().import_suspended(data)
         self.forced_replans = int(data.get("forced_replans", 0))
         self.truncated_execute_steps = int(data.get("truncated_execute_steps", 0))
+        raw_outcomes = data.get("dispatch_outcomes")
+        self.dispatch_outcomes = (
+            {str(k): str(v) for k, v in raw_outcomes.items()}
+            if isinstance(raw_outcomes, Mapping) else {}
+        )
+        # The seeded mirror is the stash, which has lost the steps the
+        # context-window fallback cut; a ledger built from it would flag them.
+        self.ledger_incomplete = bool(
+            getattr(self, "mirror_restored", False) and self.truncated_execute_steps > 0
+        )
         raw_scope = data.get("continuation_scope")
         if isinstance(raw_scope, Mapping):
             scope = RuntimeHandleScope(**raw_scope)
@@ -451,7 +514,9 @@ class StructuredContinuationReAct(fastWorkflowReAct):
         )
         host = tracing.current_host()
         # Same key set as build_query_with_next_steps: fw.planner.replan has one
-        # SpanContract, so every producer writes {model, replan_trigger, plan}.
+        # SpanContract, so every producer writes {model, replan_trigger, plan}
+        # (v2: plus plan_source and subjects; this planner is plain text and
+        # names no subjects).
         # Segment bookkeeping and the injected artifact go to record_event below.
         span = tracing.start_span(
             host,
@@ -484,13 +549,15 @@ class StructuredContinuationReAct(fastWorkflowReAct):
             )
             plan = ""
             tracing.end_span(
-                host, span, status=tracing.STATUS_ERROR, attributes={"plan": plan}
+                host, span, status=tracing.STATUS_ERROR,
+                attributes={"plan": plan, "plan_source": "none", "subjects": []},
             )
         except BaseException:
             tracing.end_span(host, span, status=tracing.STATUS_ERROR)
             raise
         else:
-            tracing.end_span(host, span, attributes={"plan": plan})
+            tracing.end_span(host, span, attributes={
+                "plan": plan, "plan_source": "text" if plan else "none", "subjects": []})
         artifact = (
             f"HARNESS REPLAN — segment {next_segment} of {self.total_segments}. "
             f"Reason: {trigger}.\n{plan or DEFAULT_CONTINUATION_PLAN}"
@@ -507,6 +574,9 @@ class StructuredContinuationReAct(fastWorkflowReAct):
                 "completed_segment": completed_segment,
                 "next_segment": next_segment,
                 "max_segments": self.total_segments,
+                # True when this replan opened the last segment allowed.
+                "reached_limit": self.forced_replans >= getattr(
+                    self, "max_forced_replans", MAX_FORCED_REPLANS),
                 "reason": trigger,
                 "plan": plan,
                 "planner_error": planner_error,
@@ -518,7 +588,27 @@ class StructuredContinuationReAct(fastWorkflowReAct):
             }
         )
 
+    def later_segment_iterations(self, max_iters: int) -> int:
+        """Iterations the segments after the current one still hold; 0 outside ``_run_segments``."""
+        if not getattr(self, "_running_segments", False):
+            return 0
+        return max(0, self.total_segments - self.forced_replans - 1) * int(max_iters)
+
     def _run_segments(
+        self,
+        trajectory: dict[str, Any],
+        idx: int,
+        input_args: dict[str, Any],
+        max_iters: int,
+    ) -> dspy.Prediction:
+        # Only this loop runs later segments; `aforward` does not.
+        self._running_segments = True
+        try:
+            return self._run_segment_loop(trajectory, idx, input_args, max_iters)
+        finally:
+            self._running_segments = False
+
+    def _run_segment_loop(
         self,
         trajectory: dict[str, Any],
         idx: int,
@@ -539,6 +629,7 @@ class StructuredContinuationReAct(fastWorkflowReAct):
                         "scope_id": getattr(self, "continuation_scope_id", None),
                         "completed_segment": total_segments,
                         "max_segments": total_segments,
+                        "reached_limit": True,
                         "reason": (
                             f"segment {total_segments} reached the "
                             f"{max_iters}-iteration limit"
@@ -558,10 +649,16 @@ class StructuredContinuationReAct(fastWorkflowReAct):
         self.forced_replans = 0
         self.truncated_execute_steps = 0
         self.execute_ordinal_by_step = {}
+        self.dispatch_outcomes = {}
+        self.ledger_incomplete = False
         # ido-8ps.27: one roster nudge per TURN, and a turn here is a forward()
         # across all of its segments, not a segment. (fix-4dsr: the same cap now
         # applies to the finish-check note that replaced the roster nudge.)
         self._finish_notes_fired = 0
+        # One vendor budget per turn (routing and the finish check together).
+        # A resume after ask_user does not come through here, so it keeps it.
+        budget_factory = getattr(self, "vendor_budget_factory", None)
+        self.vendor_budget = budget_factory() if callable(budget_factory) else None
         self.bind_scope()
         trajectory: dict[str, Any] = {}
         max_iters = int(input_args.pop("max_iters", self.max_iters))

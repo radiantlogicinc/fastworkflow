@@ -81,7 +81,7 @@ httpx2 = {version = ">=2.0.0", optional = true}
 # ---- Optional `router` / `jev` extras: TypeSafe's Jev decision model ----
 # observation_offloading/search_router.py; off unless FW_SEARCH_ROUTER=jev and JEV_API_KEY.
 # observation_offloading/finish_check.py; off unless FW_FINISH_CHECK=jev and JEV_API_KEY.
-typesafe-sdk = {version = "^0.7.2", optional = true}
+typesafe-sdk = {version = "0.7.2", optional = true}
 pydantic-settings = {version = ">=2.14.2", optional = true}  # GHSA-4xgf-cpjx-pc3j (NestedSecretsSettingsSource follows symlinks outside secrets_dir -> local file read + secrets_dir_max_size bypass, fixed 2.14.2). Pulled transitively by mcp/fastapi-mcp in the `server` extra.
 datasets = {version = "^5.0.1", optional = true}  # CVE-2026-66007 / PYSEC-2026-3716 (path traversal via unsanitized file_name; fixed 5.0.1)
 
@@ -151,6 +151,8 @@ priority = "explicit"
 
 [tool.poetry.extras]
 training = ["datasets"]
+# Deprecated alias of `jev`, kept so existing `fastworkflow[router]` installs work.
+# Keep its list identical to `jev`'s; new docs and installs should name `jev`.
 router = ["typesafe-sdk"]
 # Every Jev-backed feature (search routing, the finish-time execution check).
 jev = ["typesafe-sdk"]

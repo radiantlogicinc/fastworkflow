@@ -10,10 +10,14 @@ import threading
 import time
 from pathlib import Path
 
+import litellm
 import pytest
 
 import fastworkflow
+from fastworkflow import context_budget
 from fastworkflow.observability import store as observability_store
+from fastworkflow.observation_offloading import jev_client
+from tests.jev_stub import JevStub
 
 # Add the project root to the Python path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -160,6 +164,52 @@ def pytest_configure(config):
         "markers",
         "requires_llm_key: mark test as needing a real LLM API key to do more than skip",
     )
+
+
+@pytest.fixture
+def jev_stub(monkeypatch):
+    """A loopback stand-in for TypeSafe's Jev API (``tests/jev_stub.py``), reached through FW_JEV_BASE_URL.
+
+    Real HTTP through the real typesafe_sdk: the owner-approved harness for the
+    Jev-backed features, in place of a scripted client.
+    """
+    stub = JevStub()
+    monkeypatch.setenv(jev_client.BASE_URL_ENV, stub.base_url)
+    monkeypatch.delitem(fastworkflow._env_vars, jev_client.BASE_URL_ENV, raising=False)
+    monkeypatch.delenv(jev_client.SDK_BASE_URL_ENV, raising=False)
+    yield stub
+    stub.close()
+    # A request the test abandoned still holds a vendor worker until it ends by
+    # itself, and counts toward the orphan cap while it runs; the next test
+    # must not find the pool busy.
+    deadline = time.monotonic() + 5
+    while (jev_client.calls_in_flight() or jev_client.calls_orphaned()) and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+
+@pytest.fixture
+def restore_litellm_model_cost():
+    """Undo a test's ``litellm.register_model`` when it ends.
+
+    Registration is process-wide: it writes ``litellm.model_cost`` and the
+    provider's model-name set. Both are restored in place, since other modules
+    hold references to them, and the window caches that read them are cleared.
+    """
+    model_cost = {key: dict(value) for key, value in litellm.model_cost.items()}
+    openai_models = set(litellm.open_ai_chat_completion_models)
+    try:
+        yield
+    finally:
+        litellm.model_cost.clear()
+        litellm.model_cost.update(model_cost)
+        litellm.open_ai_chat_completion_models.clear()
+        litellm.open_ai_chat_completion_models.update(openai_models)
+        # Private, and absent from some litellm versions: the lowercase map
+        # and model-info caches built from ``model_cost``.
+        invalidate = getattr(litellm.utils, "_invalidate_model_cost_lowercase_map", None)
+        if invalidate is not None:
+            invalidate()
+        context_budget.reset_cache()
 
 
 @pytest.fixture(autouse=True, scope="function")

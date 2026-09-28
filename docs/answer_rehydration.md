@@ -62,6 +62,20 @@ under the key `answer_rehydration_note`:
 Not rehydrated for the answer (evidence exists under these observations): O5, O9, O14
 ```
 
+(That is the line until 2026-09-28. Since fix-94m9 the prefix,
+`answer_rehydration.NOT_REHYDRATED_PREFIX`, also tells the extractor to say so
+in the answer:
+
+```
+Not rehydrated for the answer (evidence exists under these observations, but the answer's evidence limit was reached; say in the final answer that the rows of these observations are not included in it): O5, O9, O14
+```
+
+It changes the extract prompt only when the budget binds, but it is an
+agent-visible wording change on the default path made without re-measuring
+answers. The agent signature, the `search_memory` description and the offload
+label now also say observations are *normally* restored; see
+[`observation_search.md`](observation_search.md).)
+
 Ascending by execute ordinal, always the same line for the same run. It exists so
 the extractor can report those slots as **unresolved** rather than guessing at
 them — the opposite of the pointer answer, which claims the evidence was seen.

@@ -1,5 +1,5 @@
+import asyncio
 import logging
-import os
 import time
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
@@ -12,6 +12,7 @@ from dspy.primitives.module import Module
 from dspy.signatures.signature import ensure_signature
 
 from fastworkflow import tracing
+from fastworkflow.context_budget import env_value
 from fastworkflow.utils.dspy_logger import DSPyForward
 
 logger = logging.getLogger(__name__)
@@ -24,8 +25,14 @@ EVAL_FINISH_REMINDERS_ENV = "FW_EVAL_FINISH_REMINDERS"
 def _evaluation_control(
     name: str, *, default_enabled: bool = True
 ) -> tuple[bool, str | None]:
-    raw = os.environ.get(name)
-    if raw is None:
+    """Read a disable-only control the way ``FW_FINISH_CHECK`` is read.
+
+    The workflow's ``fastworkflow.env`` first, then the process; an empty value
+    is unset. Anything set other than ``0`` is refused, so a stray ``=1`` fails
+    the agent build instead of silently running the default arm.
+    """
+    raw = env_value(name)
+    if not raw:
         return default_enabled, None
     if raw != "0":
         raise ValueError(f"{name} must be exactly 0 when set")
@@ -208,6 +215,40 @@ class fastWorkflowReAct(Module):
         self._finish_notes_fired = data.get(
             "finish_notes_fired", data.get("roster_nudges_fired", 0)
         )
+        # The finish check reads the turn's steps from current_trajectory, which
+        # starts empty in a process that only imported this suspension. Only
+        # with a check attached is it seeded, from a copy of the stash (the two
+        # must stay separate objects), so without one nothing changes. The
+        # stash holds what survived the context-window fallback, not
+        # necessarily every step: ``mirror_restored`` says the mirror came
+        # from it. "Attached" means active (``workflow_agent.finish_check_active``,
+        # not imported here: it imports this module): a check switched off by
+        # FW_EVAL_FINISH_REMINDERS=0 seeds nothing either.
+        self.mirror_restored = False
+        if (not getattr(self, "current_trajectory", None)
+                and getattr(self, "finish_checker", None) is not None
+                and bool(getattr(self, "finish_reminders_enabled", True))):
+            self.current_trajectory = dict(self._suspended["trajectory"])
+            self.mirror_restored = True
+
+    def planner_view(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        """The request and trajectory a mid-turn replan plans from.
+
+        ``inputs`` and ``current_trajectory`` when set. A process that only
+        imported a suspension has neither until ``resume()`` runs, which is
+        after the ask_user replan; each empty one falls back to a copy of the
+        suspended stash's. The stash has no ``action_N`` keys and carries the
+        trajectory as the agent saw it (offload labels, not raw observations).
+        """
+        inputs = self.inputs
+        trajectory = self.current_trajectory
+        stash = self._suspended
+        if stash is not None:
+            if not inputs:
+                inputs = dict(stash["input_args"])
+            if not trajectory:
+                trajectory = dict(stash["trajectory"])
+        return inputs, trajectory
 
     def _format_trajectory(self, trajectory: dict[str, Any]):
         adapter = dspy.settings.adapter or dspy.ChatAdapter()
@@ -502,6 +543,14 @@ class fastWorkflowReAct(Module):
         # nor its note count.
         self.current_trajectory = {}
         self._finish_notes_fired = 0
+        # The rest of the per-turn state the synchronous entry
+        # (``StructuredContinuationReAct.forward``) resets: the finish check's
+        # dispatch outcomes and incomplete-ledger mark, and one vendor budget
+        # per turn for routing and the check together.
+        self.dispatch_outcomes = {}
+        self.ledger_incomplete = False
+        budget_factory = getattr(self, "vendor_budget_factory", None)
+        self.vendor_budget = budget_factory() if callable(budget_factory) else None
         for idx in range(max_iters):
             try:
                 pred = await self._async_call_with_potential_trajectory_truncation(self.react, trajectory, **input_args)
@@ -521,8 +570,10 @@ class fastWorkflowReAct(Module):
             if pred.next_tool_name == "finish":
                 # A fired nudge replaces this step's observation and returns
                 # control to the loop; no nudge ends the turn, as before.
-                if not self._intercept_finish(
-                    trajectory, idx, input_args, max_iters
+                # The check makes blocking HTTP calls, so it runs off the event loop;
+                # with no check attached there is nothing to intercept and no thread hop.
+                if getattr(self, "finish_checker", None) is None or not await asyncio.to_thread(
+                    self._intercept_finish, trajectory, idx, input_args, max_iters
                 ):
                     break
             # What `_finish_check_note` reads to know how much room is left. The sync
@@ -546,16 +597,38 @@ class fastWorkflowReAct(Module):
         this step on the note: the loop increments the counter once more and
         stops at ``max_iters``. The check declines below its minimum, which is
         how "never on exhaustion" is kept -- a turn with no room is a turn the
-        note cannot help.
+        note cannot help. That gate is this segment's room only. A segmented
+        agent (``later_segment_iterations``) restarts its counter at every
+        segment, so the count the note STATES adds what its later segments
+        still hold (``shown_iterations_left``); it does not change when the
+        note may fire.
+
+        A finish not offered to an attached check (switched off, or this turn's
+        note already spent) is still recorded by it (``record_skip``); with no
+        check attached nothing is recorded.
         """
         checker = getattr(self, "finish_checker", None)
-        if checker is None or not getattr(self, "finish_reminders_enabled", True):
-            return ""
-        if getattr(self, "_finish_notes_fired", 0) >= 1:
+        if checker is None:
             return ""
         left = int(max_iters) - int(getattr(self, "iteration_counter", 0)) - 1
+        skipped = ("disabled" if not getattr(self, "finish_reminders_enabled", True)
+                   else "cap reached" if getattr(self, "_finish_notes_fired", 0) >= 1 else "")
+        if skipped:
+            record_skip = getattr(checker, "record_skip", None)
+            if callable(record_skip):
+                try:
+                    record_skip(self, reason=skipped, iterations_left=left)
+                except Exception as error:  # noqa: BLE001 - recording must never fail a turn
+                    logger.warning("finish check event not recorded: %s", type(error).__name__)
+            return ""
         try:
-            text = checker.note(self, input_args, iterations_left=left)
+            later = getattr(self, "later_segment_iterations", None)
+            later_room = int(later(max_iters)) if callable(later) else 0
+            if later_room > 0:
+                text = checker.note(self, input_args, iterations_left=left,
+                                    shown_iterations_left=max(0, left) + later_room)
+            else:
+                text = checker.note(self, input_args, iterations_left=left)
         except Exception as error:  # noqa: BLE001 - a note must never fail a turn
             logger.warning("finish check skipped: %s: %s", type(error).__name__, error)
             return ""
@@ -719,6 +792,9 @@ class fastWorkflowReAct(Module):
 
         Users can override this method to implement their own truncation logic.
         """
+        # Every key is a step key: the coverage statement and its key were
+        # removed with answer_coverage in fix-4dsr and nothing writes such a key
+        # any more. The rest of this comment is history from when it existed:
         # The coverage statement is a rule ABOUT the trajectory, not a step of
         # it, and it is the one key whose whole job is to be read. Dropping it as
         # "the oldest tool call information" would be a bug. It exists only on

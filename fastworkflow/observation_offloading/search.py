@@ -1,7 +1,6 @@
 """Answer evidence questions using exactly one complete archived observation."""
 from __future__ import annotations
 
-from fractions import Fraction
 from typing import Any, Callable, Optional
 import hashlib
 import re
@@ -9,13 +8,43 @@ import time
 
 import dspy
 
+import fastworkflow
 from fastworkflow.utils.dspy_utils import get_lm
+from fastworkflow.utils.signatures import INVALID_FLOAT_VALUE, INVALID_INT_VALUE
 
 from fastworkflow import context_budget
-from fastworkflow.observation_offloading.archive import RuntimeHandleArchive, RuntimeHandleScope
-from fastworkflow.observation_offloading.labels import is_search_answer_key, search_answer_key
+from fastworkflow.observation_offloading.archive import (
+    RuntimeHandleArchive,
+    RuntimeHandleScope,
+)
+from fastworkflow.observation_offloading.labels import (
+    is_search_answer_key,
+    search_answer_key,
+)
 from fastworkflow.observation_offloading.listing import parse_table, served_rows
-from fastworkflow.observation_offloading.search_router import SearchRouter
+from fastworkflow.observation_offloading.related import (  # noqa: F401 - re-exported
+    RELATED_HANDLES_SHOWN,
+    RELATED_LOOKUP_FAILED,
+    RELATED_SCOPE_REFUSED,
+    SHORT_OBSERVATION_BYTES,
+    SHORT_OBSERVATION_MARK,
+    _RELATED_STOPWORDS,
+    _fold_word,
+    _related_words,
+    _scored_summaries,
+    command_verb,
+    related_handles,
+    relatedness,
+    scored_related_handles,
+    short_observation_answer,
+    short_observation_lookup,
+)
+from fastworkflow.observation_offloading.search_router import (
+    ALL_ROWS,
+    POLICY_WITHHELD,
+    ROUTER_BUDGET,
+    SearchRouter,
+)
 from fastworkflow.observation_offloading.state import (
     archive,
     context_clause_of,
@@ -27,13 +56,14 @@ from fastworkflow.observation_offloading.state import (
     stored_handles,
 )
 
-#: The reference page geometry of an observation read: one 4 KB page, at most
-#: three of them in a single search. Their product is no longer an independent
-#: contract -- it is the REFERENCE VALUE of ``SEARCH_OBSERVATION`` below, which
-#: reproduces it exactly at the reference window and scales it with the search
-#: model everywhere else.
-#: (Since 2026-09-27 the bound is a quarter of the window, see
-#: ``SEARCH_OBSERVATION``; one page remains its floor.)
+#: Since 2026-09-27 the read bound is a quarter of the search model's window
+#: (see ``SEARCH_OBSERVATION``) and this geometry no longer equals it; one page
+#: remains its floor. Superseded history: the reference page geometry of an
+#: observation read was one 4 KB page, at most three of them in a single
+#: search. Their product is no longer an independent contract -- it is the
+#: REFERENCE VALUE of ``SEARCH_OBSERVATION`` below, which reproduces it exactly
+#: at the reference window and scales it with the search model everywhere else
+#: (since 2026-09-27, only below the ceiling: a wider window no longer raises it).
 DEFAULT_PAGE_BYTES = 4096
 SEARCH_MEMORY_MAX_PAGES = 3
 # A search answer is model output capped only by the 2,048-token completion
@@ -55,18 +85,22 @@ SEARCH_ANSWER_MIN_BYTES = context_budget.SEARCH_ANSWER.floor
 #: is routinely a different model with a different window, and sizing one
 #: model's prompt from another model's window is the failure this bound exists
 #: to prevent.
-SEARCH_MODEL_ENV = "LLM_OBSERVATION_SEARCH"
+SEARCH_MODEL_ENV = context_budget.SEARCH_MODEL_ENV
 
 #: How much archived observation ONE ``search_memory`` call may hand the search
 #: model. A fixed fraction of that model's context window, on the
 #: ``fastworkflow.context_budget`` pattern, so moving the search model moves the
-#: bound and no deployment has to set a byte count. The fraction is pinned to
+#: bound and no deployment has to set a byte count. (History, superseded on
+#: 2026-09-27 by the quarter-of-the-window paragraph below:) The fraction is pinned to
 #: reproduce the declared page geometry EXACTLY at the reference window:
 #: 131,072 tokens x 4 bytes/token x 3/128 = 12,288 = ``DEFAULT_PAGE_BYTES`` x
 #: ``SEARCH_MEMORY_MAX_PAGES``. Its floor is one page: below that a search could
 #: not read a single page of evidence, which is not a search. It has no tuning
 #: override: the search model's window is the only input, and
 #: ``FW_MODEL_CONTEXT_TOKENS`` is how a deployment corrects that window.
+#: (Superseded on 2026-09-27: it now has the tuning override
+#: ``FW_SEARCH_OBSERVATION_MAX_BYTES``, and ``FW_MODEL_CONTEXT_TOKENS`` only
+#: lowers the search window -- see the ceiling paragraph below.)
 #:
 #: Raised to a quarter of the window (fix-ufot follow-up, 2026-09-27): 131,072
 #: bytes at the reference window. The page geometry above is the FORMER value
@@ -75,13 +109,20 @@ SEARCH_MODEL_ENV = "LLM_OBSERVATION_SEARCH"
 #: large unpaginated observations, which it lets be read whole instead of as a
 #: prefix. Hex-heavy text tokenizes below 4 bytes/token; a quarter still leaves
 #: room in the window, and a refusal degrades to the typed over-window outcome.
-SEARCH_OBSERVATION = context_budget.BudgetSpec(
-    name="search_observation_max_bytes",
-    fraction=Fraction(1, 4),
-    override_env=None,
-    floor=DEFAULT_PAGE_BYTES,
-    what="one archived observation handed to the observation-search model",
-)
+#:
+#: Capped at 131,072 bytes (``context_budget.SEARCH_OBSERVATION_CEILING_BYTES``,
+#: 2026-09-27): a quarter of a 1M-token window is ~1 MB sent on every search of
+#: that observation, paid again per call. The cap equals the reference value,
+#: so a wider search model no longer raises the bound; an observation above it
+#: is read as a prefix with the bounded-evidence marker. The search window is
+#: also the SMALLER of ``FW_MODEL_CONTEXT_TOKENS`` and the search model's
+#: metadata when both are known, since that setting usually states the agent's
+#: window. ``FW_SEARCH_OBSERVATION_MAX_BYTES`` overrides the bound (same
+#: parsing and floor as every other override) and may exceed the cap.
+#:
+#: The spec itself lives in ``context_budget`` so ``budget_provenance``
+#: reports it; its floor there is this module's ``DEFAULT_PAGE_BYTES``.
+SEARCH_OBSERVATION = context_budget.SEARCH_OBSERVATION
 REFERENCE_SEARCH_OBSERVATION_MAX_BYTES = SEARCH_OBSERVATION.reference_bytes  # 12,288 before 2026-09-27; now 131,072
 
 #: The marker that types a search observation whose EVIDENCE was cut, and the
@@ -111,18 +152,15 @@ def search_window_tokens() -> tuple[int, str]:
     ``LLM_OBSERVATION_SEARCH`` instead of ``LLM_AGENT``: the explicit
     ``FW_MODEL_CONTEXT_TOKENS`` setting still wins because it is the
     deployment's statement about the whole stack, then the search model's own
-    litellm metadata, then whatever ``context_budget`` resolves. The metadata
+    litellm metadata, then whatever ``context_budget`` resolves. (Since
+    2026-09-27 the setting no longer wins outright: when it and the search
+    model's metadata are both known, the smaller of the two answers.) The metadata
     lookup is ``context_budget``'s cached one on purpose -- a second
     tokens-from-a-model path is precisely what that module exists to prevent.
+    The resolution itself is ``context_budget.search_window_tokens``, so the
+    provenance record and the search read the same window.
     """
-    if context_budget.env_value(context_budget.MODEL_CONTEXT_TOKENS_ENV):
-        return context_budget.context_window_tokens()
-    model = context_budget.env_value(SEARCH_MODEL_ENV)
-    if model:
-        tokens = context_budget._model_window_tokens(model)
-        if tokens is not None:
-            return tokens, f"{context_budget.SOURCE_MODEL_METADATA}:{model}"
-    return context_budget.context_window_tokens()
+    return context_budget.search_window_tokens()
 
 
 def search_observation_max_bytes() -> int:
@@ -130,9 +168,12 @@ def search_observation_max_bytes() -> int:
 
     Derived like every other budget, with no tuning override. The only thing
     special about this budget is the window it is cut from, so that is the
-    only thing stated here.
+    only thing stated here. Since 2026-09-27 it does have one,
+    ``FW_SEARCH_OBSERVATION_MAX_BYTES``, and the derived value is capped at
+    ``context_budget.SEARCH_OBSERVATION_CEILING_BYTES`` (the override may
+    exceed that cap).
     """
-    return context_budget.budget_bytes(SEARCH_OBSERVATION, search_window_tokens()[0])
+    return context_budget.search_observation_max_bytes()
 
 
 def search_answer_max_bytes_from_env() -> int:
@@ -201,81 +242,6 @@ def text_page(text: str, start_byte: int, max_bytes: int) -> dict[str, Any]:
     }
 
 
-#: An archived observation at or under this many UTF-8 bytes is returned
-#: verbatim instead of searched. It is lossless: the search model would read
-#: exactly these bytes. In recorded runs (fix-cj7t) such handles were
-#: navigation replies ("Context is now 'DirectoryExplorer'") or one-line
-#: failures picked by mistake, 21 of 23 times.
-SHORT_OBSERVATION_BYTES = 256
-SHORT_OBSERVATION_MARK = "[search_memory SHORT OBSERVATION:"
-RELATED_HANDLES_SHOWN = 3
-_RELATED_STOPWORDS = frozenset({
-    "the", "and", "for", "of", "a", "an", "to", "in", "on", "is", "are", "what", "which",
-    "with", "list", "all", "their", "its", "this", "that", "from", "by", "show", "provide",
-    "give", "label", "uid", "listed", "returned", "output", "observation", "corresponding",
-    "value", "was", "were", "get", "find", "open"})
-
-
-def _fold_word(word: str) -> str:
-    return word[:-1] if len(word) > 3 and word.endswith("s") and not word.endswith("ss") else word
-
-
-def _related_words(text: str) -> set[str]:
-    return {_fold_word(w) for w in re.findall(r"[a-z0-9]+", (text or "").lower())
-            if len(w) > 1 and w not in _RELATED_STOPWORDS}
-
-
-def related_handles(
-    question: str,
-    exclude: str,
-    scope: RuntimeHandleScope,
-    store: RuntimeHandleArchive,
-    limit: int = RELATED_HANDLES_SHOWN,
-) -> list[tuple[str, str, Optional[str]]]:
-    """``(alias, command, clause)`` of the turn's handles that best match *question*.
-
-    Scored on the question's words against each handle's command name and
-    recorded subject clause, most recent first on ties. Short handles and
-    search-answer records are never offered: they are not something to search.
-    Chosen from the archive's summaries, so no stored text is loaded; subjects
-    come from the process cache after their first read.
-    """
-    wanted = _related_words(question)
-    scored = []
-    for row in store.list_summaries(scope):
-        alias = str(row.get("alias") or "")
-        if alias == exclude or is_search_answer_key(alias):
-            continue
-        if int(row.get("utf8_bytes") or 0) <= SHORT_OBSERVATION_BYTES:
-            continue
-        command = str(row.get("command") or "")
-        verb = re.split(r"[\s<(]", command.strip(), maxsplit=1)[0]
-        clause = context_clause_of(scope, alias, selected_archive=store)
-        score = (3 * len(wanted & _related_words(verb.replace("_", " ")))
-                 + 2 * len(wanted & _related_words(clause or "")))
-        if score:
-            scored.append(((score, int(row.get("offload_order") or 0)), alias, verb, clause))
-    scored.sort(key=lambda item: item[0], reverse=True)
-    return [(alias, verb, clause) for _, alias, verb, clause in scored[:limit]]
-
-
-def short_observation_answer(
-    *, alias: str, command: str, text: str,
-    related: list[tuple[str, str, Optional[str]]],
-) -> str:
-    """The whole of a short observation, and where the answer more likely is."""
-    ran = f" of {command}" if command else ""
-    if related:
-        where = "; ".join(f"{a} ({c}{', in ' + cl if cl else ''})" for a, c, cl in related)
-        hint = (f"If it does not answer the question, observations in this turn that "
-                f"match it better are: {where}. Search one of those instead.")
-    else:
-        hint = ("No other observation in this turn matches the question's words; run "
-                "the command that produces what you need.")
-    return (f"{SHORT_OBSERVATION_MARK} {alias} is the complete response{ran}, shown "
-            f"verbatim because it is too short to search]\n{text}\n{hint}")
-
-
 NO_NARROWING = "NONE"
 NARROWING_DESCRIPTION_CHARS = 160
 
@@ -287,8 +253,12 @@ def narrowing_inputs(
 
     An input declared with ``available_from`` picks a record to open rather than
     narrowing a listing, and a required input was already given, so neither is
-    offered. Anything that goes wrong reads as NONE: the answer then describes
-    the narrowing instead of naming an input.
+    offered. Optional means an ``Optional`` type OR a non-None default: paging
+    and filter inputs (``limit: int = 50``, ``status: str = "all"``) are
+    usually declared the second way. The required-field sentinels
+    (``NOT_FOUND``, ``INVALID_INT_VALUE``, ``INVALID_FLOAT_VALUE``) are defaults
+    that mean "required", not optional. Anything that goes wrong reads as NONE:
+    the answer then describes the narrowing instead of naming an input.
     """
     if not command or describe_inputs is None:
         return NO_NARROWING
@@ -296,13 +266,28 @@ def narrowing_inputs(
         inputs = describe_inputs(command) or []
     except Exception:  # noqa: BLE001 - metadata must never stop a search
         return NO_NARROWING
-    # The metadata reports a required field's default as None too, so
-    # optionality is read from the declared type.
+    # The metadata reports a required field's default as None too, so a None
+    # default says nothing and optionality is then read from the declared type.
     lines = [f"{field['name']}: {str(field.get('description') or '')[:NARROWING_DESCRIPTION_CHARS]}"
              for field in inputs
              if field.get("name") and not field.get("available_from")
-             and ("Optional" in str(field.get("type")) or "None" in str(field.get("type")))]
+             and _is_optional_input(field)]
     return "\n".join(lines) or NO_NARROWING
+
+
+def _is_optional_input(field: dict[str, Any]) -> bool:
+    declared = str(field.get("type"))
+    if "Optional" in declared or "None" in declared:
+        return True
+    default = field.get("default")
+    # Required fields conventionally carry a sentinel default that parameter
+    # extraction treats as missing, so a sentinel default is not optionality.
+    return default is not None and default not in _required_field_sentinels()
+
+
+def _required_field_sentinels() -> tuple[Any, ...]:
+    return (fastworkflow.get_env_var("NOT_FOUND", default="NOT_FOUND"),
+            INVALID_INT_VALUE, INVALID_FLOAT_VALUE)
 
 
 #: What the subject field says when the framework recorded no subject for the
@@ -744,6 +729,65 @@ def bound_answer_for_trajectory(
                           evidence_marking=evidence_marking)
 
 
+#: Why a search did not serve a listing's rows, on every search event. None when
+#: it did.
+LISTING_SKIP_ROUTER_DISABLED = "router_disabled"
+LISTING_SKIP_NO_LISTING = "no_listing"
+LISTING_SKIP_ROUTER_ERROR = "router_error"
+#: The turn's routing calls or vendor time were used up, so the router was not asked.
+LISTING_SKIP_ROUTER_BUDGET = ROUTER_BUDGET
+#: The capture policy withheld a value the router would send, so nothing was sent.
+LISTING_SKIP_POLICY_WITHHELD = POLICY_WITHHELD
+LISTING_SKIP_NOT_ALL_ROWS = "not_all_rows"
+LISTING_SKIP_BELOW_THRESHOLD = "below_threshold"
+LISTING_SKIP_SHORT = "short_observation"
+LISTING_SKIP_MISSING = "missing_handle"
+#: The router wanted every row, but not one fits the answer bound beside the
+#: text above the rows and the closing line, so the model answers instead.
+LISTING_SKIP_ROWS_DO_NOT_FIT = "rows_do_not_fit"
+
+
+def listing_path_fields(
+    router: Optional[SearchRouter],
+    table: Optional[dict[str, Any]],
+    route: Optional[dict[str, Any]],
+    *,
+    skipped: Optional[str] = None,
+) -> dict[str, Any]:
+    """Which path a search took, so a ``route`` of None is never ambiguous.
+
+    ``route`` alone is None both when routing is off and when no listing was
+    parsed; these fields separate the two and name the refusal otherwise.
+    ``for_report`` is the router's verdict on whether the rows were wanted
+    only for the final answer. It is recorded and does not change the path.
+    """
+    if skipped is None:
+        if router is None:
+            skipped = LISTING_SKIP_ROUTER_DISABLED
+        elif table is None:
+            skipped = LISTING_SKIP_NO_LISTING
+        elif route and route.get("error") == ROUTER_BUDGET:
+            skipped = LISTING_SKIP_ROUTER_BUDGET
+        elif route and route.get("error") == POLICY_WITHHELD:
+            skipped = LISTING_SKIP_POLICY_WITHHELD
+        elif not route or route.get("error"):
+            skipped = LISTING_SKIP_ROUTER_ERROR
+        elif route.get("choice") != ALL_ROWS:
+            skipped = LISTING_SKIP_NOT_ALL_ROWS
+        elif not router.wants_all_rows(route):
+            skipped = LISTING_SKIP_BELOW_THRESHOLD
+    return {"router_enabled": router is not None,
+            "listing_parsed": table is not None,
+            "listing_shape": table["shape"] if table else None,
+            "listing_skip_reason": skipped,
+            "for_report": route.get("for_report") if route else None}
+
+
+def trailing_lines_dropped(text: str, table: dict[str, Any]) -> int:
+    """Non-blank lines after the parsed listing's end, which serving rows omits."""
+    return sum(1 for line in text.splitlines()[table["end_line"]:] if line.strip())
+
+
 def search_memory(
     question: str,
     alias: str,
@@ -788,11 +832,12 @@ def search_memory(
         tier = "sqlite"
     if handle is None:
         record_event({"kind": "search_memory", "scope_id": selected_scope.scope_id,
-                      "alias": wanted, "status": "missing", "still_inline": still_inline})
+                      "alias": wanted, "status": "missing", "still_inline": still_inline,
+                      **listing_path_fields(router, None, None, skipped=LISTING_SKIP_MISSING)})
         return f"search_memory: no matching offloaded handle {wanted} in this turn."
     query = f"{reasoning.strip().rstrip('.')}. {question.strip()}" if reasoning.strip() else question.strip()
     command = str(handle.get("command") or "")
-    verb = re.split(r"[\s<(]", command.strip(), maxsplit=1)[0]
+    verb = command_verb(command)
     base_event = {"kind": "search_memory", "scope_id": selected_scope.scope_id,
                   "alias": wanted, "tier": tier, "still_inline": still_inline,
                   "question": question, "reasoning": reasoning,
@@ -803,27 +848,45 @@ def search_memory(
         return round((time.monotonic() - began) * 1000)
 
     if base_event["observation_bytes"] <= SHORT_OBSERVATION_BYTES:
-        related = related_handles(question, wanted, selected_scope, store)
+        lookup = short_observation_lookup(question, wanted, verb, selected_scope, store)
+        scored = lookup["scored"]
+        related = [(alias, verb, clause) for _, alias, verb, clause in scored]
         text = short_observation_answer(alias=wanted, command=verb,
-                                        text=handle["text"], related=related)
+                                        text=handle["text"], related=related,
+                                        clause=lookup["clause"], unlisted=lookup["unlisted"])
         record_event({**base_event, "status": "short_verbatim",
                       "related": [alias for alias, _, _ in related],
+                      "related_scores": [score for score, _, _, _ in scored],
+                      "own_score": lookup["own_score"],
+                      "related_lookup_failed": lookup["unlisted"] == RELATED_LOOKUP_FAILED,
+                      "related_scope_refused": lookup["unlisted"] == RELATED_SCOPE_REFUSED,
+                      "related_lookup_error": lookup["error"],
+                      "subject_recorded": lookup["clause"] is not None,
+                      **listing_path_fields(router, None, None, skipped=LISTING_SKIP_SHORT),
                       "observation_utf8_bytes": len(text.encode("utf-8")),
                       "latency_ms": elapsed_ms()})
         return text
     table = parse_table(handle["text"])
     route = (router.route(question, reasoning, handle["text"], host=trace_host)
              if (router and table) else None)
+    path = listing_path_fields(router, table, route)
     if router is not None and router.wants_all_rows(route):
         header = answer_header(wanted, tier)
-        text, shown, total = served_rows(
-            wanted, table, search_answer_max_bytes_from_env() - len(header.encode("utf-8")))
-        record_event({**base_event, "status": "rows_served", "router": route,
-                      "listing_shape": table["shape"],
-                      "rows_shown": shown, "rows_total": total,
-                      "observation_utf8_bytes": len((header + text).encode("utf-8")),
-                      "latency_ms": elapsed_ms()})
-        return header + text
+        answer_bound = search_answer_max_bytes_from_env()
+        served = served_rows(wanted, table, answer_bound - len(header.encode("utf-8")))
+        if served is None:
+            path = listing_path_fields(router, table, route, skipped=LISTING_SKIP_ROWS_DO_NOT_FIT)
+        else:
+            text, shown, total = served
+            served_bytes = len((header + text).encode("utf-8"))
+            record_event({**base_event, "status": "rows_served", "router": route,
+                          **path,
+                          "rows_shown": shown, "rows_total": total,
+                          "observation_utf8_bytes": served_bytes,
+                          "served_over_bound": served_bytes > answer_bound,
+                          "trailing_lines_dropped": trailing_lines_dropped(handle["text"], table),
+                          "latency_ms": elapsed_ms()})
+            return header + text
     narrowing = narrowing_inputs(verb, describe_inputs)
     # The evidence is cut to the search model's own budget BEFORE the call, not
     # hoped to fit it. An execute observation that used no result handles is
@@ -831,7 +894,6 @@ def search_memory(
     # whole on every search of it -- paid for again on every repeat, and past
     # some size refused outright by the provider.
     max_observation_bytes = search_observation_max_bytes()
-    command = str(handle.get("command") or "")
     # ido-kmm (F4). The subject travels BESIDE the evidence, never inside it:
     # ``handle["text_sha256"]`` still covers exactly the bytes the command
     # returned, so an observation and its digest stay comparable with every
@@ -858,9 +920,9 @@ def search_memory(
         alias=wanted, command=command,
         shown_bytes=evidence["shown_bytes"], total_bytes=evidence["total_bytes"],
     ) if evidence["bounded"] else ""
-    event = {"kind": "search_memory", "scope_id": selected_scope.scope_id,
-             "alias": wanted, "tier": tier, "still_inline": still_inline, "question": question,
-             "reasoning": reasoning, "observation_bytes": evidence["total_bytes"],
+    # ``base_event["observation_bytes"]`` is ``evidence["total_bytes"]``: both
+    # measure the whole stored text.
+    event = {**base_event,
              "observation_sent_bytes": evidence["shown_bytes"],
              "observation_bounded": evidence["bounded"],
              "observation_max_bytes": max_observation_bytes,
@@ -869,8 +931,8 @@ def search_memory(
              "subject_recorded": not subject_is_unknown(subject),
              "subject_utf8_bytes": subject_bytes,
              "router": route,
-             "narrowing_inputs": narrowing != NO_NARROWING,
-             "text_sha256": handle["text_sha256"]}
+             **path,
+             "narrowing_inputs": narrowing != NO_NARROWING}
     # A deployment that never declared the search role gets the agent's model
     # and credential rather than a failed search: the window half already falls
     # back that way (``search_window_tokens``), so this makes the halves agree.

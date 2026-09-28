@@ -51,6 +51,14 @@ class PersistenceError(RuntimeError):
     """Handle text and digest disagree, or an alias collides."""
 
 
+#: A row under the alias exists for this turn key that this scope may not
+#: reuse: its text differs, or it belongs to another channel (which this
+#: scope cannot read, so identical text cannot be told from different text).
+ALIAS_COLLISION_MESSAGE = (
+    "runtime handle alias is already stored for this turn (different text or another channel)"
+)
+
+
 # ---------------------------------------------------------------------------
 # Redaction policy (ido-zlm)
 # ---------------------------------------------------------------------------
@@ -174,6 +182,11 @@ def clear_live_raw() -> None:
 #: shorter than the evidence writes' wait.
 EVENT_WRITE_TIMEOUT_SECONDS = 0.5
 
+#: How long ``list_summaries`` waits for the database lock. It only feeds a
+#: suggestion printed beside an answer that is already complete, so it gives
+#: up on the same terms as an event write rather than the evidence writes' 30 s.
+SUMMARY_READ_TIMEOUT_SECONDS = 0.5
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -188,6 +201,10 @@ class RuntimeHandleScope:
     is PERSISTED is narrower: ``turn_key`` and ``channel_id`` key and erase
     the evidence rows, and ``scope_id`` is stored beside them only so an
     erasure can reach this process's caches.
+
+    Every read and subject write matches the channel as well as the turn key,
+    so a scope pairing another channel with this turn's key reads nothing and
+    cannot replace this channel's subjects; persisting under it collides.
     """
 
     store_identity: str
@@ -206,6 +223,18 @@ class RuntimeHandleScope:
             sort_keys=True,
         ).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
+
+
+def is_broad_scope(scope: RuntimeHandleScope) -> bool:
+    """Whether *scope* is keyed by something wider than one turn.
+
+    The process-default scope and the between-turns fallback both use the
+    channel (or the process) as the turn key, so their rows span every turn --
+    and, for the default scope, every session -- that fell back to it.
+    Enumerating the handles of such a scope lists other turns' commands and
+    subjects, so ``list_summaries`` refuses to.
+    """
+    return scope.turn_key == scope.channel_id
 
 
 class RuntimeHandleArchive:
@@ -309,18 +338,14 @@ class RuntimeHandleArchive:
             conn.commit()
         row_sha256 = self._stored_sha256(scope, alias)
         if row_sha256 is None:
-            raise PersistenceError(
-                "runtime handle alias collides with different text in this turn"
-            )
+            raise PersistenceError(ALIAS_COLLISION_MESSAGE)
         live = self._live_copy(scope, alias, row_sha256)
         if live is not None:
             same = live["text_sha256"] == text_sha256
         else:
             same = row_sha256 in (stored_sha256, text_sha256)
         if not same:
-            raise PersistenceError(
-                "runtime handle alias collides with different text in this turn"
-            )
+            raise PersistenceError(ALIAS_COLLISION_MESSAGE)
         if live is None and row_sha256 == stored_sha256 and stored_text != text:
             with _live_lock:
                 _live_raw.setdefault(scope.scope_id, {})[(self.db_path, str(alias))] = {
@@ -330,17 +355,15 @@ class RuntimeHandleArchive:
                 }
         stored = self.get(scope, alias)
         if stored is None:
-            raise PersistenceError(
-                "runtime handle alias collides with different text in this turn"
-            )
+            raise PersistenceError(ALIAS_COLLISION_MESSAGE)
         return stored
 
     def _stored_sha256(self, scope: RuntimeHandleScope, alias: str) -> Optional[str]:
         with closing(self._connect()) as conn:
             row = conn.execute(
                 "SELECT text_sha256 FROM offload_evidence "
-                "WHERE turn_key = ? AND alias = ?",
-                (scope.turn_key, str(alias)),
+                "WHERE turn_key = ? AND channel_id = ? AND alias = ?",
+                (scope.turn_key, scope.channel_id, str(alias)),
             ).fetchone()
         return None if row is None else str(row["text_sha256"])
 
@@ -369,25 +392,27 @@ class RuntimeHandleArchive:
                 SELECT alias, offload_order, command_name, step_index,
                        text_utf8, text_sha256
                 FROM offload_evidence
-                WHERE turn_key = ? AND alias = ?
+                WHERE turn_key = ? AND channel_id = ? AND alias = ?
                 """,
-                (scope.turn_key, alias),
+                (scope.turn_key, scope.channel_id, alias),
             ).fetchone()
         return None if row is None else self._read(scope, row)
 
-    def list(self, scope: RuntimeHandleScope, alias: str = "") -> list[dict[str, Any]]:
+    def list(self, scope: RuntimeHandleScope, alias: str = "", *,
+             timeout: float = 30.0) -> list[dict[str, Any]]:
+        """Every stored row of *scope* (or just *alias*), waiting at most *timeout* for the lock."""
         query = """
             SELECT alias, offload_order, command_name, step_index,
                    text_utf8, text_sha256
             FROM offload_evidence
-            WHERE turn_key = ?
+            WHERE turn_key = ? AND channel_id = ?
         """
-        params: list[Any] = [scope.turn_key]
+        params: list[Any] = [scope.turn_key, scope.channel_id]
         if alias:
             query += " AND alias = ?"
             params.append(alias)
         query += " ORDER BY offload_order, alias"
-        with closing(self._connect()) as conn:
+        with closing(self._connect(timeout=timeout)) as conn:
             rows = conn.execute(query, params).fetchall()
         return [self._read(scope, row) for row in rows]
 
@@ -395,17 +420,28 @@ class RuntimeHandleArchive:
         """``alias``, ``command``, ``offload_order`` and ``utf8_bytes`` of every row.
 
         The stored text is measured in SQL and never loaded, for callers that
-        choose among a turn's handles without reading them.
+        choose among a turn's handles without reading them. ``text_utf8`` is
+        written as a BLOB, so ``length()`` is its stored UTF-8 byte count and
+        SQLite answers it from the record header without reading the content
+        (a ``CAST`` would materialise the value first). It is the STORED
+        size -- what a search of the row reads -- not ``raw_utf8_bytes``, which
+        is the pre-redaction size and differs from it for a redacted row.
+
+        Nothing is listed for a broad scope (``is_broad_scope``), and rows are
+        filtered by channel as well as turn key. The wait for the database is
+        ``SUMMARY_READ_TIMEOUT_SECONDS``; a failure raises.
         """
-        with closing(self._connect()) as conn:
+        if is_broad_scope(scope):
+            return []
+        with closing(self._connect(timeout=SUMMARY_READ_TIMEOUT_SECONDS)) as conn:
             rows = conn.execute(
                 """
-                SELECT alias, command_name, offload_order, length(CAST(text_utf8 AS BLOB))
+                SELECT alias, command_name, offload_order, length(text_utf8)
                 FROM offload_evidence
-                WHERE turn_key = ?
+                WHERE turn_key = ? AND channel_id = ?
                 ORDER BY offload_order, alias
                 """,
-                (scope.turn_key,),
+                (scope.turn_key, scope.channel_id),
             ).fetchall()
         return [{"alias": alias, "command": command, "offload_order": order,
                  "utf8_bytes": int(size or 0)}
@@ -485,6 +521,7 @@ class RuntimeHandleArchive:
                 ON CONFLICT(turn_key, alias) DO UPDATE SET
                     context_clause = excluded.context_clause,
                     recorded_at = excluded.recorded_at
+                WHERE offload_subjects.channel_id = excluded.channel_id
                 """,
                 (
                     scope.turn_key,
@@ -497,17 +534,18 @@ class RuntimeHandleArchive:
             )
             conn.commit()
 
-    def get_subject(self, scope: RuntimeHandleScope, alias: str) -> Optional[str]:
+    def get_subject(self, scope: RuntimeHandleScope, alias: str, *,
+                    timeout: float = 30.0) -> Optional[str]:
         """The recorded clause, ``""`` at the root, ``None`` when UNRECORDED.
 
         ``None`` is the answer an alias nobody stamped gives, and it is never
-        upgraded to a guess.
+        upgraded to a guess. The wait for the lock is at most *timeout*.
         """
-        with closing(self._connect()) as conn:
+        with closing(self._connect(timeout=timeout)) as conn:
             row = conn.execute(
                 "SELECT context_clause FROM offload_subjects "
-                "WHERE turn_key = ? AND alias = ?",
-                (scope.turn_key, str(alias)),
+                "WHERE turn_key = ? AND channel_id = ? AND alias = ?",
+                (scope.turn_key, scope.channel_id, str(alias)),
             ).fetchone()
         return None if row is None else str(row["context_clause"])
 
@@ -521,8 +559,9 @@ class RuntimeHandleArchive:
         with closing(self._connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
-                "DELETE FROM offload_subjects WHERE turn_key = ? AND alias = ?",
-                (scope.turn_key, str(alias)),
+                "DELETE FROM offload_subjects "
+                "WHERE turn_key = ? AND channel_id = ? AND alias = ?",
+                (scope.turn_key, scope.channel_id, str(alias)),
             )
             conn.commit()
 
@@ -543,9 +582,9 @@ class RuntimeHandleArchive:
                 SELECT capture_policy_version, capture_profile, redaction,
                        redacted, raw_utf8_bytes, persisted_at
                 FROM offload_evidence
-                WHERE turn_key = ? AND alias = ?
+                WHERE turn_key = ? AND channel_id = ? AND alias = ?
                 """,
-                (scope.turn_key, str(alias)),
+                (scope.turn_key, scope.channel_id, str(alias)),
             ).fetchone()
         if row is None:
             return None
@@ -621,7 +660,8 @@ class UnavailableHandleArchive:
     def get(self, scope: RuntimeHandleScope, alias: str) -> Optional[dict[str, Any]]:
         return None
 
-    def list(self, scope: RuntimeHandleScope, alias: str = "") -> list[dict[str, Any]]:
+    def list(self, scope: RuntimeHandleScope, alias: str = "", *,
+             timeout: float = 30.0) -> list[dict[str, Any]]:
         return []
 
     def list_summaries(self, scope: RuntimeHandleScope) -> list[dict[str, Any]]:
@@ -643,7 +683,8 @@ class UnavailableHandleArchive:
             f"runtime handle archive unavailable at {self.db_path}: {self.reason}"
         )
 
-    def get_subject(self, scope: RuntimeHandleScope, alias: str) -> Optional[str]:
+    def get_subject(self, scope: RuntimeHandleScope, alias: str, *,
+                    timeout: float = 30.0) -> Optional[str]:
         return None
 
     def forget_subject(self, scope: RuntimeHandleScope, alias: str) -> None:

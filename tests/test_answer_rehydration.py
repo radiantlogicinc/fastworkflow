@@ -243,6 +243,11 @@ class BudgetAndOrder(unittest.TestCase):
         self.assertTrue(report.note_line.startswith(NOT_REHYDRATED_PREFIX))
         self.assertEqual(report.note_line,
                          NOT_REHYDRATED_PREFIX + ", ".join(report.dropped_aliases))
+        # The agent was told observations are normally restored, so the
+        # extractor is told to state the omission in the answer itself.
+        self.assertIn("evidence limit was reached", report.note_line)
+        self.assertIn("say in the final answer that the rows of these observations "
+                      "are not included in it", report.note_line)
         # Deterministic: ascending by execute ordinal, every time.
         self.assertEqual(report.dropped_aliases,
                          sorted(report.dropped_aliases,

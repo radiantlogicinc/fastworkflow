@@ -1,0 +1,513 @@
+{
+ "finish_check": [
+  {
+   "state": {
+    "request": "Audit Alan Cooper and Grace Hopper (token Bearer [REDACTED])",
+    "plan_steps": {
+     "1": "Find Alan Cooper and Grace Hopper",
+     "2": "For each person: open the identity and list the accounts a. open_identity_by_uid b. list_accounts",
+     "3": "Show the portraits",
+     "4": "Remove the accounts the user picks",
+     "5": "Summarise what was found"
+    }
+   },
+   "model": "jev-golden",
+   "questions": {
+    "x1": {
+     "type": "noul",
+     "instructions": "Does plan step 1 require running a workflow command to retrieve or change something? Answer no if step 1 only reasons over results already obtained (compare, intersect, summarise, report) or asks the user.",
+     "criteria": {
+      "true": "Step 1 runs at least one command.",
+      "false": "Step 1 runs no command: it reasons, reports or asks the user."
+     }
+    },
+    "a1_0": {
+     "type": "noul",
+     "instructions": "Does plan step 1 call for work on the person \"Alan Cooper\"? Answer yes if step 1 names \"Alan Cooper\", or if step 1 applies to every person named in the request and \"Alan Cooper\" is one of them.",
+     "criteria": {
+      "true": "Step 1 requires an action about \"Alan Cooper\".",
+      "false": "Step 1 is about other things, not \"Alan Cooper\"."
+     }
+    },
+    "a1_1": {
+     "type": "noul",
+     "instructions": "Does plan step 1 call for work on the person \"Grace Hopper\"? Answer yes if step 1 names \"Grace Hopper\", or if step 1 applies to every person named in the request and \"Grace Hopper\" is one of them.",
+     "criteria": {
+      "true": "Step 1 requires an action about \"Grace Hopper\".",
+      "false": "Step 1 is about other things, not \"Grace Hopper\"."
+     }
+    },
+    "x2": {
+     "type": "noul",
+     "instructions": "Does plan step 2 require running a workflow command to retrieve or change something? Answer no if step 2 only reasons over results already obtained (compare, intersect, summarise, report) or asks the user.",
+     "criteria": {
+      "true": "Step 2 runs at least one command.",
+      "false": "Step 2 runs no command: it reasons, reports or asks the user."
+     }
+    },
+    "a2_0": {
+     "type": "noul",
+     "instructions": "Does plan step 2 call for work on the person \"Alan Cooper\"? Answer yes if step 2 names \"Alan Cooper\", or if step 2 applies to every person named in the request and \"Alan Cooper\" is one of them.",
+     "criteria": {
+      "true": "Step 2 requires an action about \"Alan Cooper\".",
+      "false": "Step 2 is about other things, not \"Alan Cooper\"."
+     }
+    },
+    "p2_1_0": {
+     "type": "noul",
+     "instructions": "Part 1 of plan step 2: \"open_identity_by_uid\"\nDoes this part call for work on the person \"Alan Cooper\"? Answer yes if it names \"Alan Cooper\", or if it applies to every person it is about and \"Alan Cooper\" is one of them.",
+     "criteria": {
+      "true": "This part requires an action about \"Alan Cooper\".",
+      "false": "This part is about other things, not \"Alan Cooper\"."
+     }
+    },
+    "p2_2_0": {
+     "type": "noul",
+     "instructions": "Part 2 of plan step 2: \"list_accounts\"\nDoes this part call for work on the person \"Alan Cooper\"? Answer yes if it names \"Alan Cooper\", or if it applies to every person it is about and \"Alan Cooper\" is one of them.",
+     "criteria": {
+      "true": "This part requires an action about \"Alan Cooper\".",
+      "false": "This part is about other things, not \"Alan Cooper\"."
+     }
+    },
+    "a2_1": {
+     "type": "noul",
+     "instructions": "Does plan step 2 call for work on the person \"Grace Hopper\"? Answer yes if step 2 names \"Grace Hopper\", or if step 2 applies to every person named in the request and \"Grace Hopper\" is one of them.",
+     "criteria": {
+      "true": "Step 2 requires an action about \"Grace Hopper\".",
+      "false": "Step 2 is about other things, not \"Grace Hopper\"."
+     }
+    },
+    "p2_1_1": {
+     "type": "noul",
+     "instructions": "Part 1 of plan step 2: \"open_identity_by_uid\"\nDoes this part call for work on the person \"Grace Hopper\"? Answer yes if it names \"Grace Hopper\", or if it applies to every person it is about and \"Grace Hopper\" is one of them.",
+     "criteria": {
+      "true": "This part requires an action about \"Grace Hopper\".",
+      "false": "This part is about other things, not \"Grace Hopper\"."
+     }
+    },
+    "p2_2_1": {
+     "type": "noul",
+     "instructions": "Part 2 of plan step 2: \"list_accounts\"\nDoes this part call for work on the person \"Grace Hopper\"? Answer yes if it names \"Grace Hopper\", or if it applies to every person it is about and \"Grace Hopper\" is one of them.",
+     "criteria": {
+      "true": "This part requires an action about \"Grace Hopper\".",
+      "false": "This part is about other things, not \"Grace Hopper\"."
+     }
+    },
+    "x5": {
+     "type": "noul",
+     "instructions": "Does plan step 5 require running a workflow command to retrieve or change something? Answer no if step 5 only reasons over results already obtained (compare, intersect, summarise, report) or asks the user.",
+     "criteria": {
+      "true": "Step 5 runs at least one command.",
+      "false": "Step 5 runs no command: it reasons, reports or asks the user."
+     }
+    },
+    "a5_0": {
+     "type": "noul",
+     "instructions": "Does plan step 5 call for work on the person \"Alan Cooper\"? Answer yes if step 5 names \"Alan Cooper\", or if step 5 applies to every person named in the request and \"Alan Cooper\" is one of them.",
+     "criteria": {
+      "true": "Step 5 requires an action about \"Alan Cooper\".",
+      "false": "Step 5 is about other things, not \"Alan Cooper\"."
+     }
+    },
+    "a5_1": {
+     "type": "noul",
+     "instructions": "Does plan step 5 call for work on the person \"Grace Hopper\"? Answer yes if step 5 names \"Grace Hopper\", or if step 5 applies to every person named in the request and \"Grace Hopper\" is one of them.",
+     "criteria": {
+      "true": "Step 5 requires an action about \"Grace Hopper\".",
+      "false": "Step 5 is about other things, not \"Grace Hopper\"."
+     }
+    }
+   }
+  },
+  {
+   "state": {
+    "ledger": [
+     {
+      "n": 1,
+      "command": "find_identity <name>Alan Cooper</name>",
+      "context": "DirectoryExplorer",
+      "acted_on": "DirectoryExplorer",
+      "refers_to": {},
+      "names_in_output": [
+       "Alan Cooper"
+      ],
+      "outcome": "result",
+      "head": "1 identity(s).\n28c5aeb5b64e4ac6c40c57b0235980e2  Alan Cooper"
+     },
+     {
+      "n": 2,
+      "command": "open_identity_by_uid <uid>28c5aeb5b64e4ac6c40c57b0235980e2</uid>",
+      "context": "DirectoryExplorer",
+      "acted_on": "Identity 28c5aeb5b64e4ac6c40c57b0235980e2 Alan Cooper",
+      "refers_to": {
+       "28c5aeb5b64e4ac6c40c57b0235980e2": "Alan Cooper (listed by find_identity <name>Alan Cooper</name>)"
+      },
+      "names_in_output": [],
+      "outcome": "result",
+      "head": "Entered Identity context."
+     },
+     {
+      "n": 3,
+      "command": "list_accounts",
+      "context": "Identity 28c5aeb5b64e4ac6c40c57b0235980e2 Alan Cooper",
+      "acted_on": "",
+      "refers_to": {},
+      "names_in_output": [],
+      "outcome": "empty",
+      "head": "No accounts found."
+     },
+     {
+      "n": 4,
+      "command": "find_identity <name>Grace Hopper</name>",
+      "context": "Identity 28c5aeb5b64e4ac6c40c57b0235980e2 Alan Cooper",
+      "acted_on": "",
+      "refers_to": {},
+      "names_in_output": [
+       "Grace Hopper"
+      ],
+      "outcome": "error",
+      "head": "Execution error: identity lookup failed"
+     }
+    ]
+   },
+   "model": "jev-golden",
+   "questions": {
+    "g1": {
+     "type": "noul",
+     "instructions": "Plan step 1: \"Find Alan Cooper and Grace Hopper\"\nWas this step executed at all? Yes if some ledger row ran the command it names, or another command doing the same kind of action, and the row is not an execution error. What the command returned does not matter.",
+     "criteria": {
+      "true": "Some row ran this step's action without an execution error.",
+      "false": "No row ran this step's action, or every such row was an execution error."
+     }
+    },
+    "e1_0": {
+     "type": "noul",
+     "instructions": "Plan step: \"Find Alan Cooper and Grace Hopper\"\nWas this step executed for \"Alan Cooper\"? Yes if some ledger row ran the command this step names, or another command doing the same kind of action, for \"Alan Cooper\", and the row is not an execution error. What the command returned does not matter. A row is for \"Alan Cooper\" if its command, context or acted_on names \"Alan Cooper\", or if refers_to resolves one of its identifiers to \"Alan Cooper\" or to what the request calls \"Alan Cooper\" (a label may be worded differently). names_in_output only says \"Alan Cooper\" appears somewhere in the row's output listing: that alone does not make the row about \"Alan Cooper\", but it can tie a finding, listing or context to \"Alan Cooper\".",
+     "criteria": {
+      "true": "Some row ran this step's action for \"Alan Cooper\" without an execution error.",
+      "false": "No row ran this step's action for \"Alan Cooper\", or every such row was an execution error."
+     }
+    },
+    "e1_1": {
+     "type": "noul",
+     "instructions": "Plan step: \"Find Alan Cooper and Grace Hopper\"\nWas this step executed for \"Grace Hopper\"? Yes if some ledger row ran the command this step names, or another command doing the same kind of action, for \"Grace Hopper\", and the row is not an execution error. What the command returned does not matter. A row is for \"Grace Hopper\" if its command, context or acted_on names \"Grace Hopper\", or if refers_to resolves one of its identifiers to \"Grace Hopper\" or to what the request calls \"Grace Hopper\" (a label may be worded differently). names_in_output only says \"Grace Hopper\" appears somewhere in the row's output listing: that alone does not make the row about \"Grace Hopper\", but it can tie a finding, listing or context to \"Grace Hopper\".",
+     "criteria": {
+      "true": "Some row ran this step's action for \"Grace Hopper\" without an execution error.",
+      "false": "No row ran this step's action for \"Grace Hopper\", or every such row was an execution error."
+     }
+    },
+    "g2": {
+     "type": "noul",
+     "instructions": "Plan step 2: \"For each person: open the identity and list the accounts a. open_identity_by_uid b. list_accounts\"\nWas this step executed at all? Yes if some ledger row ran the command it names, or another command doing the same kind of action, and the row is not an execution error. What the command returned does not matter.",
+     "criteria": {
+      "true": "Some row ran this step's action without an execution error.",
+      "false": "No row ran this step's action, or every such row was an execution error."
+     }
+    },
+    "e2_1_0": {
+     "type": "noul",
+     "instructions": "Plan step: \"For each person: open the identity and list the accounts a. open_identity_by_uid b. list_accounts\"\nPart of that step: \"open_identity_by_uid\"\nWas this part executed for \"Alan Cooper\"? Yes if some ledger row ran the command this part names, or another command doing the same kind of action, for \"Alan Cooper\", and the row is not an execution error. What the command returned does not matter. A row is for \"Alan Cooper\" if its command, context or acted_on names \"Alan Cooper\", or if refers_to resolves one of its identifiers to \"Alan Cooper\" or to what the request calls \"Alan Cooper\" (a label may be worded differently). names_in_output only says \"Alan Cooper\" appears somewhere in the row's output listing: that alone does not make the row about \"Alan Cooper\", but it can tie a finding, listing or context to \"Alan Cooper\".",
+     "criteria": {
+      "true": "Some row ran this part's action for \"Alan Cooper\" without an execution error.",
+      "false": "No row ran this part's action for \"Alan Cooper\", or every such row was an execution error."
+     }
+    },
+    "e2_2_0": {
+     "type": "noul",
+     "instructions": "Plan step: \"For each person: open the identity and list the accounts a. open_identity_by_uid b. list_accounts\"\nPart of that step: \"list_accounts\"\nWas this part executed for \"Alan Cooper\"? Yes if some ledger row ran the command this part names, or another command doing the same kind of action, for \"Alan Cooper\", and the row is not an execution error. What the command returned does not matter. A row is for \"Alan Cooper\" if its command, context or acted_on names \"Alan Cooper\", or if refers_to resolves one of its identifiers to \"Alan Cooper\" or to what the request calls \"Alan Cooper\" (a label may be worded differently). names_in_output only says \"Alan Cooper\" appears somewhere in the row's output listing: that alone does not make the row about \"Alan Cooper\", but it can tie a finding, listing or context to \"Alan Cooper\".",
+     "criteria": {
+      "true": "Some row ran this part's action for \"Alan Cooper\" without an execution error.",
+      "false": "No row ran this part's action for \"Alan Cooper\", or every such row was an execution error."
+     }
+    },
+    "e2_1_1": {
+     "type": "noul",
+     "instructions": "Plan step: \"For each person: open the identity and list the accounts a. open_identity_by_uid b. list_accounts\"\nPart of that step: \"open_identity_by_uid\"\nWas this part executed for \"Grace Hopper\"? Yes if some ledger row ran the command this part names, or another command doing the same kind of action, for \"Grace Hopper\", and the row is not an execution error. What the command returned does not matter. A row is for \"Grace Hopper\" if its command, context or acted_on names \"Grace Hopper\", or if refers_to resolves one of its identifiers to \"Grace Hopper\" or to what the request calls \"Grace Hopper\" (a label may be worded differently). names_in_output only says \"Grace Hopper\" appears somewhere in the row's output listing: that alone does not make the row about \"Grace Hopper\", but it can tie a finding, listing or context to \"Grace Hopper\".",
+     "criteria": {
+      "true": "Some row ran this part's action for \"Grace Hopper\" without an execution error.",
+      "false": "No row ran this part's action for \"Grace Hopper\", or every such row was an execution error."
+     }
+    },
+    "g5": {
+     "type": "noul",
+     "instructions": "Plan step 5: \"Summarise what was found\"\nWas this step executed at all? Yes if some ledger row ran the command it names, or another command doing the same kind of action, and the row is not an execution error. What the command returned does not matter.",
+     "criteria": {
+      "true": "Some row ran this step's action without an execution error.",
+      "false": "No row ran this step's action, or every such row was an execution error."
+     }
+    },
+    "e5_0": {
+     "type": "noul",
+     "instructions": "Plan step: \"Summarise what was found\"\nWas this step executed for \"Alan Cooper\"? Yes if some ledger row ran the command this step names, or another command doing the same kind of action, for \"Alan Cooper\", and the row is not an execution error. What the command returned does not matter. A row is for \"Alan Cooper\" if its command, context or acted_on names \"Alan Cooper\", or if refers_to resolves one of its identifiers to \"Alan Cooper\" or to what the request calls \"Alan Cooper\" (a label may be worded differently). names_in_output only says \"Alan Cooper\" appears somewhere in the row's output listing: that alone does not make the row about \"Alan Cooper\", but it can tie a finding, listing or context to \"Alan Cooper\".",
+     "criteria": {
+      "true": "Some row ran this step's action for \"Alan Cooper\" without an execution error.",
+      "false": "No row ran this step's action for \"Alan Cooper\", or every such row was an execution error."
+     }
+    },
+    "e5_1": {
+     "type": "noul",
+     "instructions": "Plan step: \"Summarise what was found\"\nWas this step executed for \"Grace Hopper\"? Yes if some ledger row ran the command this step names, or another command doing the same kind of action, for \"Grace Hopper\", and the row is not an execution error. What the command returned does not matter. A row is for \"Grace Hopper\" if its command, context or acted_on names \"Grace Hopper\", or if refers_to resolves one of its identifiers to \"Grace Hopper\" or to what the request calls \"Grace Hopper\" (a label may be worded differently). names_in_output only says \"Grace Hopper\" appears somewhere in the row's output listing: that alone does not make the row about \"Grace Hopper\", but it can tie a finding, listing or context to \"Grace Hopper\".",
+     "criteria": {
+      "true": "Some row ran this step's action for \"Grace Hopper\" without an execution error.",
+      "false": "No row ran this step's action for \"Grace Hopper\", or every such row was an execution error."
+     }
+    }
+   }
+  },
+  {
+   "state": {
+    "ledger": [
+     {
+      "n": 1,
+      "command": "find_identity <name>Alan Cooper</name>",
+      "context": "DirectoryExplorer",
+      "acted_on": "DirectoryExplorer",
+      "refers_to": {},
+      "names_in_output": [
+       "Alan Cooper"
+      ],
+      "outcome": "result",
+      "head": "1 identity(s).\n28c5aeb5b64e4ac6c40c57b0235980e2  Alan Cooper"
+     },
+     {
+      "n": 2,
+      "command": "open_identity_by_uid <uid>28c5aeb5b64e4ac6c40c57b0235980e2</uid>",
+      "context": "DirectoryExplorer",
+      "acted_on": "Identity 28c5aeb5b64e4ac6c40c57b0235980e2 Alan Cooper",
+      "refers_to": {
+       "28c5aeb5b64e4ac6c40c57b0235980e2": "Alan Cooper (listed by find_identity <name>Alan Cooper</name>)"
+      },
+      "names_in_output": [],
+      "outcome": "result",
+      "head": "Entered Identity context."
+     }
+    ]
+   },
+   "model": "jev-golden",
+   "questions": {
+    "g1": {
+     "type": "noul",
+     "instructions": "Plan step 1: \"Find Alan Cooper and Grace Hopper\"\nWas this step executed at all? Yes if some ledger row ran the command it names, or another command doing the same kind of action, and the row is not an execution error. What the command returned does not matter.",
+     "criteria": {
+      "true": "Some row ran this step's action without an execution error.",
+      "false": "No row ran this step's action, or every such row was an execution error."
+     }
+    },
+    "e1_0": {
+     "type": "noul",
+     "instructions": "Plan step: \"Find Alan Cooper and Grace Hopper\"\nWas this step executed for \"Alan Cooper\"? Yes if some ledger row ran the command this step names, or another command doing the same kind of action, for \"Alan Cooper\", and the row is not an execution error. What the command returned does not matter. A row is for \"Alan Cooper\" if its command, context or acted_on names \"Alan Cooper\", or if refers_to resolves one of its identifiers to \"Alan Cooper\" or to what the request calls \"Alan Cooper\" (a label may be worded differently). names_in_output only says \"Alan Cooper\" appears somewhere in the row's output listing: that alone does not make the row about \"Alan Cooper\", but it can tie a finding, listing or context to \"Alan Cooper\".",
+     "criteria": {
+      "true": "Some row ran this step's action for \"Alan Cooper\" without an execution error.",
+      "false": "No row ran this step's action for \"Alan Cooper\", or every such row was an execution error."
+     }
+    },
+    "e1_1": {
+     "type": "noul",
+     "instructions": "Plan step: \"Find Alan Cooper and Grace Hopper\"\nWas this step executed for \"Grace Hopper\"? Yes if some ledger row ran the command this step names, or another command doing the same kind of action, for \"Grace Hopper\", and the row is not an execution error. What the command returned does not matter. A row is for \"Grace Hopper\" if its command, context or acted_on names \"Grace Hopper\", or if refers_to resolves one of its identifiers to \"Grace Hopper\" or to what the request calls \"Grace Hopper\" (a label may be worded differently). names_in_output only says \"Grace Hopper\" appears somewhere in the row's output listing: that alone does not make the row about \"Grace Hopper\", but it can tie a finding, listing or context to \"Grace Hopper\".",
+     "criteria": {
+      "true": "Some row ran this step's action for \"Grace Hopper\" without an execution error.",
+      "false": "No row ran this step's action for \"Grace Hopper\", or every such row was an execution error."
+     }
+    },
+    "g2": {
+     "type": "noul",
+     "instructions": "Plan step 2: \"For each person: open the identity and list the accounts a. open_identity_by_uid b. list_accounts\"\nWas this step executed at all? Yes if some ledger row ran the command it names, or another command doing the same kind of action, and the row is not an execution error. What the command returned does not matter.",
+     "criteria": {
+      "true": "Some row ran this step's action without an execution error.",
+      "false": "No row ran this step's action, or every such row was an execution error."
+     }
+    },
+    "e2_1_0": {
+     "type": "noul",
+     "instructions": "Plan step: \"For each person: open the identity and list the accounts a. open_identity_by_uid b. list_accounts\"\nPart of that step: \"open_identity_by_uid\"\nWas this part executed for \"Alan Cooper\"? Yes if some ledger row ran the command this part names, or another command doing the same kind of action, for \"Alan Cooper\", and the row is not an execution error. What the command returned does not matter. A row is for \"Alan Cooper\" if its command, context or acted_on names \"Alan Cooper\", or if refers_to resolves one of its identifiers to \"Alan Cooper\" or to what the request calls \"Alan Cooper\" (a label may be worded differently). names_in_output only says \"Alan Cooper\" appears somewhere in the row's output listing: that alone does not make the row about \"Alan Cooper\", but it can tie a finding, listing or context to \"Alan Cooper\".",
+     "criteria": {
+      "true": "Some row ran this part's action for \"Alan Cooper\" without an execution error.",
+      "false": "No row ran this part's action for \"Alan Cooper\", or every such row was an execution error."
+     }
+    },
+    "e2_2_0": {
+     "type": "noul",
+     "instructions": "Plan step: \"For each person: open the identity and list the accounts a. open_identity_by_uid b. list_accounts\"\nPart of that step: \"list_accounts\"\nWas this part executed for \"Alan Cooper\"? Yes if some ledger row ran the command this part names, or another command doing the same kind of action, for \"Alan Cooper\", and the row is not an execution error. What the command returned does not matter. A row is for \"Alan Cooper\" if its command, context or acted_on names \"Alan Cooper\", or if refers_to resolves one of its identifiers to \"Alan Cooper\" or to what the request calls \"Alan Cooper\" (a label may be worded differently). names_in_output only says \"Alan Cooper\" appears somewhere in the row's output listing: that alone does not make the row about \"Alan Cooper\", but it can tie a finding, listing or context to \"Alan Cooper\".",
+     "criteria": {
+      "true": "Some row ran this part's action for \"Alan Cooper\" without an execution error.",
+      "false": "No row ran this part's action for \"Alan Cooper\", or every such row was an execution error."
+     }
+    },
+    "e2_1_1": {
+     "type": "noul",
+     "instructions": "Plan step: \"For each person: open the identity and list the accounts a. open_identity_by_uid b. list_accounts\"\nPart of that step: \"open_identity_by_uid\"\nWas this part executed for \"Grace Hopper\"? Yes if some ledger row ran the command this part names, or another command doing the same kind of action, for \"Grace Hopper\", and the row is not an execution error. What the command returned does not matter. A row is for \"Grace Hopper\" if its command, context or acted_on names \"Grace Hopper\", or if refers_to resolves one of its identifiers to \"Grace Hopper\" or to what the request calls \"Grace Hopper\" (a label may be worded differently). names_in_output only says \"Grace Hopper\" appears somewhere in the row's output listing: that alone does not make the row about \"Grace Hopper\", but it can tie a finding, listing or context to \"Grace Hopper\".",
+     "criteria": {
+      "true": "Some row ran this part's action for \"Grace Hopper\" without an execution error.",
+      "false": "No row ran this part's action for \"Grace Hopper\", or every such row was an execution error."
+     }
+    },
+    "g5": {
+     "type": "noul",
+     "instructions": "Plan step 5: \"Summarise what was found\"\nWas this step executed at all? Yes if some ledger row ran the command it names, or another command doing the same kind of action, and the row is not an execution error. What the command returned does not matter.",
+     "criteria": {
+      "true": "Some row ran this step's action without an execution error.",
+      "false": "No row ran this step's action, or every such row was an execution error."
+     }
+    },
+    "e5_0": {
+     "type": "noul",
+     "instructions": "Plan step: \"Summarise what was found\"\nWas this step executed for \"Alan Cooper\"? Yes if some ledger row ran the command this step names, or another command doing the same kind of action, for \"Alan Cooper\", and the row is not an execution error. What the command returned does not matter. A row is for \"Alan Cooper\" if its command, context or acted_on names \"Alan Cooper\", or if refers_to resolves one of its identifiers to \"Alan Cooper\" or to what the request calls \"Alan Cooper\" (a label may be worded differently). names_in_output only says \"Alan Cooper\" appears somewhere in the row's output listing: that alone does not make the row about \"Alan Cooper\", but it can tie a finding, listing or context to \"Alan Cooper\".",
+     "criteria": {
+      "true": "Some row ran this step's action for \"Alan Cooper\" without an execution error.",
+      "false": "No row ran this step's action for \"Alan Cooper\", or every such row was an execution error."
+     }
+    },
+    "e5_1": {
+     "type": "noul",
+     "instructions": "Plan step: \"Summarise what was found\"\nWas this step executed for \"Grace Hopper\"? Yes if some ledger row ran the command this step names, or another command doing the same kind of action, for \"Grace Hopper\", and the row is not an execution error. What the command returned does not matter. A row is for \"Grace Hopper\" if its command, context or acted_on names \"Grace Hopper\", or if refers_to resolves one of its identifiers to \"Grace Hopper\" or to what the request calls \"Grace Hopper\" (a label may be worded differently). names_in_output only says \"Grace Hopper\" appears somewhere in the row's output listing: that alone does not make the row about \"Grace Hopper\", but it can tie a finding, listing or context to \"Grace Hopper\".",
+     "criteria": {
+      "true": "Some row ran this step's action for \"Grace Hopper\" without an execution error.",
+      "false": "No row ran this step's action for \"Grace Hopper\", or every such row was an execution error."
+     }
+    }
+   }
+  },
+  {
+   "state": {
+    "ledger": [
+     {
+      "n": 3,
+      "command": "list_accounts",
+      "context": "Identity 28c5aeb5b64e4ac6c40c57b0235980e2 Alan Cooper",
+      "acted_on": "",
+      "refers_to": {},
+      "names_in_output": [],
+      "outcome": "empty",
+      "head": "No accounts found."
+     },
+     {
+      "n": 4,
+      "command": "find_identity <name>Grace Hopper</name>",
+      "context": "Identity 28c5aeb5b64e4ac6c40c57b0235980e2 Alan Cooper",
+      "acted_on": "",
+      "refers_to": {},
+      "names_in_output": [
+       "Grace Hopper"
+      ],
+      "outcome": "error",
+      "head": "Execution error: identity lookup failed"
+     }
+    ]
+   },
+   "model": "jev-golden",
+   "questions": {
+    "g1": {
+     "type": "noul",
+     "instructions": "Plan step 1: \"Find Alan Cooper and Grace Hopper\"\nWas this step executed at all? Yes if some ledger row ran the command it names, or another command doing the same kind of action, and the row is not an execution error. What the command returned does not matter.",
+     "criteria": {
+      "true": "Some row ran this step's action without an execution error.",
+      "false": "No row ran this step's action, or every such row was an execution error."
+     }
+    },
+    "e1_0": {
+     "type": "noul",
+     "instructions": "Plan step: \"Find Alan Cooper and Grace Hopper\"\nWas this step executed for \"Alan Cooper\"? Yes if some ledger row ran the command this step names, or another command doing the same kind of action, for \"Alan Cooper\", and the row is not an execution error. What the command returned does not matter. A row is for \"Alan Cooper\" if its command, context or acted_on names \"Alan Cooper\", or if refers_to resolves one of its identifiers to \"Alan Cooper\" or to what the request calls \"Alan Cooper\" (a label may be worded differently). names_in_output only says \"Alan Cooper\" appears somewhere in the row's output listing: that alone does not make the row about \"Alan Cooper\", but it can tie a finding, listing or context to \"Alan Cooper\".",
+     "criteria": {
+      "true": "Some row ran this step's action for \"Alan Cooper\" without an execution error.",
+      "false": "No row ran this step's action for \"Alan Cooper\", or every such row was an execution error."
+     }
+    },
+    "e1_1": {
+     "type": "noul",
+     "instructions": "Plan step: \"Find Alan Cooper and Grace Hopper\"\nWas this step executed for \"Grace Hopper\"? Yes if some ledger row ran the command this step names, or another command doing the same kind of action, for \"Grace Hopper\", and the row is not an execution error. What the command returned does not matter. A row is for \"Grace Hopper\" if its command, context or acted_on names \"Grace Hopper\", or if refers_to resolves one of its identifiers to \"Grace Hopper\" or to what the request calls \"Grace Hopper\" (a label may be worded differently). names_in_output only says \"Grace Hopper\" appears somewhere in the row's output listing: that alone does not make the row about \"Grace Hopper\", but it can tie a finding, listing or context to \"Grace Hopper\".",
+     "criteria": {
+      "true": "Some row ran this step's action for \"Grace Hopper\" without an execution error.",
+      "false": "No row ran this step's action for \"Grace Hopper\", or every such row was an execution error."
+     }
+    },
+    "g2": {
+     "type": "noul",
+     "instructions": "Plan step 2: \"For each person: open the identity and list the accounts a. open_identity_by_uid b. list_accounts\"\nWas this step executed at all? Yes if some ledger row ran the command it names, or another command doing the same kind of action, and the row is not an execution error. What the command returned does not matter.",
+     "criteria": {
+      "true": "Some row ran this step's action without an execution error.",
+      "false": "No row ran this step's action, or every such row was an execution error."
+     }
+    },
+    "e2_1_0": {
+     "type": "noul",
+     "instructions": "Plan step: \"For each person: open the identity and list the accounts a. open_identity_by_uid b. list_accounts\"\nPart of that step: \"open_identity_by_uid\"\nWas this part executed for \"Alan Cooper\"? Yes if some ledger row ran the command this part names, or another command doing the same kind of action, for \"Alan Cooper\", and the row is not an execution error. What the command returned does not matter. A row is for \"Alan Cooper\" if its command, context or acted_on names \"Alan Cooper\", or if refers_to resolves one of its identifiers to \"Alan Cooper\" or to what the request calls \"Alan Cooper\" (a label may be worded differently). names_in_output only says \"Alan Cooper\" appears somewhere in the row's output listing: that alone does not make the row about \"Alan Cooper\", but it can tie a finding, listing or context to \"Alan Cooper\".",
+     "criteria": {
+      "true": "Some row ran this part's action for \"Alan Cooper\" without an execution error.",
+      "false": "No row ran this part's action for \"Alan Cooper\", or every such row was an execution error."
+     }
+    },
+    "e2_2_0": {
+     "type": "noul",
+     "instructions": "Plan step: \"For each person: open the identity and list the accounts a. open_identity_by_uid b. list_accounts\"\nPart of that step: \"list_accounts\"\nWas this part executed for \"Alan Cooper\"? Yes if some ledger row ran the command this part names, or another command doing the same kind of action, for \"Alan Cooper\", and the row is not an execution error. What the command returned does not matter. A row is for \"Alan Cooper\" if its command, context or acted_on names \"Alan Cooper\", or if refers_to resolves one of its identifiers to \"Alan Cooper\" or to what the request calls \"Alan Cooper\" (a label may be worded differently). names_in_output only says \"Alan Cooper\" appears somewhere in the row's output listing: that alone does not make the row about \"Alan Cooper\", but it can tie a finding, listing or context to \"Alan Cooper\".",
+     "criteria": {
+      "true": "Some row ran this part's action for \"Alan Cooper\" without an execution error.",
+      "false": "No row ran this part's action for \"Alan Cooper\", or every such row was an execution error."
+     }
+    },
+    "e2_1_1": {
+     "type": "noul",
+     "instructions": "Plan step: \"For each person: open the identity and list the accounts a. open_identity_by_uid b. list_accounts\"\nPart of that step: \"open_identity_by_uid\"\nWas this part executed for \"Grace Hopper\"? Yes if some ledger row ran the command this part names, or another command doing the same kind of action, for \"Grace Hopper\", and the row is not an execution error. What the command returned does not matter. A row is for \"Grace Hopper\" if its command, context or acted_on names \"Grace Hopper\", or if refers_to resolves one of its identifiers to \"Grace Hopper\" or to what the request calls \"Grace Hopper\" (a label may be worded differently). names_in_output only says \"Grace Hopper\" appears somewhere in the row's output listing: that alone does not make the row about \"Grace Hopper\", but it can tie a finding, listing or context to \"Grace Hopper\".",
+     "criteria": {
+      "true": "Some row ran this part's action for \"Grace Hopper\" without an execution error.",
+      "false": "No row ran this part's action for \"Grace Hopper\", or every such row was an execution error."
+     }
+    },
+    "g5": {
+     "type": "noul",
+     "instructions": "Plan step 5: \"Summarise what was found\"\nWas this step executed at all? Yes if some ledger row ran the command it names, or another command doing the same kind of action, and the row is not an execution error. What the command returned does not matter.",
+     "criteria": {
+      "true": "Some row ran this step's action without an execution error.",
+      "false": "No row ran this step's action, or every such row was an execution error."
+     }
+    },
+    "e5_0": {
+     "type": "noul",
+     "instructions": "Plan step: \"Summarise what was found\"\nWas this step executed for \"Alan Cooper\"? Yes if some ledger row ran the command this step names, or another command doing the same kind of action, for \"Alan Cooper\", and the row is not an execution error. What the command returned does not matter. A row is for \"Alan Cooper\" if its command, context or acted_on names \"Alan Cooper\", or if refers_to resolves one of its identifiers to \"Alan Cooper\" or to what the request calls \"Alan Cooper\" (a label may be worded differently). names_in_output only says \"Alan Cooper\" appears somewhere in the row's output listing: that alone does not make the row about \"Alan Cooper\", but it can tie a finding, listing or context to \"Alan Cooper\".",
+     "criteria": {
+      "true": "Some row ran this step's action for \"Alan Cooper\" without an execution error.",
+      "false": "No row ran this step's action for \"Alan Cooper\", or every such row was an execution error."
+     }
+    },
+    "e5_1": {
+     "type": "noul",
+     "instructions": "Plan step: \"Summarise what was found\"\nWas this step executed for \"Grace Hopper\"? Yes if some ledger row ran the command this step names, or another command doing the same kind of action, for \"Grace Hopper\", and the row is not an execution error. What the command returned does not matter. A row is for \"Grace Hopper\" if its command, context or acted_on names \"Grace Hopper\", or if refers_to resolves one of its identifiers to \"Grace Hopper\" or to what the request calls \"Grace Hopper\" (a label may be worded differently). names_in_output only says \"Grace Hopper\" appears somewhere in the row's output listing: that alone does not make the row about \"Grace Hopper\", but it can tie a finding, listing or context to \"Grace Hopper\".",
+     "criteria": {
+      "true": "Some row ran this step's action for \"Grace Hopper\" without an execution error.",
+      "false": "No row ran this step's action for \"Grace Hopper\", or every such row was an execution error."
+     }
+    }
+   }
+  }
+ ],
+ "router": [
+  {
+   "state": {
+    "question": "Who are the holders?",
+    "agent_reasoning": "I saw Bearer [REDACTED]",
+    "observation_start": "3 holder(s).\nuid  label\nu1  Alan\nu2  Bea"
+   },
+   "model": "jev-golden",
+   "questions": {
+    "wants": {
+     "type": "choice",
+     "instructions": "An agent asked a question about one earlier command output (the observation). A command output is often a list that belongs to one subject, such as the items of one person, one account or one record. What does the question ask to get back from that output?",
+     "criteria": {
+      "all_rows": "The whole list: every row or item it contains, e.g. 'list the items for Jane Doe', 'what entries are listed for this account', 'who are the members', 'the actions suggested for this record', 'the uids and labels for X'. Naming the subject the list belongs to (a person, an account, a record) still means all rows. Also, in this workflow: 'show every holder'.",
+      "rows_by_position": "Only some rows chosen by position: the first one, the first N, rows 11 to 20, the next few.",
+      "rows_about_named_item": "Only the row or rows for one particular item inside the list, whether such an item is present, or the rows that match a stated condition, e.g. 'is Jane Doe among them', 'does item X appear', 'entries whose label contains Y'. The subject the whole list belongs to is not such an item. Also, in this workflow: 'is Alan among them'.",
+      "count": "Only how many rows or items there are.",
+      "other": "A field value, a property record, a score or a judgement: not rows of a list."
+     }
+    },
+    "for_report": {
+     "type": "noul",
+     "instructions": "Is the agent gathering this only so it can include it in its final answer or report, rather than to decide its next action (which item to open, which command to run)?",
+     "criteria": {
+      "true": "Only for the final answer or report.",
+      "false": "To decide or perform a next action, or not stated."
+     }
+    }
+   }
+  }
+ ]
+}

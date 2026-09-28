@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,10 +14,15 @@ from unittest.mock import patch
 
 import dspy
 
+import fastworkflow
 from fastworkflow import tracing
 from fastworkflow.observation_offloading.agent import (
     build_compacting_step,
     build_tool_agent,
+    describe_command_inputs,
+    dispatched_command_name,
+    remember_dispatched_command,
+    search_memory_description,
 )
 from fastworkflow.observation_offloading.archive import (
     PersistenceError,
@@ -39,11 +45,13 @@ from fastworkflow.observation_offloading.continuation import (
     MAX_FORCED_REPLANS,
     REPLAN_OBSERVATION_MAX_BYTES,
     StructuredContinuationReAct,
+    max_forced_replans_from_env,
     replan_trajectory_skeleton,
 )
 from fastworkflow.observation_offloading.labels import (
     ALIAS_SOURCE_HEADER,
     ALIAS_SOURCE_LABEL,
+    LABEL_RESTORE_MARK,
     RESPONSE_ESCAPE,
     alias_line,
     annotated_observation,
@@ -83,6 +91,7 @@ from fastworkflow.observation_offloading.search import (
 from fastworkflow.observation_offloading.state import (
     HOT_HANDLE_MAX_BYTES,
     clear_hot_handles,
+    current_scope,
     hot_handle_max_bytes_from_env,
     hot_payload_bytes,
     observation_inline,
@@ -95,6 +104,9 @@ from fastworkflow.observation_offloading.state import (
 )
 from fastworkflow.answer_rehydration import rehydrate, rehydrated_label
 from fastworkflow.observation_offloading.compact import RECENT_OBSERVATIONS_PROTECTED
+from fastworkflow.workflow_agent import WorkflowAgentSignature
+
+TODO_WORKFLOW = Path(__file__).parent / "todo_list_workflow"
 
 
 class CompactTrajectory(unittest.TestCase):
@@ -529,10 +541,12 @@ class StructuredContinuation(unittest.TestCase):
         self.assertIn("segment 5 of 5", trajectory["replan_4"])
         replans = [e for e in snapshot_events() if e["kind"] == "forced_replan"]
         self.assertEqual([e["max_segments"] for e in replans], [5, 5, 5, 5])
+        self.assertEqual([e["reached_limit"] for e in replans], [False, False, False, True])
         walls = [e for e in snapshot_events() if e["kind"] == "forced_replan_wall"]
         self.assertEqual(len(walls), 1)
         self.assertEqual(walls[0]["completed_segment"], 5)
         self.assertEqual(walls[0]["max_segments"], 5)
+        self.assertTrue(walls[0]["reached_limit"])
         self.assertIn("segment 5 reached", walls[0]["reason"])
 
 
@@ -1277,6 +1291,43 @@ class AgentConstruction(unittest.TestCase):
         self.assertEqual(agent.total_segments, 4)
         installed = [e for e in snapshot_events() if e["kind"] == "agent_installed"]
         self.assertEqual(installed[0]["max_forced_replans"], 3)
+
+    def test_the_replan_bound_has_a_bounded_override(self) -> None:
+        """FW_MAX_FORCED_REPLANS moves the bound within [0, 10]; a value
+        that is not an integer leaves the default, and the event says which."""
+        for raw, expected in (("1", 1), ("0", 0), ("25", 10), ("-4", 0), ("many", 3)):
+            with self.subTest(raw=raw):
+                reset_runtime_state()
+                self._set_env("FW_MAX_FORCED_REPLANS", raw)
+                self.assertEqual(max_forced_replans_from_env(), expected)
+                agent = build_tool_agent(
+                    SimpleNamespace(), self.Signature, [self.noop_tool], max_iters=3)
+                self.assertEqual(agent.max_forced_replans, expected)
+                self.assertEqual(agent.total_segments, expected + 1)
+                installed = [e for e in snapshot_events() if e["kind"] == "agent_installed"]
+                self.assertEqual(installed[-1]["max_forced_replans"], expected)
+
+    def test_the_search_tool_description_states_the_real_read_bound(self) -> None:
+        """The number in the description is the bound the search applies,
+        so a different window moves it; no router means the model-only wording.
+        Since 2026-09-27 a bigger window than the reference no longer raises
+        the bound past its 131,072-byte ceiling, so a smaller one is used."""
+        self._set_env("FW_MODEL_CONTEXT_TOKENS", str(131_072 // 2))
+        agent = build_tool_agent(
+            SimpleNamespace(), self.Signature, [self.noop_tool], max_iters=3)
+        desc = agent.tools["search_memory"].desc
+        self.assertIn("65,536", desc)
+        self.assertNotIn("131,072", desc)
+        self.assertIn("Do not search to collect rows for the final answer", desc)
+        self.assertIn("normally restored in full when\nthe final answer is written", desc)
+        # The restore is budget-bound; the description says what happens then.
+        self.assertIn("If the answer's evidence limit is reached, the oldest observations are\n"
+                      "not restored and the answer names them.", desc)
+        # The history kept in the tool's own docstring never reaches the agent.
+        self.assertNotIn("Superseded", desc)
+        served = search_memory_description(read_bound_bytes=4_096, rows_served=True)
+        self.assertIn("rows may be copied back verbatim", served)
+        self.assertNotIn("usually declined", served)
 
     def test_evaluation_control_overrides_are_recorded_unambiguously(self) -> None:
         self._set_env("FW_EVAL_FINISH_REMINDERS", "0")
@@ -2895,3 +2946,104 @@ class MinimumOffloadSaving(unittest.TestCase):
             scope=self.scope, selected_archive=self.archive,
         )
         self.assertEqual(metadata["labeled_aliases"], ["O1"])
+
+
+class RestoreWording(unittest.TestCase):
+    """The restore is budget-bound, and every place that promises it says so."""
+
+    def test_a_label_says_normally_restored_and_both_earlier_marks_still_parse(self) -> None:
+        label = offload_label(alias="O4", command_name="show_holders", response="payload",
+                              description="holder rows")
+        self.assertTrue(label.endswith("Normally restored for the final answer."))
+        self.assertEqual(LABEL_RESTORE_MARK, "Normally restored for the final answer.")
+        earlier = ("Offloaded observation O4 returned by show_holders. It contains holder rows. "
+                   "Restored in full for the final answer.")
+        self.assertTrue(is_offload_label(earlier))
+        self.assertEqual(label_alias(earlier), "O4")
+
+    def test_the_agent_signature_names_the_evidence_limit(self) -> None:
+        doc = " ".join((WorkflowAgentSignature.__doc__ or "").split())
+        self.assertIn("is normally restored in full when the final answer is written", doc)
+        self.assertIn("If the answer's evidence limit is reached, the oldest observations are not "
+                      "restored and the answer names them.", doc)
+        self.assertNotIn("is restored in full", doc)
+        self.assertIn("Search memory only for a value you need to choose your next step, "
+                      "never to collect rows for the final answer.", doc)
+
+
+class ProducingCommandInputs(unittest.TestCase):
+    """search_memory's narrowing inputs come from the command the alias ran.
+
+    A copy of the real todo list workflow, with ``TodoList/set_properties``'s
+    input descriptions changed so it and ``TodoItem/set_properties`` -- the same
+    bare name in two contexts -- declare distinguishable inputs. Metadata is
+    read from the copy's real routing definition.
+    """
+
+    def setUp(self) -> None:
+        reset_runtime_state()
+        self.addCleanup(reset_runtime_state)
+        if fastworkflow.RoutingRegistry is None:
+            # The metadata lookup reads the registry fastworkflow.init installs.
+            fastworkflow.init(env_vars={})
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.workflow = Path(directory.name) / "two_contexts_workflow"
+        shutil.copytree(TODO_WORKFLOW, self.workflow,
+                        ignore=shutil.ignore_patterns("___*", "__pycache__"))
+        source = self.workflow / "_commands" / "TodoList" / "set_properties.py"
+        text = source.read_text(encoding="utf-8")
+        self.assertIn('description="Description of the todo list"', text)
+        source.write_text(text.replace('description="Description of the todo list"',
+                                       'description="New description of this list itself"', 1),
+                          encoding="utf-8")
+        workflow = SimpleNamespace(folderpath=str(self.workflow))
+        self.host = SimpleNamespace(
+            action_log=[
+                {"command": "set_properties <description>a</description>",
+                 "command_name": "TodoItem/set_properties", "parameters": None, "response": "ok"},
+                {"command": "set_properties <description>b</description>",
+                 "command_name": "TodoList/set_properties", "parameters": None, "response": "ok"},
+            ],
+            get_active_workflow=lambda: workflow,
+        )
+
+    @staticmethod
+    def description_of(inputs: list[dict]) -> str:
+        return next(field["description"] for field in inputs if field["name"] == "description")
+
+    def test_the_dispatched_command_wins_over_the_latest_of_the_same_name(self) -> None:
+        latest = describe_command_inputs(self.host, "set_properties")
+        self.assertEqual(self.description_of(latest), "New description of this list itself")
+        filed = describe_command_inputs(self.host, "set_properties",
+                                        dispatched="TodoItem/set_properties")
+        self.assertEqual(self.description_of(filed), "Description of the todo list")
+
+    def test_a_filed_name_for_another_command_falls_back_to_the_latest(self) -> None:
+        inputs = describe_command_inputs(self.host, "set_properties",
+                                         dispatched="TodoItem/get_properties")
+        self.assertEqual(self.description_of(inputs), "New description of this list itself")
+
+    def test_the_name_is_filed_under_the_in_flight_alias_of_this_scope_only(self) -> None:
+        class Signature(dspy.Signature):
+            user_query: str = dspy.InputField()
+            answer: str = dspy.OutputField()
+
+        def noop_tool(command: str) -> str:
+            """Return the command unchanged."""
+            return command
+
+        agent = build_tool_agent(SimpleNamespace(), Signature, [noop_tool], max_iters=3)
+        self.assertEqual(agent.dispatched_commands, {})
+        agent.current_trajectory = {"tool_name_0": "execute_workflow_query",
+                                    "tool_args_0": {"command": "set_properties"}}
+        agent.execute_ordinal_by_step = {0: 3}
+        remember_dispatched_command(agent, "TodoItem/set_properties")
+        scope = current_scope()
+        self.assertEqual(dispatched_command_name(agent, scope, "O3"), "TodoItem/set_properties")
+        other = RuntimeHandleScope("store", "channel", "experiment", "task", 0, "another-turn")
+        self.assertIsNone(dispatched_command_name(agent, other, "O3"))
+        # A completed step is not in flight: nothing is filed for it.
+        agent.current_trajectory["observation_0"] = "ok"
+        remember_dispatched_command(agent, "TodoList/set_properties")
+        self.assertEqual(dispatched_command_name(agent, scope, "O3"), "TodoItem/set_properties")

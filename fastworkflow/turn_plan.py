@@ -14,28 +14,36 @@ plain-text planner and ``parse_text_plan`` recovers what it can: numbered steps,
 lettered sub-steps, and the backticked command names that are real commands.
 Subjects cannot be recovered from text, so a fallback plan has none and the
 finish check then asks only whether each step ran at all.
+
+Structured planning is disabled (2026-09-28, owner decision), not behind a
+flag: the planner always returns plain text, so every plan is a
+``parse_text_plan`` plan with ``source="text"`` and no subjects. The code that
+served only the structured planner is commented out below, kept for reference.
 """
 from __future__ import annotations
 
 import re
-from typing import Iterable, Optional
+# Structured planning disabled 2026-09-28 (owner decision); kept for reference.
+# from typing import Iterable, Optional
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
 import fastworkflow
 
-#: Appended to the planner's instructions when it returns a structured plan.
-STRUCTURED_PLAN_GUIDE = """
-    Return the plan as structured steps:
-    - text: one short sentence per step.
-    - commands: the workflow command names the step runs (empty when it only reasons, compares, reports or asks the user).
-    - parts: only when a step runs several commands in sequence, one sub-step per command, each with its own commands.
-      Alternatives (one command OR another, whichever applies) are not parts: list them together in the step's commands.
-    - optional: true for a step or sub-step that is optional or only needed in some cases.
-    - needs_user: true for a step that asks the user, or that only runs after the user confirms, approves or selects something.
-    Also list the subjects: every specific item the request names and asks about (a person, an account, a record...),
-    with its name exactly as written in the request and one lowercase word for its kind.
-    """
+# Structured planning disabled 2026-09-28 (owner decision); kept for reference.
+# #: Appended to the planner's instructions when it returns a structured plan.
+# STRUCTURED_PLAN_GUIDE = """
+#     Return the plan as structured steps:
+#     - text: one short sentence per step.
+#     - commands: the workflow command names the step runs (empty when it only reasons, compares, reports or asks the user).
+#     - parts: only when a step runs several commands in sequence, one sub-step per command, each with its own commands.
+#       Alternatives (one command OR another, whichever applies) are not parts: list them together in the step's commands.
+#     - optional: true for a step or sub-step that is optional or only needed in some cases.
+#     - needs_user: true for a step that asks the user, or that only runs after the user confirms, approves or selects something.
+#     Also list the subjects: every specific item the request names and asks about (a person, an account, a record...),
+#     with its name exactly as written in the request and one lowercase word for its kind.
+#     """
 
 
 def workflow_command_names(workflow_path: str) -> Optional[set[str]]:
@@ -51,7 +59,7 @@ class PlanSubject(BaseModel):
     """A specific item the request names and asks about."""
 
     name: str = Field(description="The name exactly as written in the request")
-    kind: str = Field(description="One lowercase word for what it is, e.g. person, account, permission, control, order")
+    kind: str = Field(description="One lowercase word for what it is: the kind of item the request or the workflow calls it")
 
 
 class PlanPart(BaseModel):
@@ -78,21 +86,25 @@ class TurnPlan(BaseModel):
     steps: list[PlanStep] = Field(default_factory=list)
     subjects: list[PlanSubject] = Field(default_factory=list)
     #: "structured" when the planner returned these fields, "text" when they were
-    #: parsed from a plain-text plan after the structured call failed.
+    #: parsed from a plain-text plan after the structured call failed or
+    #: returned no steps.
+    #: With structured planning disabled (2026-09-28) the planner only produces
+    #: "text"; the default is left as it was for plans built directly.
     source: str = "structured"
 
 
-def render(steps: Iterable[PlanStep]) -> str:
-    """The numbered list the agent reads."""
-    lines = []
-    for number, step in enumerate(steps, 1):
-        flags = [flag for flag, on in (("optional", step.optional), ("needs the user", step.needs_user)) if on]
-        suffix = f" ({', '.join(flags)})" if flags else ""
-        lines.append(f"{number}. {step.text.strip()}{suffix}")
-        for letter, part in zip("abcdefghijklmnopqrstuvwxyz", step.parts):
-            optional = " (optional)" if part.optional else ""
-            lines.append(f"   {letter}. {part.text.strip()}{optional}")
-    return "\n".join(lines)
+# Structured planning disabled 2026-09-28 (owner decision); kept for reference.
+# def render(steps: Iterable[PlanStep]) -> str:
+#     """The numbered list the agent reads."""
+#     lines = []
+#     for number, step in enumerate(steps, 1):
+#         flags = [flag for flag, on in (("optional", step.optional), ("needs the user", step.needs_user)) if on]
+#         suffix = f" ({', '.join(flags)})" if flags else ""
+#         lines.append(f"{number}. {step.text.strip()}{suffix}")
+#         for letter, part in zip("abcdefghijklmnopqrstuvwxyz", step.parts):
+#             optional = " (optional)" if part.optional else ""
+#             lines.append(f"   {letter}. {part.text.strip()}{optional}")
+#     return "\n".join(lines)
 
 
 def step_text(step: PlanStep) -> str:
@@ -112,8 +124,17 @@ def command_parts(step: PlanStep) -> list[PlanPart]:
     return parts if len(parts) >= 2 else []
 
 
+def step_commands(step: PlanStep) -> list[str]:
+    """Every command the step and any of its sub-steps names, optional sub-steps included, once each."""
+    return list(dict.fromkeys([*step.commands, *(name for part in step.parts for name in part.commands)]))
+
+
 def is_checked(step: PlanStep) -> bool:
-    """Whether the finish check holds the agent to this step."""
+    """Whether the finish check holds the agent to this step.
+
+    The check also skips a step naming a command not declared read-only
+    (``finish_check.provably_read_only``); that needs the workflow, this does not.
+    """
     return not (step.optional or step.needs_user)
 
 
@@ -123,23 +144,48 @@ def is_checked(step: PlanStep) -> bool:
 
 _STEP_RE = re.compile(r"^\s*\**\s*(\d+)[.)]\s*")
 _PART_RE = re.compile(r"(?:(?<=\s)|^)([a-l])[.)]\s")
-_COMMAND_RE = re.compile(r"`([a-z][a-z0-9_]*)")
-_OPTIONAL_LEAD_RE = re.compile(
-    r"\boptional(?:ly)?\b(?! (?:filter|parameter|argument)s?\b)(?!ly with a filter)|\bif needed\b",
+# A command may be written qualified by its context (`Account/add_tag`); the
+# bare name is kept, as ``workflow_command_names`` lists bare names.
+_COMMAND_RE = re.compile(r"`(?:[A-Za-z_]\w*/)*([a-z][a-z0-9_]*)")
+# Matched over a step's whole text, so "optional" as an adjective ("with optional
+# filters") must not count: only a step that says it is optional, or is needed
+# only in some cases.
+_OPTIONAL_RE = re.compile(
+    r"^\W*optional(?:ly)?\b|\boptionally\b(?! (?:with|by|using|filter(?:ed|ing)?)\b)"
+    r"|\(optional\)|\b(?:is|are) optional\b|\bif (?:needed|necessary)\b",
     re.IGNORECASE,
 )
 _APPROVAL_RE = re.compile(
     r"\bafter (?:the )?(?:user(?:'s)? )?(?:approval|confirmation)\b|\bpending (?:user )?approval\b"
-    r"|\buser confirmation required\b|\bonce confirmed\b|\bif (?:the )?user (?:confirms|approves|selects)\b"
-    r"|\bafter (?:the )?user (?:selects|confirms|approves)\b|\(after confirmation\)",
+    r"|\buser confirmation required\b|\bonce confirmed\b"
+    r"|\bif (?:the )?(?:user )?(?:confirms|confirmed|approves|approved|agrees|selects)\b"
+    r"|\bafter (?:the )?user (?:selects|confirms|approves)\b|\(after confirmation\)"
+    r"|\bask(?:s|ing)? (?:the )?(?:user )?(?:for|to) (?:confirm|approv)"
+    r"|\bwith (?:the )?user(?:'s|s'|s)? (?:approval|confirmation)\b"
+    r"|\b(?:await(?:s|ing)?|wait(?:s|ing)? for) (?:the )?(?:user(?:'s)? )?(?:confirmation|approval)\b",
     re.IGNORECASE,
 )
-_LEAD_CHARS = 40
 
 
-def _lead(text: str) -> str:
-    title = re.match(r"^\s*(?:[a-l][.)]\s*)?\*\*(.+?)\*\*", text)
-    return title.group(1) if title else text[:_LEAD_CHARS]
+def _split_inline(number: int, text: str, later_numbers: frozenset[int] = frozenset()) -> list[str]:
+    """One numbered line that holds the next steps too: "1. a. 2. b. 3. c".
+
+    A next number only starts a step after a sentence end, and never when a
+    later line of the plan already starts with it: "set the page size to 2.
+    Then list" is one step.
+    """
+    steps = []
+    while True:
+        number += 1
+        if number in later_numbers:
+            break
+        mark = re.search(rf"(?<=[.;:!?]\s){number}[.)]\s", text)
+        if not mark:
+            break
+        steps.append(text[: mark.start()].strip())
+        text = text[mark.end():]
+    steps.append(text.strip())
+    return [step for step in steps if step]
 
 
 def _commands(text: str, known: Optional[set[str]]) -> list[str]:
@@ -153,12 +199,15 @@ def parse_text_plan(text: str, known_commands: Optional[set[str]] = None) -> Tur
     ``known_commands`` filters backticked words to real command names, so a
     backticked field name (``permission_uid``) is not taken for a command.
     """
-    steps: list[str] = []
+    numbered: list[tuple[int, str]] = []
     for line in (text or "").splitlines():
-        if _STEP_RE.match(line):
-            steps.append(_STEP_RE.sub("", line, count=1).strip())
-        elif steps and line.strip():
-            steps[-1] += " " + line.strip()
+        mark = _STEP_RE.match(line)
+        if mark:
+            numbered.append((int(mark.group(1)), line[mark.end():].strip()))
+        elif numbered and line.strip():
+            numbered[-1] = (numbered[-1][0], numbered[-1][1] + " " + line.strip())
+    steps = [step for index, (number, raw) in enumerate(numbered)
+             for step in _split_inline(number, raw, frozenset(n for n, _ in numbered[index + 1:]))]
     if not steps and (text or "").strip():
         # A plan squeezed onto one line: "1. a 2. b".
         steps = [s.strip() for s in re.split(r"(?:^|\s)\d+[.)]\s", text) if s.strip()]
@@ -175,14 +224,15 @@ def parse_text_plan(text: str, known_commands: Optional[set[str]] = None) -> Tur
                 parts.append(PlanPart(
                     text=part_text,
                     commands=_commands(part_text, known_commands),
-                    optional=bool(_OPTIONAL_LEAD_RE.search(_lead(part_text)) or _APPROVAL_RE.search(part_text)),
+                    optional=bool(_OPTIONAL_RE.search(part_text) or _APPROVAL_RE.search(part_text)),
                 ))
-        lead = _lead(head)
+        # A step with sub-steps is flagged by its own text; each sub-step by its own.
+        own_text = head.strip() or raw.strip()
         plan_steps.append(PlanStep(
-            text=head.strip() or raw.strip(),
+            text=own_text,
             commands=_commands(raw, known_commands),
             parts=parts,
-            optional=bool(_OPTIONAL_LEAD_RE.search(lead)),
-            needs_user=bool(_APPROVAL_RE.search(lead)),
+            optional=bool(_OPTIONAL_RE.search(own_text)),
+            needs_user=bool(_APPROVAL_RE.search(own_text)),
         ))
     return TurnPlan(steps=plan_steps, subjects=[], source="text")

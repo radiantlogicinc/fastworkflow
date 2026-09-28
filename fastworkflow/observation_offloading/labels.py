@@ -131,6 +131,32 @@ def unescape_response(text: str) -> str:
     return text[len(RESPONSE_ESCAPE):] if depth else text
 
 
+#: A line that could pass for framework output on a path that prints stored
+#: text verbatim between framework lines: a ``[search_memory ...]`` marker, a
+#: handle line or search-answer header (``Observation O7 (``), or an offload
+#: label. Matched anywhere in the line and in any case, since the reader is a
+#: model, not this module's anchored regexes.
+_MARKER_SHAPE_RE = re.compile(
+    r"\[search_memory"
+    r"|\bObservation O[1-9]\d* \("
+    r"|\b(?:Offloaded observation |Use search_memory tool to search inside Observation )"
+    r"O[1-9]\d* returned by ",
+    re.IGNORECASE)
+
+
+def quote_marker_lines(text: str) -> str:
+    """*text* with every line shaped like framework output quoted by ``RESPONSE_ESCAPE``.
+
+    For backend text printed verbatim beside framework markers (a short
+    observation, served listing rows), so a stored line cannot forge a marker,
+    a hint or a handle. Every other line, and the line structure, is unchanged.
+    One-way: nothing reads these texts back, so unlike ``escape_response``
+    there is no inverse, and an already-quoted marker line is quoted again.
+    """
+    return "\n".join(RESPONSE_ESCAPE + line if _MARKER_SHAPE_RE.search(line) else line
+                     for line in text.split("\n"))
+
+
 def annotated_observation(alias: str, context: str = "", text: str = "") -> str:
     """The observation as the agent sees it: our handle line, then the response.
 
@@ -260,14 +286,26 @@ def output_description(response: str) -> str:
     return f"command output beginning with: {heading[:200]}" if heading else "an empty command result"
 
 
+#: The per-label reminder of the restore promise. The promise and what follows
+#: from it (search only for a next-step value) are stated ONCE, in the agent
+#: signature and the search_memory tool description; repeating them in every
+#: label cost ~100 bytes per label and made fewer observations worth
+#: offloading (``offload_saving_bytes``). Labels written with the longer
+#: sentence still parse: ``LABEL_RE`` reads only the prefix. "Normally", because
+#: the restore is bounded by the answer's evidence budget: when it binds, the
+#: oldest observations are not restored and the answer step is told which
+#: (``answer_rehydration.NOT_REHYDRATED_PREFIX``). Labels written with the
+#: earlier "Restored in full for the final answer." parse the same way.
+LABEL_RESTORE_MARK = "Normally restored for the final answer."
+
+
 def offload_label(*, alias: str, command_name: str, response: str,
                   description: str = "") -> str:
     description = description.strip() or output_description(response)
     return (
         f"{OFFLOAD_MARK}{alias} returned by {command_name}. "
         f"It contains {description.rstrip('.')}. "
-        f"It is restored in full when the final answer is written, so search it with "
-        f"search_memory only for a value you need for your next step."
+        f"{LABEL_RESTORE_MARK}"
     ).rstrip()
 
 

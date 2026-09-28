@@ -73,10 +73,14 @@ MIN_MAX_BYTES = context_budget.ANSWER_REHYDRATION.floor
 
 #: The key the drop line is appended under. Deliberately not an observation key:
 #: it is a statement about the trajectory, not a tool result, and the extractor
-#: must never read it as evidence about the workflow.
+#: must never read it as evidence about the workflow. The prefix tells the
+#: extractor to say so in the answer: the agent was told observations are
+#: normally restored, so an answer silently missing rows would read as complete.
 NOT_REHYDRATED_KEY = "answer_rehydration_note"
 NOT_REHYDRATED_PREFIX = (
-    "Not rehydrated for the answer (evidence exists under these observations): "
+    "Not rehydrated for the answer (evidence exists under these observations, but the "
+    "answer's evidence limit was reached; say in the final answer that the rows of these "
+    "observations are not included in it): "
 )
 
 KIND_LABEL = "label"        # (a)

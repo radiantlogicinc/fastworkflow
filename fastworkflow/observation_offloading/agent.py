@@ -14,16 +14,21 @@ from fastworkflow.observation_offloading.archive import (
     UnavailableHandleArchive,
 )
 from fastworkflow.observation_offloading.compact import compact_trajectory
+from fastworkflow.observation_offloading.jev_client import TurnBudget
 from fastworkflow.observation_offloading.continuation import (
     DEFAULT_MAX_ITERS,
-    MAX_FORCED_REPLANS,
     StructuredContinuationReAct,
 )
 from fastworkflow.observation_offloading.manifest import install_span_policy
-from fastworkflow.observation_offloading.search import search_memory
+from fastworkflow.observation_offloading.search import (
+    search_memory,
+    search_observation_max_bytes,
+)
 from fastworkflow.observation_offloading.search_router import router_for_workflow
-from fastworkflow.observation_offloading.finish_check import checker_from_env
+from fastworkflow.observation_offloading.finish_check import checker_from_env, command_effects
 from fastworkflow.observation_offloading.state import (
+    current_execute_alias,
+    current_scope,
     prune_once,
     record_event,
     scope_for_host,
@@ -170,27 +175,150 @@ def describe_command_output(chat_session: Any, command: str, response: str) -> s
         return ""
 
 
-def describe_command_inputs(chat_session: Any, command: str) -> list[dict[str, Any]]:
-    """Declared inputs of the command most recently run under the name *command*.
+def remember_dispatched_command(agent: Any, command_name: str) -> None:
+    """File the qualified command the in-flight execute step ran, under its alias.
 
-    *command* is the bare command word the archive recorded (``show_holders``);
-    the action log maps it to the qualified command that actually ran.
+    Called at dispatch, when the step's alias is known and the command's
+    qualified name has just been resolved: two contexts can each have a command
+    of the same bare name, and the archive records only the bare word. Kept on
+    the agent for the current turn's scope only; a new scope starts empty, and
+    a process that imported a suspension has nothing filed for the steps before
+    it (``describe_command_inputs`` then falls back). Never raises.
     """
-    core = getattr(chat_session, "_core", chat_session)
-    records = getattr(core, "action_log", [])
-    record = next((r for r in reversed(records)
-                   if str(r.get("command_name") or "").rsplit("/", 1)[-1] == command), None)
-    if record is None:
-        return []
+    try:
+        alias = current_execute_alias(agent)
+        if agent is None or not alias or not command_name:
+            return
+        scope_id = current_scope().scope_id
+        filed = getattr(agent, "dispatched_commands", None)
+        if not isinstance(filed, dict) or scope_id not in filed:
+            filed = {scope_id: {}}
+            agent.dispatched_commands = filed
+        filed[scope_id][alias] = str(command_name)
+    except Exception:  # noqa: BLE001 - bookkeeping must never fail a command
+        logger.debug("could not file the dispatched command", exc_info=True)
+
+
+def dispatched_command_name(agent: Any, scope: Any, alias: str) -> Optional[str]:
+    """The qualified command filed for *alias* in *scope*, or None."""
+    filed = getattr(agent, "dispatched_commands", None)
+    names = filed.get(getattr(scope, "scope_id", None)) if isinstance(filed, dict) else None
+    return names.get(alias) if isinstance(names, dict) else None
+
+
+def describe_command_inputs(chat_session: Any, command: str,
+                            dispatched: Optional[str] = None) -> list[dict[str, Any]]:
+    """Declared inputs of the command that produced an observation.
+
+    *command* is the bare command word the archive recorded (``show_holders``).
+    *dispatched* is the qualified name filed for the observation's alias at
+    dispatch (``remember_dispatched_command``), used when its bare name is
+    *command*. Otherwise the action log maps *command* to the qualified command
+    most recently run under that bare name, which is a guess when two contexts
+    share it.
+    """
+    if dispatched and dispatched.rsplit("/", 1)[-1] == command:
+        command_name = dispatched
+    else:
+        core = getattr(chat_session, "_core", chat_session)
+        records = getattr(core, "action_log", [])
+        record = next((r for r in reversed(records)
+                       if str(r.get("command_name") or "").rsplit("/", 1)[-1] == command), None)
+        if record is None:
+            return []
+        command_name = record["command_name"]
     try:
         workflow = chat_session.get_active_workflow()
         routing = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
         metadata = CommandMetadataAPI._extract_signature_info(
-            record["command_name"], routing, routing)
+            command_name, routing, routing)
         return list(metadata.get("inputs", []))
     except Exception:
         # Missing metadata must never prevent a search.
         return []
+
+
+_SEARCH_MEMORY_DESCRIPTION = """Answer a question inside ONE earlier execute_workflow_query observation.
+
+alias is the O-number printed on that observation's first line
+("Observation O42 (execute_workflow_query)", or
+"Observation O42 (execute_workflow_query, in Account 28c5aeb5... Alan
+Cooper)" when the command ran inside a context) or named in its offload
+label. Pass only the O-number. Any printed O-number works, whether its
+result is still shown in full or was replaced by a label. Never pass a
+step number. An alias that was never printed is a miss, not another
+observation.
+
+The "in <Context> <instance>" part of that line says WHICH instance the
+observation is about: a listing produced inside an account belongs to
+that account even though its rows do not repeat the account's id.
+
+The search also knows WHICH context instance the framework recorded for
+that observation, and is told it separately from the evidence, so a
+question about that subject can be answered from rows that never repeat
+its id. It will not adopt a subject your question assumes: when no
+subject was recorded it says so instead of guessing one.
+
+Two different bounds apply, and the right response to each is the
+opposite of the other.
+
+The READ is bounded: at most {read_bound} of the observation's LEADING
+UTF-8 bytes reach the search model, a budget derived from that model's own
+context window. A long observation is therefore searched as a prefix, not
+in full. An answer produced from a partial read says so and states the
+bytes it did not read; nothing missing from it is thereby absent from the
+observation. Every search of an observation starts at byte zero, so
+re-asking with a narrower question reads the same bytes and cannot reach
+the rest. To reach the rest, re-run the command that produced the
+observation with a narrower filter or a smaller page and search the NEW
+observation. If the search model refuses even that bounded prompt as too
+long, the call says so and returns no evidence; repeating it sends the
+same bytes, so do not retry it unchanged.
+
+The ANSWER is bounded separately: a long answer is cut to fit the
+trajectory, says so, and reports how many bytes it left out. That one
+IS worth asking again on the same observation with a narrower question,
+because the evidence was read and only its presentation was cut.
+
+Every observation of this turn, offloaded or not, is normally restored in full when
+the final answer is written; an offload label is a pointer to it, not a
+loss. If the answer's evidence limit is reached, the oldest observations are
+not restored and the answer names them. So a table you only need to REPORT
+needs no search. {rows}
+
+An observation short enough to print whole is returned verbatim instead
+of searched, together with the observations in this turn that mention the
+question's words more.
+"""
+
+_ROWS_MODEL_ONLY = (
+    "Do not search to collect rows for the final answer. Search for the "
+    "specific values you need to choose your NEXT step: a uid to open, whether "
+    "a named item is present, a count, one field. A request for a whole table "
+    "is usually declined or cut and costs a step."
+)
+_ROWS_SERVED = (
+    "Search for the specific values you need to choose your NEXT step: a uid "
+    "to open, whether a named item is present, a count, one field. When a "
+    "search asks for every row of a listing, the rows may be copied back "
+    "verbatim instead, as many whole rows as fit the answer bound, with a "
+    "closing line saying how many were shown; otherwise do not search to "
+    "collect rows for the final answer."
+)
+
+
+def search_memory_description(*, read_bound_bytes: int, rows_served: bool) -> str:
+    """The ``search_memory`` tool description for this agent.
+
+    Built, not literal, for two facts only known at build time: the read
+    bound, stated as the number the search will actually apply, and whether a
+    router may answer an all-rows search by copying rows, which the model-only
+    wording would otherwise contradict.
+    """
+    return _SEARCH_MEMORY_DESCRIPTION.format(
+        read_bound=f"{int(read_bound_bytes):,}",
+        rows=_ROWS_SERVED if rows_served else _ROWS_MODEL_ONLY,
+    )
 
 
 def build_tool_agent(
@@ -215,9 +343,14 @@ def build_tool_agent(
     scope = _scope_for_session(chat_session)
     # In the workflow's own observability database, so the evidence a turn
     # can be replayed from lives, and is erased, where the turn's record is.
+    # The session's bound app workflow first: an agent built outside a turn (a
+    # context resuming a suspended one) has no active workflow, and an empty
+    # path would open a database named after the working directory instead.
+    app_workflow = getattr(chat_session, "app_workflow", None)
     getter = getattr(chat_session, "get_active_workflow", None)
     active_workflow = getter() if callable(getter) else None
-    workflow_path = str(getattr(active_workflow, "folderpath", "") or "")
+    workflow_path = (str(getattr(app_workflow, "folderpath", "") or "")
+                     or str(getattr(active_workflow, "folderpath", "") or ""))
     archive_path = state_paths.observability_db(workflow_path)
     # An archive that cannot be opened degrades; it does not stop the agent
     # being built (ido-t5x). ``build_compacting_step`` catches compaction
@@ -225,8 +358,14 @@ def build_tool_agent(
     # early for it to catch.
     selected_archive = open_handle_archive(archive_path, scope=scope)
     router = router_for_workflow(workflow_path)
+    # The finish-time execution check, when a deployment turns it on; it reads
+    # the turn's initial plan, which the planner stores on the session.
+    finish_checker = checker_from_env()
     turn_runtime = build_turn_runtime(scope, archive=selected_archive)
     agent: Any = None
+    if router is not None:
+        # The router is shared per process; the budget it draws on is this agent's turn.
+        router = router.within_budget(lambda: getattr(agent, "vendor_budget", None))
 
     compacting_step = build_compacting_step(
         lambda: agent,
@@ -238,6 +377,9 @@ def build_tool_agent(
 
     def scoped_search_memory(question: str, alias: str) -> str:
         """Answer a question inside ONE earlier execute_workflow_query observation.
+
+        Replaced at build time by ``search_memory_description``; this text is
+        the history it was derived from.
 
         alias is the O-number printed on that observation's first line
         ("Observation O42 (execute_workflow_query)", or
@@ -263,7 +405,8 @@ def build_tool_agent(
 
         The READ is bounded: at most a budget of the observation's LEADING
         UTF-8 bytes reaches the search model, derived from that model's own
-        context window (a quarter of it: 131,072 bytes at the reference window). A long
+        context window (a quarter of it: 131,072 bytes at the reference window).
+        (Superseded: a quarter of it; the served text states the byte count.) A long
         observation is therefore searched as a prefix, not in full. An answer
         produced from a partial read says so and states the bytes it did not
         read; nothing missing from it is thereby absent from the observation.
@@ -283,13 +426,16 @@ def build_tool_agent(
         Do not search to collect rows for the final answer. Every observation
         of this turn, offloaded or not, is restored in full when the final
         answer is written, so a table you only need to REPORT needs no search.
+        (Superseded: ...is normally restored in full; if the answer's evidence
+        limit is reached, the oldest observations are not restored and the
+        answer names them.)
         Search for the specific values you need to choose your NEXT step: a uid
         to open, whether a named item is present, a count, one field. A request
         for a whole table is usually declined or cut and costs a step.
 
         An observation short enough to print whole is returned verbatim instead
         of searched, together with the observations in this turn that match the
-        question better.
+        question better. (Superseded: ...that mention the question's words more.)
         """
 
         current = getattr(agent, "continuation_scope", None) or scope
@@ -297,11 +443,17 @@ def build_tool_agent(
             question, alias, reasoning=current_search_reasoning(agent),
             scope=current, selected_archive=selected_archive,
             router=router,
-            describe_inputs=lambda command: describe_command_inputs(chat_session, command),
+            describe_inputs=lambda command: describe_command_inputs(
+                chat_session, command,
+                dispatched=dispatched_command_name(agent, current, alias.strip())),
             trace_host=chat_session,
         )
 
     scoped_search_memory.__name__ = "search_memory"
+    scoped_search_memory.__doc__ = search_memory_description(
+        read_bound_bytes=search_observation_max_bytes(),
+        rows_served=router is not None,
+    )
     agent = StructuredContinuationReAct(
         signature,
         tools=[*tools, scoped_search_memory],
@@ -314,10 +466,23 @@ def build_tool_agent(
     agent.observation_archive = selected_archive
     agent.turn_runtime = turn_runtime
     agent.describe_output = lambda command, response: describe_command_output(chat_session, command, response)
-    # The finish-time execution check, when a deployment turns it on; it reads
-    # the turn's initial plan, which the planner stores on the session.
-    agent.finish_checker = checker_from_env()
+    agent.finish_checker = finish_checker
+    # The check only asks about steps whose commands the workflow's manifest
+    # declares read-only; without the lookup every command is unknown. The
+    # plan names the bound app workflow's commands, and an agent built outside
+    # a turn (a context resuming a suspended one) has no active workflow --
+    # which is why ``workflow_path`` above reads the bound app workflow first.
+    agent.command_effect = command_effects(workflow_path) if finish_checker is not None else None
+    # Alias -> qualified command, filed at dispatch (``remember_dispatched_command``).
+    agent.dispatched_commands = {}
+    agent.search_router = router
+    # One vendor budget per turn, shared by routing and the finish check;
+    # replaced at every forward(), kept across an ask_user resume. None when
+    # both are off.
+    agent.vendor_budget_factory = TurnBudget if (router is not None or finish_checker is not None) else None
+    agent.vendor_budget = agent.vendor_budget_factory() if agent.vendor_budget_factory else None
     agent.plan_source = lambda: getattr(chat_session, "_turn_plan", None)
+    agent.plan_status = lambda: getattr(chat_session, "_turn_plan_status", None)
     if agent.evaluation_control_overrides:
         record_event(
             {
@@ -331,7 +496,7 @@ def build_tool_agent(
         {
             "kind": "agent_installed",
             "max_iters": agent.max_iters,
-            "max_forced_replans": MAX_FORCED_REPLANS,
+            "max_forced_replans": agent.max_forced_replans,
             "finish_check": agent.finish_checker is not None,
             "tools": sorted(agent.tools),
             "scope_id": scope.scope_id,

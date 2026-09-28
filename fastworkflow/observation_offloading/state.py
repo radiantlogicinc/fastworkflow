@@ -6,6 +6,7 @@ import os
 import sqlite3
 import tempfile
 import threading
+from collections import OrderedDict
 from contextlib import closing
 from typing import Any, Mapping, Optional
 
@@ -44,6 +45,14 @@ _search_answers: dict[str, int] = {}
 #: ``CommandExecutor.invoke_command`` BEFORE the command runs and read when
 #: the alias line is printed. Turn-scoped like everything else here.
 _context_clauses: dict[str, str] = {}
+#: ``handle_key``s the archive was asked about and had no subject for, oldest
+#: first, so a caller that reads every handle of a turn (``related_handles``)
+#: pays one archive read per unrecorded alias rather than one per call. Kept
+#: apart from ``_context_clauses`` so "known to be unrecorded" can never be
+#: confused with a recorded clause, and bounded because nothing else evicts
+#: it. ``record_context_clause`` and ``forget_context_clause`` invalidate.
+_unrecorded_clauses: "OrderedDict[str, None]" = OrderedDict()
+UNRECORDED_CLAUSE_CACHE_MAX = 4096
 _events: list[dict[str, Any]] = []
 #: Database paths an event write has already failed against, so each failure
 #: is logged once rather than once per event.
@@ -526,6 +535,7 @@ def record_context_clause(
     text = str(clause or "")
     with _lock:
         _context_clauses[handle_key(scope, alias)] = text
+        _unrecorded_clauses.pop(handle_key(scope, alias), None)
     _write_subject(scope, alias, text, selected_archive)
 
 
@@ -549,9 +559,16 @@ def _write_subject(
 
 
 def context_clause_of(
-    scope: RuntimeHandleScope, alias: str, *, selected_archive: Any = None
+    scope: RuntimeHandleScope, alias: str, *, selected_archive: Any = None,
+    durable: bool = True, timeout: Optional[float] = None, strict: bool = False,
 ) -> Optional[str]:
     """The recorded clause for *alias*, ``""`` at the root, None if unrecorded.
+
+    ``durable=False`` answers from process memory only, for a caller that has
+    just seen the archive fail and must not wait on it again; a miss then
+    reads as unrecorded. *timeout*, when given, is how long the archive read
+    waits for a locked database; ``strict=True`` raises a failed read instead
+    of answering unrecorded, for a caller that must stop on it.
 
     Process memory first, then the archive. The second tier is
     what makes a subject survive a restart: a rehydrated label, a cross-context
@@ -562,20 +579,35 @@ def context_clause_of(
     kept a second way -- so the read is paid for once per alias per process.
 
     ``None`` still means UNRECORDED. Nothing here ever invents a subject.
+    An archive answer of "no subject" is remembered too (bounded), so asking
+    again does not re-read the archive; a failed read is not remembered.
     """
     key = handle_key(scope, alias)
     with _lock:
         if key in _context_clauses:
             return _context_clauses[key]
+        if key in _unrecorded_clauses:
+            _unrecorded_clauses.move_to_end(key)
+            return None
+    if not durable:
+        return None
     store = durable_archive(selected_archive)
     if store is None:
         return None
     try:
-        clause = store.get_subject(scope, alias)
+        clause = (store.get_subject(scope, alias) if timeout is None
+                  else store.get_subject(scope, alias, timeout=timeout))
     except Exception:  # noqa: BLE001 - an unreadable archive is an unrecorded one
+        if strict:
+            raise
         logger.debug("could not read the stored subject of %s", alias, exc_info=True)
         return None
     if clause is None:
+        with _lock:
+            if key not in _context_clauses:
+                _unrecorded_clauses[key] = None
+                while len(_unrecorded_clauses) > UNRECORDED_CLAUSE_CACHE_MAX:
+                    _unrecorded_clauses.popitem(last=False)
         return None
     with _lock:
         _context_clauses.setdefault(key, clause)
@@ -600,6 +632,7 @@ def forget_context_clause(
     """
     with _lock:
         _context_clauses.pop(handle_key(scope, alias), None)
+        _unrecorded_clauses.pop(handle_key(scope, alias), None)
     store = durable_archive(selected_archive)
     if store is None:
         return
@@ -641,7 +674,7 @@ def release_scope(scope: "RuntimeHandleScope | str") -> None:
     scope_id = scope if isinstance(scope, str) else scope.scope_id
     prefix = f"{scope_id}:"
     with _lock:
-        for registry in (_handles, _archived, _context_clauses):
+        for registry in (_handles, _archived, _context_clauses, _unrecorded_clauses):
             for key in [key for key in registry if key.startswith(prefix)]:
                 del registry[key]
         _search_answers.pop(scope_id, None)
@@ -677,6 +710,7 @@ def reset_observation_state() -> None:
         _archived.clear()
         _search_answers.clear()
         _context_clauses.clear()
+        _unrecorded_clauses.clear()
         _events.clear()
         _event_write_failures.clear()
         _routes.clear()

@@ -502,7 +502,7 @@ class TestSuspensionRootSpan:
 
 
 class TestPlannerSpans:
-    def _plan(self, ctx, wf, monkeypatch, trace_trigger=None):
+    def _plan(self, ctx, wf, monkeypatch, trace_trigger=None, prediction=None):
         import dspy
 
         from fastworkflow import workflow_agent
@@ -521,7 +521,7 @@ class TestPlannerSpans:
             dspy,
             "ChainOfThought",
             lambda signature: (
-                lambda **kwargs: SimpleNamespace(
+                lambda **kwargs: prediction or SimpleNamespace(
                     next_steps="1. step one\n2. step two", reasoning=""
                 )
             ),
@@ -560,7 +560,34 @@ class TestPlannerSpans:
         assert plans[0].attributes["model"] == "test-model"
         assert plans[0].attributes["replan_trigger"] is None
         assert "step one" in plans[0].attributes["plan"]
+        assert plans[0].attributes["plan_source"] == "text"
+        assert plans[0].attributes["subjects"] == []
         assert not sink.named(tracing.SPAN_PLANNER_REPLAN)
+
+    @pytest.mark.skip(reason="structured planning disabled 2026-09-28 (owner decision)")
+    def test_structured_plan_span_carries_source_and_subjects(
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
+    ):
+        from fastworkflow.turn_plan import PlanStep, PlanSubject
+
+        # The structured planner runs only when the agent's finish check is active.
+        sink = RecordingTraceSink()
+        ctx, wf = _make_assistant_ctx(todo_workflow_path, monkeypatch, sink=sink)
+        ctx._workflow_tool_agent = SimpleNamespace(
+            finish_checker=object(), finish_reminders_enabled=True)
+        ctx._begin_turn("do the thing")
+
+        self._plan(ctx, wf, monkeypatch, prediction=SimpleNamespace(
+            steps=[PlanStep(text="List Alan Cooper's todo items", commands=["list_todos"])],
+            subjects=[PlanSubject(name="Alan Cooper", kind="person")],
+            reasoning="",
+        ))
+
+        plan, = sink.named(tracing.SPAN_PLANNER_PLAN)
+        assert plan.attributes["plan_source"] == "structured"
+        assert plan.attributes["subjects"] == ["Alan Cooper"]
+        assert "List Alan Cooper's todo items" in plan.attributes["plan"]
+        assert ctx._turn_plan.subjects[0].name == "Alan Cooper"
 
     def test_replan_span_carries_trigger(
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch

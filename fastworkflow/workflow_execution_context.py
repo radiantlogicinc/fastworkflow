@@ -39,9 +39,26 @@ from fastworkflow.state_serialization import validate_state
 from fastworkflow.observability import store as observability_store
 from fastworkflow.observability.execution_recorder import ExecutionRecorder, record_execution
 from fastworkflow.turn import TurnResult, TurnStatus, mint_turn_key
+from fastworkflow.turn_plan import TurnPlan
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_logger, dspy_utils
 from fastworkflow.utils.react import AskUserSuspend, NoSuspendedAgentStateError
+
+#: Why the turn has the plan it has. The finish check records the cause of a
+#: missing plan as ``no_plan_cause``.
+TURN_PLAN_PLANNED = "planned"
+#: The planner returned no plan at all.
+TURN_PLAN_PLANNER_EMPTY = "planner_empty"
+#: The planner returned a plan the check could not read steps out of.
+TURN_PLAN_UNREADABLE = "plan_unreadable"
+#: The turn was resumed from a session state written without its plan.
+TURN_PLAN_LOST_ON_RESUME = "lost_on_resume"
+#: No plan was made for the check: it was not active, or the turn was not planned.
+TURN_PLAN_NOT_PLANNED = "not_planned"
+TURN_PLAN_STATUSES = frozenset({
+    TURN_PLAN_PLANNED, TURN_PLAN_PLANNER_EMPTY, TURN_PLAN_UNREADABLE,
+    TURN_PLAN_LOST_ON_RESUME, TURN_PLAN_NOT_PLANNED,
+})
 
 
 def _agent_result_attributes(result: Any, attempts: int) -> dict[str, Any]:
@@ -165,6 +182,13 @@ class WorkflowExecutionContext:
         self._distillation_insights_count = 0
         self._planning_insights: Optional[str] = None
         self._execution_insights: Optional[str] = None
+
+        # The turn's initial plan, which the finish-time execution check
+        # verifies, and why there is none when there is none: one of
+        # TURN_PLAN_STATUSES. Written by the planner at the start of a turn and
+        # carried across a cross-process ask_user resume by serialize_state.
+        self._turn_plan: Optional[TurnPlan] = None
+        self._turn_plan_status: str = TURN_PLAN_NOT_PLANNED
 
         # Observability (design §3.1): sink + identity + span bookkeeping.
         # The sink is a per-context attribute, not transport state [R28].
@@ -981,6 +1005,14 @@ class WorkflowExecutionContext:
             "attempt": self._attempt,
             "claim_epoch": self._claim_epoch,
             "server_incarnation": self._server_incarnation,
+            # Additive keys, read with .get: a blob written before them resumes
+            # a suspended turn with no plan, recorded as lost on resume. The
+            # plan is null whenever the finish check is off.
+            "turn_plan": (
+                self._turn_plan.model_dump(mode="json")
+                if self._turn_plan is not None else None
+            ),
+            "turn_plan_status": self._turn_plan_status,
         }
         # No default=str round-trip. This is the first serializer, so coercing
         # here is what made every downstream strictness check vacuous: an
@@ -1055,6 +1087,31 @@ class WorkflowExecutionContext:
             self._ensure_agent_initialized()
             if self._workflow_tool_agent is not None:
                 self._workflow_tool_agent.import_suspended(react_blob)
+            # The suspended turn's plan, which only the finish check reads.
+            # Advisory, so it never fails a restore: a plan that does not
+            # validate is a plan lost on resume, like one in a blob written
+            # without the key. Only for an ACTIVE check
+            # (``workflow_agent.finish_check_active``): one switched off by
+            # FW_EVAL_FINISH_REMINDERS=0 restores nothing.
+            agent = self._workflow_tool_agent
+            if (getattr(agent, "finish_checker", None) is not None
+                    and bool(getattr(agent, "finish_reminders_enabled", True))):
+                plan: Optional[TurnPlan] = None
+                status = TURN_PLAN_LOST_ON_RESUME
+                if "turn_plan" in state:
+                    raw_plan = state.get("turn_plan")
+                    raw_status = state.get("turn_plan_status")
+                    try:
+                        plan = TurnPlan.model_validate(raw_plan) if raw_plan is not None else None
+                    except ValueError:
+                        plan = None
+                    else:
+                        status = raw_status if raw_status in TURN_PLAN_STATUSES else (
+                            TURN_PLAN_PLANNED if plan is not None else TURN_PLAN_NOT_PLANNED)
+                    if plan is None and status == TURN_PLAN_PLANNED:
+                        status = TURN_PLAN_LOST_ON_RESUME
+                self._turn_plan = plan
+                self._turn_plan_status = status
 
         saved_context_name = state.get("current_command_context_name")
         if (

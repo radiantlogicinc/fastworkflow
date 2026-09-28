@@ -134,7 +134,7 @@ through their channel's conversation-less group.
 | Span name | Where emitted | Key attributes |
 |---|---|---|
 | `fw.turn` (root) | `process_turn` begin/finalize | turn_key, channel_id, conversation_id, user_message, status, success, failure_reason, suspended_ms |
-| `fw.planner.plan` / `.replan` | around the task-planner calls (`workflow_agent.py`) | plan text (capped), replan trigger, model name |
+| `fw.planner.plan` / `.replan` | around the task-planner calls (`workflow_agent.py`) | plan text (capped), replan trigger, model name; since per-span v2 (aggregate contract 8) `plan_source` (`structured` / `text` / `text_fallback` / `none`) and redacted `subjects` |
 | `fw.agent.tool_call` | the CommandTraceEvent emission sites — **outside** the `command_trace_queue is not None` guards; the sink is reached via WEC/config, not the transport-queue contract `[R28]` | raw agent command text |
 | `fw.command.execute` | `CommandExecutor.invoke_command` boundary | context, command_name, parameters, response text (capped), success, duration_ms |
 | `fw.ask_user` | ask_user suspend/resume (A7 semantics) | agent_query, user_response, human wait |
@@ -151,13 +151,24 @@ inferred:
 | Span name | Where emitted | Key attributes |
 |---|---|---|
 | `fw.agent.execute` | `WEC._call_agent_with_retry` — the one choke point both the fresh forward and the resume pass through | agent_input, resumed, model, attempts, final_answer, suspended, clarification, exhausted |
-| `fw.agent.step` | each iteration of `fastWorkflowReAct._run_loop` | step_index, thought, tool_name, tool_args, observation, clarification, tool_error |
-| `fw.search.route` | `SearchRouter.route` (`observation_offloading/search_router.py`), inside a `search_memory` step, only when routing is enabled (`FW_SEARCH_ROUTER=jev`) and the observation holds a listing. Kind `llm`; added in span contract v6 | model, choice, p_all_rows, for_report, latency_ms, input_tokens, output_tokens, error_type |
+| `fw.agent.step` | each iteration of `fastWorkflowReAct._run_loop` | step_index, thought, tool_name, tool_args, observation, clarification, tool_error; `finish_check_note` (per-span v3, aggregate contract 7; replaced `roster_nudge`) marks the `finish` step whose observation is the finish check's note rather than a tool result |
+| `fw.search.route` | `SearchRouter.route` (`observation_offloading/search_router.py`), inside a `search_memory` step, only when routing is enabled (`FW_SEARCH_ROUTER=jev`, or since 2026-09-27 the name of a registered decision provider) and the observation holds a listing. Not started once the turn's routing calls (3) or vendor time (10 s) are spent: that search records the router error `router_budget` on its offload event, with no span. Kind `llm`; added in span contract v6 | model, choice, p_all_rows, for_report, latency_ms, input_tokens, output_tokens, error_type |
+| `fw.finish_check` | `FinishChecker.note` (`observation_offloading/finish_check.py`), inside the agent's `finish` step, only when the check is enabled (`FW_FINISH_CHECK=jev`, or since 2026-09-27 the name of a registered decision provider), a plan has a checked step and at least two iterations are left (and, since 2026-09-27, the turn's ledger is complete: a `ledger incomplete` finish opens no span). Kind `llm`; added in span contract v7 | model, plan_source, steps, subjects (a count), questions, requests, splits, input_tokens, latency_ms, flagged, fired, error_type |
 
 `fw.search.route` records the verdict and its cost, never the question or the
 observation (those stay on the search's offload event). It is not
 `fw.llm.call`, so the cost and cut-at-limit readers keyed on that name do not
-count it.
+count it. The same holds for `fw.finish_check`: its tokens are outside every
+`fw.llm.call` total, and which steps it flagged is on the `finish_check` offload
+event (by step and subject index), not the span.
+
+Neither span's attributes nor its contract version changed on 2026-09-27. The
+diagnostics added then -- `provider`, `vendor_ms`, `error_status`,
+`error_request_id`, `error_code`, `error_stage`, and on the finish check
+`calibration`, `user_replies`, `no_plan_cause`, `subjects_capped`,
+`ledger_bytes` and `ledger_rows_trimmed` -- are on the offload events only
+(`search_memory`'s `router` field and `finish_check`); see
+[observation_search.md](observation_search.md#finish-time-execution-check).
 
 `fw.agent.execute` is the executor as a phase, sibling to `fw.planner.plan`
 under `fw.turn`; it is **not** `fw.command.execute`, which is one command inside

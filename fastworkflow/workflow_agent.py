@@ -8,8 +8,9 @@ import traceback
 from datetime import datetime, timezone
 
 import dspy
-from dspy.utils.exceptions import AdapterParseError
-from pydantic import ValidationError
+# Structured planning disabled 2026-09-28 (owner decision); kept for reference.
+# from dspy.utils.exceptions import AdapterParseError
+# from pydantic import ValidationError
 
 import fastworkflow
 from fastworkflow import tracing
@@ -19,24 +20,46 @@ from fastworkflow.utils import dspy_utils
 from fastworkflow.command_metadata_api import CommandMetadataAPI
 from fastworkflow.utils.react import AskUserSuspend
 from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
-from fastworkflow.observation_offloading.agent import build_tool_agent
-from fastworkflow.observation_offloading.finish_check import checker_from_env
+from fastworkflow.observation_offloading.agent import build_tool_agent, remember_dispatched_command
+# Structured planning disabled 2026-09-28 (owner decision); kept for reference.
+# from fastworkflow.observation_offloading.archive import capture_record_for
+from fastworkflow.observation_offloading.finish_check import record_dispatch
+from fastworkflow.workflow_execution_context import (
+    TURN_PLAN_NOT_PLANNED,
+    TURN_PLAN_PLANNED,
+    TURN_PLAN_PLANNER_EMPTY,
+    TURN_PLAN_UNREADABLE,
+)
 from fastworkflow.turn_plan import (
-    STRUCTURED_PLAN_GUIDE,
-    PlanStep,
-    PlanSubject,
+    # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
+    # STRUCTURED_PLAN_GUIDE,
+    # PlanStep,
+    # PlanSubject,
     TurnPlan,
     parse_text_plan,
-    render,
+    # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
+    # render,
     workflow_command_names,
+)
+
+#: The internal workflow every output of a command stopped before the
+#: application carries as its workflow_name.
+CME_WORKFLOW_NAME = "command_metadata_extraction"
+#: NLU stages a command is left in when it did not run: the step needs
+#: parameters, or its command was ambiguous or not understood.
+_NOT_RUN_STAGES = (
+    fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION,
+    fastworkflow.NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
+    fastworkflow.NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION,
 )
 
 class WorkflowAgentSignature(dspy.Signature):
     """
     Carefully review the user request, then execute the next steps using available tools for building the final answer.
     Every user intent must be fully addressed before returning the final answer.
-    A command output offloaded to memory is not lost: every observation of this turn is restored in full
-    when the final answer is written. Search memory only for a value you need to choose your next step,
+    A command output offloaded to memory is not lost: every observation of this turn is normally restored in full
+    when the final answer is written. If the answer's evidence limit is reached, the oldest observations are not
+    restored and the answer names them. Search memory only for a value you need to choose your next step,
     never to collect rows for the final answer.
     """
     user_query = dspy.InputField(desc="The natural language user query.")
@@ -169,6 +192,8 @@ def _resolve_or_escalate(result, chat_session_obj: fastworkflow.ChatSession, res
     if bool(getattr(result, "needs_human", False)) or not clarified_cmd:
         # Break recursion: reset CME clarification stage to INTENT_DETECTION.
         _execute_workflow_query("abort", chat_session_obj=chat_session_obj)
+        # The abort ran; the step it cleared up after did not.
+        record_dispatch(getattr(chat_session_obj, "workflow_tool_agent", None), ran=False)
         question = getattr(result, "clarification_question", "") or response_text
         # Directive observation -> outer agent calls its own ask_user (blocks in A, suspends in B).
         return (
@@ -387,10 +412,24 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
         "response": response_text
     }
     _append_action_record(chat_session_obj, record)
+    # Which qualified command this step's alias ran, for search_memory's
+    # narrowing inputs. A CME command (the abort after a parameter-extraction
+    # error, go_up) is not the command the step asked for.
+    if command_output.workflow_name != CME_WORKFLOW_NAME:
+        remember_dispatched_command(getattr(chat_session_obj, "workflow_tool_agent", None), name)
 
     # Check workflow context to determine if we're in an error state that needs specialized handling
     cme_workflow = chat_session_obj.cme_workflow
     nlu_stage = cme_workflow.context.get("NLU_Pipeline_Stage")
+
+    # For the finish check's ledger: did this step reach a command? Recorded
+    # before the resolvers run, so a clarified command they retry overwrites
+    # it. go_up and reset_context are CME commands that succeed, so they ran.
+    record_dispatch(
+        getattr(chat_session_obj, "workflow_tool_agent", None),
+        ran=not (nlu_stage in _NOT_RUN_STAGES or (
+            command_output.workflow_name == CME_WORKFLOW_NAME and not command_output.success)),
+    )
 
     # Handle intent ambiguity clarification state with specialized agent.
     # The intent clarification agent is always present here: _execute_workflow_query
@@ -408,6 +447,8 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     # Handle parameter extraction errors with abort
     if nlu_stage == fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION:
         abort_confirmation = _execute_workflow_query('abort', chat_session_obj=chat_session_obj)
+        # The abort ran; the step it cleared up after did not.
+        record_dispatch(getattr(chat_session_obj, "workflow_tool_agent", None), ran=False)
         # Thread the active planning context so replanning uses the same planner LM
         # and insights as the current turn (critical for distillation: otherwise
         # replans silently fall back to LLM_PLANNER instead of the teacher/student LM).
@@ -673,6 +714,42 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
     )
 
 
+def finish_check_active(agent) -> bool:
+    """Whether the finish-time check will verify the plan made for *agent*'s turn.
+
+    The one decision the planner and the agent share: a check attached when the
+    agent was built, and not switched off by ``FW_EVAL_FINISH_REMINDERS=0``. With
+    it off, nothing the check adds runs -- no note, and no structured plan.
+
+    Structured planning is disabled (2026-09-28): with the check active the
+    planner still makes a plain-text plan, parsed for the check by
+    ``parse_text_plan``; this decision still gates that parse and the plan's
+    seeding and restore.
+    """
+    return (getattr(agent, "finish_checker", None) is not None
+            and bool(getattr(agent, "finish_reminders_enabled", True)))
+
+
+def _text_turn_plan(plan_text: str, workflow_path: str) -> TurnPlan | None:
+    """The finish check's plan recovered from plain text; None if it cannot be."""
+    try:
+        return parse_text_plan(plan_text, workflow_command_names(workflow_path))
+    except Exception as error:  # noqa: BLE001 - a plan the check cannot read must not fail the turn
+        logger.warning(f"text plan not parsed ({type(error).__name__}); the finish check has no plan")
+        return None
+
+
+# Structured planning disabled 2026-09-28 (owner decision); kept for reference.
+# def _redacted_subject_names(turn_plan: TurnPlan | None) -> list[str]:
+#     """The plan's subject names as the capture policy would store them."""
+#     if turn_plan is None:
+#         return []
+#     try:
+#         return [capture_record_for(subject.name)[0] for subject in turn_plan.subjects]
+#     except Exception:  # noqa: BLE001 - record no names rather than unredacted ones
+#         return []
+
+
 def build_query_with_next_steps(user_query: str,
     chat_session_obj: fastworkflow.ChatSession, with_agent_inputs_and_trajectory: bool = False,
     planning_insights: str | None = None, planner_lm = None,
@@ -705,25 +782,27 @@ def build_query_with_next_steps(user_query: str,
     else:
         enhanced_docstring = base_docstring
 
-    structured_docstring = f"{enhanced_docstring}\n{STRUCTURED_PLAN_GUIDE}"
-    steps_desc = "the plan's steps in order, each one short sentence"
-    subjects_desc = "the specific named items the request asks about (people, accounts, records...), each once"
-
-    class TaskPlannerSignature(dspy.Signature):
-        __doc__ = structured_docstring
-        user_query: str = dspy.InputField()
-        subjects: list[PlanSubject] = dspy.OutputField(desc=subjects_desc)
-        steps: list[PlanStep] = dspy.OutputField(desc=steps_desc)
-
-    class TaskPlannerWithTrajectoryAndAgentInputsSignature(dspy.Signature):
-        __doc__ = structured_docstring
-        agent_inputs: dict = dspy.InputField()
-        agent_trajectory: dict = dspy.InputField()
-        user_response: str = dspy.InputField()
-        subjects: list[PlanSubject] = dspy.OutputField(desc=subjects_desc)
-        steps: list[PlanStep] = dspy.OutputField(desc=steps_desc)
+    # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
+    # structured_docstring = f"{enhanced_docstring}\n{STRUCTURED_PLAN_GUIDE}"
+    # steps_desc = "the plan's steps in order, each one short sentence"
+    # subjects_desc = "the specific named items the request asks about (people, accounts, records...), each once"
+    #
+    # class TaskPlannerSignature(dspy.Signature):
+    #     __doc__ = structured_docstring
+    #     user_query: str = dspy.InputField()
+    #     subjects: list[PlanSubject] = dspy.OutputField(desc=subjects_desc)
+    #     steps: list[PlanStep] = dspy.OutputField(desc=steps_desc)
+    #
+    # class TaskPlannerWithTrajectoryAndAgentInputsSignature(dspy.Signature):
+    #     __doc__ = structured_docstring
+    #     agent_inputs: dict = dspy.InputField()
+    #     agent_trajectory: dict = dspy.InputField()
+    #     user_response: str = dspy.InputField()
+    #     subjects: list[PlanSubject] = dspy.OutputField(desc=subjects_desc)
+    #     steps: list[PlanStep] = dspy.OutputField(desc=steps_desc)
 
     # The plain-text planner, used only when the structured call fails.
+    # With structured planning disabled (2026-09-28) it is the only planner.
     class TaskPlannerTextSignature(dspy.Signature):
         __doc__ = enhanced_docstring
         user_query: str = dspy.InputField()
@@ -747,6 +826,11 @@ def build_query_with_next_steps(user_query: str,
     if planner_lm is None:
         planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
     agent_adapter = CommandsSystemPreludeAdapter()
+    # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
+    # # A structured reply that does not parse goes straight to the text planner:
+    # # DSPy's JSON retry would re-ask without the command list and accept a plan
+    # # whose commands the model never saw.
+    # structured_adapter = CommandsSystemPreludeAdapter(use_json_adapter_fallback=False)
 
     # fw.planner.plan for the turn's initial plan, fw.planner.replan for
     # mid-turn re-planning (trace_trigger names what re-triggered it).
@@ -764,61 +848,113 @@ def build_query_with_next_steps(user_query: str,
     # planning fails is never checked against the previous turn's plan.
     if trace_trigger is None:
         chat_session_obj._turn_plan = None
+        chat_session_obj._turn_plan_status = TURN_PLAN_NOT_PLANNED
 
-    def plan_with(structured: bool):
+    # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
+    # def plan_with(structured: bool):
+    def plan_with():
         if with_agent_inputs_and_trajectory:
             workflow_tool_agent = chat_session_obj.workflow_tool_agent
-            task_planner_func = dspy.ChainOfThought(
-                TaskPlannerWithTrajectoryAndAgentInputsSignature if structured
-                else TaskPlannerTextWithTrajectoryAndAgentInputsSignature)
-            cleaned_agent_inputs = {k: v for k, v in workflow_tool_agent.inputs.items() if k != "available_commands"}
+            # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
+            # task_planner_func = dspy.ChainOfThought(
+            #     TaskPlannerWithTrajectoryAndAgentInputsSignature if structured
+            #     else TaskPlannerTextWithTrajectoryAndAgentInputsSignature)
+            task_planner_func = dspy.ChainOfThought(TaskPlannerTextWithTrajectoryAndAgentInputsSignature)
+            agent_inputs, agent_trajectory = workflow_tool_agent.planner_view()
+            cleaned_agent_inputs = {k: v for k, v in agent_inputs.items() if k != "available_commands"}
             return task_planner_func(
                 agent_inputs = cleaned_agent_inputs,
-                agent_trajectory = workflow_tool_agent.current_trajectory,
+                agent_trajectory = agent_trajectory,
                 user_response = user_query,
                 available_commands=available_commands) # Note that this is not part of the signature. It is extra metadata that will be picked up by the CommandsSystemPreludeAdapter
-        task_planner_func = dspy.ChainOfThought(
-            TaskPlannerSignature if structured else TaskPlannerTextSignature)
+        # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
+        # task_planner_func = dspy.ChainOfThought(
+        #     TaskPlannerSignature if structured else TaskPlannerTextSignature)
+        task_planner_func = dspy.ChainOfThought(TaskPlannerTextSignature)
         return task_planner_func(
             user_query=user_query,
             available_commands=available_commands) # Note that this is not part of the signature. It is extra metadata that will be picked up by the CommandsSystemPreludeAdapter
 
-    # The structured plan exists for the finish check, and costs the planner
-    # call real time (measured with cerebras/gpt-oss-120b on three todo-list
-    # requests: median 12.1 s structured against 3.7 s plain text). A
-    # deployment without the check keeps the plain-text planner it always had.
-    structured = checker_from_env() is not None
+    # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
+    # # The structured plan exists for the finish check, and costs the planner
+    # # call real time (measured with cerebras/gpt-oss-120b on three todo-list
+    # # requests: median 12.1 s structured against 3.7 s plain text). A
+    # # deployment without the check keeps the plain-text planner it always had,
+    # # and so does a replan: only the turn's initial plan is ever checked.
+    # structured = trace_trigger is None and finish_check_active(
+    #     getattr(chat_session_obj, "workflow_tool_agent", None))
+    # Only the turn's initial plan is ever checked, so a replan is not parsed.
+    check_active = trace_trigger is None and finish_check_active(
+        getattr(chat_session_obj, "workflow_tool_agent", None))
     turn_plan: TurnPlan | None = None
     plan_text = ""
     try:
         with dspy.context(lm=planner_lm, adapter=agent_adapter):
-            if structured:
-                try:
-                    prediction = plan_with(structured=True)
-                    turn_plan = TurnPlan(steps=list(prediction.steps or []),
-                                         subjects=list(prediction.subjects or []))
-                    plan_text = render(turn_plan.steps)
-                # Only an answer that does not parse into the structure falls
-                # back; a provider error (rate limit, timeout, auth) propagates
-                # as it did before, rather than doubling the calls to a provider
-                # that failed.
-                except (AdapterParseError, ValidationError, ValueError, TypeError) as structured_error:
-                    logger.warning(
-                        f"structured planner failed ({type(structured_error).__name__}); "
-                        "using the plain-text planner")
+            # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
+            # if structured:
+            #     try:
+            #         with dspy.context(adapter=structured_adapter):
+            #             prediction = plan_with(structured=True)
+            #         steps = list(prediction.steps or [])
+            #         if steps:
+            #             turn_plan = TurnPlan(steps=steps, subjects=list(prediction.subjects or []))
+            #             plan_text = render(turn_plan.steps)
+            #         else:
+            #             logger.warning("structured planner returned no steps; using the plain-text planner")
+            #     # Only an answer that does not parse into the structure falls
+            #     # back; a provider error (rate limit, timeout, auth) propagates
+            #     # as it did before, rather than doubling the calls to a provider
+            #     # that failed.
+            #     except (AdapterParseError, ValidationError, ValueError, TypeError) as structured_error:
+            #         logger.warning(
+            #             f"structured planner failed ({type(structured_error).__name__}); "
+            #             "using the plain-text planner")
             if turn_plan is None:
-                prediction = plan_with(structured=False)
+                # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
+                # prediction = plan_with(structured=False)
+                prediction = plan_with()
                 plan_text = prediction.next_steps or ""
-                turn_plan = parse_text_plan(
-                    plan_text, workflow_command_names(current_workflow.folderpath))
+                # Only the finish check reads a text plan's steps back out.
+                # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
+                # if structured:
+                if check_active:
+                    turn_plan = _text_turn_plan(plan_text, current_workflow.folderpath)
     except BaseException:
         tracing.end_span(chat_session_obj, span, status=tracing.STATUS_ERROR)
         raise
+    if not plan_text:
+        plan_source = "none"
+    # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
+    # elif not structured:
+    #     plan_source = "text"
+    # elif turn_plan is not None and turn_plan.source == "structured":
+    #     plan_source = "structured"
+    # else:
+    #     plan_source = "text_fallback"
+    else:
+        plan_source = "text"
     tracing.end_span(
         chat_session_obj,
         span,
-        attributes={"plan": plan_text},
+        attributes={
+            "plan": plan_text,
+            "plan_source": plan_source,
+            # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
+            # "subjects": _redacted_subject_names(turn_plan),
+            "subjects": [],
+        },
     )
+
+    # Why the finish check has the plan it has; only a plan made for it counts.
+    # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
+    # if trace_trigger is None and structured:
+    if check_active:
+        if turn_plan is not None and turn_plan.steps:
+            chat_session_obj._turn_plan_status = TURN_PLAN_PLANNED
+        elif not plan_text:
+            chat_session_obj._turn_plan_status = TURN_PLAN_PLANNER_EMPTY
+        else:
+            chat_session_obj._turn_plan_status = TURN_PLAN_UNREADABLE
 
     if not plan_text:
         return user_query

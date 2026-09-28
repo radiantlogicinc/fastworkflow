@@ -225,7 +225,13 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # v7: fw.finish_check added -- the optional finish-time execution check
 # (fastworkflow/observation_offloading/finish_check.py) -- and fw.agent.step v3 replaces the
 # `roster_nudge` attribute with `finish_check_note` (the roster nudge was removed).
-SPAN_CONTRACT_VERSION = 7
+#
+# v8: fw.planner.plan / fw.planner.replan v2 -- `plan` may be the structured plan
+# rendered with "(optional)" / "(needs the user)" flags, and the span gains
+# `plan_source` and the redacted `subjects`.
+# Structured planning is disabled (2026-09-28): the keys are unchanged, so the
+# version is too; `plan_source` is now only "text" or "none" and `subjects` [].
+SPAN_CONTRACT_VERSION = 8
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -434,13 +440,22 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # .plan when it was re-triggered mid-turn. Same keys, so same version, and
     # `replan_trigger` is on both — None on a first plan says "this was the first
     # plan", where an absent key would only say "older record".
+    # v2: `plan` is the structured plan rendered as a numbered list with
+    # "(optional)" / "(needs the user)" flags when the finish check is on;
+    # `plan_source` says which planner produced it ("structured", "text",
+    # "text_fallback" after a failed or empty structured call, "none" for no
+    # plan) and `subjects` holds the structured plan's subject names, redacted
+    # by the capture policy.
+    # Structured planning is disabled (2026-09-28): new spans carry only
+    # `plan_source` "text" or "none" and `subjects` []; older records may still
+    # hold "structured" / "text_fallback".
     SPAN_PLANNER_PLAN: SpanContract(
-        version=1,
-        attributes=frozenset({"model", "replan_trigger", "plan"}),
+        version=2,
+        attributes=frozenset({"model", "replan_trigger", "plan", "plan_source", "subjects"}),
     ),
     SPAN_PLANNER_REPLAN: SpanContract(
-        version=1,
-        attributes=frozenset({"model", "replan_trigger", "plan"}),
+        version=2,
+        attributes=frozenset({"model", "replan_trigger", "plan", "plan_source", "subjects"}),
     ),
     # v2: the known-name refusal keys. The emitter wrote the three
     # `known_name_*` keys before they were declared here.
