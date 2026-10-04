@@ -137,12 +137,16 @@ class TestSchema:
         assert {
             "conversations",
             "turns",
-            "feedback",
             "spans",
             "artifacts",
             "train_runs",
             "diagnostics",
+            "human_feedback",
         } <= tables
+        # `feedback` was the agent-memory table: one mutable row per turn,
+        # read only by `get_memory_window` and replayed into the agent's
+        # prompt. fix-9eg.16 removed it, so a fresh store must not create it.
+        assert "feedback" not in tables
         assert store.db_size_bytes() > 0
 
     def test_file_posture(self, db_path):
@@ -177,18 +181,20 @@ class TestSchema:
         """Fresh schema (fix-49m.3): never migrated. The store never shipped in a
         release, so an older populated DB is a developer's local file: it is
         deleted and recreated empty at the current version, owner-only, with a
-        warning naming the path and both versions."""
+        warning naming the path and both versions. Only the pre-release formats
+        below MIN_READABLE_SCHEMA_VERSION are replaced; a shipped one is refused
+        (see `test_the_writable_store_still_refuses_everything_older`)."""
         obs.ObservabilityStore(db_path)
         conn = sqlite3.connect(db_path)
         conn.execute("INSERT INTO diagnostics VALUES ('older-build-row', 'gone', 'x')")
-        conn.execute(f"PRAGMA user_version = {obs.SCHEMA_VERSION - 1}")
+        conn.execute(f"PRAGMA user_version = {obs.MIN_READABLE_SCHEMA_VERSION - 1}")
         conn.commit()
         conn.close()
         with caplog.at_level("WARNING"):
             store = obs.ObservabilityStore(db_path)
         warning = "\n".join(record.getMessage() for record in caplog.records)
         assert db_path in warning
-        assert f"v{obs.SCHEMA_VERSION - 1}" in warning
+        assert f"v{obs.MIN_READABLE_SCHEMA_VERSION - 1}" in warning
         assert f"v{obs.SCHEMA_VERSION}" in warning
         conn = sqlite3.connect(db_path)
         try:
@@ -218,7 +224,7 @@ class TestSchema:
         obs.ObservabilityStore(db_path)
         conn = sqlite3.connect(db_path)
         conn.execute("PRAGMA journal_mode=DELETE")
-        conn.execute(f"PRAGMA user_version = {obs.SCHEMA_VERSION - 1}")
+        conn.execute(f"PRAGMA user_version = {obs.MIN_READABLE_SCHEMA_VERSION - 1}")
         conn.commit()
         conn.close()
         for companion in (f"{db_path}-wal", f"{db_path}-shm"):
@@ -290,24 +296,61 @@ class TestSchema:
         assert "PRAGMA table_info" not in source
         assert "schema_features" in source
 
+    def _stamp_version(self, db_path, version):
+        conn = sqlite3.connect(db_path)
+        conn.execute(f"PRAGMA user_version = {version}")
+        conn.commit()
+        conn.close()
+
+    def test_read_only_store_refuses_a_schema_it_cannot_read(self, db_path):
+        """The read-only view is refused up front with the reason, instead of
+        failing later on a column the reader assumes (fix-49m.3 adjustment b).
+
+        The boundary moved down by exactly one version at the v7 feedback
+        bump: v6 is the oldest READABLE schema, because real recorded evidence
+        exists at v6 and the only difference the reader has to survive is the
+        feedback columns v6 does not have. Anything older is still refused.
+        """
+        obs.ObservabilityStore(db_path)
+        self._stamp_version(db_path, obs.MIN_READABLE_SCHEMA_VERSION - 1)
+        with pytest.raises(obs.IncompatibleObservabilityDB, match="carries no migration"):
+            obs.ReadOnlyObservabilityStore(db_path)
+        self._stamp_version(db_path, obs.MIN_READABLE_SCHEMA_VERSION)
+        older = obs.ReadOnlyObservabilityStore(db_path)
+        assert older.schema_version == obs.MIN_READABLE_SCHEMA_VERSION
+        self._stamp_version(db_path, obs.SCHEMA_VERSION)
+        current = obs.ReadOnlyObservabilityStore(db_path)
+        assert current.schema_version == obs.SCHEMA_VERSION
+
+    def test_the_writable_store_still_refuses_everything_older(self, db_path):
+        """Reading old evidence is not permission to write to it.
+
+        A v6 database has no category, subcategory, anchor or identity column,
+        so an append would either fail on the insert or record a note the task
+        view could never file. The refusal is at open, before either.
+        """
+        obs.ObservabilityStore(db_path)
+        self._stamp_version(db_path, obs.MIN_READABLE_SCHEMA_VERSION)
+        before = open(db_path, "rb").read()
+        with pytest.raises(obs.IncompatibleObservabilityDB, match="carries no migration"):
+            obs.ObservabilityStore(db_path)
+        with pytest.raises(obs.IncompatibleObservabilityDB):
+            obs.ObservabilityStore.open_for_annotation(db_path)
+        # A shipped schema is evidence: refused, never replaced.
+        assert open(db_path, "rb").read() == before
+
     def test_read_only_store_refuses_an_older_schema_and_never_deletes_it(self, db_path):
         """The read-only view refuses an older store up front with the reason
         (fix-49m.3 adjustment b), instead of failing later on a column the
         reader assumes -- and, unlike the writer, never replaces it."""
         obs.ObservabilityStore(db_path)
-        conn = sqlite3.connect(db_path)
-        conn.execute(f"PRAGMA user_version = {obs.SCHEMA_VERSION - 1}")
-        conn.commit()
-        conn.close()
+        self._stamp_version(db_path, obs.MIN_READABLE_SCHEMA_VERSION - 1)
         before = open(db_path, "rb").read()
         with pytest.raises(obs.IncompatibleObservabilityDB, match="carries no migration"):
             obs.ReadOnlyObservabilityStore(db_path)
         assert open(db_path, "rb").read() == before
         # And the current version still opens read-only.
-        conn = sqlite3.connect(db_path)
-        conn.execute(f"PRAGMA user_version = {obs.SCHEMA_VERSION}")
-        conn.commit()
-        conn.close()
+        self._stamp_version(db_path, obs.SCHEMA_VERSION)
         obs.ReadOnlyObservabilityStore(db_path)
 
 
@@ -644,17 +687,36 @@ class TestConversationMemoryRoundTrip:
         window = store.get_memory_window("c", 1, max_turns=10)
         assert window[0]["conversation summary"] == "the resumed turn"
 
-    def test_feedback_joins_into_the_memory_window(self, db_path, sink):
+    def test_no_feedback_joins_into_the_memory_window(self, db_path, sink):
+        """The join is gone with the table it read (fix-9eg.16).
+
+        It used to put whatever had been posted to the old `/post_feedback`
+        into the window, which `restore_history_from_turns` turned into a
+        `dspy.History` message and `_refine_user_query` rendered into the
+        refiner's prompt. Review notes replaced it and deliberately do not
+        travel that path: nothing in this build feeds recorded feedback back
+        into a model.
+        """
         turn_result = self._turn_result("a turn with feedback", "{}")
         sink.emit_turn_record(turn_result)
         assert sink.flush()
 
         store = obs.ObservabilityStore(db_path)
-        store.upsert_feedback(
-            turn_result.turn_output.turn_key, json.dumps({"nl_feedback": "helpful"})
+        assert not hasattr(store, "upsert_feedback")
+        turn_key = turn_result.turn_output.turn_key
+        store.add_human_feedback(
+            turn_key,
+            target_kind="turn",
+            span_ids=[],
+            target_label="Turn",
+            provenance="human",
+            comment="helpful",
+            category="conclusions",
+            subcategory="what_went_right",
         )
         window = store.get_memory_window("c", 1, max_turns=10)
-        assert window[0]["feedback"] == {"nl_feedback": "helpful"}
+        assert set(window[0]) == {"conversation summary", "conversation_traces"}
+        assert len(store.list_human_feedback(turn_key)) == 1
 
 
 # ----------------------------------------------------------------------
@@ -1155,3 +1217,53 @@ class TestSyncFirstTurnRecords:
         assert row is not None and row["status"] == "awaiting_user"
         # A suspended row is not a pending-retry obligation: it is not terminal.
         assert sink.pending_retry_depth() == 0
+
+
+class TestSpanStatsForTurns:
+    def test_matches_count_and_max_rowid(self, many_turn_spans):
+        db, keys = many_turn_spans
+        store = obs.ReadOnlyObservabilityStore(db)
+        stats = store.span_stats_for_turns(keys)
+        for key in keys:
+            spans = store.get_spans(key)
+            count, max_rowid = stats[key]
+            assert count == len(spans)
+            assert max_rowid > 0
+        empty = store.span_stats_for_turns(["never-recorded"])
+        assert empty["never-recorded"] == (0, 0)
+
+
+class TestConnectionClosing:
+    def test_repeated_reads_do_not_leak_fds(self, db_path, sink):
+        """Connections from `with store._connect()` must close, not await GC."""
+        sink.emit_span(
+            tracing.Span(
+                span_id="fd-1",
+                trace_id="t-fd",
+                name="fw.turn",
+                start_ns=int(time.time() * 1e9),
+                status="ok",
+            )
+        )
+        assert sink.flush()
+        store = obs.ReadOnlyObservabilityStore(db_path)
+        # Warm once so schema/feature probes are not part of the sample.
+        store.list_turns(limit=1)
+        store.get_turn("t-fd")
+        store.db_size_bytes()
+
+        import gc
+
+        gc.disable()
+        try:
+            baseline = len(os.listdir("/proc/self/fd"))
+            for _ in range(1000):
+                store.list_turns(limit=1)
+                store.get_turn("t-fd")
+                store.db_size_bytes()
+            after = len(os.listdir("/proc/self/fd"))
+        finally:
+            gc.enable()
+        assert after - baseline <= 5, (
+            f"open FDs grew by {after - baseline} (baseline={baseline}, after={after})"
+        )

@@ -61,30 +61,69 @@ Body:
 ```json
 { "user_query": "cancel my most recent order", "timeout_seconds": 60 }
 ```
-Streams the internal workflow↔assistant conversation as it happens, then the final output. Framing
-depends on the session's `stream_format`:
+Streams the internal workflow↔assistant conversation as it happens, then the final output.
 
-- **NDJSON** (`application/x-ndjson`), one JSON object per line:
+Response headers (read these first; both are CORS-exposed, so a browser client on another origin
+can see them):
+
+- `X-FW-Turn-Key` — the execution key of this turn, sent before the first frame. It is the handle
+  for recovery (below).
+- `X-FW-Stream-Format` — `ndjson` or `sse`, i.e. which framing this body actually uses. It follows
+  the session's `stream_format` (fixed at `/initialize`); read the header rather than assuming.
+
+**Event types.** `trace` — one public agent↔workflow interaction. `timeout` — NON-terminal: this
+turn passed the `timeout_seconds` you asked for, but the deadline governs *delivery*, not
+ownership: the turn is still running, its remaining traces and its `output` still arrive, and
+resubmitting would start a second turn. `output` — TERMINAL, the turn's `TurnOutput`; a failed or
+`awaiting_user` turn arrives here too. `error` — TERMINAL, the turn produced no output at all.
+**Exactly one terminal frame ends the body and nothing follows it.**
+
+- **NDJSON** (`application/x-ndjson`), one JSON object per line. The whole envelope is on the line:
   ```json
-  {"type":"trace","data": { /* trace event */ }}
-  {"type":"trace","data": { /* … */ }}
-  {"type":"output","data": { /* CommandOutput */ }}
-  {"type":"error","data": {"detail":"…"}}   // only on failure
+  {"type":"trace","seq":0,"turn_key":"…exec…","logical_turn_key":"…","data": { /* trace event */ }}
+  {"type":"trace","seq":1,"turn_key":"…exec…","logical_turn_key":"…","data": { /* … */ }}
+  {"type":"timeout","seq":2,"turn_key":"…exec…","logical_turn_key":"…",
+   "data":{"detail":"Command execution timed out after 60 seconds","timeout_seconds":60,"still_running":true}}
+  {"type":"output","seq":3,"turn_key":"…exec…","logical_turn_key":"…","data": { /* TurnOutput */ }}
   ```
-- **SSE** (`text/event-stream`):
+- **SSE** (`text/event-stream`) — same events, same payloads; `seq` is the event id and `data` is
+  the payload alone, so identity comes from the response header:
   ```
+  id: 0
   event: trace
   data: { /* trace event */ }
 
+  id: 1
   event: output
-  data: { /* CommandOutput */ }
-
-  event: error
-  data: {"detail":"…"}
+  data: { /* TurnOutput */ }
   ```
 
+**Order and deduplication.** `seq` starts at 0 and is gapless and unique per stream; drop a `seq`
+you have already rendered. A chunk can split a frame, so buffer until the delimiter (`\n` for
+NDJSON, a blank line for SSE).
+
+**Recovery — read, never resubmit.** If the body dies mid-turn, the turn keeps running server-side:
+poll `GET /turns/{key}` and, for the interactions you missed, `GET /turns/{key}/trace` (non
+destructive and repeatable). Resubmitting the query would be a second turn. *Which key:* start from
+`X-FW-Turn-Key`, but keep the `logical_turn_key` that the NDJSON frames and every `/turns` answer
+carry — the execution key only resolves while the turn is live (a chat execution is not retained
+after it retires), whereas the store is keyed by the logical one. Where a partially read stream and
+the stored record disagree, the record wins.
+
+**HTTP 202 — the same query is already in flight.** A retried or duplicated submission is deduped
+onto the running execution and answered `202 {"turn_key":…, "exec_state":"running",
+"logical_turn_key":…, "reason":"duplicate_submission"}` with no body to read: the frames belong to
+the consumer already reading them. Poll that key. A *different* query on a busy channel is
+`409 {"detail":…, "reason":"channel_busy", "turn_key":…}`.
+
+**Artifacts.** The terminal `output` carries `command_outputs[*].command_response.artifacts`
+alongside the answer. A value may be inline, or an offloaded reference
+`{"__fw_artifact_ref__":"<id>","size":…,"content_type":"…"}` to be fetched from the store that
+produced it. Render them beside the final answer, not only in a debug view.
+
 UI guidance: render every `trace` event live (this reproduces the `fastWorkflow run` CLI streaming
-UX), then render the `output` event as the final human-readable answer.
+UX), show a `timeout` as "still working" rather than a failure, then render the `output` event as
+the final human-readable answer.
 
 ### POST /invoke_agent  (auth)
 Non-streaming agent turn. Returns a `CommandOutput` JSON with an extra `traces` array. Use only if
@@ -106,8 +145,41 @@ Execute a specific command directly, bypassing intent + parameter extraction.
 - `POST /new_conversation` — persist the current conversation (generates topic/summary) and start fresh. Use for the **New chat** button.
 - `GET /conversations?limit=20` — list past conversations (`ConversationSummary[]`, newest first). Use to render the **history list**.
 - `POST /activate_conversation` `{ "conversation_id": 7 }` — restore a past conversation into the active session. Use for **continue previous chat**.
-- `POST /post_feedback` `{ "binary_or_numeric_score": 1.0, "nl_feedback": "…" }` — feedback on the latest turn (optional thumbs up/down).
 - `POST /cancel_pending` — abandon a suspended `ask_user` clarification turn.
+
+### Feedback (auth)
+`POST /post_feedback` records ONE free-form comment about recorded evidence. It
+is not a thumbs up/down and carries no score: the old
+`{binary_or_numeric_score, nl_feedback}` body and the agent-memory table behind
+it were removed, and a request in that shape is rejected rather than scored.
+
+The comment is anchored explicitly — a turn, or a component within it — and
+classified with a category and one of its own subcategories:
+
+| `category` | `subcategory` |
+| --- | --- |
+| `observations_analysis` | `observation`, `analysis` |
+| `conclusions` | `what_went_right`, `what_went_wrong` |
+| `recommendations` | `what_to_do`, `what_not_to_do` |
+
+```json
+POST /post_feedback?turn_key=<turn_key>
+{ "target_kind": "turn", "span_ids": [], "target_label": "Turn",
+  "provenance": "coding_agent",
+  "category": "recommendations", "subcategory": "what_to_do",
+  "comment": "Plan all three items before answering." }
+```
+
+`comment` is arbitrary text and is stored as written. A comparison comment adds
+a `paired` object naming the other execution (`store_id`, `turn_keys`,
+`experiment_id`, `task_id`, `attempt`, plus the same target fields), and the one
+row is then visible from both tasks.
+
+Reads are separate GETs, never a POST: `GET /api/feedback-notes?turn_key=…` for
+one turn, `GET /api/task-feedback?experiment=…&task=…` for a whole task, and
+`GET /api/feedback-taxonomy` for the categories above. Evidence that cannot be
+written to — a sealed archive, or an older store — still accepts a comment: it
+is recorded beside the evidence and the evidence file is not modified.
 
 ### Health probes (public)
 - `GET /probes/healthz` → `{"status":"alive"}` (liveness).

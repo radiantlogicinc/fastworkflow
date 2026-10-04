@@ -23,6 +23,11 @@ from fastworkflow.observability.store import (
 )
 
 WORKSPACE_SCHEMA = "fastworkflow-observability-workspace/1"
+
+# How many turn rows one page of an attempt's keys asks for. A page size, not
+# a cap: the enumeration below keeps asking until a short page says the
+# attempt is exhausted.
+_TURN_PAGE = 1_000
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -162,7 +167,9 @@ class _WorkspaceReadOnlyStore(ReadOnlyObservabilityStore):
         self._immutable = immutable
         super().__init__(db_path)
 
-    def _connect(self, timeout: float = 30.0) -> sqlite3.Connection:
+    # Overrides the raw opener, not `_connect`: the base class builds every
+    # connection (construction probes and closing `with` blocks) from it.
+    def _open_connection(self, timeout: float = 30.0) -> sqlite3.Connection:
         query = "mode=ro&immutable=1" if self._immutable else "mode=ro"
         conn = sqlite3.connect(
             f"{Path(self.db_path).resolve().as_uri()}?{query}",
@@ -193,6 +200,40 @@ class ReadOnlyWorkspaceStoreRegistry:
             return self._stores[store_id]
         except KeyError as exc:
             raise UnknownWorkspaceStore(f"unknown store_id {store_id!r}") from exc
+
+    def store_id_for_identity(self, identity: str) -> str:
+        """The manifest store whose DECLARED identity is `identity`.
+
+        An `ExecutionRef` names its store by `store_identity()`; the manifest
+        names the same store by `store_id`. A comparison comment whose two
+        sides live in different archives needs the one translated into the
+        other, and the manifest is the only place this build is willing to
+        read it from: the declaration is already there, `_verify_store`
+        already checks the archive still matches it, and answering from the
+        declaration searches no directory and opens no file the manifest did
+        not name.
+
+        A store the manifest declares no identity for is NOT resolved by
+        opening it to look: the declaration is the authorization, and an
+        undeclared store raises rather than being adopted. Two declarations of
+        the same identity are refused for the same reason -- the right answer
+        is to fix the manifest, not to pick one.
+        """
+        matches = [
+            store.store_id
+            for store in self._stores.values()
+            if store.store_identity is not None and store.store_identity == identity
+        ]
+        if not matches:
+            raise UnknownWorkspaceStore(
+                f"no workspace store declares evidence identity {identity!r}"
+            )
+        if len(matches) > 1:
+            raise UnknownWorkspaceStore(
+                f"evidence identity {identity!r} is declared by more than one "
+                f"workspace store ({', '.join(sorted(matches))})"
+            )
+        return matches[0]
 
     @contextmanager
     def open(self, store_id: str) -> Iterator[ReadOnlyObservabilityStore]:
@@ -566,36 +607,101 @@ class ObservabilityWorkspace:
         return tasks
 
     def attempts(
-        self, experiment_id: str, *, task_id: Optional[str] = None
+        self,
+        experiment_id: str,
+        *,
+        task_id: Optional[str] = None,
+        turn_refs_for: Optional[Any] = None,
     ) -> list[dict[str, Any]]:
+        """Attempt rows, optionally with the turn keys each one recorded.
+
+        `turn_refs_for` bounds the TURN reading, which is the expensive half:
+        pass a set of attempt numbers to read turns for those alone, or an
+        empty set for attempt metadata and no turn read at all. The default
+        reads them for every attempt, which is what the existing callers
+        expect. An attempt whose turns were not read carries no `turn_refs`
+        key rather than an empty list, so "this run recorded nothing" and
+        "nobody asked about this run" stay different answers.
+        """
         attempts: list[dict[str, Any]] = []
+        wanted = (
+            None
+            if turn_refs_for is None
+            else {int(attempt) for attempt in turn_refs_for}
+        )
         for segment in self.segments(experiment_id):
             with self.registry.open(segment["store_id"]) as store:
                 local_id = segment["local_experiment_id"]
                 for attempt in store.experiment_attempt_rows(local_id, task_id=task_id):
                     row = dict(attempt)
-                    turns = store.list_turns(
-                        experiment_id=local_id,
-                        task_id=row["task_id"],
-                        attempt=int(row["attempt"]),
-                        limit=10_000,
-                    )
                     row.update(
                         {
                             "store_id": segment["store_id"],
                             "segment_id": segment["segment_id"],
                             "local_experiment_id": local_id,
-                            "turn_refs": [
-                                {
-                                    "store_id": segment["store_id"],
-                                    "logical_turn_key": turn["turn_key"],
-                                }
-                                for turn in turns
-                            ],
                         }
                     )
+                    if wanted is None or int(row["attempt"]) in wanted:
+                        row["turn_refs"] = [
+                            {
+                                "store_id": segment["store_id"],
+                                "logical_turn_key": key,
+                            }
+                            for key in self._attempt_turn_keys(
+                                store, local_id, row["task_id"], int(row["attempt"])
+                            )
+                        ]
                     attempts.append(row)
         return attempts
+
+    def attempt_turn_keys(
+        self,
+        *,
+        store_id: str,
+        local_experiment_id: str,
+        task_id: str,
+        attempt: int,
+    ) -> list[str]:
+        """The turn keys of ONE attempt, named by full identity.
+
+        An attempt number alone does not identify a run across a workspace --
+        two archives, or two segments of one, can each record an attempt 1 --
+        so the archive and the local experiment are named rather than searched
+        for.
+        """
+        with self.registry.open(store_id) as store:
+            return self._attempt_turn_keys(
+                store, local_experiment_id, task_id, attempt
+            )
+
+    @staticmethod
+    def _attempt_turn_keys(
+        store: Any, local_experiment_id: str, task_id: str, attempt: int
+    ) -> list[str]:
+        """Every turn key of one attempt, in this route's own order.
+
+        Paged by KEYSET, because one bounded read stops at its bound without
+        saying so: a run of more turns than the bound would have produced a
+        reference describing a shorter run than the archive holds, and a
+        summary over it would have been over part of a run while reporting a
+        whole one. Each page continues the previous one in the same
+        `turn_key DESC` order the single read returned, so what a caller sees
+        is unchanged except that it is now complete.
+        """
+        keys: list[str] = []
+        cursor: Optional[str] = None
+        while True:
+            page = store.list_turns(
+                experiment_id=local_experiment_id,
+                task_id=task_id,
+                attempt=attempt,
+                limit=_TURN_PAGE,
+                before_turn_key=cursor,
+            )
+            keys.extend(str(turn["turn_key"]) for turn in page)
+            if len(page) < _TURN_PAGE:
+                return keys
+            cursor = str(page[-1]["turn_key"])
 
     def turn(self, store_id: str, logical_turn_key: str) -> Optional[dict[str, Any]]:
         if not store_id:

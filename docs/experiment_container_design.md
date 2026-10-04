@@ -49,13 +49,16 @@ An **experiment** is a labelled set of tasks, each run one or more times, whose
 turns can be found, scored and compared as a unit. Nothing in the tree is that
 object. Verified 2026-08-29: the string `experiment` does not occur in any
 `fastworkflow/*.py` outside two unrelated prose comments under `train/`, and
-occurs nowhere in `fastworkflow/run_chatbot/static/index.html`.
+occurs nowhere in `fastworkflow/run_chatbot/static/index.html`. (Since
+2026-09-30 that page's source lives as ordered parts under
+`fastworkflow/run_chatbot/static/src/`; `load_index_html()` assembles them into
+the same single page.)
 
 What exists, and why each is not this:
 
 | What exists | Why it is not an experiment container |
 |---|---|
-| `observability.sqlite3` is three-level — channel → conversation → turn (`observability/store.py:1050,1058`), with `idx_turns_conv` and the shipped `/api/channels`, `/api/conversations`, `/api/turns` — and the SPA already nests those three levels (`index.html:736-746,767-787`) | The read shape generalises for free. The missing thing is a **grouping dimension**, not a viewer. |
+| `observability.sqlite3` is three-level — channel → conversation → turn (`observability/store.py:1050,1058`), with `idx_turns_conv` and the shipped `/api/channels`, `/api/conversations`, `/api/turns` — and the SPA already nests those three levels (`index.html:736-746,767-787` as of 2026-08-29; today the rail is `renderHierarchy` in `static/src/120-header-rail.js`, fed by `run_chatbot/navigation.py`) | The read shape generalises for free. The missing thing is a **grouping dimension**, not a viewer. |
 | `observability/evidence_run.py` mints a `run_id` per measured run (`:267`) and asserts zero-drop, prune suppression, archival and provenance | That `run_id` exists **only** inside the dict `EvidenceRun.as_record()` returns (`:141-158`). **No column anywhere joins a turn back to the run it belonged to.** That is the gap in one sentence. |
 | `distillation_runs` (`:1095-1125`) is one row per compared **message** | A single trial, one level *below* a task attempt. |
 | `train_runs` (`:1087`) | A training publication, unrelated to task execution. |
@@ -1037,21 +1040,32 @@ cross-origin write.
 Extends the existing rail rather than adding a second tree: experiment → task →
 attempt is the same three-level grouping `groupTurnsByChannel`
 (`index.html:736-746`) and `renderConversationGroups` (`:767-787`) already build.
+(Both were removed as dead code on 2026-09-29, fix-hzux.13; the rail now renders
+the server-built tree from `run_chatbot/navigation.py` in `renderHierarchy`,
+`static/src/120-header-rail.js`.)
 An attempt row links into the trace view through `openTurnInDebug()`
-(`:3352-3371`), which already tolerates the async writer lag — not `selectTurn`
-directly.
+(`:3352-3371`; now in `static/src/260-chat-live.js`), which already tolerates the
+async writer lag — not `selectTurn` directly.
 
 Hard constraints, all asserted at the byte level by
 `tests/test_run_chatbot_server.py`, not by a browser:
 
-* **No `innerHTML`** (`:377`). Build nodes with `el()` / `createTextNode`.
-* **No non-loopback URL anywhere in the file**, `https://` included (`:668-679`).
-* A new panel must be added to `setTopMode`'s explicit id list (`:2457-2469`) —
+* **No `innerHTML`** (`:377`; now `test_page_never_uses_innerhtml`). Build nodes with `el()` / `createTextNode`.
+* **No non-loopback URL anywhere in the file**, `https://` included (`:668-679`;
+  now `test_spa_ships_as_package_data`).
+* A new panel must be added to `setTopMode`'s explicit id list (`:2457-2469`;
+  now in `static/src/230-mode-picker.js`) —
   it assigns `className` wholesale, so an unlisted panel never hides and any class
   set in the HTML on a listed element is wiped.
-* `server.py` stays **stdlib-only** (`[R23]`, asserted at `:709`).
+* `server.py` stays **stdlib-only** (`[R23]`, asserted at `:709`; now
+  `test_server_module_is_stdlib_only`, plus a subprocess check that importing the
+  chatbot server loads no dspy/litellm/fastapi/starlette/uvicorn).
 * The SPA stays **one file** — `pyproject.toml:24` lists exactly
-  `run_chatbot/static/index.html` as package data.
+  `run_chatbot/static/index.html` as package data. Since 2026-09-30
+  (fix-hzux.12) it is still served as one page with one inline script, but its
+  source is ordered parts under `run_chatbot/static/src/` and `pyproject.toml`
+  includes `run_chatbot/static/src/*`. A new part is a new file in that
+  directory; `tests/test_run_chatbot_spa_parts.py` guards the assembly.
 
 An **invalid experiment must be visually unmistakable**, and must show its
 `invalid_reason`. The hypothesis renders read-only with an affordance saying *why*

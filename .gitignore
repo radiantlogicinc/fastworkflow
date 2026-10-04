@@ -256,3 +256,4 @@ rejected_examples.json
 
 # Beads / Dolt files (added by bd init)
 .beads/proxieddb/
+tests/todo_list_workflow/benchmarks/.setup.lock

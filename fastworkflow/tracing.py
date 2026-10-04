@@ -231,7 +231,13 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # `plan_source` and the redacted `subjects`.
 # Structured planning is disabled (2026-09-28): the keys are unchanged, so the
 # version is too; `plan_source` is now only "text" or "none" and `subjects` [].
-SPAN_CONTRACT_VERSION = 8
+#
+# v9 (fix-txxy): `fw.distillation.pass` joins the taxonomy. A turn that ran a
+# teacher pass and a student pass used to record both under one flat trace with
+# nothing saying which activity was whose, so a run recorded before this and a
+# run recorded after it are not comparable on that question: the older one is
+# "no pass identity recorded", not "one pass".
+SPAN_CONTRACT_VERSION = 9
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -279,6 +285,43 @@ SPAN_TRAIN_PREFIX = "fw.train."
 RESERVED_V2_SPAN_NAMES = frozenset(
     {SPAN_NLU_INTENT, SPAN_NLU_PARAM_EXTRACTION, SPAN_LLM_CALL, SPAN_TRAIN_PREFIX}
 )
+
+# ----------------------------------------------------------------------
+# Recorded passes within one turn (fix-txxy)
+# ----------------------------------------------------------------------
+#
+# Distillation runs the agent twice for ONE user message — a teacher pass and a
+# student pass — inside one turn, so both passes' dispatches, planner calls and
+# LLM calls share one trace id. Nothing recorded which was whose: a reader
+# holding the trace could only guess from ordering and model names, and
+# `comparison.PassSelector` (which resolves pass membership ONLY from recorded
+# spans) had nothing to resolve against.
+#
+# One span per pass answers both halves of that. The stamp is on the span, so a
+# selector keyed on `fw.pass` is evidence rather than an assertion; and because
+# the pass span is on the parenting stack for the duration of the pass,
+# everything the pass did is in its subtree and inherits the stamp through
+# ancestry — no emitter downstream has to learn about passes.
+#
+# Activity that belongs to NEITHER pass stays outside the span by construction:
+# insight extraction runs after both passes have closed, so its LLM calls parent
+# to the turn root and no pass's cost roll-up can claim them.
+SPAN_DISTILLATION_PASS = "fw.distillation.pass"
+
+# The attribute a pass-stamping producer records, and the one
+# `comparison.discover_pass_selectors` / `selection_api.DEFAULT_PASS_ATTRIBUTE`
+# already look for. Dotted like a span name rather than named `pass` because it
+# is a cross-emitter label, not one emitter's field.
+ATTR_PASS = "fw.pass"
+
+PASS_TEACHER = "teacher"
+PASS_STUDENT = "student"
+
+# A pass whose outcome the producer did not record. Deliberately NOT a
+# `TurnStatus` member: "completed" is a claim, and a pass that ended in a way
+# the producer could not classify has not made it. Defaulting an unclassified
+# outcome to completed is how a failure becomes invisible in a roll-up.
+PASS_STATUS_UNKNOWN = "unknown"
 
 # The decision-model call that may route one search_memory request over a
 # listing. A model call of its own, so kind "llm"; not fw.llm.call, which is the
@@ -457,6 +500,22 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
         version=2,
         attributes=frozenset({"model", "replan_trigger", "plan", "plan_source", "subjects"}),
     ),
+    # One distillation pass. `fw.pass` is the membership stamp every descendant
+    # inherits through ancestry; the rest is the pass's OWN content, recorded
+    # here because the turn row cannot hold it -- two passes share one turn row,
+    # so its answer and status are the turn's and belong to neither pass.
+    #
+    # `answer` is the pass's final answer as the user would have seen it, and it
+    # is recorded by the producer that generated it rather than copied from the
+    # turn: the whole point of a teacher/student view is that the two answers
+    # differ, and reporting the turn's answer under both headings would hide
+    # exactly the difference the view is read for.
+    SPAN_DISTILLATION_PASS: SpanContract(
+        version=1,
+        attributes=frozenset(
+            {ATTR_PASS, "model", "answer", "plan", "status", "failure_reason"}
+        ),
+    ),
     # v2: the known-name refusal keys. The emitter wrote the three
     # `known_name_*` keys before they were declared here.
     # v3: `auto_navigation_enabled` is absent. Auto-navigation was removed, so
@@ -493,11 +552,18 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
         ),
     ),
     SPAN_NLU_PARAM_EXTRACTION: SpanContract(
-        version=1,
+        # v2 (fix-8ko2): `retry_round_ordinal` joins the boolean `retry_round`.
+        # The flag says an extraction resumed from stored parameters; the
+        # ordinal says which attempt it was, which a consumer previously had to
+        # guess by counting spans. A span carrying v1 has the flag only, and a
+        # reader must keep treating its round as unrecorded rather than
+        # inferring one.
+        version=2,
         attributes=frozenset(
             {
                 "command_name",
                 "retry_round",
+                "retry_round_ordinal",
                 "extraction_method",
                 "missing_fields",
                 "invalid_fields",
@@ -634,13 +700,16 @@ def status_for_dispatch_exception(exc: BaseException) -> str:
     AskUserSuspend closed as `error` in three of them, `awaiting_user` in a
     fourth, and escaped a fifth without closing its span at all — so an
     ordinary pause for input drew as a red ERROR node in the chatbot waterfall
-    (index.html:1671), and what a reader saw depended on which layer happened
+    (`renderWaterfall`, run_chatbot/static/src/220-turn-nav.js), and what a
+    reader saw depended on which layer happened
     to catch it.
 
     Control signals map to CANCELLED rather than AWAITING_USER deliberately.
     `awaiting_user` is a TURN-level state in this codebase: the store's
     non-terminal turn status, and the only thing the SPA tests it for
-    (index.html:803/840/2342 all read `turn.status`). Nothing anywhere reads a
+    (`statusBadge` in 210-turn-detail.js and the chat status lines in
+    240-chat.js / 260-chat-live.js, all under run_chatbot/static/src, read the
+    turn's status). Nothing anywhere reads a
     SPAN status of awaiting_user. A span status describes that span's own
     outcome — this dispatch was cut short — while "we are waiting on a human"
     is recorded once, on the turn, where readers already look for it.

@@ -103,6 +103,19 @@ COLLECTABLE_TERMINAL_KINDS = frozenset({"initialize_startup"})
 MAX_RETAINED_STARTUP_TURNS = 20
 TURN_RETENTION_SECONDS = 300.0
 
+# When a non-retained execution is dropped, its execution key → logical key
+# mapping is kept for the same window. Two strings per finished turn, not a
+# retained payload: the point is only that a caller holding the EXECUTION key
+# can still reach the durable record, which the store keys by the LOGICAL one.
+#
+# Streaming needs this. A client learns the execution key from the response
+# header BEFORE the first frame — that is what the header is for — so a body
+# that dies before the first frame leaves it holding a key that used to stop
+# resolving the moment the turn retired, which is to say a completed answer it
+# could not read and an invitation to submit the query again. Same bound as the
+# retention above, plus a count cap; the payload stays in the store.
+MAX_RETIRED_KEY_ALIASES = 512
+
 # Where workflows read the caller's credential from. Documented in the server
 # README, so the read contract is preserved — what changed is that it is only
 # present while an accepted turn is running, and is never checkpointed.
@@ -240,6 +253,10 @@ class TurnRegistry:
         self._by_key: dict[str, TurnExecution] = {}
         # channel_id -> turn_key of the live (non-terminal) execution.
         self._active_by_channel: dict[str, str] = {}
+        # execution turn_key -> (channel_id, logical turn_key, expires_at) for
+        # executions already dropped from _by_key. Insertion-ordered, so the
+        # oldest alias is the first one evicted.
+        self._retired_aliases: dict[str, tuple[str, str, datetime]] = {}
         self._lock = asyncio.Lock()
         self._collectable_kinds = collectable_kinds
         self._max_retained_terminal = max_retained_terminal
@@ -390,6 +407,7 @@ class TurnRegistry:
                 # Nothing else to sweep for: this record is gone, and the count
                 # cap is enforced on every completion of a kind that is retained.
                 self._by_key.pop(turn_key, None)
+                self._remember_retired_key(execn)
                 logger.debug(
                     f"Retired turn {turn_key} (kind={execn.kind}): nothing looks "
                     f"up a finished {execn.kind}"
@@ -405,6 +423,55 @@ class TurnRegistry:
                 logger.debug(
                     f"Evicted {evicted} retained terminal turn(s) after {turn_key}"
                 )
+
+    def _remember_retired_key(self, execn: TurnExecution) -> None:
+        """Keep a dropped execution's key pointing at its durable record.
+
+        Called under ``_lock`` as part of retirement. The execution's payload
+        is gone; what stays is the mapping a holder of the EXECUTION key needs
+        to read the stored turn, which is keyed by the LOGICAL one. Without it
+        a streaming client that lost its body before the first frame — holding
+        only the key from the response header — could not reach the answer its
+        turn had already produced.
+        """
+        if execn.logical_turn_key is None:
+            return
+        now = _now()
+        self._retired_aliases[execn.turn_key] = (
+            execn.channel_id,
+            execn.logical_turn_key,
+            now + timedelta(seconds=self._retention_seconds),
+        )
+        for key in [
+            key
+            for key, (_channel, _logical, expires_at) in self._retired_aliases.items()
+            if expires_at <= now
+        ]:
+            self._retired_aliases.pop(key, None)
+        while len(self._retired_aliases) > MAX_RETIRED_KEY_ALIASES:
+            self._retired_aliases.pop(next(iter(self._retired_aliases)))
+
+    def resolve_retired_logical_key(
+        self, key: str, channel_id: str
+    ) -> Optional[str]:
+        """The logical key of a retired execution, for its own channel only.
+
+        Same authorization shape as a live lookup ([A39]): a key belonging to
+        another channel is indistinguishable from an unknown one. Returns None
+        once the alias has expired, at which point the caller is left with an
+        unknown key — bounded, and by then the client has long since either
+        recovered or given up.
+        """
+        entry = self._retired_aliases.get(key)
+        if entry is None:
+            return None
+        alias_channel, logical_key, expires_at = entry
+        if alias_channel != channel_id:
+            return None
+        if expires_at <= _now():
+            self._retired_aliases.pop(key, None)
+            return None
+        return logical_key
 
     def _evict_expired(self, now: Optional[datetime] = None) -> int:
         """Drop retained terminal executions whose age window has passed."""
@@ -763,6 +830,184 @@ async def run_owned_turn(
         # and delaying the trim by that would hold the session cache over its
         # target for the duration. Retirement cannot disturb the label anyway.
         await _label_conversation_after_turn(runtime, execn, turns_appended)
+
+
+# ---------------------------------------------------------------------------
+# Streaming frame transport (fix-9eg.20.1)
+# ---------------------------------------------------------------------------
+
+# The execution key of a streaming turn, on the response head. A streaming
+# client learns its recovery handle BEFORE the first frame, so a body that dies
+# mid-turn is recovered by polling that key rather than by resubmitting the
+# query. Cross-origin readers (the chatbot page is served from its own loopback
+# origin) only see it because the CORS middleware exposes it.
+STREAM_TURN_KEY_HEADER = "X-FW-Turn-Key"
+STREAM_FORMAT_HEADER = "X-FW-Stream-Format"
+
+# The two frames that can end a stream, and nothing else. `timeout` is
+# deliberately NOT one of them: the delivery deadline in
+# run_process_message_with_trace_stream reports and keeps going — it owns the
+# executor until the work exits — so a turn that passes its deadline still
+# emits its remaining traces and its output afterwards. Delivering that as an
+# `error` (which it was) contradicted "nothing follows the terminal frame" and
+# told a client the turn had failed when it had not.
+STREAM_TERMINAL_FRAMES = frozenset({"output", "error"})
+
+
+class TurnStreamChannel:
+    """One streaming turn's ordered frame queue.
+
+    Events are queued by the owning turn and drained by the response body.
+    Separating them is the point: a client that disconnects stops draining while
+    the turn runs to completion and retires itself normally.
+
+    FRAME TYPES:
+
+      ``trace``    one public agent↔workflow interaction, as it happens.
+      ``timeout``  non-terminal: this turn passed the delivery deadline the
+                   request asked for. It is still running and still owns its
+                   executor, so more ``trace`` frames and the ``output`` frame
+                   still follow. A client shows it as "still working", not as a
+                   failure, and does not resubmit.
+      ``output``   TERMINAL. The turn's ``TurnOutput`` projection, whatever its
+                   status — a failed or ``awaiting_user`` turn arrives here.
+      ``error``    TERMINAL. The turn did not produce an output at all.
+
+    ORDER AND DEDUPLICATION CONTRACT — the rule a client codes to:
+
+      * every frame carries ``seq``, starting at 0 and incrementing by one in
+        emission order, plus the ``turn_key`` of the execution that produced it
+        and ``logical_turn_key`` once the workflow has minted it;
+      * ``seq`` is unique within a stream. A client that has already rendered a
+        ``seq`` drops the repeat rather than rendering it twice;
+      * exactly one terminal frame ends the body, and nothing follows it. The
+        channel enforces this rather than trusting its callers: a second
+        terminal emit is refused, so a failure recorded AFTER the output was
+        delivered (post-turn housekeeping in ``run_owned_turn`` — the trim, the
+        window) cannot arrive as a second ending that contradicts the answer
+        the client already has. Such a failure is logged and lives in the
+        execution's record, which is the authoritative account anyway;
+      * a consumer that stops reading is never re-sent anything, and no second
+        consumer is attached to a live stream. What a dropped connection missed
+        is recovered from the durable record — ``GET /turns/{key}`` and
+        ``GET /turns/{key}/trace`` — never by resubmitting the query, and the
+        stored record is authoritative wherever it and a partially read stream
+        disagree;
+      * WHICH key to recover with: the execution key (the response header, and
+        every NDJSON frame) resolves only while the registry holds the
+        execution, and a chat turn is not a retained kind — it stops resolving
+        the moment the turn retires. The LOGICAL key is the durable handle,
+        because the store is keyed by it. It is on every NDJSON frame once the
+        workflow mints it, and in every ``GET /turns/{key}`` answer as
+        ``logical_turn_key``, so a client that starts from the execution key
+        adopts the logical one from its first answer and keeps it.
+
+    Frames are enqueued without awaiting (the queue is unbounded), so emission
+    order is the order the turn produced them even when the producer never
+    yields to the loop between two emits.
+    """
+
+    def __init__(self) -> None:
+        self._queue: asyncio.Queue = asyncio.Queue()
+        self._seq = 0
+        self._turn_key: Optional[str] = None
+        self._logical_turn_key: Callable[[], Optional[str]] = lambda: None
+        self._closed = False
+        self._terminated = False
+
+    def bind(
+        self,
+        turn_key: str,
+        logical_turn_key: Optional[Callable[[], Optional[str]]] = None,
+    ) -> None:
+        """Stamp this stream's frames with the execution that owns them.
+
+        Called by the owning turn task before its first emit; the logical key is
+        a callable because the workflow mints it inside the work, after the
+        first frames may already have gone out.
+        """
+        self._turn_key = turn_key
+        if logical_turn_key is not None:
+            self._logical_turn_key = logical_turn_key
+
+    def _resolve_logical_turn_key(self) -> Optional[str]:
+        try:
+            return self._logical_turn_key()
+        except Exception as exc:  # never fail a frame on an identity lookup
+            logger.debug(f"stream frame could not resolve its logical key: {exc!r}")
+            return None
+
+    @property
+    def terminated(self) -> bool:
+        """Whether the one terminal frame has already been queued."""
+        return self._terminated
+
+    def emit_nowait(self, kind: str, data: Any) -> Optional[dict[str, Any]]:
+        """Queue one frame. A no-op once the stream has ended.
+
+        Returns the frame (tests and callers read its ``seq``), or None when the
+        emit was refused: either the stream is already closed — the drain loop
+        stopped at the sentinel, so anything emitted afterwards would never be
+        read — or a terminal frame has already gone out and this would be a
+        second ending.
+        """
+        if self._closed:
+            return None
+        if self._terminated:
+            logger.debug(
+                f"stream frame '{kind}' dropped: turn {self._turn_key} already "
+                "delivered its terminal frame"
+            )
+            return None
+        if kind in STREAM_TERMINAL_FRAMES:
+            self._terminated = True
+        frame = {
+            "type": kind,
+            "seq": self._seq,
+            "turn_key": self._turn_key,
+            "logical_turn_key": self._resolve_logical_turn_key(),
+            "data": data,
+        }
+        self._seq += 1
+        self._queue.put_nowait(frame)
+        return frame
+
+    async def emit(self, kind: str, data: Any) -> None:
+        """Async spelling of ``emit_nowait`` for callbacks that await."""
+        self.emit_nowait(kind, data)
+
+    def close(self) -> None:
+        """End the body. Idempotent, so the guarantee path can call it blind."""
+        if self._closed:
+            return
+        self._closed = True
+        self._queue.put_nowait(None)
+
+    async def frames(self):
+        """Yield frames until the terminal sentinel."""
+        while True:
+            frame = await self._queue.get()
+            if frame is None:
+                break
+            yield frame
+
+
+def encode_stream_frame(frame: dict[str, Any], stream_format: str) -> str:
+    """One frame on the wire.
+
+    NDJSON carries the whole envelope, so identity and ``seq`` travel with the
+    payload. SSE keeps its documented ``event``/``data`` shape — ``data`` is the
+    payload alone — and carries ``seq`` as the event id, which is what an SSE
+    client already reads for ordering; its turn identity comes from the
+    ``X-FW-Turn-Key`` response header.
+    """
+    if stream_format == "sse":
+        return (
+            f"id: {frame['seq']}\n"
+            f"event: {frame['type']}\n"
+            f"data: {json.dumps(frame['data'])}\n\n"
+        )
+    return json.dumps(frame) + "\n"
 
 
 def _commit_startup_outcome(

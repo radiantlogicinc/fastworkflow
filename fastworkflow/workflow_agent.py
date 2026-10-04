@@ -203,6 +203,38 @@ def _resolve_or_escalate(result, chat_session_obj: fastworkflow.ChatSession, res
     return _execute_workflow_query(clarified_cmd, chat_session_obj=chat_session_obj)
 
 
+def _explicit_agent_command(command: str, workflow) -> str:
+    """Resolve the agent tool's command token against its current command surface.
+
+    This tool takes command names, not natural-language intents. Never let an
+    unavailable name fall through to fuzzy/cache/classifier substitution. Normal
+    assistant NLU remains unchanged; parameter extraction still runs as before.
+    """
+    from fastworkflow.command_executor import CommandNotFoundError
+
+    parts = command.strip().split(maxsplit=1)
+    token = parts[0].lstrip("/") if parts else ""
+    app = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
+    cme = fastworkflow.RoutingRegistry.get_definition(
+        fastworkflow.get_internal_workflow_path("command_metadata_extraction"))
+    available = (set(app.get_command_names(workflow.current_command_context_name))
+                 | set(cme.get_command_names("IntentDetection"))
+                 | set(cme.get_command_names("ErrorCorrection")))
+    matches = [name for name in available
+               if token.lower() == (name if "/" in token else name.split("/")[-1]).lower()]
+    if len(matches) != 1:
+        raise CommandNotFoundError(
+            f"Command {token!r} is unavailable or ambiguous in context "
+            f"{workflow.current_command_context_name!r}. Use what_can_i_do for "
+            "available commands, or navigate to the required context.")
+    # The CME exact-prefix matcher consumes short names. Do not permit a
+    # qualified token to collapse onto a different command with the same tail.
+    short = matches[0].split("/")[-1]
+    if sum(name.split("/")[-1].lower() == short.lower() for name in available) != 1:
+        raise CommandNotFoundError(f"Ambiguous command name {short!r} in current context")
+    return short + (" " + parts[1] if len(parts) > 1 else "")
+
+
 def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSession) -> str:
     """
     Executes the command and returns either a response, or a clarification request.
@@ -254,7 +286,8 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     from fastworkflow.command_executor import CommandExecutor, _annotation
     started = datetime.now(timezone.utc)
     try:
-        command_output = CommandExecutor.invoke_command(chat_session_obj, command)
+        resolved_command = _explicit_agent_command(command, chat_session_obj.get_active_workflow())
+        command_output = CommandExecutor.invoke_command(chat_session_obj, resolved_command)
     except BaseException as e:
         # BaseException, not CommandCancelledError. This arm used to name only
         # that one exception, and the comment beside it even observed that

@@ -496,6 +496,17 @@ class ExperimentController:
         # same setup lock; a deleted ID is refused and a bound ID is protected.
         if registration is not None:
             benchmark_setup.bind_experiment(folder, experiment_id, self.db_path, self.store_identity)
+        # Bind the evidence source for selection (`fix-9eg.17.1`/`.17.2`). The
+        # experiment may already be registered in the workflow's contest — from
+        # UI creation, before this store existed — and this is where its
+        # evidence is attached to that registration. One control file for the
+        # whole workflow: a private sidecar beside this DB would give the same
+        # experiment two winners, one of which nobody is looking at.
+        control_db_path = None
+        if folder:
+            control_db_path = benchmark_setup.bind_runner_evidence(
+                folder, self.store, self.db_path
+            )
         self.store.create_experiment(
             experiment_id,
             description,
@@ -510,6 +521,11 @@ class ExperimentController:
             benchmark_digest_sha256=benchmark_digest_sha256,
             capture_profile=self.capture_profile,
             capture_policy_version=self.capture_policy_version,
+            # No workflow folder means no workflow contest to join, and the
+            # per-store sidecar stays the default. A folder we could not join
+            # records nothing rather than a second, conflicting winner.
+            initialize_winner=control_db_path is not None or not folder,
+            selection_control_db_path=control_db_path,
         )
         self.store.declare_experiment_attempts(experiment_id, declarations)
 
@@ -755,6 +771,7 @@ class ExperimentHarness:
         archive_dir: Optional[str] = None,
         defeat_caches: bool = True,
         install_memory_policy: bool = False,
+        runs_per_task: int = 1,
     ) -> None:
         self.workflow_folderpath = workflow_folderpath
         self.description = description
@@ -769,6 +786,9 @@ class ExperimentHarness:
         self.archive_dir = archive_dir
         self.defeat_caches = defeat_caches
         self.install_memory_policy = install_memory_policy
+        from fastworkflow.benchmark.setup import validate_runs_per_task
+
+        self.runs_per_task = validate_runs_per_task(runs_per_task)
         self._db_path = state_paths.observability_db(workflow_folderpath)
         bootstrap_store = observability_store.ObservabilityStore(
             self._db_path, migrate=True
@@ -794,13 +814,21 @@ class ExperimentHarness:
 
         Task prompts are optional in setup, so the harness supplies actual
         messages through ExperimentTask as usual. No model runs here.
+
+        The registration's `runs_per_task` becomes this harness's default
+        repeat count, so the number chosen at setup is the number that runs
+        without the caller passing it again — the same value the UI and an
+        agent both read.
         """
-        from fastworkflow.benchmark.setup import experiment_manifest
+        from fastworkflow.benchmark.setup import experiment_manifest, validate_runs_per_task
 
         record, _ = experiment_manifest(workflow_folderpath, experiment_id)
         # The registration's description is a default, not an override: a runner
         # that names its own run wins over what setup recorded.
         kwargs.setdefault("description", record["description"])
+        kwargs.setdefault(
+            "runs_per_task", validate_runs_per_task(record.get("runs_per_task", 1))
+        )
         return cls(workflow_folderpath, experiment_id=experiment_id,
                    benchmark_id=record["benchmark_id"],
                    benchmark_version=record["benchmark_version"],
@@ -925,7 +953,7 @@ class ExperimentHarness:
         self,
         tasks: Iterable[ExperimentTask],
         *,
-        attempts: int = 1,
+        attempts: Optional[int] = None,
         grader: Optional[Grader] = None,
     ) -> dict[str, Any]:
         """Run every task `attempts` times as one experiment.
@@ -934,13 +962,24 @@ class ExperimentHarness:
         task executes. Everything else runs inside `evidence_run()`, so the run
         gets zero-drop assertion, prune suppression, archival and provenance —
         and an invalid verdict from it makes the experiment invalid.
+
+        `attempts` defaults to this harness's `runs_per_task`, which
+        `from_benchmark_experiment` took from the registration — so the repeat
+        count chosen at setup is the one that runs. n repeats are n attempts of
+        ONE experiment, with distinct attempt identities and channels: they are
+        repeated samples of one setup, not n unrelated experiments. Planned,
+        running, finished and failed attempts are all preserved; nothing reruns
+        until n successes.
         """
+        from fastworkflow.benchmark import setup as benchmark_setup
+        from fastworkflow.benchmark.setup import validate_runs_per_task
+
         task_list = list(tasks)
         if not task_list:
             raise ValueError("a task set with no tasks is not an experiment")
-        attempts = int(attempts)
-        if attempts <= 0:
-            raise ValueError("attempts must be positive")
+        attempts = validate_runs_per_task(
+            self.runs_per_task if attempts is None else attempts, field="attempts"
+        )
         seen = {t.task_id for t in task_list}
         if len(seen) != len(task_list):
             raise ValueError(
@@ -962,9 +1001,10 @@ class ExperimentHarness:
             required_evidence_segments=1,
             arm=self.arm,
             baseline_experiment_id=self.baseline_experiment_id,
-            workflow_name=os.path.basename(
-                self.workflow_folderpath.rstrip("/\\")
-            ),
+            # The same helper setup uses. A comparison group is derived from
+            # this string, so registration and execution disagreeing about it
+            # opens a second contest instead of raising anything.
+            workflow_name=benchmark_setup.workflow_name_for(self.workflow_folderpath),
             benchmark_id=self.benchmark_id,
             benchmark_version=self.benchmark_version,
             benchmark_digest_sha256=self.benchmark_digest_sha256,

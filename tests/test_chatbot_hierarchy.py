@@ -3,6 +3,8 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import urllib.error
+import urllib.request
 
 import pytest
 
@@ -107,6 +109,43 @@ def test_navigation_orders_benchmark_experiments_newest_first():
     ]
 
 
+def _navigation_http(server, *, etag=None):
+    url = f'http://127.0.0.1:{server.port}/api/navigation'
+    req = urllib.request.Request(url)
+    req.add_header('Authorization', f'Bearer {server.token}')
+    if etag is not None:
+        req.add_header('If-None-Match', etag)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, dict(resp.headers), resp.read()
+    except urllib.error.HTTPError as err:
+        return err.code, dict(err.headers), err.read()
+
+
+def test_navigation_payload_is_slim_and_supports_etag(hierarchy_server):
+    """Turn info is whitelisted; other kinds keep full info for showHierarchyInfo."""
+    server, _spec, _eid, _default, _store = hierarchy_server
+    status, headers, body = _navigation_http(server)
+    assert status == 200
+    data = json.loads(body)
+    turns = [n for n in walk(data['root']) if n['kind'] == 'turn']
+    assert turns
+    for turn in turns:
+        assert set(turn.get('info') or {}).issubset({'status', 'started_at'})
+    conversations = [n for n in walk(data['root']) if n['kind'] == 'conversation']
+    assert conversations
+    assert any(
+        {'channel_id', 'conversation_id'} <= set(c.get('info') or {})
+        for c in conversations
+    )
+    etag = headers.get('ETag') or headers.get('etag')
+    assert etag
+    status304, headers304, body304 = _navigation_http(server, etag=etag)
+    assert status304 == 304
+    assert body304 == b''
+    assert (headers304.get('ETag') or headers304.get('etag')) == etag
+
+
 def test_navigation_workspace_is_scoped(workspace_server):
     server, _workflow, _before = workspace_server
     status, data = _request(server, '/api/navigation')
@@ -209,3 +248,40 @@ def test_record_navigator_dom(record_nav_server):
         f'http://127.0.0.1:{server.port}/?token={server.token}', *NAV_TURNS],
         capture_output=True, text=True, timeout=40)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _run_dom(script_name, server, *extra, timeout=40):
+    dependency = os.environ.get('TEST_JSDOM_ROOT')
+    if not dependency:
+        pytest.skip('Set TEST_JSDOM_ROOT to run DOM integration with jsdom')
+    script = Path(__file__).with_name(script_name)
+    result = subprocess.run(
+        ['node', str(script), dependency,
+         f'http://127.0.0.1:{server.port}/?token={server.token}', *extra],
+        capture_output=True, text=True, timeout=timeout)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_navigation_etag_dom(hierarchy_server):
+    server, _spec, _eid, _default, _store = hierarchy_server
+    _run_dom('chatbot_nav_etag_dom.cjs', server)
+
+
+def test_polling_visibility_dom(hierarchy_server):
+    server, _spec, _eid, _default, _store = hierarchy_server
+    _run_dom('chatbot_polling_visibility_dom.cjs', server, timeout=60)
+
+
+def test_keyboard_rail_dom(hierarchy_server):
+    server, _spec, _eid, _default, _store = hierarchy_server
+    _run_dom('chatbot_keyboard_rail_dom.cjs', server, timeout=90)
+
+
+def test_unreachable_and_clear_rotation_dom(hierarchy_server):
+    server, _spec, _eid, _default, _store = hierarchy_server
+    _run_dom('chatbot_unreachable_clear_dom.cjs', server)
+
+
+def test_perf_render_dom(hierarchy_server):
+    server, _spec, _eid, _default, _store = hierarchy_server
+    _run_dom('chatbot_perf_render_dom.cjs', server)

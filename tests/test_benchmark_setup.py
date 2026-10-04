@@ -213,11 +213,15 @@ def test_http_create_register_execute_drilldown_and_plain_conversations(
     )
     # Annotations are written to this registered source, even when the UI's
     # default database points elsewhere. Cross-experiment writes are refused.
-    feedback_path = "/api/human-feedback?turn_key=registered-turn&benchmark_experiment=" + experiment_id
+    scope = "?turn_key=registered-turn&benchmark_experiment=" + experiment_id
+    # One write route and a separate read route since fix-9eg.16.
+    write_path = "/post_feedback" + scope
+    read_path = "/api/feedback-notes" + scope
     comment = {"target_kind": "turn", "span_ids": [], "target_label": "Turn",
                "comment": "Check the final answer against the task prompt.",
-               "provenance": "human"}
-    assert _request(server, feedback_path, "POST", comment)[0] == 201
+               "provenance": "human", "category": "recommendations",
+               "subcategory": "what_to_do"}
+    assert _request(server, write_path, "POST", comment)[0] == 201
     assert store.list_human_feedback("registered-turn")[0]["comment"] == comment["comment"]
     assert _request(server, "/api/experiment/" + experiment_id + "/analysis" + suffix,
                     "PUT", {"analysis": "Free-form review"})[0] == 405
@@ -227,9 +231,9 @@ def test_http_create_register_execute_drilldown_and_plain_conversations(
     default = obs.ObservabilityStore(str(tmp_path / "default.sqlite3"))
     _write_turn(default, _turn_row("plain-turn", "chatbot"))
     server.db_path = default.db_path
-    assert _request(server, feedback_path, "GET")[1]["feedback"][0]["comment"] == comment["comment"]
+    assert _request(server, read_path)[1]["feedback"][0]["comment"] == comment["comment"]
     assert default.list_human_feedback("plain-turn") == []
-    assert _request(server, "/api/human-feedback?turn_key=plain-turn&benchmark_experiment=" + experiment_id,
+    assert _request(server, "/post_feedback?turn_key=plain-turn&benchmark_experiment=" + experiment_id,
                     "POST", comment)[0] == 404
     assert _request(server, "/api/turns")[1]["turns"][0]["turn_key"] == "plain-turn"
     assert (
@@ -238,7 +242,7 @@ def test_http_create_register_execute_drilldown_and_plain_conversations(
     )
 
     _write_turn(store, _turn_row("unrelated-turn", "chatbot"))
-    assert _request(server, "/api/human-feedback?turn_key=unrelated-turn&benchmark_experiment=" + experiment_id,
+    assert _request(server, "/post_feedback?turn_key=unrelated-turn&benchmark_experiment=" + experiment_id,
                     "POST", comment)[0] == 400
 
 
@@ -310,6 +314,10 @@ def test_harness_factory_preserves_registered_identity(tmp_path, monkeypatch):
 def test_delete_empty_registration_preserves_benchmark_and_refuses_stale_runner(setup_server, tmp_path):
     server, folder = setup_server
     benchmark = create(folder)
+    # The first experiment of a group is its winner, and the winner is not
+    # deletable (`fix-jfy5`). This one holds that title so the registration
+    # under test is an ordinary non-selected one.
+    selected = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
     record = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
     eid = record["experiment_id"]
     path = "/api/benchmark-experiments/" + eid
@@ -319,7 +327,10 @@ def test_delete_empty_registration_preserves_benchmark_and_refuses_stale_runner(
     assert setup.load_experiment(folder, eid)["store"] is None
     status, result = _request(server, path, "DELETE")
     assert status == 200 and result["deleted"] == eid
-    assert setup.registered_experiments(folder, benchmark["benchmark_id"]) == []
+    assert [row["experiment_id"] for row in
+            setup.registered_experiments(folder, benchmark["benchmark_id"])] == [
+        selected["experiment_id"]
+    ]
     assert _request(server, path)[0] == 404
     assert _request(server, path, "DELETE")[0] == 404
     assert (folder / "benchmarks" / benchmark["benchmark_id"] / "v1.json").read_bytes() == before
@@ -398,6 +409,11 @@ def test_delete_workspace_and_unrelated_routes_refused(workspace_server):
 def test_delete_and_runner_binding_are_serialized(tmp_path):
     from threading import Barrier
     benchmark = create(tmp_path)
+    # Hold the group's winner title with an experiment nobody races, so the
+    # raced one is always an ordinary non-selected registration: a winner is
+    # not deletable (`fix-jfy5`), and this test is about the file lock between
+    # deletion and a runner's binding, not about selection.
+    setup.create_experiment(tmp_path, benchmark["benchmark_id"], "v1")
     for _ in range(8):
         record = setup.create_experiment(tmp_path, benchmark["benchmark_id"], "v1")
         eid = record["experiment_id"]

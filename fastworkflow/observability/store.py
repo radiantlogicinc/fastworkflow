@@ -47,7 +47,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Iterable, Iterator, Mapping, Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -65,7 +65,9 @@ from fastworkflow.utils.logging import logger
 # populated store whose user_version is older than this constant is DELETED
 # and recreated empty when the writer opens it (the store has never shipped in
 # a release, so such a file can only be a developer's local DB); the read-only
-# store refuses it and never deletes anything.
+# store refuses it and never deletes anything. Stores at
+# MIN_READABLE_SCHEMA_VERSION or newer shipped, so the writer refuses them
+# instead of deleting them.
 #
 # v3 (fix-qe2): experiment_attempts.runtime_snapshot_json -- the binding
 # server's credential-free runtime snapshot, stamped at claim time. Create-time
@@ -74,8 +76,26 @@ from fastworkflow.utils.logging import logger
 # v5 (fix-46l.2): feedback provenance distinguishes human, coding-agent, and
 # distillation-agent annotations.
 # v6 (fix-w6w): experiment archival is a durable annotation.
+# v7 (fix-9eg.16/.19.1): the agent-memory `feedback` table is gone, and review
+# notes carry their category, subcategory, stable identity and frozen evidence
+# anchors as columns.
 # Fresh schema only, with no migration of previously recorded evidence.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
+
+# ...but a v6 store still READS. This is the one place the fresh-schema rule
+# (fix-49m.3) is relaxed, and only for `ReadOnlyObservabilityStore`: v6 is the
+# shipped format, real recorded evidence exists in it, and refusing to open it
+# would make this change destroy the ability to look at last week's runs. The
+# relaxation is narrow and checkable — v7 differs from v6 in the feedback
+# surface alone, so `list_human_feedback` reads the older row shape and every
+# other read is byte-identical. Writes are NOT relaxed: a v6 file is still
+# refused by the writable store and by `open_for_annotation`, because adding a
+# categorized row to it would mean migrating a user's live database, which no
+# part of this change is authorized to do.
+MIN_READABLE_SCHEMA_VERSION = 6
+# The schema version that first recorded a feedback row's category,
+# subcategory, stable identity and frozen anchors.
+FEEDBACK_TAXONOMY_SCHEMA_VERSION = 7
 
 # Which capture profile this deployment records under (arch §12.0 delta 3).
 # Defaults to `debug`, which is byte-for-byte today's behavior: EXP-003 is a
@@ -284,86 +304,46 @@ FEATURE_OFFLOAD_EVENTS_V1 = "offload_events_v1"
 # `<db>` plus this suffix. Nothing reads it any more; opening a store deletes it.
 LEGACY_OFFLOAD_SIDECAR_SUFFIX = ".offload-handles.sqlite3"
 FEEDBACK_PROVENANCES = frozenset({"human", "coding_agent", "distillation_agent"})
-# Composer tabs and stored-comment labels. Existing comments already used these
-# headings (and "What did not work" as a synonym for went-wrong); reads parse
-# them without rewriting the comment column, so older stores stay intact.
-HUMAN_FEEDBACK_SECTIONS = (
-    ("went_wrong", "What went wrong", ("what went wrong", "what did not work")),
-    ("worked", "What worked", ("what worked",)),
-    ("should_change", "What should change", ("what should change",)),
-)
-_HUMAN_FEEDBACK_HEADER_RE = re.compile(
-    r"(?im)^[ \t]*(What went wrong|What did not work|What worked|What should change)"
-    r"[ \t]*:[ \t]*"
-)
-_HUMAN_FEEDBACK_HEADER_TO_KEY = {
-    alias: key
-    for key, _label, aliases in HUMAN_FEEDBACK_SECTIONS
-    for alias in aliases
-}
+FEEDBACK_COMMENT_MAX_CHARS = 100_000
 
-
-def parse_human_feedback_comment(comment: str) -> dict[str, str]:
-    """Split a stored comment into the three composer tabs.
-
-    Unlabelled text is left in ``comment`` only: guessing a tab would invent a
-    category the author did not choose. Duplicate headings concatenate.
-    """
-    sections = {key: "" for key, _label, _aliases in HUMAN_FEEDBACK_SECTIONS}
-    if not isinstance(comment, str) or not comment:
-        return sections
-    matches = list(_HUMAN_FEEDBACK_HEADER_RE.finditer(comment))
-    if not matches:
-        return sections
-    for index, match in enumerate(matches):
-        key = _HUMAN_FEEDBACK_HEADER_TO_KEY[match.group(1).strip().lower()]
-        start = match.end()
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(comment)
-        chunk = comment[start:end].strip()
-        if not chunk:
-            continue
-        sections[key] = f"{sections[key]}\n\n{chunk}".strip() if sections[key] else chunk
-    return sections
-
-
-def compose_human_feedback_comment(
-    *,
-    went_wrong: str = "",
-    worked: str = "",
-    should_change: str = "",
-    comment: str | None = None,
-) -> str:
-    """Build the stored comment from tab fields, or keep a legacy free-form comment."""
-    values = {
-        "went_wrong": went_wrong,
-        "worked": worked,
-        "should_change": should_change,
-    }
-    for key, value in values.items():
-        if value is None:
-            values[key] = ""
-        elif not isinstance(value, str):
-            raise ValueError(f"{key} must be text")
-    parts = []
-    for key, label, _aliases in HUMAN_FEEDBACK_SECTIONS:
-        text = values[key].strip()
-        if text:
-            parts.append(f"{label}: {text}")
-    if parts:
-        composed = "\n\n".join(parts)
-    elif isinstance(comment, str) and comment.strip():
-        composed = comment.strip()
-    else:
-        raise ValueError("feedback must contain text (at most 100000 characters)")
-    if len(composed) > 100000:
-        raise ValueError("feedback must contain text (at most 100000 characters)")
-    return composed
+# The composer's three headings ("What went wrong:" / "What worked:" / "What
+# should change:") and the reader that split a stored comment on them lived
+# here until fix-9eg.19.1. They are gone rather than remapped: the owner-
+# confirmed taxonomy in `observability/feedback.py` carries category and
+# subcategory as explicit enum columns, and re-deriving one of its six
+# subcategories from a legacy heading would record a guess as the author's
+# choice. Comments written before the columns existed read back with
+# `category`/`subcategory` of None and are shown as unclassified, text
+# untouched.
 
 
 def _human_feedback_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """One stored comment in wire shape, whether v6 or v7 recorded it.
+
+    A v6 row has no taxonomy, identity or anchor columns, so they read as
+    None. That is the honest answer for a comment written before they existed;
+    `feedback.dedupe_key` knows how to give such a row an identity for a
+    consolidated read without writing one back into a store this build will
+    not migrate.
+    """
     value = dict(row)
     value["span_ids"] = json.loads(value.pop("span_ids_json"))
-    value.update(parse_human_feedback_comment(value.get("comment") or ""))
+    value.setdefault("feedback_uid", None)
+    value.setdefault("category", None)
+    value.setdefault("subcategory", None)
+    raw_anchors = value.pop("anchors_json", None)
+    anchors: Any = None
+    if isinstance(raw_anchors, str) and raw_anchors:
+        try:
+            anchors = json.loads(raw_anchors)
+        except ValueError:
+            anchors = None
+    value["anchors"] = anchors
+    paired = anchors.get("paired") if isinstance(anchors, Mapping) else None
+    value["paired"] = paired
+    value["pair_key"] = (
+        anchors.get("pair_key") if isinstance(anchors, Mapping) else None
+    )
     return value
 
 # Single source: the policy engine's own version (fix-49m.3 wiring).
@@ -437,102 +417,6 @@ def resolve_capture_policy() -> "capture_policy_module.CapturePolicy":
         policy = capture_policy_module.policy_for_profile(name)
         _CAPTURE_POLICY_CACHE[name] = policy
     return policy
-
-
-# Turn columns the capture policy deliberately does NOT touch.
-#
-# These two are not evidence, they are operational state: `get_memory_window` and
-# `_USABLE_TURN_FILTER` read exactly `conversation_summary` and
-# `conversation_traces` to rebuild the agent's conversation memory, and the filter
-# requires the summary to be non-NULL. Withholding them would not reduce what a
-# bundle exposes — it would make the agent forget, which is a behavior change and
-# therefore outside a Phase 0 slice.
-#
-# PII in conversation memory is a real gap; it is fix-cj4's. It needs a redaction
-# that leaves memory usable, which is a different problem from withholding
-# evidence, and solving it by omission here would silently degrade every
-# evidence-profile run's agent.
-_POLICY_EXEMPT_TURN_COLUMNS = frozenset({"conversation_summary", "conversation_traces"})
-
-# Turn columns that are pure evidence — nothing operational reads them — paired
-# with what they actually contain. `failure_reason` is `opaque-payload` rather
-# than text because it can embed a provider error body (the [R20] scenario), so
-# nobody can say what is in it.
-_POLICED_TURN_COLUMNS: tuple[tuple[str, str], ...] = (
-    ("user_message", "user-text"),
-    ("refined_user_message", "user-text"),
-    ("answer", "user-text"),
-    ("failure_reason", "opaque-payload"),
-)
-
-# ----------------------------------------------------------------------
-# The write paths that do NOT ride the TurnResult pipeline (fix-ajv.9)
-# ----------------------------------------------------------------------
-#
-# `serialize_turn_result` is where the capture policy meets a turn, and
-# `upsert_turn_row` is where the credential scrub meets one. Five persisted
-# surfaces reach SQLite without passing through either: conversation labels,
-# feedback, train-run metrics, writer diagnostics, and the SCALAR columns beside
-# a span's (already scrubbed) `attributes` JSON. FW-REQ-002 clause 3 requires
-# every captured field to have a declared policy, so each of the five is decided
-# here rather than by omission — including the three that are deliberately
-# scrub-only, whose reasons are recorded at their write sites.
-#
-# Policy paths are named constants because a deployment re-admitting one of these
-# under the evidence profile has to spell the path exactly (see
-# `CapturePolicy.policy_for`), and a path that only exists as a literal inside a
-# method is a path nobody can find in order to spell it.
-POLICY_PATH_SPAN_NAME = "span.name"
-POLICY_PATH_SPAN_COMMAND_NAME = "span.command_name"
-POLICY_PATH_SPAN_CONTEXT = "span.context"
-POLICY_PATH_CONVERSATION_TOPIC = "conversation.topic"
-POLICY_PATH_CONVERSATION_SUMMARY = "conversation.summary"
-POLICY_PATH_TRAIN_METRICS = "train_run.metrics_json"
-# (ido-zlm) The sixth surface: the RAW command response that
-# `observation_offloading.archive` persists into `offload_evidence`. It does not
-# ride the TurnResult pipeline, so without this path it escaped both
-# protections entirely -- a credential in a command response was stored
-# verbatim where the same text inside a span attribute was scrubbed.
-POLICY_PATH_OFFLOAD_OBSERVATION = "offload.observation.text"
-
-
-def _protected_text(
-    value: Any,
-    *,
-    redactor: Redactor,
-    policy: "capture_policy_module.CapturePolicy",
-    field_path: str,
-    classification: str,
-) -> Any:
-    """Credential-scrub a persisted string, then apply the capture policy to it.
-
-    **Scrub first, policy second**, which is the opposite order from
-    `_POLICED_TURN_COLUMNS` (there the policy runs in `serialize_turn_result` and
-    the scrub runs later, in `upsert_turn_row`). Two reasons it has to be this way
-    on these paths:
-
-    * A conversation label can arrive by either of two routes —
-      `SQLiteTraceSink._apply_label`, which scrubs before calling
-      `apply_label_txn`, or `ObservabilityStore.record_conversation_label`, which
-      does not. Scrubbing first makes both produce `policy(scrub(text))`, because
-      the scrub is idempotent. Policing first would give the same label two
-      different digests depending on which route wrote it, and a digest that
-      depends on plumbing is not a digest anyone can compare.
-    * The badge left behind carries a digest of what it replaced. Digesting the
-      unscrubbed text would make the badge a confirmation oracle for a guessed
-      credential, which is a strange thing for a redaction record to be.
-
-    Returns TEXT, always: an envelope is serialized here because every caller
-    binds the result to a TEXT column and sqlite3 cannot bind a mapping. Same
-    reasoning as `_policed_column`, which does it for the turn row.
-    """
-    if not value:
-        return value
-    scrubbed = redactor.redact(value)
-    captured = policy.apply(field_path, scrubbed, classification=classification)
-    if capture_policy_module.is_capture_envelope(captured):
-        return json.dumps(captured, ensure_ascii=False)
-    return captured
 
 
 class WriterHealthDelta(BaseModel):
@@ -728,7 +612,7 @@ _POLICED_TURN_COLUMNS: tuple[tuple[str, str], ...] = (
 # `serialize_turn_result` is where the capture policy meets a turn, and
 # `upsert_turn_row` is where the credential scrub meets one. Five persisted
 # surfaces reach SQLite without passing through either: conversation labels,
-# feedback, train-run metrics, writer diagnostics, and the SCALAR columns beside
+# review notes, train-run metrics, writer diagnostics, and the SCALAR columns beside
 # a span's (already scrubbed) `attributes` JSON. FW-REQ-002 clause 3 requires
 # every captured field to have a declared policy, so each of the five is decided
 # here rather than by omission — including the three that are deliberately
@@ -744,6 +628,35 @@ POLICY_PATH_SPAN_CONTEXT = "span.context"
 POLICY_PATH_CONVERSATION_TOPIC = "conversation.topic"
 POLICY_PATH_CONVERSATION_SUMMARY = "conversation.summary"
 POLICY_PATH_TRAIN_METRICS = "train_run.metrics_json"
+POLICY_PATH_PASS_ANSWER = "span.pass.answer"
+POLICY_PATH_PASS_PLAN = "span.pass.plan"
+
+# The span name is restated rather than imported: this module is the sink and
+# does not import the runtime's `tracing`. `tests/test_distillation_pass_capture`
+# asserts the two spellings agree, because a drift here does not fail — it
+# silently stops policing the fields.
+_SPAN_DISTILLATION_PASS = "fw.distillation.pass"
+
+# The ONLY span attributes this store classifies. Span attributes are otherwise
+# credential-scrubbed wholesale (`upsert_span_rows`) and carry no per-key
+# policy, which is a general gap and NOT repaired here.
+#
+# These two are different in kind from everything else in an attribute bag:
+# `answer` is the text a pass showed the user and `plan` is the next-step
+# sequence it generated, both free text, and both already withheld under the
+# evidence profile everywhere else they are persisted — `turns.answer` through
+# `_POLICED_TURN_COLUMNS`, `span.context` through `_protected_text`. Recording
+# them here unclassified would make `fw.distillation.pass` the one route by
+# which user text reaches an evidence bundle, which is the definition of a
+# bypass. `user-text` is therefore the classification, and under `evidence` the
+# profile default withholds both with a badge (§12.0 delta 3) rather than
+# dropping them silently.
+_POLICED_SPAN_ATTRIBUTES: dict[str, dict[str, tuple[str, str]]] = {
+    _SPAN_DISTILLATION_PASS: {
+        "answer": (POLICY_PATH_PASS_ANSWER, "user-text"),
+        "plan": (POLICY_PATH_PASS_PLAN, "user-text"),
+    },
+}
 # (ido-zlm) The sixth surface: the RAW command response that
 # `observation_offloading.archive` persists into `offload_evidence`. It does not
 # ride the TurnResult pipeline, so without this path it escaped both
@@ -789,6 +702,110 @@ def _protected_text(
     if capture_policy_module.is_capture_envelope(captured):
         return json.dumps(captured, ensure_ascii=False)
     return captured
+
+
+def _policed_span_attributes(
+    span_name: Any,
+    attributes: Any,
+    *,
+    redactor: Redactor,
+    policy: "capture_policy_module.CapturePolicy",
+) -> Any:
+    """A span's attribute bag with its classified fields policed.
+
+    Returns the bag unchanged for every span that declares none, which is every
+    span but one — so this costs a dict lookup on the hot path and changes
+    nothing else.
+
+    Scrub first, policy second, for the reasons `_protected_text` gives: the
+    digest in the badge must describe what was persisted, not the credential a
+    guesser is testing. Unlike `_protected_text` the envelope is left as a
+    MAPPING, because this value is nested inside the attributes JSON rather
+    than bound to a TEXT column; serializing it here would give a reader a
+    string that happens to parse.
+    """
+    declared = _POLICED_SPAN_ATTRIBUTES.get(span_name)
+    if not declared or not isinstance(attributes, Mapping):
+        return attributes
+    policed = dict(attributes)
+    for key, (field_path, classification) in declared.items():
+        value = policed.get(key)
+        if isinstance(value, str) and value:
+            policed[key] = policy.apply(
+                field_path, redactor.redact(value), classification=classification
+            )
+            continue
+        capped = _capped_prefix(value)
+        if capped is None:
+            continue
+        policed[key] = _police_capped(
+            value,
+            capped,
+            redactor=redactor,
+            policy=policy,
+            field_path=field_path,
+            classification=classification,
+        )
+    return policed
+
+
+def _capped_prefix(value: Any) -> Optional[str]:
+    """The surviving text of a `tracing.cap_attr_value` envelope, if that is what
+    this is.
+
+    An over-limit attribute never reaches the sink as a string: the emitter has
+    already replaced it with `{truncated, original_length, sha256, value}`,
+    where `value` is a RAW prefix of the text. Treating that mapping as "not a
+    string, nothing to police" is how a long answer walked past the evidence
+    profile while a short one was withheld — the longer the secret, the less
+    protected it was.
+    """
+    if not isinstance(value, Mapping) or value.get("truncated") is not True:
+        return None
+    prefix = value.get("value")
+    return prefix if isinstance(prefix, str) and prefix else None
+
+
+def _police_capped(
+    envelope: Mapping[str, Any],
+    prefix: str,
+    *,
+    redactor: Redactor,
+    policy: "capture_policy_module.CapturePolicy",
+    field_path: str,
+    classification: str,
+) -> Any:
+    """Apply the policy to text the emitter had already cut.
+
+    The policy sees the prefix, because the prefix is all that survived — there
+    is nothing else here to withhold, and pretending otherwise would put a
+    digest of text this process never held into the record.
+
+    When the policy acts, the cap envelope does NOT survive beside the result:
+
+    * its `value` is the raw prefix, which is the thing being withheld;
+    * its `sha256` digests the ORIGINAL, unscrubbed text. Keeping that next to a
+      withheld value turns the record into a confirmation oracle for a guessed
+      secret, which is the same reason `_protected_text` scrubs before it
+      digests.
+
+    What is kept is `original_length` and a `truncated_before_capture` flag, so
+    the badge stays truthful in the other direction too: the policy's own
+    `original_bytes` and `digest` describe the PREFIX, and without these two a
+    reader would take them for measurements of the whole value.
+    """
+    captured = policy.apply(
+        field_path, redactor.redact(prefix), classification=classification
+    )
+    if capture_policy_module.is_capture_envelope(captured):
+        return {
+            **captured,
+            "truncated_before_capture": True,
+            "original_length": envelope.get("original_length"),
+        }
+    # The debug profile, whose contract is that nothing changes: the cap
+    # envelope is returned as it came, carrying the scrubbed prefix.
+    return {**envelope, "value": captured}
 
 
 def protect_offload_observation(text: str) -> str:
@@ -1415,18 +1432,29 @@ _SCHEMA_STATEMENTS = [
         experiment_id TEXT, task_id TEXT, attempt INTEGER,
         claim_epoch INTEGER, server_incarnation TEXT,
         record_json TEXT NOT NULL)""",
-    """CREATE TABLE IF NOT EXISTS feedback (
-        turn_key TEXT PRIMARY KEY, feedback_json TEXT NOT NULL,
-        updated_at TEXT NOT NULL)""",
+    # The agent-memory `feedback` table (one mutable row per turn, joined into
+    # dspy.History) was removed in fix-9eg.16. It is not recreated and it is
+    # not read: a v6 file still carries the table, and this build leaves those
+    # bytes alone rather than dropping them out from under a store it does not
+    # own.
     """CREATE TABLE IF NOT EXISTS human_feedback (
         feedback_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        feedback_uid TEXT NOT NULL UNIQUE,
         turn_key TEXT NOT NULL REFERENCES turns(turn_key),
         target_kind TEXT NOT NULL, span_ids_json TEXT NOT NULL,
         target_label TEXT NOT NULL, comment TEXT NOT NULL,
         provenance TEXT NOT NULL,
+        category TEXT, subcategory TEXT,
+        anchors_json TEXT NOT NULL,
+        pair_experiment_id TEXT, pair_task_id TEXT,
         created_at TEXT NOT NULL)""",
     """CREATE INDEX IF NOT EXISTS idx_human_feedback_turn
         ON human_feedback(turn_key, feedback_id)""",
+    # A comparison comment is about two executions and is reachable from the
+    # task on EITHER side. The primary side is found through `turns`; this is
+    # how the other side is found without scanning every anchor blob.
+    """CREATE INDEX IF NOT EXISTS idx_human_feedback_pair
+        ON human_feedback(pair_experiment_id, pair_task_id)""",
     """CREATE TRIGGER IF NOT EXISTS delete_turn_human_feedback
         AFTER DELETE ON turns BEGIN
         DELETE FROM human_feedback WHERE turn_key=OLD.turn_key;
@@ -1665,6 +1693,32 @@ def _present_offload_tables(conn: sqlite3.Connection) -> tuple[str, ...]:
     return tuple(table for table in _OFFLOAD_EVIDENCE_TABLES if table in found)
 
 
+class _ClosingConnection:
+    """sqlite3.Connection wrapper that closes on ``with`` exit.
+
+    ``with sqlite3.Connection`` commits/rollbacks but does not close. This
+    wrapper restores ``with self._connect() as conn`` as a leak-free pattern
+    while still proxying attributes so ``conn = self._connect(); ...;
+    conn.close()`` keeps working for the few long-held-handle call sites.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        object.__setattr__(self, "_conn", conn)
+
+    def __enter__(self) -> sqlite3.Connection:
+        self._conn.__enter__()
+        return self._conn
+
+    def __exit__(self, exc_type, exc, tb) -> bool:  # type: ignore[no-untyped-def]
+        try:
+            return bool(self._conn.__exit__(exc_type, exc, tb))
+        finally:
+            self._conn.close()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+
 class ObservabilityStore:
     """Schema owner + synchronous operations on one observability DB.
 
@@ -1676,12 +1730,45 @@ class ObservabilityStore:
         self.db_path = db_path
         if migrate:
             self._ensure_schema()
+        # The version the FILE is at, which `_ensure_schema` has just pinned
+        # to `SCHEMA_VERSION` on the writable path. It is recorded rather than
+        # assumed because `open_for_annotation` and the read-only subclass
+        # both reach files this build did not create.
+        self.schema_version = self._read_schema_version()
         self._features = self._load_features()
 
     @staticmethod
     def open_for_annotation(db_path: str) -> "ObservabilityStore":
-        """Open an existing DB read-write without creating or migrating it."""
-        return ObservabilityStore(db_path, migrate=False)
+        """Open an existing DB read-write without creating or migrating it.
+
+        Refuses anything but the current schema. Annotating an older store
+        would mean writing a row shape its file has no columns for, and the
+        alternative — quietly adding them — is the migration this build does
+        not do to a database somebody else owns.
+        """
+        store = ObservabilityStore(db_path, migrate=False)
+        if store.schema_version != SCHEMA_VERSION:
+            raise IncompatibleObservabilityDB(
+                f"{db_path} has schema v{store.schema_version}; annotating "
+                f"requires v{SCHEMA_VERSION} and this build carries no "
+                "migration. It can still be read."
+            )
+        return store
+
+    def _read_schema_version(self) -> int:
+        # Closed explicitly, not merely committed: `with` on a sqlite3
+        # connection ends the transaction and leaves the handle open, and an
+        # open handle in WAL mode keeps the -wal sidecar alive. That sidecar
+        # is writable even when the database file is not, so a leak here
+        # would let a read-only store accept writes for as long as it took
+        # the garbage collector to get round to it.
+        conn = self._open_connection(timeout=5.0)
+        try:
+            return int(conn.execute("PRAGMA user_version").fetchone()[0])
+        except Exception:
+            return 0
+        finally:
+            conn.close()
 
     def _store_redactor(self) -> Redactor:
         redactor = getattr(self, "_redactor", None)
@@ -1705,12 +1792,25 @@ class ObservabilityStore:
 
     # -- connections ----------------------------------------------------
 
-    def _connect(self, timeout: float = 30.0) -> sqlite3.Connection:
+    def _open_connection(self, timeout: float = 30.0) -> sqlite3.Connection:
+        """Open a raw SQLite connection. Callers that hold it beyond a ``with``
+        block (snapshot pins, sink writer transactions) must close it themselves.
+        """
         conn = sqlite3.connect(self.db_path, timeout=timeout, check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _connect(self, timeout: float = 30.0) -> "_ClosingConnection":
+        """A connection that closes when used as ``with self._connect()``.
+
+        ``with sqlite3.Connection`` commits/rollbacks but does NOT close, so the
+        plain form used to leak a handle per call until cyclic GC reclaimed it.
+        Attribute access still proxies to the underlying connection so the few
+        call sites that do ``conn = self._connect()`` keep working.
+        """
+        return _ClosingConnection(self._open_connection(timeout=timeout))
 
     def _ensure_schema(self) -> None:
         """Create or open the schema; replace a populated DB from an older build.
@@ -1722,6 +1822,11 @@ class ObservabilityStore:
         with its ``-wal`` and ``-shm`` -- and a fresh store is created in its
         place. A DB from a NEWER build is refused and never touched. When the
         old files cannot be deleted, the older DB is refused as before.
+
+        A DB at ``MIN_READABLE_SCHEMA_VERSION`` or newer is the exception: that
+        format shipped and holds real recorded evidence, so it is refused and
+        left untouched rather than deleted. Only the pre-release formats below
+        it are replaced.
         """
         try:
             self._ensure_schema_once()
@@ -1809,6 +1914,20 @@ class ObservabilityStore:
                     ).fetchone()
                     is not None
                 )
+                if has_tables and found >= MIN_READABLE_SCHEMA_VERSION:
+                    # A shipped schema holds real recorded evidence: it is
+                    # refused, never deleted (see MIN_READABLE_SCHEMA_VERSION).
+                    raise IncompatibleObservabilityDB(
+                        f"{self.db_path} has schema v{found}; this build requires "
+                        f"v{SCHEMA_VERSION} and carries no migration (fresh "
+                        "observability schema, fix-49m.3; experiments."
+                        "benchmark_id, benchmark_version, benchmark_digest_sha256 "
+                        "and experiment_attempts."
+                        "runtime_snapshot_json, human_feedback.provenance and "
+                        "experiments.archived are create-time columns). It still "
+                        "opens read-only. Move or delete the file and its "
+                        "-wal/-shm sidecars to start a new store."
+                    )
                 if has_tables:
                     raise _OlderPopulatedStore(found)
             conn.execute("PRAGMA journal_mode=WAL")
@@ -1923,7 +2042,7 @@ class ObservabilityStore:
         """
         conn = None
         try:
-            conn = self._connect(timeout=5.0)
+            conn = self._open_connection(timeout=5.0)
             row = conn.execute(
                 "SELECT value FROM diagnostics WHERE key='schema_features'"
             ).fetchone()
@@ -2335,7 +2454,17 @@ class ObservabilityStore:
             ):
                 continue
             attributes = redactor.redact(
-                json.dumps(_sanitize_json_value(span.attributes), ensure_ascii=False)
+                json.dumps(
+                    _sanitize_json_value(
+                        _policed_span_attributes(
+                            span.name,
+                            span.attributes,
+                            redactor=redactor,
+                            policy=policy,
+                        )
+                    ),
+                    ensure_ascii=False,
+                )
             )
             span_name = _protected_text(
                 span.name,
@@ -2669,34 +2798,35 @@ class ObservabilityStore:
     def get_memory_window(
         self, channel_id: str, conversation_id: int, max_turns: int
     ) -> list[dict[str, Any]]:
-        """The newest ``max_turns`` usable turns as canonical 3-key memory
-        dicts (oldest-first), feedback joined in — the read that
-        replaces the legacy ``get_conversation_window``."""
+        """The newest ``max_turns`` usable turns as canonical memory dicts
+        (oldest-first) — the gate-1 [R3] read that replaces the legacy
+        ``get_conversation_window``.
+
+        Two keys, not three. The third used to be `feedback`, joined from the
+        agent-memory `feedback` table so that whatever a caller had posted to
+        `/post_feedback` was replayed into the agent's `dspy.History` on the
+        next turn. fix-9eg.16 removed that table and that injection: it was an
+        unreviewed free-text channel straight into the model's context, and
+        the review notes the Observability loop actually uses are a different
+        thing entirely (`human_feedback`, append-only, categorized, never fed
+        back into a prompt by this build).
+        """
         with self._connect() as conn:
             rows = conn.execute(
-                f"""SELECT t.conversation_summary, t.conversation_traces, f.feedback_json
-                    FROM turns t LEFT JOIN feedback f ON f.turn_key = t.turn_key
+                f"""SELECT t.conversation_summary, t.conversation_traces
+                    FROM turns t
                     WHERE t.channel_id=? AND t.conversation_id=?
                       AND {self._USABLE_TURN_FILTER}
                     ORDER BY t.ordinal DESC, t.turn_key DESC LIMIT ?""",
                 (channel_id, conversation_id, max_turns),
             ).fetchall()
-        window = []
-        for row in reversed(rows):
-            feedback = None
-            if row["feedback_json"]:
-                try:
-                    feedback = json.loads(row["feedback_json"])
-                except ValueError:
-                    feedback = row["feedback_json"]
-            window.append(
-                {
-                    "conversation summary": row["conversation_summary"],
-                    "conversation_traces": row["conversation_traces"],
-                    "feedback": feedback,
-                }
-            )
-        return window
+        return [
+            {
+                "conversation summary": row["conversation_summary"],
+                "conversation_traces": row["conversation_traces"],
+            }
+            for row in reversed(rows)
+        ]
 
     def conversation_summaries(
         self, channel_id: str, conversation_id: int
@@ -2779,7 +2909,7 @@ class ObservabilityStore:
 
     def dump_all_conversations(self, channel_id: str) -> list[dict[str, Any]]:
         """Admin-dump reconstruction of the hydrated legacy shape (ruling C7):
-        one object per conversation with 3-key turns (+feedback) inlined."""
+        one object per conversation with its memory turns inlined."""
         dumped = []
         for conv in self.list_conversation_summaries(channel_id, limit=1_000_000):
             conv_id = conv["conversation_id"]
@@ -2796,72 +2926,12 @@ class ObservabilityStore:
             )
         return dumped
 
-    def upsert_feedback(self, turn_key: str, feedback_json: str) -> None:
-        """Upsert a turn's feedback. Credential-scrubbed, NOT policy-withheld.
-
-        The one column where the two protection layers disagree.
-        The scrub applies for the same reason it applies everywhere: it is
-        unconditional, and `nl_feedback` is free text a user typed, which is a
-        place a pasted token lands. Scrubbing serialized JSON cannot corrupt it —
-        every credential pattern is confined to characters that cannot appear
-        unescaped inside a JSON string, so a replacement can never cross a
-        delimiter (pinned by test).
-        WHY NO CAPTURE POLICY: this column is read by `get_memory_window`,
-        which passes the parsed value straight into `dspy.History` through
-        `conversation_history_io.restore_history_from_turns` — it is the agent's
-        memory of being corrected, not evidence about the agent. Under `evidence`
-        a withheld value would still parse, so the agent would silently receive a
-        badge dict where its feedback used to be and behave differently. That is a
-        behavior change, not a reduction in exposure, and this layer does not make
-        those; it is the same call `_POLICY_EXEMPT_TURN_COLUMNS` records for
-        `conversation_summary` and `conversation_traces`, and it belongs with
-        conversation-memory redaction generally, which has to leave memory usable.
-        """
-        feedback_json = self._store_redactor().redact(feedback_json)
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
-                """INSERT INTO feedback (turn_key, feedback_json, updated_at)
-                   VALUES (?, ?, ?)
-                   ON CONFLICT(turn_key) DO UPDATE SET
-                     feedback_json=excluded.feedback_json, updated_at=excluded.updated_at""",
-                (turn_key, feedback_json, _utcnow_iso()),
-            )
-            conn.commit()
-
-    def get_feedback(self, turn_key: str) -> Optional[dict[str, Any]]:
-        """Return the stored agent-memory feedback for one turn, unchanged.
-
-        This deliberately queries ``feedback`` directly. Feedback remains
-        readable when its turn has no conversation summary and is therefore
-        excluded from the conversation-memory window.
-        """
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT turn_key, feedback_json, updated_at "
-                "FROM feedback WHERE turn_key=?",
-                (turn_key,),
-            ).fetchone()
-        return dict(row) if row is not None else None
-
-    def list_feedback(
-        self, channel_id: Optional[str] = None, limit: int = 100
-    ) -> list[dict[str, Any]]:
-        """List stored agent-memory feedback without interpreting verdicts."""
-        if limit < 0:
-            raise ValueError("limit must be non-negative")
-        query = (
-            "SELECT f.turn_key, f.feedback_json, f.updated_at, t.channel_id "
-            "FROM feedback f LEFT JOIN turns t ON t.turn_key=f.turn_key"
-        )
-        params: list[Any] = []
-        if channel_id is not None:
-            query += " WHERE t.channel_id=?"
-            params.append(channel_id)
-        query += " ORDER BY f.updated_at DESC, f.turn_key DESC LIMIT ?"
-        params.append(limit)
-        with self._connect() as conn:
-            return [dict(row) for row in conn.execute(query, params).fetchall()]
+    # `upsert_feedback`, `get_feedback` and `list_feedback` were the whole of
+    # the agent-memory feedback table (fix-9eg.16). They were an upsert of one
+    # mutable row per turn, read straight back into `dspy.History`; the review
+    # loop uses `add_human_feedback` / `list_human_feedback` instead, which
+    # append, carry provenance and a category, and are never injected into a
+    # prompt. There is no dual read and no compatibility shim.
 
     def record_train_run(
         self,
@@ -2989,40 +3059,137 @@ class ObservabilityStore:
     # -- reads (GET /turns, run_chatbot) ---------------------------------
 
     def list_human_feedback(self, turn_key: str) -> list[dict[str, Any]]:
-        """Human annotations, separate from agent-memory feedback in this DB."""
+        """Every recorded review note on one turn, oldest first.
+
+        Works against a v6 store too: the taxonomy, identity and anchor
+        columns simply are not there, and `_human_feedback_row` reports them
+        as None rather than inventing them.
+        """
+        columns = (
+            "*"
+            if self._records_feedback_taxonomy()
+            else "feedback_id, turn_key, target_kind, span_ids_json, "
+                 "target_label, comment, provenance, created_at"
+        )
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM human_feedback WHERE turn_key=? ORDER BY feedback_id",
+                f"SELECT {columns} FROM human_feedback WHERE turn_key=? "
+                "ORDER BY feedback_id",
                 (turn_key,),
             ).fetchall()
         return [_human_feedback_row(row) for row in rows]
 
+    def list_task_feedback(
+        self, *, experiment_id: str, task_id: str
+    ) -> list[dict[str, Any]]:
+        """Every review note this store holds about one task.
+
+        "About one task" is deliberately two things ORed together, because a
+        comparison comment is about two executions and must be findable from
+        either of them:
+
+        - notes anchored to a turn the store records under this
+          experiment/task, across every attempt, turn and component; and
+        - notes whose FROZEN paired anchor names this experiment/task, which
+          is how the winner-versus-candidate remark written on the winner's
+          step shows up on the candidate's task page.
+
+        A row satisfying both appears once — it is one row. No component,
+        category or attempt filter is applied here: filtering is the caller's
+        choice and a default would quietly answer a narrower question. The
+        attempt/turn columns come from the turn row, so a reader can group by
+        attempt without the anchor having to restate it.
+
+        Ordered by `created_at` then `feedback_id` so that paging is stable.
+        """
+        if not self._records_feedback_taxonomy():
+            # v6: no pair columns exist, so the paired side cannot be stored
+            # and the primary side is all there is.
+            query = (
+                "SELECT hf.feedback_id, hf.turn_key, hf.target_kind, "
+                "hf.span_ids_json, hf.target_label, hf.comment, hf.provenance, "
+                "hf.created_at, t.experiment_id AS turn_experiment_id, "
+                "t.task_id AS turn_task_id, t.attempt AS attempt, "
+                "t.channel_id AS channel_id "
+                "FROM human_feedback hf JOIN turns t ON t.turn_key=hf.turn_key "
+                "WHERE t.experiment_id=? AND t.task_id=? "
+                "ORDER BY hf.created_at, hf.feedback_id"
+            )
+            params: tuple[Any, ...] = (experiment_id, task_id)
+        else:
+            query = (
+                "SELECT hf.*, t.experiment_id AS turn_experiment_id, "
+                "t.task_id AS turn_task_id, t.attempt AS attempt, "
+                "t.channel_id AS channel_id "
+                "FROM human_feedback hf JOIN turns t ON t.turn_key=hf.turn_key "
+                "WHERE (t.experiment_id=? AND t.task_id=?) "
+                "   OR (hf.pair_experiment_id=? AND hf.pair_task_id=?) "
+                "ORDER BY hf.created_at, hf.feedback_id"
+            )
+            params = (experiment_id, task_id, experiment_id, task_id)
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [_human_feedback_row(row) for row in rows]
+
     def add_human_feedback(self, turn_key: str, *, target_kind: str,
                            span_ids: list[str], target_label: str,
-                           provenance: str, comment: str | None = None,
-                           went_wrong: str = "", worked: str = "",
-                           should_change: str = "") -> None:
-        """Append feedback after validating its provenance and evidence anchor."""
+                           provenance: str, comment: str,
+                           category: str, subcategory: str,
+                           anchors: Any = None) -> dict[str, Any]:
+        """Append one categorized review note against recorded evidence.
+
+        The same call for a person typing in the UI and for a coding agent
+        posting over HTTP: `provenance` says which, and nothing else differs.
+        `category`/`subcategory` are the owner-confirmed enums and are
+        required — this build records no new uncategorized comments, and it
+        does not read the comment's text to fill them in.
+
+        `anchors` is a validated `feedback.FeedbackAnchors`. It is validated
+        by `feedback.record_feedback`, which can see the OTHER store a
+        comparison's second side lives in; this method re-checks everything
+        that is answerable from here (the turn, its spans, the vocabularies)
+        so that a direct caller cannot skip those. When it is omitted, a
+        primary-only anchor is built from this store's identity and the turn's
+        own recorded scope.
+
+        Returns the stored row, so a caller does not have to re-read to learn
+        the identity and timestamp it was given.
+        """
+        from fastworkflow.observability import feedback as feedback_module
+
+        if not self._records_feedback_taxonomy():
+            raise IncompatibleObservabilityDB(
+                f"{self.db_path} was written by a build whose review notes "
+                "carry no category; this build does not migrate an existing "
+                "store. Read it, or record new notes in a store this build "
+                "created."
+            )
         if not isinstance(turn_key, str) or not turn_key:
             raise ValueError("turn_key is required")
-        if target_kind not in ("turn", "phase", "step", "span"):
-            raise ValueError("invalid feedback target kind")
-        if (not isinstance(span_ids, list) or len(span_ids) > 10000
-                or any(not isinstance(v, str) or not v for v in span_ids)):
-            raise ValueError("span_ids must be a list of recorded span IDs")
-        ids = sorted(set(span_ids))
-        if (target_kind == "turn" and ids) or (target_kind != "turn" and not ids):
-            raise ValueError("component feedback requires spans; turn feedback has none")
-        comment = compose_human_feedback_comment(
-            went_wrong=went_wrong, worked=worked, should_change=should_change,
+        note = feedback_module.normalize_note(
+            target_kind=target_kind,
+            span_ids=span_ids,
+            target_label=target_label,
+            provenance=provenance,
             comment=comment,
+            category=category,
+            subcategory=subcategory,
         )
-        if not isinstance(target_label, str) or not target_label or len(target_label) > 1000:
-            raise ValueError("target_label is required (at most 1000 characters)")
-        if provenance not in FEEDBACK_PROVENANCES:
-            raise ValueError(
-                "provenance must be human, coding_agent, or distillation_agent"
+        ids = note["span_ids"]
+        comment = note["comment"]
+        category, subcategory = note["category"], note["subcategory"]
+        if anchors is None:
+            anchors = self._own_anchor(
+                turn_key,
+                target_kind=target_kind,
+                span_ids=ids,
+                target_label=target_label,
             )
+        if anchors.primary.turn_key != turn_key:
+            raise ValueError("the primary anchor must name the turn being annotated")
+        paired = anchors.paired
+        feedback_uid = f"fb-{uuid.uuid4().hex}"
+        created_at = _utcnow_iso()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             if conn.execute("SELECT 1 FROM turns WHERE turn_key=?", (turn_key,)).fetchone() is None:
@@ -3033,11 +3200,68 @@ class ObservabilityStore:
                 raise ValueError("feedback spans must belong to the selected turn")
             conn.execute(
                 "INSERT INTO human_feedback "
-                "(turn_key,target_kind,span_ids_json,target_label,comment,provenance,created_at) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (turn_key, target_kind, json.dumps(ids), self._scrub(target_label),
-                 self._scrub(comment), provenance, _utcnow_iso()),
+                "(feedback_uid,turn_key,target_kind,span_ids_json,target_label,"
+                "comment,provenance,category,subcategory,anchors_json,"
+                "pair_experiment_id,pair_task_id,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (feedback_uid, turn_key, target_kind, json.dumps(ids),
+                 self._scrub(target_label), self._scrub(comment), provenance,
+                 category, subcategory,
+                 # Scrubbed through the same redactor as the columns: the
+                 # anchor repeats `target_label` and `ref.label`, and storing
+                 # those verbatim put a credential back into the row the
+                 # column scrub had just cleaned. Identity keys are untouched.
+                 json.dumps(
+                     feedback_module.scrubbed_anchor_dict(anchors, self._scrub),
+                     ensure_ascii=False,
+                 ),
+                 paired.ref.experiment_id if paired else None,
+                 paired.ref.task_id if paired else None,
+                 created_at),
             )
+            conn.commit()
+        stored = [
+            row for row in self.list_human_feedback(turn_key)
+            if row.get("feedback_uid") == feedback_uid
+        ]
+        return stored[0] if stored else {}
+
+    def _records_feedback_taxonomy(self) -> bool:
+        """Whether this file's `human_feedback` has the v7 columns.
+
+        Answered from the schema version the store was opened at, not by
+        looking at column names: the fresh-schema rule (fix-49m.3) exists so
+        that one build never guesses another build's shape, and the version is
+        what both open paths already checked.
+        """
+        return self.schema_version >= FEEDBACK_TAXONOMY_SCHEMA_VERSION
+
+    def _own_anchor(self, turn_key: str, *, target_kind: str,
+                    span_ids: list[str], target_label: str) -> Any:
+        """A primary-only anchor from this store's identity and the turn row.
+
+        The scope is COPIED from the recorded turn rather than asked for, so
+        the default path cannot record a claim the evidence does not support.
+        """
+        from fastworkflow.observability.comparison import ExecutionRef
+        from fastworkflow.observability import feedback as feedback_module
+
+        row = self.get_turn(turn_key) or {}
+        ref = ExecutionRef(
+            store_id=self.store_identity(),
+            turn_keys=(turn_key,),
+            experiment_id=row.get("experiment_id"),
+            task_id=row.get("task_id"),
+            attempt=row.get("attempt"),
+        )
+        return feedback_module.FeedbackAnchors(
+            primary=feedback_module.FeedbackTarget(
+                ref=ref,
+                target_kind=target_kind,
+                span_ids=tuple(span_ids),
+                target_label=target_label,
+            )
+        )
 
     def get_turn(self, turn_key: str) -> Optional[dict[str, Any]]:
         with self._connect() as conn:
@@ -3088,6 +3312,63 @@ class ObservabilityStore:
                     spans_by_turn[row["trace_id"]].append(dict(row))
         return spans_by_turn
 
+    def iter_spans_for_turn_batches(
+        self,
+        turn_keys: Iterable[str],
+        *,
+        batch_size: int = 15,
+    ) -> Iterable[tuple[list[str], dict[str, list[dict[str, Any]]]]]:
+        """Yield span rows in small turn-key batches on one shared connection.
+
+        Same row shape as `spans_for_turns`, but never materialises more than
+        ``batch_size`` turns' spans at once -- needed when a complete scan
+        would otherwise hold hundreds of MB of attribute JSON.
+        """
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
+        keys = list(dict.fromkeys(key for key in turn_keys if key))
+        if not keys:
+            return
+        with self._connect() as conn:
+            for batch in _chunked(keys, batch_size):
+                spans_by_turn: dict[str, list[dict[str, Any]]] = {
+                    key: [] for key in batch
+                }
+                placeholders = ",".join("?" * len(batch))
+                rows = conn.execute(
+                    f"SELECT * FROM spans WHERE trace_id IN ({placeholders}) "
+                    "ORDER BY trace_id, start_ns",
+                    batch,
+                ).fetchall()
+                for row in rows:
+                    spans_by_turn[row["trace_id"]].append(dict(row))
+                yield batch, spans_by_turn
+
+    def span_stats_for_turns(
+        self, turn_keys: Iterable[str]
+    ) -> dict[str, tuple[int, int]]:
+        """Cheap freshness fingerprint per turn: ``{turn_key: (count, max_rowid)}``.
+
+        Used by the derived-turn cache to decide whether a cached markers/stamps
+        entry is still valid without reading span attribute JSON. Every requested
+        key is present; turns with no spans map to ``(0, 0)``.
+        """
+        keys = list(dict.fromkeys(key for key in turn_keys if key))
+        stats: dict[str, tuple[int, int]] = {key: (0, 0) for key in keys}
+        if not keys:
+            return stats
+        with self._connect() as conn:
+            for chunk in _chunked(keys):
+                placeholders = ",".join("?" * len(chunk))
+                rows = conn.execute(
+                    f"SELECT trace_id, COUNT(*), MAX(rowid) FROM spans "
+                    f"WHERE trace_id IN ({placeholders}) GROUP BY trace_id",
+                    chunk,
+                ).fetchall()
+                for trace_id, count, max_rowid in rows:
+                    stats[str(trace_id)] = (int(count), int(max_rowid or 0))
+        return stats
+
     def list_conversations(
         self, channel_id: Optional[str] = None, limit: int = 100, offset: int = 0
     ) -> list[dict[str, Any]]:
@@ -3114,14 +3395,29 @@ class ObservabilityStore:
         attempt: Optional[int] = None,
         limit: int = 100,
         offset: int = 0,
+        before_turn_key: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """Turn rows, newest first, without record_json (fetch one turn for that).
 
         The experiment filters extend this route rather than getting a parallel
         implementation (`[XR9]`); they ride `idx_turns_experiment`.
+
+        `before_turn_key` is a KEYSET bound: rows strictly after it in this
+        route's own `turn_key DESC` order. Paging by `offset` alone is only
+        stable against a store nobody is writing to -- a turn recorded between
+        two pages shifts every later offset by one, so a live scan can repeat a
+        row or skip one entirely, and a count taken across such a scan is wrong
+        in a way nothing downstream can detect. A caller that resumes from the
+        last key it saw is immune to that, and is also able to walk a dataset
+        larger than any one bounded scan (`observability/diagnosis.py`, which is
+        why this exists). Combining it with `offset` is allowed and means what
+        it says: skip that many rows of the remainder.
         """
         clauses: list[str] = []
         params: list[Any] = []
+        if before_turn_key is not None:
+            clauses.append("turn_key<?")
+            params.append(before_turn_key)
         if channel_id is not None:
             clauses.append("channel_id=?")
             params.append(channel_id)
@@ -3203,6 +3499,22 @@ class ObservabilityStore:
                 (limit,),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def get_train_run(self, run_id: str) -> Optional[dict[str, Any]]:
+        """One training run by its primary key, however old it is.
+
+        Separate from `list_train_runs` rather than derived from it, because
+        the list is a bounded newest-first window and a run older than that
+        window is still a run that exists. Reading a detail out of the list
+        would make "was this training run recorded?" depend on how many have
+        been recorded since, which is a 404 about the reader's paging rather
+        than about the evidence (`fix-9eg.2`).
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM train_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            return dict(row) if row is not None else None
 
     def writer_health(self) -> Optional[dict[str, Any]]:
         with self._connect() as conn:
@@ -3326,6 +3638,8 @@ class ObservabilityStore:
         benchmark_id: Optional[str] = None,
         benchmark_version: Optional[str] = None,
         benchmark_digest_sha256: Optional[str] = None,
+        initialize_winner: bool = True,
+        selection_control_db_path: Optional[str] = None,
     ) -> None:
         """Pre-register an experiment. Written BEFORE any task runs.
 
@@ -3338,6 +3652,23 @@ class ObservabilityStore:
         `DO UPDATE` set deliberately excludes `status`, `invalid_reason` and
         `invalid_detail`: a resume must not be able to launder an `invalid`
         verdict back to `running`.
+
+        `initialize_winner` (`fix-9eg.17.1`) records the experiment in its
+        comparison group afterwards, where the FIRST experiment of a group
+        becomes its current winner automatically. That write lands in a control
+        sidecar, never in this DB: evidence is what happened, a winner is a
+        judgement about it, and sealed evidence must stay byte-identical while
+        judgements about it keep being made. Registration is idempotent, so the
+        resume path above re-registers without disturbing a winner that has
+        since moved. It is deliberately AFTER the commit: a control sidecar
+        that cannot be written must not be able to fail an experiment's
+        creation. Because it is after the commit it cannot raise either —
+        `initialize_winner_for` reports every control-side problem through its
+        return value and the log, since there is nothing this method could roll
+        back and nothing the caller could retry. An experiment whose group
+        already holds older unadopted runs is registered WITHOUT becoming their
+        winner; the embedder bootstraps that group explicitly
+        (`SelectionControlStore.adopt_existing_experiments`).
         """
         if not experiment_id:
             raise ValueError("experiment_id is required")
@@ -3469,6 +3800,18 @@ class ObservabilityStore:
                 ),
             )
             conn.commit()
+            created = conn.execute(
+                "SELECT * FROM experiments WHERE experiment_id=?", (experiment_id,)
+            ).fetchone()
+        if initialize_winner and created is not None:
+            from fastworkflow.observability import selection as selection_module
+
+            selection_module.initialize_winner_for(
+                self,
+                experiment_id,
+                control_db_path=selection_control_db_path,
+                experiment=dict(created),
+            )
 
     def declare_experiment_attempts(
         self,
@@ -4532,9 +4875,6 @@ class ObservabilityStore:
                 for chunk in _chunked(turn_keys):
                     marks = ", ".join("?" for _ in chunk)
                     conn.execute(
-                        f"DELETE FROM feedback WHERE turn_key IN ({marks})", chunk
-                    )
-                    conn.execute(
                         f"DELETE FROM artifacts WHERE turn_key IN ({marks})", chunk
                     )
                     conn.execute(
@@ -5271,13 +5611,17 @@ class ObservabilityStore:
         `quiesce_live_writer=False` restores the unconditional refusal for a
         caller whose contract is "the writer must already be gone" — the seal
         path checks that itself, before it promotes the experiment's status.
+
+        WHAT THIS IS NOT. Reaching this method still means constructing a store
+        on the source, and construction is a writer: `_connect`'s journal-mode
+        pragma is write-capable, so a database carrying a pending WAL is
+        checkpointed — main rewritten, `-wal`/`-shm` removed — before the
+        `before` snapshot below is taken. The unchanged-bytes claim is
+        therefore about the source as it stood AFTER this store opened it.
+        Archiving evidence this process does not own needs a baseline from
+        before any open: `fastworkflow.observability.archive`.
         """
-        target = Path(destination)
-        if target.exists():
-            raise FileExistsError(
-                f"refusing to overwrite an existing evidence archive: {target}"
-            )
-        target.parent.mkdir(parents=True, exist_ok=True)
+        target = self._prepare_archive_target(destination)
         source = os.path.abspath(self.db_path)
         live_sink = sink_for_db_path(source)
         if live_sink is not None and not live_sink._closed:
@@ -5289,6 +5633,34 @@ class ObservabilityStore:
                 return self._snapshot_to(target, source)
         self._refuse_if_an_unreachable_writer_holds(source)
         return self._snapshot_to(target, source)
+
+    def _prepare_archive_target(self, destination: str) -> Path:
+        """Refuse to overwrite an archive, and make room for a new one."""
+        target = Path(destination)
+        if target.exists():
+            raise FileExistsError(
+                f"refusing to overwrite an existing evidence archive: {target}"
+            )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        return target
+
+    def snapshot_settled_source_to(self, destination: str) -> dict[str, Any]:
+        """Snapshot a source the CALLER has already established is settled.
+
+        `archive_to` answers the "is anyone writing this?" question the only
+        way it can from inside the store — by looking for a sink this process
+        minted and, failing that, at the writer-health row. A caller archiving
+        a private copy it has just taken and byte-verified knows something
+        stronger than that row does: nothing can write this file, and the
+        health row is the historical writer's, copied in along with the rest of
+        the evidence. It would be a stale-pid coincidence away from refusing an
+        archive that is provably safe. Such a caller skips the negotiation and
+        asks for the snapshot itself; everybody else calls `archive_to`.
+        """
+        return self._snapshot_to(
+            self._prepare_archive_target(destination),
+            os.path.abspath(self.db_path),
+        )
 
     def _refuse_if_an_unreachable_writer_holds(self, source: str) -> None:
         """Refuse a snapshot of a store some OTHER writer is still holding.
@@ -5342,7 +5714,7 @@ class ObservabilityStore:
         # pin makes that close never the last one; no statement is ever run on
         # it, and it is what makes "source bytes verified unchanged" a fact
         # about the source rather than about the timing of a garbage collection.
-        pin = self._connect()
+        pin = self._open_connection()
         before = {path: self._file_digest(path) for path in source_paths}
         confirmed_before = {
             path: self._file_digest(path) for path in source_paths
@@ -5358,8 +5730,8 @@ class ObservabilityStore:
         compacted = target.with_name(f".{target.name}.{uuid.uuid4().hex}.compact")
         try:
             source_uri = Path(source).as_uri() + "?mode=ro"
-            with sqlite3.connect(source_uri, uri=True) as source_conn:
-                with sqlite3.connect(str(temporary)) as snapshot_conn:
+            with contextlib.closing(sqlite3.connect(source_uri, uri=True)) as source_conn:
+                with contextlib.closing(sqlite3.connect(str(temporary))) as snapshot_conn:
                     source_conn.backup(snapshot_conn)
             after_backup = {
                 path: self._file_digest(path) for path in source_paths
@@ -5368,7 +5740,7 @@ class ObservabilityStore:
                 raise SourceChangedDuringArchive(
                     "source DB/WAL bytes changed while taking the snapshot"
                 )
-            with sqlite3.connect(str(temporary)) as snapshot_conn:
+            with contextlib.closing(sqlite3.connect(str(temporary))) as snapshot_conn:
                 snapshot_conn.execute("VACUUM INTO ?", (str(compacted),))
             os.replace(compacted, target)
             after_compaction = {
@@ -5387,13 +5759,20 @@ class ObservabilityStore:
             if archive_digest is None:
                 raise RuntimeError("archive disappeared before verification")
             archive_uri = target.resolve().as_uri() + "?mode=ro"
-            with sqlite3.connect(archive_uri, uri=True) as archive_conn:
+            with contextlib.closing(sqlite3.connect(archive_uri, uri=True)) as archive_conn:
                 identity_row = archive_conn.execute(
                     "SELECT value FROM diagnostics WHERE key=?",
                     (STORE_IDENTITY_DIAGNOSTIC,),
                 ).fetchone()
                 integrity = archive_conn.execute(
                     "PRAGMA integrity_check"
+                ).fetchone()[0]
+                # Read from the archive rather than reported from this build's
+                # SCHEMA_VERSION. Archiving does not migrate, so a v6 database
+                # sealed by a v7 build is a v6 archive, and saying seven would
+                # describe the archiver instead of the file it produced.
+                archive_schema_version = archive_conn.execute(
+                    "PRAGMA user_version"
                 ).fetchone()[0]
             if integrity != "ok":
                 raise RuntimeError(f"archive integrity check failed: {integrity}")
@@ -5405,7 +5784,7 @@ class ObservabilityStore:
                 "size_bytes": archive_digest["size_bytes"],
                 "sha256": archive_digest["sha256"],
                 "store_identity": str(identity_row[0]),
-                "schema_version": SCHEMA_VERSION,
+                "schema_version": archive_schema_version,
                 "read_only": True,
                 "sealed": True,
                 "source_bytes_verified_unchanged": True,
@@ -5438,7 +5817,8 @@ class ObservabilityStore:
 
         ``include_conversationless_turns`` (operator opt-in) also
         deletes conversation-less turn records (e.g. per-invocation CLI
-        channels) older than the horizon, with their feedback — otherwise no
+        channels) older than the horizon, with their spans, artifacts and review
+        notes — otherwise no
         retention knob ever reaches them.
         """
         if pruning_suppressed():
@@ -5514,7 +5894,6 @@ class ObservabilityStore:
                         ).fetchall()
                     ]
                     for key in keys:
-                        conn.execute("DELETE FROM feedback WHERE turn_key=?", (key,))
                         conn.execute("DELETE FROM spans WHERE trace_id=?", (key,))
                         conn.execute("DELETE FROM artifacts WHERE turn_key=?", (key,))
                         conn.execute("DELETE FROM turns WHERE turn_key=?", (key,))
@@ -5658,7 +6037,7 @@ class ObservabilityStore:
         if limit is not None:
             query += " LIMIT ?"
             params.append(int(limit))
-        with contextlib.closing(self._connect()) as conn:
+        with self._connect() as conn:
             if "offload_events" not in _present_offload_tables(conn):
                 return []
             rows = conn.execute(query, params).fetchall()
@@ -5710,11 +6089,10 @@ class ObservabilityStore:
                     (channel_id,),
                 ).fetchall()
             ]
-            deleted["feedback"] = conn.execute(
-                "DELETE FROM feedback WHERE turn_key IN "
-                "(SELECT turn_key FROM turns WHERE channel_id=?)",
-                (channel_id,),
-            ).rowcount
+            # `human_feedback` needs no delete of its own: the
+            # `delete_turn_human_feedback` trigger removes a turn's review
+            # notes with the turn, which is what erasure [R21] has to mean now
+            # that the notes are the only feedback rows left.
             deleted["spans"] = conn.execute(
                 "DELETE FROM spans WHERE channel_id=? OR trace_id IN "
                 "(SELECT turn_key FROM turns WHERE channel_id=?)",
@@ -5808,7 +6186,7 @@ class ObservabilityStore:
                     ).fetchall()
                 )
             for table in (
-                "feedback", "spans", "artifacts", *offload_tables,
+                "spans", "artifacts", *offload_tables,
                 "turns", "conversations",
             ):
                 deleted[table] = conn.execute(f"DELETE FROM {table}").rowcount
@@ -5835,7 +6213,7 @@ class ReadOnlyObservabilityStore(ObservabilityStore):
 
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
-        conn = self._connect()
+        conn = self._open_connection()
         try:
             found = conn.execute("PRAGMA user_version").fetchone()[0]
             if found > SCHEMA_VERSION:
@@ -5843,22 +6221,26 @@ class ReadOnlyObservabilityStore(ObservabilityStore):
                     f"{self.db_path} has schema v{found}; this build reads up to "
                     f"v{SCHEMA_VERSION}. Refusing to open a newer DB [R11]."
                 )
-            if found < SCHEMA_VERSION:
-                # No migration (fresh schema, fix-49m.3): an older store is
-                # refused up front with the reason, instead of failing later on
-                # a column the reader assumes exists. The writer replaces such
-                # a store; a reader must never delete what it inspects.
+            if found < MIN_READABLE_SCHEMA_VERSION:
+                # Same rule as the writable store (fresh schema, fix-49m.3):
+                # an older store is refused up front with the reason, instead
+                # of failing later on a column the reader assumes exists.
                 raise IncompatibleObservabilityDB(
-                    f"{self.db_path} has schema v{found}; this build requires "
-                    f"v{SCHEMA_VERSION} and carries no migration (fresh "
-                    "observability schema, fix-49m.3). Open it with a "
-                    f"v{found} build."
+                    f"{self.db_path} has schema v{found}; this build reads "
+                    f"v{MIN_READABLE_SCHEMA_VERSION} and newer and carries no "
+                    "migration (fresh observability schema, fix-49m.3). Open "
+                    f"it with a v{found} build."
                 )
         finally:
             conn.close()
+        # Reading v6 as well as v7 is deliberate and is the ONLY tolerated
+        # version spread (see MIN_READABLE_SCHEMA_VERSION). The difference is
+        # confined to `human_feedback`, so this is what the two feedback reads
+        # branch on; no other read has a second shape.
+        self.schema_version = found
         self._features = self._load_features()
 
-    def _connect(self, timeout: float = 30.0) -> sqlite3.Connection:
+    def _open_connection(self, timeout: float = 30.0) -> sqlite3.Connection:
         conn = sqlite3.connect(
             f"file:{self.db_path}?mode=ro",
             uri=True,
@@ -5867,6 +6249,9 @@ class ReadOnlyObservabilityStore(ObservabilityStore):
         )
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _connect(self, timeout: float = 30.0) -> "_ClosingConnection":
+        return _ClosingConnection(self._open_connection(timeout=timeout))
 
 
 # ----------------------------------------------------------------------
@@ -6058,7 +6443,7 @@ class SQLiteTraceSink:
         started = time.monotonic()
         conn = None
         try:
-            conn = self.store._connect(
+            conn = self.store._open_connection(
                 timeout=float(
                     _env_int("FW_OBS_SYNC_WRITE_TIMEOUT_S", _DEFAULT_SYNC_WRITE_TIMEOUT_S)
                 )
@@ -6205,7 +6590,7 @@ class SQLiteTraceSink:
         with self._health_lock:
             snapshot = dict(self._health)
         try:
-            conn = self.store._connect()
+            conn = self.store._open_connection()
             try:
                 conn.execute("BEGIN IMMEDIATE")
                 self.store.merge_writer_health_row(conn, snapshot)
@@ -6223,7 +6608,7 @@ class SQLiteTraceSink:
         "healthy" about a run that dropped records after the last heartbeat.
         """
         try:
-            conn = self.store._connect()
+            conn = self.store._open_connection()
             try:
                 self._maybe_write_health(conn, force=True)
             finally:
@@ -6394,7 +6779,7 @@ class SQLiteTraceSink:
         the digest comparison is still the thing that decides.
         """
         try:
-            conn = self.store._connect()
+            conn = self.store._open_connection()
             try:
                 self._maybe_write_health(conn, force=True)
                 with contextlib.suppress(Exception):
@@ -6437,7 +6822,7 @@ class SQLiteTraceSink:
     def _writer_loop(self) -> None:
         conn: Optional[sqlite3.Connection] = None
         try:
-            conn = self.store._connect()
+            conn = self.store._open_connection()
             while not self._stop.is_set():
                 # The one place this thread stops touching the DB on request
                 # (fix-7de). At the top of the loop, so a parked writer is
@@ -6520,7 +6905,7 @@ class SQLiteTraceSink:
                 return
         conn = None
         try:
-            conn = self.store._connect(
+            conn = self.store._open_connection(
                 timeout=float(
                     _env_int("FW_OBS_SYNC_WRITE_TIMEOUT_S", _DEFAULT_SYNC_WRITE_TIMEOUT_S)
                 )

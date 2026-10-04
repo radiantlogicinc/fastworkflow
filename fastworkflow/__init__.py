@@ -342,17 +342,11 @@ def get_internal_workflow_path(workflow_name: str) -> str:
 def get_workflow_id(workflow_id_str: str) -> int:
     return int(mmh3.hash(workflow_id_str))
 
-from .workflow import Workflow as Workflow
-from .chat_session import ChatSession as ChatSession
 from .active_workflow import (
     get_active_workflow,
     push_active_workflow,
     pop_active_workflow,
     clear_workflow_stack,
-)
-from .workflow_execution_context import (
-    WorkflowExecutionContext,
-    CommandCancelledError,
 )
 
 # Turn-level result types (fastworkflow.turn). Imported here — after
@@ -387,3 +381,127 @@ from fastworkflow.metrics import (
     NoOpMetricsSink as NoOpMetricsSink,
     LoggingMetricsSink as LoggingMetricsSink,
 )
+
+# The ChatSessionDescriptor instance used to occupy this name until the eager
+# `from .chat_session import ChatSession` replaced it with the submodule.
+# Leave the name unbound so attribute access loads that submodule on demand
+# instead of publishing the descriptor, which is not the public object.
+del chat_session
+
+# First-use re-exports. Workflow pulls numpy via kvstore; ChatSession and
+# WorkflowExecutionContext pull dspy, litellm, fastapi, and starlette.
+_LAZY_ATTRS = {
+    "Workflow": ("fastworkflow.workflow", "Workflow"),
+    "ChatSession": ("fastworkflow.chat_session", "ChatSession"),
+    "WorkflowExecutionContext": (
+        "fastworkflow.workflow_execution_context",
+        "WorkflowExecutionContext",
+    ),
+    "CommandCancelledError": (
+        "fastworkflow.workflow_execution_context",
+        "CommandCancelledError",
+    ),
+}
+
+__all__ = (
+    "Action",
+    "Any",
+    "BaseModel",
+    "ChatSession",
+    "ChatSessionDescriptor",
+    "CommandCancelledError",
+    "CommandContextModel",
+    "CommandOutput",
+    "CommandResponse",
+    "CommandTraceEvent",
+    "CommandTraceEventDirection",
+    "EPHEMERAL",
+    "Enum",
+    "FW_ARTIFACT_REF_KEY",
+    "LoggingMetricsSink",
+    "MCPContent",
+    "MCPToolCall",
+    "MCPToolResult",
+    "MetricsSink",
+    "ModelPipelineRegistry",
+    "ModuleType",
+    "NLUPipelineStage",
+    "NoOpMetricsSink",
+    "NoOpTraceSink",
+    "Optional",
+    "Recommendation",
+    "RoutingDefinition",
+    "RoutingRegistry",
+    "Span",
+    "TraceSink",
+    "TurnOutput",
+    "TurnResult",
+    "TurnStatus",
+    "Union",
+    "UnsupportedStateVersion",
+    "Workflow",
+    "WorkflowExecutionContext",
+    "active_workflow",
+    "agent_runtime",
+    "chat_session",
+    "clear_workflow_stack",
+    "context_budget",
+    "contextlib",
+    "dataclass",
+    "datetime",
+    "get_active_workflow",
+    "get_env_var",
+    "get_fastworkflow_package_path",
+    "get_internal_workflow_path",
+    "get_workflow_id",
+    "init",
+    "kvstore",
+    "metrics",
+    "mint_turn_key",
+    "mmh3",
+    "model_validator",
+    "observability",
+    "os",
+    "pop_active_workflow",
+    "push_active_workflow",
+    "runtime_manifest",
+    "session_state_store",
+    "state_paths",
+    "state_serialization",
+    "storage_keys",
+    "time",
+    "tracing",
+    "turn",
+    "turn_plan",
+    "utils",
+    "workflow",
+    "workflow_execution_context",
+)
+
+
+def __getattr__(name: str):
+    # PEP 562: Workflow/ChatSession/WorkflowExecutionContext import numpy, dspy, litellm, and fastapi.
+    import importlib
+
+    spec = _LAZY_ATTRS.get(name)
+    if spec is not None:
+        module_name, attr_name = spec
+        module = importlib.import_module(module_name)
+        for public_name, (lazy_module, lazy_attr) in _LAZY_ATTRS.items():
+            if lazy_module == module_name:
+                globals()[public_name] = getattr(module, lazy_attr)
+        return globals()[name]
+    try:
+        module = importlib.import_module(f".{name}", __name__)
+    except ModuleNotFoundError as exc:
+        if exc.name == f"{__name__}.{name}":
+            raise AttributeError(
+                f"module {__name__!r} has no attribute {name!r}"
+            ) from None
+        raise
+    globals()[name] = module
+    return module
+
+
+def __dir__() -> list[str]:
+    return sorted(set(__all__) | {key for key in globals() if not key.startswith("_")})

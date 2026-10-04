@@ -3,7 +3,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import threading
-from pathlib import Path
 
 import pytest
 
@@ -13,7 +12,7 @@ from fastworkflow.experiment.setup import (
     SCHEMA,
     setup_digest,
 )
-from fastworkflow.run_chatbot.server import ChatbotServer
+from fastworkflow.run_chatbot.server import ChatbotServer, load_index_html
 from tests.test_chatbot_benchmarks import _request, workspace_server  # noqa: F401
 
 
@@ -241,9 +240,7 @@ def test_workspace_refuses_setup_authoring(workspace_server):
 
 
 def test_ui_has_pre_run_entry_and_safe_task_rendering():
-    html = (
-        Path(__file__).parents[1] / "fastworkflow/run_chatbot/static/index.html"
-    ).read_text()
+    html = load_index_html().decode("utf-8")
     assert 'id="benchmarkSetupBtn"' in html
     ui = html[
         html.index("/* Benchmark setup:") : html.index(
@@ -286,9 +283,7 @@ def test_navigation_and_setup_ignore_incompatible_evidence(
 
 
 def test_setup_navigation_is_visible_outside_debug_view():
-    html = (
-        Path(__file__).parents[1] / "fastworkflow/run_chatbot/static/index.html"
-    ).read_text()
+    html = load_index_html().decode("utf-8")
     header = html.split("</header>")[0]
     assert 'id="benchmarkSetupBtn"' in header
     assert html.count('id="benchmarkSetupBtn"') == 1

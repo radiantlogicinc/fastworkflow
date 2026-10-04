@@ -29,6 +29,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow import TurnStatus
+from fastworkflow.conversation_history_io import restore_history_from_turns
 from fastworkflow.observability import store as obs
 
 # Big enough that reading an excluded turn would be obvious in memory terms, small
@@ -93,18 +94,28 @@ def test_a_window_wider_than_the_conversation_returns_all_of_it(store):
     assert _summaries(window) == [f"turn-{i}" for i in range(4)]
 
 
-def test_the_window_carries_the_canonical_three_key_shape(store):
-    """The restore feeds this straight into restore_history_from_turns."""
+def test_the_window_carries_the_canonical_two_key_shape(store):
+    """The restore feeds this straight into restore_history_from_turns.
+
+    Two keys since fix-9eg.16, not three. The third was `feedback`, joined
+    from the agent-memory table so that a posted score and free text were
+    replayed into the agent's prompt on its next turn; the table, the route
+    that wrote it and the injection were removed together.
+    """
     conv_id = _conversation_of(store, 2)
 
     window = store.get_memory_window(CHANNEL, conv_id, 2)
 
     assert all(
-        set(entry) == {"conversation summary", "conversation_traces", "feedback"}
+        set(entry) == {"conversation summary", "conversation_traces"}
         for entry in window
     )
     assert window[0]["conversation_traces"].startswith("0:")
-    assert window[0]["feedback"] is None
+    assert all("feedback" not in entry for entry in window)
+    assert all(
+        set(message) == {"conversation summary", "conversation_traces"}
+        for message in restore_history_from_turns(window).messages
+    )
 
 
 def test_a_zero_width_window_returns_no_turns_without_failing(store):

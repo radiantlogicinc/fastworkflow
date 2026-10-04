@@ -1,0 +1,176 @@
+</style>
+</head>
+<body>
+<div id="healthBanner">
+  <strong>Heads up:</strong>
+  <span id="healthText"></span>
+  <button class="dismiss" id="healthDismiss">Dismiss</button>
+</div>
+<header>
+  <h1>fastWorkflow</h1>
+  <nav class="modeTabs" aria-label="Workbench mode">
+    <button id="modeTest" class="active">Chat</button>
+    <button id="modeDebug">Debug</button>
+  </nav>
+  <span class="pill" id="statusPill"><span class="dot"></span><span id="statusPillText">starting…</span></span>
+  <span class="meta" id="metaLine"></span>
+  <span id="workspaceChrome"></span>
+  <span class="spacer"></span>
+  <div class="headerActions">
+    <button id="benchmarkSetupBtn" class="primary">Benchmark setup</button>
+    <button id="switchWfBtn" style="display:none">Switch workflow</button>
+    <details class="headerTools" id="workspaceTools">
+      <summary>Tools</summary>
+      <div class="toolMenu">
+        <button id="refreshBtn" style="display:none">Refresh</button>
+        <button id="clearConvsBtn" style="display:none">Clear conversations</button>
+        <button id="trainingHistoryBtn">Training history</button>
+        <label for="themeSelect">Appearance</label>
+        <select id="themeSelect"><option value="auto">System theme</option><option value="light">Light</option><option value="dark">Dark</option></select>
+      </div>
+    </details>
+  </div>
+</header>
+
+<main id="pickerMain">
+  <div id="pickerCard">
+    <h2>Pick a workflow</h2>
+    <div class="sub">Choose a workflow below — its server starts automatically
+      and you land in the chat. Folders expand to show the workflows inside.</div>
+    <div class="pickerCols">
+      <div class="pickerCol">
+        <h3>Detected workflows</h3>
+        <div id="wfCandidates"><div class="empty">scanning…</div></div>
+      </div>
+      <div class="pickerCol">
+        <h3>Browse folders</h3>
+        <div id="browsePath"></div>
+        <div id="browseList"></div>
+        <div id="workspaceManifestList"></div>
+      </div>
+    </div>
+    <div id="envSetup">
+      <h3>Workflow environment files are missing</h3>
+      <div id="envSetupText"></div>
+      <div class="envFiles">
+        <div class="envFile">
+          <label for="envFilePick">Choose fastworkflow.env</label>
+          <input type="file" id="envFilePick" accept=".env,text/plain">
+        </div>
+        <div class="envFile">
+          <label for="passwordsFilePick">Choose fastworkflow.passwords.env</label>
+          <input type="file" id="passwordsFilePick" accept=".env,text/plain">
+        </div>
+      </div>
+      <div class="actions">
+        <button id="uploadEnvBtn" class="primary">Use selected files</button>
+        <button id="createEnvBtn">Create from templates</button>
+      </div>
+    </div>
+    <div id="pickerStatus"></div>
+  </div>
+</main>
+
+<main id="debugMain">
+  <div id="rail" role="navigation" aria-label="Benchmark and conversation navigation">
+    <div class="railTabs" role="tablist" aria-label="Debug records">
+      <button id="navConversations" class="active" role="tab" aria-selected="true" aria-controls="convList">Conversations</button>
+      <button id="navBenchmarks" role="tab" aria-selected="false" aria-controls="convList" tabindex="-1">Benchmarks</button>
+    </div>
+    <div id="convList"></div>
+  </div>
+  <div id="detail" role="region" aria-label="Selected record"><div class="emptyState"><strong>Explore a conversation</strong><p>Select a conversation on the left to revisit its turns and inspect what happened.</p></div></div>
+  <aside id="reviewPane" aria-label="Review questions"></aside>
+</main>
+<nav id="recordNav" aria-label="Move through records">
+  <button id="recordNavUp" type="button" aria-label="Up to the parent record" disabled><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 11l7-7 7 7M12 4v16"></path></svg></button>
+  <button id="recordNavDown" type="button" aria-label="Down into the first child record" disabled><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 13l7 7 7-7M12 20V4"></path></svg></button>
+  <span class="navRule"></span>
+  <button id="recordNavPrev" type="button" aria-label="Previous record at this level" disabled><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M11 5l-7 7 7 7M4 12h16"></path></svg></button>
+  <button id="recordNavNext" type="button" aria-label="Next record at this level" disabled><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M13 5l7 7-7 7M20 12H4"></path></svg></button>
+</nav>
+<!-- Top, up, down, bottom for a chat answer's artifact panel; cloned per panel. -->
+<template id="artifactNavIcons">
+  <svg data-move="first" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 4h14M12 20V9M6 14l6-6 6 6"></path></svg>
+  <svg data-move="prev" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 11l7-7 7 7M12 4v16"></path></svg>
+  <svg data-move="next" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 13l7 7 7-7M12 20V4"></path></svg>
+  <svg data-move="last" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 20h14M12 4v11M6 10l6 6 6-6"></path></svg>
+</template>
+<nav id="turnFindNav" aria-label="Find turns">
+  <button id="turnFindOpen" type="button" aria-expanded="false" aria-controls="turnFindDialog" aria-label="Find turns" title="Find turns"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="10.5" cy="10.5" r="6.25"></circle><path d="M15.2 15.2L20.5 20.5"></path></svg></button>
+</nav>
+<dialog id="turnFindDialog" aria-label="Find turns by what was recorded">
+  <form id="turnFind" role="search" aria-label="Find turns by what was recorded">
+    <div class="turnFindRow">
+      <input id="turnFindText" type="search" autocomplete="off" placeholder="Find turns…" aria-label="Search recorded turn text">
+      <button id="turnFindGo" type="submit">Find</button>
+    </div>
+    <div id="turnFindScope" role="group" aria-label="What this search is scoped to"></div>
+    <div id="turnFindMarkers" role="group" aria-label="Filter by what the trace recorded"></div>
+    <div id="turnFindStatus" role="status" aria-live="polite"></div>
+  </form>
+</dialog>
+
+<section id="testMain">
+  <div id="chatArea">
+    <div id="connStrip">
+      <span id="connText">connecting…</span>
+      <button id="advToggle" type="button" aria-expanded="false" aria-controls="advPanel">Advanced: connect to a different server</button>
+      <button id="newConvBtn" class="primary newConv" style="display:none">+ New conversation</button>
+    </div>
+    <div id="advPanel" hidden>
+      <div class="fields">
+        <div class="field">
+          <label for="tBaseUrl">FastAPI base URL</label>
+          <input type="text" id="tBaseUrl" placeholder="http://127.0.0.1:8000">
+        </div>
+        <div class="field">
+          <label for="tToken">Bearer token (JWT — blank uses /initialize's)</label>
+          <input type="text" id="tToken" placeholder="(from /initialize)">
+        </div>
+        <div class="field">
+          <label>&nbsp;</label>
+          <button id="tConnect">Reconnect</button>
+        </div>
+      </div>
+    </div>
+    <div id="chatLog"><div class="empty">Waiting for the workflow server…</div></div>
+    <div id="reuseNotice" role="status" aria-live="polite">
+      <span class="reuseWhat" id="reuseNoticeText"></span>
+      <button id="reuseClear" type="button">Clear</button>
+    </div>
+    <div id="composer">
+      <textarea id="chatInput" rows="1" placeholder="Message the agent…" disabled></textarea>
+      <div id="composerActions">
+        <button id="chatSend" class="primary" disabled>Send</button>
+        <button id="composerTip" type="button" aria-label="Composer tip">Tip<div class="composerTipBubble" role="tooltip">Messages go to the agent. Start a message with "/" to run a command deterministically (no agent). Enter sends, Shift+Enter adds a line. Every turn is inspectable in the Debug tab.</div></button>
+      </div>
+    </div>
+  </div>
+</section>
+<div id="noticeStack" aria-label="Notifications"></div>
+<dialog id="trainingDialog" aria-labelledby="trainingTitle">
+  <header>
+    <h2 id="trainingTitle">Training history</h2>
+    <select id="trainingStore" aria-label="Evidence store" style="display:none"></select>
+    <span class="spacer"></span>
+    <button id="trainingClose" type="button">Close</button>
+  </header>
+  <div class="trainingBody">
+    <div id="trainingRunList" role="navigation" aria-label="Recorded training runs"></div>
+    <div id="trainingRunDetail" role="region" aria-label="Selected training run"></div>
+  </div>
+</dialog>
+<dialog id="confirmDialog" aria-labelledby="confirmTitle" aria-describedby="confirmDescription">
+  <h2 id="confirmTitle">Delete this empty experiment?</h2>
+  <p id="confirmDescription">This removes the unused experiment. Its benchmark and tasks will stay in place. Create a new experiment if you need it again.</p>
+  <div class="actions"><button id="cancelDelete" autofocus>Keep experiment</button><button id="confirmDelete" class="danger">Delete experiment</button></div>
+</dialog>
+<dialog id="logDialog" aria-labelledby="logDialogTitle">
+  <h2 id="logDialogTitle">Log</h2>
+  <p id="logDialogPath"></p>
+  <p id="logDialogNote"></p>
+  <pre id="logDialogLines"></pre>
+  <div class="actions"><button id="logDialogClose" type="button">Close</button></div>
+</dialog>
+<script>

@@ -81,8 +81,19 @@ Based on: [fastworkflow_fastapi_spec.md](mdc:docs/fastworkflow_fastapi_spec.md)
   - Return up to `limit` (default `20`) latest conversations for the channel by `updated_at` desc, each including `{ conversation_id, topic, summary }`.
 
 - **POST `/post_feedback`**
-  - Attach optional feedback to the latest turn of the active conversation.
-  - Validate that at least one of `binary_or_numeric_score` or `nl_feedback` is provided; both may be provided.
+  - Record ONE free-form comment about recorded evidence, anchored to an
+    explicit turn (`?turn_key=`) or to a component within it. It used to attach
+    `{binary_or_numeric_score, nl_feedback}` to the latest turn of the active
+    conversation; that agent-memory table was removed (fix-9eg.16) and the
+    score is not reintroduced.
+  - Validate the `category`/`subcategory` pair against the taxonomy
+    (`observations_analysis` → `observation` | `analysis`; `conclusions` →
+    `what_went_right` | `what_went_wrong`; `recommendations` → `what_to_do` |
+    `what_not_to_do`) and the anchor against the evidence it names.
+  - Append-only. Evidence that cannot be written to is annotated beside itself
+    rather than modified.
+  - Reads are separate GETs: `/api/feedback-notes`, `/api/task-feedback`,
+    `/api/workspace/task-feedback`, `/api/feedback-taxonomy`.
 
 - **POST `/admin/dump_all_conversations`**
   - Iterate all channels and conversations in Rdict; write a JSONL file to the provided folder and return the file path.
@@ -111,7 +122,7 @@ Based on: [fastworkflow_fastapi_spec.md](mdc:docs/fastworkflow_fastapi_spec.md)
 - **Status codes**
   - 404 Not Found: Missing `channel_id` / session not found.
   - 409 Conflict: Concurrent turn already in progress for the same `channel_id`.
-  - 422 Unprocessable Entity: Validation failures, invalid paths, invalid action schema, XOR violations (e.g., both `startup_command` and `startup_action` provided; or neither feedback field provided in `/post_feedback`).
+  - 422 Unprocessable Entity: Validation failures, invalid paths, invalid action schema, XOR violations (e.g., both `startup_command` and `startup_action` provided). `/post_feedback` reports an invalid category/subcategory pair or a bad anchor as 400.
   - 500 Internal Server Error: Unexpected errors (log with stack trace; avoid broad except without logging).
   - 504 Gateway Timeout: No `CommandOutput` before `timeout_seconds`.
 - **Error body**: `{ "detail": "<human‑readable message>" }`.
@@ -124,7 +135,7 @@ Based on: [fastworkflow_fastapi_spec.md](mdc:docs/fastworkflow_fastapi_spec.md)
     - `summary: str`
     - `created_at: int` (epoch ms)
     - `updated_at: int`
-    - `turns: [ { "conversation summary": str, "conversation_traces": str (JSON), feedback: { binary_or_numeric_score: bool|float|null, nl_feedback: str|null, timestamp: int } | null } ]`
+    - `turns: [ { "conversation summary": str, "conversation_traces": str (JSON) } ]` — no `feedback` key; review comments live in the observability store, not in conversation memory.
 - **Constraints**
   - Single active conversation per channel to avoid write concurrency.
   - Histories persist across restarts; default resume to the last conversation.

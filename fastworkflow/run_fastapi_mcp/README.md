@@ -297,17 +297,61 @@ Switch to a different conversation by ID.
 ```
 
 ### `POST /post_feedback`
-Attach feedback to the latest turn.
+Record one review note against a recorded turn, or a component of it. Returns
+`201` and the turn's notes, newest last.
+
+Notes are append-only: posting again adds a second note rather than replacing
+the first. Nothing feeds them back into a model's prompt.
 
 **Request:**
 ```json
 {
-  "binary_or_numeric_score": true,
-  "nl_feedback": "Helpful response"
+  "turn_key": "chan-1:7",
+  "target_kind": "turn",
+  "target_label": "Turn",
+  "comment": "The request names three people; the plan covers only two.",
+  "category": "observations_analysis",
+  "subcategory": "observation",
+  "provenance": "coding_agent"
 }
 ```
 
-At least one of `binary_or_numeric_score` or `nl_feedback` must be provided.
+`category`, `subcategory`, `target_kind` and `provenance` are enumerations in
+the generated OpenAPI schema, so a client reading the schema sees the allowed
+values. Category and subcategory must also PAIR; an unpaired combination is a
+`422`. The six confirmed meanings:
+
+| category | subcategories |
+| --- | --- |
+| `observations_analysis` | `observation`, `analysis` |
+| `conclusions` | `what_went_right`, `what_went_wrong` |
+| `recommendations` | `what_to_do`, `what_not_to_do` |
+
+`comment` is free text — structure it however you like; no heading in it is
+parsed, and the category is never inferred from the text. `provenance` is
+`human`, `coding_agent` or `distillation_agent` and defaults to
+`coding_agent`. `target_kind` defaults to `turn`; `phase`, `step` and `span`
+require `span_ids` that belong to the turn. `experiment_id`, `task_id`,
+`attempt` and `pass_id` are optional scope, and are checked against what the
+turn actually records rather than believed. `paired` names a second execution
+for a comparison note, in the same store.
+
+This replaced a different endpoint of the same name. The old one posted
+`{binary_or_numeric_score?, nl_feedback?}`, wrote one mutable row per turn to
+an agent-memory `feedback` table, and that row was replayed into the agent's
+`dspy.History` on its next turn. The table, the route and the injection were
+removed together (`fix-9eg.16`); there is no compatibility shim, and the old
+body is rejected.
+
+### `GET /feedback?turn_key=...`
+List the review notes recorded against one turn, oldest first. Each row
+carries its category, subcategory, display labels, provenance, evidence
+anchors and timestamp. Notes written before the taxonomy read back with
+`category` and `subcategory` of `null` and `classified: false`.
+
+### `GET /feedback_taxonomy`
+The categories, subcategories, UI labels and composer prompts, from the same
+source the browser UI uses.
 
 ## Admin Endpoints (REST-only; not exposed via MCP)
 

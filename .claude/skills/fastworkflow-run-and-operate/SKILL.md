@@ -206,7 +206,9 @@ request/response detail in [references/fastapi-endpoints.md](references/fastapi-
 | `/cancel_pending` | POST | Bearer | Abandon a suspended ask_user turn, clear durable pending state |
 | `/new_conversation` | POST | Bearer | Archive current, start fresh |
 | `/conversations?limit=20` | GET | Bearer | List past conversations |
-| `/post_feedback` | POST | Bearer | Record feedback on a turn |
+| `/post_feedback` | POST | Bearer | Append one categorized review note to a named turn (201) |
+| `/feedback?turn_key=...` | GET | Bearer | The review notes on one turn |
+| `/feedback_taxonomy` | GET | Bearer | The category/subcategory enums, labels and prompts |
 | `/activate_conversation` | POST | Bearer | Resume an archived conversation |
 | `/admin/dump_all_conversations` | POST | **NONE** | Dump every channel's conversations to a JSONL file |
 | `/admin/generate_mcp_token` | POST | **NONE** | Mint long-lived (default 365-day) tokens for MCP clients |

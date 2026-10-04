@@ -33,10 +33,12 @@ Do not rerun a workflow merely to obtain an answer already present in its record
 
 ## Use human feedback precisely
 
-The **Feedback** box on a turn, phase, step or span appends a timestamped comment to that
-working evidence database, split into **What went wrong**, **What worked**, and **What should
-change**. Comment on the narrowest component with recorded spans that explains the problem; if the
-component has no span anchor, comment on the turn. Useful comments state:
+The **Feedback** box on a turn, phase, step or span appends a timestamped comment, categorized
+with one of three categories and its two subcategories: **Observations / Analysis**
+(`observation`, `analysis`), **Conclusions** (`what_went_right`, `what_went_wrong`) and
+**Recommendations** (`what_to_do`, `what_not_to_do`). The comment itself is free text and no
+heading in it is parsed. Comment on the narrowest component with recorded spans that explains the
+problem; if the component has no span anchor, comment on the turn. Useful comments state:
 
 - What the user expected and what was observed.
 - The concrete example or evidence supporting the difference.
@@ -47,21 +49,25 @@ Ask which order the customer means before requesting a refund.” This identifie
 an outcome to test. Treat any proposed fix as a hypothesis to verify against the trace.
 
 Read the full comment history, including disagreements and later corrections. The UI shows
-comments matching the selected component; `list_human_feedback(turn_key)` returns all anchors
-for that turn with `comment` plus parsed `went_wrong`, `worked`, and `should_change` fields.
-Preserve original comments; record an agent's interpretation in analysis rather
-than inventing or overwriting a human judgment.
+comments matching the selected component; `list_human_feedback(turn_key)` returns all anchors for
+that turn with `comment`, `category`/`subcategory` and the frozen `anchors`, and
+`list_task_feedback(experiment_id=, task_id=)` returns everything said about a whole task.
+Comments written before the taxonomy read back with no category and are shown as unclassified;
+do not guess which of the six they would have been. Preserve original comments; record an agent's
+interpretation in analysis rather than inventing or overwriting a human judgment.
 
 Keep three mechanisms distinct:
 
 | Mechanism | Meaning |
 |---|---|
 | `human_feedback` | Developer/operator annotations attached to recorded evidence; no automatic retraining, prompt injection or score change |
-| `feedback` / `get_feedback` | Agent-memory feedback used in conversation history; a different API and behavior |
+| The agent-memory `feedback` table | Removed with its `dspy.History` injection (fix-9eg.16). Recorded comments are never replayed into a prompt |
 | Independent human review assignments | Rubric-based ratings with their own review flow; comments and simulated-operator replies are not substitutes |
 
-Snapshots are read-only. Add comments in the working experiment database; an existing archive
-does not acquire later comments automatically. Do not modify a sealed archive to insert feedback.
+Snapshots are read-only evidence, which is not the same as read-only feedback. A comment on a
+sealed archive, or on a store an older build wrote, is appended to an annotation sidecar
+(`<stem>.feedback.sqlite3`) beside it; the archive's bytes do not change and the reads return
+the union. Never modify a sealed archive to insert feedback.
 
 ## Diagnose and choose the smallest useful change
 

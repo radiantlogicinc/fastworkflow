@@ -9,7 +9,8 @@ can miss five write paths:
   inert and whose `evidence` profile is default-deny.
 
 Both are wired into the TurnResult pipeline. Conversation labels written through
-the SYNC store path, feedback, train-run metrics, writer diagnostics, and the
+the SYNC store path, review-note comments, train-run metrics, writer diagnostics,
+and the
 scalar columns beside a span's (already scrubbed) attributes JSON do not go
 through that pipeline, so without their own protection they reach SQLite
 verbatim under every profile.
@@ -32,8 +33,12 @@ Three properties are load-bearing here and are asserted for every surface:
 
 Two of the five are deliberately scrub-only, and the tests pin those decisions
 rather than leaving them to be re-litigated by whoever reads the code next:
-`feedback_json` is the agent's memory of being corrected, and `diagnostics` is
-the evidence gate's own input.
+`human_feedback.comment` is the record of what a reviewer judged, and
+`diagnostics` is the evidence gate's own input. Surface 1 used to be
+`feedback.feedback_json`, the agent's memory of being corrected; fix-9eg.16
+removed that table and the prompt injection that read it, so the scrub is
+pinned on the review-note column that replaced it as the place free text from
+a person or a coding agent lands.
 
 Real SQLite in tmp_path throughout, per .cursor/rules/testing_rules.mdc.
 """
@@ -47,6 +52,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow import TurnStatus, tracing
+from fastworkflow.observability import feedback, feedback_sidecar
 from fastworkflow.observability import store as obs
 from fastworkflow.observability.capture_policy import (
     CaptureFieldPolicy,
@@ -430,66 +436,208 @@ class TestSpanScalarColumns:
 
 
 # ----------------------------------------------------------------------
-# Surface 1: feedback_json — credential scrub, deliberately no capture policy
+# Surface 1: human_feedback.comment — credential scrub, deliberately no policy
 # ----------------------------------------------------------------------
 
 
+def _feedback_turn(db_path):
+    """A real recorded turn, because a review note needs one to anchor to."""
+    sink = obs.SQLiteTraceSink(db_path)
+    turn = _turn_result()
+    try:
+        sink.emit_turn_record(turn)
+        assert sink.flush()
+    finally:
+        sink.close()
+    return turn.turn_output.turn_key
+
+
+def _note(store, turn_key, comment, **kw):
+    body = dict(
+        target_kind="turn",
+        span_ids=[],
+        target_label="Turn",
+        provenance="human",
+        category="conclusions",
+        subcategory="what_went_wrong",
+    )
+    body.update(kw)
+    return store.add_human_feedback(turn_key, comment=comment, **body)
+
+
 class TestFeedback:
+    """Surface 1 is now `human_feedback.comment`.
+
+    It was `feedback.feedback_json`, the agent-memory row. fix-9eg.16 removed
+    that table, so the scrub has to be pinned where free text is actually
+    written now: a review note's comment, typed by a person or posted by a
+    coding agent, either of whom can paste a credential into it.
+    """
+
     def test_planted_credentials_do_not_reach_the_feedback_row(
         self, db_path, planted_credentials
     ):
         store = obs.ObservabilityStore(db_path)
-        store.upsert_feedback(
-            "turn-1",
-            json.dumps({"nl_feedback": f"try {SK_TOKEN} or {ENV_SECRET}"}),
-        )
+        turn_key = _feedback_turn(db_path)
+        _note(store, turn_key, f"try {SK_TOKEN} or {ENV_SECRET}")
 
-        stored = _rows(db_path, "SELECT * FROM feedback")[0]["feedback_json"]
+        stored = _rows(db_path, "SELECT * FROM human_feedback")[0]["comment"]
         assert SK_TOKEN not in stored
         assert ENV_SECRET not in stored
+        assert REDACTED in stored
 
-    def test_scrubbing_does_not_corrupt_the_json(self, db_path, planted_credentials):
-        """Every credential pattern is confined to characters that cannot appear
-        unescaped inside a JSON string, so a replacement can never cross a
-        delimiter. Asserted rather than reasoned about, because
-        `get_memory_window` calls `json.loads` on this column and falls back to
-        handing the agent the raw text when it fails."""
+    def test_scrubbing_leaves_the_rest_of_the_comment_alone(
+        self, db_path, planted_credentials
+    ):
+        """A scrub that swallowed surrounding prose would quietly destroy the
+        one thing this row exists to keep: what the author actually said."""
         store = obs.ObservabilityStore(db_path)
-        store.upsert_feedback(
-            "turn-1",
-            json.dumps(
-                {
-                    "binary_or_numeric_score": 1,
-                    "nl_feedback": f"the key {SK_TOKEN} did not work",
-                    "timestamp": 1756339200000,
-                }
-            ),
+        turn_key = _feedback_turn(db_path)
+        _note(
+            store,
+            turn_key,
+            f"the key {SK_TOKEN} did not work.\nRetry with the tenant key.",
         )
 
-        stored = _rows(db_path, "SELECT * FROM feedback")[0]["feedback_json"]
-        parsed = json.loads(stored)
-        assert parsed["binary_or_numeric_score"] == 1
-        assert parsed["timestamp"] == 1756339200000
-        assert REDACTED in parsed["nl_feedback"]
+        stored = _rows(db_path, "SELECT * FROM human_feedback")[0]["comment"]
+        assert stored.startswith("the key ")
+        assert stored.endswith("did not work.\nRetry with the tenant key.")
+        assert REDACTED in stored
+
+    def test_the_label_is_scrubbed_too(self, db_path, planted_credentials):
+        """`target_label` is caller-supplied text on the same row."""
+        store = obs.ObservabilityStore(db_path)
+        turn_key = _feedback_turn(db_path)
+        _note(store, turn_key, "fine", target_label=f"Turn {SK_TOKEN}")
+
+        stored = _rows(db_path, "SELECT * FROM human_feedback")[0]["target_label"]
+        assert SK_TOKEN not in stored and REDACTED in stored
+
+    def test_no_column_of_the_stored_row_carries_the_credential(
+        self, db_path, planted_credentials
+    ):
+        """Scanned whole-row, not column by column.
+
+        `target_label` is scrubbed on its own column and then written a SECOND
+        time, verbatim, inside `anchors_json` — so a check that reads only the
+        columns it remembers to name reports a clean row while the credential
+        sits two fields away. Every value in the row is scanned instead, which
+        is the only form of this assertion that keeps working when the row
+        grows another field.
+        """
+        store = obs.ObservabilityStore(db_path)
+        turn_key = _feedback_turn(db_path)
+        _note(
+            store,
+            turn_key,
+            f"try {SK_TOKEN}",
+            target_label=f"Turn {SK_TOKEN} for {ENV_SECRET}",
+        )
+
+        row = _rows(db_path, "SELECT * FROM human_feedback")[0]
+        whole = "\n".join(str(value) for value in row.values())
+        assert SK_TOKEN not in whole, "a credential survived somewhere in the row"
+        assert ENV_SECRET not in whole
+        assert REDACTED in row["anchors_json"]
+
+    def test_the_paired_side_of_a_comparison_is_scrubbed_as_well(
+        self, db_path, planted_credentials
+    ):
+        """Both anchors, not just the one the columns mirror.
+
+        A comparison comment carries a second target whose label has no column
+        of its own, so it is only ever stored inside `anchors_json`. Scrubbing
+        the serialized anchor by mirroring the columns would clean the primary
+        side and leave the paired one untouched.
+        """
+        store = obs.ObservabilityStore(db_path)
+        left = _feedback_turn(db_path)
+        right = _feedback_turn(db_path)
+        identity = store.store_identity()
+        left_row = store.get_turn(left)
+        anchors = feedback.build_anchors(
+            feedback.FeedbackTarget.from_mapping({
+                "store_id": identity, "turn_keys": [left],
+                "target_kind": "turn", "span_ids": [],
+                "target_label": "Turn", "label": f"left {SK_TOKEN}",
+            }),
+            sources={identity: store},
+            paired=feedback.FeedbackTarget.from_mapping({
+                "store_id": identity, "turn_keys": [right],
+                "target_kind": "turn", "span_ids": [],
+                "target_label": f"Turn {SK_TOKEN}",
+                "label": f"right {ENV_SECRET}",
+            }),
+        )
+        pair_key = anchors.pair_key
+        store.add_human_feedback(
+            left, target_kind="turn", span_ids=[], target_label="Turn",
+            provenance="human", comment="the two sides diverge here",
+            category="conclusions", subcategory="what_went_wrong",
+            anchors=anchors,
+        )
+
+        row = _rows(db_path, "SELECT * FROM human_feedback")[0]
+        whole = "\n".join(str(value) for value in row.values())
+        assert SK_TOKEN not in whole and ENV_SECRET not in whole
+        stored = json.loads(row["anchors_json"])
+        assert REDACTED in stored["paired"]["target_label"]
+        assert REDACTED in stored["paired"]["ref"]["label"]
+        # Identity is NOT redacted: scrubbing a key would orphan the comment.
+        assert stored["paired"]["ref"]["turn_keys"] == [right]
+        assert stored["primary"]["ref"]["turn_keys"] == [left]
+        assert stored["pair_key"] == pair_key
+        assert left_row is not None
+
+    def test_the_sidecar_scrubs_its_anchors_the_same_way(
+        self, db_path, tmp_path, planted_credentials
+    ):
+        """The second writer is the one nobody remembers to check.
+
+        A note recorded against sealed or v6 evidence takes a different code
+        path into a different file, and the scrub has to be on both or the
+        redaction guarantee depends on which store happened to be writable.
+        """
+        store = obs.ObservabilityStore(db_path)
+        turn_key = _feedback_turn(db_path)
+        assert store.get_turn(turn_key) is not None
+        evidence = obs.ReadOnlyObservabilityStore(db_path)
+        annotated = feedback_sidecar.AnnotatedEvidence.for_writing(evidence)
+        annotated.add_human_feedback(
+            turn_key, target_kind="turn", span_ids=[],
+            target_label=f"Turn {SK_TOKEN}", provenance="human",
+            comment=f"sealed note with {ENV_SECRET}",
+            category="observations_analysis", subcategory="observation",
+        )
+
+        sidecar_path = feedback_sidecar.feedback_db_path_for(db_path)
+        row = _rows(sidecar_path, "SELECT * FROM feedback_notes")[0]
+        whole = "\n".join(str(value) for value in row.values())
+        assert SK_TOKEN not in whole and ENV_SECRET not in whole
+        assert REDACTED in row["anchors_json"]
 
     @pytest.mark.parametrize("profile", ["debug", "evidence"])
     def test_feedback_content_survives_both_profiles(self, db_path, monkeypatch, profile):
         """PINS A DELIBERATE DECISION: no capture policy on this column.
 
-        `get_memory_window` parses it and `restore_history_from_turns` puts the
-        result straight into `dspy.History` — it is the agent's memory of being
-        corrected, not evidence about the agent. Under `evidence` a badge would
-        still parse, so the agent would silently receive an envelope dict where
-        its feedback used to be and behave differently. Redacting this column
-        belongs with conversation-memory redaction, which has to leave memory
-        usable. If this test ever fails, the agent just got quieter.
+        The reason changed with the surface. It used to be that the column fed
+        `dspy.History`, so a withheld-content envelope would have changed how
+        the agent behaved. That path is gone. What is left is the reason the
+        notes exist at all: a review comment IS the record of what a reviewer
+        judged, and an envelope in its place makes the task Feedback view
+        unreadable while looking like it still works. Credentials are scrubbed
+        above; the prose is kept.
         """
         monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, profile)
         store = obs.ObservabilityStore(db_path)
-        store.upsert_feedback("turn-1", json.dumps({"nl_feedback": TENANT}))
+        turn_key = _feedback_turn(db_path)
+        _note(store, turn_key, TENANT)
 
-        stored = _rows(db_path, "SELECT * FROM feedback")[0]["feedback_json"]
-        assert json.loads(stored) == {"nl_feedback": TENANT}
+        row = _rows(db_path, "SELECT * FROM human_feedback")[0]
+        assert row["comment"] == TENANT
+        assert (row["category"], row["subcategory"]) == (
+            "conclusions", "what_went_wrong",
+        )
 
 
 # ----------------------------------------------------------------------
@@ -666,12 +814,16 @@ class TestConversationMemory:
     def test_memory_rebuilds_intact_under_both_profiles(
         self, db_path, monkeypatch, profile
     ):
-        """Summary, traces AND feedback all have to arrive.
+        """Summary and traces both have to arrive.
 
-        `test_capture_policy_wiring` already pins the first two through
-        `_POLICY_EXEMPT_TURN_COLUMNS`; this adds the third, which is the one this
-        change could have broken, and asserts the whole 3-key shape
-        `restore_history_from_turns` consumes.
+        `test_capture_policy_wiring` pins them through
+        `_POLICY_EXEMPT_TURN_COLUMNS`; this asserts the whole shape
+        `restore_history_from_turns` consumes. There were three keys until
+        fix-9eg.16: the third joined the agent-memory feedback row into the
+        window and thence into the agent's prompt. Recorded review notes
+        deliberately do NOT travel this path, which is asserted here as well
+        — a redaction test is exactly where a reappearing prompt channel
+        would need to be noticed.
         """
         monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, profile)
         sink = obs.SQLiteTraceSink(db_path)
@@ -683,9 +835,7 @@ class TestConversationMemory:
             sink.close()
 
         store = obs.ObservabilityStore(db_path)
-        store.upsert_feedback(
-            turn.turn_output.turn_key, json.dumps({"nl_feedback": "helpful"})
-        )
+        _note(store, turn.turn_output.turn_key, "helpful")
 
         assert store.count_usable_turns("chan", 1) == 1
         window = store.get_memory_window("chan", 1, max_turns=10)
@@ -693,9 +843,9 @@ class TestConversationMemory:
             {
                 "conversation summary": "user asked about a kayak",
                 "conversation_traces": "get_order -> ok",
-                "feedback": {"nl_feedback": "helpful"},
             }
         ]
+        assert "helpful" not in json.dumps(window)
 
     @pytest.mark.parametrize("profile", ["debug", "evidence"])
     def test_a_labeled_conversation_still_lists_and_dumps(
@@ -741,7 +891,8 @@ def test_the_default_profile_leaves_all_five_surfaces_byte_identical(db_path):
     store = obs.ObservabilityStore(db_path)
     conv = store.mint_conversation_id("chan")
     store.record_conversation_label("chan", conv, "Kayak order", TENANT)
-    store.upsert_feedback("turn-1", json.dumps({"nl_feedback": TENANT}))
+    turn_key = _feedback_turn(db_path)
+    _note(store, turn_key, TENANT)
     store.record_train_run("run-1", "fp", None, None, _metrics())
     _set_diagnostic(store, "probe", {"note": TENANT})
     span = _span()
@@ -750,9 +901,7 @@ def test_the_default_profile_leaves_all_five_surfaces_byte_identical(db_path):
     conversation = _rows(db_path, "SELECT * FROM conversations")[0]
     assert conversation["topic"] == "Kayak order"
     assert conversation["summary"] == TENANT
-    assert json.loads(
-        _rows(db_path, "SELECT * FROM feedback")[0]["feedback_json"]
-    ) == {"nl_feedback": TENANT}
+    assert _rows(db_path, "SELECT * FROM human_feedback")[0]["comment"] == TENANT
     assert json.loads(
         _rows(db_path, "SELECT * FROM train_runs")[0]["metrics_json"]
     ) == _metrics()

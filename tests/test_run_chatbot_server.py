@@ -15,10 +15,16 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import importlib.resources
 import json
+import os
 import re
 import signal
+import socket
 import sqlite3
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 import tomllib
@@ -190,8 +196,7 @@ def seeded_db(workflow_path) -> str:
         ),
     ]
 
-    conn = store._connect()
-    try:
+    with store._connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         assert store.upsert_turn_row(
             conn,
@@ -227,9 +232,6 @@ def seeded_db(workflow_path) -> str:
              "busy_retries": 0, "refused_terminal_writes": 0,
              "last_error": "disk full"},
         )
-        conn.commit()
-    finally:
-        conn.close()
     return db_path
 
 
@@ -271,7 +273,12 @@ def _row_counts(db_path: str) -> dict:
     try:
         return {
             table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            for table in ("conversations", "turns", "spans", "artifacts", "feedback")
+            # `human_feedback` replaced the agent-memory `feedback` table
+            # (fix-9eg.16); clearing has to reach the review notes too, since
+            # they are anchored to the turns being deleted.
+            for table in (
+                "conversations", "turns", "spans", "artifacts", "human_feedback",
+            )
         }
     finally:
         conn.close()
@@ -405,11 +412,12 @@ class TestPage:
         assert b'id="channelSel"' not in server.index_html
         assert b"/api/channels" not in server.index_html
         assert b"chanGroup" in server.index_html
-        assert b"renderConversationGroups" in server.index_html
-        assert b"renderNestedTurns" in server.index_html
+        assert b"function renderHierarchy()" in server.index_html
         # Empty nodes are hidden at both levels: conversations with no turns,
         # and channels left with no conversation.
-        assert b"channelHasConversation" in server.index_html
+        # navigation.py creates conversation nodes only from turn rows, so the
+        # rail renders the server's tree rather than filtering empties itself.
+        assert b"if (!hierarchyRoot) { return; }" in server.index_html
 
     def test_unknown_path_404(self, server):
         status, _, _ = _get(server, "/nope")
@@ -548,7 +556,7 @@ class TestApi:
             "turns": 0,
             "spans": 0,
             "artifacts": 0,
-            "feedback": 0,
+            "human_feedback": 0,
         }
         # Clearing data never rewinds conversation identity.
         assert obs.ObservabilityStore(seeded_db).mint_conversation_id("chan1") == 2
@@ -672,6 +680,40 @@ class TestCliPaths:
         out = capsys.readouterr().out
         assert "pick a workflow in the browser" in out
 
+    def test_run_chatbot_main_sighup_runs_shutdown(self, monkeypatch):
+        """SIGHUP must take the same finally/shutdown path as SIGTERM/Ctrl+C."""
+        import os
+
+        if not hasattr(signal, "SIGHUP"):
+            pytest.skip("SIGHUP is not available on this platform")
+
+        cleaned: list[str] = []
+
+        def serve_forever(self):
+            os.kill(os.getpid(), signal.SIGHUP)
+            time.sleep(2)
+
+        def shutdown(self):
+            cleaned.append("shutdown")
+            try:
+                self.httpd.server_close()
+            except Exception:
+                pass
+
+        monkeypatch.setattr(
+            run_chatbot_server.ChatbotServer, "serve_forever", serve_forever
+        )
+        monkeypatch.setattr(run_chatbot_server.ChatbotServer, "shutdown", shutdown)
+        with pytest.raises(SystemExit) as exited:
+            run_chatbot_server.run_chatbot_main(
+                SimpleNamespace(
+                    server_port=18001,
+                    expect_encrypted_jwt=False,
+                )
+            )
+        assert exited.value.code in (0, None)
+        assert cleaned == ["shutdown"]
+
     def test_open_in_browser_is_a_noop_under_pytest(self, monkeypatch):
         # The pytest skip is env-based, not a CLI flag: a test that drives
         # run_chatbot_main must not pop a browser, and must not need --no-browser.
@@ -697,13 +739,17 @@ class TestCliPaths:
 
 class TestPackaging:
     def test_spa_ships_as_package_data(self):
-        import importlib.resources
-
-        resource = (
-            importlib.resources.files("fastworkflow.run_chatbot") / "static" / "index.html"
+        root = (
+            importlib.resources.files("fastworkflow.run_chatbot") / "static" / "src"
         )
-        assert resource.is_file()
-        page = resource.read_bytes()
+        parts = sorted(
+            (entry for entry in root.iterdir() if entry.is_file()),
+            key=lambda entry: entry.name,
+        )
+        assert parts, "SPA source parts are missing from package data"
+        for part in parts:
+            assert part.is_file()
+        page = b"".join(part.read_bytes() for part in parts)
         assert b"fastWorkflow Chatbot" in page
         # Self-contained: no external origins anywhere in the page. Test mode
         # legitimately names loopback origins (the local FastAPI server), so
@@ -725,13 +771,7 @@ class TestPackaging:
         Chips used to reuse `.wfBar` (`position: absolute`), which pinned them
         to the viewport instead of the legend (fix-kw7.14).
         """
-        page = (
-            Path(__file__).parent.parent
-            / "fastworkflow"
-            / "run_chatbot"
-            / "static"
-            / "index.html"
-        ).read_text()
+        page = run_chatbot_server.load_index_html().decode("utf-8")
         assert 'el("span", "chip wfBar "' not in page
         assert 'el("span", "chip " + pair[0])' in page
         chip_rule = page.split(".legend .chip {", 1)[1].split("}", 1)[0]
@@ -744,7 +784,7 @@ class TestPackaging:
         pyproject = Path(__file__).parent.parent / "pyproject.toml"
         data = tomllib.loads(pyproject.read_text())
         includes = data["tool"]["poetry"]["include"]
-        assert "fastworkflow/run_chatbot/static/index.html" in includes
+        assert "fastworkflow/run_chatbot/static/src/*" in includes
 
     def test_server_module_is_stdlib_only(self):
         # [R23]: debug mode must work on a base install (no [server] extra).
@@ -761,6 +801,50 @@ class TestPackaging:
             assert forbidden not in imported_roots, (
                 f"chatbot server imports {forbidden}"
             )
+
+    def test_server_import_skips_heavy_frameworks(self):
+        """Importing the chatbot server must not load dspy, litellm, or FastAPI.
+
+        test_server_module_is_stdlib_only only scans server.py's own import
+        statements. The package init and experiment package used to pull those
+        libraries in before the first request.
+        """
+        script = textwrap.dedent(
+            """
+            import sys
+            import time
+
+            started = time.perf_counter()
+            import fastworkflow.run_chatbot.server
+            elapsed = time.perf_counter() - started
+            forbidden = ("dspy", "litellm", "fastapi", "starlette", "uvicorn")
+            present = sorted({
+                name.split(".", 1)[0]
+                for name in sys.modules
+                if name.split(".", 1)[0] in forbidden
+            })
+            print(f"ELAPSED={elapsed:.4f}")
+            print("PRESENT=" + ",".join(present))
+            """
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        elapsed = None
+        present = None
+        for line in result.stdout.splitlines():
+            if line.startswith("ELAPSED="):
+                elapsed = float(line.split("=", 1)[1])
+            elif line.startswith("PRESENT="):
+                present = [item for item in line.split("=", 1)[1].split(",") if item]
+        assert present == [], result.stdout + result.stderr
+        assert elapsed is not None
+        assert elapsed < 0.5, f"chatbot import took {elapsed:.3f}s"
 
 
 # ----------------------------------------------------------------------
@@ -925,6 +1009,24 @@ class TestControlPlane:
         assert "pkg" not in local
         assert local["child_wf"]["rel"] == "pkg/apps/child_wf"
 
+    def test_workflow_candidate_walk_is_cached_briefly(self, tmp_path, monkeypatch):
+        cwd = tmp_path / "proj"
+        (cwd / "first_wf" / "_commands").mkdir(parents=True)
+        monkeypatch.chdir(cwd)
+        run_chatbot_server.invalidate_workflow_candidate_walk_cache()
+        first = run_chatbot_server.list_workflow_candidates()
+        assert any(w["name"] == "first_wf" for w in first if w["source"] == "local")
+        (cwd / "second_wf" / "_commands").mkdir(parents=True)
+        cached = run_chatbot_server.list_workflow_candidates()
+        assert not any(w["name"] == "second_wf" for w in cached if w["source"] == "local")
+        run_chatbot_server.invalidate_workflow_candidate_walk_cache()
+        refreshed = run_chatbot_server.list_workflow_candidates()
+        assert any(w["name"] == "second_wf" for w in refreshed if w["source"] == "local")
+        # Trained/training flags still refresh on a cache hit.
+        second = next(w for w in refreshed if w["name"] == "second_wf")
+        assert second["trained"] is False
+        assert second["training"] is False
+
     def test_rel_under_rejects_paths_outside_root(self, tmp_path):
         root = tmp_path / "root"
         root.mkdir()
@@ -1047,3 +1149,258 @@ class TestControlPlane:
         assert status == 405
         status, _ = _post(server, "/api/channels", {})
         assert status == 405
+
+
+# ----------------------------------------------------------------------
+# Reliability: error logging, access log, bounded request bodies
+# ----------------------------------------------------------------------
+
+
+def _raw_http(server, request: bytes, timeout: float = 5.0) -> bytes:
+    with socket.create_connection(("127.0.0.1", server.port), timeout=timeout) as sock:
+        sock.sendall(request)
+        chunks: list[bytes] = []
+        expected_len = None
+        while True:
+            piece = sock.recv(4096)
+            if not piece:
+                break
+            chunks.append(piece)
+            joined = b"".join(chunks)
+            head, sep, body = joined.partition(b"\r\n\r\n")
+            if not sep:
+                continue
+            if expected_len is None:
+                match = re.search(rb"(?im)^content-length:\s*(\d+)\s*$", head)
+                expected_len = int(match.group(1)) if match else 0
+            if len(body) >= expected_len:
+                break
+        return b"".join(chunks)
+
+
+class TestChatbotErrorAndBodyReliability:
+    def test_unhandled_exception_logs_traceback_with_error_id(
+        self, server, caplog, monkeypatch
+    ):
+        import logging
+
+        def boom():
+            raise RuntimeError("forced chatbot failure")
+
+        monkeypatch.setattr(server, "session_payload", boom)
+        with caplog.at_level(logging.ERROR, logger="fastworkflow.run_chatbot.server"):
+            status, _, body = _get(
+                server,
+                f"/api/session?token={server.token}",
+                token=None,
+            )
+        assert status == 500
+        payload = json.loads(body)
+        assert payload["error"] == "internal error: RuntimeError"
+        assert "error_id" in payload
+        assert payload["error_id"] in caplog.text
+        assert "RuntimeError" in caplog.text
+        assert "forced chatbot failure" in caplog.text
+        assert "/api/session" in caplog.text
+        assert "token=REDACTED" in caplog.text
+        assert server.token not in caplog.text
+
+    def test_access_log_opt_in_redacts_token(self, server, caplog, monkeypatch):
+        import logging
+
+        monkeypatch.setenv("FASTWORKFLOW_CHATBOT_ACCESS_LOG", "1")
+        with caplog.at_level(logging.INFO, logger="fastworkflow.run_chatbot.server"):
+            status, _, _ = _get(
+                server,
+                f"/api/session?token={server.token}",
+                token=None,
+            )
+            # The handler thread logs after the response is flushed to the client.
+            deadline = time.monotonic() + 2.0
+            joined = ""
+            while "/api/session" not in joined and time.monotonic() < deadline:
+                joined = "\n".join(
+                    r.getMessage() for r in caplog.records if "GET" in r.getMessage()
+                )
+                if "/api/session" not in joined:
+                    time.sleep(0.01)
+        assert status == 200
+        assert "/api/session" in joined
+        assert "token=REDACTED" in joined
+        assert server.token not in joined
+        assert "200" in joined
+
+    def test_negative_content_length_is_400(self, server):
+        raw = _raw_http(
+            server,
+            (
+                f"POST /api/clear_conversations HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{server.port}\r\n"
+                f"Authorization: Bearer {server.token}\r\n"
+                f"Content-Length: -1\r\n"
+                f"\r\n"
+            ).encode(),
+        )
+        assert raw.startswith(b"HTTP/1.1 400")
+        assert b"invalid Content-Length" in raw
+
+    def test_oversize_content_length_is_413_without_body(self, server):
+        raw = _raw_http(
+            server,
+            (
+                f"POST /api/clear_conversations HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{server.port}\r\n"
+                f"Authorization: Bearer {server.token}\r\n"
+                f"Content-Length: {5 * 1024 * 1024}\r\n"
+                f"\r\n"
+            ).encode(),
+            timeout=3.0,
+        )
+        assert raw.startswith(b"HTTP/1.1 413")
+        assert b"request body too large" in raw
+
+    def test_chunked_transfer_encoding_is_411(self, server):
+        raw = _raw_http(
+            server,
+            (
+                f"POST /api/clear_conversations HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{server.port}\r\n"
+                f"Authorization: Bearer {server.token}\r\n"
+                f"Transfer-Encoding: chunked\r\n"
+                f"\r\n"
+                f"0\r\n\r\n"
+            ).encode(),
+        )
+        assert raw.startswith(b"HTTP/1.1 411")
+        assert b"Content-Length required" in raw
+
+    def test_missing_content_length_is_empty_body(self, server):
+        # Bodyless POST without Content-Length must keep today's behaviour:
+        # parse as {} and continue (here: confirmation required).
+        raw = _raw_http(
+            server,
+            (
+                f"POST /api/clear_conversations HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{server.port}\r\n"
+                f"Authorization: Bearer {server.token}\r\n"
+                f"\r\n"
+            ).encode(),
+        )
+        assert raw.startswith(b"HTTP/1.1 400")
+        assert b"confirmation required" in raw
+
+
+class TestProcessLogs:
+    """GET /api/logs/{server,train}: bounded, redacted, 404-free."""
+
+    def _server_log(self, server) -> Path:
+        session = _get_json(server, "/api/session")["session"]
+        path = Path(session["server_log_path"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def test_missing_logs_exist_false_without_404(self, server):
+        for route in ("/api/logs/server", "/api/logs/train"):
+            status, _, body = _get(server, route)
+            assert status == 200, body
+            data = json.loads(body)
+            assert data["exists"] is False
+            assert data["lines"] == []
+            assert data["truncated"] is False
+            assert "path" in data
+
+    def test_logs_stay_behind_the_existing_token_and_host_gate(self, server):
+        status, _, body = _get(server, "/api/logs/server", token=None)
+        assert status == 401
+        assert b"token" in body
+        status, _, body = _get(
+            server, "/api/logs/train", headers={"Host": "evil.example.com"}
+        )
+        assert status == 403
+        assert b"forbidden" in body
+
+    def test_tail_redacts_secrets_and_keeps_usage_counts(self, server):
+        path = self._server_log(server)
+        path.write_text(
+            "\n".join(
+                [
+                    f"chatbot token {server.token}",
+                    "Authorization: Bearer fw-bearer-secret",
+                    "OPENAI_API_KEY=fw-api-key-value",
+                    "DB_PASSWORD=fw-password-value",
+                    "APP_SECRET=fw-secret-value",
+                    "SERVICE_TOKEN=fw-token-value",
+                    "PROMPT_TOKENS=17",
+                    "ordinary line stays",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        status, _, body = _get(server, "/api/logs/server?tail=50")
+        assert status == 200, body
+        data = json.loads(body)
+        text = "\n".join(data["lines"])
+        assert data["exists"] is True
+        assert data["truncated"] is False
+        assert data["path"] == os.path.abspath(path)
+        assert server.token not in text
+        assert "fw-bearer-secret" not in text
+        assert "Bearer [REDACTED]" in text
+        assert "fw-api-key-value" not in text
+        assert "OPENAI_API_KEY=[REDACTED]" in text
+        assert "DB_PASSWORD=[REDACTED]" in text
+        assert "APP_SECRET=[REDACTED]" in text
+        assert "SERVICE_TOKEN=[REDACTED]" in text
+        assert "PROMPT_TOKENS=17" in text
+        assert "ordinary line stays" in text
+
+    def test_tail_defaults_to_200_and_caps_at_2000(self, server):
+        path = self._server_log(server)
+        path.write_text("".join(f"line-{i}\n" for i in range(2500)), encoding="utf-8")
+        default = json.loads(_get(server, "/api/logs/server")[2])
+        assert len(default["lines"]) == 200
+        assert default["lines"][0] == "line-2300"
+        assert default["lines"][-1] == "line-2499"
+        assert default["truncated"] is True
+        capped = json.loads(_get(server, "/api/logs/server?tail=9000")[2])
+        assert len(capped["lines"]) == 2000
+        assert capped["lines"][-1] == "line-2499"
+        small = json.loads(_get(server, "/api/logs/server?tail=3")[2])
+        assert small["lines"] == ["line-2497", "line-2498", "line-2499"]
+        status, _, body = _get(server, "/api/logs/server?tail=nope")
+        assert status == 400
+        assert b"tail" in body
+
+    def test_read_stops_at_the_last_mebibyte(self, server):
+        path = self._server_log(server)
+        path.write_bytes(
+            b"HEAD-MARKER\n" + (b"x" * (1024 * 1024)) + b"\nTAIL-MARKER\n"
+        )
+        data = json.loads(_get(server, "/api/logs/server?tail=2000")[2])
+        text = "\n".join(data["lines"])
+        assert data["truncated"] is True
+        assert "HEAD-MARKER" not in text
+        assert "TAIL-MARKER" in text
+
+    def test_train_log_is_the_workflow_state_file(self, server, workflow_path):
+        from fastworkflow.run_chatbot import launcher
+
+        _pid_path, log_path = launcher.train_artifact_paths(
+            workflow_path, create=True
+        )
+        Path(log_path).write_text(
+            "train-line\nLITELLM_API_KEY=fw-train-secret\n", encoding="utf-8"
+        )
+        data = json.loads(_get(server, "/api/logs/train?tail=20")[2])
+        assert data["exists"] is True
+        assert data["path"] == os.path.abspath(log_path)
+        text = "\n".join(data["lines"])
+        assert "train-line" in text
+        assert "fw-train-secret" not in text
+        assert "LITELLM_API_KEY=[REDACTED]" in text
+        session = _get_json(server, "/api/session")["session"]
+        assert session["train_log_path"] == os.path.abspath(log_path) or (
+            session["train_log_path"] == log_path
+        )
+        assert session["server_log_path"]

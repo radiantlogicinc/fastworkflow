@@ -9,6 +9,15 @@ runtime evicted between response construction and first body iteration.
 
 It is now admitted through the registry like every other turn, which is what
 makes it visible to the 409 guard, to eviction, and to the shutdown drain.
+
+COST (fix-14ac): every turn here used to run the planner, so the whole file
+cost real model calls and could not be run in a no-paid-calls environment —
+which is how its documented event allowlist went stale without anyone
+noticing. The turns that exercise the TRANSPORT now run the session's runtime
+in deterministic mode: the same route, registry, CME pipeline, trace queue and
+streaming body, answered locally instead of by a planner. Nothing about what
+is asserted changed. A case that genuinely needs the planner would be marked
+paid; none of the remaining ones do.
 """
 
 from __future__ import annotations
@@ -17,6 +26,7 @@ import asyncio
 import importlib
 import json
 import os
+import shutil
 import sys
 import uuid
 
@@ -28,21 +38,57 @@ import fastworkflow
 
 @pytest.fixture
 def hello_world_workflow_path():
-    package_path = fastworkflow.get_fastworkflow_package_path()
-    workflow_path = os.path.join(package_path, "examples", "hello_world")
+    """The repo's trained test workflow, not the shipped example.
+
+    ``fastworkflow/examples/hello_world`` ships without intent-classifier
+    artifacts (no ``___command_info/global/threshold.json``), so a turn that
+    actually reaches the NLU pipeline dies there. That never showed while
+    every turn went to the planner; running these locally surfaced it
+    immediately. ``tests/hello_world_workflow`` is the trained one the rest of
+    the suite drives (testing_rules.mdc), and the transport under test does
+    not care which workflow answers.
+    """
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    workflow_path = os.path.join(project_root, "tests", "hello_world_workflow")
     if not os.path.isdir(workflow_path):
         pytest.skip(f"hello_world workflow not found at {workflow_path}")
     return workflow_path
 
 
 @pytest.fixture
-def env_files():
+def env_files(tmp_path):
+    """Workflow env files written from the shipped template.
+
+    Previously the repo's own ``env/.env`` and ``passwords/.env``, which meant
+    the whole file skipped on a machine that has no passwords file — so the
+    tests were unrunnable for two independent reasons at once. The keys here
+    are placeholders and are never used: no test in this file reaches a model.
+    """
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env_file = os.path.join(project_root, "env", ".env")
-    passwords_file = os.path.join(project_root, "passwords", ".env")
-    if not os.path.isfile(env_file) or not os.path.isfile(passwords_file):
-        pytest.skip("env files missing for FastAPI tests")
-    return env_file, passwords_file
+    template = os.path.join(
+        project_root, "fastworkflow", "examples", "fastworkflow.env"
+    )
+    if not os.path.isfile(template):
+        pytest.skip(f"env template missing at {template}")
+
+    env_file = tmp_path / "fastworkflow.env"
+    shutil.copy(template, env_file)
+    passwords_file = tmp_path / "fastworkflow.passwords.env"
+    passwords_file.write_text(
+        "\n".join(
+            f"LITELLM_API_KEY_{role}=placeholder-not-used"
+            for role in (
+                "SYNDATA_GEN",
+                "PARAM_EXTRACTION",
+                "RESPONSE_GEN",
+                "PLANNER",
+                "AGENT",
+                "CONVERSATION_STORE",
+            )
+        )
+        + "\n"
+    )
+    return str(env_file), str(passwords_file)
 
 
 @pytest.fixture
@@ -84,23 +130,55 @@ def _initialize(client: TestClient, channel_id: str, stream_format: str = "ndjso
     return {"Authorization": f"Bearer {resp.json()['access_token']}"}
 
 
+def _answer_locally(app_module, channel_id: str) -> None:
+    """Let this session's runtime answer without the planner.
+
+    It is the real WorkflowExecutionContext either way — intent detection,
+    command execution, the trace queue and the turn record all still run. Only
+    the routing decision inside it changes, and that decision is the paid one.
+    """
+    async def configure():
+        runtime = await app_module.session_manager.get_session(channel_id)
+        runtime.execution_context._run_as_agent = False
+
+    asyncio.run(configure())
+
+
 def test_a_streaming_turn_completes_and_retires_itself(app_module):
     """The happy path still streams, and the execution ends up terminal."""
     channel_id = _channel("stream")
 
     with TestClient(app_module.app) as client:
         headers = _initialize(client, channel_id)
+        _answer_locally(app_module, channel_id)
         resp = client.post(
             "/invoke_agent_stream",
             headers=headers,
-            json={"user_query": "add 2 and 3", "timeout_seconds": 60},
+            # A command that needs no parameters: "add 2 and 3" would route to
+            # add_two_numbers and hand its arguments to DSPy extraction, which
+            # is another model call. The transport does not care which command
+            # answers, only that a real one does.
+            json={"user_query": "what can i do", "timeout_seconds": 60},
         )
         assert resp.status_code == 200
         events = [json.loads(line) for line in resp.text.splitlines() if line.strip()]
 
     assert events, "stream produced no events"
-    assert {e["type"] for e in events} <= {"trace", "output", "error"}
+    # The interactions arrive before the answer, which is the whole point of
+    # streaming them — and the turn really answered. Without this the file
+    # passes just as happily on a stream whose only content is a failure,
+    # which is how a workflow with no trained classifier went unnoticed.
+    assert events[0]["type"] == "trace"
+    assert events[-1]["type"] == "output"
+    assert events[-1]["data"]["success"] is True
+    assert events[-1]["data"]["answer"]
+    # 'timeout' joined the documented set when the delivery deadline stopped
+    # being reported as a (terminal) 'error': it says the turn passed the
+    # deadline and is STILL running, so it can appear here and cannot be the
+    # last event. The terminal set is unchanged.
+    assert {e["type"] for e in events} <= {"trace", "timeout", "output", "error"}
     assert events[-1]["type"] in ("output", "error")
+    assert sum(e["type"] in ("output", "error") for e in events) == 1
 
     # Registered, ran, and cleared its own active pointer.
     assert not app_module.turn_registry.has_active(channel_id)
@@ -228,6 +306,9 @@ def test_the_delivery_deadline_does_not_abandon_the_executor(app_module):
             run_startup=False,
         )
         runtime = await app_module.session_manager.get_session(channel_id)
+        # Local answer, real turn: the deadline behaviour under test belongs to
+        # the streaming helper, not to whatever produced the answer.
+        runtime.execution_context._run_as_agent = False
         timeouts = []
 
         async def on_timeout(detail):
@@ -238,7 +319,7 @@ def test_the_delivery_deadline_does_not_abandon_the_executor(app_module):
             async with runtime.lock:
                 return await app_module.run_process_message_with_trace_stream(
                     runtime,
-                    "add 2 and 3",
+                    "what can i do",   # parameterless: no extraction call
                     0,  # deadline already passed on the first poll
                     app_module.session_manager,
                     lambda _t: None,

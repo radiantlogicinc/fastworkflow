@@ -137,22 +137,88 @@ def test_validation_startup_mutual_exclusion(app_module):
     assert req2.user_id is None
 
 
-def test_validation_feedback_presence(app_module):
-    """Test that at least one feedback field must be provided"""
+def test_the_feedback_request_no_longer_takes_a_score():
+    """The agent-memory body is gone, and nothing silently accepts it.
+
+    `binary_or_numeric_score` / `nl_feedback` wrote one mutable row per turn
+    that was read straight back into the agent's `dspy.History` (fix-9eg.16).
+    A request in that shape is now missing every required field of a review
+    note, and carries two the model does not define; both are refused rather
+    than ignored, so a client still posting it learns that it is.
+    """
     from pydantic import ValidationError
-    PostFeedbackRequest = app_module.PostFeedbackRequest
+
+    from fastworkflow.run_fastapi_mcp.utils import PostFeedbackRequest
+
     with pytest.raises(ValidationError):
-        PostFeedbackRequest(
-            binary_or_numeric_score=None,
-            nl_feedback=None,
-        )
-    req = PostFeedbackRequest(binary_or_numeric_score=True)
-    assert req.binary_or_numeric_score == 1.0
-    req = PostFeedbackRequest(nl_feedback="Great response")
-    assert req.nl_feedback == "Great response"
-    req = PostFeedbackRequest(binary_or_numeric_score=0.8, nl_feedback="Good")
-    assert req.binary_or_numeric_score == 0.8
-    assert req.nl_feedback == "Good"
+        PostFeedbackRequest(binary_or_numeric_score=None, nl_feedback=None)
+    with pytest.raises(ValidationError):
+        PostFeedbackRequest(binary_or_numeric_score=0.8, nl_feedback="Good")
+    assert not {"binary_or_numeric_score", "nl_feedback"} & set(
+        PostFeedbackRequest.model_fields
+    )
+
+
+def _assert_taxonomy_enums(published):
+    from fastworkflow.observability import feedback as observability_feedback
+    from fastworkflow.observability.store import FEEDBACK_PROVENANCES
+
+    assert published["category"]["enum"] == [
+        category.value for category in observability_feedback.FEEDBACK_TAXONOMY
+    ]
+    assert published["subcategory"]["enum"] == [
+        sub.value
+        for category in observability_feedback.FEEDBACK_TAXONOMY
+        for sub in category.subcategories
+    ]
+    assert published["target_kind"]["enum"] == list(
+        observability_feedback.FEEDBACK_TARGET_KINDS
+    )
+    assert sorted(published["provenance"]["enum"]) == sorted(FEEDBACK_PROVENANCES)
+
+
+def test_the_taxonomy_is_an_enumeration_in_the_published_schema():
+    """A coding agent reads the schema; prose in a docstring does not reach it.
+
+    The three categories, the six subcategories, the target kinds and the
+    provenances have to appear as enumerations in the generated document, or
+    an agent calling this tool has no way to discover the allowed values short
+    of guessing and being refused. Asserted on the model's own JSON schema,
+    which is what FastAPI embeds, so it runs without credentials; the
+    assembled OpenAPI document is checked below where the app can be built.
+    """
+    from fastworkflow.run_fastapi_mcp.utils import PostFeedbackRequest
+
+    _assert_taxonomy_enums(PostFeedbackRequest.model_json_schema()["properties"])
+
+
+def test_the_openapi_document_publishes_the_same_enumerations(app_module):
+    schema = app_module.app.openapi()
+    _assert_taxonomy_enums(
+        schema["components"]["schemas"]["PostFeedbackRequest"]["properties"]
+    )
+
+
+@pytest.mark.parametrize("field,value", [
+    ("category", "insights"),
+    ("subcategory", "what_should_change"),
+    ("target_kind", "sentence"),
+    ("provenance", "anonymous"),
+])
+def test_a_value_outside_the_enumeration_is_refused(field, value):
+    """Refused by the type, not by a string comparison further in."""
+    from pydantic import ValidationError
+
+    from fastworkflow.run_fastapi_mcp.utils import PostFeedbackRequest
+
+    body = dict(
+        turn_key="turn-1", target_label="Turn", comment="text",
+        category="conclusions", subcategory="what_went_wrong",
+    )
+    body[field] = value
+    with pytest.raises(ValidationError) as caught:
+        PostFeedbackRequest(**body)
+    assert field in str(caught.value)
 
 
 def test_session_manager_basic(app_module):
@@ -422,46 +488,111 @@ def test_conversations_list_endpoint(app_module, unique_user_id):
 
 
 def test_post_feedback_endpoint(app_module, unique_user_id):
-    """Test POST /post_feedback endpoint - feedback on in-memory turns"""
+    """POST /post_feedback records a review note against a recorded turn.
+
+    It used to write the agent-memory feedback row — one mutable row per
+    turn, keyed to nothing, read straight back into the agent's
+    `dspy.History` on its next turn. fix-9eg.16 removed that table, that
+    injection and that body. What the route records now is an append-only,
+    categorized note anchored to a turn that actually exists in the channel's
+    observability store, and NOTHING puts it back into a prompt: the
+    conversation history is asserted below to be untouched.
+    """
     client = TestClient(app_module.app)
     init = _initialize(client, unique_user_id)
     headers = _authorize(client, init["access_token"])
-    # Create a turn
-    client.post("/invoke_agent", headers=headers, json={
+    turn = client.post("/invoke_agent", headers=headers, json={
         "user_query": "add 5 and 5",
         "timeout_seconds": 30,
     })
-    response = client.post("/post_feedback", headers=headers, json={
-        "binary_or_numeric_score": True,
-    })
-    assert response.status_code == 200
-    # Verify in-memory updated
+    assert turn.status_code == 200
+    turn_key = turn.json()["turn_key"]
+
     import asyncio
     runtime = asyncio.run(app_module.session_manager.get_session(unique_user_id))
-    assert runtime is not None
-    assert len(runtime.chat_session.conversation_history.messages) > 0
-    last_turn = runtime.chat_session.conversation_history.messages[-1]
-    assert last_turn["feedback"] is not None
-    assert last_turn["feedback"]["binary_or_numeric_score"] == 1.0
-    # Overwrite feedback
+    history_before = list(runtime.chat_session.conversation_history.messages)
+
     response = client.post("/post_feedback", headers=headers, json={
-        "nl_feedback": "Very helpful!",
+        "turn_key": turn_key,
+        "target_kind": "turn",
+        "target_label": "Turn",
+        "comment": "Answered the arithmetic but did not show the steps.",
+        "category": "conclusions",
+        "subcategory": "what_went_wrong",
+        "provenance": "coding_agent",
     })
-    assert response.status_code == 200
+    assert response.status_code == 201, response.text
+    recorded = response.json()["feedback"]
+    assert recorded[-1]["comment"].startswith("Answered the arithmetic")
+    assert recorded[-1]["category"] == "conclusions"
+    assert recorded[-1]["subcategory"] == "what_went_wrong"
+    assert recorded[-1]["feedback_uid"]
+
+    # A second note APPENDS. The old route overwrote one row per turn.
+    response = client.post("/post_feedback", headers=headers, json={
+        "turn_key": turn_key,
+        "target_label": "Turn",
+        "comment": "Show the intermediate sum next time.",
+        "category": "recommendations",
+        "subcategory": "what_to_do",
+        "provenance": "human",
+    })
+    assert response.status_code == 201, response.text
+    assert len(response.json()["feedback"]) == len(recorded) + 1
+
+    listed = client.get("/feedback", headers=headers, params={"turn_key": turn_key})
+    assert listed.status_code == 200
+    assert [row["subcategory"] for row in listed.json()["feedback"]] == [
+        "what_went_wrong", "what_to_do",
+    ]
+
     runtime = asyncio.run(app_module.session_manager.get_session(unique_user_id))
-    last_turn = runtime.chat_session.conversation_history.messages[-1]
-    assert last_turn["feedback"]["nl_feedback"] == "Very helpful!"
-    # Persist on rotation
-    response = client.post("/new_conversation", headers=headers, json={})
-    assert response.status_code == 200 or response.status_code == 500
+    assert runtime.chat_session.conversation_history.messages == history_before
 
 
 def test_post_feedback_validation(app_module):
-    """Test POST /post_feedback validation (both fields null)"""
+    """Unauthenticated, and the body the removed API used, are both refused."""
     client = TestClient(app_module.app)
-    # Both fields null should fail validation (may be 401 if no token provided)
     response = client.post("/post_feedback", json={})
     assert response.status_code in [401, 403, 422]
+    # The old agent-memory body is not a valid note and is not accepted as one.
+    response = client.post("/post_feedback", json={
+        "binary_or_numeric_score": True, "nl_feedback": "Very helpful!",
+    })
+    assert response.status_code in [401, 403, 422]
+
+
+@pytest.mark.parametrize("category,subcategory", [
+    ("conclusions", "observation"),
+    ("recommendations", "what_went_right"),
+    ("insights", "observation"),
+])
+def test_post_feedback_rejects_an_unpaired_category(category, subcategory):
+    """Pairing is validated on the model, so a mismatch is a 422 and never
+    reaches the store. Runs without credentials: it is a schema property."""
+    from pydantic import ValidationError
+
+    from fastworkflow.run_fastapi_mcp.utils import PostFeedbackRequest
+
+    with pytest.raises(ValidationError):
+        PostFeedbackRequest(
+            turn_key="turn-1", target_label="Turn", comment="text",
+            category=category, subcategory=subcategory,
+        )
+
+
+def test_post_feedback_accepts_every_confirmed_pair():
+    from fastworkflow.observability import feedback as observability_feedback
+    from fastworkflow.run_fastapi_mcp.utils import PostFeedbackRequest
+
+    for category in observability_feedback.FEEDBACK_TAXONOMY:
+        for sub in category.subcategories:
+            request = PostFeedbackRequest(
+                turn_key="turn-1", target_label="Turn", comment="text",
+                category=category.value, subcategory=sub.value,
+            )
+            assert request.provenance == "coding_agent"
+            assert request.target_kind == "turn"
 
 
 def test_activate_conversation_endpoint(app_module, unique_user_id):

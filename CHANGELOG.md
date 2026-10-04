@@ -5,6 +5,80 @@ Releases before 3.4.0 were announced in their merge-commit subjects
 with `git tag` and `git log --first-parent main`. This file starts at 3.4.0; it
 does not backfill them.
 
+## 3.5.0 — observability debug UI hardening and winner-selection fixes
+
+The adversarial review of the `run_chatbot` observability UI (`fix-hzux`) is
+resolved, and experiment winner selection no longer has a dead end on deletion
+or recovery.
+
+### Added
+
+- **Process logs in the UI** (`fix-hzux.3`): the spawned FastAPI server's and
+  training's logs are reachable from the debug UI instead of "the terminal".
+- **Parent watch for the FastAPI child** (`fix-hzux.4`):
+  `run_fastapi_mcp --parent_pid` exits when `run_chatbot` dies uncleanly
+  (SIGHUP, SIGKILL, crash), so the next launch no longer finds an orphan on its
+  port.
+- **Derived-turn cache** (`fastworkflow.observability.derived_cache`,
+  `fix-hzux.1`): `/api/turns` reuses per-turn derivations keyed on span count
+  and last row, so a warm scan recomputes only turns that gained spans.
+- **`fastworkflow.observability.turn_derivations`** (`fix-cnoc`): the pure turn
+  derivations (`execution_ledger`, `turn_decision_signals`,
+  `is_low_confidence`, LLM-call cost helpers) live in core observability, with
+  no dependency on the debug UI. `cost_rollup` lives in
+  `fastworkflow.observability.comparison`. The old `run_chatbot` import paths
+  re-export the same objects.
+
+### Changed
+
+- **`run_chatbot` split into per-domain modules** (`fix-hzux.11`): `server.py`
+  and `selection_api.py` become `handler_*` modules behind one route table and
+  one auth chokepoint (`fix-hzux.10`).
+- **The SPA ships as ordered source parts** (`fix-hzux.12`):
+  `run_chatbot/static/index.html` is replaced by `static/src/*`, concatenated
+  at serve time; the wheel includes `static/src/*`.
+- **The "stdlib-only" chatbot is stdlib-only** (`fix-hzux.17`): `fastworkflow`
+  and `fastworkflow.experiment` import their heavy members lazily (PEP 562), so
+  starting the chatbot no longer loads dspy, litellm or fastapi.
+- **Navigation and the workflow picker are lighter** (`fix-hzux.6`, `.7`):
+  `/api/navigation` sends summaries with an ETag, and the picker stops polling
+  when it is not shown.
+- **Workflow activation no longer blocks a request for seconds** or mutates
+  session state other threads read without a lock (`fix-hzux.5`).
+- **Initial winner election picks the group's oldest member** (`fix-kkod`), not
+  whichever registration happens to trigger it.
+- **A group's sole experiment can be deleted even when it is the automatic
+  winner** (`fix-65ik`, part): the pointer is withdrawn with an ordinary
+  `retire` decision, and the next experiment of the group is elected
+  automatically. A winner whose group has other members is still refused (409).
+- **Clearer selection errors**: `ExperimentSelected` and `NoCurrentSelection`
+  say why and what to do.
+
+### Fixed
+
+- **Deleted unused experiments stay out of winner selection** (`fix-jfy5`).
+- **FastAPI feedback enforces channel ownership** on reads and writes; an
+  unknown turn and another channel's turn get the same 404 (`fix-bnym`).
+- **FastAPI feedback resolves recorded pass selectors** and refuses spans
+  outside the named pass (`fix-jxkk`).
+- **Paired task feedback filters on the queried side's attempt** (`fix-ptu1`).
+- **Leaked SQLite connections**: per-request observability store connections
+  are closed deterministically instead of by cyclic GC (`fix-hzux.8`).
+- **Request bodies are size-capped**, and a negative `Content-Length` no longer
+  reads to EOF (`fix-hzux.9`).
+- **`run_chatbot` reports its own failures**: access log restored,
+  `logger.exception` on 500s (`fix-hzux.2`); the SPA no longer swallows errors
+  in empty catches (`fix-hzux.15`).
+- **Trace view and transcript stay bounded**: multi-MB span payloads render
+  lazily and superseded fetches are cancelled (`fix-hzux.16`).
+- **The debug rail is keyboard-operable** (`fix-hzux.14`).
+
+### Known limits
+
+- A permanently lost evidence store still leaves new comparison groups in its
+  workflow without a winner, and a winner-less group cannot be promoted into
+  (`fix-65ik`, open).
+
 ## 3.4.0 — observation offloading and search
 
 **Observation offloading and answer-time rehydration become the framework's

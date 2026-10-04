@@ -28,7 +28,6 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
-import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -985,7 +984,7 @@ class TestPage:
         assert b"var LOW_CONFIDENCE_DEFAULT_MARGIN = 0.2" in page
         assert b'id="fLowConf"' not in page and b'id="fLowConfMargin"' not in page
         assert b'id="convList"' in page
-        assert b"appendSignalChips(sub, t.decision_signals)" in page          # rail rows
+        # Rail rows are label-only (owner decision 2026-09-29); signals show in the turn view.
         assert b"appendSignalChips(container, turn.decision_signals)" in page # turn header
         assert b"appendSignalChips(sub, stamps.decision_signals)" in page     # workspace links
         assert b'"asked the user"' in page and b'"consequence "' in page
@@ -1003,9 +1002,20 @@ class TestPage:
         assert b"function fmtCostAmount(cost)" in page
         assert b'"cost not recorded"' in page
         assert b"function fmtCost(duration, tokens, cost)" in page
-        assert b"cost: addCost(spanCost(span), sumCost(children))" in page
-        assert b"appendCostChip(sub, t.llm_cost)" in page
-        assert b"appendCostChip(subLine, row.llm_cost)" in page
+        # A level charges its own call only when no other call is already
+        # charged for the same provider response, whether that other call nests
+        # inside it or sits beside it. Charging both doubled the tree's total
+        # (fix-9eg.5, then shared-response-cost for the sibling shape). This
+        # assertion previously pinned the nesting-only form.
+        assert b"cost: addCost(own.cost, sumCost(children))" in page
+        assert b"function chargeFolds(byId)" in page
+        assert b'own = { tokens: sharedTokens(), cost: sharedCost(), cache: spanCache(span) };' in page
+        # Rail rows carry no cost chip (label-only rail, owner decision 2026-09-29).
+        # The attempt row's chips come from the EVIDENCE view keyed by attempt
+        # (`extra`), not from the decision view's run row (`row`) — that one
+        # carries Best run and comparability and no cost at all, so reading
+        # `row.llm_cost` there would have shown nothing for every attempt.
+        assert b"appendCostChip(subLine, extra.llm_cost)" in page
         assert b"appendCostChip(outcomeLine, row.llm_cost)" in page
         assert b'row("LLM cost", fmtCostAmount(turn.llm_cost))' in page
         # Inside #detail, not a new panel; the rules the page already keeps.

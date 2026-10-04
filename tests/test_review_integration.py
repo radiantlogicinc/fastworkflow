@@ -20,10 +20,19 @@ def _workspace(tmp_path: Path) -> tuple[Path, Path]:
     source = tmp_path / "live.sqlite3"
     store = ObservabilityStore(str(source))
     with store._connect() as conn:
+        # A recorded developer/agent review note in the evidence store. The
+        # point of the fixture is that formal blinded review is a SEPARATE
+        # sidecar: it must not read, rewrite or count this row. It used to be
+        # a row in the agent-memory `feedback` table, which fix-9eg.16
+        # removed; the separation it demonstrates is unchanged.
         conn.execute(
-            """INSERT INTO feedback (turn_key, feedback_json, updated_at)
-               VALUES (?, ?, ?)""",
-            ("turn-1", '{"kind":"developer-agent","text":"keep separate"}', "now"),
+            """INSERT INTO human_feedback
+                 (feedback_uid, turn_key, target_kind, span_ids_json,
+                  target_label, comment, provenance, category, subcategory,
+                  anchors_json, created_at)
+               VALUES (?, ?, 'turn', '[]', 'Turn', ?, 'coding_agent',
+                       'conclusions', 'what_went_wrong', '{}', 'now')""",
+            ("fb-fixture-1", "turn-1", "keep separate"),
         )
         conn.commit()
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -139,7 +148,7 @@ def test_assignment_stack_preserves_roles_revisions_and_sealed_evidence(tmp_path
     immutable_uri = f"{archive.resolve().as_uri()}?mode=ro&immutable=1"
     with sqlite3.connect(immutable_uri, uri=True) as conn:
         feedback_before = conn.execute(
-            "SELECT turn_key, feedback_json, updated_at FROM feedback"
+            "SELECT feedback_uid, turn_key, comment, created_at FROM human_feedback"
         ).fetchall()
 
     with _serve(manifest) as server:
@@ -246,6 +255,6 @@ def test_assignment_stack_preserves_roles_revisions_and_sealed_evidence(tmp_path
     assert archive.read_bytes() == archive_before
     with sqlite3.connect(immutable_uri, uri=True) as conn:
         feedback_after = conn.execute(
-            "SELECT turn_key, feedback_json, updated_at FROM feedback"
+            "SELECT feedback_uid, turn_key, comment, created_at FROM human_feedback"
         ).fetchall()
     assert feedback_after == feedback_before

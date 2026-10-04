@@ -3,7 +3,7 @@
 This document specifies an HTTP-only Model Context Protocol (MCP) server for FastWorkflow. It is intended for client agents (e.g., Claude Desktop) to interrogate and use FastWorkflow workflows via a stable, sessioned API surface.
 
 The spec balances two interaction styles:
-- Coarse-grained tools mirroring the FastAPI behavior (initialize, invoke_agent/assistant, conversations, feedback).
+- Coarse-grained tools mirroring the FastAPI behavior (initialize, invoke_agent/assistant, conversations, recorded feedback comments).
 - A fine-grained explicit `execute_command` tool for clients that prefer to perform their own planning and parameter formatting.
 
 No agent-internal tools (e.g., ask_user, intent_misunderstood) are exposed. Current context is not returned by `get_workflow_info`; clients should use the `what_is_current_context` command (discoverable via `get_commands`) and read the `context` field in every `CommandOutput`.
@@ -12,7 +12,7 @@ No agent-internal tools (e.g., ask_user, intent_misunderstood) are exposed. Curr
 ## 1) Scope and Goals
 
 - Expose an HTTP-only MCP server (streamable HTTP transport) for a single, pre-configured workflow loaded at server startup.
-- Provide sessioned interactions: initialize, NL agentic turns, deterministic assistant turns, explicit command execution, conversation lifecycle, and feedback.
+- Provide sessioned interactions: initialize, NL agentic turns, deterministic assistant turns, explicit command execution, conversation lifecycle, and recording feedback comments about recorded evidence.
 - Default `user_id` handling: if omitted, use `"default_user"`.
 - Offer discoverability: workflow high-level info (purpose/contexts) and command metadata for the active context.
 - Optionally include live trace events in responses when enabled at server startup.
@@ -174,16 +174,29 @@ All tools are session-scoped (require an active MCP session). Unless specified, 
 - Errors: 404 (not found)
 
 ### 5.10 post_feedback
-- Purpose: Attach optional feedback to the latest turn in the active conversation.
+- Purpose: Record ONE free-form comment about recorded evidence, anchored to an
+  explicit turn or component. Not a score.
+- History: the parameters used to be `{binary_or_numeric_score, nl_feedback}`
+  attached to the latest turn of the active conversation. That agent-memory
+  table was removed (fix-9eg.16) and the score is not reintroduced; the old
+  shape is rejected, not translated.
 - Params:
   ```json
-  { "binary_or_numeric_score": true, "nl_feedback": "string|null" }
+  { "turn_key": "…", "target_kind": "turn", "span_ids": [],
+    "target_label": "Turn", "provenance": "coding_agent",
+    "category": "recommendations", "subcategory": "what_to_do",
+    "comment": "Plan all three items before answering." }
   ```
-- Returns:
-  ```json
-  { "status": "ok" }
-  ```
-- Errors: 404 (no session), 422 (both fields null)
+  `category` and `subcategory` are enums and must pair:
+  `observations_analysis` → `observation` | `analysis`; `conclusions` →
+  `what_went_right` | `what_went_wrong`; `recommendations` → `what_to_do` |
+  `what_not_to_do`. `comment` is arbitrary text. An optional `paired` object
+  names the other execution of a comparison, in its own authorized store.
+- Returns: the turn's comments, including the one just recorded.
+- Errors: 404 (turn not found), 400 (invalid pair or anchor), 409 (unreadable
+  annotation storage)
+- Reads are separate: `GET /api/feedback-notes?turn_key=…`,
+  `GET /api/task-feedback?experiment=…&task=…`, `GET /api/feedback-taxonomy`.
 
 Out of scope for MCP tools: `perform_action`, admin operations (dump/export), action log resources.
 
@@ -275,7 +288,7 @@ Prefer importing FastWorkflow canonical types where available (e.g., `CommandOut
 Map failures to MCP/JSON-RPC error codes/messages analogous to HTTP semantics:
 - 404: Session/user/conversation not found.
 - 409: Concurrent turn in progress for this session.
-- 422: Validation failures (e.g., both feedback fields null, malformed command).
+- 422: Validation failures (e.g., malformed command). An invalid feedback category/subcategory pair is a 400.
 - 504: Timeout waiting for `CommandOutput`.
 - 500: Unexpected error (log stack trace; do not swallow errors).
 
@@ -299,7 +312,7 @@ This section outlines a concrete, modular structure for an HTTP-only MCP server 
   - `UserSessionManager`: keyed by MCP session id; provides `get_or_create(session_id, user_id)`, `get(session_id)`, and lifecycle helpers.
 
 - `conversation_store.py`:
-  - Rdict adapters: load/save list, rotate conversation, fetch latest N, attach feedback.
+  - Rdict adapters: load/save list, rotate conversation, fetch latest N. Turns carry no feedback key; review comments live in the observability store.
   - Enforce uniqueness of `topic` per user (case/whitespace-insensitive; append suffix when needed).
 
 - `workflow_adapter.py`:
@@ -488,7 +501,7 @@ async def invoke_agent(user_query: str, timeout_seconds: int = 60):
 
 Unit tests:
 - Session lifecycle: initialize with/without `user_id`, per-session serialization (409 on concurrent turns), timeout behavior (504), and error mapping.
-- Validation: 422 for malformed `execute_command`, feedback XOR rule (at least one non-null field).
+- Validation: 422 for malformed `execute_command`; 400 for a feedback category/subcategory pair that is not one of the six allowed combinations.
 - Discovery: `get_workflow_info` (no current_context), `get_commands` returns both text and structured metadata.
 
 Integration tests:
@@ -496,7 +509,7 @@ Integration tests:
 - Deterministic path: `initialize` → `invoke_assistant` → assert output.
 - Fine-grained path: `initialize` → `get_commands` → `execute_command`.
 - Conversations: `new_conversation` → `list_conversations` → `activate_conversation` → verify persistence and restoration.
-- Feedback path: `post_feedback` after a turn, verify it is stored on the latest turn.
+- Feedback path: `post_feedback` naming a recorded turn, then `GET /api/feedback-notes` for that turn; verify the comment, its category and its subcategory read back.
 
 
 ## 13) Future Enhancements (Non-Blocking)

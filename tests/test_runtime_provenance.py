@@ -23,6 +23,7 @@ from pydantic import ValidationError
 
 from fastworkflow.observability.provenance import (
     LLM_ROLE_VARS,
+    LOCK_FILENAMES,
     ORPHAN_ROLE_VARS,
     EngineProvenance,
     ModelProvenance,
@@ -283,8 +284,13 @@ def test_lock_hashes_cover_the_files_that_exist():
     assert "poetry.lock" in hashes
     assert hashes["poetry.lock"].startswith("sha256:")
     # Enumerated, not globbed: a lock file that does not exist is simply absent
-    # rather than silently folded into one combined value.
-    assert "uv.lock" not in hashes
+    # rather than silently folded into one combined value. Checked against the
+    # checkout rather than a hardcoded "uv.lock is absent", so a stray local
+    # lock file is reported as present instead of failing the test. At least one
+    # enumerated name must be missing, or the absent half checks nothing.
+    for name in LOCK_FILENAMES:
+        assert (name in hashes) == (REPO_ROOT / name).is_file(), name
+    assert any(not (REPO_ROOT / name).exists() for name in LOCK_FILENAMES)
 
 
 def test_lock_hashes_of_a_directory_without_locks_is_empty(tmp_path):

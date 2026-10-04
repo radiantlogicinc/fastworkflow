@@ -232,16 +232,18 @@ class TestAdditiveSchema:
         assert {"experiment_id", "task_id", "attempt"} <= conv_cols
         assert {"idx_turns_experiment", "idx_conv_experiment_attempt"} <= indexes
 
-    def test_schema_version_is_six_for_create_time_only_columns(self, db_path):
+    def test_schema_version_is_seven_for_create_time_only_columns(self, db_path):
         """fix-42b added create-time-only experiment columns and bumped v1->v2;
         fix-qe2 added experiment_attempts.runtime_snapshot_json and bumped
         v2->v3; fix-aw5 added feedback in v4; fix-46l.2 added feedback
-        provenance in v5; fix-w6w added experiment archival in v6. All are
-        create-time columns with no migration path."""
+        provenance in v5; fix-w6w added experiment archival in v6; fix-9eg.16
+        dropped the agent-memory `feedback` table and gave `human_feedback`
+        its taxonomy, identity and anchor columns in v7. All are create-time
+        columns with no migration path."""
         obs.ObservabilityStore(db_path)
         conn = sqlite3.connect(db_path)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
             attempt_cols = {
                 r[1] for r in conn.execute("PRAGMA table_info(experiment_attempts)")
             }
@@ -250,7 +252,7 @@ class TestAdditiveSchema:
             }
         finally:
             conn.close()
-        assert obs.SCHEMA_VERSION == 6
+        assert obs.SCHEMA_VERSION == 7
         assert "runtime_snapshot_json" in attempt_cols
         assert "archived" in experiment_cols
 
@@ -306,7 +308,7 @@ class TestAdditiveSchema:
             obs.ReadOnlyObservabilityStore(db_path)
         message = str(excinfo.value)
         assert "schema v1" in message
-        assert "requires v6" in message
+        assert f"reads v{obs.MIN_READABLE_SCHEMA_VERSION} and newer" in message
         assert "carries no migration" in message
 
         conn = sqlite3.connect(db_path)
@@ -344,7 +346,7 @@ class TestAdditiveSchema:
         assert store.has_feature(obs.FEATURE_EXPERIMENTS_V1)
         conn = sqlite3.connect(db_path)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == obs.SCHEMA_VERSION
             assert conn.execute(
                 "SELECT count(*) FROM turns WHERE turn_key='legacy'"
             ).fetchone()[0] == 0
@@ -2093,7 +2095,7 @@ class TestRuntimeSnapshotStamp:
         obs.ObservabilityStore(db_path)
         conn = sqlite3.connect(db_path)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == obs.SCHEMA_VERSION
             assert "runtime_snapshot_json" in {
                 r[1] for r in conn.execute("PRAGMA table_info(experiment_attempts)")
             }

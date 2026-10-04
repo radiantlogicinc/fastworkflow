@@ -35,8 +35,7 @@ DDL to recreate or upgrade an evidence database.
 | `artifacts` | `artifact_id`, turn/span anchor, content type, byte size/digest, `inline_value`, capture error |
 | `experiments` | Experiment identity, description, notes, benchmark pin, capture regime, status |
 | `experiment_attempts` | `(experiment_id, task_id, attempt)`, channel, outcome/lifecycle evidence, `runtime_snapshot_json` |
-| `human_feedback` | Append-only timestamped comments anchored to a turn or component spans |
-| `feedback` | Agent-memory feedback; not the human annotation table |
+| `human_feedback` | Append-only timestamped review notes anchored to a turn or component spans, with `category`/`subcategory`, `feedback_uid`, frozen `anchors_json` (v7; a v6 store has the comment columns only) |
 | `train_runs` | Training metadata and `metrics_json` |
 | `diagnostics` | Writer health and store/capture markers |
 
@@ -192,8 +191,8 @@ The full internal `TurnResult`, post-redaction:
 | `list_conversations(channel_id=, limit=, offset=)` / `list_channels()` | Navigation |
 | `get_artifact(artifact_id)` | Offloaded artifact row (`inline_value` is bytes) |
 | `list_train_runs(limit=)` | Training-run metrics rows, newest first (`metrics_json`) |
-| `list_human_feedback(turn_key)` | All component and turn comments, oldest first; decoded `span_ids`, plus parsed `went_wrong` / `worked` / `should_change` |
-| `get_feedback(turn_key)` / `list_feedback(channel_id=, limit=)` | Separate agent-memory feedback |
+| `list_human_feedback(turn_key)` | All component and turn notes, oldest first; decoded `span_ids`, `category`/`subcategory` (None on a v6 row), decoded `anchors` |
+| `list_task_feedback(experiment_id=, task_id=)` | Every note about one task, across attempts and turns, plus notes whose frozen pair anchor names it |
 | `get_experiment(experiment_id)` / `experiment_attempt_rows(experiment_id, task_id=)` | Pin/configuration and attempt records; attempt `runtime_snapshot` is decoded or null |
 | `store_identity()` / `capture_regime()` | Evidence source and capture profile/policy identity |
 | `writer_health()` | The writer's drop/error counters — read this before trusting span completeness |
@@ -287,15 +286,27 @@ for comment in store.list_human_feedback(turn_key):
     # Inspect anchors and json.loads(anchor["attributes"]) alongside the original comment.
 ```
 
-For authorized annotation automation, the UI endpoint is
-`POST /api/human-feedback?turn_key=<encoded-key>` with exactly
-`{"target_kind":"turn","span_ids":[],"target_label":"Turn","comment":"..."}`.
-GET on the same path returns all comments for the turn. Preserve the UI's authentication and
-source selection: add `benchmark_experiment=<id>` for a registered experiment's bound working
-store, or `store_id=<id>` for workspace reads. Workspace POST is refused; annotate the working
-database. The server uses the narrow `ObservabilityStore.open_for_annotation` path internally;
-it is not a reason to open a writer during analysis.
+For authorized annotation automation, the write endpoint is
+`POST /post_feedback?turn_key=<encoded-key>` with exactly
+`{"target_kind":"turn","span_ids":[],"target_label":"Turn","comment":"...",`
+`"provenance":"coding_agent","category":"conclusions","subcategory":"what_went_wrong"}`.
+Category and subcategory are enums and must pair; `GET /api/feedback-taxonomy` lists all six
+pairs with the watermark text the composer shows. Reads are separate routes:
+`GET /api/feedback-notes?turn_key=<encoded-key>` for one turn, and
+`GET /api/task-feedback?experiment=<id>&task=<id>` for every note about a task across attempts,
+turns and components (optional `category`, `subcategory`, `provenance`, `target_kind`,
+`component`, `attempt`, `limit`, `offset`; no filter is applied by default).
 
-The `feedback` table and `/api/feedback` read routes instead expose conversation-memory feedback.
-Formal human review assignments have separate rubric/capability controls. Neither should be
-substituted for developer comments or vice versa.
+Preserve the UI's authentication and source selection: add `benchmark_experiment=<id>` for a
+registered experiment's bound working store, or `store_id=<id>` for workspace reads.
+
+A POST is accepted even when the evidence must not be written. For a workspace store (sealed or
+not) and for a store an older build wrote, the note is appended to an annotation sidecar,
+`<stem>.feedback.sqlite3` beside the evidence, and the evidence file is byte-identical
+afterwards; the response carries `"annotated": true` and the reads return the union. Otherwise
+the server uses the narrow `ObservabilityStore.open_for_annotation` path; that is not a reason to
+open a writer during analysis.
+
+The agent-memory `feedback` table and the `/api/feedback` read routes it backed were removed with
+their `dspy.History` injection (fix-9eg.16); those paths now 404. Formal human review assignments
+have separate rubric/capability controls and are not these comments.
