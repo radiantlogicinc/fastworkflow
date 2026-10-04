@@ -171,6 +171,8 @@ function showExperiment(experimentId) {
       exp.description
         ? ("Description: " + exp.description)
         : "Review outcomes, follow the evidence, and capture what you learn.");
+    var intro = actions.parentNode.querySelector(".intro");
+    intro.insertBefore(el("div", "recordId", "ID: " + experimentId), intro.querySelector("p"));
     if (exp.benchmark_id && !(session && session.workspace_mode)) {
       var archive = el("button", "ghost", exp.archived ? "Unarchive experiment" : "Archive experiment");
       archive.title = exp.archived
