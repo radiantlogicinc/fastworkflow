@@ -27,6 +27,44 @@ function expCrumbs(container, trail) {
   container.appendChild(bar);
 }
 
+/* The same experiment id can be recorded in more than one store, so a node is
+   this page's only when its source is the one the page reads from. */
+function experimentNodeMatches(experimentId) {
+  return function (n) {
+    return n.kind === "experiment" && n.experiment_id === experimentId &&
+      (n.source && n.source.benchmark_experiment || null) === benchmarkExperimentSource;
+  };
+}
+
+function hierarchyCrumb(path) {
+  var node = path[path.length - 1];
+  return { label: hierarchyLabel(node), onClick: function () {
+    activateHierarchy(findHierarchyByKey(node.key) || path, true);
+  } };
+}
+
+/* An experiment's crumbs start where the rail does: Benchmarks, then the
+   branch the experiment sits under, each landing where its rail row would.
+   The rail can hold no node for it (a workspace, an evidence store it could
+   not open, a run recorded since the last refresh), so the benchmark the
+   experiment record names stands in, remembered per source for the task page,
+   which renders before any experiment record is read. */
+var experimentBenchmarks = {};
+function experimentAncestorCrumbs(experimentId, exp) {
+  var scoped = String(benchmarkExperimentSource) + "\u001f" + experimentId;
+  if (exp) { experimentBenchmarks[scoped] = exp.benchmark_id || null; }
+  var path = findHierarchy(experimentNodeMatches(experimentId));
+  if (path) { return path.slice(0, -1).map(function (_, i) { return hierarchyCrumb(path.slice(0, i + 1)); }); }
+  var crumbs = [hierarchyRoot ? hierarchyCrumb([hierarchyRoot]) : { label: "Benchmarks", onClick: showBenchmarks }];
+  if (!(scoped in experimentBenchmarks)) { return crumbs; }
+  var benchmarkId = experimentBenchmarks[scoped];
+  var branch = findHierarchy(function (n) { return n.kind === "benchmark" && (n.benchmark_id || null) === benchmarkId; });
+  if (branch) { crumbs.push(hierarchyCrumb(branch)); }
+  else if (benchmarkId) { crumbs.push({ label: benchmarkId, onClick: function () { showBenchmark(benchmarkId); } }); }
+  else { crumbs.push({ label: "Experiments without a benchmark" }); }
+  return crumbs;
+}
+
 function expStatusPill(status) {
   var cls = status === "complete" ? "pill ok"
     : (status === "invalid" ? "pill err" : "pill wait");
@@ -106,8 +144,7 @@ function showExperiments() {
 }
 
 function showExperiment(experimentId) {
-  focusHierarchy(function (n) { return n.kind === "experiment" && n.experiment_id === experimentId &&
-    (n.source && n.source.benchmark_experiment || null) === benchmarkExperimentSource; });
+  focusHierarchy(experimentNodeMatches(experimentId));
   var nav = expNavToken();
   state.experimentId = experimentId;
   state.experimentTask = null;
@@ -129,10 +166,7 @@ function showExperiment(experimentId) {
        author may or may not have written, and a page whose heading is a
        paragraph (or blank) is no longer a heading. */
     var expName = "Experiment · " + experimentId.slice(-8);
-    expCrumbs(d, [
-      { label: "Experiments", onClick: showExperiments },
-      { label: expName }
-    ]);
+    expCrumbs(d, experimentAncestorCrumbs(experimentId, exp).concat([{ label: expName }]));
     var actions = pageHeader(d, exp.archived ? "ARCHIVED EXPERIMENT" : "RECORDED EXPERIMENT", expName,
       exp.description
         ? ("Description: " + exp.description)
@@ -385,14 +419,13 @@ function showExperimentTask(experimentId, taskId, label) {
   state.experimentTask = taskId;
   var d = document.getElementById("detail");
   clear(d);
-  var crumbs = [
-    { label: "Experiments", onClick: showExperiments },
+  var crumbs = experimentAncestorCrumbs(experimentId).concat([
     /* the experiment's NAME, matching the parent view; a deep link that has
        no name in hand builds the same one out of the id */
     { label: label || ("Experiment · " + experimentId.slice(-8)),
       onClick: function () { showExperiment(experimentId); } },
     { label: taskId }
-  ];
+  ]);
   /* Compare state belongs to one task. Arriving at a different task resets it
      rather than carrying "attempt 3" into a task that has two. */
   resetTaskCompare(experimentId, taskId);

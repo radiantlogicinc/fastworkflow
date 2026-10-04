@@ -76,6 +76,32 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   await until(contestSettled);
   assert.equal(d.getElementById('detail').textContent, railView);
   assert.equal(w.benchmarkExperimentSource, eid);
+  // The experiment and its task pages spell the whole trail from Benchmarks,
+  // not from the legacy flat Experiments list.
+  const pageCrumbs = () => d.querySelector('#detail .crumbs');
+  const assertTrail = (...tail) => {
+    const text = pageCrumbs().textContent;
+    assert.ok(text.startsWith('Benchmarks'), text);
+    assert.ok(!text.startsWith('Experiments'), text);
+    for (const label of ['Tuning benchmark', ...tail]) assert.ok(text.includes(label), text);
+  };
+  assertTrail(expName);
+  const tasksHead = [...d.querySelectorAll('#detail h2')].find(e=>e.textContent==='Tasks');
+  const taskRow = [...d.querySelectorAll('#detail .listItem')]
+    .find(e=>tasksHead.compareDocumentPosition(e) & w.Node.DOCUMENT_POSITION_FOLLOWING);
+  const taskId = taskRow.querySelector('.title').textContent;
+  taskRow.click();
+  await until(()=>[...d.querySelectorAll('#detail h2')].some(e=>e.textContent==='Attempts'));
+  assertTrail(expName, taskId);
+  for (const view of ['compare', 'feedback']) {
+    d.querySelector(`#detail [data-task-view="${view}"]`).click();
+    await until(()=>d.querySelector(`#detail [data-task-view="${view}"]`)?.getAttribute('aria-selected')==='true');
+    assertTrail(expName, taskId);
+  }
+  [...pageCrumbs().querySelectorAll('button')].find(e=>e.textContent==='Tuning benchmark').click();
+  await until(()=>d.querySelector('#detail h1')?.textContent==='Tuning benchmark');
+  assert.ok(find('Tuning benchmark').parentElement.classList.contains('selected'));
+  assert.equal(d.querySelector('#detail [data-task-view]'), null);
   click('task'); // conversation node
   assert.ok(d.getElementById('detail').textContent.includes('1 turns'));
   assert.equal(w.benchmarkExperimentSource, eid);

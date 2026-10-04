@@ -1275,7 +1275,7 @@ function showBenchmarkExperiment(id) {
     if (benchNavStale(nav)) { return; }
     clear(d); var row = data.experiment, manifest = data.benchmark;
     expCrumbs(d, [{label: "Benchmarks", onClick: showBenchmarks},
-      {label: manifest.title || row.benchmark_id, onClick: function () { showBenchmark(row.benchmark_id, row.benchmark_version); }}, {label: "Experiment"}]);
+      {label: manifest.title || row.benchmark_id, onClick: function () { showBenchmark(row.benchmark_id, row.benchmark_version); }}, {label: "Experiment · " + id.slice(-8)}]);
     var actions = pageHeader(d, "EXPERIMENT · " + row.benchmark_version, manifest.title || row.benchmark_id, "A dedicated run of this benchmark, with " + manifest.tasks.length + " tasks ready to track.");
     if (data.can_delete) {
       var remove = el("button", "danger", "Delete empty experiment");
