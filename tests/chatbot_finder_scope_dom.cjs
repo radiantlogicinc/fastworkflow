@@ -129,13 +129,16 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
   assert.ok(chip, 'the failure chip is not on the page');
   mark = requests.length;
   chip.click();
+  // A chip only edits the question; nothing is asked until Find.
+  assert.equal(requests.length, mark, 'toggling a chip searched on its own');
+  d.getElementById('turnFindGo').click();
   await until(() => settled() && w.turnFind.markers.step_unsuccessful === true
     && w.turnFind.rows.length === 1, 'the scoped marker search never settled');
 
   assert.deepEqual(keys(), [world.failedTurn]);
   assert.equal(w.turnFind.scope.attempt, 2, 'the marker chip dropped the scope');
   searches(mark).forEach(path => {
-    assert.ok(path.includes('markers_any=step_unsuccessful'), path);
+    assert.ok(path.includes('markers_all=step_unsuccessful'), path);
     assert.ok(path.includes('attempt=2'), path);
   });
 
@@ -153,6 +156,7 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
     'a cleared scope was still sent: ' + path));
 
   failureChip().click();
+  d.getElementById('turnFindGo').click();
   await until(() => settled() && w.turnFind.markers.step_unsuccessful === false,
     'the marker filter never came off');
 

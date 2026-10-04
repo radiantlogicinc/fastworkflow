@@ -52,7 +52,7 @@ each of which the real corpus shows is not academic:
    Where the evidence cannot answer, the field says so and `coverage` counts it.
 
 **Not a second ledger.** The dispatch sequence comes from
-`run_chatbot/server.py`'s `execution_ledger`, through
+`observability/turn_derivations.py`'s `execution_ledger`, through
 `comparison.default_ledger_projection()` and `comparison.project_execution`, so
 a step this module diagnoses is the same step the comparison view aligns and the
 same row the debug UI lists. Anchors are `comparison.EvidenceAnchor`, so a
@@ -69,8 +69,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Mapping, Optional, Protocol, Sequence
+from typing import Any, Callable, Hashable, Iterable, Mapping, Optional, Protocol, Sequence
 
 from fastworkflow import tracing
 from fastworkflow.observability.comparison import (
@@ -86,6 +87,15 @@ from fastworkflow.observability.comparison import (
     anchor_for_step,
     default_ledger_projection,
     project_execution,
+)
+from fastworkflow.observability.derived_cache import (
+    DerivedTurnCache,
+    DerivedTurnEntry,
+    estimate_entry_bytes,
+)
+from fastworkflow.observability.turn_derivations import (
+    is_low_confidence,
+    turn_decision_signals,
 )
 
 # ----------------------------------------------------------------------
@@ -179,6 +189,12 @@ MAX_MARKER_ANCHORS = 8
 # follows `TurnSearchPage.next_scan_cursor`, which resumes exactly where the
 # previous segment stopped and does eventually reach the end of the store.
 SCAN_CHUNK = 500
+
+# Span attribute JSON is the memory hog of a complete scan (hundreds of MB for
+# a large store when 500 turns' spans are materialised together). `list_turns`
+# still walks in SCAN_CHUNK keyset pages; spans are fetched in much smaller
+# sub-batches so peak resident span JSON stays bounded (~tens of MB).
+SPAN_FETCH_BATCH = 8
 
 # A page larger than this is refused rather than silently served: a caller
 # asking for a million rows in one response has made a mistake, and answering it
@@ -292,25 +308,28 @@ LowConfidenceTest = Callable[[Mapping[str, Any], float], bool]
 
 
 def default_decision_signals() -> DecisionSignalProjection:
-    """`run_chatbot/server.py`'s `turn_decision_signals` -- the one implementation.
+    """`observability/turn_derivations.py`'s `turn_decision_signals` -- the one implementation.
 
-    Imported lazily for the reason `comparison.default_ledger_projection` gives:
-    this module must stay usable without the HTTP layer, and the dependency runs
-    one way at import time. The low-confidence filter has to mean the same thing
-    in a complete scan as it does on the page the browser already had, and the
-    only way to guarantee that is to run the same function.
+    Imported from that stdlib-only module for the reason
+    `comparison.default_ledger_projection` gives: this module must stay usable
+    without the HTTP layer, and the dependency runs one way at import time. The
+    low-confidence filter has to mean the same thing in a complete scan as it
+    does on the page the browser already had, and the only way to guarantee that
+    is to run the same function.
     """
-    from fastworkflow.run_chatbot.server import turn_decision_signals
-
+    # No cycle: turn_derivations imports nothing from fastworkflow, and
+    # turn_annotations (which imports TurnQuery, diagnose_turn, and
+    # InvalidTurnQuery from here) re-exports it.
     return turn_decision_signals
 
 
 def default_low_confidence_test() -> LowConfidenceTest:
-    """`run_chatbot/server.py`'s `is_low_confidence`: below the threshold on a
+    """`observability/turn_derivations.py`'s `is_low_confidence`: below the threshold on a
     RECORDED margin only. A turn whose decisions recorded no margin is not low
     confidence, it is unmeasured -- the distinction `.18.1`'s acceptance names."""
-    from fastworkflow.run_chatbot.server import is_low_confidence
-
+    # No cycle: turn_derivations imports nothing from fastworkflow, and
+    # turn_annotations (which imports TurnQuery, diagnose_turn, and
+    # InvalidTurnQuery from here) re-exports it.
     return is_low_confidence
 
 
@@ -1001,7 +1020,7 @@ def turn_markers(
     default for them.
 
     `low_confidence_below` is applied here rather than after paging, using
-    `run_chatbot/server.py`'s own `turn_decision_signals` and `is_low_confidence`
+    `observability/turn_derivations.py`'s own `turn_decision_signals` and `is_low_confidence`
     -- the defect `.18.1` exists to fix is precisely that the server applied
     that test to an already-cut page.
     """
@@ -1871,6 +1890,10 @@ def search_turns(
     *,
     store_id: Optional[str] = None,
     with_facets: bool = True,
+    derived_cache: Optional[DerivedTurnCache] = None,
+    page_stamps: Optional[
+        Callable[[Iterable[Mapping[str, Any]]], Mapping[str, Any]]
+    ] = None,
 ) -> TurnSearchPage:
     """Filter, search, count and page over the COMPLETE authorized dataset.
 
@@ -1887,10 +1910,22 @@ def search_turns(
     a row or skipping one -- which would corrupt `total_matched` in a way no
     caller could detect.
 
-    Spans are read once per chunk through `spans_for_turns`, which is the
-    existing bounded multi-turn read (one chunked query per page, not one query
-    per turn), and are not read at all when neither the predicate nor facets
-    need them.
+    Spans are read in `SPAN_FETCH_BATCH`-sized sub-batches through
+    `iter_spans_for_turn_batches` when the source provides it (still one SQL
+    query per sub-batch, not one query per turn), and are not read at all when
+    neither the predicate nor facets need them. When `page_stamps` is supplied,
+    page stamps (cut-at-limit, decision signals, cost) are computed for EVERY
+    fetched turn while its decoded spans are in hand -- not only for rows that
+    land on the page -- and stored in `derived_cache` with the markers, so
+    later pages are warm instead of refetching and re-decoding those spans;
+    then the span rows are dropped. Without `page_stamps`, rows carry only the
+    diagnostic projection they always have -- agent-facing callers stay
+    unchanged.
+
+    An optional `derived_cache` skips the span fetch entirely on a freshness
+    hit, but only when the source has a stable filesystem identity (and the
+    caller-supplied `store_id` when present). Without a cache, or without a
+    stable identity, behaviour matches the uncached scan.
 
     Scope is whatever the caller opened. This never resolves a path, never
     consults a second store, and passes the experiment/task/attempt filters to
@@ -1907,6 +1942,7 @@ def search_turns(
     filters = query.store_filters()
     reads_record = query.reads_record
     need_markers = query.needs_spans or with_facets or reads_record
+    want_stamps = page_stamps is not None
     rows: list[dict[str, Any]] = []
     total_matched = 0
     total_scanned = 0
@@ -1947,6 +1983,15 @@ def search_turns(
     segmented = query.scan_limit is not None or query.resume_after is not None
     cursor = query.resume_after
     page_full = False
+    store_ident = _stable_store_identity(source, store_id)
+    cacheable = (
+        derived_cache is not None
+        and store_ident is not None
+        and callable(getattr(source, "span_stats_for_turns", None))
+    )
+    policy_key = _loop_policy_cache_key(query.loop_policy)
+    iter_batches = getattr(source, "iter_spans_for_turn_batches", None)
+
     while not page_full:
         chunk_size = SCAN_CHUNK
         if query.scan_limit is not None:
@@ -1960,11 +2005,109 @@ def search_turns(
         if not chunk:
             break
 
-        spans_by_turn: dict[str, list[dict[str, Any]]] = {}
-        if need_markers:
-            spans_by_turn = source.spans_for_turns(
-                [row["turn_key"] for row in chunk if row.get("turn_key")]
-            )
+        if not need_markers:
+            for row in chunk:
+                total_scanned += 1
+                turn_key = _text_or_none(row.get("turn_key"))
+                if turn_key is None:
+                    continue
+                cursor = turn_key
+                if not turn_matches(row, None, query):
+                    continue
+                position = total_matched
+                total_matched += 1
+                if page_start <= position < page_end:
+                    rows.append(dict(row))
+                    if segmented and len(rows) >= query.limit:
+                        page_full = True
+                        break
+            continue
+
+        row_by_key = {
+            key: row
+            for row in chunk
+            for key in [_text_or_none(row.get("turn_key"))]
+            if key is not None
+        }
+        chunk_keys = list(row_by_key)
+        markers_by_key: dict[str, TurnMarkers] = {}
+        stamps_by_key: dict[str, Mapping[str, Any]] = {}
+        fetch_keys: list[str] = []
+        cache_keys: dict[str, Hashable] = {}
+
+        # The freshness probe yields the cache key both to look an entry up and
+        # to store one after a fetch, so it runs whenever caching is possible --
+        # a cold cache still pays it, because every miss is put below.
+        if cacheable:
+            assert derived_cache is not None and store_ident is not None
+            stats_by_key = source.span_stats_for_turns(chunk_keys)  # type: ignore[attr-defined]
+            for key in chunk_keys:
+                span_count, max_rowid = stats_by_key.get(key, (0, 0))
+                cache_key = _derived_cache_key(
+                    store_ident,
+                    key,
+                    span_count=int(span_count),
+                    max_rowid=int(max_rowid),
+                    turn_row=row_by_key.get(key),
+                    low_confidence_below=query.low_confidence_below,
+                    policy_key=policy_key,
+                    want_stamps=want_stamps,
+                )
+                cache_keys[key] = cache_key
+                hit = derived_cache.get(cache_key)
+                if hit is not None:
+                    markers_by_key[key] = hit.markers
+                    if want_stamps:
+                        stamps_by_key[key] = hit.stamps
+                else:
+                    fetch_keys.append(key)
+        else:
+            fetch_keys = list(chunk_keys)
+
+        if fetch_keys:
+            if callable(iter_batches):
+                batch_iter = iter_batches(fetch_keys, batch_size=SPAN_FETCH_BATCH)
+            else:
+                batch_iter = [(fetch_keys, source.spans_for_turns(fetch_keys))]
+            decoder = _SpanTree(())
+            for _batch_keys, spans_by_turn in batch_iter:
+                for key in _batch_keys:
+                    raw_spans = spans_by_turn.get(key, [])
+                    # Decode attributes once; turn_markers and page stamps both
+                    # accept already-decoded mappings, so a second json.loads
+                    # of the same column is avoided.
+                    decoded = []
+                    for span in raw_spans:
+                        copy = dict(span)
+                        copy["attributes"] = decoder.attributes(span)
+                        decoded.append(copy)
+                    markers = turn_markers(
+                        key,
+                        decoded,
+                        turn_row=row_by_key.get(key),
+                        low_confidence_below=query.low_confidence_below,
+                        loop_policy=query.loop_policy,
+                    )
+                    stamps: Mapping[str, Any] = {}
+                    if want_stamps:
+                        assert page_stamps is not None
+                        stamps = page_stamps(decoded)
+                        stamps_by_key[key] = stamps
+                    markers_by_key[key] = markers
+                    cache_key = cache_keys.get(key)
+                    if cacheable and cache_key is not None and derived_cache is not None:
+                        derived_cache.put(
+                            cache_key,
+                            DerivedTurnEntry(
+                                markers=markers,
+                                stamps=dict(stamps) if want_stamps else {},
+                                approx_bytes=estimate_entry_bytes(
+                                    markers, stamps if want_stamps else {}
+                                ),
+                            ),
+                        )
+                    decoded.clear()
+                spans_by_turn.clear()
 
         for row in chunk:
             total_scanned += 1
@@ -1975,21 +2118,19 @@ def search_turns(
             # accounted whether or not it matched, and a later segment must not
             # walk it again.
             cursor = turn_key
-            markers: Optional[TurnMarkers] = None
-            if need_markers:
+            markers = markers_by_key.get(turn_key)
+            if markers is None:
                 markers = turn_markers(
                     turn_key,
-                    spans_by_turn.get(turn_key, []),
+                    (),
                     turn_row=row,
                     low_confidence_below=query.low_confidence_below,
                     loop_policy=query.loop_policy,
                 )
-                if reads_record:
-                    markers = _widen_with_record(markers, _read_record(source, turn_key))
+            if reads_record:
+                markers = _widen_with_record(markers, _read_record(source, turn_key))
 
-            if with_facets and markers is not None and turn_matches(
-                row, markers, facet_query
-            ):
+            if with_facets and turn_matches(row, markers, facet_query):
                 for marker in markers.markers:
                     if facets.get(marker) is not None:
                         facets[marker] = (facets.get(marker) or 0) + 1
@@ -2000,17 +2141,37 @@ def search_turns(
             total_matched += 1
             if page_start <= position < page_end:
                 annotated = dict(row)
-                if markers is not None:
-                    annotated["diagnosis"] = markers.as_dict()
-                    # The rail's existing chips read these two names; keeping
-                    # them means a row from this scan drops into the current UI
-                    # without the client learning a new shape.
-                    annotated["decision_signals"] = dict(markers.decision_signals)
-                    annotated["markers"] = list(markers.markers)
+                annotated["diagnosis"] = markers.as_dict()
+                # The rail's existing chips read these two names; keeping
+                # them means a row from this scan drops into the current UI
+                # without the client learning a new shape.
+                annotated["decision_signals"] = dict(markers.decision_signals)
+                annotated["markers"] = list(markers.markers)
+                if want_stamps:
+                    assert page_stamps is not None
+                    stamps = stamps_by_key.get(turn_key)
+                    if stamps is None:
+                        stamps = page_stamps(())
+                    annotated.update(stamps)
                 rows.append(annotated)
                 if segmented and len(rows) >= query.limit:
                     page_full = True
                     break
+
+    # When markers were not needed but the caller asked for page stamps, stamp
+    # the page now in small batches so facets=false still avoids a second full
+    # decode in annotate_turn_rows, without materialising the whole store.
+    if want_stamps and not need_markers and rows:
+        assert page_stamps is not None
+        _stamp_page_rows(
+            source,
+            rows,
+            stamps_fn=page_stamps,
+            derived_cache=derived_cache if cacheable else None,
+            store_ident=store_ident,
+            policy_key=policy_key,
+            low_confidence_below=query.low_confidence_below,
+        )
 
     # Whether anything the store's filters admit still lies beyond the cursor.
     # Asked of the store rather than inferred from the loop, because "the chunk
@@ -2044,6 +2205,119 @@ def search_turns(
         query=query.as_dict(),
         store_id=store_id,
     )
+
+
+def _stable_store_identity(
+    source: TurnSearchSource, store_id: Optional[str]
+) -> Optional[Hashable]:
+    """A filesystem-stable cache namespace, or None when caching must be skipped.
+
+    `id(source)` is never used: per-request readers recycle object ids, and
+    workspace archive stores are byte-copies that share turn keys with their
+    live originals.
+    """
+    db_path = getattr(source, "db_path", None)
+    if not isinstance(db_path, str) or not db_path:
+        return None
+    try:
+        real = os.path.realpath(db_path)
+    except OSError:
+        return None
+    if store_id:
+        return (real, str(store_id))
+    return (real,)
+
+
+def _turn_row_cache_fields(turn_row: Optional[Mapping[str, Any]]) -> tuple[Any, ...]:
+    """Every turn-row field `turn_markers` reads (today: only `status`)."""
+    row = turn_row or {}
+    return (_text_or_none(row.get("status")),)
+
+
+def _derived_cache_key(
+    store_ident: Hashable,
+    turn_key: str,
+    *,
+    span_count: int,
+    max_rowid: int,
+    turn_row: Optional[Mapping[str, Any]],
+    low_confidence_below: Optional[float],
+    policy_key: tuple[tuple[str, Any], ...],
+    want_stamps: bool,
+) -> tuple[Any, ...]:
+    return (
+        store_ident,
+        turn_key,
+        span_count,
+        max_rowid,
+        _turn_row_cache_fields(turn_row),
+        low_confidence_below,
+        policy_key,
+        want_stamps,
+    )
+
+
+def _loop_policy_cache_key(policy: LoopPolicy) -> tuple[tuple[str, Any], ...]:
+    return tuple(sorted(policy.as_dict().items()))
+
+
+def _stamp_page_rows(
+    source: TurnSearchSource,
+    rows: list[dict[str, Any]],
+    *,
+    stamps_fn: Callable[[Iterable[Mapping[str, Any]]], Mapping[str, Any]],
+    derived_cache: Optional[DerivedTurnCache],
+    store_ident: Optional[Hashable],
+    policy_key: tuple[tuple[str, Any], ...],
+    low_confidence_below: Optional[float],
+) -> None:
+    """Attach page stamps to already-selected rows, in memory-bounded batches."""
+    need = [row for row in rows if "llm_calls_cut_at_limit" not in row]
+    if not need:
+        return
+    keys = [str(row["turn_key"]) for row in need if row.get("turn_key")]
+    stamps_by_key: dict[str, Mapping[str, Any]] = {}
+    fetch_keys = list(keys)
+    row_by_key = {str(row["turn_key"]): row for row in need if row.get("turn_key")}
+    if (
+        derived_cache is not None
+        and store_ident is not None
+        and len(derived_cache) > 0
+        and callable(getattr(source, "span_stats_for_turns", None))
+    ):
+        stats_by_key = source.span_stats_for_turns(keys)  # type: ignore[attr-defined]
+        fetch_keys = []
+        for key in keys:
+            span_count, max_rowid = stats_by_key.get(key, (0, 0))
+            cache_key = _derived_cache_key(
+                store_ident,
+                key,
+                span_count=int(span_count),
+                max_rowid=int(max_rowid),
+                turn_row=row_by_key.get(key),
+                low_confidence_below=low_confidence_below,
+                policy_key=policy_key,
+                want_stamps=True,
+            )
+            hit = derived_cache.get(cache_key)
+            if hit is not None and hit.stamps:
+                stamps_by_key[key] = hit.stamps
+            else:
+                fetch_keys.append(key)
+    if fetch_keys:
+        iter_batches = getattr(source, "iter_spans_for_turn_batches", None)
+        if callable(iter_batches):
+            batch_iter = iter_batches(fetch_keys, batch_size=SPAN_FETCH_BATCH)
+        else:
+            batch_iter = [(fetch_keys, source.spans_for_turns(fetch_keys))]
+        for batch_keys, spans_by_turn in batch_iter:
+            for key in batch_keys:
+                stamps_by_key[key] = stamps_fn(spans_by_turn.get(key, []))
+            spans_by_turn.clear()
+    for row in need:
+        key = str(row.get("turn_key") or "")
+        row.update(stamps_by_key.get(key) or stamps_fn(()))
+
 
 
 def _read_record(source: TurnSearchSource, turn_key: str) -> Any:

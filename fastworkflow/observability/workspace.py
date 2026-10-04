@@ -167,7 +167,9 @@ class _WorkspaceReadOnlyStore(ReadOnlyObservabilityStore):
         self._immutable = immutable
         super().__init__(db_path)
 
-    def _connect(self, timeout: float = 30.0) -> sqlite3.Connection:
+    # Overrides the raw opener, not `_connect`: the base class builds every
+    # connection (construction probes and closing `with` blocks) from it.
+    def _open_connection(self, timeout: float = 30.0) -> sqlite3.Connection:
         query = "mode=ro&immutable=1" if self._immutable else "mode=ro"
         conn = sqlite3.connect(
             f"{Path(self.db_path).resolve().as_uri()}?{query}",

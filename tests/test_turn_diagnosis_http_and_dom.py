@@ -671,7 +671,15 @@ def test_the_page_never_says_no_matches_before_the_scan_finishes():
 def test_the_page_bounds_what_one_keystroke_can_cost():
     page = run_chatbot_server.load_index_html()
     assert b"var TURN_FIND_SCAN = 200;" in page
-    assert b"var TURN_FIND_DEBOUNCE_MS = 250;" in page
+    # A keystroke costs nothing: the search runs only when Find is submitted,
+    # so there is no per-keystroke timer to bound.
+    assert b"TURN_FIND_DEBOUNCE_MS" not in page
+    assert b"function turnFindSchedule" not in page
+    assert b'getElementById("turnFindText").addEventListener("input"' not in page
+    assert (
+        b'document.getElementById("turnFind").addEventListener("submit", function (event) {\n'
+        b"  event.preventDefault();"
+    ) in page
     # Page smaller than scan is the pairing that used to lose matches; the
     # client picks it deliberately rather than avoiding it.
     assert b"var TURN_FIND_PAGE = 25;" in page

@@ -314,6 +314,10 @@ def test_harness_factory_preserves_registered_identity(tmp_path, monkeypatch):
 def test_delete_empty_registration_preserves_benchmark_and_refuses_stale_runner(setup_server, tmp_path):
     server, folder = setup_server
     benchmark = create(folder)
+    # The first experiment of a group is its winner, and the winner is not
+    # deletable (`fix-jfy5`). This one holds that title so the registration
+    # under test is an ordinary non-selected one.
+    selected = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
     record = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
     eid = record["experiment_id"]
     path = "/api/benchmark-experiments/" + eid
@@ -323,7 +327,10 @@ def test_delete_empty_registration_preserves_benchmark_and_refuses_stale_runner(
     assert setup.load_experiment(folder, eid)["store"] is None
     status, result = _request(server, path, "DELETE")
     assert status == 200 and result["deleted"] == eid
-    assert setup.registered_experiments(folder, benchmark["benchmark_id"]) == []
+    assert [row["experiment_id"] for row in
+            setup.registered_experiments(folder, benchmark["benchmark_id"])] == [
+        selected["experiment_id"]
+    ]
     assert _request(server, path)[0] == 404
     assert _request(server, path, "DELETE")[0] == 404
     assert (folder / "benchmarks" / benchmark["benchmark_id"] / "v1.json").read_bytes() == before
@@ -402,6 +409,11 @@ def test_delete_workspace_and_unrelated_routes_refused(workspace_server):
 def test_delete_and_runner_binding_are_serialized(tmp_path):
     from threading import Barrier
     benchmark = create(tmp_path)
+    # Hold the group's winner title with an experiment nobody races, so the
+    # raced one is always an ordinary non-selected registration: a winner is
+    # not deletable (`fix-jfy5`), and this test is about the file lock between
+    # deletion and a runner's binding, not about selection.
+    setup.create_experiment(tmp_path, benchmark["benchmark_id"], "v1")
     for _ in range(8):
         record = setup.create_experiment(tmp_path, benchmark["benchmark_id"], "v1")
         eid = record["experiment_id"]

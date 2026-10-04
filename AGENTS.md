@@ -38,11 +38,12 @@ running rather than a resource problem. If you are working alongside another age
 **serialise the suite runs**; a run measured against a tree another agent is still
 editing is worthless anyway, so waiting costs nothing.
 
-The suite takes ~50 minutes — 1860 tests, measured 2026-08-20 at v3.1.1 (1846
-passed, 14 skipped); two runs that day, on adjacent trees, took 51:40 and 50:03.
-It said ~24 minutes for a long time, from back when the suite was ~495 tests; if
-you budget against that number you will conclude a healthy run has hung. Budget
-for it rather than backgrounding it and hoping.
+The suite takes ~2 hours 7 minutes — ~5,200 tests, measured 2026-10-03 (4896
+passed, 11 failed, 304 skipped in 2:07:22). It said ~50 minutes before that
+(1860 tests, measured 2026-08-20 at v3.1.1), and ~24 minutes before that, from
+back when the suite was ~495 tests; if you budget against an old number you will
+conclude a healthy run has hung. Budget for it rather than backgrounding it and
+hoping.
 
 ### Browser checks skip themselves unless you ask for them
 

@@ -78,6 +78,8 @@ from .utils import (
     ensure_topic_and_summary,
     reserve_conversation_id,
     record_turn_feedback,
+    assert_channel_owns_turn,
+    FeedbackTurnNotFound,
     try_ensure_topic_and_summary,
     ConversationSummary,
     InitializationRequest,
@@ -114,6 +116,7 @@ from .turns import (
     compute_idempotency_key,
 )
 from . import server_memory
+from .parent_watch import start_parent_liveness_watch
 from .jwt_manager import (
     create_access_token,
     create_refresh_token,
@@ -668,6 +671,14 @@ def load_args():
                             "(`run_chatbot` spawns a server without this flag). While off "
                             "both routes 404 and are absent from the OpenAPI schema; while "
                             "on both additionally require a Bearer token.")
+    # Hidden: set by run_chatbot's launcher so an orphaned child exits when the
+    # chatbot parent disappears without a clean terminate_server.
+    parser.add_argument(
+        "--parent_pid",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     return parser.parse_args()
 
 ARGS = load_args()
@@ -2285,7 +2296,13 @@ async def list_conversations(
         201: {"description": "Review note recorded"},
         400: {"description": "The note does not describe recorded evidence"},
         401: {"description": "Invalid or expired JWT token"},
-        404: {"description": "Session not found"},
+        404: {
+            "description": (
+                "Session not found — or the note names a turn this channel "
+                "does not own, which is indistinguishable from an unknown "
+                "turn by design"
+            )
+        },
         422: {"description": "Malformed body, or category/subcategory do not pair"}
     }
 )
@@ -2309,6 +2326,13 @@ async def post_feedback(
     about the evidence -- the turn, its spans, a declared experiment, task or
     attempt -- is checked against what the store actually recorded.
 
+    Authorization is the same as GET /turns ([A39]): the JWT channel must own
+    EVERY turn the note names, primary and paired alike, and one it does not
+    own is a 404 identical to an unknown key. A `pass_id` on either side is
+    resolved from that turn's recorded `fw.pass` spans, so a pass the evidence
+    does not stamp is refused by name rather than answered with another pass's
+    activity.
+
     Reads live on GET /feedback, so a read is never spelled as a post.
 
     Requires a valid JWT access token in the Authorization header (Bearer token format).
@@ -2328,6 +2352,12 @@ async def post_feedback(
             async with runtime.lock:
                 try:
                     stored = record_turn_feedback(runtime, request, logger)
+                except FeedbackTurnNotFound as exc:
+                    # 404, not 400, and the same 404 an unknown key gets: a
+                    # write refused for ownership must not confirm that the
+                    # turn exists, and it returns nothing about the notes
+                    # already on it.
+                    raise _turn_not_found(exc.turn_key) from exc
                 except (observability_feedback.FeedbackError, ValueError) as exc:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
@@ -2354,7 +2384,12 @@ async def post_feedback(
     responses={
         200: {"description": "Recorded review notes for the turn"},
         401: {"description": "Invalid or expired JWT token"},
-        404: {"description": "Session or turn not found"}
+        404: {
+            "description": (
+                "Session not found, unknown turn, or a turn belonging to "
+                "another channel (the last two are indistinguishable)"
+            )
+        }
     }
 )
 async def get_feedback(
@@ -2368,6 +2403,11 @@ async def get_feedback(
     write surface was renamed, the read was not folded into it. Notes written
     before the taxonomy existed come back with a null category and
     `classified: false` — unclassified, with their text untouched.
+
+    The JWT channel must own the turn ([A39]). Anything else — a foreign turn
+    or an unknown one — is the same 404, so this route cannot be used to
+    confirm that another channel's turn key exists, let alone read the notes
+    on it.
     """
     channel_id = session.channel_id
     try:
@@ -2383,11 +2423,13 @@ async def get_feedback(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="no observability store is active for this channel",
                 )
-            if store.get_turn(turn_key) is None:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"turn not found: {turn_key}",
-                )
+            # Ownership, not mere presence. The store is shared by every
+            # channel this server serves, so a turn being IN it says nothing
+            # about who may read the notes on it (fix-bnym).
+            try:
+                assert_channel_owns_turn(store, runtime.channel_id, turn_key)
+            except FeedbackTurnNotFound as exc:
+                raise _turn_not_found(turn_key) from exc
             return {
                 "turn_key": turn_key,
                 "feedback": observability_feedback.present(
@@ -2696,6 +2738,10 @@ def main():
     server_memory.install_policy(
         keep_history=getattr(ARGS, "keep_dspy_history", False)
     )
+
+    # Chatbot-spawned children pass --parent_pid so an unclean chatbot exit
+    # (SIGHUP / SIGKILL / crash) cannot leave this process orphaned.
+    start_parent_liveness_watch(getattr(ARGS, "parent_pid", None))
     
     # Read LOG_LEVEL from env file to configure uvicorn's logger
     # (env file isn't loaded until lifespan, but uvicorn needs log_level at startup)

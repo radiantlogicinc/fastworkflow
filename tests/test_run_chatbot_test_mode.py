@@ -24,10 +24,12 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import logging
 import os
 import re
 import sys
 import threading
+import time
 import uuid
 import urllib.error
 import urllib.request
@@ -39,6 +41,7 @@ from fastworkflow.observability import store as obs
 from fastworkflow import state_paths
 from fastworkflow.cli import add_run_chatbot_parser
 from fastworkflow.run_chatbot import launcher
+from fastworkflow.run_chatbot import server as run_chatbot_server
 
 
 @pytest.fixture
@@ -255,12 +258,7 @@ class TestCorsOriginFlag:
 
 
 def _spa_bytes() -> bytes:
-    import importlib.resources
-
-    resource = (
-        importlib.resources.files("fastworkflow.run_chatbot") / "static" / "index.html"
-    )
-    return resource.read_bytes()
+    return run_chatbot_server.load_index_html()
 
 
 class TestChatbotTestModeAssets:
@@ -277,8 +275,7 @@ class TestChatbotTestModeAssets:
         assert b'id="tabTurns"' not in page
         assert b'id="tabConvs"' not in page
         assert b'id="channelSel"' not in page
-        assert b"renderNestedTurns" in page
-        assert b"renderConversationGroups" in page
+        assert b"function renderHierarchy()" in page
         assert b"workflowTree" in page
         assert b"wfFolder" in page
         assert b"appendMarkdown" in page
@@ -419,6 +416,19 @@ class TestSpawnDecision:
         # Debug mode is explicitly unaffected.
         assert "debug mode" in plan.reason.lower()
 
+    def test_parent_pid_is_forwarded_when_provided(self):
+        plan = launcher.plan_server_spawn(
+            **self.KW, allow_unsigned_jwt=True, missing_packages=[], parent_pid=4242
+        )
+        assert plan.ok is True
+        assert plan.cmd[plan.cmd.index("--parent_pid") + 1] == "4242"
+
+    def test_parent_pid_absent_when_not_requested(self):
+        plan = launcher.plan_server_spawn(
+            **self.KW, allow_unsigned_jwt=True, missing_packages=[]
+        )
+        assert "--parent_pid" not in plan.cmd
+
     def _chatbot(self, tmp_path, monkeypatch, spawn_options):
         from fastworkflow.run_chatbot import server as run_chatbot_server
 
@@ -432,6 +442,8 @@ class TestSpawnDecision:
         resolved_options = dict(spawn_options)
         resolved_options["env_file_path"] = str(env_file)
         resolved_options["passwords_file_path"] = str(passwords_file)
+        # FakeProc/DeadProc tests do not need the production 1s startup probe.
+        resolved_options.setdefault("startup_probe_seconds", 0.0)
         srv = run_chatbot_server.ChatbotServer(
             port=0, spawn_options=resolved_options
         )
@@ -459,9 +471,6 @@ class TestSpawnDecision:
 
         monkeypatch.setattr(launcher, "plan_server_spawn", capture_plan)
         monkeypatch.setattr(launcher, "spawn_server", lambda plan: _FakeProc())
-        monkeypatch.setattr(
-            "fastworkflow.run_chatbot.server.time.sleep", lambda s: None
-        )
         srv, wf = self._chatbot(
             tmp_path, monkeypatch,
             {"no_server": False, "server_port": 8123,
@@ -498,9 +507,6 @@ class TestSpawnDecision:
 
         monkeypatch.setattr(launcher, "plan_server_spawn", capture_plan)
         monkeypatch.setattr(launcher, "spawn_server", lambda plan: _FakeProc())
-        monkeypatch.setattr(
-            "fastworkflow.run_chatbot.server.time.sleep", lambda s: None
-        )
         srv, wf = self._chatbot(
             tmp_path, monkeypatch,
             {"no_server": False, "expect_encrypted_jwt": True,
@@ -568,9 +574,6 @@ class TestSpawnDecision:
 
         monkeypatch.setattr(launcher, "plan_server_spawn", capture_plan)
         monkeypatch.setattr(launcher, "spawn_server", lambda plan: _FakeProc())
-        monkeypatch.setattr(
-            "fastworkflow.run_chatbot.server.time.sleep", lambda s: None
-        )
         squatter = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         squatter.bind(("127.0.0.1", 0))
         squatter.listen(1)
@@ -596,21 +599,17 @@ class TestSpawnDecision:
         class _DeadProc:
             pid = 4242
             returncode = None
-            _polls = 0
+            alive = True
 
             def poll(self):
-                # Alive through the spawn liveness check and the activation's
-                # own session payload (two polls), dead afterwards.
-                _DeadProc._polls += 1
-                if _DeadProc._polls > 2:
+                # Stay alive through activation's startup wait + payload; the
+                # test flips ``alive`` afterwards to simulate a mid-session death.
+                if not _DeadProc.alive:
                     self.returncode = 3
                     return 3
                 return None
 
         monkeypatch.setattr(launcher, "spawn_server", lambda plan: _DeadProc())
-        monkeypatch.setattr(
-            "fastworkflow.run_chatbot.server.time.sleep", lambda s: None
-        )
         srv, wf = self._chatbot(
             tmp_path, monkeypatch,
             {"no_server": False, "env_file_path": "/env/.env",
@@ -619,6 +618,7 @@ class TestSpawnDecision:
         try:
             first = srv.activate_workflow(wf)
             assert first["server_running"] is True
+            _DeadProc.alive = False
             second = srv.session_payload()
         finally:
             srv.httpd.server_close()
@@ -626,8 +626,140 @@ class TestSpawnDecision:
         assert second["server_url"] is None
         assert second["server_exit_code"] == 3
 
+    def test_auto_spawn_passes_parent_pid(self, tmp_path, monkeypatch):
+        captured = {}
+        real_plan = launcher.plan_server_spawn
 
-class TestRunChatbotCliSurface:
+        def capture_plan(**kwargs):
+            captured.update(kwargs)
+            return real_plan(**kwargs)
+
+        class _FakeProc:
+            pid = 4242
+
+            def poll(self):
+                return None
+
+        monkeypatch.setattr(launcher, "plan_server_spawn", capture_plan)
+        monkeypatch.setattr(launcher, "spawn_server", lambda plan: _FakeProc())
+        srv, wf = self._chatbot(
+            tmp_path,
+            monkeypatch,
+            {
+                "no_server": False,
+                "server_port": 8124,
+                "env_file_path": "/env/.env",
+                "passwords_file_path": "/passwords/.env",
+            },
+        )
+        try:
+            session = srv.activate_workflow(wf)
+        finally:
+            srv.httpd.server_close()
+        assert captured["parent_pid"] == os.getpid()
+        assert session["server_running"] is True
+
+    def test_session_payload_never_tears_across_activations(
+        self, tmp_path, monkeypatch
+    ):
+        """Concurrent session_payload readers must not see a new workflow paired
+        with a previous activation's server_url/db_path. Uses no_server so the
+        publication path is exercised without spawning FastAPI."""
+        from fastworkflow.run_chatbot import server as run_chatbot_server
+
+        monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
+        workflows = []
+        for name in ("wf_a", "wf_b", "wf_c"):
+            wf = tmp_path / name
+            (wf / "_commands").mkdir(parents=True)
+            workflows.append(str(wf))
+        srv = run_chatbot_server.ChatbotServer(
+            port=0,
+            spawn_options={"no_server": True, "server_port": 9001},
+        )
+        stop = threading.Event()
+        torn: list[tuple[str, str]] = []
+
+        def reader():
+            while not stop.is_set():
+                payload = srv.session_payload()
+                path = payload.get("workflow_path") or ""
+                db = payload.get("db_path") or ""
+                if path and db:
+                    expected_db = state_paths.observability_db(path)
+                    if db != expected_db:
+                        torn.append((path, db))
+                # Also reject a workflow path from one activation with a
+                # server_url that names a different fixed port from options —
+                # with no_server the URL is always the configured port, so the
+                # interesting check is path/db consistency above.
+
+        readers = [
+            threading.Thread(target=reader, daemon=True) for _ in range(4)
+        ]
+        for thread in readers:
+            thread.start()
+        try:
+            for _ in range(40):
+                for wf in workflows:
+                    srv.activate_workflow(wf)
+        finally:
+            stop.set()
+            for thread in readers:
+                thread.join(timeout=2)
+            srv.httpd.server_close()
+        assert torn == []
+
+
+class TestParentLivenessWatch:
+    def test_child_exits_when_parent_is_sigkilled(self):
+        """Real processes: a parent that starts only the watcher is SIGKILLed;
+        the child must exit within ~10s. Avoids spinning up FastAPI/uvicorn."""
+        import subprocess
+        import textwrap
+
+        parent_src = textwrap.dedent(
+            """
+            import os, sys, subprocess, time
+            child_src = r'''
+            import sys
+            from fastworkflow.run_fastapi_mcp.parent_watch import watch_parent_until_gone
+            watch_parent_until_gone(int(sys.argv[1]), interval_s=0.2, grace_s=1.0)
+            '''
+            child = subprocess.Popen(
+                [sys.executable, "-c", child_src, str(os.getpid())],
+            )
+            sys.stdout.write(f"child_pid={child.pid}\\n")
+            sys.stdout.flush()
+            time.sleep(60)
+            """
+        )
+        parent = subprocess.Popen(
+            [sys.executable, "-c", parent_src],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert parent.stdout is not None
+        line = parent.stdout.readline().strip()
+        assert line.startswith("child_pid="), (line, parent.stderr.read() if parent.stderr else "")
+        child_pid = int(line.split("=", 1)[1])
+        os.kill(parent.pid, 9)  # SIGKILL — unclean exit, no terminate_server
+        parent.wait(timeout=5)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            try:
+                os.kill(child_pid, 9)
+            except ProcessLookupError:
+                pass
+            pytest.fail(f"watcher child pid {child_pid} did not exit within 10s")
+
     def _parser(self):
         parser = argparse.ArgumentParser()
         subparsers = parser.add_subparsers(dest="command", required=True)
@@ -764,9 +896,10 @@ class TestChatPaneRestoresLatestConversation:
         assert b"tmClearLog();" in page
         # New conversation must replace the restored thread, not append to it.
         assert b'tm.activeConversationId = null' in page
-        assert b"New conversation started (the previous one was saved and titled)." in page
+        assert b'showNotice("New conversation started")' in page
         handler = page.split(b'tm.activeConversationId = null')[1][:200]
         assert b"tmClearLog();" in handler
+        assert b'showNotice("New conversation started")' in handler
 
     def test_highest_conversation_id_is_the_one_to_continue(
         self, tmp_path, monkeypatch
@@ -811,3 +944,136 @@ class TestChatPaneRestoresLatestConversation:
         finally:
             srv.shutdown()
             thread.join(timeout=5)
+
+
+def _auth_get(server, path: str) -> tuple[int, dict]:
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{server.port}{path}",
+        headers={"Authorization": f"Bearer {server.token}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as err:
+        return err.code, json.loads(err.read() or b"{}")
+
+
+def _wait_for_log_line(path: str, needle: str, timeout_s: float = 5.0) -> str:
+    deadline = time.time() + timeout_s
+    text = ""
+    while time.time() < deadline:
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                text = handle.read()
+            if needle in text:
+                return text
+        time.sleep(0.05)
+    return text
+
+
+def _stub_server_plan(tmp_path, message: str, sleep_s: float = 30):
+    """A real spawn plan whose command is a short Python stub, not uvicorn."""
+    wf = tmp_path / "wf"
+    wf.mkdir(exist_ok=True)
+    env = wf / "fastworkflow.env"
+    passwords = wf / "fastworkflow.passwords.env"
+    env.write_text("LLM_AGENT=stub\n", encoding="utf-8")
+    passwords.write_text("LITELLM_API_KEY_AGENT=not-used\n", encoding="utf-8")
+    plan = launcher.plan_server_spawn(
+        workflow_path=str(wf),
+        env_file_path=str(env),
+        passwords_file_path=str(passwords),
+        chatbot_origin="http://127.0.0.1:9",
+        server_port=8123,
+        allow_unsigned_jwt=True,
+        missing_packages=[],
+        parent_pid=os.getpid(),
+    )
+    assert plan.ok, plan.reason
+    assert plan.cmd[plan.cmd.index("--host") + 1] == "127.0.0.1"
+    assert plan.cmd[plan.cmd.index("--parent_pid") + 1] == str(os.getpid())
+    plan.cmd = [
+        sys.executable,
+        "-c",
+        "import time\n"
+        f"print({message!r}, flush=True)\n"
+        f"time.sleep({sleep_s})\n",
+    ]
+    return wf, plan
+
+
+class TestSpawnedServerLog:
+    def test_spawn_writes_a_rotated_log_and_not_the_terminal(
+        self, tmp_path, monkeypatch, caplog, capsys
+    ):
+        monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
+        _wf, first = _stub_server_plan(tmp_path, "generation-one")
+        procs = []
+        try:
+            with caplog.at_level(logging.INFO, logger="fastworkflow.run_chatbot.launcher"):
+                proc = launcher.spawn_server(first)
+            procs.append(proc)
+            assert os.getsid(proc.pid) == proc.pid
+            assert "generation-one" in _wait_for_log_line(first.log_path, "generation-one")
+            assert any(first.log_path in record.message for record in caplog.records)
+            captured = capsys.readouterr()
+            assert "generation-one" not in captured.out
+            assert "generation-one" not in captured.err
+            assert first.log_path not in captured.out
+            launcher.terminate_server(proc, grace_seconds=2)
+
+            _wf, second = _stub_server_plan(tmp_path, "generation-two")
+            assert second.log_path == first.log_path
+            proc2 = launcher.spawn_server(second)
+            procs.append(proc2)
+            assert "generation-two" in _wait_for_log_line(
+                second.log_path, "generation-two"
+            )
+            current = open(second.log_path, encoding="utf-8").read()
+            previous = open(second.log_path + ".1", encoding="utf-8").read()
+            assert "generation-two" in current
+            assert "generation-one" not in current
+            assert "generation-one" in previous
+            assert not os.path.exists(second.log_path + ".2")
+        finally:
+            for proc in procs:
+                if proc.poll() is None:
+                    launcher.terminate_server(proc, grace_seconds=2)
+
+    def test_killed_child_tail_is_readable_through_the_api(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
+        wf, plan = _stub_server_plan(
+            tmp_path, "spawned-server-ready OPENAI_API_KEY=fw-spawn-secret"
+        )
+        proc = launcher.spawn_server(plan)
+        srv = None
+        thread = None
+        try:
+            text = _wait_for_log_line(plan.log_path, "spawned-server-ready")
+            assert "spawned-server-ready" in text
+            launcher.terminate_server(proc, grace_seconds=2)
+            assert proc.poll() is not None
+            srv = run_chatbot_server.ChatbotServer(
+                workflow_path=str(wf),
+                port=0,
+                spawn_options={"no_server": True},
+            )
+            thread = threading.Thread(target=srv.serve_forever, daemon=True)
+            thread.start()
+            status, data = _auth_get(srv, "/api/logs/server?tail=20")
+            assert status == 200
+            assert data["exists"] is True
+            assert data["path"] == os.path.abspath(plan.log_path)
+            joined = "\n".join(data["lines"])
+            assert "spawned-server-ready" in joined
+            assert "fw-spawn-secret" not in joined
+            assert "OPENAI_API_KEY=[REDACTED]" in joined
+        finally:
+            if proc.poll() is None:
+                launcher.terminate_server(proc, grace_seconds=2)
+            if srv is not None:
+                srv.shutdown()
+            if thread is not None:
+                thread.join(timeout=5)

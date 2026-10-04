@@ -47,7 +47,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Iterable, Iterator, Mapping, Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -1693,6 +1693,32 @@ def _present_offload_tables(conn: sqlite3.Connection) -> tuple[str, ...]:
     return tuple(table for table in _OFFLOAD_EVIDENCE_TABLES if table in found)
 
 
+class _ClosingConnection:
+    """sqlite3.Connection wrapper that closes on ``with`` exit.
+
+    ``with sqlite3.Connection`` commits/rollbacks but does not close. This
+    wrapper restores ``with self._connect() as conn`` as a leak-free pattern
+    while still proxying attributes so ``conn = self._connect(); ...;
+    conn.close()`` keeps working for the few long-held-handle call sites.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        object.__setattr__(self, "_conn", conn)
+
+    def __enter__(self) -> sqlite3.Connection:
+        self._conn.__enter__()
+        return self._conn
+
+    def __exit__(self, exc_type, exc, tb) -> bool:  # type: ignore[no-untyped-def]
+        try:
+            return bool(self._conn.__exit__(exc_type, exc, tb))
+        finally:
+            self._conn.close()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+
 class ObservabilityStore:
     """Schema owner + synchronous operations on one observability DB.
 
@@ -1736,7 +1762,7 @@ class ObservabilityStore:
         # is writable even when the database file is not, so a leak here
         # would let a read-only store accept writes for as long as it took
         # the garbage collector to get round to it.
-        conn = self._connect(timeout=5.0)
+        conn = self._open_connection(timeout=5.0)
         try:
             return int(conn.execute("PRAGMA user_version").fetchone()[0])
         except Exception:
@@ -1766,12 +1792,25 @@ class ObservabilityStore:
 
     # -- connections ----------------------------------------------------
 
-    def _connect(self, timeout: float = 30.0) -> sqlite3.Connection:
+    def _open_connection(self, timeout: float = 30.0) -> sqlite3.Connection:
+        """Open a raw SQLite connection. Callers that hold it beyond a ``with``
+        block (snapshot pins, sink writer transactions) must close it themselves.
+        """
         conn = sqlite3.connect(self.db_path, timeout=timeout, check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _connect(self, timeout: float = 30.0) -> "_ClosingConnection":
+        """A connection that closes when used as ``with self._connect()``.
+
+        ``with sqlite3.Connection`` commits/rollbacks but does NOT close, so the
+        plain form used to leak a handle per call until cyclic GC reclaimed it.
+        Attribute access still proxies to the underlying connection so the few
+        call sites that do ``conn = self._connect()`` keep working.
+        """
+        return _ClosingConnection(self._open_connection(timeout=timeout))
 
     def _ensure_schema(self) -> None:
         """Create or open the schema; replace a populated DB from an older build.
@@ -2003,7 +2042,7 @@ class ObservabilityStore:
         """
         conn = None
         try:
-            conn = self._connect(timeout=5.0)
+            conn = self._open_connection(timeout=5.0)
             row = conn.execute(
                 "SELECT value FROM diagnostics WHERE key='schema_features'"
             ).fetchone()
@@ -3272,6 +3311,63 @@ class ObservabilityStore:
                 for row in rows:
                     spans_by_turn[row["trace_id"]].append(dict(row))
         return spans_by_turn
+
+    def iter_spans_for_turn_batches(
+        self,
+        turn_keys: Iterable[str],
+        *,
+        batch_size: int = 15,
+    ) -> Iterable[tuple[list[str], dict[str, list[dict[str, Any]]]]]:
+        """Yield span rows in small turn-key batches on one shared connection.
+
+        Same row shape as `spans_for_turns`, but never materialises more than
+        ``batch_size`` turns' spans at once -- needed when a complete scan
+        would otherwise hold hundreds of MB of attribute JSON.
+        """
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
+        keys = list(dict.fromkeys(key for key in turn_keys if key))
+        if not keys:
+            return
+        with self._connect() as conn:
+            for batch in _chunked(keys, batch_size):
+                spans_by_turn: dict[str, list[dict[str, Any]]] = {
+                    key: [] for key in batch
+                }
+                placeholders = ",".join("?" * len(batch))
+                rows = conn.execute(
+                    f"SELECT * FROM spans WHERE trace_id IN ({placeholders}) "
+                    "ORDER BY trace_id, start_ns",
+                    batch,
+                ).fetchall()
+                for row in rows:
+                    spans_by_turn[row["trace_id"]].append(dict(row))
+                yield batch, spans_by_turn
+
+    def span_stats_for_turns(
+        self, turn_keys: Iterable[str]
+    ) -> dict[str, tuple[int, int]]:
+        """Cheap freshness fingerprint per turn: ``{turn_key: (count, max_rowid)}``.
+
+        Used by the derived-turn cache to decide whether a cached markers/stamps
+        entry is still valid without reading span attribute JSON. Every requested
+        key is present; turns with no spans map to ``(0, 0)``.
+        """
+        keys = list(dict.fromkeys(key for key in turn_keys if key))
+        stats: dict[str, tuple[int, int]] = {key: (0, 0) for key in keys}
+        if not keys:
+            return stats
+        with self._connect() as conn:
+            for chunk in _chunked(keys):
+                placeholders = ",".join("?" * len(chunk))
+                rows = conn.execute(
+                    f"SELECT trace_id, COUNT(*), MAX(rowid) FROM spans "
+                    f"WHERE trace_id IN ({placeholders}) GROUP BY trace_id",
+                    chunk,
+                ).fetchall()
+                for trace_id, count, max_rowid in rows:
+                    stats[str(trace_id)] = (int(count), int(max_rowid or 0))
+        return stats
 
     def list_conversations(
         self, channel_id: Optional[str] = None, limit: int = 100, offset: int = 0
@@ -5618,7 +5714,7 @@ class ObservabilityStore:
         # pin makes that close never the last one; no statement is ever run on
         # it, and it is what makes "source bytes verified unchanged" a fact
         # about the source rather than about the timing of a garbage collection.
-        pin = self._connect()
+        pin = self._open_connection()
         before = {path: self._file_digest(path) for path in source_paths}
         confirmed_before = {
             path: self._file_digest(path) for path in source_paths
@@ -5634,8 +5730,8 @@ class ObservabilityStore:
         compacted = target.with_name(f".{target.name}.{uuid.uuid4().hex}.compact")
         try:
             source_uri = Path(source).as_uri() + "?mode=ro"
-            with sqlite3.connect(source_uri, uri=True) as source_conn:
-                with sqlite3.connect(str(temporary)) as snapshot_conn:
+            with contextlib.closing(sqlite3.connect(source_uri, uri=True)) as source_conn:
+                with contextlib.closing(sqlite3.connect(str(temporary))) as snapshot_conn:
                     source_conn.backup(snapshot_conn)
             after_backup = {
                 path: self._file_digest(path) for path in source_paths
@@ -5644,7 +5740,7 @@ class ObservabilityStore:
                 raise SourceChangedDuringArchive(
                     "source DB/WAL bytes changed while taking the snapshot"
                 )
-            with sqlite3.connect(str(temporary)) as snapshot_conn:
+            with contextlib.closing(sqlite3.connect(str(temporary))) as snapshot_conn:
                 snapshot_conn.execute("VACUUM INTO ?", (str(compacted),))
             os.replace(compacted, target)
             after_compaction = {
@@ -5663,7 +5759,7 @@ class ObservabilityStore:
             if archive_digest is None:
                 raise RuntimeError("archive disappeared before verification")
             archive_uri = target.resolve().as_uri() + "?mode=ro"
-            with sqlite3.connect(archive_uri, uri=True) as archive_conn:
+            with contextlib.closing(sqlite3.connect(archive_uri, uri=True)) as archive_conn:
                 identity_row = archive_conn.execute(
                     "SELECT value FROM diagnostics WHERE key=?",
                     (STORE_IDENTITY_DIAGNOSTIC,),
@@ -5941,7 +6037,7 @@ class ObservabilityStore:
         if limit is not None:
             query += " LIMIT ?"
             params.append(int(limit))
-        with contextlib.closing(self._connect()) as conn:
+        with self._connect() as conn:
             if "offload_events" not in _present_offload_tables(conn):
                 return []
             rows = conn.execute(query, params).fetchall()
@@ -6117,7 +6213,7 @@ class ReadOnlyObservabilityStore(ObservabilityStore):
 
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
-        conn = self._connect()
+        conn = self._open_connection()
         try:
             found = conn.execute("PRAGMA user_version").fetchone()[0]
             if found > SCHEMA_VERSION:
@@ -6144,7 +6240,7 @@ class ReadOnlyObservabilityStore(ObservabilityStore):
         self.schema_version = found
         self._features = self._load_features()
 
-    def _connect(self, timeout: float = 30.0) -> sqlite3.Connection:
+    def _open_connection(self, timeout: float = 30.0) -> sqlite3.Connection:
         conn = sqlite3.connect(
             f"file:{self.db_path}?mode=ro",
             uri=True,
@@ -6153,6 +6249,9 @@ class ReadOnlyObservabilityStore(ObservabilityStore):
         )
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _connect(self, timeout: float = 30.0) -> "_ClosingConnection":
+        return _ClosingConnection(self._open_connection(timeout=timeout))
 
 
 # ----------------------------------------------------------------------
@@ -6344,7 +6443,7 @@ class SQLiteTraceSink:
         started = time.monotonic()
         conn = None
         try:
-            conn = self.store._connect(
+            conn = self.store._open_connection(
                 timeout=float(
                     _env_int("FW_OBS_SYNC_WRITE_TIMEOUT_S", _DEFAULT_SYNC_WRITE_TIMEOUT_S)
                 )
@@ -6491,7 +6590,7 @@ class SQLiteTraceSink:
         with self._health_lock:
             snapshot = dict(self._health)
         try:
-            conn = self.store._connect()
+            conn = self.store._open_connection()
             try:
                 conn.execute("BEGIN IMMEDIATE")
                 self.store.merge_writer_health_row(conn, snapshot)
@@ -6509,7 +6608,7 @@ class SQLiteTraceSink:
         "healthy" about a run that dropped records after the last heartbeat.
         """
         try:
-            conn = self.store._connect()
+            conn = self.store._open_connection()
             try:
                 self._maybe_write_health(conn, force=True)
             finally:
@@ -6680,7 +6779,7 @@ class SQLiteTraceSink:
         the digest comparison is still the thing that decides.
         """
         try:
-            conn = self.store._connect()
+            conn = self.store._open_connection()
             try:
                 self._maybe_write_health(conn, force=True)
                 with contextlib.suppress(Exception):
@@ -6723,7 +6822,7 @@ class SQLiteTraceSink:
     def _writer_loop(self) -> None:
         conn: Optional[sqlite3.Connection] = None
         try:
-            conn = self.store._connect()
+            conn = self.store._open_connection()
             while not self._stop.is_set():
                 # The one place this thread stops touching the DB on request
                 # (fix-7de). At the top of the loop, so a parked writer is
@@ -6806,7 +6905,7 @@ class SQLiteTraceSink:
                 return
         conn = None
         try:
-            conn = self.store._connect(
+            conn = self.store._open_connection(
                 timeout=float(
                     _env_int("FW_OBS_SYNC_WRITE_TIMEOUT_S", _DEFAULT_SYNC_WRITE_TIMEOUT_S)
                 )

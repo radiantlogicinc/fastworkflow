@@ -136,7 +136,15 @@ def _evidence_fingerprint(db_path: str) -> dict[str, str]:
     does not open it. The two files below are where rows actually live, so a
     write to evidence still shows up.
     """
-    return {suffix: _digest(f"{db_path}{suffix}") for suffix in ("", "-wal")}
+    wal = f"{db_path}-wal"
+    # An absent `-wal` and an empty one hold the same rows: none. Which one a
+    # settled store has depends on whether some connection was still open when
+    # `_settle` ran, and a read-only open recreates it empty -- neither is a write.
+    no_wal_rows = not os.path.exists(wal) or os.path.getsize(wal) == 0
+    return {
+        "": _digest(db_path),
+        "-wal": "no WAL rows" if no_wal_rows else _digest(wal),
+    }
 
 
 def _promote(control, group_id, candidate, *, actor="reviewer", rationale=None):

@@ -32,7 +32,12 @@ from fastworkflow.observability.comparison import (
     StoreExecutionReader,
     project_execution,
 )
-from fastworkflow.run_chatbot.server import cost_rollup, execution_ledger
+from fastworkflow.observability.derived_cache import DerivedTurnCache
+from fastworkflow.run_chatbot.server import (
+    cost_rollup,
+    execution_ledger,
+    turn_span_stamps,
+)
 
 T0 = 1_700_000_000_000_000_000
 STORE_ID = "diagnosis-store"
@@ -1933,3 +1938,223 @@ def test_malformed_query_values_are_refused_not_coerced(kwargs: dict) -> None:
     """
     with pytest.raises(diag.InvalidTurnQuery):
         diag.TurnQuery(**kwargs)
+
+
+# ----------------------------------------------------------------------
+# Derived-turn cache (markers + page stamps)
+# ----------------------------------------------------------------------
+
+
+def test_search_without_page_stamps_keeps_pre_stamp_row_keys(
+    store: obs.ObservabilityStore,
+) -> None:
+    """Without `page_stamps`, rows stay stamp-free (agent-facing contract)."""
+    _navigating_turn(store, "turn-stamp-free")
+    page = diag.search_turns(
+        store, diag.TurnQuery(limit=10), store_id=STORE_ID
+    )
+    assert page.rows
+    stamp_keys = {"llm_calls_cut_at_limit", "llm_cost"}
+    for row in page.rows:
+        assert stamp_keys.isdisjoint(row.keys())
+        assert "markers" in row
+        assert "diagnosis" in row
+
+
+def test_derived_cache_matches_uncached_search(store: obs.ObservabilityStore) -> None:
+    """Cached and uncached complete scans must agree byte-for-byte on the page."""
+    from fastworkflow.observability.derived_cache import DerivedTurnCache
+    from fastworkflow.run_chatbot.server import turn_span_stamps
+
+    for index in range(6):
+        _navigating_turn(store, f"turn-{index:02d}")
+    for index in range(6, 10):
+        _plain_turn(store, f"turn-{index:02d}")
+
+    query = diag.TurnQuery(
+        markers_any=(diag.MARKER_CONTEXT_NAVIGATION,),
+        limit=4,
+        low_confidence_below=0.25,
+    )
+    uncached = diag.search_turns(
+        store, query, store_id=STORE_ID, page_stamps=turn_span_stamps
+    )
+    cache = DerivedTurnCache(max_entries=64, max_bytes=1024 * 1024)
+    cold = diag.search_turns(
+        store,
+        query,
+        store_id=STORE_ID,
+        derived_cache=cache,
+        page_stamps=turn_span_stamps,
+    )
+    warm = diag.search_turns(
+        store,
+        query,
+        store_id=STORE_ID,
+        derived_cache=cache,
+        page_stamps=turn_span_stamps,
+    )
+    assert cold.as_dict() == uncached.as_dict()
+    assert warm.as_dict() == uncached.as_dict()
+    assert len(cache) > 0
+
+
+def test_derived_cache_invalidates_when_a_span_is_appended(
+    store: obs.ObservabilityStore,
+) -> None:
+    from fastworkflow.observability.derived_cache import DerivedTurnCache
+
+    turn_key = "turn-cache-1"
+    _plain_turn(store, turn_key)
+    cache = DerivedTurnCache(max_entries=32, max_bytes=1024 * 1024)
+    query = diag.TurnQuery(limit=10)
+    first = diag.search_turns(
+        store, query, store_id=STORE_ID, derived_cache=cache
+    )
+    assert first.rows[0]["turn_key"] == turn_key
+    before_markers = first.rows[0]["markers"]
+
+    # Appending a span changes COUNT(*)/MAX(rowid); the next scan must miss
+    # the stale entry and see the new navigation marker.
+    span = _execute_span(
+        f"{turn_key}-nav",
+        turn_key,
+        call_id="c-nav",
+        command_name="open_project",
+        start_ns=T0 + 1,
+        context_before="Workspace",
+        context_after="Project",
+    )
+    with store._connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        store.upsert_span_rows(conn, [span], store._store_redactor())
+        conn.commit()
+
+    second = diag.search_turns(
+        store, query, store_id=STORE_ID, derived_cache=cache
+    )
+    assert diag.MARKER_CONTEXT_NAVIGATION in second.rows[0]["markers"]
+    assert second.rows[0]["markers"] != before_markers
+
+
+def test_derived_cache_warm_scan_reuses_entries_and_recomputes_only_changed(
+    store: obs.ObservabilityStore,
+) -> None:
+    """A hit hands back the stored entry; a miss puts a freshly built one.
+
+    Equal results alone cannot tell a warm hit from a silent recompute, so
+    entry identity is what proves the warm scan skipped the span fetch.
+    """
+    _plain_turn(store, "turn-warm-a")
+    _plain_turn(store, "turn-warm-b")
+    cache = DerivedTurnCache(max_entries=32, max_bytes=1024 * 1024)
+    query = diag.TurnQuery(limit=10)
+
+    def scan() -> diag.TurnSearchPage:
+        return diag.search_turns(
+            store,
+            query,
+            store_id=STORE_ID,
+            derived_cache=cache,
+            page_stamps=turn_span_stamps,
+        )
+
+    cold = scan()
+    assert len(cache) == 2
+    cold_entries = dict(cache._entries)
+
+    warm = scan()
+    assert warm.as_dict() == cold.as_dict()
+    assert len(cache) == 2
+    assert all(cache._entries[key] is entry for key, entry in cold_entries.items())
+
+    span = _execute_span(
+        "turn-warm-a-nav",
+        "turn-warm-a",
+        call_id="c-nav",
+        command_name="open_project",
+        start_ns=T0 + 1,
+        context_before="Workspace",
+        context_after="Project",
+    )
+    with store._connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        store.upsert_span_rows(conn, [span], store._store_redactor())
+        conn.commit()
+
+    changed = scan()
+    by_key = {row["turn_key"]: row for row in changed.rows}
+    assert diag.MARKER_CONTEXT_NAVIGATION in by_key["turn-warm-a"]["markers"]
+    # The stale entry is left to age out; the changed turn adds a new key and
+    # the untouched turn is still served from its original entry.
+    assert len(cache) == 3
+    assert sum(
+        cache._entries.get(key) is entry for key, entry in cold_entries.items()
+    ) == 2
+
+
+def test_derived_cache_invalidates_when_turn_row_status_changes(
+    store: obs.ObservabilityStore,
+) -> None:
+    """`turn_markers` reads `status` from the turn row; row-only edits must miss."""
+    from fastworkflow.observability.derived_cache import DerivedTurnCache
+
+    turn_key = "turn-status-1"
+    _plain_turn(store, turn_key)
+    cache = DerivedTurnCache(max_entries=32, max_bytes=1024 * 1024)
+    query = diag.TurnQuery(limit=10)
+    first = diag.search_turns(
+        store, query, store_id=STORE_ID, derived_cache=cache
+    )
+    assert diag.MARKER_AWAITING_USER not in first.rows[0]["markers"]
+
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE turns SET status=? WHERE turn_key=?",
+            ("awaiting_user", turn_key),
+        )
+        conn.commit()
+
+    second = diag.search_turns(
+        store, query, store_id=STORE_ID, derived_cache=cache
+    )
+    assert diag.MARKER_AWAITING_USER in second.rows[0]["markers"]
+
+
+def test_derived_cache_small_cap_still_matches_uncached(
+    store: obs.ObservabilityStore,
+) -> None:
+    """A complete scan over more turns than the cap must still match uncached."""
+    from fastworkflow.observability.derived_cache import DerivedTurnCache
+
+    for index in range(12):
+        _plain_turn(store, f"turn-{index:02d}")
+    query = diag.TurnQuery(limit=20)
+    uncached = diag.search_turns(store, query, store_id=STORE_ID)
+    cache = DerivedTurnCache(max_entries=3, max_bytes=1024 * 1024)
+    with_cache = diag.search_turns(
+        store, query, store_id=STORE_ID, derived_cache=cache
+    )
+    assert with_cache.as_dict() == uncached.as_dict()
+    assert len(cache) <= 3
+
+
+def test_derived_cache_is_bounded() -> None:
+    from fastworkflow.observability.derived_cache import (
+        DerivedTurnCache,
+        DerivedTurnEntry,
+    )
+
+    cache = DerivedTurnCache(max_entries=3, max_bytes=1024 * 1024)
+    for index in range(10):
+        cache.put(
+            ("store", f"turn-{index}", 1, index, (None,), None, (), False),
+            DerivedTurnEntry(
+                markers={"i": index},
+                stamps={"llm_calls_cut_at_limit": 0},
+                approx_bytes=64,
+            ),
+        )
+    assert len(cache) == 3
+    assert cache.get(("store", "turn-0", 1, 0, (None,), None, (), False)) is None
+    assert cache.get(("store", "turn-9", 1, 9, (None,), None, (), False)) is not None

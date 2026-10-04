@@ -107,6 +107,10 @@ DECISION_INITIAL = "initial"
 DECISION_PROMOTE = "promote"
 DECISION_KEEP = "keep"
 DECISION_UNDECIDED = "undecided"
+# What `retire_experiment` appends when a registration leaves the contest. Like
+# `initial` it is written by the system, never offered to clients: withdrawing
+# an experiment is a consequence of deleting it, not a verdict about it.
+DECISION_RETIRE = "retire"
 # `initial` is not offered to clients: it is what registration writes once, for
 # the first experiment in a group.
 CLIENT_DECISIONS = frozenset({DECISION_PROMOTE, DECISION_KEEP, DECISION_UNDECIDED})
@@ -121,6 +125,7 @@ SYSTEM_ACTOR_KIND = "system"
 SELECTION_ACTOR_KINDS = frozenset(FEEDBACK_PROVENANCES | {SYSTEM_ACTOR_KIND})
 
 _AUTOMATIC_PROVENANCE = "automatic_first_experiment"
+_RETIREMENT_PROVENANCE = "registration_deleted"
 _MAX_TEXT = 4000
 
 # How many older unadopted peers a refusal reports. The list is diagnostic, not
@@ -216,6 +221,27 @@ class ExperimentSourceCollision(SelectionControlError):
         )
 
 
+class SelectionRetirementRefused(SelectionControlError):
+    """This experiment cannot leave the contest. Two reasons, kept apart:
+
+    - ``is_current_winner`` — the group's pointer names it and the group has
+      other members (or the caller did not pass ``allow_sole_winner``).
+      Withdrawing it would either leave the pointer naming something that is
+      gone, or make this module pick a successor nobody asked it to pick.
+      Neither is a deletion's business, so the caller is refused and told to
+      select a different winner first.
+    - ``has_evidence`` — a run was recorded under it. Retirement is for a
+      registration that never happened; evidence is history, and history stays
+      in the contest it was part of.
+    """
+
+    def __init__(self, experiment_id: str, group_id: Optional[str], reason: str, detail: str) -> None:
+        self.experiment_id = experiment_id
+        self.group_id = group_id
+        self.reason = reason
+        super().__init__(detail)
+
+
 class UnknownComparisonGroup(KeyError):
     """No comparison group with that id exists in this sidecar."""
 
@@ -237,7 +263,13 @@ class ExperimentNotInGroup(ValueError):
 
 
 class NoCurrentSelection(ValueError):
-    """A decision was recorded about a scope that has no current selection."""
+    """A decision was recorded about a scope that has no current selection.
+
+    For the experiment winner that is almost always a group whose election is
+    being withheld because the bootstrap could not read every evidence store
+    (see `adopt_existing_experiments`); the message says so, because "no
+    current winner" alone reads like a bug rather than a wait.
+    """
 
 
 class StaleSelection(ValueError):
@@ -1140,17 +1172,23 @@ class SelectionControlStore:
         # serialise every unrelated registration behind the slowest reader. The
         # transaction below re-checks the pointer, which is what actually
         # decides, so a group initialized while we scanned is seen as initialized.
+        # The scan asks about the group the transaction will actually use: an
+        # existing member stays in the group it first joined.
+        scan_group_id = self._member_group_id(experiment_id) or group_id
         peers: list[str] = []
         scanned: list[str] = []
         unresolved: list[str] = []
-        if allow_initial_winner and self._pointer_missing(group_id):
+        looked = False
+        if allow_initial_winner and self._pointer_missing(scan_group_id):
+            looked = True
             peers, scanned, unresolved = self._unadopted_older_peers(
-                group_id, experiment_id, created_at
+                scan_group_id, experiment_id, created_at
             )
 
         registered = False
         initialized = False
         bootstrap_required = False
+        rescan = False
         with self._write() as conn:
             member = conn.execute(
                 """SELECT group_id, source_id FROM comparison_group_members
@@ -1217,33 +1255,74 @@ class SelectionControlStore:
             if pointer is None and allow_initial_winner:
                 if peers or unresolved:
                     bootstrap_required = True
+                elif not looked:
+                    # The pointer was there when the scan was skipped and is
+                    # gone now: a sole winner was deleted in between
+                    # (`retire_experiment(allow_sole_winner=True)`). Nothing
+                    # was checked for unadopted history, so this transaction
+                    # elects nobody and the registration runs once more, as a
+                    # member now, with the scan.
+                    rescan = True
                 else:
+                    # The OLDEST member takes the pointer, not the caller. A
+                    # group can hold members before it has a winner -- a
+                    # bootstrap that could not read every source registers
+                    # them and elects nobody -- and the registration that
+                    # finally elects is whichever arrives first once the view
+                    # is whole, often a newer one than the history already
+                    # sitting in the group (`fix-kkod`). Same rule as
+                    # `adopt_existing_experiments`: `_order_key`, earliest wins.
+                    elected = min(
+                        conn.execute(
+                            """SELECT experiment_id, created_at
+                                 FROM comparison_group_members WHERE group_id=?""",
+                            (group_id,),
+                        ).fetchall(),
+                        key=lambda m: _order_key(m["created_at"], m["experiment_id"]),
+                    )
+                    elected_id = str(elected["experiment_id"])
                     selection_id = uuid.uuid4().hex
+                    # NOT a hardcoded 1. A group can have history BEFORE it has
+                    # a winner: a bootstrap that could not see every source
+                    # registers members and elects nobody, and a member deleted
+                    # in the meantime appends `retire` at seq 1 (`fix-jfy5`).
+                    # The election that finally arrives is the next sequence
+                    # number; reusing 1 violated the UNIQUE (scope, group,
+                    # scope_key, seq) and lost the election to a swallowed
+                    # IntegrityError, leaving the group winner-less for good.
+                    seq = int(
+                        conn.execute(
+                            """SELECT COALESCE(MAX(seq), 0) FROM selection_decisions
+                                WHERE scope_kind=? AND group_id=? AND scope_key=?""",
+                            (EXPERIMENT_SCOPE, group_id, ""),
+                        ).fetchone()[0]
+                    ) + 1
                     conn.execute(
                         """INSERT INTO selection_pointers
                            (scope_kind, group_id, scope_key, experiment_id,
                             task_id, attempt, selection_id, decision,
                             decision_seq, decided_at)
-                           VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, 1, ?)""",
+                           VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)""",
                         (
                             EXPERIMENT_SCOPE,
                             group_id,
                             "",
-                            experiment_id,
+                            elected_id,
                             selection_id,
                             DECISION_INITIAL,
+                            seq,
                             now,
                         ),
                     )
                     self._append_decision_in_txn(
                         conn,
                         group_id=group_id,
-                        seq=1,
+                        seq=seq,
                         decision=DECISION_INITIAL,
                         previous_experiment_id=None,
                         previous_selection_id=None,
-                        candidate_experiment_id=experiment_id,
-                        new_experiment_id=experiment_id,
+                        candidate_experiment_id=elected_id,
+                        new_experiment_id=elected_id,
                         new_selection_id=selection_id,
                         actor=actor,
                         actor_kind=actor_kind,
@@ -1252,6 +1331,18 @@ class SelectionControlStore:
                         created_at=now,
                     )
                     initialized = True
+        if rescan:
+            again = self._register(
+                experiment_id,
+                row,
+                source_id=source_id,
+                allow_initial_winner=allow_initial_winner,
+                actor=actor,
+                actor_kind=actor_kind,
+                provenance=provenance,
+            )
+            again["registered"] = again["registered"] or registered
+            return again
         if bootstrap_required:
             reason = (
                 f"{len(peers)} older experiment(s) of the same lineage are not "
@@ -1332,6 +1423,9 @@ class SelectionControlStore:
             unresolved = []
         if not sources:
             return [], [], unresolved
+        # Members are skipped here because they are already in the contest,
+        # not because they are newer: the election in `_register` picks the
+        # oldest MEMBER, so an older member is elected rather than outranked.
         members = self._member_ids()
         mine = _order_key(created_at, experiment_id)
         peers: list[str] = []
@@ -1444,6 +1538,198 @@ class SelectionControlStore:
             ],
         }
 
+    def retire_experiment(
+        self,
+        experiment_id: str,
+        *,
+        actor: str = "fastworkflow",
+        actor_kind: str = SYSTEM_ACTOR_KIND,
+        provenance: str = _RETIREMENT_PROVENANCE,
+        rationale: Optional[str] = None,
+        allow_sole_winner: bool = False,
+    ) -> dict[str, Any]:
+        """Withdraw a registration that is being deleted (`fix-jfy5`).
+
+        The bug this closes: registration and election happen together at
+        creation, deletion only tombstoned the registration, so a group could
+        be left naming a winner nobody could open -- unresolvable, listed as a
+        member, and impossible to duplicate, which is the one action the winner
+        screen offers.
+
+        The policy is deliberately small. A member that is NOT the current
+        winner leaves, membership row and all, in ONE transaction that also
+        appends the `retire` row. The current winner does not leave while the
+        group has anybody else in it:
+
+        - Clearing the pointer and stopping would leave the group with no
+          winner while members remain, which is a judgement about the contest
+          that nobody made.
+        - Clearing it and electing a successor would be this module deciding
+          the contest while somebody was deleting something else.
+
+        So it refuses, and the refusal is the whole feature: the caller selects
+        a different winner first and then deletes. That is one user action
+        more, in exchange for a pointer that can never name a tombstone. The
+        refusal covers the AUTOMATIC first winner too -- it is still the
+        experiment every read currently reports, and "nobody chose it" is not
+        the same as "anybody may remove it".
+
+        The one exception is ``allow_sole_winner=True`` with the winner as the
+        group's ONLY member (`fix-65ik`). There is nobody to select instead, so
+        the refusal had no way out: promoting a second experiment and deleting
+        the first only moved the problem onto the second. Neither objection
+        above applies -- a contest with no entrants has no verdict to withhold
+        and no successor to pick -- so the member row AND the pointer go, and
+        the `retire` row records the winner it removed (`new_experiment_id`
+        empty). The next experiment of that lineage is elected automatically,
+        like the first one was. Any other member present means refusal as
+        before; that is checked inside the same transaction, so a registration
+        that joins first turns this into the ordinary refusal.
+
+        The check and the removal are one `BEGIN IMMEDIATE` transaction, which
+        is what makes the interesting race safe in both directions: a promotion
+        that lands first makes this refuse, and a retirement that lands first
+        makes the promotion fail its membership check. Neither order can leave
+        the pointer naming a withdrawn experiment.
+
+        An experiment with evidence is refused as well. Retirement is for a
+        registration nobody ran; a recorded run stays in the contest it was
+        part of.
+
+        History is append-only throughout: a `retire` row is added naming what
+        left and the pointer before and after (the same pointer, except in the
+        sole-winner case), and nothing is rewritten. An experiment nobody
+        registered here is not an error -- retirement is idempotent, so a
+        deletion path can call it without first asking whether it applies.
+
+        The GROUP row stays even when its last member leaves, because the
+        decisions made in it name it and an append-only history must not end up
+        referring to a contest that no longer exists. A group with no members
+        and no pointer reads as "nobody has won this yet", which is what it is;
+        the next experiment of that lineage rejoins it. Two paths produce one:
+        the last NON-winner leaving a group that never elected (a bootstrap
+        that could not read every source registers members and elects nobody),
+        and the sole winner leaving under ``allow_sole_winner``.
+        """
+        experiment_id = _require_text(experiment_id, "experiment_id")
+        actor = _require_text(actor, "actor")
+        provenance = _require_text(provenance, "provenance")
+        if actor_kind not in SELECTION_ACTOR_KINDS:
+            raise ValueError(
+                "actor_kind must be one of " + ", ".join(sorted(SELECTION_ACTOR_KINDS))
+            )
+        rationale = _clean(rationale)
+        if rationale is not None and len(rationale) > _MAX_TEXT:
+            raise ValueError(f"rationale must be at most {_MAX_TEXT} characters")
+
+        # Read evidence BEFORE taking the write lock, the way `_register` does:
+        # resolving a store can be slow, and the transaction below re-checks the
+        # binding, which is the check that actually decides.
+        source_id = self._member_source_id(experiment_id)
+        if source_id is None and self._experiment_state(experiment_id, None) is not None:
+            raise SelectionRetirementRefused(
+                experiment_id,
+                self._member_group_id(experiment_id),
+                "has_evidence",
+                f"experiment {experiment_id!r} has recorded evidence and cannot "
+                "be withdrawn from its comparison group",
+            )
+
+        now = _utcnow_iso()
+        with self._write() as conn:
+            member = conn.execute(
+                "SELECT * FROM comparison_group_members WHERE experiment_id=?",
+                (experiment_id,),
+            ).fetchone()
+            if member is None:
+                return {
+                    "retired": False,
+                    "experiment_id": experiment_id,
+                    "group_id": None,
+                    "seq": None,
+                }
+            group_id = str(member["group_id"])
+            if _clean(member["source_id"]) is not None:
+                raise SelectionRetirementRefused(
+                    experiment_id,
+                    group_id,
+                    "has_evidence",
+                    f"experiment {experiment_id!r} is bound to evidence source "
+                    f"{str(member['source_id'])!r} and cannot be withdrawn from "
+                    "its comparison group",
+                )
+            pointer = conn.execute(
+                """SELECT * FROM selection_pointers
+                    WHERE scope_kind=? AND group_id=? AND scope_key=?""",
+                (EXPERIMENT_SCOPE, group_id, ""),
+            ).fetchone()
+            winner_retired = False
+            if pointer is not None and str(pointer["experiment_id"]) == experiment_id:
+                others = conn.execute(
+                    """SELECT 1 FROM comparison_group_members
+                        WHERE group_id=? AND experiment_id<>? LIMIT 1""",
+                    (group_id, experiment_id),
+                ).fetchone()
+                if not allow_sole_winner or others is not None:
+                    raise SelectionRetirementRefused(
+                        experiment_id,
+                        group_id,
+                        "is_current_winner",
+                        f"experiment {experiment_id!r} is the current winner of "
+                        f"comparison group {group_id!r}; select a different winner "
+                        "before withdrawing it",
+                    )
+                winner_retired = True
+            seq = int(
+                conn.execute(
+                    """SELECT COALESCE(MAX(seq), 0) FROM selection_decisions
+                        WHERE scope_kind=? AND group_id=? AND scope_key=?""",
+                    (EXPERIMENT_SCOPE, group_id, ""),
+                ).fetchone()[0]
+            ) + 1
+            conn.execute(
+                "DELETE FROM comparison_group_members WHERE group_id=? AND experiment_id=?",
+                (group_id, experiment_id),
+            )
+            if winner_retired:
+                conn.execute(
+                    """DELETE FROM selection_pointers
+                        WHERE scope_kind=? AND group_id=? AND scope_key=?""",
+                    (EXPERIMENT_SCOPE, group_id, ""),
+                )
+            current_experiment_id = (
+                None if pointer is None else str(pointer["experiment_id"])
+            )
+            current_selection_id = (
+                None if pointer is None else str(pointer["selection_id"])
+            )
+            self._append_decision_in_txn(
+                conn,
+                group_id=group_id,
+                seq=seq,
+                decision=DECISION_RETIRE,
+                previous_experiment_id=current_experiment_id,
+                previous_selection_id=current_selection_id,
+                candidate_experiment_id=experiment_id,
+                # The winner is the same before and after, which is the point --
+                # unless the sole winner itself left, and then there is none.
+                new_experiment_id=None if winner_retired else current_experiment_id,
+                new_selection_id=None if winner_retired else current_selection_id,
+                actor=actor,
+                actor_kind=actor_kind,
+                provenance=provenance,
+                rationale=rationale,
+                created_at=now,
+            )
+        return {
+            "retired": True,
+            "experiment_id": experiment_id,
+            "group_id": group_id,
+            "seq": seq,
+            "winner_retired": winner_retired,
+            "winner": self.current_winner(group_id),
+        }
+
     # -- decisions -------------------------------------------------------
 
     def record_decision(
@@ -1509,7 +1795,16 @@ class SelectionControlStore:
             ).fetchone()
             if pointer is None:
                 raise NoCurrentSelection(
-                    f"comparison group {group_id!r} has no current winner"
+                    f"comparison group {group_id!r} has no current winner yet, "
+                    "so there is nothing to promote over, keep or defer. A "
+                    "winner is elected automatically -- the earliest "
+                    "experiment of the group -- only once this workflow's "
+                    "recorded history can be read in full; until then setup "
+                    "registers experiments without electing one, so an older "
+                    "run sitting in an unreadable evidence store cannot be "
+                    "outranked by a newer one. Make the missing evidence "
+                    "store readable again; the next experiment created, "
+                    "duplicated or started retries the election."
                 )
             current_selection_id = str(pointer["selection_id"])
             current_experiment_id = str(pointer["experiment_id"])
@@ -2229,6 +2524,7 @@ __all__ = [
     "DECISION_INITIAL",
     "DECISION_KEEP",
     "DECISION_PROMOTE",
+    "DECISION_RETIRE",
     "DECISION_UNDECIDED",
     "EXPERIMENT_SCOPE",
     "EvidenceSourceUnresolved",
@@ -2248,6 +2544,7 @@ __all__ = [
     "SelectionControlError",
     "SelectionControlStore",
     "SelectionControlUnavailable",
+    "SelectionRetirementRefused",
     "StaleSelection",
     "TASK_BEST_SCOPE",
     "ExperimentNotFound",

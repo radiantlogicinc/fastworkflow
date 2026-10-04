@@ -98,6 +98,44 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
     ]
   };
   w.tmRenderTurn(live, turnOutput);
+  assert.equal(live.querySelector('.activity').open, false,
+    'activity collapses once the answer is painted');
+  assert.ok(live.querySelector('.activity .cmdOut'),
+    'the turn command lines fold into the activity panel');
+  const order = Array.from(live.children).map(n => n.className);
+  assert.ok(order.indexOf('activity') < order.indexOf('bubble'),
+    'the activity reads above the answer: ' + JSON.stringify(order));
+  assert.ok(order.indexOf('bubble') < order.indexOf('artifactsLinkRow'),
+    'the artifacts link sits below the answer: ' + JSON.stringify(order));
+
+  /* Artifacts wait behind one link, and open beside the answer one at a time. */
+  const link = live.querySelector('.artifactsLink');
+  const panel = live.querySelector('.artifacts');
+  assert.match(link.textContent, /5 artifacts/);
+  assert.equal(panel.hidden, true, 'artifacts start collapsed behind the link');
+  assert.equal(link.getAttribute('aria-controls'), panel.id);
+  link.click();
+  assert.equal(panel.hidden, false);
+  assert.equal(link.getAttribute('aria-expanded'), 'true');
+  const shown = () => cards(live).filter(c => !c.hidden).map(c => c.querySelector('.aKey').textContent);
+  const [first, prev, next, last] = Array.from(panel.querySelectorAll('.aNav button'));
+  const position = () => panel.querySelector('.aPosition').textContent;
+  assert.deepEqual(shown(), ['note']);
+  assert.equal(position(), '1 of 5');
+  assert.ok(first.disabled && prev.disabled && !next.disabled && !last.disabled);
+  next.click();
+  assert.deepEqual(shown(), ['report']);
+  assert.equal(position(), '2 of 5');
+  last.click();
+  assert.equal(position(), '5 of 5');
+  assert.ok(!first.disabled && !prev.disabled && next.disabled && last.disabled);
+  prev.click();
+  assert.deepEqual(shown(), ['gone']);
+  first.click();
+  assert.equal(position(), '1 of 5');
+  panel.querySelector('.aClose').click();
+  assert.equal(panel.hidden, true);
+  assert.equal(link.getAttribute('aria-expanded'), 'false');
   assert.match(live.querySelector('.bubble').textContent, /The report is attached/);
   assert.equal(cards(live).length, 5);
   assert.deepEqual(cards(live).map(c => c.querySelector('.aKey').textContent),
@@ -131,6 +169,7 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
   w.tmRenderTurn(live, turnOutput);
   assert.equal(live.querySelectorAll('.meta').length, 1);
   assert.equal(live.querySelectorAll('.artifacts').length, 1);
+  assert.equal(live.querySelectorAll('.artifactsLink').length, 1);
   assert.equal(live.querySelectorAll('.activity').length, 1,
     'the activity record must survive a repaint');
   assert.equal((live.querySelector('.bubble').textContent.match(/attached/g) || []).length, 1);

@@ -48,6 +48,22 @@ function read(w, format, body, extra) {
   const w = dom.window;
   await new Promise(r => setTimeout(r, 100));
 
+  /* The server control lives in the empty middle of the connection strip and
+     reveals its fields in the section under that strip. */
+  const strip = w.document.getElementById('connStrip');
+  const toggle = w.document.getElementById('advToggle');
+  const panel = w.document.getElementById('advPanel');
+  assert.equal(toggle.parentElement, strip);
+  assert.ok(strip.compareDocumentPosition(panel) & w.Node.DOCUMENT_POSITION_FOLLOWING);
+  assert.equal(panel.hidden, true);
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  toggle.click();
+  assert.equal(panel.hidden, false);
+  assert.equal(toggle.getAttribute('aria-expanded'), 'true');
+  assert.ok(panel.querySelector('#tBaseUrl'));
+  toggle.click();
+  assert.equal(panel.hidden, true);
+
   /* ---- NDJSON: the whole envelope, gapless, identity on every frame ---- */
   const nd = read(w, 'ndjson', bodies.ndjson);
   assert.deepEqual(nd.bad, [], 'a real NDJSON body failed to parse');
@@ -83,6 +99,7 @@ function read(w, format, body, extra) {
   for (const [format, parsed] of [['ndjson', nd], ['sse', sse], ['late', late]]) {
     const msg = w.tmBubble('agent', '…');
     const activity = w.tmActivityPanel(msg);
+    assert.equal(activity.node.open, true, format + ': activity starts open so the exchange can stream');
     let finalized = null, failed = null;
     parsed.frames.forEach(f => w.tmApplyStreamFrame(f, activity, {
       output: out => { finalized = out; w.tmRenderTurn(msg, out); },
@@ -97,6 +114,8 @@ function read(w, format, body, extra) {
     assert.equal(rows.length, parsed.frames.filter(f => f.type === 'trace').length);
     assert.match(rows[0].textContent, /agent → workflow/);
     assert.match(rows[rows.length - 1].textContent, /workflow → agent/);
+    assert.equal(msg.querySelector('.activity').open, false,
+      format + ': activity collapsed once the answer was painted');
 
     if (format === 'late') {
       /* Reported as still working, not as a failure, and the answer that
@@ -108,6 +127,17 @@ function read(w, format, body, extra) {
       assert.equal(finalized.success, true);
     }
   }
+
+  /* A turn that is still waiting on the user has no final answer yet, so the
+     exchange stays open. */
+  const waiting = w.tmBubble('agent', '…');
+  w.tmActivityPanel(waiting);
+  w.tmRenderTurn(waiting, {
+    status: 'awaiting_user', success: false, answer: 'Which one?',
+    command_outputs: [{command_name: 'ask', command_response: {response: 'Which one?', success: true}}]
+  });
+  assert.equal(waiting.querySelector('.activity').open, true);
+  assert.match(waiting.textContent, /waiting for your reply/);
 
   assert.deepEqual(errors, []);
   w.close();

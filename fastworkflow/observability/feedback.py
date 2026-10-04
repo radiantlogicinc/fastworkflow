@@ -784,6 +784,103 @@ def dedupe_key(row: Mapping[str, Any]) -> str:
     return f"legacy:{row.get('store_id') or ''}:{row.get('feedback_id')}"
 
 
+def _side_scope(side: Any) -> Optional[tuple[Any, Any, Any]]:
+    """The experiment/task/attempt one stored anchor side names, or None."""
+    if not isinstance(side, Mapping):
+        return None
+    ref = side.get("ref")
+    if not isinstance(ref, Mapping):
+        return None
+    return (ref.get("experiment_id"), ref.get("task_id"), ref.get("attempt"))
+
+
+def task_attempts(
+    row: Mapping[str, Any],
+    *,
+    experiment_ids: Sequence[str],
+    task_id: str,
+) -> Optional[frozenset[int]]:
+    """Which attempts OF THE QUERIED TASK one stored comment is about.
+
+    `list_task_feedback` returns a row when EITHER the annotated turn or the
+    frozen paired anchor names the task, while the `attempt` column always
+    belongs to the annotated turn. A comparison note written on
+    left-experiment/left-task attempt 1 against right-experiment/right-task
+    attempt 2 therefore carries `attempt=1` when the RIGHT task's page asks
+    about its own attempt 2: filtering on the column alone shows that note
+    under an attempt the right task never ran and hides it under the one it
+    did.
+
+    So each side is matched in its own right, and the attempts of the sides
+    that actually name the queried task are what comes back:
+
+    - BOTH sides may match. A note pairing two attempts of one task is about
+      both of them, and it stays one row either way (`dedupe_key`).
+    - A side that names the task WITHOUT an attempt matches every attempt of
+      it: a note anchored to the task as a whole is not evidence about one run,
+      and hiding it from every attempt view would lose it entirely.
+    - `None` means "no attempt is named", the same permissive answer.
+
+    `experiment_ids` is every id the task may be recorded under: a workspace
+    manifest gives an experiment a LOGICAL id while each segment keeps its own
+    local one, and a row written under the local id is the same task the reader
+    asked about (see `consolidate_task_feedback`).
+    """
+    wanted = {str(value) for value in experiment_ids if value}
+    task = str(task_id)
+    sides: list[tuple[Any, Any, Any]] = [
+        (row.get("turn_experiment_id"), row.get("turn_task_id"), row.get("attempt"))
+    ]
+    paired = _side_scope(row.get("paired"))
+    if paired is None:
+        anchors = row.get("anchors")
+        if isinstance(anchors, Mapping):
+            paired = _side_scope(anchors.get("paired"))
+    if paired is None and row.get("pair_task_id"):
+        # The pair columns without a readable anchor: the row is known to be
+        # about the other side's task, and the attempt it names is not
+        # recoverable, so it is treated as naming none.
+        paired = (row.get("pair_experiment_id"), row.get("pair_task_id"), None)
+    if paired is not None:
+        sides.append(paired)
+
+    matched = False
+    attempts: set[int] = set()
+    for experiment_id, side_task, attempt in sides:
+        if experiment_id is None or side_task is None:
+            continue
+        if str(side_task) != task or str(experiment_id) not in wanted:
+            continue
+        matched = True
+        if attempt is None:
+            return None
+        try:
+            attempts.add(int(attempt))
+        except (TypeError, ValueError):  # pragma: no cover - a non-numeric attempt
+            return None
+    if not matched:
+        # Unreachable for rows this module fetched, because the read that
+        # produced them matched the task on one side or the other. A caller
+        # filtering rows from somewhere else keeps the column's own meaning
+        # rather than having the filter quietly pass everything.
+        attempt = row.get("attempt")
+        return frozenset({int(attempt)}) if isinstance(attempt, int) else None
+    return frozenset(attempts)
+
+
+def _attempt_matches(
+    row: Mapping[str, Any],
+    *,
+    experiment_ids: Sequence[str],
+    task_id: str,
+    attempt: Optional[int],
+) -> bool:
+    if attempt is None:
+        return True
+    named = task_attempts(row, experiment_ids=experiment_ids, task_id=task_id)
+    return named is None or int(attempt) in named
+
+
 def consolidate_task_feedback(
     stores: Mapping[str, Any],
     *,
@@ -840,6 +937,10 @@ def consolidate_task_feedback(
 
     merged: dict[str, dict[str, Any]] = {}
     scoped = list(local_experiment_ids) if local_experiment_ids else [experiment_id]
+    # Every id this task's evidence may be recorded under, for the attempt
+    # match: the logical id the reader asked about plus each segment's local
+    # one, because either may be the id a row's anchor names.
+    known_experiment_ids = tuple(dict.fromkeys([experiment_id, *scoped]))
     for store_id, store in sorted(stores.items()):
         for local_id in scoped:
             for row in store.list_task_feedback(
@@ -858,7 +959,14 @@ def consolidate_task_feedback(
         and (provenance is None or row.get("provenance") == provenance)
         and (target_kind is None or row.get("target_kind") == target_kind)
         and (component is None or row.get("target_label") == component)
-        and (attempt is None or row.get("attempt") == attempt)
+        # The attempt of whichever side names the task being read, not the
+        # annotated turn's: see `task_attempts`.
+        and _attempt_matches(
+            row,
+            experiment_ids=known_experiment_ids,
+            task_id=task_id,
+            attempt=attempt,
+        )
     ]
     window = filtered[offset : offset + limit] if limit else []
     return TaskFeedbackPage(

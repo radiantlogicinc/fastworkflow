@@ -1358,8 +1358,7 @@ class TestThePageKeepsTheDistinctionsTheDomRunCannotReach:
         through the one navigation helper every contributor list shares, rather
         than through a second copy of the source-scoping rules.
         """
-        page = Path(run_chatbot_server.__file__).with_name("static") / "index.html"
-        source = page.read_bytes()
+        source = run_chatbot_server.load_index_html()
 
         assert b"openPairSpan(ctx, side, contributor.turn_key, contributor.span_id, note)" in source
         # And the turn-scoped fallback stays only for a dispatch with no span.
@@ -1369,8 +1368,7 @@ class TestThePageKeepsTheDistinctionsTheDomRunCannotReach:
         assert b'typeof openPairSpan === "function"' not in source
 
     def test_the_page_renders_the_servers_summary_and_does_not_recount(self):
-        page = Path(run_chatbot_server.__file__).with_name("static") / "index.html"
-        source = page.read_bytes()
+        source = run_chatbot_server.load_index_html()
 
         assert b"function renderCommandSummary(container, cmp, ctx)" in source
         assert b"projection.command_summary" in source

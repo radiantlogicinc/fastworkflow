@@ -1342,8 +1342,7 @@ class TestThePageSourceKeepsTheDistinctions:
     without a provider: that no absence is rendered as a zero or a miss."""
 
     def test_the_helpers_are_present_and_unknown_is_its_own_answer(self, usage_server):
-        page = Path(run_chatbot_server.__file__).with_name("static") / "index.html"
-        source = page.read_bytes()
+        source = run_chatbot_server.load_index_html()
 
         assert b"function cacheStateOf(span)" in source
         assert b"function appendCacheChip(parent, cache)" in source
@@ -1363,8 +1362,7 @@ class TestThePageSourceKeepsTheDistinctions:
                                                                   usage_server):
         """The page builds its trace tree from spans it loads itself, so the
         fold has to exist on both sides or one screen contradicts the other."""
-        page = Path(run_chatbot_server.__file__).with_name("static") / "index.html"
-        source = page.read_bytes()
+        source = run_chatbot_server.load_index_html()
 
         assert b"function spanResponseId(span)" in source
         assert b"function sumResponses(nodes)" in source

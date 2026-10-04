@@ -306,6 +306,10 @@ class TestDuplicateExperiment:
 
     def test_a_deleted_experiment_cannot_be_duplicated(self, folder):
         benchmark = _benchmark(folder)
+        # The first experiment of a group is its winner, and the winner is not
+        # deletable (`fix-jfy5`); this one exists so `source` is an ordinary
+        # non-selected registration.
+        setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
         source = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
         setup.delete_empty_experiment(folder, source["experiment_id"])
 
@@ -978,6 +982,85 @@ class TestTheDefaultStoreIsPartOfTheHistory:
             for item in report["registrations_unavailable"]
         ), report["registrations_unavailable"]
         assert _winner_id(folder, record["experiment_id"]) is None
+
+
+class TestTheDeferredElectionGoesToTheOldestMember:
+    """`fix-kkod`: the withheld election, when it finally happens, is the
+    group's OLDEST member's -- not whichever registration arrives first.
+
+    An incomplete bootstrap registers members and elects nobody, so by the time
+    the view is whole the older history is already a MEMBER. The older-peer
+    scan only looks for non-members, and seeding runs before history adoption,
+    so the first registration re-seeded used to take the pointer over history
+    that was sitting right there in the group.
+    """
+
+    def test_a_rebuilt_control_elects_the_historical_experiment(
+        self, folder, tmp_path
+    ):
+        """The reproduction: control rebuilt while ANOTHER group's store is
+        unreadable; history for this group lives only in the default store."""
+        roster = _benchmark(folder, "Roster")
+        payroll = _benchmark(folder, "Payroll")
+        default_db = state_paths.observability_db(str(folder))
+        Path(default_db).parent.mkdir(parents=True, exist_ok=True)
+        _historical_experiment(
+            obs.ObservabilityStore(default_db), folder, roster, "exp-historical"
+        )
+        other = setup.create_experiment(folder, payroll["benchmark_id"], "v1")
+        other_db = str(tmp_path / "payroll.sqlite3")
+        _store, controller = _controller(folder, other_db)
+        _declare(controller, other)
+        newer = setup.create_experiment(folder, roster["benchmark_id"], "v1")
+        assert _winner_id(folder, newer["experiment_id"]) == "exp-historical"
+
+        _forget_selection(folder)
+        os.rename(other_db, other_db + ".unmounted")
+        partial = setup.ensure_selection_bootstrap(folder, create=True)
+        assert partial["complete"] is False
+        group_id = str(_control(folder).group_for_experiment(
+            newer["experiment_id"])["group_id"])
+        # Both are members already, and nobody is elected.
+        assert {r["experiment_id"] for r in _control(folder).group_members(group_id)} == {
+            "exp-historical", newer["experiment_id"]
+        }
+        assert _winner_id(folder, newer["experiment_id"]) is None
+
+        os.rename(other_db + ".unmounted", other_db)
+        report = setup.ensure_selection_bootstrap(folder)
+
+        assert report["complete"] is True
+        assert _winner_id(folder, newer["experiment_id"]) == "exp-historical"
+        history = _control(folder).decision_history(group_id)
+        assert [(r["seq"], r["decision"], r["new_experiment_id"]) for r in history] == [
+            (1, "initial", "exp-historical")
+        ]
+
+    def test_the_newer_member_registering_first_elects_the_older_one(self, folder):
+        """The rule itself, on the control: the caller is not the candidate."""
+        control = selection.open_shared_control(
+            selection.shared_control_db_path_for(str(folder))
+        )
+        older = selection.ExperimentReference(
+            experiment_id="exp-zzz-older", workflow_name="w", benchmark_id="b",
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+        newer = selection.ExperimentReference(
+            experiment_id="exp-aaa-newer", workflow_name="w", benchmark_id="b",
+            created_at="2026-01-02T00:00:00+00:00",
+        )
+        for reference in (newer, older):
+            control.register_experiment_reference(reference, allow_initial_winner=False)
+        group_id = str(control.group_for_experiment("exp-zzz-older")["group_id"])
+
+        result = control.register_experiment_reference(newer)
+
+        assert result["initialized"] is True
+        assert control.current_winner(group_id)["experiment_id"] == "exp-zzz-older"
+        (row,) = control.decision_history(group_id)
+        assert (row["decision"], row["candidate_experiment_id"], row["new_experiment_id"]) == (
+            "initial", "exp-zzz-older", "exp-zzz-older"
+        )
 
 
 class TestARunnerStartingWhileTheHistoryIsUnreadable:

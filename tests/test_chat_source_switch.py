@@ -290,8 +290,7 @@ def test_without_the_boundary_the_old_source_survives_the_switch(
     jsdom_root = os.environ.get("TEST_JSDOM_ROOT")
     if not jsdom_root:
         pytest.skip("Set TEST_JSDOM_ROOT to run DOM integration with jsdom")
-    page = Path(run_chatbot_server.__file__).with_name("static") / "index.html"
-    source = page.read_text(encoding="utf-8")
+    source = run_chatbot_server.load_index_html().decode("utf-8")
     call = "    resetSourceScopedState();\n"
     assert source.count(call) == 1, "the reset call moved; update this copy"
     private_page = tmp_path / "index-without-the-boundary.html"

@@ -1217,3 +1217,53 @@ class TestSyncFirstTurnRecords:
         assert row is not None and row["status"] == "awaiting_user"
         # A suspended row is not a pending-retry obligation: it is not terminal.
         assert sink.pending_retry_depth() == 0
+
+
+class TestSpanStatsForTurns:
+    def test_matches_count_and_max_rowid(self, many_turn_spans):
+        db, keys = many_turn_spans
+        store = obs.ReadOnlyObservabilityStore(db)
+        stats = store.span_stats_for_turns(keys)
+        for key in keys:
+            spans = store.get_spans(key)
+            count, max_rowid = stats[key]
+            assert count == len(spans)
+            assert max_rowid > 0
+        empty = store.span_stats_for_turns(["never-recorded"])
+        assert empty["never-recorded"] == (0, 0)
+
+
+class TestConnectionClosing:
+    def test_repeated_reads_do_not_leak_fds(self, db_path, sink):
+        """Connections from `with store._connect()` must close, not await GC."""
+        sink.emit_span(
+            tracing.Span(
+                span_id="fd-1",
+                trace_id="t-fd",
+                name="fw.turn",
+                start_ns=int(time.time() * 1e9),
+                status="ok",
+            )
+        )
+        assert sink.flush()
+        store = obs.ReadOnlyObservabilityStore(db_path)
+        # Warm once so schema/feature probes are not part of the sample.
+        store.list_turns(limit=1)
+        store.get_turn("t-fd")
+        store.db_size_bytes()
+
+        import gc
+
+        gc.disable()
+        try:
+            baseline = len(os.listdir("/proc/self/fd"))
+            for _ in range(1000):
+                store.list_turns(limit=1)
+                store.get_turn("t-fd")
+                store.db_size_bytes()
+            after = len(os.listdir("/proc/self/fd"))
+        finally:
+            gc.enable()
+        assert after - baseline <= 5, (
+            f"open FDs grew by {after - baseline} (baseline={baseline}, after={after})"
+        )

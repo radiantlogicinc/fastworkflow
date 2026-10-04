@@ -1600,8 +1600,7 @@ def test_the_page_keeps_the_two_labels_distinct():
     """A cheap guard on the page source for the distinction the DOM run above
     drives, so a future edit that collapses the two labels back into one fails
     here too rather than only on a machine with jsdom installed."""
-    page = Path(run_chatbot_server.__file__).with_name("static") / "index.html"
-    source = page.read_text()
+    source = run_chatbot_server.load_index_html().decode("utf-8")
 
     assert 'if (answer.attribution === "pass") {' in source
     assert '"recorded for this pass"' in source

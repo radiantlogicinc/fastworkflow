@@ -55,8 +55,8 @@ unreadable turn is reported in `unavailable` and the rest still renders, so an
 execution with no scores, a half-pruned trace, or one missing side can still be
 inspected.
 
-The per-turn step list is the execution ledger from `run_chatbot/server.py`,
-injected rather than re-derived, because a second implementation of "what
+The per-turn step list is the execution ledger from `observability/turn_derivations.py`
+(re-exported by `run_chatbot/turn_annotations.py`), injected rather than re-derived, because a second implementation of "what
 dispatches happened in this turn" is exactly the semantic mismatch this work
 must not introduce. Nested wrappers therefore appear exactly once, as the
 ledger files them, and every roll-up here that could double-count a parent and
@@ -70,8 +70,10 @@ import json
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterable, Mapping, Optional, Protocol, Sequence
 
+from fastworkflow.observability.turn_derivations import execution_ledger
+
 # The span name the ledger builds its rows from, restated here (as
-# `run_chatbot/server.py` restates it) so that reading a stored trace does not
+# `observability/turn_derivations.py` restates it) so that reading a stored trace does not
 # import the HTTP layer.
 SPAN_COMMAND_EXECUTE = "fw.command.execute"
 
@@ -611,25 +613,25 @@ CostRollup = Callable[[Iterable[Mapping[str, Any]]], Mapping[str, Any]]
 
 
 def default_ledger_projection() -> LedgerProjection:
-    """`run_chatbot/server.py`'s `execution_ledger` -- the one implementation.
+    """`observability/turn_derivations.py`'s `execution_ledger` -- the one implementation.
 
-    Imported lazily so this module stays usable without the HTTP layer and so
-    the dependency runs one way at import time. Callers that already hold the
-    function (the server does) should pass it instead.
+    Imported from a stdlib-only module below this one, so this module stays
+    usable without the HTTP layer and the dependency runs one way at import
+    time. Callers that already hold the function (the server does) should pass
+    it instead.
     """
-    from fastworkflow.run_chatbot.server import execution_ledger
-
+    # No cycle: turn_derivations imports nothing from fastworkflow, and
+    # turn_annotations (which imports project_execution from here) re-exports it.
     return execution_ledger
 
 
 def default_cost_rollup() -> CostRollup:
-    """`run_chatbot/server.py`'s `cost_rollup`, for the same reason.
+    """This module's own `cost_rollup`, beside the `usage_rollup` it delegates to.
 
     Recorded cost only: it answers `total: None`, never 0, when no LLM call
     recorded a cost, and this module passes that through unchanged.
     """
-    from fastworkflow.run_chatbot.server import cost_rollup
-
+    # No cycle: `cost_rollup` is defined here; turn_annotations re-exports it.
     return cost_rollup
 
 
@@ -1130,7 +1132,8 @@ def _recorded_text(value: Any) -> Optional[str]:
     look alike -- which is exactly why the envelope stays in
     `TurnProjection.pass_content`. A reader that needs to tell "this pass said
     nothing" from "this pass said something nobody may see" reads the envelope;
-    `index.html` does, and badges the second.
+    the chatbot page does (`captureEnvelope` / `policedText` in
+    run_chatbot/static/src/110-state-format.js), and badges the second.
     """
     if isinstance(value, str):
         return value
@@ -2033,6 +2036,37 @@ def usage_rollup(
     )
 
 
+def cost_rollup(spans: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """Sum of recorded costs over the CANONICAL LLM calls, with the unrecorded
+    count beside it. `total` is None -- never 0 -- when no call recorded a cost.
+
+    Canonical because one provider call can appear in a span list more than
+    once, and charging each appearance bills money that was never spent
+    (fix-9eg.5). Two things duplicate: `end_span` re-emits a span under the same
+    `span_id`, and a wrapper `fw.llm.call` nests around the inner call that
+    produced the same `history_uuid`. An outer+inner pair that each recorded
+    $0.25 for one response was summed to $0.50 here while the comparison
+    projection said $0.25 -- so a turn row and the same turn's comparison
+    disagreed about what it cost, and every per-turn, per-attempt and
+    navigation figure that reads this function was inflated.
+
+    DELEGATED rather than reimplemented. Folding duplicates needs three rules --
+    one record per `span_id`, the innermost record of a nested pair, and the
+    first of several siblings quoting one `history_uuid` -- and a second copy of
+    those rules is a second chance to get them apart. It already happened: a
+    partial fold here agreed with `usage_rollup` on nested calls and still
+    reported $0.50 against its $0.25 for two NON-nested spans naming the same
+    response. `usage_rollup` is the one accounting, and it never calls back into
+    `cost_rollup`, so there is no cycle.
+
+    The returned shape is unchanged: `calls` still counts every call the trace
+    holds, a duplicate that is not charged still shows up in `unrecorded` rather
+    than vanishing, and `total` is still None -- never 0 -- when no call
+    recorded a cost.
+    """
+    return usage_rollup(spans)["cost"]
+
+
 def _sum_recorded(values: Iterable[Optional[int]]) -> Optional[int]:
     """Sum of the values that were recorded, or None when none was.
 
@@ -2887,6 +2921,7 @@ __all__ = [
     "canonical_llm_spans",
     "compare_executions",
     "comparison_digest",
+    "cost_rollup",
     "default_cost_rollup",
     "default_ledger_projection",
     "discover_pass_selectors",

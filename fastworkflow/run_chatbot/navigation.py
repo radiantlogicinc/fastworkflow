@@ -37,6 +37,18 @@ def newest_experiments_first(rows):
     return sorted(rows, key=_experiment_sort_key, reverse=True)
 
 
+# Turn nodes are selected via /api/turn/<key>; the rail and the conversation
+# turn list only read status and started_at from turn.info. Other kinds keep
+# full info because showHierarchyInfo dumps every key for the selected node.
+_TURN_INFO_KEYS = ('status', 'started_at')
+
+
+def _slim_turn_info(turn):
+    if not turn:
+        return {}
+    return {key: turn[key] for key in _TURN_INFO_KEYS if key in turn and turn[key] is not None}
+
+
 def read_source(store, source, experiment_id=None):
     return {
         'source': source, 'experiment_id': experiment_id,
@@ -133,7 +145,7 @@ def build_navigation(benchmarks, registrations, sources, warnings=()):
             conv = conversation(turn, parent)
             seen.add((turn.get('channel_id'), turn.get('conversation_id')))
             conv['children'].append(_node('turn', ((turn.get('user_message') or '(no message)')[:100] + ('…' if len(turn.get('user_message') or '') > 100 else '')), source, turn['turn_key'],
-                turn_key=turn['turn_key'], source=source, info=turn))
+                turn_key=turn['turn_key'], source=source, info=_slim_turn_info(turn)))
         for row in conv_rows:
             if (row['channel_id'], row['conversation_id']) in seen:
                 continue

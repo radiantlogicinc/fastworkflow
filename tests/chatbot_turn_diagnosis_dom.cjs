@@ -32,6 +32,8 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   const rows = () => [...d.querySelectorAll('#detail .listItem')];
   const chip = name => [...d.querySelectorAll('#turnFindMarkers button')]
     .find(b => b.textContent.includes(name));
+  // Chips and the text box only edit the question; Find is what asks it.
+  const find = () => d.getElementById('turnFindGo').click();
 
   // The filter vocabulary is present before any search has run, so the
   // operator can pick a filter without first searching for everything.
@@ -52,6 +54,8 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   // ---------------------------------------------------------------
   chip('navigated context').click();
   assert.equal(chip('navigated context').getAttribute('aria-pressed'), 'true');
+  assert.equal(w.turnFind.active, false, 'toggling a chip searched without Find');
+  find();
   // While the walk is unfinished the page must not answer; it must say it is
   // still looking. Asserted on the status line rather than by timing.
   await until(() => rows().length === 1, 'the navigating turn, found past the first segment');
@@ -78,10 +82,22 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   chip('navigated context').click();
   await until(() => chip('extraction errored'), 'facet chips after a search');
   chip('extraction errored').click();
+  find();
   await until(() => detail().includes('No turn in this store matches'),
     'the empty state, after a complete scan');
   assert.ok(status().includes('the whole store'), 'status: ' + status());
+
+  // Two chips are ANDed: the navigating turn carries "navigated context" but
+  // not "extraction errored", so asking for both finds nothing, where OR
+  // would have found it.
+  chip('navigated context').click();
+  find();
+  await until(() => detail().includes('No turn in this store matches'),
+    'both chips together, after a complete scan');
+  chip('navigated context').click();
+
   chip('extraction errored').click();
+  find();
   await until(() => rows().length > 0, 'results to come back');
 
   // ---------------------------------------------------------------
@@ -151,6 +167,7 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   const box = d.getElementById('turnFindText');
   box.value = keys.repeated;
   box.dispatchEvent(new w.Event('input', {bubbles: true}));
+  find();
   await until(() => rows().length === 1 && status().includes('the whole store'),
     'a completed search for the repeated turn');
   // Now the walk finished, so the counts are the answer and carry no "+".
@@ -161,6 +178,7 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
 
   box.value = keys.trouble;
   box.dispatchEvent(new w.Event('input', {bubbles: true}));
+  find();
   await until(() => rows().length === 1 && rows()[0].textContent.includes('ambiguous intent'),
     'the intent-trouble turn by text');
   const row = rows()[0];
@@ -195,6 +213,7 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   // ---------------------------------------------------------------
   box.value = keys.same_type;
   box.dispatchEvent(new w.Event('input', {bubbles: true}));
+  find();
   await until(() => rows().length === 1, 'the same-type turn');
   rows()[0].click();
   await until(() => detail().includes('Execution ledger'), 'that turn to open');
@@ -210,6 +229,7 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   // ---------------------------------------------------------------
   box.value = keys.repeated;
   box.dispatchEvent(new w.Event('input', {bubbles: true}));
+  find();
   await until(() => rows().length === 1, 'the repeated-command turn');
   rows()[0].click();
   await until(() => detail().includes('What was recorded'), 'the repeated turn to open');
@@ -224,6 +244,7 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   // ---------------------------------------------------------------
   box.value = keys.record_only;
   box.dispatchEvent(new w.Event('input', {bubbles: true}));
+  find();
   await until(() => rows().length === 1, 'the record-only failure');
   rows()[0].click();
   await until(() => detail().includes('Execution ledger'), 'the record-only turn to open');

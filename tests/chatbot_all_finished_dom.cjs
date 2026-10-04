@@ -6,7 +6,7 @@
  *   empty_task  one run still going, nothing finished
  *   big_task    twenty-one finished runs, one more than may be summarized
  *
- * Three phases, chosen by argv[6]:
+ * The phases, chosen by argv[6]:
  *
  *   all        the rule's own button, the task's counts, and the members the
  *              SERVER resolved -- nothing here is assembled from the rows
@@ -15,7 +15,20 @@
  *              an explicit Refresh is what replaces it
  *   overlimit  a task above the bound is refused whole, with its counts
  *
- * Every request is real and so is every answer. */
+ * And three about WHICH answer the one population notice ends up showing when
+ * two requests report on the same population (`fix-kphi`):
+ *
+ *   notice-order          a drill-down validation requested first answers
+ *                         last, and must not overwrite the newer check
+ *   notice-order-reverse   the other direction: an older check answering after
+ *                         a newer drill-down validation
+ *   recheck-keeps-navigation  a check clicked while a drill-down is in flight
+ *                         does not cancel the drill-down
+ *
+ * Every request is real and so is every answer. The only thing the harness
+ * does to timing is HOLD a real response until the test says when: an answer
+ * arriving after a newer one is the defect itself, and a fabricated body would
+ * prove nothing about the page's ordering. */
 const assert = require('node:assert/strict');
 const {JSDOM, VirtualConsole} = require(process.argv[2] + '/node_modules/jsdom');
 const url = process.argv[3];
@@ -75,6 +88,141 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
       + detail().slice(0, 1500));
   }
   await openRuns();
+
+  /* Hold the first real response whose path matches, and deliver it when the
+     test releases it. The request is the page's own and the body is the
+     server's own; only its arrival moves. */
+  function holdFirst(match) {
+    const original = w.fetch;
+    const state = {captured: false, release: null};
+    const held = new Promise(resolve => { state.release = resolve; });
+    w.fetch = async (path, options) => {
+      const result = await original(path, options);
+      if (!state.captured && match(String(path))) {
+        state.captured = true;
+        const body = await result.text();
+        await held;
+        return new Response(body, {status: result.status});
+      }
+      return result;
+    };
+    return state;
+  }
+
+  const isMemberCheck = path => path.includes('/selected-runs/validation?attempt=');
+  const isPopulationCheck = path =>
+    path.includes('/selected-runs/validation?') && !isMemberCheck(path);
+
+  /* The reader's own click on a member row, not a call into the page. */
+  function compareIn(attempt) {
+    const row = d.querySelector('#detail [data-selected-member="' + attempt + '"]');
+    if (!row) return null;
+    return [...row.querySelectorAll('button')]
+      .filter(node => node.textContent.startsWith('Compare'))[0] || null;
+  }
+
+  async function ask(step) {
+    process.stdout.write(step + '\n');
+    await new Promise(resolve => process.stdin.once('data', resolve));
+  }
+
+  if (phase === 'notice-order' || phase === 'notice-order-reverse'
+      || phase === 'recheck-keeps-navigation') {
+    at('all').click();
+    await until(() => members().length === 2, 'the two finished runs');
+    assert.deepEqual(members(), ['1', '2'], 'members: ' + members().join(','));
+  }
+
+  if (phase === 'notice-order') {
+    /* ==============================================================
+     * An older contributor check must not answer about the population
+     * ============================================================== */
+    const held = holdFirst(isMemberCheck);
+    /* Member 1's answer is edited in place first, so opening it is refused and
+       the reader stays on this panel looking at the notice. */
+    await ask('READY-FOR-EVIDENCE');
+    compareIn(1).click();
+    await until(() => held.captured, 'the contributor check to be captured');
+
+    /* Only NOW does the population move, after that answer was computed. */
+    await ask('READY-FOR-MUTATION');
+    at('check').click();
+    const fresh = await until(
+      () => noticeText().startsWith('The runs recorded for this task have changed:')
+        ? noticeText() : null,
+      'the new population notice');
+    assert.ok(fresh.includes('attempt 3'),
+      'the check names the run that became eligible: ' + fresh.slice(0, 400));
+
+    held.release();
+    await wait(500);
+    assert.equal(noticeText(), fresh,
+      'the older contributor check answered second, over a population read '
+      + 'before attempt 3 finished, and must not replace the newer answer: '
+      + noticeText().slice(0, 400));
+    assert.ok(!noticeText().includes('membership below is unchanged'),
+      'and above all must not claim the membership is unchanged when a run '
+      + 'has finished since: ' + noticeText().slice(0, 400));
+    assert.deepEqual(members(), ['1', '2'],
+      'nothing replaced the membership: ' + members().join(','));
+    /* The contributor's own answer still lands where it belongs, beside the
+       run that was clicked, so the older response was ordered and not
+       discarded wholesale. */
+    assert.ok(detail().includes('no longer records what these totals'),
+      'the stale member is refused in its own row: ' + detail().slice(0, 900));
+  }
+
+  if (phase === 'notice-order-reverse') {
+    /* ==============================================================
+     * The other direction: an older check, a newer drill-down
+     * ============================================================== */
+    const held = holdFirst(isPopulationCheck);
+    at('check').click();
+    await until(() => held.captured, 'the population check to be captured');
+    assert.ok(noticeText().includes('checking whether the runs recorded'),
+      'the check says what it is waiting for: ' + noticeText().slice(0, 300));
+
+    /* The population moves, and member 1's answer is edited, after that check
+       was answered and before the drill-down asks. */
+    await ask('READY-FOR-MUTATION');
+    compareIn(1).click();
+    const fresh = await until(
+      () => noticeText().startsWith('The runs recorded for this task have changed:')
+        ? noticeText() : null,
+      'the drill-down to report the moved population');
+    assert.ok(fresh.includes('attempt 3'), fresh.slice(0, 400));
+
+    held.release();
+    await wait(500);
+    assert.equal(noticeText(), fresh,
+      'the check was requested first and answers last, so its older reading '
+      + 'must not replace the newer one: ' + noticeText().slice(0, 400));
+    assert.ok(!noticeText().includes('membership below is unchanged'),
+      noticeText().slice(0, 400));
+  }
+
+  if (phase === 'recheck-keeps-navigation') {
+    /* ==============================================================
+     * Checking is not navigating
+     * ============================================================== */
+    const held = holdFirst(isMemberCheck);
+    compareIn(2).click();
+    await until(() => held.captured, 'the contributor check to be captured');
+    at('check').click();
+    await until(() => noticeText().includes('Checked just now'), 'the check');
+    assert.ok(noticeText().includes('membership below is unchanged'),
+      'nothing has moved, so that is what it says: ' + noticeText().slice(0, 300));
+
+    /* The drill-down the reader asked for answers after it, and opens: a
+       recheck reports on the population and claims nothing about which run the
+       reader is opening. */
+    held.release();
+    await until(() => w.taskView === 'compare', 'the drill-down to open');
+    assert.ok(!detail().includes('The page moved on before that check answered'),
+      'a check must not invalidate a drill-down that was already in flight: '
+      + detail().slice(0, 600));
+    await until(() => detail().includes('attempt 2'), 'the comparison');
+  }
 
   if (phase === 'all') {
     /* ==============================================================

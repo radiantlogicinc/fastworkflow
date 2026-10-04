@@ -1296,7 +1296,15 @@ def test_selecting_a_few_runs_of_a_crowded_task_still_works(crowded_world):
 # ----------------------------------------------------------------------
 
 
-def _dom(server, world, phase, *, on_ready=None):
+def _dom(server, world, phase, *, on_ready=None, on_steps=None):
+    """Drive the shipped page in jsdom, mutating the store where it asks.
+
+    `on_steps` maps a handshake the harness prints to what the store does at
+    that point. A phase may need more than one -- editing a run's recorded
+    answer and finishing another run are two different mutations at two
+    different moments -- and each one is answered on stdin so the page carries
+    on only after the real store has really changed.
+    """
     jsdom_root = os.environ.get("TEST_JSDOM_ROOT")
     if not jsdom_root:
         pytest.skip("Set TEST_JSDOM_ROOT to run DOM integration with jsdom")
@@ -1308,7 +1316,10 @@ def _dom(server, world, phase, *, on_ready=None):
         world["task_id"],
         phase,
     ]
-    if on_ready is None:
+    steps = dict(on_steps or {})
+    if on_ready is not None:
+        steps["READY-FOR-MUTATION"] = on_ready
+    if not steps:
         result = subprocess.run(command, capture_output=True, text=True,
                                 timeout=180)
         assert result.returncode == 0, result.stdout + result.stderr
@@ -1318,17 +1329,22 @@ def _dom(server, world, phase, *, on_ready=None):
         stderr=subprocess.PIPE, text=True,
     )
     try:
+        pending = dict(steps)
         for line in process.stdout:
-            if "READY-FOR-MUTATION" in line:
-                on_ready()
-                process.stdin.write("go\n")
-                process.stdin.flush()
+            token = next((name for name in pending if name in line), None)
+            if token is None:
+                continue
+            pending.pop(token)()
+            process.stdin.write("go\n")
+            process.stdin.flush()
+            if not pending:
                 break
         stdout, stderr = process.communicate(timeout=180)
     finally:
         if process.poll() is None:
             process.kill()
     assert process.returncode == 0, stdout + stderr
+    assert not pending, f"the page never asked for {sorted(pending)}: {stdout}"
 
 
 def test_the_page_summarizes_every_finished_run_of_a_task(
@@ -1355,3 +1371,81 @@ def test_the_page_reports_an_over_limit_population_without_summarizing_part(
 ):
     world = dict(drift_world, task_id=drift_world["big_task"])
     _dom(drift_server, world, "overlimit")
+
+
+# ----------------------------------------------------------------------
+# One notice, two requests reporting on the same population (fix-kphi)
+# ----------------------------------------------------------------------
+
+
+def _first_turn_of(world, attempt):
+    """The turn key `drift_world` recorded for one attempt of its task."""
+    return f"fin-{world['task_id'][:8]}-a{attempt}"
+
+
+def _make_member_stale(world, attempt):
+    """Edit what one member's run recorded, in place, so opening it is refused.
+
+    Real evidence change against the real store -- same turn key, same spans,
+    same everything the summary names -- which is what keeps the reader on the
+    panel looking at the notice instead of navigating away from it.
+    """
+    from tests.test_selected_runs import _edit_recorded_outcome
+
+    _edit_recorded_outcome(world["store"], _first_turn_of(world, attempt), 0, False)
+
+
+def test_an_older_contributor_check_cannot_overwrite_a_newer_population_notice(
+    drift_server, drift_world
+):
+    """`fix-kphi`, in a real DOM against the real server.
+
+    The contributor check and the explicit "Check for run changes" both report
+    on the same population into the same notice. Here the contributor check is
+    requested FIRST, over a population in which attempt 3 was still running,
+    and answers LAST -- after attempt 3 really finished and the explicit check
+    said so. Its older reading must not replace the newer one, because a reader
+    told "the membership below is unchanged" has no reason to refresh.
+    """
+    _dom(
+        drift_server, drift_world, "notice-order",
+        on_steps={
+            "READY-FOR-EVIDENCE": lambda: _make_member_stale(drift_world, 1),
+            "READY-FOR-MUTATION": lambda: drift_world["finish"](
+                drift_world["task_id"], 3
+            ),
+        },
+    )
+
+
+def test_an_older_run_change_check_cannot_overwrite_a_newer_population_notice(
+    drift_server, drift_world
+):
+    """The same ordering, the other way round.
+
+    The explicit check is requested first and answers last; the drill-down
+    validation requested after it carries the fresher reading. One monotonic
+    claim has to order both directions, or fixing one would simply move the
+    defect to the other.
+    """
+
+    def moved():
+        drift_world["finish"](drift_world["task_id"], 3)
+        _make_member_stale(drift_world, 1)
+
+    _dom(
+        drift_server, drift_world, "notice-order-reverse",
+        on_steps={"READY-FOR-MUTATION": moved},
+    )
+
+
+def test_checking_for_run_changes_does_not_cancel_a_drill_down_in_flight(
+    drift_server, drift_world
+):
+    """Ownership of the notice is shared; ownership of the NAVIGATION is not.
+
+    A reader who opens a contributor and then asks whether the runs have
+    changed has asked two questions, not replaced the first with the second.
+    The drill-down still opens when its answer arrives.
+    """
+    _dom(drift_server, drift_world, "recheck-keeps-navigation")

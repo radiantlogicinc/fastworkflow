@@ -511,6 +511,232 @@ def test_the_feedback_ui_works_in_a_real_dom(experiment_server):
 
 
 # ---------------------------------------------------------------------------
+# An attempt filter answers about the side of the pair that was asked about
+# ---------------------------------------------------------------------------
+
+
+def _paired(identity, turn_keys, *, experiment_id, task_id, attempt):
+    """The paired anchor a compare row hands the composer, as posted."""
+    return {
+        "store_id": identity,
+        "turn_keys": list(turn_keys),
+        "experiment_id": experiment_id,
+        "task_id": task_id,
+        "attempt": attempt,
+        "target_kind": "turn",
+        "span_ids": [],
+        "target_label": "Turn",
+    }
+
+
+def test_a_paired_note_is_filtered_by_the_queried_sides_attempt(
+    experiment_server,
+):
+    """`fix-ptu1`, over real HTTP against a real store.
+
+    The note is written on the LEFT experiment's attempt 1 about the RIGHT
+    experiment's attempt 2, so the row's `attempt` column says 1 while the
+    right task's page is asking about its own attempt 2. Filtering on the
+    column alone showed the note under attempt 1 -- which that task never ran
+    -- and hid it under the attempt it is actually about.
+    """
+    server, store = experiment_server
+    left = _seed_task(
+        store, experiment_id="exp-left", task_id="task-left", attempts=(1,)
+    )
+    right = _seed_task(
+        store, experiment_id="exp-right", task_id="task-right", attempts=(2,)
+    )
+    note = "the right run's second attempt recovered where the left one gave up"
+    _post(
+        server,
+        left[0],
+        comment=note,
+        paired=_paired(
+            store.store_identity(), [right[0]],
+            experiment_id="exp-right", task_id="task-right", attempt=2,
+        ),
+    )
+
+    def right_side(**params):
+        return _task_feedback(
+            server, experiment="exp-right", task="task-right", **params
+        )
+
+    def left_side(**params):
+        return _task_feedback(
+            server, experiment="exp-left", task="task-left", **params
+        )
+
+    whole = right_side()
+    assert [row["comment"] for row in whole["feedback"]] == [note]
+    # The row still reports the annotated turn's attempt, because that is what
+    # the column means. What changed is the FILTER, which no longer reads it as
+    # the queried side's attempt.
+    assert whole["feedback"][0]["attempt"] == 1
+    assert [row["comment"] for row in right_side(attempt=2)["feedback"]] == [note]
+    assert right_side(attempt=1)["total"] == 0, (
+        "the right task has no attempt 1, so nothing may be shown under one"
+    )
+    # The primary side is untouched: it still filters on its own attempt.
+    assert [row["comment"] for row in left_side(attempt=1)["feedback"]] == [note]
+    assert left_side(attempt=2)["total"] == 0
+
+
+def test_a_pair_of_two_attempts_of_one_task_is_found_under_both(
+    experiment_server,
+):
+    """One row, both attempts, once each.
+
+    A note comparing two runs of the SAME task is about both of them, so it
+    belongs under either attempt -- and it is still one comment, not two.
+    """
+    server, store = experiment_server
+    keys = _seed_task(store, task_id="task-1")
+    note = "attempt 2 asked a clarifying question that attempt 1 skipped"
+    _post(
+        server,
+        keys[0],
+        comment=note,
+        paired=_paired(
+            store.store_identity(), [keys[2]],
+            experiment_id="exp-1", task_id="task-1", attempt=2,
+        ),
+    )
+    assert _task_feedback(server)["total"] == 1
+    for attempt in (1, 2):
+        page = _task_feedback(server, attempt=attempt)
+        assert [row["comment"] for row in page["feedback"]] == [note], (
+            f"the pair is about attempt {attempt} as well"
+        )
+    assert _task_feedback(server, attempt=3)["total"] == 0
+
+
+def test_a_paired_side_posted_without_an_attempt_is_filtered_by_the_recorded_one(
+    experiment_server,
+):
+    """The writer completes the paired scope off the turn row, so the filter
+    has a real attempt to match rather than a permissive blank."""
+    server, store = experiment_server
+    left = _seed_task(store, task_id="task-1", attempts=(1,))
+    right = _seed_task(store, task_id="task-2")
+    note = "the other task's run reached this question and stopped"
+    written = _post(
+        server,
+        left[0],
+        comment=note,
+        paired={
+            "store_id": store.store_identity(),
+            # attempt omitted on purpose: `complete_scope` reads it off the
+            # turn this reference names.
+            "turn_keys": [right[1]],
+            "experiment_id": "exp-1",
+            "task_id": "task-2",
+            "target_kind": "turn",
+            "span_ids": [],
+            "target_label": "Turn",
+        },
+    )
+    assert written["feedback"][0]["paired"]["ref"]["attempt"] == 1
+    assert [
+        row["comment"]
+        for row in _task_feedback(server, task="task-2", attempt=1)["feedback"]
+    ] == [note]
+    assert _task_feedback(server, task="task-2", attempt=2)["total"] == 0
+
+
+def test_a_row_whose_pair_anchor_is_unreadable_is_not_hidden_by_an_attempt(
+    experiment_server,
+):
+    """The defensive branch, against a row that really is shaped that way.
+
+    The pair COLUMNS say which task the note is also about; the anchor JSON is
+    where the attempt lives. A row with the columns and no readable anchor --
+    what a note written by an older build projects -- names no attempt on the
+    side being read, so it is shown under whichever attempt is asked for
+    rather than disappearing from every one of them.
+    """
+    server, store = experiment_server
+    left = _seed_task(store, task_id="task-1", attempts=(1,))
+    _seed_task(store, task_id="task-2")
+    note = "recorded with pair columns and no readable anchor"
+    with store._connect() as conn:
+        conn.execute(
+            "INSERT INTO human_feedback (feedback_uid, turn_key, target_kind,"
+            " span_ids_json, target_label, comment, provenance, anchors_json,"
+            " pair_experiment_id, pair_task_id, created_at)"
+            " VALUES (?, ?, 'turn', '[]', 'Turn', ?, 'human', '{}',"
+            " 'exp-1', 'task-2', '2026-01-01T00:00:00+00:00')",
+            ("fb-unreadable-anchor", left[0], note),
+        )
+        conn.commit()
+    for attempt in (1, 2):
+        page = _task_feedback(server, task="task-2", attempt=attempt)
+        assert [row["comment"] for row in page["feedback"]] == [note]
+    # Read from the side it is anchored to, its own attempt still filters it.
+    assert _task_feedback(server, task="task-1", attempt=1)["total"] == 1
+    assert _task_feedback(server, task="task-1", attempt=2)["total"] == 0
+
+
+def test_a_logical_experiment_matches_the_attempt_under_each_local_id(
+    experiment_server,
+):
+    """The workspace case: one logical experiment, two local ids, one row.
+
+    A comparison note written across two segments of one logical experiment is
+    a single row whose two sides name DIFFERENT local experiment ids. Both
+    sides have to be recognized as the task the reader asked about, or the
+    attempt filter would match neither and the note would vanish from a view
+    that shows it perfectly well unfiltered.
+    """
+    server, store = experiment_server
+    first = _seed_task(store, experiment_id="seg-a", task_id="task", attempts=(1,))
+    second = _seed_task(store, experiment_id="seg-b", task_id="task", attempts=(2,))
+    note = "the second segment's run repeated the first segment's mistake"
+    _post(
+        server,
+        first[0],
+        comment=note,
+        paired=_paired(
+            store.store_identity(), [second[0]],
+            experiment_id="seg-b", task_id="task", attempt=2,
+        ),
+    )
+    identity = store.store_identity()
+
+    def page(**params):
+        return fb.consolidate_task_feedback(
+            {identity: store},
+            experiment_id="logical",
+            task_id="task",
+            local_experiment_ids=["seg-a", "seg-b"],
+            **params,
+        )
+
+    assert page().total == 1, "one row, however many local ids name it"
+    assert page(attempt=1).total == 1, "the segment the note was written on"
+    assert page(attempt=2).total == 1, "the segment the note is about"
+    assert page(attempt=3).total == 0
+
+
+def test_the_attempt_filter_still_answers_for_rows_with_no_pair(
+    experiment_server,
+):
+    """The ordinary case, unchanged: a note with no paired side filters on the
+    attempt of the turn it is anchored to."""
+    server, store = experiment_server
+    keys = _seed_task(store)
+    _post(server, keys[0], comment="about attempt 1")
+    _post(server, keys[2], comment="about attempt 2")
+    assert [row["comment"] for row in _task_feedback(server, attempt=1)["feedback"]] == [
+        "about attempt 1"
+    ]
+    assert [row["comment"] for row in _task_feedback(server, attempt=2)["feedback"]] == [
+        "about attempt 2"
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Legacy: a real v6 corpus, read-only, never rewritten
 # ---------------------------------------------------------------------------
 
@@ -716,6 +942,26 @@ def test_legacy_rows_still_deduplicate_and_consolidate(legacy_v6_copy):
         )
         assert page.total >= 1
         assert all(row["category"] is None for row in page.rows)
+
+
+def test_a_legacy_row_is_filtered_by_its_own_attempt(legacy_v6_copy):
+    """A v6 row has no pair columns at all, so the turn it is anchored to is
+    the only side there is -- and the attempt filter still answers from it."""
+    store = obs.ReadOnlyObservabilityStore(str(legacy_v6_copy))
+    rows = _legacy_rows(legacy_v6_copy)
+    by_attempt = {1: 0, 2: 0}
+    for index in range(len(rows)):
+        by_attempt[2 if (index % 3) + 1 == 3 else 1] += 1
+    for attempt, expected in by_attempt.items():
+        page = fb.consolidate_task_feedback(
+            {"legacy": store},
+            experiment_id="exp-legacy",
+            task_id="task-legacy",
+            attempt=attempt,
+        )
+        assert page.total == expected
+        assert all(row["attempt"] == attempt for row in page.rows)
+    assert sum(by_attempt.values()) == len(rows) > 0
 
 
 def test_reading_the_legacy_copy_does_not_write_to_it(legacy_v6_copy):

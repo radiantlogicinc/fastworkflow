@@ -700,13 +700,16 @@ def status_for_dispatch_exception(exc: BaseException) -> str:
     AskUserSuspend closed as `error` in three of them, `awaiting_user` in a
     fourth, and escaped a fifth without closing its span at all — so an
     ordinary pause for input drew as a red ERROR node in the chatbot waterfall
-    (index.html:1671), and what a reader saw depended on which layer happened
+    (`renderWaterfall`, run_chatbot/static/src/220-turn-nav.js), and what a
+    reader saw depended on which layer happened
     to catch it.
 
     Control signals map to CANCELLED rather than AWAITING_USER deliberately.
     `awaiting_user` is a TURN-level state in this codebase: the store's
     non-terminal turn status, and the only thing the SPA tests it for
-    (index.html:803/840/2342 all read `turn.status`). Nothing anywhere reads a
+    (`statusBadge` in 210-turn-detail.js and the chat status lines in
+    240-chat.js / 260-chat-live.js, all under run_chatbot/static/src, read the
+    turn's status). Nothing anywhere reads a
     SPAN status of awaiting_user. A span status describes that span's own
     outcome — this dispatch was cut short — while "we are waiting on a human"
     is recorded once, on the turn, where readers already look for it.

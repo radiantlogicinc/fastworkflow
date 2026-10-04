@@ -650,8 +650,7 @@ def test_freeform_benchmark_analysis(live_server, value):
 
 
 def _ui_script():
-    page = Path(__file__).parents[1].joinpath(
-        'fastworkflow/run_chatbot/static/index.html').read_text()
+    page = run_chatbot_server.load_index_html().decode("utf-8")
     return re.search(r'<script[^>]*>(.*?)</script>', page, re.S).group(1)
 
 

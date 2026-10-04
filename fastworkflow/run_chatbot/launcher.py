@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import logging
 import os
 import signal
 import subprocess
@@ -34,6 +35,8 @@ import sys
 import threading
 from dataclasses import dataclass, field
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # Same package set `fastworkflow.cli._require_server_extra` guards on.
 SERVER_EXTRA_PACKAGES = (
@@ -61,6 +64,7 @@ class ServerSpawnPlan:
     reason: str = ""  # human-readable refusal message when not ok
     cmd: list[str] = field(default_factory=list)
     server_url: str = ""
+    log_path: str = ""
 
 
 def plan_server_spawn(
@@ -73,11 +77,14 @@ def plan_server_spawn(
     expect_encrypted_jwt: bool = False,
     allow_unsigned_jwt: bool = False,
     missing_packages: Optional[list[str]] = None,
+    parent_pid: Optional[int] = None,
 ) -> ServerSpawnPlan:
     """Decide whether the chatbot may spawn the FastAPI server, and with what args.
 
     Pure function [R19]: callers pass ``missing_packages`` (defaulting to a
     live probe) so tests can exercise every branch without subprocesses.
+    ``parent_pid``, when set, is forwarded as a hidden ``--parent_pid`` so the
+    child can exit if the chatbot disappears without a clean shutdown.
     """
     if missing_packages is None:
         missing_packages = missing_server_packages()
@@ -129,22 +136,95 @@ def plan_server_spawn(
     ]
     if expect_encrypted_jwt:
         cmd.append("--expect_encrypted_jwt")
+    if parent_pid is not None:
+        cmd.extend(["--parent_pid", str(int(parent_pid))])
     return ServerSpawnPlan(
-        ok=True, cmd=cmd, server_url=f"http://127.0.0.1:{server_port}"
+        ok=True,
+        cmd=cmd,
+        server_url=f"http://127.0.0.1:{server_port}",
+        log_path=server_log_path(workflow_path),
     )
 
 
-def spawn_server(plan: ServerSpawnPlan) -> subprocess.Popen:
-    """Start the planned server as a child process (inherits stdio/env).
+def _workflow_state_dir(workflow_path: str, *, create: bool) -> str:
+    """State dir for one workflow. ``create=False`` must not mkdir."""
+    from fastworkflow import state_paths
 
-    The child gets its own session/process group so (a) a terminal Ctrl+C
-    cannot kill it out from under the chatbot's own shutdown sequencing and
-    (b) ``terminate_server`` can signal the whole group, catching any workers
-    the server itself forks.
+    if create:
+        return state_paths.workflow_state_dir(workflow_path)
+    return os.path.join(
+        state_paths.state_root(),
+        "workflows",
+        state_paths.workflow_id(workflow_path),
+    )
+
+
+SERVER_LOG_FILENAME = "server.log"
+
+
+def server_log_path(workflow_path: str, *, create: bool = False) -> str:
+    """Current FastAPI server log under the workflow state dir.
+
+    Same directory convention as :func:`train_artifact_paths`. The previous
+    spawn is kept beside it as ``server.log.1``. ``create=False`` (session
+    polls, plan construction) must not mkdir.
+    """
+    return os.path.join(
+        _workflow_state_dir(workflow_path, create=create), SERVER_LOG_FILENAME
+    )
+
+
+def _rotate_server_log(log_path: str) -> None:
+    """Keep the previous spawn's log as ``server.log.1`` and start fresh.
+
+    ``os.replace`` overwrites an existing ``.1``, so only the current file and
+    one previous generation remain. No background trimmer: the file may grow
+    for the life of that process; readers cap what they return.
+    """
+    if os.path.exists(log_path):
+        os.replace(log_path, log_path + ".1")
+
+
+def _cmd_flag(cmd: list[str], flag: str) -> str:
+    try:
+        return cmd[cmd.index(flag) + 1]
+    except (ValueError, IndexError):
+        return ""
+
+
+def spawn_server(plan: ServerSpawnPlan) -> subprocess.Popen:
+    """Start the planned server as a child process.
+
+    stdout and stderr go to the workflow's server log (opened in this
+    process; the fd is passed to the child and this process's copy is
+    closed). The environment is inherited. The child gets its own
+    session/process group so (a) a terminal Ctrl+C cannot kill it out from
+    under the chatbot's own shutdown sequencing and (b) ``terminate_server``
+    can signal the whole group, catching any workers the server itself forks.
+    ``--parent_pid`` stays on the planned command.
     """
     if not plan.ok:
         raise ValueError(f"refused spawn plan cannot be executed: {plan.reason}")
-    return subprocess.Popen(plan.cmd, start_new_session=(os.name == "posix"))
+    log_path = plan.log_path
+    if not log_path:
+        workflow_path = _cmd_flag(plan.cmd, "--workflow_path")
+        if not workflow_path:
+            raise ValueError("spawn plan has no workflow path for the server log")
+        log_path = server_log_path(workflow_path)
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    _rotate_server_log(log_path)
+    fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        proc = subprocess.Popen(
+            plan.cmd,
+            stdout=fd,
+            stderr=subprocess.STDOUT,
+            start_new_session=(os.name == "posix"),
+        )
+    finally:
+        os.close(fd)
+    logger.info("FastAPI server log: %s", log_path)
+    return proc
 
 
 def terminate_server(proc: subprocess.Popen, grace_seconds: float = 10.0) -> None:
@@ -225,16 +305,7 @@ def train_artifact_paths(workflow_path: str, *, create: bool = False) -> tuple[s
     ``create=False`` (the poll path) must not mkdir: listing 100 candidates
     would otherwise stamp empty state dirs for every untrained workflow.
     """
-    from fastworkflow import state_paths
-
-    if create:
-        state_dir = state_paths.workflow_state_dir(workflow_path)
-    else:
-        state_dir = os.path.join(
-            state_paths.state_root(),
-            "workflows",
-            state_paths.workflow_id(workflow_path),
-        )
+    state_dir = _workflow_state_dir(workflow_path, create=create)
     return (
         os.path.join(state_dir, TRAIN_PID_FILENAME),
         os.path.join(state_dir, TRAIN_LOG_FILENAME),

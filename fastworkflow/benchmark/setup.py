@@ -53,6 +53,27 @@ class ExperimentDeleted(BenchmarkSetupConflict):
     """A deleted registration must never fall back to an unregistered run."""
 
 
+class ExperimentSelected(BenchmarkSetupConflict):
+    """The current winner is not deleted while others remain; select one first.
+
+    Deleting an unused registration withdraws it from the contest
+    (`retire_experiment_selection`), and the one thing that cannot be withdrawn
+    while the group has other members is the experiment the contest currently
+    names. The alternatives were worse: clearing the pointer files a "nobody
+    won" nobody decided, and electing a successor decides a contest on the
+    user's behalf during an unrelated deletion. So this is refused — a 409 at
+    the HTTP edge — and the user promotes another experiment first.
+
+    It applies to the automatic first winner too. Nobody chose it, but it is
+    still the experiment every read reports right now.
+
+    The group's ONLY member is not refused (`fix-65ik`): there is nobody to
+    promote instead, so the refusal had no way out, and removing it leaves an
+    empty contest rather than an undecided one. Its next experiment is elected
+    automatically, the way the first one was.
+    """
+
+
 # Runs per task. Bounded because the only thing between this number and n real
 # executions is somebody's typing: 1000 is not a repeat count, it is a bill.
 MIN_RUNS_PER_TASK = 1
@@ -498,9 +519,12 @@ def _seed_registrations(workflow_path, control, *, already_missing=()):
     heard of — and becomes the winner, outranking months of older work that was
     never in the contest to lose it.
 
-    Seeding is idempotent (registering a known experiment adds no member row
-    and no decision), so this runs on every bootstrap rather than once behind a
-    flag nobody can verify.
+    Seeding is safe to repeat: registering a known experiment adds no member
+    row, and adds a decision only when its group still has no winner and the
+    view is now whole -- the `initial` election a previous, incomplete
+    bootstrap withheld, which goes to the group's OLDEST member rather than to
+    whichever registration happens to be re-seeded first (`fix-kkod`). So this
+    runs on every bootstrap rather than once behind a flag nobody can verify.
 
     Two passes, and the order is the point. The first admits every store the
     registrations name, so completeness is known BEFORE anybody is elected. The
@@ -534,21 +558,33 @@ def _seed_registrations(workflow_path, control, *, already_missing=()):
             sources[record["experiment_id"]] = source_id
 
     seeded = []
-    for record in records:
-        try:
-            control.register_experiment_reference(
-                _reference_for(workflow_path, record, sources.get(record["experiment_id"])),
-                allow_initial_winner=not missing,
-            )
-            seeded.append(record["experiment_id"])
-        except Exception as exc:
-            logger.warning(
-                f"observability: registration {record['experiment_id']!r} could "
-                f"not be seeded into the selection contest: {exc}"
-            )
-            missing.append(
-                {"experiment_id": record["experiment_id"], "error": str(exc)}
-            )
+    # Under the SETUP lock, re-reading each registration inside it. `records`
+    # was enumerated before the lock, and `delete_empty_experiment` withdraws a
+    # registration from the contest and tombstones it while holding this same
+    # lock. Without the re-read, a bootstrap that read its list a moment
+    # earlier would register the deleted id again — after its withdrawal — and
+    # put a tombstone back in the contest, which is `fix-jfy5` by the back
+    # door. A registration created since the enumeration is simply seeded on
+    # the next bootstrap, the way it always was.
+    with _lock(workflow_path):
+        for stale in records:
+            experiment_id = stale["experiment_id"]
+            try:
+                record = load_experiment(workflow_path, experiment_id)
+            except (KeyError, ExperimentDeleted, ValueError):
+                continue
+            try:
+                control.register_experiment_reference(
+                    _reference_for(workflow_path, record, sources.get(experiment_id)),
+                    allow_initial_winner=not missing,
+                )
+                seeded.append(experiment_id)
+            except Exception as exc:
+                logger.warning(
+                    f"observability: registration {experiment_id!r} could "
+                    f"not be seeded into the selection contest: {exc}"
+                )
+                missing.append({"experiment_id": experiment_id, "error": str(exc)})
     return {"seeded": seeded, "registrations_unavailable": missing}
 
 
@@ -667,7 +703,40 @@ def register_experiment_selection(workflow_path, record, *, allow_initial_winner
     that ran just before it came back incomplete: register, but do not hand
     this brand-new experiment a title that some older, currently unreadable one
     may already hold.
+
+    `record` is the registration the CALLER holds, which is why this takes the
+    setup lock and re-reads by id instead of trusting it. `create_experiment`
+    writes the file, releases the lock, runs a bootstrap and only then arrives
+    here; a deletion in that gap has already withdrawn the experiment, and
+    writing the caller's cached copy would put the tombstoned id straight back
+    into the contest — and make it promotable again (`fix-jfy5`). Every setup
+    path into the control goes through a lock-and-re-read for that reason:
+    this one, and the bootstrap's `_seed_registrations`.
     """
+    with _lock(workflow_path):
+        return _register_selection_locked(
+            workflow_path,
+            record["experiment_id"],
+            allow_initial_winner=allow_initial_winner,
+        )
+
+
+def _register_selection_locked(workflow_path, experiment_id, *, allow_initial_winner=True):
+    """`register_experiment_selection` with the setup lock ALREADY held.
+
+    Separate because the lock is a plain `flock` and is NOT reentrant: the
+    deletion path is inside it when it needs to undo a withdrawal, and calling
+    the public function from there would deadlock against itself rather than
+    fail visibly.
+
+    Returns None for a registration that is gone or tombstoned, which is the
+    refusal that matters here: a deleted id must not come back as a member,
+    because membership is what a later promotion is validated against.
+    """
+    try:
+        record = load_experiment(workflow_path, experiment_id)
+    except (KeyError, ExperimentDeleted, ValueError):
+        return None
     try:
         control = open_workflow_control(workflow_path)
         return control.register_experiment_reference(
@@ -676,10 +745,57 @@ def register_experiment_selection(workflow_path, record, *, allow_initial_winner
         )
     except Exception as exc:  # creation must not fail on a control problem
         logger.warning(
-            f"observability: experiment {record['experiment_id']!r} was created "
+            f"observability: experiment {experiment_id!r} was created "
             f"but not registered for winner selection: {exc}"
         )
         return None
+
+
+def retire_experiment_selection(workflow_path, experiment_id):
+    """Take a registration that is being deleted OUT of the workflow contest.
+
+    The other half of `register_experiment_selection`, and the thing whose
+    absence was `fix-jfy5`: creation registers and may elect, deletion only
+    tombstoned the JSON, so a group could be left pointing at an experiment
+    that no longer exists — reported as the winner, unresolvable, and
+    impossible to duplicate.
+
+    NOT best effort, unlike registration, and that asymmetry is deliberate. A
+    registration that fails to enter the contest is visibly winner-less; a
+    deletion that fails to leave it is invisible, and the stale pointer it
+    leaves behind is exactly this bug. So a control that exists and cannot be
+    updated fails the deletion instead, with nothing changed. A workflow with
+    no control file at all has nothing to retire and nothing to fail: `None`.
+
+    Raises `ExperimentSelected` (409) when the experiment is the group's
+    current winner and other experiments are still in the group — see that
+    class for why deletion does not get to move a winner pointer. The winner
+    that is the group's ONLY member is withdrawn along with the pointer; the
+    result's `winner_retired` says so, which is what the deletion's
+    compensation needs to know.
+    """
+    path = workflow_control_db_path(workflow_path)
+    if selection.control_mode_of(path) is None:
+        return None
+    control = open_workflow_control(workflow_path, create=False)
+    try:
+        return control.retire_experiment(
+            experiment_id,
+            rationale="its registration was deleted",
+            allow_sole_winner=True,
+        )
+    except selection.SelectionRetirementRefused as exc:
+        if exc.reason == "is_current_winner":
+            raise ExperimentSelected(
+                "This experiment is the current winner of its comparison "
+                "group, and the group has other experiments in it. Deleting "
+                "it would leave them without a winner anybody chose, so it is "
+                "refused: promote one of the other experiments to winner "
+                "first, then delete this one."
+            ) from exc
+        raise BenchmarkSetupConflict(
+            "This experiment is part of the recorded contest and cannot be deleted."
+        ) from exc
 
 
 def bind_runner_evidence(workflow_path, store, db_path=None):
@@ -748,6 +864,24 @@ def workflow_winner(workflow_path, experiment_id):
     except selection.SelectionControlUnavailable:
         return None
     return control.winner_for_experiment(experiment_id)
+
+
+def is_sole_group_member(workflow_path, experiment_id):
+    """True when this experiment is the only member of its comparison group.
+
+    Read-only, like `workflow_winner`. It is the condition under which the
+    current winner may be deleted (`ExperimentSelected`), asked separately so a
+    screen can offer exactly what the deletion accepts.
+    """
+    try:
+        control = open_workflow_control(workflow_path, create=False)
+    except selection.SelectionControlUnavailable:
+        return False
+    group = control.group_for_experiment(experiment_id)
+    if group is None:
+        return False
+    members = control.group_members(str(group["group_id"]))
+    return [str(row["experiment_id"]) for row in members] == [experiment_id]
 
 
 def save_benchmark(workflow_path, body):
@@ -995,15 +1129,92 @@ def delete_empty_experiment(workflow_path, experiment_id):
 
     A tombstone prevents delayed runners from treating a deleted ID as a new,
     unregistered experiment. No evidence database or benchmark version is touched.
+
+    The registration also LEAVES THE CONTEST it joined at creation (`fix-jfy5`).
+    Withdrawal comes FIRST because it is the only refusable step, so a refused
+    deletion — the current winner of a group with other members, or a
+    registration with evidence — leaves both the file and the contest exactly
+    as they were. Nothing here elects anybody: the winner can be the experiment
+    being deleted only when it is the group's sole member (`fix-65ik`), and
+    then there is nobody to succeed it — the group is left empty and
+    winner-less, and its next experiment is elected on registration.
+
+    Two writes that are not one transaction, made safe by which one can fail
+    and by the lock around both:
+
+    - Withdraw, then tombstone. A crash between them leaves a live registration
+      that is not a contest member, which the next `ensure_selection_bootstrap`
+      re-seeds (registration is idempotent, and a sole winner withdrawn this
+      way is re-elected by it, being the oldest member of its group); a rename
+      that FAILS is compensated here, by re-registering the reference we just
+      withdrew.
+    - `_seed_registrations` takes this same lock and re-reads the registrations
+      inside it, so a bootstrap cannot be holding a records list from before
+      the tombstone and re-register a deleted id after the withdrawal.
     """
     with _lock(workflow_path):
-        record = load_experiment(workflow_path, experiment_id)
-        if record.get("store") is not None:
-            raise BenchmarkSetupConflict(
-                "This experiment has been handed to a runner and cannot be deleted."
-            )
-        path = _registration_path(workflow_path, experiment_id)
-        deleted = path.parent / ".deleted" / path.name
+        return _delete_locked(workflow_path, experiment_id)
+
+
+def _delete_locked(workflow_path, experiment_id):
+    """The body of `delete_empty_experiment`, with the setup lock ALREADY held.
+
+    Split out so the ordering it depends on can be tested against the real
+    thing: a caller that holds the lock (a test reproducing a bootstrap racing
+    a deletion) can run the actual deletion rather than a paraphrase of it.
+    Everything about the policy lives here; the public function is the lock.
+    """
+    record = load_experiment(workflow_path, experiment_id)
+    if record.get("store") is not None:
+        raise BenchmarkSetupConflict(
+            "This experiment has been handed to a runner and cannot be deleted."
+        )
+    retired = retire_experiment_selection(workflow_path, experiment_id) or {}
+    was_winner = bool(retired.get("winner_retired"))
+    path = _registration_path(workflow_path, experiment_id)
+    deleted = path.parent / ".deleted" / path.name
+    try:
         deleted.parent.mkdir(exist_ok=True)
         os.replace(path, deleted)
-        return record
+    except OSError:
+        # The registration is still there, so the withdrawal above has to go
+        # back: membership is what a later promotion is checked against, and an
+        # experiment a user can still see must still be selectable.
+        # Re-registering restores exactly what was removed — the member row
+        # with no evidence source — and `allow_initial_winner=False` keeps it
+        # from taking a pointer it did not hold a moment ago. A sole winner DID
+        # hold the pointer a moment ago, and the withdrawal cleared it, so it
+        # is re-registered with the election allowed: the group is empty but
+        # for it, the election picks the oldest member, and the user gets back
+        # the winner they had (with `initial`, `retire`, `initial` in the
+        # append-only history, which is what happened). The LOCKED form,
+        # because this lock is not reentrant and we are already inside it.
+        restored = _register_selection_locked(
+            workflow_path, experiment_id, allow_initial_winner=was_winner
+        )
+        if restored is not None and was_winner and restored.get("winner") is None:
+            # Re-elected nobody: the view stopped being whole in between (an
+            # evidence store became unreadable), so the election is withheld
+            # like any other. The member is back and the next complete
+            # bootstrap elects it; said out loud so nobody reads it as lost.
+            logger.error(
+                f"observability: experiment {experiment_id!r} could not be "
+                "tombstoned, and was put back into the selection contest of "
+                f"{workflow_name_for(workflow_path)!r} WITHOUT its winner "
+                "title: the workflow's history cannot be read in full right "
+                "now. The next bootstrap that can read it re-elects it."
+            )
+        if restored is None:
+            # The repair failed, so the user keeps a registration that is no
+            # longer in the contest. Said out loud, because the alternative is
+            # an experiment that looks ordinary and silently cannot be
+            # promoted; the next `ensure_selection_bootstrap` re-seeds it.
+            logger.error(
+                f"observability: experiment {experiment_id!r} could not be "
+                "tombstoned AND could not be put back into the selection "
+                f"contest of {workflow_name_for(workflow_path)!r}. Its "
+                "registration still exists but is not a member until the next "
+                "bootstrap re-seeds it."
+            )
+        raise
+    return record
