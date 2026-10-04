@@ -866,6 +866,39 @@ def workflow_winner(workflow_path, experiment_id):
     return control.winner_for_experiment(experiment_id)
 
 
+def benchmark_winner(workflow_path, benchmark_id):
+    """The current winner of this benchmark's contest, or None.
+
+    Read-only, like `workflow_winner`. A contest is one group per benchmark
+    lineage, across versions, so the page that lists every experiment of that
+    lineage can mark the one the pointer names without opening each experiment.
+    Inspecting a benchmark that has never entered a contest does not create
+    the control file.
+    """
+    benchmark_id = str(benchmark_id or "").strip()
+    if not benchmark_id:
+        return None
+    try:
+        control = open_workflow_control(workflow_path, create=False)
+    except selection.SelectionControlUnavailable:
+        return None
+    name = workflow_name_for(workflow_path)
+    groups = [
+        group
+        for group in control.list_groups()
+        if group.get("group_kind") == selection.GROUP_BENCHMARK
+        and group.get("benchmark_id") == benchmark_id
+    ]
+    named = [group for group in groups if group.get("workflow_name") == name]
+    # A renamed workflow folder leaves the old name on the group. One such
+    # group is still this contest; two, with neither matching, is ambiguous
+    # and marking either experiment would be a guess.
+    group = named[0] if named else (groups[0] if len(groups) == 1 else None)
+    if group is None:
+        return None
+    return control.current_winner(str(group["group_id"]))
+
+
 def is_sole_group_member(workflow_path, experiment_id):
     """True when this experiment is the only member of its comparison group.
 

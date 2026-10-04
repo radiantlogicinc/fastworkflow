@@ -52,7 +52,8 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   await until(() => summary(experimentName));
   assert.ok(summary(experimentName).parentElement.classList.contains('archived'));
   await until(() => d.querySelector('#detail .recordCard.archived'));
-  assert.equal(d.querySelector('#detail .recordCard.archived .pill').textContent, 'Archived');
+  assert.ok([...d.querySelectorAll('#detail .recordCard.archived .pill')]
+    .some(pill => pill.textContent === 'Archived'));
   assert.ok(d.querySelector('#convList [aria-label="Hide archived experiments"]'));
 
   d.querySelector('#convList [aria-label="Hide archived experiments"]').click();

@@ -1150,6 +1150,59 @@ function editBenchmark(current) {
     }).catch(function (e) { msg.textContent = e.message; });
   }); toolbar.appendChild(save); d.appendChild(toolbar);
 }
+/* The name a person can recognise: the rail's short id, then the description
+   the author wrote. The card index ("Experiment 3") is a position in the
+   newest-first list and moves, so the winner callout does not use it. */
+function benchmarkExperimentTitle(row) {
+  var recordedPath = findRecordedExperimentPath(row.experiment_id);
+  var recordedNode = recordedPath && recordedPath[recordedPath.length - 1];
+  var described = recordedNode ? recordedNode.label : row.description;
+  var shortId = "Experiment · " + String(row.experiment_id || "").slice(-8);
+  return { shortId: shortId, described: described || "" };
+}
+
+/* Newest-first puts the winner, often the oldest registration, at the bottom
+   of a long list, and an archived winner is hidden until the rail asks for
+   it. The callout names the pointer where the list starts. It is the same
+   fact the experiment page reports, including when nobody chose and the first
+   experiment still holds the contest. */
+function renderBenchmarkWinner(host, result, benchmarkId) {
+  clear(host);
+  var winnerId = result.winner_experiment_id;
+  if (!winnerId) { return; }
+  var row = null;
+  (result.experiments || []).some(function (candidate) {
+    if (candidate.experiment_id === winnerId) { row = candidate; return true; }
+  });
+  var hidden = row && row.archived && !archivedExperimentsShown[benchmarkId];
+  var card = el("div", "statusCard winnerCallout");
+  var content = el("div");
+  var badges = el("div", "diffToolbar");
+  badges.appendChild(el("span", "pill ok", "Winner"));
+  if (result.winner_automatic) {
+    badges.appendChild(el("span", "pill", "automatic — first experiment"));
+  }
+  content.appendChild(badges);
+  var title = row ? benchmarkExperimentTitle(row) : { shortId: winnerId, described: "" };
+  content.appendChild(el("strong", null, title.shortId));
+  if (title.described) { content.appendChild(el("p", null, title.described)); }
+  var note = "This workflow's current answer for the benchmark.";
+  if (hidden) {
+    note += " It is archived, so the list hides it until archived experiments are shown.";
+  } else if (!row) {
+    note = "Recorded as the winner, but it is not in this benchmark's experiment list.";
+  }
+  content.appendChild(el("p", null, note));
+  if (row) {
+    var open = el("button", "winnerOpen", "Open winning experiment");
+    open.type = "button";
+    open.addEventListener("click", function () { openBenchmarkRecord(row); });
+    content.appendChild(open);
+  }
+  card.appendChild(content);
+  host.appendChild(card);
+}
+
 function showBenchmark(benchmarkId, selectedVersion) {
   focusHierarchy(function (n) { return n.kind === "benchmark" && n.benchmark_id === benchmarkId; });
   benchmarkExperimentSource = null;
@@ -1189,11 +1242,15 @@ function showBenchmark(benchmarkId, selectedVersion) {
           }).catch(function (e) { msg.textContent = e.message; });
         }); experimentsHead.appendChild(create);
       }
-      d.appendChild(msg); d.appendChild(experimentList);
+      d.appendChild(msg);
+      var winnerHost = el("div");
+      d.appendChild(winnerHost);
+      d.appendChild(experimentList);
       experimentList.appendChild(el("div", "empty", "Loading experiments…"));
       api("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/experiments").then(function (result) {
         if (benchNavStale(nav)) { return; }
         clear(experimentList);
+        renderBenchmarkWinner(winnerHost, result, benchmarkId);
         var archivedCount = result.experiments.filter(function (row) { return row.archived; }).length;
         var experiments = archivedExperimentsShown[benchmarkId]
           ? result.experiments
@@ -1209,8 +1266,13 @@ function showBenchmark(benchmarkId, selectedVersion) {
           }
         }
         experiments.forEach(function (row, index) {
-          var b = el("button", "recordCard" + (row.archived ? " archived" : "")), top = el("span", "eyebrow", row.benchmark_version || version);
-          if (row.archived) { top.appendChild(el("span", "pill", "Archived")); }
+          var classes = "recordCard" + (row.archived ? " archived" : "") + (row.is_winner ? " winning" : "");
+          var b = el("button", classes), top = el("span", "eyebrow");
+          top.appendChild(el("span", null, row.benchmark_version || version));
+          var marks = el("span", "marks");
+          if (row.is_winner) { marks.appendChild(el("span", "pill ok", "Winner")); }
+          if (row.archived) { marks.appendChild(el("span", "pill", "Archived")); }
+          top.appendChild(marks);
           top.appendChild(el("span", "arrow", "↗")); b.appendChild(top);
           var recordedPath = findRecordedExperimentPath(row.experiment_id);
           var recordedNode = recordedPath && recordedPath[recordedPath.length - 1];

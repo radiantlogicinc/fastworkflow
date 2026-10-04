@@ -183,6 +183,13 @@ class TestBenchmarkReadApi:
             newer["experiment_id"],
             older["experiment_id"],
         ]
+        # The first experiment holds the contest until somebody promotes
+        # another. The list stays newest-first; the pointer is a separate fact.
+        by_id = {row["experiment_id"]: row for row in data["experiments"]}
+        assert data["winner_experiment_id"] == older["experiment_id"]
+        assert data["winner_automatic"] is True
+        assert by_id[older["experiment_id"]]["is_winner"] is True
+        assert by_id[newer["experiment_id"]]["is_winner"] is False
 
 
 class TestBenchmarkWriteApi:

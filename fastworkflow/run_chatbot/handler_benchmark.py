@@ -292,8 +292,31 @@ class _BenchmarkRoutes:
                         offset += len(batch)
             except IncompatibleObservabilityDB as exc:
                 warning = STORE_UNAVAILABLE + str(exc)
+        # One read for the whole list. The winner is a pointer on the contest,
+        # not a property of any registration row, and the list is newest-first
+        # so the experiment it names is often the oldest card on the page.
+        winner_id = None
+        winner_automatic = False
+        if self.chatbot.workspace is None:
+            try:
+                winner = benchmark_setup.benchmark_winner(folder, benchmark_id)
+            except (OSError, sqlite3.Error, ValueError) as exc:
+                warning = warning or str(exc)
+                winner = None
+            if winner and winner.get("experiment_id"):
+                winner_id = str(winner["experiment_id"])
+                winner_automatic = bool(winner.get("automatic"))
+        for row in rows:
+            row["is_winner"] = bool(
+                winner_id and row.get("experiment_id") == winner_id
+            )
         self._send_json(
-            {"experiments": newest_experiments_first(rows), "warning": warning}
+            {
+                "experiments": newest_experiments_first(rows),
+                "warning": warning,
+                "winner_experiment_id": winner_id,
+                "winner_automatic": winner_automatic,
+            }
         )
 
     def _handle_benchmarks(self, path: str) -> None:
