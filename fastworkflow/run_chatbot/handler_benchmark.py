@@ -18,6 +18,7 @@ from fastworkflow.benchmark.catalog import (
     write_analysis,
     write_version,
 )
+from fastworkflow.observability import control
 from fastworkflow.observability.store import IncompatibleObservabilityDB
 from fastworkflow.run_chatbot.http_common import STORE_UNAVAILABLE
 
@@ -44,10 +45,19 @@ class _BenchmarkRoutes:
                     runs_per_task=body.get("runs_per_task", 1),
                 )
                 self._send_json({"experiment": record}, status=201)
-        except benchmark_setup.BenchmarkSetupConflict as exc:
+        except (benchmark_setup.BenchmarkSetupConflict, IncompatibleObservabilityDB) as exc:
             self._error(409, str(exc))
+        except sqlite3.OperationalError as exc:
+            self._write_refused(exc)
         except (BenchmarkManifestError, ValueError, TypeError) as exc:
             self._error(400, str(exc))
+
+    def _write_refused(self, exc: sqlite3.OperationalError) -> None:
+        """A busy live DB is 503 (retryable), a read-only one 409 (design §5)."""
+        status = control.write_refusal_status(exc)
+        if status is None:
+            raise exc
+        self._error(status, str(exc))
 
     def _post_benchmark_version(self, path: str, body: Any, query: dict[str, list[str]]) -> None:
         self._handle_benchmark_post(path, body)
@@ -66,8 +76,11 @@ class _BenchmarkRoutes:
         except (KeyError, benchmark_setup.ExperimentDeleted):
             self._error(404, "experiment not found")
             return
-        except benchmark_setup.BenchmarkSetupConflict as exc:
+        except (benchmark_setup.BenchmarkSetupConflict, IncompatibleObservabilityDB) as exc:
             self._error(409, str(exc))
+            return
+        except sqlite3.OperationalError as exc:
+            self._write_refused(exc)
             return
         except (ValueError, TypeError) as exc:
             self._error(400, str(exc))
@@ -130,7 +143,7 @@ class _BenchmarkRoutes:
         except (KeyError, benchmark_setup.ExperimentDeleted):
             self._error(404, "experiment not found")
             return
-        except (ValueError, BenchmarkManifestError) as exc:
+        except (ValueError, BenchmarkManifestError, IncompatibleObservabilityDB) as exc:
             self._error(409, str(exc))
             return
         recorded, warning = False, None
@@ -181,10 +194,10 @@ class _BenchmarkRoutes:
     def _handle_registration_patch(self, path: str, body: dict[str, Any]) -> None:
         """`PATCH /api/benchmark-experiments/<id>` -- the author's description.
 
-        The registration file is setup data, not evidence, and this route can
+        The registration is setup data, not evidence, and this route can
         only reach one whose runner has not claimed it:
-        `update_experiment_description` refuses a bound registration under the
-        same lock the binding takes.
+        `update_experiment_description` refuses a bound registration in the
+        same kind of transaction the binding takes.
         """
         experiment_id = unquote(path[len("/api/benchmark-experiments/"):]).rstrip("/")
         if not experiment_id:
@@ -203,8 +216,11 @@ class _BenchmarkRoutes:
         except (KeyError, benchmark_setup.ExperimentDeleted):
             self._error(404, "experiment not found")
             return
-        except benchmark_setup.BenchmarkSetupConflict as exc:
+        except (benchmark_setup.BenchmarkSetupConflict, IncompatibleObservabilityDB) as exc:
             self._error(409, str(exc))
+            return
+        except sqlite3.OperationalError as exc:
+            self._write_refused(exc)
             return
         except (ValueError, TypeError) as exc:
             self._error(400, str(exc))
@@ -245,11 +261,11 @@ class _BenchmarkRoutes:
                         )
                     )
         else:
-            registrations = benchmark_setup.registered_experiments(folder, benchmark_id)
-            rows = [dict(row, registered=True, status="registered", archived=False)
-                    for row in registrations]
-            registered = {row["experiment_id"]: row for row in rows}
             try:
+                registrations = benchmark_setup.registered_experiments(folder, benchmark_id)
+                rows = [dict(row, registered=True, status="registered", archived=False)
+                        for row in registrations]
+                registered = {row["experiment_id"]: row for row in rows}
                 store = self.chatbot.open_store()
                 if store:
                     offset = 0

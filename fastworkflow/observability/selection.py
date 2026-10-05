@@ -641,6 +641,36 @@ class SelectionControlStore:
         the last NON-winner leaving a group that never elected, and the sole
         winner leaving under ``allow_sole_winner``.
         """
+        with control.write(self.store) as conn:
+            retired = self.retire_in_txn(
+                conn,
+                experiment_id,
+                actor=actor,
+                actor_kind=actor_kind,
+                provenance=provenance,
+                rationale=rationale,
+                allow_sole_winner=allow_sole_winner,
+            )
+        if not retired["retired"]:
+            return retired
+        return {**retired, "winner": self.current_winner(retired["group_id"])}
+
+    def retire_in_txn(
+        self,
+        conn: sqlite3.Connection,
+        experiment_id: str,
+        *,
+        actor: str = "fastworkflow",
+        actor_kind: str = SYSTEM_ACTOR_KIND,
+        provenance: str = _RETIREMENT_PROVENANCE,
+        rationale: Optional[str] = None,
+        allow_sole_winner: bool = False,
+    ) -> dict[str, Any]:
+        """`retire_experiment` inside the caller's ``BEGIN IMMEDIATE``.
+
+        Deleting a registration tombstones it in the same transaction, so a
+        refusal here leaves both exactly as they were.
+        """
         experiment_id = _require_text(experiment_id, "experiment_id")
         actor, provenance = _require_actor(actor, actor_kind, provenance)
         rationale = _clean(rationale)
@@ -648,89 +678,87 @@ class SelectionControlStore:
             raise ValueError(f"rationale must be at most {_MAX_TEXT} characters")
 
         now = _utcnow_iso()
-        with control.write(self.store) as conn:
-            member = conn.execute(
-                "SELECT * FROM comparison_group_members WHERE experiment_id=?",
-                (experiment_id,),
+        member = conn.execute(
+            "SELECT * FROM comparison_group_members WHERE experiment_id=?",
+            (experiment_id,),
+        ).fetchone()
+        group_id = None if member is None else str(member["group_id"])
+        if conn.execute(
+            "SELECT 1 FROM experiments WHERE experiment_id=?", (experiment_id,)
+        ).fetchone() is not None:
+            raise SelectionRetirementRefused(
+                experiment_id,
+                group_id,
+                "has_evidence",
+                f"experiment {experiment_id!r} has recorded evidence and cannot "
+                "be withdrawn from its comparison group",
+            )
+        if member is None:
+            return {
+                "retired": False,
+                "experiment_id": experiment_id,
+                "group_id": None,
+                "seq": None,
+            }
+        pointer = _pointer(conn, group_id)
+        winner_retired = False
+        if pointer is not None and str(pointer["experiment_id"]) == experiment_id:
+            others = conn.execute(
+                """SELECT 1 FROM comparison_group_members
+                    WHERE group_id=? AND experiment_id<>? LIMIT 1""",
+                (group_id, experiment_id),
             ).fetchone()
-            group_id = None if member is None else str(member["group_id"])
-            if conn.execute(
-                "SELECT 1 FROM experiments WHERE experiment_id=?", (experiment_id,)
-            ).fetchone() is not None:
+            if not allow_sole_winner or others is not None:
                 raise SelectionRetirementRefused(
                     experiment_id,
                     group_id,
-                    "has_evidence",
-                    f"experiment {experiment_id!r} has recorded evidence and cannot "
-                    "be withdrawn from its comparison group",
+                    "is_current_winner",
+                    f"experiment {experiment_id!r} is the current winner of "
+                    f"comparison group {group_id!r}; select a different winner "
+                    "before withdrawing it",
                 )
-            if member is None:
-                return {
-                    "retired": False,
-                    "experiment_id": experiment_id,
-                    "group_id": None,
-                    "seq": None,
-                }
-            pointer = _pointer(conn, group_id)
-            winner_retired = False
-            if pointer is not None and str(pointer["experiment_id"]) == experiment_id:
-                others = conn.execute(
-                    """SELECT 1 FROM comparison_group_members
-                        WHERE group_id=? AND experiment_id<>? LIMIT 1""",
-                    (group_id, experiment_id),
-                ).fetchone()
-                if not allow_sole_winner or others is not None:
-                    raise SelectionRetirementRefused(
-                        experiment_id,
-                        group_id,
-                        "is_current_winner",
-                        f"experiment {experiment_id!r} is the current winner of "
-                        f"comparison group {group_id!r}; select a different winner "
-                        "before withdrawing it",
-                    )
-                winner_retired = True
-            seq = _next_seq(conn, EXPERIMENT_SCOPE, group_id, "")
+            winner_retired = True
+        seq = _next_seq(conn, EXPERIMENT_SCOPE, group_id, "")
+        conn.execute(
+            "DELETE FROM comparison_group_members WHERE group_id=? AND experiment_id=?",
+            (group_id, experiment_id),
+        )
+        if winner_retired:
             conn.execute(
-                "DELETE FROM comparison_group_members WHERE group_id=? AND experiment_id=?",
-                (group_id, experiment_id),
+                """DELETE FROM selection_pointers
+                    WHERE scope_kind=? AND group_id=? AND scope_key=?""",
+                (EXPERIMENT_SCOPE, group_id, ""),
             )
-            if winner_retired:
-                conn.execute(
-                    """DELETE FROM selection_pointers
-                        WHERE scope_kind=? AND group_id=? AND scope_key=?""",
-                    (EXPERIMENT_SCOPE, group_id, ""),
-                )
-            current_experiment_id = (
-                None if pointer is None else str(pointer["experiment_id"])
-            )
-            current_selection_id = (
-                None if pointer is None else str(pointer["selection_id"])
-            )
-            self._append_decision_in_txn(
-                conn,
-                group_id=group_id,
-                seq=seq,
-                decision=DECISION_RETIRE,
-                previous_experiment_id=current_experiment_id,
-                previous_selection_id=current_selection_id,
-                candidate_experiment_id=experiment_id,
-                # The winner is the same before and after, which is the point --
-                # unless the sole winner itself left, and then there is none.
-                new_experiment_id=None if winner_retired else current_experiment_id,
-                new_selection_id=None if winner_retired else current_selection_id,
-                actor=actor,
-                actor_kind=actor_kind,
-                provenance=provenance,
-                rationale=rationale,
-                created_at=now,
-            )
+        current_experiment_id = (
+            None if pointer is None else str(pointer["experiment_id"])
+        )
+        current_selection_id = (
+            None if pointer is None else str(pointer["selection_id"])
+        )
+        self._append_decision_in_txn(
+            conn,
+            group_id=group_id,
+            seq=seq,
+            decision=DECISION_RETIRE,
+            previous_experiment_id=current_experiment_id,
+            previous_selection_id=current_selection_id,
+            candidate_experiment_id=experiment_id,
+            # The winner is the same before and after, which is the point --
+            # unless the sole winner itself left, and then there is none.
+            new_experiment_id=None if winner_retired else current_experiment_id,
+            new_selection_id=None if winner_retired else current_selection_id,
+            actor=actor,
+            actor_kind=actor_kind,
+            provenance=provenance,
+            rationale=rationale,
+            created_at=now,
+        )
         return {
             "retired": True,
             "experiment_id": experiment_id,
             "group_id": group_id,
             "seq": seq,
             "winner_retired": winner_retired,
-            "winner": self.current_winner(group_id),
         }
 
     # -- decisions -------------------------------------------------------

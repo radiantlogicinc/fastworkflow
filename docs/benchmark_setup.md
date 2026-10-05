@@ -49,12 +49,12 @@ labels, not substitutes for attempt bootstrap credentials or execution context
 binding. Supplying an experiment ID alone to a raw conversation call does not
 perform that lifecycle.
 
-Benchmark versions remain in `<workflow>/benchmarks/<id>/vN.json`. Pending
-experiment registrations live in `<workflow>/benchmarks/.experiments/`; they
-need no execution database. Once a controller declares execution, its store path
-and identity let the browser drill into that evidence even when it is outside
-the default state root. One experiment identity binds to one store. Multiple
-sealed stores continue to use the existing workspace viewer.
+Benchmark versions remain in `<workflow>/benchmarks/<id>/vN.json`. Experiment
+registrations are rows of the workflow's live evidence DB
+(`experiment_registrations`); creating the first one creates that DB if nobody
+has chatted yet. Once a controller declares execution the registration is
+bound, and deletion is a tombstone row state. Multiple sealed stores continue
+to use the existing workspace viewer.
 
 The existing `ExperimentHarness(...)`, unregistered controller experiments and
 ordinary chat conversations continue to work without benchmark setup.

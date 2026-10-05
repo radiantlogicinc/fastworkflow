@@ -1,8 +1,9 @@
 """Simple benchmark authoring and experiment identities for harness handoff.
 
-Benchmark versions are immutable catalog files. Experiment registrations can be
-created before an execution store exists. A controller binds a registration to
-its actual evidence store when it declares the attempts, never at UI creation.
+Benchmark versions are immutable catalog files. Experiment registrations are
+rows of the workflow's live DB (`experiment_registrations`) and can be created
+before any evidence exists. A controller binds a registration when it declares
+the attempts, never at UI creation.
 
 An experiment enters its comparison group HERE, at creation (`fix-9eg.17.1`),
 before any evidence exists, which is what makes the first experiment of a group
@@ -17,22 +18,24 @@ from __future__ import annotations
 import json
 import os
 import re
-import tempfile
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from fastworkflow.benchmark.catalog import (
-    benchmarks_root,
+    BenchmarkAlreadyExistsError,
     list_versions,
     load_version,
     write_version,
     _safe_segment,
 )
 from fastworkflow import state_paths
-from fastworkflow.observability import selection
-from fastworkflow.observability.store import open_live_store
-from fastworkflow.utils.logging import logger
+from fastworkflow.observability import control, selection
+from fastworkflow.observability.store import (
+    STORE_IDENTITY_DIAGNOSTIC,
+    ObservabilityStore,
+    open_live_store,
+)
 
 
 class BenchmarkSetupConflict(ValueError):
@@ -47,7 +50,7 @@ class ExperimentSelected(BenchmarkSetupConflict):
     """The current winner is not deleted while others remain; select one first.
 
     Deleting an unused registration withdraws it from the contest
-    (`retire_experiment_selection`), and the one thing that cannot be withdrawn
+    (`delete_empty_experiment`), and the one thing that cannot be withdrawn
     while the group has other members is the experiment the contest currently
     names. The alternatives were worse: clearing the pointer files a "nobody
     won" nobody decided, and electing a successor decides a contest on the
@@ -95,35 +98,6 @@ def validate_runs_per_task(value, *, field: str = "runs_per_task") -> int:
     return value
 
 
-
-@contextmanager
-def _lock(workflow_path):
-    # The project targets Unix; flock coordinates HTTP threads and harness processes.
-    import fcntl
-
-    root = benchmarks_root(workflow_path)
-    root.mkdir(parents=True, exist_ok=True)
-    with (root / ".setup.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
-
-
-def _atomic_json(path, value):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, name = tempfile.mkstemp(dir=path.parent, prefix=".pending-")
-    try:
-        with os.fdopen(fd, "w") as stream:
-            json.dump(value, stream, indent=2, allow_nan=False)
-            stream.write("\n")
-        os.replace(name, path)
-    finally:
-        if os.path.exists(name):
-            os.unlink(name)
-
-
 # ----------------------------------------------------------------------
 # The workflow's contest, in its live DB
 # ----------------------------------------------------------------------
@@ -155,118 +129,6 @@ def workflow_control(workflow_path, *, write=False):
     return selection.SelectionControlStore(
         open_live_store(_live_db_path(workflow_path), write=write)
     )
-
-
-def _reference_for(workflow_path, record):
-    return selection.ExperimentReference(
-        experiment_id=record["experiment_id"],
-        workflow_name=workflow_name_for(workflow_path),
-        benchmark_id=record.get("benchmark_id"),
-        benchmark_version=record.get("benchmark_version"),
-        benchmark_digest_sha256=record.get("benchmark_digest_sha256"),
-        created_at=record.get("created_at"),
-    )
-
-
-def register_experiment_selection(workflow_path, record, *, allow_initial_winner=True):
-    """Enter a registration in the workflow contest; the first one wins.
-
-    Runs at creation, before the runner has recorded anything: an experiment
-    is a decision to run something long before a runner records it, and the
-    first experiment of a group should be its winner from that moment. Best
-    effort by design — a live DB that cannot be written, or that this workflow
-    does not have yet, must not stop somebody creating an experiment — so every
-    problem is reported and logged rather than raised. The runner joins the
-    same group when it records the experiment.
-
-    `record` is the registration the CALLER holds, which is why this takes the
-    setup lock and re-reads by id instead of trusting it. `create_experiment`
-    writes the file, releases the lock and only then arrives here; a deletion
-    in that gap has already withdrawn the experiment, and writing the caller's
-    cached copy would put the tombstoned id straight back into the contest —
-    and make it promotable again (`fix-jfy5`).
-    """
-    with _lock(workflow_path):
-        return _register_selection_locked(
-            workflow_path,
-            record["experiment_id"],
-            allow_initial_winner=allow_initial_winner,
-        )
-
-
-def _register_selection_locked(workflow_path, experiment_id, *, allow_initial_winner=True):
-    """`register_experiment_selection` with the setup lock ALREADY held.
-
-    Separate because the lock is a plain `flock` and is NOT reentrant: the
-    deletion path is inside it when it needs to undo a withdrawal, and calling
-    the public function from there would deadlock against itself rather than
-    fail visibly.
-
-    Returns None for a registration that is gone or tombstoned, which is the
-    refusal that matters here: a deleted id must not come back as a member,
-    because membership is what a later promotion is validated against.
-    """
-    try:
-        record = load_experiment(workflow_path, experiment_id)
-    except (KeyError, ExperimentDeleted, ValueError):
-        return None
-    try:
-        return workflow_control(workflow_path, write=True).register_experiment_reference(
-            _reference_for(workflow_path, record),
-            allow_initial_winner=allow_initial_winner,
-        )
-    except Exception as exc:  # creation must not fail on a control problem
-        logger.warning(
-            f"observability: experiment {experiment_id!r} was created "
-            f"but not registered for winner selection: {exc}"
-        )
-        return None
-
-
-def retire_experiment_selection(workflow_path, experiment_id):
-    """Take a registration that is being deleted OUT of the workflow contest.
-
-    The other half of `register_experiment_selection`, and the thing whose
-    absence was `fix-jfy5`: creation registers and may elect, deletion only
-    tombstoned the JSON, so a group could be left pointing at an experiment
-    that no longer exists — reported as the winner, unresolvable, and
-    impossible to duplicate.
-
-    NOT best effort, unlike registration, and that asymmetry is deliberate. A
-    registration that fails to enter the contest is visibly winner-less; a
-    deletion that fails to leave it is invisible, and the stale pointer it
-    leaves behind is exactly this bug. So a control that exists and cannot be
-    updated fails the deletion instead, with nothing changed. A workflow with
-    no live DB at all has nothing to retire and nothing to fail: `None`.
-
-    Raises `ExperimentSelected` (409) when the experiment is the group's
-    current winner and other experiments are still in the group — see that
-    class for why deletion does not get to move a winner pointer. The winner
-    that is the group's ONLY member is withdrawn along with the pointer; the
-    result's `winner_retired` says so, which is what the deletion's
-    compensation needs to know.
-    """
-    if not os.path.isfile(_live_db_path(workflow_path)):
-        return None
-    control = workflow_control(workflow_path, write=True)
-    try:
-        return control.retire_experiment(
-            experiment_id,
-            rationale="its registration was deleted",
-            allow_sole_winner=True,
-        )
-    except selection.SelectionRetirementRefused as exc:
-        if exc.reason == "is_current_winner":
-            raise ExperimentSelected(
-                "This experiment is the current winner of its comparison "
-                "group, and the group has other experiments in it. Deleting "
-                "it would leave them without a winner anybody chose, so it is "
-                "refused: promote one of the other experiments to winner "
-                "first, then delete this one."
-            ) from exc
-        raise BenchmarkSetupConflict(
-            "This experiment is part of the recorded contest and cannot be deleted."
-        ) from exc
 
 
 def workflow_winner(workflow_path, experiment_id):
@@ -336,37 +198,39 @@ def save_benchmark(workflow_path, body):
         raise ValueError("add at least one task")
     benchmark_id = body.get("benchmark_id") or f"benchmark-{uuid.uuid4().hex}"
     _safe_segment(benchmark_id, "benchmark_id")
-    with _lock(workflow_path):
-        versions = list_versions(workflow_path, benchmark_id)
-        latest = versions[-1] if versions else None
-        if body.get("expected_version") != latest:
-            raise BenchmarkSetupConflict("benchmark changed; reopen before saving")
-        prior = load_version(workflow_path, benchmark_id, latest) if latest else None
-        known = {t["task_id"]: t for t in prior["tasks"]} if prior else {}
-        tasks, seen = [], set()
-        for item in raw:
-            if not isinstance(item, dict) or not isinstance(
-                item.get("prompt", ""), str
-            ):
-                raise ValueError("each task prompt must be text (or omitted)")
-            task_id = item.get("task_id")
-            if task_id is not None and task_id not in known:
-                raise ValueError("new task IDs are assigned automatically")
-            task_id = task_id or f"task_{uuid.uuid4().hex}"
-            if task_id in seen:
-                raise ValueError("duplicate task ID")
-            seen.add(task_id)
-            old = known.get(task_id, {})
-            tasks.append(
-                {
-                    "task_id": task_id,
-                    "prompt": item.get("prompt", ""),
-                    "description": old.get("description", ""),
-                    "payload": old.get("payload", {}),
-                }
-            )
-        numbers = [int(v[1:]) for v in versions if re.fullmatch(r"v\d+", v)]
-        version = f"v{max(numbers, default=0) + 1}"
+    versions = list_versions(workflow_path, benchmark_id)
+    latest = versions[-1] if versions else None
+    if body.get("expected_version") != latest:
+        raise BenchmarkSetupConflict("benchmark changed; reopen before saving")
+    prior = load_version(workflow_path, benchmark_id, latest) if latest else None
+    known = {t["task_id"]: t for t in prior["tasks"]} if prior else {}
+    tasks, seen = [], set()
+    for item in raw:
+        if not isinstance(item, dict) or not isinstance(
+            item.get("prompt", ""), str
+        ):
+            raise ValueError("each task prompt must be text (or omitted)")
+        task_id = item.get("task_id")
+        if task_id is not None and task_id not in known:
+            raise ValueError("new task IDs are assigned automatically")
+        task_id = task_id or f"task_{uuid.uuid4().hex}"
+        if task_id in seen:
+            raise ValueError("duplicate task ID")
+        seen.add(task_id)
+        old = known.get(task_id, {})
+        tasks.append(
+            {
+                "task_id": task_id,
+                "prompt": item.get("prompt", ""),
+                "description": old.get("description", ""),
+                "payload": old.get("payload", {}),
+            }
+        )
+    numbers = [int(v[1:]) for v in versions if re.fullmatch(r"v\d+", v)]
+    version = f"v{max(numbers, default=0) + 1}"
+    # `write_version` creates the file exclusively, so of two saves against the
+    # same `expected_version` exactly one writes the next version.
+    try:
         return write_version(
             workflow_path,
             {
@@ -377,11 +241,105 @@ def save_benchmark(workflow_path, body):
                 "tasks": tasks,
             },
         )
+    except BenchmarkAlreadyExistsError as exc:
+        raise BenchmarkSetupConflict("benchmark changed; reopen before saving") from exc
 
 
-def _registration_path(workflow_path, experiment_id):
-    _safe_segment(experiment_id, "experiment_id")
-    return benchmarks_root(workflow_path) / ".experiments" / f"{experiment_id}.json"
+# ----------------------------------------------------------------------
+# Registrations, in the live DB's `experiment_registrations`
+# ----------------------------------------------------------------------
+
+_SELECT_REGISTRATIONS = (
+    "SELECT *, (SELECT value FROM diagnostics WHERE key=?) AS store_id "
+    "FROM experiment_registrations "
+)
+
+
+def _record(row):
+    """The registration as the API serves it; `store` is set once bound."""
+    return {
+        "experiment_id": row["experiment_id"],
+        "benchmark_id": row["benchmark_id"],
+        "benchmark_version": row["benchmark_version"],
+        "benchmark_digest_sha256": row["benchmark_digest_sha256"],
+        "description": row["description"],
+        "task_ids": json.loads(row["task_ids_json"]),
+        "runs_per_task": row["runs_per_task"],
+        "created_at": row["created_at"],
+        "store": {"store_id": row["store_id"]} if row["state"] == "bound" else None,
+        "source_experiment_id": row["source_experiment_id"],
+        "changed_fields": json.loads(row["changed_fields_json"]),
+    }
+
+
+def _live(row, experiment_id):
+    if row is None:
+        raise KeyError(experiment_id)
+    if row["state"] == "deleted":
+        raise ExperimentDeleted("This experiment was deleted. Create a new experiment.")
+    return row
+
+
+def _registrations(workflow_path, where, params):
+    """Registration rows, read-only; none when the workflow has no live DB."""
+    return control.rows(
+        open_live_store(_live_db_path(workflow_path)),
+        _SELECT_REGISTRATIONS + where,
+        (STORE_IDENTITY_DIAGNOSTIC, *params),
+    )
+
+
+def _register(workflow_path, record):
+    """Insert a new registration and join its contest, in one transaction.
+
+    The one control write allowed to create the live DB: creating an
+    experiment is a POST, and a workflow nobody has chatted with yet has no DB
+    to register it in. Reads still never create one.
+    """
+    db_path = _live_db_path(workflow_path)
+    store = (
+        open_live_store(db_path, write=True)
+        if os.path.isfile(db_path)
+        else ObservabilityStore(db_path)
+    )
+    with control.write(store) as conn:
+        conn.execute(
+            """INSERT INTO experiment_registrations
+               (experiment_id, benchmark_id, benchmark_version,
+                benchmark_digest_sha256, description, task_ids_json,
+                runs_per_task, source_experiment_id, changed_fields_json,
+                created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                record["experiment_id"], record["benchmark_id"],
+                record["benchmark_version"], record["benchmark_digest_sha256"],
+                record["description"], json.dumps(record["task_ids"]),
+                record["runs_per_task"], record["source_experiment_id"],
+                json.dumps(record["changed_fields"]), record["created_at"],
+            ),
+        )
+        selection.SelectionControlStore(store).join_in_txn(
+            conn,
+            record["experiment_id"],
+            dict(record, workflow_name=workflow_name_for(workflow_path)),
+        )
+    return record
+
+
+@contextmanager
+def _registration_write(workflow_path, experiment_id):
+    """One `BEGIN IMMEDIATE` on a live registration: (store, conn, row)."""
+    db_path = _live_db_path(workflow_path)
+    if not os.path.isfile(db_path):
+        raise KeyError(experiment_id)
+    store = open_live_store(db_path, write=True)
+    with control.write(store) as conn:
+        row = conn.execute(
+            "SELECT *, NULL AS store_id FROM experiment_registrations "
+            "WHERE experiment_id=?",
+            (experiment_id,),
+        ).fetchone()
+        yield store, conn, _live(row, experiment_id)
 
 
 def create_experiment(
@@ -420,10 +378,7 @@ def create_experiment(
         "source_experiment_id": None,
         "changed_fields": [],
     }
-    with _lock(workflow_path):
-        _atomic_json(_registration_path(workflow_path, experiment_id), record)
-    register_experiment_selection(workflow_path, record)
-    return record
+    return _register(workflow_path, record)
 
 
 def duplicate_experiment(
@@ -461,8 +416,7 @@ def duplicate_experiment(
             changed.append("runs_per_task")
     experiment_id = f"exp-{uuid.uuid4().hex}"
     # Copy the source wholesale, then overwrite exactly the fields that must
-    # differ: a setup field added later is inherited by duplicates without this
-    # function having to learn about it.
+    # differ.
     record = dict(source)
     record.update(
         {
@@ -475,10 +429,7 @@ def duplicate_experiment(
             "changed_fields": sorted(changed),
         }
     )
-    with _lock(workflow_path):
-        _atomic_json(_registration_path(workflow_path, experiment_id), record)
-    register_experiment_selection(workflow_path, record)
-    return record
+    return _register(workflow_path, record)
 
 
 def update_experiment_description(workflow_path, experiment_id, description):
@@ -491,42 +442,33 @@ def update_experiment_description(workflow_path, experiment_id, description):
     """
     if not isinstance(description, str):
         raise ValueError("description must be text")
-    with _lock(workflow_path):
-        record = load_experiment(workflow_path, experiment_id)
-        if record.get("store") is not None:
+    with _registration_write(workflow_path, experiment_id) as (_store, conn, row):
+        if row["state"] == "bound":
             raise BenchmarkSetupConflict(
                 "This experiment has been handed to a runner; its description "
                 "is now part of the recorded run."
             )
-        record["description"] = description.strip()
-        _atomic_json(_registration_path(workflow_path, experiment_id), record)
-        return record
+        conn.execute(
+            "UPDATE experiment_registrations SET description=? WHERE experiment_id=?",
+            (description.strip(), experiment_id),
+        )
+    return dict(_record(row), description=description.strip())
 
 
 def load_experiment(workflow_path, experiment_id):
-    path = _registration_path(workflow_path, experiment_id)
-    try:
-        record = json.loads(path.read_text())
-    except FileNotFoundError:
-        if (path.parent / ".deleted" / path.name).is_file():
-            raise ExperimentDeleted("This experiment was deleted. Create a new experiment.")
-        raise KeyError(experiment_id)
-    if record.get("experiment_id") != experiment_id:
-        raise ValueError("experiment registration identity mismatch")
-    return record
+    found = _registrations(workflow_path, "WHERE experiment_id=?", (experiment_id,))
+    return _record(_live(found[0] if found else None, experiment_id))
 
 
-def registered_experiments(workflow_path, benchmark_id):
-    root = benchmarks_root(workflow_path) / ".experiments"
-    if not root.is_dir():
-        return []
-    rows = []
-    for path in sorted(root.glob("*.json")):
-        try:
-            rows.append(load_experiment(workflow_path, path.stem))
-        except (KeyError, ExperimentDeleted):
-            continue  # A deletion can complete between enumeration and read.
-    return [row for row in rows if row["benchmark_id"] == benchmark_id]
+def registered_experiments(workflow_path, benchmark_id=None):
+    """Live registrations of one benchmark, or of every benchmark when None."""
+    where, params = "WHERE state<>'deleted' ", ()
+    if benchmark_id is not None:
+        where, params = where + "AND benchmark_id=? ", (benchmark_id,)
+    return [
+        _record(row)
+        for row in _registrations(workflow_path, where + "ORDER BY experiment_id", params)
+    ]
 
 
 def experiment_manifest(workflow_path, experiment_id):
@@ -541,90 +483,62 @@ def experiment_manifest(workflow_path, experiment_id):
     return record, manifest
 
 
-def bind_experiment(workflow_path, experiment_id, db_path, store_id):
-    with _lock(workflow_path):
-        record = load_experiment(workflow_path, experiment_id)
-        target = {"db_path": os.path.abspath(db_path), "store_id": store_id}
-        if record.get("store") not in (None, target):
-            raise BenchmarkSetupConflict(
-                "experiment is already bound to another evidence store"
+def bind_experiment(workflow_path, experiment_id):
+    """Mark a registration as handed to a runner; refused once deleted."""
+    with _registration_write(workflow_path, experiment_id) as (_store, conn, row):
+        if row["state"] == "registered":
+            conn.execute(
+                "UPDATE experiment_registrations SET state='bound', bound_at=? "
+                "WHERE experiment_id=?",
+                (datetime.now(timezone.utc).isoformat(), experiment_id),
             )
-        record["store"] = target
-        _atomic_json(_registration_path(workflow_path, experiment_id), record)
 
 
 def delete_empty_experiment(workflow_path, experiment_id):
-    """Remove an unused registration, serialized against a runner's store binding.
+    """Remove an unused registration, serialized against a runner's binding.
 
-    A tombstone prevents delayed runners from treating a deleted ID as a new,
-    unregistered experiment. No evidence database or benchmark version is touched.
+    The tombstone (`state='deleted'`) prevents delayed runners from treating a
+    deleted ID as a new, unregistered experiment. No evidence or benchmark
+    version is touched.
 
-    The registration also LEAVES THE CONTEST it joined at creation (`fix-jfy5`).
-    Withdrawal comes FIRST because it is the only refusable step, so a refused
-    deletion — the current winner of a group with other members, or a
-    registration with evidence — leaves both the file and the contest exactly
-    as they were. Nothing here elects anybody: the winner can be the experiment
-    being deleted only when it is the group's sole member (`fix-65ik`), and
-    then there is nobody to succeed it — the group is left empty and
-    winner-less, and its next experiment is elected on registration.
-
-    Two writes that are not one transaction, made safe by which one can fail
-    and by the lock around both:
-
-    - Withdraw, then tombstone. A crash between them leaves a live registration
-      that is not a contest member; a rename that FAILS is compensated here, by
-      re-registering the reference we just withdrew.
+    The registration also LEAVES THE CONTEST it joined at creation (`fix-jfy5`),
+    in the same transaction: creation registers and may elect, so a deletion
+    that only tombstoned would leave a group pointing at an experiment that no
+    longer exists — reported as the winner, unresolvable, and impossible to
+    duplicate. A refused deletion — the current winner of a group with other
+    members, or a registration with evidence — leaves both the registration and
+    the contest exactly as they were. Nothing here elects anybody: the winner
+    can be the experiment being deleted only when it is the group's sole member
+    (`fix-65ik`), and then there is nobody to succeed it — the group is left
+    empty and winner-less, and its next experiment is elected on registration.
     """
-    with _lock(workflow_path):
-        return _delete_locked(workflow_path, experiment_id)
-
-
-def _delete_locked(workflow_path, experiment_id):
-    """The body of `delete_empty_experiment`, with the setup lock ALREADY held.
-
-    Split out so the ordering it depends on can be tested against the real
-    thing: a caller that holds the lock (a test reproducing a bootstrap racing
-    a deletion) can run the actual deletion rather than a paraphrase of it.
-    Everything about the policy lives here; the public function is the lock.
-    """
-    record = load_experiment(workflow_path, experiment_id)
-    if record.get("store") is not None:
-        raise BenchmarkSetupConflict(
-            "This experiment has been handed to a runner and cannot be deleted."
-        )
-    retired = retire_experiment_selection(workflow_path, experiment_id) or {}
-    was_winner = bool(retired.get("winner_retired"))
-    path = _registration_path(workflow_path, experiment_id)
-    deleted = path.parent / ".deleted" / path.name
-    try:
-        deleted.parent.mkdir(exist_ok=True)
-        os.replace(path, deleted)
-    except OSError:
-        # The registration is still there, so the withdrawal above has to go
-        # back: membership is what a later promotion is checked against, and an
-        # experiment a user can still see must still be selectable.
-        # Re-registering restores exactly what was removed — the member row
-        # with no evidence source — and `allow_initial_winner=False` keeps it
-        # from taking a pointer it did not hold a moment ago. A sole winner DID
-        # hold the pointer a moment ago, and the withdrawal cleared it, so it
-        # is re-registered with the election allowed: the group is empty but
-        # for it, the election picks the oldest member, and the user gets back
-        # the winner they had (with `initial`, `retire`, `initial` in the
-        # append-only history, which is what happened). The LOCKED form,
-        # because this lock is not reentrant and we are already inside it.
-        restored = _register_selection_locked(
-            workflow_path, experiment_id, allow_initial_winner=was_winner
-        )
-        if restored is None:
-            # The repair failed, so the user keeps a registration that is no
-            # longer in the contest. Said out loud, because the alternative is
-            # an experiment that looks ordinary and silently cannot be
-            # promoted.
-            logger.error(
-                f"observability: experiment {experiment_id!r} could not be "
-                "tombstoned AND could not be put back into the selection "
-                f"contest of {workflow_name_for(workflow_path)!r}. Its "
-                "registration still exists but is not a member of the contest."
+    with _registration_write(workflow_path, experiment_id) as (store, conn, row):
+        if row["state"] == "bound":
+            raise BenchmarkSetupConflict(
+                "This experiment has been handed to a runner and cannot be deleted."
             )
-        raise
-    return record
+        try:
+            selection.SelectionControlStore(store).retire_in_txn(
+                conn,
+                experiment_id,
+                rationale="its registration was deleted",
+                allow_sole_winner=True,
+            )
+        except selection.SelectionRetirementRefused as exc:
+            if exc.reason == "is_current_winner":
+                raise ExperimentSelected(
+                    "This experiment is the current winner of its comparison "
+                    "group, and the group has other experiments in it. Deleting "
+                    "it would leave them without a winner anybody chose, so it is "
+                    "refused: promote one of the other experiments to winner "
+                    "first, then delete this one."
+                ) from exc
+            raise BenchmarkSetupConflict(
+                "This experiment is part of the recorded contest and cannot be deleted."
+            ) from exc
+        conn.execute(
+            "UPDATE experiment_registrations SET state='deleted', deleted_at=? "
+            "WHERE experiment_id=?",
+            (datetime.now(timezone.utc).isoformat(), experiment_id),
+        )
+    return _record(row)

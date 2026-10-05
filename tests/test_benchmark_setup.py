@@ -7,9 +7,10 @@ import sqlite3
 
 import pytest
 
+from fastworkflow import state_paths
 from fastworkflow.benchmark import setup as setup
 from fastworkflow.observability import store as obs
-from fastworkflow.benchmark.catalog import load_version, write_version
+from fastworkflow.benchmark.catalog import list_versions, load_version, write_version
 from fastworkflow.experiment.runner import ExperimentController, ExperimentHarness
 from tests.test_experiment_setup import setup_server  # noqa: F401
 from tests.test_chatbot_benchmarks import _request, workspace_server  # noqa: F401
@@ -326,16 +327,17 @@ def test_delete_empty_registration_preserves_benchmark_and_refuses_stale_runner(
     assert store.experiment_attempt_declarations(eid) == []
 
 
-def test_delete_refuses_bound_experiment_even_if_store_unavailable(setup_server, tmp_path):
+def test_delete_refuses_bound_experiment(setup_server):
     server, folder = setup_server
     benchmark = create(folder)
     record = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
     eid = record["experiment_id"]
-    setup.bind_experiment(folder, eid, str(tmp_path / "not-present.sqlite3"), "recorded-store")
+    setup.bind_experiment(folder, eid)
     path = "/api/benchmark-experiments/" + eid
     assert _request(server, path)[1]["can_delete"] is False
     assert _request(server, path, "DELETE")[0] == 409
-    assert setup.load_experiment(folder, eid)["store"]["store_id"] == "recorded-store"
+    live = obs.ReadOnlyObservabilityStore(state_paths.observability_db(str(folder)))
+    assert setup.load_experiment(folder, eid)["store"] == {"store_id": live.store_identity()}
 
 
 def test_description_is_optional_free_text_the_author_owns(setup_server, tmp_path):
@@ -393,8 +395,8 @@ def test_delete_and_runner_binding_are_serialized(tmp_path):
     benchmark = create(tmp_path)
     # Hold the group's winner title with an experiment nobody races, so the
     # raced one is always an ordinary non-selected registration: a winner is
-    # not deletable (`fix-jfy5`), and this test is about the file lock between
-    # deletion and a runner's binding, not about selection.
+    # not deletable (`fix-jfy5`), and this test is about the transaction that
+    # serializes deletion against a runner's binding, not about selection.
     setup.create_experiment(tmp_path, benchmark["benchmark_id"], "v1")
     for _ in range(8):
         record = setup.create_experiment(tmp_path, benchmark["benchmark_id"], "v1")
@@ -430,3 +432,82 @@ def test_delete_and_runner_binding_are_serialized(tmp_path):
             assert store.get_experiment(eid) is None
             with pytest.raises(setup.ExperimentDeleted):
                 setup.load_experiment(tmp_path, eid)
+
+
+def test_experiment_lifecycle_over_http_leaves_only_authored_files(setup_server):
+    """Create, duplicate, edit and delete through the API: the project keeps
+    only authored benchmark files, the state dir no JSON or lock files."""
+    server, folder = setup_server
+    status, result = _request(server, "/api/benchmark-setup", "POST",
+                              {"title": "Review", "tasks": [{}]})
+    assert status == 201
+    benchmark_id = result["version"]["benchmark_id"]
+    base = "/api/benchmarks/" + benchmark_id
+    assert _request(server, base + "/analysis", "PUT", {"analysis": "Notes"})[0] == 200
+    state_dir = Path(state_paths.workflow_state_dir(str(folder)))
+    assert not Path(state_paths.observability_db(str(folder))).exists()
+
+    status, result = _request(server, base + "/experiments", "POST",
+                              {"version": "v1", "description": "First"})
+    assert status == 201
+    first = result["experiment"]
+    assert first["store"] is None and "db_path" not in json.dumps(first)
+    detail = "/api/benchmark-experiments/" + first["experiment_id"]
+    status, result = _request(server, detail + "/duplicate", "POST", {"runs_per_task": 2})
+    assert status == 201 and result["changed_fields"] == ["runs_per_task"]
+    copy = result["experiment"]
+    copy_path = "/api/benchmark-experiments/" + copy["experiment_id"]
+    assert _request(server, copy_path, "PATCH", {"description": "Copy"})[0] == 200
+
+    listed = {row["experiment_id"]: row
+              for row in _request(server, base + "/experiments")[1]["experiments"]}
+    assert set(listed) == {first["experiment_id"], copy["experiment_id"]}
+    assert listed[copy["experiment_id"]]["description"] == "Copy"
+    assert listed[copy["experiment_id"]]["runs_per_task"] == 2
+    assert listed[copy["experiment_id"]]["source_experiment_id"] == first["experiment_id"]
+    assert listed[first["experiment_id"]]["is_winner"] is True
+    shown = _request(server, copy_path)[1]
+    assert shown["experiment"] == dict(copy, description="Copy")
+    assert shown["can_delete"] is True
+
+    assert _request(server, copy_path, "DELETE")[0] == 200
+    assert _request(server, copy_path)[0] == 404
+    assert [row["experiment_id"] for row in
+            _request(server, base + "/experiments")[1]["experiments"]] == [first["experiment_id"]]
+
+    benchmarks = folder / "benchmarks"
+    assert sorted(p.relative_to(benchmarks).as_posix() for p in benchmarks.rglob("*")) == [
+        benchmark_id, benchmark_id + "/analysis.json", benchmark_id + "/v1.json",
+    ]
+    leftovers = [p.name for p in state_dir.rglob("*") if p.suffix in (".json", ".lock")]
+    assert leftovers == []
+
+
+def test_concurrent_saves_of_the_next_version_one_wins_one_conflicts(setup_server):
+    server, folder = setup_server
+    first = create(folder)
+    for n in range(4):
+        body = {"benchmark_id": first["benchmark_id"], "expected_version": f"v{n + 1}",
+                "title": "Edit", "tasks": [{}]}
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            statuses = sorted(pool.map(
+                lambda _: _request(server, "/api/benchmark-setup", "POST", body)[0], range(2)
+            ))
+        assert statuses == [201, 409]
+    assert list_versions(folder, first["benchmark_id"]) == ["v1", "v2", "v3", "v4", "v5"]
+
+
+def test_a_read_only_live_db_refuses_registration_writes_with_409(setup_server):
+    server, folder = setup_server
+    benchmark = create(folder)
+    eid = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")["experiment_id"]
+    live = Path(state_paths.observability_db(str(folder)))
+    live.chmod(0o444)
+    try:
+        path = "/api/benchmark-experiments/" + eid
+        status, data = _request(server, path, "PATCH", {"description": "x"})
+        assert status == 409 and "readonly" in data["error"].lower()
+        assert _request(server, path, "DELETE")[0] == 409
+    finally:
+        live.chmod(0o600)
+    assert setup.load_experiment(folder, eid)["description"] == ""

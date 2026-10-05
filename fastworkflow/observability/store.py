@@ -4278,6 +4278,8 @@ class ObservabilityStore:
         *,
         sha256: str,
         store_identity: str,
+        path: str,
+        size_bytes: int,
     ) -> str:
         """Attach the sole sealed-evidence handle to an already-promoted run.
 
@@ -4287,6 +4289,10 @@ class ObservabilityStore:
         its own digest, which is why the digest lives on the source row and in
         the manifest while the STATUS lives in the archive too
         (`begin_workspace_seal`).
+
+        The same transaction records the archive in `sealed_archives`, the
+        only writer of that table, which is how `SelectionControlStore.store_for`
+        finds a sealed member without trusting any caller-supplied path.
         """
         if not re.fullmatch(r"[0-9a-f]{64}", sha256 or ""):
             raise ValueError("sha256 must be a lowercase 64-character digest")
@@ -4338,6 +4344,14 @@ class ObservabilityStore:
                           status=?
                     WHERE experiment_id=?""",
                 (sha256, store_identity, _utcnow_iso(), status, experiment_id),
+            )
+            control.ensure(conn)
+            conn.execute(
+                """INSERT OR REPLACE INTO sealed_archives
+                   (experiment_id, archive_sha256, path, size_bytes, sealed_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (experiment_id, sha256, os.path.abspath(path), int(size_bytes),
+                 _utcnow_iso()),
             )
             conn.commit()
         return str(status)

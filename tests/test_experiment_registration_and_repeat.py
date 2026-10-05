@@ -147,22 +147,24 @@ class TestRegistrationWinsAtCreation:
         assert _winner_id(folder, first["experiment_id"]) == first["experiment_id"]
         assert _winner_id(folder, other["experiment_id"]) == other["experiment_id"]
 
-    def test_creation_survives_a_workflow_with_no_live_db(self, tmp_path):
-        """Minting an identity must not fail because there is no contest to join.
+    def test_creation_on_a_workflow_with_no_live_db_creates_it(self, tmp_path):
+        """Minting an identity must not fail because nobody has chatted yet.
 
-        Nor does it create the live DB to join one: control writers refuse
-        when the file does not exist (§2).
+        The registration lives in the live DB, so creating the first one (a
+        POST) creates that DB; reading still never does.
         """
         wf = tmp_path / "unrecorded_workflow"
         wf.mkdir()
         benchmark = _benchmark(wf)
+        assert setup.registered_experiments(wf, benchmark["benchmark_id"]) == []
+        assert not os.path.exists(state_paths.observability_db(str(wf)))
 
         record = setup.create_experiment(wf, benchmark["benchmark_id"], "v1")
 
         assert record["experiment_id"].startswith("exp-")
         assert setup.load_experiment(wf, record["experiment_id"]) == record
-        assert _winner_id(wf, record["experiment_id"]) is None
-        assert not os.path.exists(state_paths.observability_db(str(wf)))
+        assert _winner_id(wf, record["experiment_id"]) == record["experiment_id"]
+        assert os.path.isfile(state_paths.observability_db(str(wf)))
 
 
 # ----------------------------------------------------------------------
@@ -252,20 +254,6 @@ class TestDuplicateExperiment:
         assert candidate["runs_per_task"] == 3
         # The source is untouched: duplicating is not editing.
         assert setup.load_experiment(folder, source["experiment_id"]) == source
-
-    def test_a_setup_field_added_later_is_inherited_without_code_changes(self, folder):
-        """The copy is wholesale, then overwritten — not field by field."""
-        benchmark = _benchmark(folder)
-        source = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
-        record = setup.load_experiment(folder, source["experiment_id"])
-        record["future_runner_setting"] = {"temperature": 0}
-        setup._atomic_json(
-            setup._registration_path(folder, source["experiment_id"]), record
-        )
-
-        candidate = setup.duplicate_experiment(folder, source["experiment_id"])
-
-        assert candidate["future_runner_setting"] == {"temperature": 0}
 
     def test_a_candidate_does_not_outrank_the_experiment_it_copied(self, folder):
         benchmark = _benchmark(folder)

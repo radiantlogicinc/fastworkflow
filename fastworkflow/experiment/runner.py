@@ -470,9 +470,6 @@ class ExperimentController:
                                   (benchmark_digest_sha256, "benchmark_digest_sha256")):
                 if supplied is not None and supplied != registration[key]:
                     raise ValueError(f"{key} differs from the registered experiment")
-            target = {"db_path": os.path.abspath(self.db_path), "store_id": self.store_identity}
-            if registration.get("store") not in (None, target):
-                raise ValueError("experiment is already bound to another evidence store")
             benchmark_id = registration["benchmark_id"]
             benchmark_version = registration["benchmark_version"]
             benchmark_digest_sha256 = registration["benchmark_digest_sha256"]
@@ -492,10 +489,11 @@ class ExperimentController:
                     loaded["digest_sha256"],
                     benchmark_digest_sha256,
                 )
-        # Reserve the registration before writing evidence. Deletion uses the
-        # same setup lock; a deleted ID is refused and a bound ID is protected.
+        # Reserve the registration before writing evidence. Deletion takes the
+        # same row in its own transaction; a deleted ID is refused and a bound
+        # ID is protected.
         if registration is not None:
-            benchmark_setup.bind_experiment(folder, experiment_id, self.db_path, self.store_identity)
+            benchmark_setup.bind_experiment(folder, experiment_id)
         # The experiment joins its contest in the store it is recorded into
         # (`fix-9eg.17.1`), in the same transaction; one registered at UI
         # creation is already a member there and keeps its group.
@@ -709,6 +707,8 @@ class ExperimentController:
             experiment_id,
             sha256=archive["sha256"],
             store_identity=archive["store_identity"],
+            path=archive["path"],
+            size_bytes=archive["size_bytes"],
         )
         archive["experiment_id"] = experiment_id
         archive["experiment_status"] = status

@@ -20,9 +20,9 @@ The policy, which is deliberately small:
 - Nothing rewrites history: withdrawal appends a `retire` row.
 
 Integration throughout, per `.cursor/rules/testing_rules.mdc`: real
-registration files, the control tables of the workflow's real live DB, a real
+registrations and the control tables of the workflow's real live DB, a real
 `ObservabilityStore`
-written through a real `ExperimentController`, real filesystem failures, and the
+written through a real `ExperimentController`, and the
 real `ChatbotServer` over a real socket. No Mock fixtures, and nothing here runs
 a model or spends anything -- every experiment below is an identity and a
 declaration.
@@ -299,47 +299,6 @@ class TestTheSoleWinnerCanBeDeleted:
         assert refusal.value.reason == "is_current_winner"
         assert _winner_id(folder, only) == only
 
-    def test_a_rename_failure_gives_the_sole_winner_its_title_back(
-        self, folder, benchmark_id
-    ):
-        """The compensation when the withdrawal took the pointer with it.
-
-        A REAL filesystem failure, as in `TestPartialDeletionIsRepaired`. The
-        re-registration has to allow the election this time -- the pointer it
-        restores was cleared by the withdrawal a moment ago -- and it runs
-        inside the non-reentrant setup lock, hence the thread and deadline.
-        """
-        only = _create(folder, benchmark_id)
-        group_id = _group_id(folder, only)
-        blocked = setup._registration_path(folder, only)
-        obstruction = blocked.parent / ".deleted" / blocked.name
-        obstruction.mkdir(parents=True)
-        (obstruction / "in-the-way").write_text("not a tombstone")
-        raised = {}
-
-        def delete():
-            try:
-                setup.delete_empty_experiment(folder, only)
-            except BaseException as exc:  # noqa: BLE001 - reported, not handled
-                raised["error"] = exc
-
-        deleting = threading.Thread(target=delete, daemon=True)
-        deleting.start()
-        deleting.join(timeout=30)
-        assert not deleting.is_alive(), "the deletion deadlocked on its own lock"
-
-        assert isinstance(raised.get("error"), OSError)
-        assert setup.load_experiment(folder, only)["experiment_id"] == only
-        assert _member_ids(folder, group_id) == {only}
-        assert _winner_id(folder, only) == only
-        # What happened, appended: elected, withdrawn, elected again.
-        assert [row[1] for row in _history(folder, group_id)] == [
-            "initial", "retire", "initial",
-        ]
-        # And a second experiment joins it without winning.
-        second = _create(folder, benchmark_id)
-        assert _winner_id(folder, second) == only
-
     def test_a_sole_winner_deletion_racing_a_creation_agrees_either_way(
         self, folder
     ):
@@ -463,20 +422,15 @@ class TestANonWinnerLeavesTheContest:
         assert retirement[2] == doomed  # candidate: what was withdrawn
         assert retirement[3] == winner  # the winner, unchanged by it
 
-    def test_a_workflow_with_no_live_db_still_deletes(
-        self, folder, benchmark_id
-    ):
-        """Withdrawal is not a new prerequisite for deleting a registration."""
-        only = _create(folder, benchmark_id)
-        live = state_paths.observability_db(str(folder))
-        for suffix in ("", "-wal", "-shm"):
-            try:
-                os.unlink(live + suffix)
-            except FileNotFoundError:
-                pass
+    def test_a_workflow_with_no_live_db_has_nothing_to_delete(self, tmp_path):
+        """The registration lives in the live DB, so there is none without it,
+        and deleting it brings no database into existence."""
+        workflow = tmp_path / "unrecorded_workflow"
+        workflow.mkdir()
 
-        assert setup.delete_empty_experiment(folder, only)["experiment_id"] == only
-        assert not os.path.exists(live)
+        with pytest.raises(KeyError):
+            setup.delete_empty_experiment(workflow, "exp-nobody")
+        assert not os.path.exists(state_paths.observability_db(str(workflow)))
 
 
 # ----------------------------------------------------------------------
@@ -533,144 +487,6 @@ class TestEvidenceIsNeverRetired:
         assert _member_ids(folder, str(winner["group_id"])) == {
             recorded["experiment_id"]
         }
-
-
-# ----------------------------------------------------------------------
-# The two writes that are not one transaction
-# ----------------------------------------------------------------------
-
-
-class TestPartialDeletionIsRepaired:
-    def test_a_rename_failure_leaves_the_registration_selectable(
-        self, folder, benchmark_id
-    ):
-        """A REAL filesystem failure, not a patched one.
-
-        `os.replace` onto a directory raises, which is what a tombstone that
-        cannot be written looks like from here. The withdrawal ran first, so
-        without the compensation the user would be left with a registration
-        they can still see, still open and still delete -- but which no longer
-        exists as far as a promotion is concerned.
-
-        Run on a worker thread with a join deadline, because the compensation
-        happens INSIDE the setup lock and the lock is a plain `flock`: a repair
-        that reached for the public (locking) registration helper would wait on
-        itself forever, and a hang is not a test failure unless something is
-        watching the clock.
-        """
-        winner = _create(folder, benchmark_id)
-        doomed = _create(folder, benchmark_id)
-        group_id = _group_id(folder, winner)
-        blocked = setup._registration_path(folder, doomed)
-        obstruction = blocked.parent / ".deleted" / blocked.name
-        obstruction.mkdir(parents=True)
-        (obstruction / "in-the-way").write_text("not a tombstone")
-        raised = {}
-
-        def delete():
-            try:
-                setup.delete_empty_experiment(folder, doomed)
-            except BaseException as exc:  # noqa: BLE001 - reported, not handled
-                raised["error"] = exc
-
-        deleting = threading.Thread(target=delete, daemon=True)
-        deleting.start()
-        deleting.join(timeout=30)
-        assert not deleting.is_alive(), "the deletion deadlocked on its own lock"
-
-        # The failure is reported, not swallowed.
-        assert isinstance(raised.get("error"), OSError)
-        assert setup.load_experiment(folder, doomed)["experiment_id"] == doomed
-        assert _member_ids(folder, group_id) == {winner, doomed}
-        assert _winner_id(folder, winner) == winner
-        # Selectable again, which is the part membership is load-bearing for.
-        _promote(folder, doomed)
-        assert _winner_id(folder, winner) == doomed
-
-
-# ----------------------------------------------------------------------
-# Deletion racing a delayed registration
-# ----------------------------------------------------------------------
-
-
-class TestADelayedRegistrationCannotResurrectADeletion:
-    """`create_experiment` writes the file, releases the lock, and only then
-    registers the record it is still holding. Everything after the
-    release is a window, and the record it carries into that window is a copy
-    of a file that may no longer exist.
-    """
-
-    def test_a_delayed_registration_of_a_deleted_record_registers_nothing(
-        self, folder, benchmark_id
-    ):
-        winner = _create(folder, benchmark_id)
-        doomed = _create(folder, benchmark_id)
-        # Exactly what `create_experiment` is holding when it reaches the
-        # registration call: the record as it was before anything else ran.
-        cached = setup.load_experiment(folder, doomed)
-        group_id = _group_id(folder, winner)
-        setup.delete_empty_experiment(folder, doomed)
-
-        assert setup.register_experiment_selection(folder, cached) is None
-
-        assert _member_ids(folder, group_id) == {winner}
-
-    def test_a_tombstoned_id_stays_unpromotable_after_a_delayed_registration(
-        self, folder, benchmark_id
-    ):
-        """The consequence the membership removal exists to prevent.
-
-        A restored member row is not cosmetic: it is what `record_decision`
-        validates a candidate against, so a resurrected id becomes promotable
-        and the winner pointer can land on a tombstone.
-        """
-        winner = _create(folder, benchmark_id)
-        doomed = _create(folder, benchmark_id)
-        cached = setup.load_experiment(folder, doomed)
-        control = _control(folder)
-        current = control.winner_for_experiment(winner)
-        setup.delete_empty_experiment(folder, doomed)
-
-        setup.register_experiment_selection(folder, cached)
-
-        with pytest.raises(selection.ExperimentNotInGroup):
-            control.record_decision(
-                str(current["group_id"]), "promote",
-                expected_selection_id=str(current["selection_id"]),
-                candidate_experiment_id=doomed, provenance="human", **HUMAN,
-            )
-        assert _winner_id(folder, winner) == winner
-
-    def test_a_delayed_registration_that_races_a_deletion_agrees_either_way(
-        self, folder, benchmark_id
-    ):
-        """Unsynchronised, and the invariant does not depend on who wins.
-
-        Both sides now take the setup lock, so the two orders are "registered
-        then withdrawn" and "withdrawn, then nothing to register". Neither ends
-        with the deleted id in the contest.
-        """
-        winner = _create(folder, benchmark_id)
-        group_id = _group_id(folder, winner)
-        for _ in range(8):
-            doomed = _create(folder, benchmark_id)
-            cached = setup.load_experiment(folder, doomed)
-            threads = [
-                threading.Thread(
-                    target=lambda: setup.register_experiment_selection(folder, cached)
-                ),
-                threading.Thread(
-                    target=lambda: setup.delete_empty_experiment(folder, doomed)
-                ),
-            ]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join(timeout=30)
-                assert not thread.is_alive()
-
-            assert _member_ids(folder, group_id) == {winner}
-            assert _winner_id(folder, winner) == winner
 
 
 # ----------------------------------------------------------------------

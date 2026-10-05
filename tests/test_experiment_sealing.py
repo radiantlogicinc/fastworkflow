@@ -9,6 +9,7 @@ import stat
 
 import pytest
 
+from fastworkflow.observability import control, selection
 from fastworkflow.observability import store as obs
 from fastworkflow import state_paths
 from fastworkflow.experiment.runner import ExperimentController, experiment_store_readiness
@@ -275,6 +276,29 @@ def test_the_sealed_archive_reports_the_experiment_complete(installed_db, tmp_pa
     assert source["status"] == "complete"
     assert source["workspace_archive_sha256"] == archive["sha256"]
     assert source["workspace_store_identity"] == installed_db[1]
+
+
+def test_the_seal_registers_its_archive_and_the_contest_reads_it(installed_db, tmp_path):
+    """`sealed_archives` is written in the seal's own transaction, and
+    `store_for` then hands back the archive rather than the live DB."""
+    controller = _sealable(installed_db)
+    archive_path = tmp_path / "workspace.sqlite3"
+    contest = selection.SelectionControlStore(controller.store)
+    assert contest.store_for("exp-1") is controller.store
+
+    archive = controller.seal_workspace_evidence("exp-1", str(archive_path))
+
+    assert control.rows(
+        controller.store,
+        "SELECT experiment_id, archive_sha256, path, size_bytes FROM sealed_archives",
+    ) == [{
+        "experiment_id": "exp-1", "archive_sha256": archive["sha256"],
+        "path": str(archive_path), "size_bytes": archive_path.stat().st_size,
+    }]
+    sealed = contest.store_for("exp-1")
+    assert isinstance(sealed, obs.ReadOnlyObservabilityStore)
+    assert sealed.db_path == str(archive_path)
+    assert sealed.get_experiment("exp-1")["status"] == "complete"
 
 
 def test_the_archive_stays_byte_immutable_after_the_status_stamp(

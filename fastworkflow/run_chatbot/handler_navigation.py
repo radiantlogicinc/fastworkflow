@@ -82,8 +82,6 @@ class _NavigationRoutes:
                     except BenchmarkManifestError as exc:
                         warnings.append(str(exc))
                 benchmarks.append(row)
-                if workspace is None:
-                    registrations.extend(benchmark_setup.registered_experiments(folder, bid))
         if workspace is not None:
             for descriptor in workspace.stores():
                 sid = descriptor["store_id"]
@@ -93,6 +91,12 @@ class _NavigationRoutes:
             self._send_navigation({"root": root})
             return
         try:
+            if benchmarks:
+                known = {row["benchmark_id"] for row in benchmarks}
+                registrations = [
+                    row for row in benchmark_setup.registered_experiments(folder)
+                    if row["benchmark_id"] in known
+                ]
             store = self.chatbot.open_store()
             if store:
                 sources.append({"store": store, "source": None})

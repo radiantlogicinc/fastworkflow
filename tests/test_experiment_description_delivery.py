@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import json
 import threading
-from pathlib import Path
 
 import pytest
 
@@ -161,12 +160,7 @@ class TestThePageGeneratesTheNameAndShowsTheDescription:
         path = f"/api/benchmark-experiments/{experiment_id}"
         assert _request(live_server, path, "PATCH", {"description": "before"})[0] == 200
 
-        benchmark_setup.bind_experiment(
-            workflow_dir,
-            experiment_id,
-            str(Path(workflow_dir) / "evidence.sqlite3"),
-            "store-1",
-        )
+        benchmark_setup.bind_experiment(workflow_dir, experiment_id)
 
         status, data = _request(
             live_server, path, "PATCH", {"description": "after the handoff"}

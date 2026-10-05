@@ -91,7 +91,7 @@ or automatic graders. Use the conventions implemented by the application's runne
 |---|---|
 | Benchmark version | `<workflow>/benchmarks/<benchmark_id>/vN.json`; schema `fastworkflow-benchmark/1` |
 | Benchmark analysis | Sibling `analysis.json`; mutable, outside the version digest |
-| UI experiment registration | `<workflow>/benchmarks/.experiments/<experiment_id>.json`; pin, task IDs, and eventual store binding |
+| UI experiment registration | `experiment_registrations` table of the live `observability.sqlite3`; pin, task IDs, and bound/deleted state |
 | Execution evidence | `observability.sqlite3`; experiments, attempts, conversations, turns, spans and annotations |
 | Pre-run review, if used | `<workflow>/experiment_setups/reviews.sqlite3`; configuration revisions and review decisions |
 
