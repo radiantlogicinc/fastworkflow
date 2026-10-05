@@ -269,11 +269,6 @@ class ChatSession:
         return self._core.workflow_tool_agent
 
     @property
-    def intent_clarification_agent(self):
-        """Get the intent clarification agent for agent mode."""
-        return self._core.intent_clarification_agent
-
-    @property
     def cme_workflow(self) -> fastworkflow.Workflow:
         """Get the command metadata extraction workflow."""
         return self._core.cme_workflow

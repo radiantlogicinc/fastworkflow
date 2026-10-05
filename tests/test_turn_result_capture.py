@@ -68,13 +68,10 @@ def initialized_fastworkflow(monkeypatch):
     RoutingRegistry.clear_registry()
 
 
-def _set_agents(ctx, agent, clarification_agent=None):
-    """Set the workflow tool agent plus a non-None clarification agent (parity
-    with WorkflowExecutionContext._initialize_agent_functionality)."""
+def _set_agents(ctx, agent):
+    """Set the workflow tool agent (parity with
+    WorkflowExecutionContext._initialize_agent_functionality)."""
     ctx._workflow_tool_agent = agent
-    ctx._intent_clarification_agent = (
-        clarification_agent if clarification_agent is not None else MagicMock()
-    )
 
 
 def _make_agent_ctx(todo_workflow_path, monkeypatch):

@@ -370,7 +370,6 @@ class TestEndToEnd:
         mock_agent.return_value = suspended
         mock_agent.resume.return_value = completed
         ctx._workflow_tool_agent = mock_agent
-        ctx._intent_clarification_agent = MagicMock()
 
         first = ctx.process_turn("clean up")
         assert sink.flush()

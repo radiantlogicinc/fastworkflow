@@ -23,19 +23,14 @@ from fastworkflow.workflow_execution_context import (
 )
 
 
-def _set_agents(ctx, agent, clarification_agent=None):
+def _set_agents(ctx, agent):
     """
-    Set the main workflow tool agent, always setting a clarification agent too.
+    Set the main workflow tool agent.
 
-    Mirrors the production invariant in
-    WorkflowExecutionContext._initialize_agent_functionality, where the main agent
-    and the intent clarification agent are initialized together. A MagicMock is a
-    fine non-None default for tests that never exercise the clarification path.
+    There is no separate intent clarification agent any more: the agent tool
+    hands the NLU's clarification reply straight back to the main agent.
     """
     ctx._workflow_tool_agent = agent
-    ctx._intent_clarification_agent = (
-        clarification_agent if clarification_agent is not None else MagicMock()
-    )
 
 
 @pytest.fixture
@@ -377,73 +372,64 @@ def test_cancel_pending_clears_awaiting_user(
     assert ctx.cancel_pending() is False
 
 
-def test_resolve_or_escalate_executes_clarified_command(
+@pytest.mark.parametrize(
+    "stage",
+    [
+        fastworkflow.NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
+        fastworkflow.NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION,
+    ],
+)
+def test_intent_clarification_reply_reaches_agent_unchanged_after_abort(
     initialized_fastworkflow,
     todo_workflow_path,
     monkeypatch,
+    stage,
 ):
-    from fastworkflow.workflow_agent import _resolve_or_escalate
+    """The agent sees the NLU's own clarification reply, and the stage is reset.
+
+    No second LLM rewrites or answers it, and the agent is not told to ask the
+    user: the reply already lists the commands to choose from.
+    """
+    from fastworkflow.command_executor import CommandExecutor
+    from fastworkflow.workflow_agent import _execute_workflow_query
 
     ctx = WorkflowExecutionContext(run_as_agent=True)
     wf = fastworkflow.Workflow.create(
         todo_workflow_path,
-        workflow_id_str=f"intent-resolve-{uuid.uuid4().hex}",
+        workflow_id_str=f"intent-pass-through-{uuid.uuid4().hex}",
     )
     ctx.bind_app_workflow(wf)
+    nlu_reply = "Ambiguous intent error for command 'frobnicate'\nChoose one of: add_task, list_todo_lists"
     calls: list[str] = []
 
-    def record_execute(cmd, chat_session_obj):
-        calls.append(cmd)
-        return f"executed:{cmd}"
+    def fake_invoke(cls, session, command: str):
+        calls.append(command)
+        if command.split("/")[-1] == "abort":
+            ctx.cme_workflow.context["NLU_Pipeline_Stage"] = (
+                fastworkflow.NLUPipelineStage.INTENT_DETECTION)
+            response = "Command aborted"
+        else:
+            ctx.cme_workflow.context["NLU_Pipeline_Stage"] = stage
+            response = nlu_reply
+        return fastworkflow.CommandOutput(
+            command_name=command,
+            command_response=fastworkflow.CommandResponse(response=response),
+        )
 
-    monkeypatch.setattr(
-        "fastworkflow.workflow_agent._execute_workflow_query",
-        record_execute,
-    )
+    monkeypatch.setattr(CommandExecutor, "invoke_command", classmethod(fake_invoke))
 
-    result = SimpleNamespace(
-        clarified_command="add_task <title>x</title>",
-        needs_human=False,
-        clarification_question="",
-    )
-    observation = _resolve_or_escalate(result, ctx, "ambiguous error")
-    assert observation == "executed:add_task <title>x</title>"
-    assert calls == ["add_task <title>x</title>"]
+    ctx.push_active_workflow(wf)
+    try:
+        observation = _execute_workflow_query("frobnicate the widget", ctx)
+    finally:
+        ctx.pop_active_workflow()
 
-
-def test_resolve_or_escalate_escalates_to_outer_ask_user(
-    initialized_fastworkflow,
-    todo_workflow_path,
-    monkeypatch,
-):
-    from fastworkflow.workflow_agent import _resolve_or_escalate
-
-    ctx = WorkflowExecutionContext(run_as_agent=True)
-    wf = fastworkflow.Workflow.create(
-        todo_workflow_path,
-        workflow_id_str=f"intent-escalate-{uuid.uuid4().hex}",
-    )
-    ctx.bind_app_workflow(wf)
-    calls: list[str] = []
-
-    def record_execute(cmd, chat_session_obj):
-        calls.append(cmd)
-        return "abort confirmed"
-
-    monkeypatch.setattr(
-        "fastworkflow.workflow_agent._execute_workflow_query",
-        record_execute,
-    )
-
-    result = SimpleNamespace(
-        clarified_command="",
-        needs_human=True,
-        clarification_question="Which list?",
-    )
-    observation = _resolve_or_escalate(result, ctx, "fallback error text")
-    assert calls == ["abort"]
-    assert "ask_user" in observation
-    assert "Which list?" in observation
+    assert observation == f"{nlu_reply}\nCommand aborted"
+    assert calls[0] == "frobnicate the widget"
+    assert [c.split("/")[-1] for c in calls[1:]] == ["abort"]
+    assert ctx.cme_workflow.context["NLU_Pipeline_Stage"] == (
+        fastworkflow.NLUPipelineStage.INTENT_DETECTION)
+    assert "ask_user" not in observation
 
 
 def test_topology_a_cli_ask_user_blocks_with_queue(

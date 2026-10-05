@@ -265,6 +265,21 @@ class CommandContextModel:
 
         return final_effective_commands_list
 
+    def inherited_base_contexts(self, context_name: str) -> set[str]:
+        """Every context whose commands *context_name* inherits, transitively.
+
+        Unknown contexts (including the global ``*``) inherit nothing. Cycles
+        are rejected when the model loads, so the walk terminates.
+        """
+        bases: set[str] = set()
+        pending = list(self._command_contexts.get(context_name, {}).get("base") or [])
+        while pending:
+            base = pending.pop()
+            if base not in bases:
+                bases.add(base)
+                pending.extend(self._command_contexts.get(base, {}).get("base") or [])
+        return bases
+
     # ---------------------------------------------------------------------
     # Context callback class resolution
     # ---------------------------------------------------------------------

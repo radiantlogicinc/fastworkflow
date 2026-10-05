@@ -18,6 +18,7 @@ from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_execution_context import CommandCancelledError
 from fastworkflow.utils import dspy_utils
 from fastworkflow.command_metadata_api import CommandMetadataAPI
+from fastworkflow.command_executor import CommandNotFoundError
 from fastworkflow.utils.react import AskUserSuspend
 from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
 from fastworkflow.observation_offloading.agent import build_tool_agent, remember_dispatched_command
@@ -184,49 +185,56 @@ def _intent_misunderstood(
     return _what_can_i_do(chat_session_obj = chat_session_obj)
 
 
-def _resolve_or_escalate(result, chat_session_obj: fastworkflow.ChatSession, response_text: str) -> str:
-    """
-    Route intent-clarification predictor output: recurse on resolve, or escalate to outer ask_user.
-    """
-    clarified_cmd = getattr(result, "clarified_command", "") or ""
-    if bool(getattr(result, "needs_human", False)) or not clarified_cmd:
-        # Break recursion: reset CME clarification stage to INTENT_DETECTION.
-        _execute_workflow_query("abort", chat_session_obj=chat_session_obj)
-        # The abort ran; the step it cleared up after did not.
-        record_dispatch(getattr(chat_session_obj, "workflow_tool_agent", None), ran=False)
-        question = getattr(result, "clarification_question", "") or response_text
-        # Directive observation -> outer agent calls its own ask_user (blocks in A, suspends in B).
-        return (
-            "Intent clarification needs the user. "
-            f"Use the ask_user tool to ask: {question}"
-        )
-    return _execute_workflow_query(clarified_cmd, chat_session_obj=chat_session_obj)
+def _display_context_name(context: str) -> str:
+    return "global" if context == "*" else context
+
+
+def _command_name_matches(token: str, name: str) -> bool:
+    """Whether an agent's command token names *name* (qualified or short form)."""
+    return token.lower() == (name if "/" in token else name.split("/")[-1]).lower()
 
 
 def _explicit_agent_command(command: str, workflow) -> str:
     """Resolve the agent tool's command token against its current command surface.
 
-    This tool takes command names, not natural-language intents. Never let an
-    unavailable name fall through to fuzzy/cache/classifier substitution. Normal
-    assistant NLU remains unchanged; parameter extraction still runs as before.
+    This tool takes command names, not natural-language intents. Never let a
+    command name that is unavailable here fall through to fuzzy/cache/classifier
+    substitution: name the contexts that do have it instead. A token that names
+    no command in any context of the workflow is not a command name, so it goes
+    to the assistant NLU unchanged. Parameter extraction still runs as before.
     """
-    from fastworkflow.command_executor import CommandNotFoundError
-
     parts = command.strip().split(maxsplit=1)
     token = parts[0].lstrip("/") if parts else ""
     app = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
     cme = fastworkflow.RoutingRegistry.get_definition(
         fastworkflow.get_internal_workflow_path("command_metadata_extraction"))
-    available = (set(app.get_command_names(workflow.current_command_context_name))
+    current_context = workflow.current_command_context_name
+    available = (set(app.get_command_names(current_context))
                  | set(cme.get_command_names("IntentDetection"))
                  | set(cme.get_command_names("ErrorCorrection")))
-    matches = [name for name in available
-               if token.lower() == (name if "/" in token else name.split("/")[-1]).lower()]
+    matches = [name for name in available if _command_name_matches(token, name)]
+    if not matches:
+        home_contexts = {
+            context for context, names in app.contexts.items()
+            if any(_command_name_matches(token, name) for name in names)}
+        if not home_contexts:
+            return command
+        # A context another home context inherits from is a base, not
+        # somewhere to navigate to; name only the most specific ones.
+        inherited = set().union(*(app.context_model.inherited_base_contexts(c)
+                                  for c in home_contexts))
+        home_contexts = sorted(home_contexts - inherited)
+        raise CommandNotFoundError(
+            f"Command {token!r} is not available in the current context "
+            f"{_display_context_name(current_context)!r}. It is available in: "
+            f"{', '.join(repr(_display_context_name(c)) for c in home_contexts)}. "
+            "Navigate to one of those contexts first (go_up or reset_context "
+            "return to an enclosing context), then retry the command.")
     if len(matches) != 1:
         raise CommandNotFoundError(
-            f"Command {token!r} is unavailable or ambiguous in context "
-            f"{workflow.current_command_context_name!r}. Use what_can_i_do for "
-            "available commands, or navigate to the required context.")
+            f"Command {token!r} is ambiguous in context "
+            f"{_display_context_name(current_context)!r}; it matches "
+            f"{', '.join(repr(m) for m in sorted(matches))}. Use the qualified name.")
     # The CME exact-prefix matcher consumes short names. Do not permit a
     # qualified token to collapse onto a different command with the same tail.
     short = matches[0].split("/")[-1]
@@ -456,27 +464,26 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     nlu_stage = cme_workflow.context.get("NLU_Pipeline_Stage")
 
     # For the finish check's ledger: did this step reach a command? Recorded
-    # before the resolvers run, so a clarified command they retry overwrites
-    # it. go_up and reset_context are CME commands that succeed, so they ran.
+    # before the error-state branches below, which abort and re-record it as
+    # not run. go_up and reset_context are CME commands that succeed, so they ran.
     record_dispatch(
         getattr(chat_session_obj, "workflow_tool_agent", None),
         ran=not (nlu_stage in _NOT_RUN_STAGES or (
             command_output.workflow_name == CME_WORKFLOW_NAME and not command_output.success)),
     )
 
-    # Handle intent ambiguity clarification state with specialized agent.
-    # The intent clarification agent is always present here: _execute_workflow_query
-    # is only reachable as a tool of the workflow_tool_agent, and both agents are
-    # initialized together in WorkflowExecutionContext._initialize_agent_functionality.
-    if nlu_stage == fastworkflow.NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION:
-        return _resolve_intent_ambiguity(
-            chat_session_obj, cme_workflow, command, response_text
-        )
-    # Handle intent misunderstanding clarification state with specialized agent
-    if nlu_stage == fastworkflow.NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION:
-        return _resolve_intent_misunderstanding(
-            chat_session_obj, command, response_text
-        )
+    # Intent ambiguity / misunderstanding: the NLU's reply already lists the
+    # candidate commands (ambiguity) or this context's commands (misunderstanding),
+    # so the agent chooses from it. Abort first so its next command is routed
+    # fresh rather than read as an answer to the clarification prompt.
+    if nlu_stage in (
+        fastworkflow.NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
+        fastworkflow.NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION,
+    ):
+        abort_confirmation = _execute_workflow_query('abort', chat_session_obj=chat_session_obj)
+        # The abort ran; the step it cleared up after did not.
+        record_dispatch(getattr(chat_session_obj, "workflow_tool_agent", None), ran=False)
+        return f'{response_text}\n{abort_confirmation}'
     # Handle parameter extraction errors with abort
     if nlu_stage == fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION:
         abort_confirmation = _execute_workflow_query('abort', chat_session_obj=chat_session_obj)
@@ -500,64 +507,6 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
         del workflow.context["is_user_command"]
 
     return response_text
-
-
-# TODO Rename this here and in `_execute_workflow_query`
-def _resolve_intent_misunderstanding(chat_session_obj, command, response_text):
-    intent_agent = chat_session_obj.intent_clarification_agent
-    # Get the workflow agent's trajectory and inputs for context
-    workflow_tool_agent = chat_session_obj.workflow_tool_agent
-    agent_inputs = workflow_tool_agent.inputs if workflow_tool_agent else {}
-    agent_trajectory = workflow_tool_agent.current_trajectory if workflow_tool_agent else {}
-
-    # Inherit the ambient agent LM (set by the caller's dspy.context) rather than
-    # hardcoding LLM_AGENT.
-    result = intent_agent(
-        original_command=command,
-        error_message=response_text,
-        agent_inputs=agent_inputs,
-        agent_trajectory=agent_trajectory,
-    )
-
-    return _resolve_or_escalate(result, chat_session_obj, response_text)
-
-
-# TODO Rename this here and in `_execute_workflow_query`
-def _resolve_intent_ambiguity(chat_session_obj, cme_workflow, command, response_text):
-    intent_agent = chat_session_obj.intent_clarification_agent
-    # Use CommandsSystemPreludeAdapter specifically for workflow agent calls
-    agent_adapter = CommandsSystemPreludeAdapter()
-
-    # Get suggested commands from intent detection system
-    from fastworkflow._workflows.command_metadata_extraction.intent_detection import CommandNamePrediction
-    predictor = CommandNamePrediction(cme_workflow)
-    suggested_commands = predictor._get_suggested_commands(predictor.path)
-
-    suggested_commands = list(suggested_commands) if suggested_commands is not None else []
-
-    # Get metadata for only the suggested commands
-    current_workflow = chat_session_obj.get_active_workflow()
-    suggested_commands_metadata = CommandMetadataAPI.get_suggested_commands_metadata(
-        subject_workflow_path=current_workflow.folderpath,
-        cme_workflow_path=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
-        active_context_name=current_workflow.current_command_context_name,
-        suggested_command_names=suggested_commands
-    )
-
-    # Get the workflow agent's trajectory and inputs for context
-    workflow_tool_agent = chat_session_obj.workflow_tool_agent
-    agent_inputs = workflow_tool_agent.inputs if workflow_tool_agent else {}
-    agent_trajectory = workflow_tool_agent.current_trajectory if workflow_tool_agent else {}
-
-    with dspy.context(adapter=agent_adapter):
-        result = intent_agent(
-            original_command=command,
-            error_message=response_text,
-            agent_inputs=agent_inputs,
-            agent_trajectory=agent_trajectory,
-            available_commands=suggested_commands_metadata  # Note that this is not part of the signature. It is extra metadata that will be picked up by the CommandsSystemPreludeAdapter
-        )
-    return _resolve_or_escalate(result, chat_session_obj, response_text)
 
 
 def _post_ask_user_response(
@@ -707,6 +656,9 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
         for attempt in range(max_retries):
             try:
                 return _execute_workflow_query(command, chat_session_obj=chat_session_obj)
+            except CommandNotFoundError as e:
+                # Deterministic and recoverable: the message says where to go.
+                return str(e)
             except Exception as e:
                 if attempt == max_retries - 1:  # Last attempt
                     message = f"Terminate immediately! Exception processing {command}: {str(e)}"

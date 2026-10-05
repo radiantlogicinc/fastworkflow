@@ -170,7 +170,6 @@ class WorkflowExecutionContext:
         self._CommandExecutor = CommandExecutor
 
         self._workflow_tool_agent = None
-        self._intent_clarification_agent = None
         self._context_change_listener = None
 
         self._awaiting_user = False
@@ -801,10 +800,6 @@ class WorkflowExecutionContext:
     @property
     def workflow_tool_agent(self):
         return self._workflow_tool_agent
-
-    @property
-    def intent_clarification_agent(self):
-        return self._intent_clarification_agent
 
     @property
     def conversation_history(self) -> dspy.History:
@@ -1850,9 +1845,6 @@ class WorkflowExecutionContext:
         if self._app_workflow is not None:
             self._app_workflow.add_context_change_listener(self._on_app_context_change)
             self._context_change_listener = self._on_app_context_change
-
-        from fastworkflow.intent_clarification_agent import initialize_intent_clarification_agent
-        self._intent_clarification_agent = initialize_intent_clarification_agent(self)
 
     def _ensure_agent_initialized(self) -> None:
         if self._workflow_tool_agent is None:

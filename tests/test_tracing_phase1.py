@@ -147,7 +147,6 @@ def _make_agent_ctx(todo_workflow_path, monkeypatch, sink=None):
 
 def _set_agents(ctx, agent):
     ctx._workflow_tool_agent = agent
-    ctx._intent_clarification_agent = MagicMock()
 
 
 # ----------------------------------------------------------------------
