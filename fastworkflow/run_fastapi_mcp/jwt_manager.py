@@ -321,6 +321,13 @@ def verify_token(token: str, expected_type: str = "access") -> dict:
     except JWTError as e:
         logger.warning(f"Token verification failed: {e}")
         raise
+    except Exception as e:
+        # The header and payload are parsed before the signature is checked, so a
+        # parser failure outside PyJWTError (a RecursionError on a deeply nested
+        # header, GHSA-8wjv-2p76-3863) comes from an unauthenticated caller and
+        # must be a refusal like any other bad token, not a 500.
+        logger.warning(f"Token verification failed: {type(e).__name__}")
+        raise JWTError(f"Failed to decode token: {type(e).__name__}") from e
 
 
 def get_token_expiry(token: str) -> Optional[datetime]:

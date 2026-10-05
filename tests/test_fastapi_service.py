@@ -3,6 +3,7 @@ Basic tests for FastWorkflow FastAPI service
 These tests validate the structure and basic functionality
 """
 
+import base64
 import os
 import tempfile
 import sys
@@ -10,6 +11,8 @@ import importlib
 
 import pytest
 from fastapi.testclient import TestClient
+
+from fastworkflow.run_fastapi_mcp import jwt_manager
 
 
 @pytest.fixture
@@ -666,6 +669,33 @@ def test_admin_endpoints_require_a_token_when_enabled(admin_enabled, path, paylo
     assert client.post(path, json=payload).status_code in (401, 403)
     bad = {"Authorization": "Bearer not-a-real-token"}
     assert client.post(path, headers=bad, json=payload).status_code == 401
+
+
+def _nested_header_token(depth=100_000):
+    """A token whose header is JSON nested `depth` deep: parsed before any
+    signature check, so anyone can send it (GHSA-8wjv-2p76-3863)."""
+    def segment(raw):
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+    header = b'{"a":' * depth + b"1" + b"}" * depth
+    return segment(header) + "." + segment(b"{}") + ".c2ln"
+
+
+@pytest.mark.parametrize("signed", [True, False])
+def test_nested_header_token_is_refused_not_a_server_error(signed):
+    """A parser failure on an attacker's token is a bad token like any other."""
+    jwt_manager.set_jwt_verification_mode(signed)
+    try:
+        with pytest.raises(jwt_manager.JWTError):
+            jwt_manager.verify_token(_nested_header_token(), expected_type="access")
+    finally:
+        jwt_manager.set_jwt_verification_mode(True)
+
+
+def test_nested_header_token_gets_401_over_http(app_module):
+    client = TestClient(app_module.app, raise_server_exceptions=False)
+    headers = {"Authorization": "Bearer " + _nested_header_token()}
+    response = client.post("/activate_conversation", headers=headers, json={"conversation_id": 1})
+    assert response.status_code == 401, response.text
 
 
 def test_admin_endpoints_absent_from_openapi_when_disabled(app_module):
