@@ -136,7 +136,7 @@ from fastworkflow.conversation_labeling import (
     TOPIC_GENERATION_TIMEOUT_ENV_VAR,
 )
 from fastworkflow.observability.store import ObservabilityStore
-from fastworkflow.observability.store import get_observability_sink
+from fastworkflow.observability.store import get_observability_sink, writer_incarnation_id
 from fastworkflow.experiment.runner import experiment_store_readiness
 
  
@@ -473,8 +473,15 @@ async def lifespan(_app: FastAPI):
             readiness_state.set_workflow_path_valid(False)
 
         trace_sink = get_observability_sink(ARGS.workflow_path)
+        # `writer_incarnation` is the health row a driver's evidence run reads
+        # on a live DB other processes also write (single live DB design §5).
         readiness_state.set_experiment_store_readiness(
-            experiment_store_readiness(trace_sink.store.db_path)
+            {
+                **experiment_store_readiness(trace_sink.store.db_path),
+                "writer_incarnation": writer_incarnation_id(
+                    trace_sink.health_snapshot()
+                ),
+            }
             if trace_sink is not None
             else None
         )

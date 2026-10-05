@@ -96,8 +96,7 @@ def finder_world(tmp_path, monkeypatch):
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     store = obs.ObservabilityStore(db_path)
     controller = ExperimentController(
-        db_path, store.store_identity(), external=False,
-        workflow_folderpath=str(folder),
+        str(folder), store.store_identity(), external=False,
     )
     workflow_name = setup.workflow_name_for(folder)
     controller.create_experiment(

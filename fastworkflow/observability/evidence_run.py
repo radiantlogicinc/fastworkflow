@@ -164,7 +164,9 @@ class EvidenceRun:
 
 
 def _health_snapshot(
-    db_path: str, sink: Optional[observability_store.SQLiteTraceSink]
+    db_path: str,
+    sink: Optional[observability_store.SQLiteTraceSink],
+    writer_incarnation: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
     """The live counters if a sink is in this process, else the persisted row.
 
@@ -180,20 +182,31 @@ def _health_snapshot(
     """
     if sink is not None and not sink._closed:
         return sink.health_snapshot()
-    return _persisted_health(db_path)
+    return _persisted_health(db_path, writer_incarnation)
 
 
-def _persisted_health(db_path: str) -> Optional[dict[str, Any]]:
-    """The `diagnostics` writer-health row, or None if it cannot be read."""
+def _persisted_health(
+    db_path: str, writer_incarnation: Optional[str] = None
+) -> Optional[dict[str, Any]]:
+    """The `diagnostics` writer-health row, or None if it cannot be read.
+
+    `writer_incarnation` names the writer that owns the run (§5); without it
+    every writer's row is folded into one.
+    """
     try:
-        return observability_store.ObservabilityStore(db_path).writer_health()
+        return observability_store.ObservabilityStore(db_path).writer_health(
+            writer_incarnation
+        )
     except Exception as exc:
         logger.warning(f"Could not read writer health from {db_path}: {exc!r}")
         return None
 
 
 def _await_health_refresh(
-    db_path: str, since: Optional[str], settle_s: float
+    db_path: str,
+    since: Optional[str],
+    settle_s: float,
+    writer_incarnation: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
     """Poll the persisted health row until it advances past `since`.
 
@@ -207,7 +220,7 @@ def _await_health_refresh(
     stays distinguishable from "we never looked".
     """
     deadline = time.monotonic() + max(settle_s, 0.0)
-    health = _persisted_health(db_path)
+    health = _persisted_health(db_path, writer_incarnation)
     while time.monotonic() < deadline:
         if health is not None and since is not None:
             if str(health.get("updated_at") or "") > since:
@@ -215,7 +228,7 @@ def _await_health_refresh(
         elif health is not None and since is None:
             return health
         time.sleep(_HEALTH_POLL_INTERVAL_S)
-        health = _persisted_health(db_path)
+        health = _persisted_health(db_path, writer_incarnation)
     return health
 
 
@@ -229,6 +242,8 @@ def evidence_run(
     require_evidence_profile: bool = False,
     raise_on_invalid: bool = False,
     health_settle_s: float = 5.0,
+    experiment_id: Optional[str] = None,
+    writer_incarnation: Optional[str] = None,
 ):
     """Record a measured run, then verify nothing was silently lost.
 
@@ -251,7 +266,12 @@ def evidence_run(
     the end of the run. A run that cannot read health from either source, or
     whose cross-process row never advances, is reported with a problem rather
     than as a clean interval — an unread counter is not a measurement of zero.
-    See `EvidenceRun.in_process`. fix-ajv.13.
+    See `EvidenceRun.in_process`. fix-ajv.13. Several processes write one live
+    DB, so a cross-process run names its writer by `writer_incarnation` (the
+    server's readiness reports it); without it every writer's row is folded
+    into one, and another writer's activity can read as a restart.
+
+    `experiment_id` scopes the archive to that experiment's rows (§3).
 
     A writer publishes a zero baseline row when it is CONSTRUCTED, not when it
     first counts something (`SQLiteTraceSink._publish_baseline_health`, fix-485),
@@ -305,7 +325,7 @@ def evidence_run(
         db_path=db_path,
         provenance=provenance,
         started_at=datetime.now(timezone.utc),
-        health_before=_health_snapshot(db_path, sink),
+        health_before=_health_snapshot(db_path, sink, writer_incarnation),
         in_process=in_process,
     )
     if not in_process and run.health_before is None:
@@ -403,7 +423,7 @@ def evidence_run(
             # window in which a drop is most likely and would go unseen.
             before_stamp = str((run.health_before or {}).get("updated_at") or "") or None
             run.health_after = _await_health_refresh(
-                db_path, before_stamp, health_settle_s
+                db_path, before_stamp, health_settle_s, writer_incarnation
             )
             after_stamp = str((run.health_after or {}).get("updated_at") or "") or None
             if run.health_after is None:
@@ -435,7 +455,7 @@ def evidence_run(
             try:
                 target = Path(archive_dir) / f"{run_id}-observability.sqlite3"
                 run.archive = observability_store.ObservabilityStore(db_path).archive_to(
-                    str(target)
+                    str(target), experiment_id=experiment_id
                 )
             except Exception as exc:
                 run.extra_problems.append(f"evidence archival failed: {exc!r}")

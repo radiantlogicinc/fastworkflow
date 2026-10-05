@@ -148,7 +148,7 @@ def drift_world(tmp_path, monkeypatch):
     task_id, empty_task, big_task = experiment["task_ids"][:3]
 
     controller = ExperimentController(
-        db, store.store_identity(), external=False, workflow_folderpath=str(folder)
+        str(folder), store.store_identity(), external=False
     )
     # The plan is exact and rectangular: every task declares the same number
     # of attempts. What each task actually RECORDS is what differs here, and
@@ -1253,7 +1253,7 @@ def crowded_world(tmp_path, monkeypatch):
     experiment_id = experiment["experiment_id"]
     task_id = experiment["task_ids"][0]
     controller = ExperimentController(
-        db, store.store_identity(), external=False, workflow_folderpath=str(folder)
+        str(folder), store.store_identity(), external=False
     )
     controller.create_experiment(
         experiment_id, experiment["description"], declared_tasks=1,

@@ -58,7 +58,7 @@ def world(folder, tmp_path):
     db_path = state_paths.observability_db(str(folder))
     store = obs.ObservabilityStore(db_path)
     controller = ExperimentController(
-        db_path, store.store_identity(), external=False, workflow_folderpath=str(folder)
+        str(folder), store.store_identity(), external=False
     )
     controller.create_experiment(
         experiment_id,
@@ -219,7 +219,7 @@ def long_attempt(folder, tmp_path):
     db_path = state_paths.observability_db(str(folder))
     store = obs.ObservabilityStore(db_path)
     controller = ExperimentController(
-        db_path, store.store_identity(), external=False, workflow_folderpath=str(folder)
+        str(folder), store.store_identity(), external=False
     )
     controller.create_experiment(
         experiment_id,
@@ -324,7 +324,7 @@ def no_turns(folder, tmp_path):
     db_path = state_paths.observability_db(str(folder))
     store = obs.ObservabilityStore(db_path)
     controller = ExperimentController(
-        db_path, store.store_identity(), external=False, workflow_folderpath=str(folder)
+        str(folder), store.store_identity(), external=False
     )
     controller.create_experiment(
         experiment_id,
@@ -627,10 +627,9 @@ class TestRefusals:
         db_path = state_paths.observability_db(str(folder))
         store = obs.ObservabilityStore(db_path)
         controller = ExperimentController(
-            db_path,
+            str(folder),
             store.store_identity(),
             external=False,
-            workflow_folderpath=str(folder),
         )
         controller.create_experiment(
             record["experiment_id"],
@@ -762,10 +761,9 @@ class TestScopeSeparation:
         candidate = setup.duplicate_experiment(folder, world["experiment_id"])
         store = world["store"]
         controller = ExperimentController(
-            store.db_path,
+            str(folder),
             store.store_identity(),
             external=False,
-            workflow_folderpath=str(folder),
         )
         task_id = world["task_id"]
         controller.create_experiment(

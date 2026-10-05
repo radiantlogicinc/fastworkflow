@@ -195,7 +195,7 @@ The full internal `TurnResult`, post-redaction:
 | `list_task_feedback(experiment_id=, task_id=)` | Every note about one task, across attempts and turns, plus notes whose frozen pair anchor names it |
 | `get_experiment(experiment_id)` / `experiment_attempt_rows(experiment_id, task_id=)` | Pin/configuration and attempt records; attempt `runtime_snapshot` is decoded or null |
 | `store_identity()` / `capture_regime()` | Evidence source and capture profile/policy identity |
-| `writer_health()` | The writer's drop/error counters — read this before trusting span completeness |
+| `writer_health(incarnation_id=None)` | A writer's drop/error counters — read this before trusting span completeness. Each writer process has its own row; with no id, every row folded together |
 | `db_size_bytes()` | File + WAL size |
 
 Additional conversation-memory reads exist (`get_memory_window`,

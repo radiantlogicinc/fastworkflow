@@ -65,9 +65,13 @@ not a human rater, and a saved review decision does not implement this responder
 
 ## External / HTTP collectors
 
-Use `ExperimentController` with the actual database path, expected store identity and
-`workflow_folderpath`. External controllers open an already initialized compatible store with
-`migrate=False`. Pass the UI's `experiment_id` and the complete task set to `create_experiment`:
+Use `ExperimentController(workflow_folderpath, expected_store_identity, ...)`; it records into
+the workflow's one live DB, `state_paths.observability_db(workflow_folderpath)`, which the server
+and the UI resolve too. Do not give the run its own `FASTWORKFLOW_STATE_ROOT`: a different root is
+a different DB, so a registered experiment raises `ExperimentNotRegisteredHere` (naming the path
+and both location variables) and an ad-hoc one logs a WARNING. External controllers open an
+already initialized compatible store with `migrate=False`. Pass the UI's `experiment_id`, the
+complete task set and `registered=True` to `create_experiment`:
 `declarations` contains `(task_id, attempt_number, channel_id)` tuples; `declared_tasks` is the
 number of unique tasks and `declared_attempts` is the repetitions per task.
 

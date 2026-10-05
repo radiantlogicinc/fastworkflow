@@ -77,7 +77,7 @@ def binding_harness(tmp_path, monkeypatch):
         assert readiness.status_code == 200
         store_readiness = readiness.json()["experiment_store_readiness"]
         controller = ExperimentController(
-            store_readiness["resolved_path"],
+            workflow_path,
             store_readiness["store_id"],
             migrate=False,
             external=True,
@@ -103,6 +103,10 @@ def test_readiness_reports_exact_experiment_store(binding_harness):
         "resolved_path": os.path.realpath(binding_harness.controller.db_path),
         "capture_profile": "evidence",
         "capture_policy_version": obs.CAPTURE_POLICY_VERSION,
+        "writer_incarnation": obs.writer_incarnation_id(
+            obs.sink_for_db_path(binding_harness.controller.db_path)
+            .health_snapshot()
+        ),
     }
 
 

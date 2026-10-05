@@ -113,8 +113,7 @@ def _declare(folder, db_path, record):
     """Hand a registration to a real runner, the way `run` does."""
     store = obs.ObservabilityStore(db_path)
     controller = ExperimentController(
-        db_path, store.store_identity(), external=False,
-        workflow_folderpath=str(folder),
+        str(folder), store.store_identity(), external=False,
     )
     controller.create_experiment(
         record["experiment_id"],

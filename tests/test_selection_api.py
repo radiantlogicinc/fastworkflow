@@ -154,8 +154,7 @@ def world(tmp_path, monkeypatch):
     task_id = first["task_ids"][0]
 
     controller = ExperimentController(
-        db_path, store.store_identity(), external=False,
-        workflow_folderpath=str(folder),
+        str(folder), store.store_identity(), external=False,
     )
     controller.create_experiment(
         experiment_id,
@@ -792,8 +791,7 @@ def two_pass_world(tmp_path, monkeypatch):
     experiment_id, task_id = record["experiment_id"], record["task_ids"][0]
 
     controller = ExperimentController(
-        db, store.store_identity(), external=False,
-        workflow_folderpath=str(folder),
+        str(folder), store.store_identity(), external=False,
     )
     controller.create_experiment(
         experiment_id, record["description"], declared_tasks=1, declared_attempts=1,

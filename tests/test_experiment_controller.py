@@ -8,6 +8,7 @@ import threading
 
 import pytest
 
+from fastworkflow import state_paths
 from fastworkflow.observability import store as obs
 from fastworkflow.experiment.runner import (
     ExperimentController,
@@ -17,17 +18,22 @@ from fastworkflow.experiment.runner import (
 
 
 @pytest.fixture
-def db_path(tmp_path, monkeypatch) -> str:
+def workflow(tmp_path, monkeypatch) -> str:
     monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
-    path = str(tmp_path / "observability.sqlite3")
-    obs.ObservabilityStore(path)
-    return path
+    folder = str(tmp_path / "workflow")
+    obs.ObservabilityStore(state_paths.observability_db(folder))
+    return folder
 
 
-def _controller(db_path: str, *, external: bool = False) -> ExperimentController:
-    identity = experiment_store_readiness(db_path)["store_id"]
+@pytest.fixture
+def db_path(workflow) -> str:
+    return state_paths.observability_db(workflow)
+
+
+def _controller(workflow: str, *, external: bool = False) -> ExperimentController:
+    identity = experiment_store_readiness(state_paths.observability_db(workflow))["store_id"]
     return ExperimentController(
-        db_path, identity, migrate=False, external=external
+        workflow, identity, migrate=False, external=external
     )
 
 
@@ -74,10 +80,10 @@ def _start_and_terminalize(
     )
 
 
-def test_external_controller_refuses_capture_regime_mismatch(db_path):
+def test_external_controller_refuses_capture_regime_mismatch(workflow, db_path):
     with pytest.raises(obs.CaptureRegimeChanged):
         ExperimentController(
-            db_path,
+            workflow,
             experiment_store_readiness(db_path)["store_id"],
             migrate=False,
             external=True,
@@ -87,7 +93,7 @@ def test_external_controller_refuses_capture_regime_mismatch(db_path):
 
 
 def test_external_controller_has_no_sink_writer_or_pruning_side_effect(
-    db_path, monkeypatch
+    workflow, db_path, monkeypatch
 ):
     before = {thread.ident for thread in threading.enumerate()}
 
@@ -98,7 +104,7 @@ def test_external_controller_has_no_sink_writer_or_pruning_side_effect(
     monkeypatch.setattr(obs.SQLiteTraceSink, "__init__", forbidden)
     monkeypatch.setattr(obs.ObservabilityStore, "prune", forbidden)
     controller = ExperimentController(
-        db_path,
+        workflow,
         experiment_store_readiness(db_path)["store_id"],
         migrate=False,
         external=True,
@@ -111,7 +117,8 @@ def test_external_controller_has_no_sink_writer_or_pruning_side_effect(
 def test_external_controller_never_migrates_and_refuses_missing_feature(
     tmp_path, monkeypatch
 ):
-    path = str(tmp_path / "old.sqlite3")
+    folder = str(tmp_path / "workflow")
+    path = state_paths.observability_db(folder)
     conn = sqlite3.connect(path)
     conn.execute(
         "CREATE TABLE diagnostics "
@@ -130,12 +137,12 @@ def test_external_controller_never_migrates_and_refuses_missing_feature(
     monkeypatch.setattr(obs.ObservabilityStore, "_ensure_schema", forbidden)
     with pytest.raises(MissingExperimentLifecycleFeature):
         ExperimentController(
-            path, "missing-store-identity", migrate=False, external=True
+            folder, "missing-store-identity", migrate=False, external=True
         )
 
 
-def test_compatible_finish_attempt_runs_running_to_complete(db_path):
-    controller = _controller(db_path)
+def test_compatible_finish_attempt_runs_running_to_complete(workflow):
+    controller = _controller(workflow)
     _create(controller)
     controller.start_attempt("exp-1", "t0", 1, "channel:t0:1")
     controller.finish_attempt(
@@ -151,8 +158,8 @@ def test_compatible_finish_attempt_runs_running_to_complete(db_path):
     assert controller.store.experiment_scores("exp-1")["reportable"] is True
 
 
-def test_external_capture_complete_is_natively_non_reportable(db_path):
-    controller = _controller(db_path, external=True)
+def test_external_capture_complete_is_natively_non_reportable(workflow):
+    controller = _controller(workflow, external=True)
     _create(controller)
     _start_and_terminalize(controller)
     controller.record_outcome(
@@ -167,8 +174,8 @@ def test_external_capture_complete_is_natively_non_reportable(db_path):
     assert "capture_complete" in score["reason_not_reportable"]
 
 
-def test_deferred_evaluation_runs_awaiting_evaluation_to_complete(db_path):
-    controller = _controller(db_path)
+def test_deferred_evaluation_runs_awaiting_evaluation_to_complete(workflow):
+    controller = _controller(workflow)
     _create(controller)
     _start_and_terminalize(controller)
 
@@ -183,8 +190,8 @@ def test_deferred_evaluation_runs_awaiting_evaluation_to_complete(db_path):
     assert controller.complete_experiment("exp-1") == "complete"
 
 
-def test_invalid_is_terminal(db_path):
-    controller = _controller(db_path)
+def test_invalid_is_terminal(workflow):
+    controller = _controller(workflow)
     _create(controller)
     assert (
         controller.invalidate_experiment("exp-1", "operator", "bad capture")
@@ -195,8 +202,8 @@ def test_invalid_is_terminal(db_path):
         controller.start_attempt("exp-1", "t0", 1, "channel:t0:1")
 
 
-def test_restart_only_accepts_execution_open_attempts(db_path):
-    controller = _controller(db_path)
+def test_restart_only_accepts_execution_open_attempts(workflow):
+    controller = _controller(workflow)
     _create(controller, tasks=2, task_ids=["open", "closed"])
     controller.start_attempt("exp-1", "open", 1, "channel:open:1")
     controller.start_attempt("exp-1", "closed", 1, "channel:closed:1")
@@ -209,8 +216,8 @@ def test_restart_only_accepts_execution_open_attempts(db_path):
         controller.restart_attempt("exp-1", "closed", 1)
 
 
-def test_terminal_values_are_idempotent_and_conflicts_are_refused(db_path):
-    controller = _controller(db_path)
+def test_terminal_values_are_idempotent_and_conflicts_are_refused(workflow):
+    controller = _controller(workflow)
     _create(controller)
     controller.start_attempt(
         "exp-1",
@@ -251,8 +258,8 @@ def test_terminal_values_are_idempotent_and_conflicts_are_refused(db_path):
         )
 
 
-def test_source_attempt_key_is_versioned_and_scrubbed(db_path):
-    controller = _controller(db_path)
+def test_source_attempt_key_is_versioned_and_scrubbed(workflow):
+    controller = _controller(workflow)
     _create(controller)
     secret = "sk-0123456789abcdefghijklmnopqrstuv"
     controller.start_attempt(
@@ -268,8 +275,8 @@ def test_source_attempt_key_is_versioned_and_scrubbed(db_path):
     assert secret not in row["source_attempt_json"]
 
 
-def test_declared_denominator_is_still_enforced(db_path):
-    controller = _controller(db_path)
+def test_declared_denominator_is_still_enforced(workflow):
+    controller = _controller(workflow)
     _create(controller, tasks=2)
     _start_and_terminalize(controller)
     controller.record_outcome(
@@ -282,7 +289,7 @@ def test_declared_denominator_is_still_enforced(db_path):
     )
 
 
-def test_markerless_ready_schema_is_refused_for_external_open(db_path):
+def test_markerless_ready_schema_is_refused_for_external_open(workflow, db_path):
     identity = obs.ObservabilityStore(
         db_path, migrate=False
     ).store_identity()
@@ -293,7 +300,7 @@ def test_markerless_ready_schema_is_refused_for_external_open(db_path):
 
     with pytest.raises(MissingExperimentLifecycleFeature):
         ExperimentController(
-            db_path,
+            workflow,
             identity,
             migrate=False,
             external=True,

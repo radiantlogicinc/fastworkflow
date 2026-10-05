@@ -640,7 +640,7 @@ def seeded_db(workflow_path) -> str:
     db_path = state_paths.observability_db(workflow_path)
     store = obs.ObservabilityStore(db_path)
     controller = ExperimentController(
-        db_path, store.store_identity(), migrate=False, external=True
+        workflow_path, store.store_identity(), migrate=False, external=True
     )
 
     controller.create_experiment(

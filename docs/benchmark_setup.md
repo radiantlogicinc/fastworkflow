@@ -39,12 +39,16 @@ The task IDs must exactly cover the registered version. Prompts are optional
 setup data; the harness supplies executable messages. The existing run path
 binds each attempt's conversation and turns to the experiment and task IDs.
 
-External controllers use the same mechanism: pass `workflow_folderpath` to
-`ExperimentController` (or to its `create_experiment` call), then call
-`create_experiment` with the UI's experiment ID, the registered task IDs and the
-usual attempt declarations. The controller looks up the immutable benchmark pin,
-refuses contradictory pins/task IDs, and binds the registration to its actual
-store. Continue with the existing register/claim/start/finish lifecycle. IDs are
+External controllers use the same mechanism: construct
+`ExperimentController(workflow_folderpath, store_identity, ...)`, which records
+into the workflow's live DB (`state_paths.observability_db`), then call
+`create_experiment` with the UI's experiment ID, the registered task IDs, the
+usual attempt declarations and `registered=True`. The controller looks up the
+immutable benchmark pin, refuses contradictory pins/task IDs, and binds the
+registration to that DB. A registered ID absent from the DB the controller
+resolved raises `ExperimentNotRegisteredHere`, naming that path and the
+`FASTWORKFLOW_STATE_ROOT` / `FASTWORKFLOW_WORKFLOW_ID` it was resolved under:
+the run, the server and the UI must all resolve the same DB. Continue with the existing register/claim/start/finish lifecycle. IDs are
 labels, not substitutes for attempt bootstrap credentials or execution context
 binding. Supplying an experiment ID alone to a raw conversation call does not
 perform that lifecycle.

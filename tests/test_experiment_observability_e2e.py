@@ -244,7 +244,7 @@ def loopback_observability(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             "experiment_store_readiness"
         ]
         controller = ExperimentController(
-            readiness["resolved_path"],
+            workflow_path,
             readiness["store_id"],
             migrate=False,
             external=True,

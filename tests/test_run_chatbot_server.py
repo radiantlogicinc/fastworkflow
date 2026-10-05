@@ -227,7 +227,7 @@ def seeded_db(workflow_path) -> str:
         store.upsert_span_rows(conn, spans, redactor)
         store.set_diagnostic(
             conn,
-            "writer_health",
+            obs.WRITER_HEALTH_KEY_PREFIX + "writer-1",
             {"spans_dropped": 2, "records_dropped": 1, "write_errors": 3,
              "busy_retries": 0, "refused_terminal_writes": 0,
              "last_error": "disk full"},

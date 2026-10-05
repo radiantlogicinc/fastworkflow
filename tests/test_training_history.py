@@ -117,11 +117,11 @@ def _seed_runs(store):
     )
 
 
-def _controller(db_path, store):
+def _controller(workflow_folder, store):
     from fastworkflow.experiment.runner import ExperimentController
 
     return ExperimentController(
-        db_path, store.store_identity(), migrate=False, external=True
+        workflow_folder, store.store_identity(), migrate=False, external=True
     )
 
 
@@ -157,9 +157,9 @@ def _snapshot(version_id, *, legacy=False):
     }
 
 
-def _seed_attempts(db_path, store):
+def _seed_attempts(workflow_folder, store):
     """Two experiments: one ran on VERSION_A, one on a version nothing trained."""
-    controller = _controller(db_path, store)
+    controller = _controller(workflow_folder, store)
     controller.create_experiment(
         "exp-on-a",
         "ran on the first trained set",
@@ -186,15 +186,20 @@ def _seed_attempts(db_path, store):
 
 
 @pytest.fixture
-def db_path(tmp_path) -> str:
-    return str(tmp_path / "observability.sqlite3")
+def workflow_folder(tmp_path) -> str:
+    return str(tmp_path / "seeded_workflow")
 
 
 @pytest.fixture
-def seeded_store(db_path):
+def db_path(workflow_folder) -> str:
+    return state_paths.observability_db(workflow_folder)
+
+
+@pytest.fixture
+def seeded_store(workflow_folder, db_path):
     store = obs.ObservabilityStore(db_path)
     _seed_runs(store)
-    _seed_attempts(db_path, store)
+    _seed_attempts(workflow_folder, store)
     return store
 
 
@@ -458,7 +463,7 @@ def training_server(workflow_dir, tmp_path, monkeypatch):
     db_path = state_paths.observability_db(str(workflow_dir))
     store = obs.ObservabilityStore(db_path)
     _seed_runs(store)
-    _seed_attempts(db_path, store)
+    _seed_attempts(str(workflow_dir), store)
     server = run_chatbot_server.ChatbotServer(
         db_path=db_path,
         workflow_path=str(workflow_dir),
@@ -925,7 +930,7 @@ def test_training_source_switch_dom(workspace_training_server):
 # ----------------------------------------------------------------------
 
 
-def test_the_projection_opens_its_store_read_only(db_path):
+def test_the_projection_opens_its_store_read_only(workflow_folder, db_path):
     """The whole surface is reads of rows that already exist.
 
     Pinned against the read-only store rather than argued: if any projection
@@ -933,7 +938,7 @@ def test_the_projection_opens_its_store_read_only(db_path):
     """
     writable = obs.ObservabilityStore(db_path)
     _seed_runs(writable)
-    _seed_attempts(db_path, writable)
+    _seed_attempts(workflow_folder, writable)
     before = Path(db_path).read_bytes()
 
     readonly = obs.ReadOnlyObservabilityStore(db_path)

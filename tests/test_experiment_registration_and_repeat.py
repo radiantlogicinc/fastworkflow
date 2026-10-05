@@ -309,10 +309,9 @@ def _controller(folder):
     db_path = state_paths.observability_db(str(folder))
     store = obs.ObservabilityStore(db_path)
     controller = ExperimentController(
-        db_path,
+        str(folder),
         store.store_identity(),
         external=False,
-        workflow_folderpath=str(folder),
     )
     return store, controller
 

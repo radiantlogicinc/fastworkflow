@@ -1038,8 +1038,7 @@ def adhoc_world(tmp_path, monkeypatch):
     Path(default_db).parent.mkdir(parents=True, exist_ok=True)
     store = obs.ObservabilityStore(default_db)
     controller = ExperimentController(
-        default_db, store.store_identity(), external=False,
-        workflow_folderpath=str(folder),
+        str(folder), store.store_identity(), external=False,
     )
     controller.create_experiment(
         "adhoc-exp", "typed at a prompt", declared_tasks=1, declared_attempts=2,

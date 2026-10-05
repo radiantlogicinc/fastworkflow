@@ -735,7 +735,7 @@ class TestDiagnostics:
         store = obs.ObservabilityStore(db_path)
         _set_diagnostic(
             store,
-            "writer_health",
+            obs.WRITER_HEALTH_KEY_PREFIX + "writer-1",
             {
                 "write_errors": 1,
                 "last_error": (
@@ -767,7 +767,7 @@ class TestDiagnostics:
         turn_keys = ["20260828T000000.000000Z-aaaaaaaaaaaa"]
         _set_diagnostic(
             store,
-            "writer_health",
+            obs.WRITER_HEALTH_KEY_PREFIX + "writer-1",
             {
                 "records_dropped": 2,
                 "spans_dropped": 0,

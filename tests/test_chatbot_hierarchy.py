@@ -40,7 +40,7 @@ def hierarchy_server(experiment_server):
     spec = setup.save_benchmark(server.workflow_path, {'title': 'Tuning benchmark', 'description': 'Review this benchmark', 'tasks': [{}]})
     registration = setup.create_experiment(server.workflow_path, spec['benchmark_id'], 'v1')
     store = default
-    controller = ExperimentController(store.db_path, store.store_identity(), external=False, workflow_folderpath=server.workflow_path)
+    controller = ExperimentController(server.workflow_path, store.store_identity(), external=False)
     eid = registration['experiment_id']
     controller.create_experiment(eid, 'Recorded experiment', declared_tasks=1, declared_attempts=1,
         declarations=[(registration['task_ids'][0], 1, 'registered')])

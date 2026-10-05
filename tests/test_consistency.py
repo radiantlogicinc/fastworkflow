@@ -270,8 +270,7 @@ def repeats(tmp_path, monkeypatch):
     task_id = baseline["task_ids"][0]
 
     controller_one = ExperimentController(
-        db, store.store_identity(), external=False,
-        workflow_folderpath=str(folder),
+        str(folder), store.store_identity(), external=False,
     )
     controller_one.create_experiment(
         baseline_id, baseline["description"], declared_tasks=1, declared_attempts=3,
@@ -293,8 +292,7 @@ def repeats(tmp_path, monkeypatch):
     candidate = setup.create_experiment(folder, benchmark_id, "v1", runs_per_task=3)
     candidate_id = candidate["experiment_id"]
     controller_two = ExperimentController(
-        db, store.store_identity(), external=False,
-        workflow_folderpath=str(folder),
+        str(folder), store.store_identity(), external=False,
     )
     controller_two.create_experiment(
         candidate_id, candidate["description"], declared_tasks=1,

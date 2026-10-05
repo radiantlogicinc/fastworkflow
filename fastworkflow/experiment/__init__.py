@@ -8,6 +8,7 @@ __all__ = [
     "ExperimentAborted",
     "ExperimentController",
     "ExperimentHarness",
+    "ExperimentNotRegisteredHere",
     "ExperimentTask",
     "Grader",
     "LM_CACHE_VAR",

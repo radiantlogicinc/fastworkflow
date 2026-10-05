@@ -199,6 +199,11 @@ _HEALTH_MONOTONE_COUNTERS: tuple[str, ...] = (
 # time would collide across a fast restart inside one clock second, and a run
 # whose writer was replaced must never look like a run whose writer persisted.
 WRITER_INCARNATION_FIELD = "writer_incarnation"
+# One diagnostics row per writer incarnation, `writer_health/<id>` (single live
+# DB design §5). Concurrent writers on one live DB would otherwise overwrite
+# each other's stamp, and every evidence run captured while the interactive
+# server was up would read as a writer restart.
+WRITER_HEALTH_KEY_PREFIX = "writer_health/"
 
 
 def writer_incarnation_id(health: Optional[Mapping[str, Any]]) -> Optional[str]:
@@ -210,6 +215,30 @@ def writer_incarnation_id(health: Optional[Mapping[str, Any]]) -> Optional[str]:
         return None
     value = stamp.get("id")
     return str(value) if value else None
+
+
+def _writer_holds(stamp: Any) -> bool:
+    """Whether a health stamp names an open writer whose process is alive here.
+
+    A row left open by a writer whose process is gone is a crash marker, not a
+    live writer; a writer on another host cannot be checked and is not counted.
+    """
+    if not isinstance(stamp, Mapping) or not stamp.get("open"):
+        return False
+    if str(stamp.get("host") or "") != socket.gethostname():
+        return False
+    try:
+        pid = int(stamp.get("pid") or 0)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if pid != os.getpid():
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False  # the writer's process is gone; the marker is stale
+    return True
 
 
 def merge_writer_health(
@@ -1633,6 +1662,38 @@ def _present_offload_tables(conn: sqlite3.Connection) -> tuple[str, ...]:
     return tuple(table for table in _OFFLOAD_EVIDENCE_TABLES if table in found)
 
 
+# What an experiment seal copies (single live DB design §3), in order: each
+# table with the predicate that picks its rows. Rows kept by turn select
+# against the copy's own `turns`, so they follow it, and go through the
+# turn-key indexes rather than scanning the live DB's spans.
+_SEAL_KEPT_TURNS = "SELECT turn_key FROM main.turns"
+_EXPERIMENT_SEAL_ROWS: tuple[tuple[str, str], ...] = (
+    *(
+        (table, "experiment_id=:experiment_id")
+        for table in (
+            "experiments", "experiment_attempts", "experiment_attempt_declarations",
+            "experiment_attempt_claims", "experiment_evidence_runs",
+            "conversations", "turns",
+        )
+    ),
+    ("spans", f"trace_id IN ({_SEAL_KEPT_TURNS})"),
+    *(
+        (table, f"turn_key IN ({_SEAL_KEPT_TURNS})")
+        for table in ("artifacts", "human_feedback", *_OFFLOAD_EVIDENCE_TABLES)
+    ),
+    # Writer health describes the live DB's writers, not this experiment.
+    ("diagnostics", "key NOT GLOB 'writer_health*'"),
+)
+
+
+def _remove_scratch(*paths: Path) -> None:
+    """Delete an archive's scratch files and any sidecars they grew."""
+    for scratch in paths:
+        for suffix in ("", "-wal", "-shm"):
+            with contextlib.suppress(FileNotFoundError):
+                Path(f"{scratch}{suffix}").unlink()
+
+
 class _ClosingConnection:
     """sqlite3.Connection wrapper that closes on ``with`` exit.
 
@@ -2905,9 +2966,13 @@ class ObservabilityStore:
         Read-modify-write, so it must run inside the caller's `BEGIN IMMEDIATE`:
         every caller here already holds one, and the write lock is what keeps two
         writers from interleaving a read and a write of the same row.
+
+        The row is the incoming writer's own (`writer_health/<incarnation id>`),
+        so the floor holds within one incarnation and no writer touches another's.
         """
+        key = WRITER_HEALTH_KEY_PREFIX + str(writer_incarnation_id(incoming))
         row = conn.execute(
-            "SELECT value FROM diagnostics WHERE key='writer_health'"
+            "SELECT value FROM diagnostics WHERE key=?", (key,)
         ).fetchone()
         stored: Optional[dict[str, Any]] = None
         if row is not None:
@@ -2916,7 +2981,7 @@ class ObservabilityStore:
             except Exception:
                 stored = None
         merged = merge_writer_health(stored, incoming)
-        self.set_diagnostic(conn, "writer_health", merged)
+        self.set_diagnostic(conn, key, merged)
         return merged
 
     # -- reads (GET /turns, run_chatbot) ---------------------------------
@@ -3335,16 +3400,32 @@ class ObservabilityStore:
             ).fetchone()
             return dict(row) if row is not None else None
 
-    def writer_health(self) -> Optional[dict[str, Any]]:
+    def writer_health_rows(self) -> list[dict[str, Any]]:
+        """Every writer incarnation's health row, least recently updated first."""
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT value, updated_at FROM diagnostics WHERE key='writer_health'"
-            ).fetchone()
-            if row is None:
-                return None
-            health = json.loads(row["value"])
-            health["updated_at"] = row["updated_at"]
-            return health
+            rows = conn.execute(
+                "SELECT value, updated_at FROM diagnostics WHERE key GLOB ? "
+                "ORDER BY updated_at",
+                (WRITER_HEALTH_KEY_PREFIX + "*",),
+            ).fetchall()
+        return [
+            {**json.loads(row["value"]), "updated_at": row["updated_at"]}
+            for row in rows
+        ]
+
+    def writer_health(
+        self, incarnation_id: Optional[str] = None
+    ) -> Optional[dict[str, Any]]:
+        """One incarnation's row, or with no id every row folded into one floor.
+
+        The fold runs `merge_writer_health` in update order, so a store with one
+        writer at a time reads exactly as the single row it used to keep.
+        """
+        health: Optional[dict[str, Any]] = None
+        for row in self.writer_health_rows():
+            if incarnation_id is None or writer_incarnation_id(row) == incarnation_id:
+                health = {**merge_writer_health(health, row), "updated_at": row["updated_at"]}
+        return health
 
     # -- the experiment container (`fix-bn1`, experiment_container_design.md) --
     #
@@ -5425,9 +5506,17 @@ class ObservabilityStore:
             return None
 
     def archive_to(
-        self, destination: str, *, quiesce_live_writer: bool = True
+        self,
+        destination: str,
+        *,
+        experiment_id: Optional[str] = None,
+        quiesce_live_writer: bool = True,
     ) -> dict[str, Any]:
         """Seal a source-read-only snapshot, including committed WAL content.
+
+        With `experiment_id`, only that experiment's rows are sealed, copied in
+        one read transaction (`_seal_experiment_to`); other writers keep writing
+        and nothing below about the live writer applies.
 
         The source is opened with ``mode=ro`` and never through ``_connect``,
         whose journal-mode pragma is intentionally write-capable. SQLite's
@@ -5454,8 +5543,7 @@ class ObservabilityStore:
         provably of a stopped store or it is not taken.
 
         `quiesce_live_writer=False` restores the unconditional refusal for a
-        caller whose contract is "the writer must already be gone" — the seal
-        path checks that itself, before it promotes the experiment's status.
+        caller whose contract is "the writer must already be gone".
 
         WHAT THIS IS NOT. Reaching this method still means constructing a store
         on the source, and construction is a writer: `_connect`'s journal-mode
@@ -5468,6 +5556,8 @@ class ObservabilityStore:
         """
         target = self._prepare_archive_target(destination)
         source = os.path.abspath(self.db_path)
+        if experiment_id is not None:
+            return self._seal_experiment_to(target, source, experiment_id)
         live_sink = sink_for_db_path(source)
         if live_sink is not None and not live_sink._closed:
             if not quiesce_live_writer:
@@ -5525,29 +5615,18 @@ class ObservabilityStore:
         taken is recoverable, and taking one of a store being written is not.
         """
         try:
-            stamp = (self.writer_health() or {}).get(WRITER_INCARNATION_FIELD)
+            rows = self.writer_health_rows()
         except Exception:  # pragma: no cover - defensive; health is diagnostics
             return
-        if not isinstance(stamp, Mapping) or not stamp.get("open"):
-            return
-        if str(stamp.get("host") or "") != socket.gethostname():
-            return
-        try:
-            pid = int(stamp.get("pid") or 0)
-        except (TypeError, ValueError):
-            return
-        if pid <= 0:
-            return
-        if pid != os.getpid():
-            try:
-                os.kill(pid, 0)
-            except OSError:
-                return  # the writer's process is gone; the marker is stale
-        raise WriterStillOpen(
-            f"refusing to seal {source!r}: writer incarnation "
-            f"{stamp.get('id')} (pid {pid}) still holds it and is not reachable "
-            f"from this process, so it cannot be held still for the snapshot"
-        )
+        for row in rows:
+            stamp = row.get(WRITER_INCARNATION_FIELD)
+            if _writer_holds(stamp):
+                raise WriterStillOpen(
+                    f"refusing to seal {source!r}: writer incarnation "
+                    f"{stamp.get('id')} (pid {stamp.get('pid')}) still holds it and "
+                    f"is not reachable from this process, so it cannot be held "
+                    f"still for the snapshot"
+                )
 
     def _snapshot_to(self, target: Path, source: str) -> dict[str, Any]:
         """Take the snapshot. The caller has already settled the source."""
@@ -5598,38 +5677,9 @@ class ObservabilityStore:
                 raise SourceChangedDuringArchive(
                     "source DB/WAL bytes changed while compacting the destination"
                 )
-            for sidecar in (f"{target}-wal", f"{target}-shm"):
-                if os.path.exists(sidecar):
-                    raise RuntimeError(
-                        f"sealed archive unexpectedly has sidecar {sidecar!r}"
-                    )
-            archive_digest = self._file_digest(str(target))
-            if archive_digest is None:
-                raise RuntimeError("archive disappeared before verification")
-            archive_uri = target.resolve().as_uri() + "?mode=ro"
-            with contextlib.closing(sqlite3.connect(archive_uri, uri=True)) as archive_conn:
-                identity_row = archive_conn.execute(
-                    "SELECT value FROM diagnostics WHERE key=?",
-                    (STORE_IDENTITY_DIAGNOSTIC,),
-                ).fetchone()
-                integrity = archive_conn.execute(
-                    "PRAGMA integrity_check"
-                ).fetchone()[0]
-            if integrity != "ok":
-                raise RuntimeError(f"archive integrity check failed: {integrity}")
-            if identity_row is None or not identity_row[0]:
-                raise RuntimeError("archive has no durable store identity")
-            target.chmod(0o444)
             return {
-                "path": str(target),
-                "size_bytes": archive_digest["size_bytes"],
-                "sha256": archive_digest["sha256"],
-                "store_identity": str(identity_row[0]),
-                "schema_version": SCHEMA_VERSION,
-                "read_only": True,
-                "sealed": True,
+                **self._verified_seal(target),
                 "source_bytes_verified_unchanged": True,
-                "sidecar_free": True,
             }
         except Exception:
             with contextlib.suppress(FileNotFoundError):
@@ -5638,12 +5688,99 @@ class ObservabilityStore:
         finally:
             with contextlib.suppress(Exception):
                 pin.close()
-            for scratch in (temporary, compacted):
-                with contextlib.suppress(FileNotFoundError):
-                    scratch.unlink()
-                for suffix in ("-wal", "-shm"):
-                    with contextlib.suppress(FileNotFoundError):
-                        Path(f"{scratch}{suffix}").unlink()
+            _remove_scratch(temporary, compacted)
+
+    def _seal_experiment_to(
+        self, target: Path, source: str, experiment_id: str
+    ) -> dict[str, Any]:
+        """Seal one experiment's rows, read in ONE transaction of the live DB (§3).
+
+        The copy is built from `_SCHEMA_STATEMENTS` alone, so no control table
+        exists in it to strip. A WAL read transaction is one consistent snapshot
+        and blocks no writer, which is what makes this safe on the live DB that
+        the interactive server and other runs keep writing.
+        """
+        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.snapshot")
+        compacted = target.with_name(f".{target.name}.{uuid.uuid4().hex}.compact")
+        try:
+            with contextlib.closing(
+                sqlite3.connect(str(temporary), uri=True, isolation_level=None)
+            ) as conn:
+                for statement in _SCHEMA_STATEMENTS:
+                    conn.execute(statement)
+                conn.execute(
+                    "ATTACH DATABASE ? AS live", (Path(source).as_uri() + "?mode=ro",)
+                )
+                conn.execute("BEGIN")
+                for table, where in _EXPERIMENT_SEAL_ROWS:
+                    columns = ", ".join(
+                        row[1] for row in conn.execute(f"PRAGMA main.table_info({table})")
+                    )
+                    copied = conn.execute(
+                        f"INSERT INTO main.{table} ({columns}) "
+                        f"SELECT {columns} FROM live.{table} WHERE {where}",
+                        {"experiment_id": experiment_id},
+                    ).rowcount
+                    if table == "experiments" and not copied:
+                        raise ExperimentNotFound(experiment_id)
+                features = json.loads(conn.execute(
+                    "SELECT value FROM main.diagnostics WHERE key='schema_features'"
+                ).fetchone()[0])
+                conn.execute(
+                    "UPDATE main.diagnostics SET value=? WHERE key='schema_features'",
+                    (json.dumps(sorted(set(features) - {control.FEATURE_CONTROL_V1})),),
+                )
+                conn.execute(f"PRAGMA main.user_version = {SCHEMA_VERSION}")
+                conn.execute("COMMIT")
+                conn.execute("DETACH DATABASE live")
+                conn.execute("VACUUM INTO ?", (str(compacted),))
+            os.replace(compacted, target)
+            return {
+                **self._verified_seal(target),
+                "experiment_id": experiment_id,
+                "consistent_snapshot": True,
+            }
+        except Exception:
+            with contextlib.suppress(FileNotFoundError):
+                target.unlink()
+            raise
+        finally:
+            _remove_scratch(temporary, compacted)
+
+    def _verified_seal(self, target: Path) -> dict[str, Any]:
+        """Verify a just-written archive, make it read-only, and describe it."""
+        for sidecar in (f"{target}-wal", f"{target}-shm"):
+            if os.path.exists(sidecar):
+                raise RuntimeError(
+                    f"sealed archive unexpectedly has sidecar {sidecar!r}"
+                )
+        archive_digest = self._file_digest(str(target))
+        if archive_digest is None:
+            raise RuntimeError("archive disappeared before verification")
+        archive_uri = target.resolve().as_uri() + "?mode=ro"
+        with contextlib.closing(sqlite3.connect(archive_uri, uri=True)) as archive_conn:
+            identity_row = archive_conn.execute(
+                "SELECT value FROM diagnostics WHERE key=?",
+                (STORE_IDENTITY_DIAGNOSTIC,),
+            ).fetchone()
+            integrity = archive_conn.execute(
+                "PRAGMA integrity_check"
+            ).fetchone()[0]
+        if integrity != "ok":
+            raise RuntimeError(f"archive integrity check failed: {integrity}")
+        if identity_row is None or not identity_row[0]:
+            raise RuntimeError("archive has no durable store identity")
+        target.chmod(0o444)
+        return {
+            "path": str(target),
+            "size_bytes": archive_digest["size_bytes"],
+            "sha256": archive_digest["sha256"],
+            "store_identity": str(identity_row[0]),
+            "schema_version": SCHEMA_VERSION,
+            "read_only": True,
+            "sealed": True,
+            "sidecar_free": True,
+        }
 
     def prune(
         self,
@@ -5805,6 +5942,13 @@ class ObservabilityStore:
                     "DELETE FROM diagnostics WHERE key=?",
                     (PRUNE_OVER_CAP_BOUND_DIAGNOSTIC,),
                 )
+            # Health rows of writers that are gone, once past the horizon (§5).
+            for key, value in conn.execute(
+                "SELECT key, value FROM diagnostics WHERE key GLOB ? AND updated_at < ?",
+                (WRITER_HEALTH_KEY_PREFIX + "*", horizon_moment.isoformat()),
+            ).fetchall():
+                if not _writer_holds(json.loads(value).get(WRITER_INCARNATION_FIELD)):
+                    conn.execute("DELETE FROM diagnostics WHERE key=?", (key,))
             conn.execute("PRAGMA incremental_vacuum")
             conn.commit()
             # Fold the deletes back into the main file now, so the evidence

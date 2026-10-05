@@ -64,6 +64,19 @@ def _optional_env(name: str) -> str | None:
     return value
 
 
+# The two variables that decide which live DB a process resolves.
+LOCATION_VARS = ("FASTWORKFLOW_STATE_ROOT", "FASTWORKFLOW_WORKFLOW_ID")
+
+
+def location_overrides() -> dict[str, str]:
+    """The location variables set for this process, env file or OS env."""
+    return {
+        name: str(value).strip()
+        for name in LOCATION_VARS
+        if (value := _optional_env(name)) and str(value).strip()
+    }
+
+
 def state_root() -> str:
     """Absolute root for all persistent state.
 

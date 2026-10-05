@@ -8,6 +8,7 @@ import sqlite3
 
 import pytest
 
+from fastworkflow import state_paths
 from fastworkflow.observability import store as obs
 from fastworkflow.experiment.runner import (
     ExperimentController,
@@ -19,17 +20,17 @@ from fastworkflow.experiment.runner import (
 @pytest.fixture
 def installed_db(tmp_path, monkeypatch):
     monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
-    path = str(tmp_path / "observability.sqlite3")
-    store = obs.ObservabilityStore(path)
+    folder = str(tmp_path / "workflow")
+    store = obs.ObservabilityStore(state_paths.observability_db(folder))
     identity = store.store_identity()
     assert identity is not None
-    return path, identity
+    return folder, identity
 
 
 def _controller(installed_db, *, external=True):
-    path, identity = installed_db
+    folder, identity = installed_db
     return ExperimentController(
-        path,
+        folder,
         identity,
         migrate=False,
         external=external,
@@ -129,10 +130,10 @@ def test_completion_rejects_same_count_wrong_task_mutation(installed_db):
 
 
 def test_explicit_store_identity_mismatch_is_refused(installed_db):
-    path, _ = installed_db
+    folder, _ = installed_db
     with pytest.raises(obs.StoreIdentityMismatch):
         ExperimentController(
-            path,
+            folder,
             "different-store-id",
             migrate=False,
             external=True,
@@ -140,41 +141,43 @@ def test_explicit_store_identity_mismatch_is_refused(installed_db):
 
 
 def test_external_controller_cannot_enable_migration(installed_db):
-    path, identity = installed_db
+    folder, identity = installed_db
     with pytest.raises(ValueError, match="migrate=False"):
         ExperimentController(
-            path,
+            folder,
             identity,
             migrate=True,
             external=True,
         )
 
 
-def test_controller_is_independent_of_ambient_state_root(
+def test_controller_records_into_the_live_db_its_state_root_resolves(
     installed_db, monkeypatch, tmp_path
 ):
-    path, identity = installed_db
-    monkeypatch.setenv(
-        "FASTWORKFLOW_STATE_ROOT", str(tmp_path / "unrelated-state-root")
-    )
+    """No caller can point a controller at another DB (single live DB §6):
+    another state root resolves another DB, which an external controller
+    refuses to bring into existence."""
+    folder, identity = installed_db
     controller = ExperimentController(
-        path,
+        folder,
         identity,
         migrate=False,
         external=True,
     )
-
-    assert controller.db_path == path
+    assert controller.db_path == state_paths.observability_db(folder)
     assert controller.store_identity == identity
-    assert not os.path.exists(
-        os.path.join(
-            os.environ["FASTWORKFLOW_STATE_ROOT"], "observability.sqlite3"
-        )
+
+    monkeypatch.setenv(
+        "FASTWORKFLOW_STATE_ROOT", str(tmp_path / "unrelated-state-root")
     )
+    with pytest.raises(MissingExperimentLifecycleFeature):
+        ExperimentController(folder, identity, migrate=False, external=True)
+    assert not os.path.exists(state_paths.observability_db(folder))
 
 
 def test_external_open_refuses_old_schema_without_declaration_feature(tmp_path):
-    path = str(tmp_path / "old.sqlite3")
+    folder = str(tmp_path / "workflow")
+    path = state_paths.observability_db(folder)
     with sqlite3.connect(path) as conn:
         conn.execute(
             "CREATE TABLE diagnostics "
@@ -194,7 +197,7 @@ def test_external_open_refuses_old_schema_without_declaration_feature(tmp_path):
 
     with pytest.raises(MissingExperimentLifecycleFeature):
         ExperimentController(
-            path,
+            folder,
             "old-store",
             migrate=False,
             external=True,
@@ -202,7 +205,8 @@ def test_external_open_refuses_old_schema_without_declaration_feature(tmp_path):
 
 
 def test_external_open_refuses_marker_from_incomplete_mixed_version(tmp_path):
-    path = str(tmp_path / "mixed.sqlite3")
+    folder = str(tmp_path / "workflow")
+    path = state_paths.observability_db(folder)
     with sqlite3.connect(path) as conn:
         conn.execute(
             "CREATE TABLE diagnostics "
@@ -236,7 +240,7 @@ def test_external_open_refuses_marker_from_incomplete_mixed_version(tmp_path):
 
     with pytest.raises(MissingExperimentLifecycleFeature):
         ExperimentController(
-            path,
+            folder,
             "mixed-store",
             migrate=False,
             external=True,
@@ -259,7 +263,8 @@ def test_required_evidence_segment_count_blocks_completion(installed_db):
 
 
 def test_readiness_reports_durable_store_identity_and_regime(installed_db):
-    path, identity = installed_db
+    folder, identity = installed_db
+    path = state_paths.observability_db(folder)
     payload = experiment_store_readiness(path)
 
     assert payload == {
@@ -272,7 +277,8 @@ def test_readiness_reports_durable_store_identity_and_regime(installed_db):
 
 
 def test_declaration_schema_has_distinct_feature_marker(installed_db):
-    path, _ = installed_db
+    folder, _ = installed_db
+    path = state_paths.observability_db(folder)
     store = obs.ObservabilityStore(path, migrate=False)
     with sqlite3.connect(path) as conn:
         tables = {

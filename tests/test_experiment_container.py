@@ -1413,7 +1413,7 @@ class TestHarness:
         assert path.parent == bundle
         assert _sha256_file(path) == archive["sha256"]
         assert archive["sealed"] is True
-        assert archive["source_bytes_verified_unchanged"] is True
+        assert archive["consistent_snapshot"] is True
         assert stat.S_IMODE(path.stat().st_mode) == 0o444
         assert not Path(f"{path}-wal").exists()
 
@@ -2112,12 +2112,12 @@ class TestRuntimeSnapshotStamp:
     """Stamped at claim, read back decoded, null when the server had none."""
 
     @staticmethod
-    def _controller(db_path):
+    def _controller(workflow_path):
         from fastworkflow.experiment.runner import ExperimentController
 
-        store = obs.ObservabilityStore(db_path)
+        store = obs.ObservabilityStore(state_paths.observability_db(workflow_path))
         controller = ExperimentController(
-            db_path, store.store_identity(), migrate=False, external=True
+            workflow_path, store.store_identity(), migrate=False, external=True
         )
         controller.create_experiment(
             "exp-stamp",
@@ -2139,9 +2139,9 @@ class TestRuntimeSnapshotStamp:
         )
 
     def test_a_claimed_attempt_carries_its_servers_snapshot_readable_back(
-        self, db_path
+        self, workflow_path, db_path
     ):
-        controller = self._controller(db_path)
+        controller = self._controller(workflow_path)
         snapshot = {
             "configuration_valid": True,
             "effective_features": {"decision_signals_v1": "shadow"},
@@ -2174,8 +2174,8 @@ class TestRuntimeSnapshotStamp:
             "runtime_snapshot"
         ] == snapshot
 
-    def test_an_attempt_bound_without_a_snapshot_reads_back_null(self, db_path):
-        controller = self._controller(db_path)
+    def test_an_attempt_bound_without_a_snapshot_reads_back_null(self, workflow_path):
+        controller = self._controller(workflow_path)
 
         controller.claim_attempt(
             self._bootstrap(controller, 2), server_incarnation="server-b"
@@ -2187,11 +2187,11 @@ class TestRuntimeSnapshotStamp:
         assert "runtime_snapshot_json" not in row
 
     def test_the_chatbot_attempts_api_exposes_the_decoded_stamp(
-        self, experiment_server, db_path
+        self, experiment_server, workflow_path
     ):
         """The UI (fix-49m.6) reads `runtime_snapshot` off the attempt rows the
         chatbot server already returns; rows that never bound read null."""
-        controller = self._controller(db_path)
+        controller = self._controller(workflow_path)
         snapshot = {"configuration_valid": True, "pid": 7, "effective_features": {}}
         controller.claim_attempt(
             self._bootstrap(controller, 1),

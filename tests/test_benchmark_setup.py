@@ -148,11 +148,11 @@ def test_http_create_register_execute_drilldown_and_plain_conversations(
     assert _request(server, detail_path)[1]["recorded"] is False
 
     # The driver records into the workflow's one live database.
-    db = str(tmp_path / "live.sqlite3")
+    db = state_paths.observability_db(str(folder))
     store = obs.ObservabilityStore(db)
     server.db_path = db
     controller = ExperimentController(
-        db, store.store_identity(), external=False, workflow_folderpath=str(folder)
+        str(folder), store.store_identity(), external=False
     )
     with pytest.raises(ValueError, match="task IDs"):
         controller.create_experiment(
@@ -232,12 +232,11 @@ def test_http_create_register_execute_drilldown_and_plain_conversations(
 def test_registered_pins_cannot_be_overridden(tmp_path):
     manifest = create(tmp_path)
     record = setup.create_experiment(tmp_path, manifest["benchmark_id"], "v1")
-    store = obs.ObservabilityStore(str(tmp_path / "evidence.sqlite3"))
+    store = obs.ObservabilityStore(state_paths.observability_db(str(tmp_path)))
     controller = ExperimentController(
-        store.db_path,
+        str(tmp_path),
         store.store_identity(),
         external=False,
-        workflow_folderpath=str(tmp_path),
     )
     declarations = [(tid, 1, tid) for tid in record["task_ids"]]
     with pytest.raises(ValueError, match="benchmark_version"):
@@ -317,9 +316,8 @@ def test_delete_empty_registration_preserves_benchmark_and_refuses_stale_runner(
     assert _request(server, path)[0] == 404
     assert _request(server, path, "DELETE")[0] == 404
     assert (folder / "benchmarks" / benchmark["benchmark_id"] / "v1.json").read_bytes() == before
-    store = obs.ObservabilityStore(str(tmp_path / "stale-runner.sqlite3"))
-    controller = ExperimentController(store.db_path, store.store_identity(), external=False,
-                                      workflow_folderpath=str(folder))
+    store = obs.ObservabilityStore(state_paths.observability_db(str(folder)))
+    controller = ExperimentController(str(folder), store.store_identity(), external=False)
     with pytest.raises(setup.ExperimentDeleted):
         controller.create_experiment(eid, "Late runner", declared_tasks=2, declared_attempts=1,
             declarations=[(task_id, 1, "channel-" + task_id) for task_id in record["task_ids"]])
@@ -361,9 +359,8 @@ def test_description_is_optional_free_text_the_author_owns(setup_server, tmp_pat
                     {"description": "x"})[0] == 404
     # The harness reads the description off the registration, so the run it
     # records carries what the author wrote rather than the benchmark's title.
-    store = obs.ObservabilityStore(str(tmp_path / "described.sqlite3"))
-    controller = ExperimentController(store.db_path, store.store_identity(), external=False,
-                                      workflow_folderpath=str(folder))
+    store = obs.ObservabilityStore(state_paths.observability_db(str(folder)))
+    controller = ExperimentController(str(folder), store.store_identity(), external=False)
     controller.create_experiment(
         eid, setup.load_experiment(folder, eid)["description"], declared_tasks=2, declared_attempts=1,
         declarations=[(task_id, 1, "channel-" + task_id) for task_id in created["task_ids"]])
@@ -401,9 +398,8 @@ def test_delete_and_runner_binding_are_serialized(tmp_path):
     for _ in range(8):
         record = setup.create_experiment(tmp_path, benchmark["benchmark_id"], "v1")
         eid = record["experiment_id"]
-        store = obs.ObservabilityStore(str(tmp_path / (eid + ".sqlite3")))
-        controller = ExperimentController(store.db_path, store.store_identity(), external=False,
-                                          workflow_folderpath=str(tmp_path))
+        store = obs.ObservabilityStore(state_paths.observability_db(str(tmp_path)))
+        controller = ExperimentController(str(tmp_path), store.store_identity(), external=False)
         barrier = Barrier(2)
         def start():
             barrier.wait()

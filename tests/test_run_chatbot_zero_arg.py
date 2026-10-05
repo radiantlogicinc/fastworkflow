@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from fastworkflow import state_paths
 from fastworkflow.observability import store as obs
 from fastworkflow.benchmark.catalog import benchmarks_root, load_version, write_version
 from fastworkflow.experiment.runner import ExperimentController
@@ -329,15 +330,13 @@ def sealed_collection(tmp_path, monkeypatch):
     (workflow / "_commands").mkdir(parents=True)
     written = write_version(workflow, _spec())
 
-    db_path = str(tmp_path / "observability.sqlite3")
-    store = obs.ObservabilityStore(db_path)
+    store = obs.ObservabilityStore(state_paths.observability_db(str(workflow)))
     identity = store.store_identity()
     controller = ExperimentController(
-        db_path,
+        str(workflow),
         identity,
         migrate=False,
         external=True,
-        workflow_folderpath=str(workflow),
     )
     controller.create_experiment(
         "exp-1",
@@ -349,7 +348,6 @@ def sealed_collection(tmp_path, monkeypatch):
         benchmark_id="g2e-tuning",
         benchmark_version="v1",
         benchmark_digest_sha256=written["digest_sha256"],
-        workflow_folderpath=str(workflow),
     )
     controller.start_attempt("exp-1", "task-1", 1, "channel-1", source_key="native-1")
     controller.finish_attempt(

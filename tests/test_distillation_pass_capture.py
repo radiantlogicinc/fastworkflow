@@ -1292,10 +1292,9 @@ def test_the_selection_api_serves_each_pass_its_own_recorded_answer(
     db_path = state_paths.observability_db(todo_workflow_path)
     store = obs.ObservabilityStore(db_path)
     controller = ExperimentController(
-        db_path,
+        todo_workflow_path,
         store.store_identity(),
         external=False,
-        workflow_folderpath=todo_workflow_path,
     )
     experiment_id = f"exp-{uuid.uuid4().hex}"
     task_id = f"task_{uuid.uuid4().hex}"
@@ -1408,10 +1407,9 @@ def pass_world(initialized_fastworkflow, todo_workflow_path, tmp_path, monkeypat
     db = state_paths.observability_db(todo_workflow_path)
     store = obs.ObservabilityStore(db)
     controller = ExperimentController(
-        db,
+        todo_workflow_path,
         store.store_identity(),
         external=False,
-        workflow_folderpath=todo_workflow_path,
     )
     experiment_id = f"exp-{uuid.uuid4().hex}"
     task_id = f"task_{uuid.uuid4().hex}"

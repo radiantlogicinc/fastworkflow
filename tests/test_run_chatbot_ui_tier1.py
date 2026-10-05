@@ -300,7 +300,7 @@ def seeded_db(workflow_path) -> str:
     store = obs.ObservabilityStore(db_path)
     policy = evidence_policy()
     controller = ExperimentController(
-        db_path, store.store_identity(), migrate=False, external=True
+        workflow_path, store.store_identity(), migrate=False, external=True
     )
 
     # -- (d) one attempt bound by a server that stamped its snapshot, one by a
