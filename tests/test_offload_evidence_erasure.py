@@ -504,6 +504,33 @@ class RetentionTests(EvidenceFixture):
         self.assertEqual(deleted["conversationless_turns"], 1)
         self.assert_erased(scope, "confidential-cli")
 
+    def test_a_bound_experiment_turn_keeps_its_evidence_past_horizon_and_cap(self):
+        """Bound through its turn record's experiment (`fix-10vj.2`)."""
+        bound = experiment_scope("exp-channel", turn="turn-exp", experiment="exp-7")
+        chat = chatbot_scope("chat", turn="turn-chat")
+        self.populate(bound, "confidential-exp")
+        self.populate(chat, "confidential-chat")
+        store = obs.ObservabilityStore(self.db_path)
+        store.create_experiment("exp-7", "L", declared_tasks=1, declared_attempts=1)
+        with store._connect() as conn:
+            store.upsert_turn_row(conn, dict(
+                turn_key="turn-exp", channel_id="exp-channel", conversation_id=None,
+                ordinal=None, user_message="fixture", refined_user_message=None,
+                entry_workflow_name="fixture", entry_context="", status="completed",
+                success=1, failure_reason=None, answer="fixture answer",
+                conversation_summary=None, conversation_traces=None,
+                started_at=None, completed_at=None, suspended_ms=0,
+                continuation_of=None, record_version=1, record_json="{}",
+                experiment_id="exp-7", task_id="task-3", attempt=1,
+            ), [], obs.Redactor())
+        self.age_rows(400)
+
+        deleted = store.prune(retention_days=30, max_bytes=1)
+
+        self.assertEqual(deleted["offload_evidence"], 1)
+        self.assert_readable(bound, "confidential-exp")
+        self.assert_erased(chat, "confidential-chat")
+
     def test_retention_of_recent_evidence_erases_nothing(self):
         deleted = obs.ObservabilityStore(self.db_path).prune(retention_days=1)
         self.assertEqual(deleted["offload_evidence"], 0)

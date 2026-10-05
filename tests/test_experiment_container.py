@@ -27,8 +27,9 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
+from fastworkflow.observability import control
 from fastworkflow.observability import store as obs
-from fastworkflow import state_paths
+from fastworkflow import state_paths, tracing
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.experiment.runner import (
     ExperimentHarness,
@@ -1657,6 +1658,143 @@ class TestErasure:
         store.prune(retention_days=0, max_bytes=1)
         assert store.get_experiment("exp-1") is not None
         assert store.experiment_attempt_rows("exp-1")
+
+
+# ----------------------------------------------------------------------
+# `fix-10vj.2`: a bound experiment's evidence outlives the horizon and the cap
+# ----------------------------------------------------------------------
+
+_EXP_TURN = "20000101T000000-exp"
+_CHAT_TURN = "20000101T000001-chat"
+
+
+def _evidence_ids(db_path: str, table: str, column: str) -> set[str]:
+    with sqlite3.connect(db_path) as conn:
+        return {row[0] for row in conn.execute(f"SELECT {column} FROM {table}")}
+
+
+def _over_cap_diagnostic(db_path: str):
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT value FROM diagnostics WHERE key=?",
+            (obs.PRUNE_OVER_CAP_BOUND_DIAGNOSTIC,),
+        ).fetchone()
+    return None if row is None else json.loads(row[0])
+
+
+class TestBoundEvidenceRetention:
+    """Both turns are 26 years old and the cap is one byte: everything is due."""
+
+    def _turn(self, store, turn_key, channel, conversation_id=None, **labels):
+        old_ns = int((time.time() - 400 * 86_400) * 1_000_000_000)
+        span = tracing.Span(
+            span_id=f"span-{turn_key}", trace_id=turn_key, name="fw.turn",
+            start_ns=old_ns, status="ok", attributes={"pad": "x" * 2_000},
+            channel_id=channel, **labels,
+        )
+        artifact = {
+            "artifact_id": f"art-{turn_key}", "turn_key": turn_key,
+            "channel_id": channel, "key": "answer", "inline_value": b"y" * 2_000,
+            **labels,
+        }
+        with store._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            store.upsert_span_rows(conn, [span], store._store_redactor())
+            store.upsert_turn_row(
+                conn,
+                _turn_row(turn_key, channel, conversation_id=conversation_id, **labels),
+                [artifact],
+                store._store_redactor(),
+            )
+            conn.commit()
+
+    def _seeded(self, store):
+        """One finished experiment attempt and one ordinary chat turn."""
+        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1)
+        channel = channel_for("exp-1", "t0", 1)
+        store.start_attempt("exp-1", "t0", 1, channel)
+        conv = store.mint_conversation_id(
+            channel, experiment_id="exp-1", task_id="t0", attempt=1
+        )
+        self._turn(store, _EXP_TURN, channel, conv,
+                   experiment_id="exp-1", task_id="t0", attempt=1)
+        self._turn(store, _CHAT_TURN, "chat")
+        store.finish_attempt("exp-1", "t0", 1, outcome="pass", outcome_source="g")
+        assert store.complete_experiment("exp-1") == "complete"
+
+    def _assert_survivors(self, db_path, *turn_keys):
+        assert _evidence_ids(db_path, "spans", "trace_id") == set(turn_keys)
+        assert _evidence_ids(db_path, "artifacts", "turn_key") == set(turn_keys)
+
+    def test_bound_evidence_survives_horizon_and_cap_ordinary_does_not(
+        self, store, db_path
+    ):
+        self._seeded(store)
+
+        deleted = store.prune(retention_days=30, max_bytes=1)
+
+        assert deleted["spans"] == 1 and deleted["artifacts"] == 1
+        self._assert_survivors(db_path, _EXP_TURN)
+        recorded = _over_cap_diagnostic(db_path)
+        assert recorded["bound_bytes"] >= 4_000
+        assert recorded["max_bytes"] == 1
+
+    def test_sealing_releases(self, store, db_path):
+        self._seeded(store)
+        store.begin_workspace_seal("exp-1")
+
+        store.prune(retention_days=30, max_bytes=1)
+
+        self._assert_survivors(db_path)
+        assert _over_cap_diagnostic(db_path) is None
+
+    def test_explicit_release_releases(self, store, db_path):
+        self._seeded(store)
+        store.release_experiment_evidence("exp-1", "tester", "scored elsewhere")
+
+        store.prune(retention_days=30, max_bytes=1_000_000_000)
+
+        self._assert_survivors(db_path)
+
+    def test_release_of_an_unknown_experiment_is_refused(self, store, db_path):
+        with pytest.raises(obs.ExperimentNotFound):
+            store.release_experiment_evidence("exp-nope", "tester")
+        with sqlite3.connect(db_path) as conn:
+            assert conn.execute(
+                "SELECT count(*) FROM evidence_releases"
+            ).fetchone()[0] == 0
+
+    def test_an_invalid_experiment_is_not_released(self, store, db_path):
+        self._seeded(store)
+        with store._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            store.invalidate_experiments_in_txn(conn, ["exp-1"], "test", "test")
+            conn.commit()
+        assert store.get_experiment("exp-1")["status"] == "invalid"
+
+        store.prune(retention_days=30, max_bytes=1_000_000_000)
+
+        self._assert_survivors(db_path, _EXP_TURN)
+
+    def test_a_store_without_control_tables_prunes_as_before(self, store, db_path):
+        self._seeded(store)
+        with store._connect() as conn:
+            control.strip(conn)
+        assert not control.present(store)
+
+        store.prune(retention_days=30, max_bytes=1_000_000_000)
+
+        self._assert_survivors(db_path, _EXP_TURN)
+
+    def test_a_stale_over_cap_record_is_cleared_once_under_cap(self, store, db_path):
+        self._seeded(store)
+        store.prune(retention_days=30, max_bytes=1)
+        assert _over_cap_diagnostic(db_path) is not None
+
+        store.prune(retention_days=30, max_bytes=1_000_000_000)
+
+        assert _over_cap_diagnostic(db_path) is None
+        self._assert_survivors(db_path, _EXP_TURN)
 
 
 # ----------------------------------------------------------------------

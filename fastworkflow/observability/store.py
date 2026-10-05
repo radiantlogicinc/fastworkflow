@@ -118,6 +118,18 @@ _PENDING_RETRY_MAX = 64
 
 _PRUNE_BATCH_ROWS = 5_000
 _PRUNE_MAX_BATCHES = 20
+# Experiments whose evidence prune keeps, past the horizon and over the cap,
+# until a seal or `release_experiment_evidence` lets it go (design §7). The
+# release clause is appended only when the control tables exist; a DB without
+# them has released nothing.
+_BOUND_EXPERIMENTS_SQL = (
+    "SELECT experiment_id FROM experiments WHERE evidence_sealed_at IS NULL"
+)
+_RELEASED_CLAUSE_SQL = (
+    " AND experiment_id NOT IN (SELECT experiment_id FROM evidence_releases)"
+)
+# Set while bound evidence alone holds the DB over its cap; cleared otherwise.
+PRUNE_OVER_CAP_BOUND_DIAGNOSTIC = "prune_over_cap_bound_bytes"
 
 # Poll interval for the quiesce handshake (fix-7de). Short, because it is only
 # ever spun on for the moment it takes the writer to finish the batch it is in
@@ -4322,6 +4334,29 @@ class ObservabilityStore:
             conn.commit()
         return str(status)
 
+    def release_experiment_evidence(
+        self, experiment_id: str, actor: str, reason: Optional[str] = None
+    ) -> None:
+        """Let `prune` reach an unsealed experiment's evidence (design §7).
+
+        Sealing releases on its own; this is the explicit release for evidence
+        that will never be sealed. Nothing calls it automatically -- not for an
+        invalid experiment, not for an old one. The first release is kept.
+        """
+        if not actor:
+            raise ValueError("actor is required")
+        with control.write(self) as conn:
+            known = conn.execute(
+                "SELECT 1 FROM experiments WHERE experiment_id=?", (experiment_id,)
+            ).fetchone()
+            if known is None:
+                raise ExperimentNotFound(experiment_id)
+            conn.execute(
+                """INSERT OR IGNORE INTO evidence_releases
+                   (experiment_id, released_at, actor, reason) VALUES (?, ?, ?, ?)""",
+                (experiment_id, _utcnow_iso(), actor, reason),
+            )
+
     def start_attempt(
         self,
         experiment_id: str,
@@ -5621,6 +5656,11 @@ class ObservabilityStore:
         records are exempt (config §5). Offload evidence is pruned by the same
         horizon and cap, one whole turn at a time. Runs incremental_vacuum.
 
+        Evidence of a bound experiment (`_BOUND_EXPERIMENTS_SQL`) is exempt
+        from both the horizon and the cap. When it alone keeps the DB over the
+        cap, the bytes it holds are recorded under
+        `PRUNE_OVER_CAP_BOUND_DIAGNOSTIC`; nothing bound is deleted.
+
         ``include_conversationless_turns`` (operator opt-in) also
         deletes conversation-less turn records (e.g. per-invocation CLI
         channels) older than the horizon, with their spans, artifacts and review
@@ -5649,6 +5689,11 @@ class ObservabilityStore:
             **{table: 0 for table in _OFFLOAD_EVIDENCE_TABLES},
         }
         erased_scopes: set[str] = set()
+        bound = _BOUND_EXPERIMENTS_SQL + (
+            _RELEASED_CLAUSE_SQL if control.present(self) else ""
+        )
+        unbound = f"(experiment_id IS NULL OR experiment_id NOT IN ({bound}))"
+        bound_turns = f"SELECT turn_key FROM turns WHERE experiment_id IN ({bound})"
 
         with self._connect() as conn:
             # As in `forget_channel`: retention deletes evidence text, and a
@@ -5658,13 +5703,15 @@ class ObservabilityStore:
                 conn.execute("BEGIN IMMEDIATE")
                 spans_cur = conn.execute(
                     "DELETE FROM spans WHERE span_id IN "
-                    "(SELECT span_id FROM spans WHERE start_ns < ? LIMIT ?)",
+                    f"(SELECT span_id FROM spans WHERE start_ns < ? AND {unbound} "
+                    "LIMIT ?)",
                     (horizon_ns, _PRUNE_BATCH_ROWS),
                 )
                 deleted["spans"] += spans_cur.rowcount
                 artifacts_cur = conn.execute(
                     "DELETE FROM artifacts WHERE artifact_id IN "
-                    "(SELECT artifact_id FROM artifacts WHERE turn_key < ? LIMIT ?)",
+                    "(SELECT artifact_id FROM artifacts WHERE turn_key < ? "
+                    f"AND {unbound} LIMIT ?)",
                     (horizon_key, _PRUNE_BATCH_ROWS),
                 )
                 deleted["artifacts"] += artifacts_cur.rowcount
@@ -5674,7 +5721,8 @@ class ObservabilityStore:
                 # bound turn key is keyed by its channel id, which does not
                 # sort by time.
                 aged_turns = self._offload_turns_in_txn(
-                    conn, before=horizon_evidence, limit=_OFFLOAD_PRUNE_BATCH_TURNS
+                    conn, before=horizon_evidence, limit=_OFFLOAD_PRUNE_BATCH_TURNS,
+                    exempt=bound_turns,
                 )
                 self._delete_offload_turns_in_txn(
                     conn, aged_turns, deleted, erased_scopes
@@ -5695,7 +5743,7 @@ class ObservabilityStore:
                         r[0]
                         for r in conn.execute(
                             "SELECT turn_key FROM turns WHERE conversation_id IS NULL "
-                            "AND turn_key < ? LIMIT ?",
+                            f"AND turn_key < ? AND {unbound} LIMIT ?",
                             (horizon_key, _PRUNE_BATCH_ROWS),
                         ).fetchall()
                     ]
@@ -5715,29 +5763,48 @@ class ObservabilityStore:
             # and the oldest offload evidence turns beside them: the evidence
             # shares this file, so it shares this cap. Each batch vacuums, so
             # the next measurement sees the pages the deletes freed.
+            only_bound_left = False
             for _ in range(_PRUNE_MAX_BATCHES):
                 if self.db_size_bytes() <= max_bytes:
                     break
                 conn.execute("BEGIN IMMEDIATE")
                 cur = conn.execute(
                     "DELETE FROM spans WHERE span_id IN "
-                    "(SELECT span_id FROM spans ORDER BY start_ns LIMIT ?)",
+                    f"(SELECT span_id FROM spans WHERE {unbound} "
+                    "ORDER BY start_ns LIMIT ?)",
                     (_PRUNE_BATCH_ROWS,),
                 )
                 oldest_turns = self._offload_turns_in_txn(
-                    conn, before=None, limit=_OFFLOAD_PRUNE_BATCH_TURNS
+                    conn, before=None, limit=_OFFLOAD_PRUNE_BATCH_TURNS,
+                    exempt=bound_turns,
                 )
                 self._delete_offload_turns_in_txn(
                     conn, oldest_turns, deleted, erased_scopes
                 )
                 conn.commit()
                 if cur.rowcount == 0 and not oldest_turns:
+                    only_bound_left = True
                     break
                 # Fetched to completion: each step of this pragma frees one page.
                 conn.execute("PRAGMA incremental_vacuum").fetchall()
                 conn.commit()
                 conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
+            bound_bytes = (
+                self._bound_evidence_bytes_in_txn(conn, bound, bound_turns)
+                if only_bound_left else 0
+            )
+            if bound_bytes:
+                self.set_diagnostic(conn, PRUNE_OVER_CAP_BOUND_DIAGNOSTIC, {
+                    "bound_bytes": bound_bytes,
+                    "db_size_bytes": self.db_size_bytes(),
+                    "max_bytes": max_bytes,
+                })
+            else:
+                conn.execute(
+                    "DELETE FROM diagnostics WHERE key=?",
+                    (PRUNE_OVER_CAP_BOUND_DIAGNOSTIC,),
+                )
             conn.execute("PRAGMA incremental_vacuum")
             conn.commit()
             # Fold the deletes back into the main file now, so the evidence
@@ -5751,15 +5818,34 @@ class ObservabilityStore:
         return deleted
 
     @staticmethod
+    def _bound_evidence_bytes_in_txn(
+        conn: sqlite3.Connection, bound: str, bound_turns: str
+    ) -> int:
+        """Payload bytes held by bound experiments: span attributes, artifact
+        values and offload evidence text."""
+        held = [
+            f"SELECT SUM(length(attributes)) FROM spans WHERE experiment_id IN ({bound})",
+            f"SELECT SUM(length(inline_value)) FROM artifacts WHERE experiment_id IN ({bound})",
+        ]
+        if "offload_evidence" in _present_offload_tables(conn):
+            held.append(
+                "SELECT SUM(length(text_utf8)) FROM offload_evidence "
+                f"WHERE turn_key IN ({bound_turns})"
+            )
+        return int(conn.execute(
+            "SELECT " + " + ".join(f"COALESCE(({sql}), 0)" for sql in held)
+        ).fetchone()[0])
+
+    @staticmethod
     def _offload_turns_in_txn(
-        conn: sqlite3.Connection, *, before: Optional[str], limit: int
+        conn: sqlite3.Connection, *, before: Optional[str], limit: int, exempt: str
     ) -> list[str]:
         """The oldest offload-evidence turns, optionally only those begun before *before*.
 
         A turn's age is the earliest timestamp on any of its evidence,
         subject or event rows -- when the turn began -- so a turn is always
         dropped whole and never leaves a subject or an event whose evidence is
-        gone.
+        gone. Turns *exempt* selects are never returned.
         """
         tables = _present_offload_tables(conn)
         if not tables:
@@ -5774,7 +5860,8 @@ class ObservabilityStore:
         return [
             str(row[0])
             for row in conn.execute(
-                f"SELECT turn_key FROM ({dated}) GROUP BY turn_key {having} "
+                f"SELECT turn_key FROM ({dated}) WHERE turn_key NOT IN ({exempt}) "
+                f"GROUP BY turn_key {having} "
                 "ORDER BY MIN(at), turn_key LIMIT ?",
                 params,
             ).fetchall()
