@@ -53,6 +53,7 @@ import re
 import shutil
 import signal
 import socket
+import sqlite3
 import stat
 import statistics
 import subprocess
@@ -870,15 +871,20 @@ class ServerProcess:
 
     def durable_store_metrics(self) -> dict[str, Any]:
         """Record count and physical bytes of the durable conversation store."""
-        conversations_dir = self.workflow_state_subdir("conversations")
+        db_path = self.workflow_state_subdir("observability.sqlite3")
         records = 0
-        if os.path.isdir(conversations_dir):
-            records = sum(
-                name.endswith(".sqlite3") for name in os.listdir(conversations_dir)
-            )
+        with contextlib.suppress(sqlite3.Error):
+            with contextlib.closing(
+                sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            ) as conn:
+                records = conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
         return {
             "records": records,
-            "conversation_bytes": _dir_bytes(conversations_dir),
+            "conversation_bytes": sum(
+                os.path.getsize(path)
+                for path in (db_path, f"{db_path}-wal")
+                if os.path.isfile(path)
+            ),
             "context_bytes": _dir_bytes(self.context_dir),
         }
 

@@ -23,6 +23,7 @@ from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.observability import store as obs
 from fastworkflow.utils.react import AskUserSuspend, fastWorkflowReAct
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from tests.todo_list_workflow.application.todo_manager import TodoListManager
 
 
 # ----------------------------------------------------------------------
@@ -146,7 +147,6 @@ def _make_agent_ctx(todo_workflow_path, monkeypatch, sink=None):
 
 def _set_agents(ctx, agent):
     ctx._workflow_tool_agent = agent
-    ctx._intent_clarification_agent = MagicMock()
 
 
 # ----------------------------------------------------------------------
@@ -640,12 +640,15 @@ class TestAgentLoopSpans:
         return agent
 
     def test_execute_wraps_steps_which_wrap_their_tool_calls(
-        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch, tmp_path
     ):
         import dspy
 
         sink = RecordingTraceSink()
         ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch, sink=sink)
+        # The context `startup` leaves the workflow in: the agent tool only
+        # dispatches command names available in the current context.
+        _wf.root_command_context = TodoListManager(str(tmp_path / "todo_list.json"))
         ctx._begin_turn("add two numbers")
         monkeypatch.setattr(
             ctx,
@@ -674,7 +677,7 @@ class TestAgentLoopSpans:
                 {
                     "next_thought": "run the command",
                     "next_tool_name": "execute_workflow_query",
-                    "next_tool_args": {"command": "add_todo milk"},
+                    "next_tool_args": {"command": "create_todo_list milk"},
                 },
                 {"next_thought": "done", "next_tool_name": "finish",
                  "next_tool_args": {}},
@@ -711,8 +714,8 @@ class TestAgentLoopSpans:
         assert [s.parent_span_id for s in steps] == [execute.span_id, execute.span_id]
         assert steps[0].attributes["thought"] == "run the command"
         assert steps[0].attributes["tool_name"] == "execute_workflow_query"
-        assert steps[0].attributes["tool_args"] == {"command": "add_todo milk"}
-        assert steps[0].attributes["observation"] == "ok:add_todo milk"
+        assert steps[0].attributes["tool_args"] == {"command": "create_todo_list milk"}
+        assert steps[0].attributes["observation"] == "ok:create_todo_list milk"
         assert steps[0].attributes["step_index"] == 0
         assert steps[1].attributes["tool_name"] == "finish"
         assert all(s.end_ns is not None for s in steps)

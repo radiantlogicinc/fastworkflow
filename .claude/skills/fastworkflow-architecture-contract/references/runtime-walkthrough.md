@@ -83,8 +83,8 @@ INTENT_AMBIGUITY_CLARIFICATION, INTENT_MISUNDERSTANDING_CLARIFICATION, PARAMETER
 `_process_agent_message` (`workflow_execution_context.py:804-815`):
 1. `_ensure_agent_initialized` (`:675-677`) builds the `fastWorkflowReAct` tool agent
    (`workflow_agent.py:387-471`, `max_iters=25`, tools: `what_can_i_do`,
-   `execute_workflow_query`, `intent_misunderstood`, `ask_user`) and the
-   intent-clarification agent.
+   `execute_workflow_query`, `intent_misunderstood`, `ask_user`). (It also built an
+   intent-clarification agent until that was removed on 2026-10-05.)
 2. `_run_agent` (`:709-734`): clears the action log, refines the query with the last 5
    conversation-history entries (`_refine_user_query`, `:981-991`), prepends an
    LLM-generated todo list (`build_query_with_next_steps`, `workflow_agent.py:474-534`),
@@ -93,9 +93,9 @@ INTENT_AMBIGUITY_CLARIFICATION, INTENT_MISUNDERSTANDING_CLARIFICATION, PARAMETER
 3. Tool calls land in `_execute_workflow_query` (`workflow_agent.py:122-259`), which calls
    the SAME `CommandExecutor.invoke_command` as the deterministic path, captures failures
    as `CommandOutput(success=False)` without masking the exception (`:152-181`), and after
-   each call inspects `NLU_Pipeline_Stage` to delegate AMBIGUITY/MISUNDERSTANDING to the
-   intent-clarification agent or auto-`abort` a PARAMETER_EXTRACTION error state
-   (`:237-252`).
+   each call inspects `NLU_Pipeline_Stage`: AMBIGUITY/MISUNDERSTANDING auto-`abort` and
+   return the NLU reply unchanged for the agent to choose from, and a PARAMETER_EXTRACTION
+   error state auto-`abort`s and replans (`:237-252`).
 4. If the result has `suspended=True` → set `_awaiting_user`, remember the message and
    clarification, `_note_agent_suspension` (appends the role-inverted ask_user entry,
    `:214-231`), return `_awaiting_user_output` (a CommandOutput whose response is the

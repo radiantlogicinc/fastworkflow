@@ -639,7 +639,7 @@ _SCOPE_CASES: dict[str, bool] = {
     "observability.sqlite3-wal": False,
     # The case the prefix rule is actually for: a sidecar written beside the
     # store in a format the suffix rule would otherwise admit.
-    "observability.sqlite3.offload-handles.json": False,
+    "observability.sqlite3.sidecar.json": False,
     # Near misses, so the rule cannot grow into "anything called observability"
     # or follow the store's name into a subdirectory.
     "observability.md": True,
@@ -737,7 +737,7 @@ def test_the_runtime_store_and_its_sidecars_are_excluded_at_the_root(tmp_path):
             "observability.sqlite3": "store\n",
             "observability.sqlite3-wal": "sidecar\n",
             "observability.sqlite3-shm": "sidecar\n",
-            "observability.sqlite3.offload-handles.json": "sidecar\n",
+            "observability.sqlite3.sidecar.json": "sidecar\n",
             "observability.md": "documentation\n",
             "README.md": "source\n",
         },

@@ -15,18 +15,44 @@ Planning comparison uses the generated plans from `build_query_with_next_steps`.
 Execution comparison uses actual resolved command_name and parameters from the
 in-process WEC action log (`ctx.action_log`), snapshotted per pass.
 Full ReAct trajectories are passed to the insight extraction LLM for richer context.
+
+Both passes run inside ONE turn, so both write to one trace and one turn row.
+Each pass is therefore recorded as its own span (`fw.distillation.pass`,
+`_pass_span`): the span stamps `fw.pass` — which everything the pass does
+inherits through ancestry, making pass membership resolvable from recorded
+evidence rather than from ordering — and carries the pass's own answer and plan,
+which the shared turn row has nowhere to put. Insight extraction runs after both
+spans close and is attributed to neither pass.
 """
 
+import contextlib
 import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator, Optional
 
 import dspy
 
 import fastworkflow
+from fastworkflow import tracing
+from fastworkflow.turn import TurnStatus
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_utils
+
+
+def _configured_model(lm_role: str) -> Optional[str]:
+    """The model string configured for an LLM role, or None when unset.
+
+    Recorded on the pass span as pass IDENTITY: "teacher" and "student" are
+    labels this module chose, and a reader six months later needs to know which
+    model actually answered under each. Never raises — a pass that cannot say
+    which model it used must still be recorded as a pass.
+    """
+    try:
+        return fastworkflow.get_env_var(lm_role) or None
+    except Exception:
+        return None
 
 
 def _announce(title: str, subtitle: str = "", style: str = "cyan") -> None:
@@ -454,6 +480,74 @@ class DistillationSession:
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
+    # Recorded pass identity and content (fix-txxy)
+    # ------------------------------------------------------------------
+
+    @contextlib.contextmanager
+    def _pass_span(
+        self, pass_id: Optional[str], model: Optional[str]
+    ) -> Iterator[dict]:
+        """Record one pass, and yield the bag its content is written into.
+
+        Two passes of one user message share a turn: one turn_key, one turn row,
+        one answer column. So there are two things to record and the span does
+        both.
+
+        **Identity.** The span carries ``fw.pass``, and it sits on the host's
+        parenting stack for the pass's duration, so every dispatch, planner call
+        and LLM call the pass makes lands in its subtree and inherits the stamp
+        through ancestry. ``comparison.PassSelector`` resolves membership from
+        exactly that, which is why nothing downstream of here has to learn what
+        a pass is. Activity belonging to neither pass — insight extraction, which
+        runs after both have closed — is outside both subtrees by construction
+        and so is claimed by neither pass's roll-up.
+
+        **Content.** The bag is emitted as the span's closing attributes. It
+        holds what the PRODUCER knows and the shared turn row cannot: this pass's
+        own answer, plan and outcome.
+
+        A ``pass_id`` of None records nothing: a caller that did not name a pass
+        is not one, and inferring "teacher" from an LM role would be the
+        confident wrong attribution this whole seam exists to avoid. Emission is
+        also declined when there is no sink or no open turn, in which case this
+        degrades to exactly the behavior that preceded it.
+        """
+        span = (
+            tracing.start_span(
+                self.chat_session,
+                tracing.SPAN_DISTILLATION_PASS,
+                kind=tracing.KIND_INTERNAL,
+                attributes={tracing.ATTR_PASS: pass_id, "model": model},
+            )
+            if pass_id
+            else None
+        )
+        pass_content: dict = {}
+        try:
+            yield pass_content
+        except BaseException as exc:
+            # The pass's OWN outcome. distill_message catches a failed student
+            # pass and carries on with the teacher's state, so without this the
+            # only record of the failure would be the turn row — which the
+            # surviving pass also owns.
+            pass_content["status"] = TurnStatus.FAILED.value
+            pass_content["failure_reason"] = type(exc).__name__
+            tracing.end_span(
+                self.chat_session,
+                span,
+                status=tracing.status_for_dispatch_exception(exc),
+                attributes=pass_content,
+            )
+            raise
+        # Not COMPLETED: the body records the outcome it observed, and a body
+        # that recorded none did not observe one. Filling that in as completed
+        # would turn "we do not know how this pass ended" into "it ended well".
+        pass_content.setdefault("status", tracing.PASS_STATUS_UNKNOWN)
+        tracing.end_span(
+            self.chat_session, span, status=tracing.STATUS_OK, attributes=pass_content
+        )
+
+    # ------------------------------------------------------------------
     # Agent run helper
     # ------------------------------------------------------------------
 
@@ -464,15 +558,45 @@ class DistillationSession:
         agent_api_key_role: str,
         planner_lm_role: str,
         planner_api_key_role: str,
+        pass_id: Optional[str] = None,
     ) -> tuple[fastworkflow.CommandOutput, dict, list[dict], list[PlanningStep]]:
         """
         Run a full agent pass with the specified LLMs for planner and agent.
+
+        ``pass_id`` names the pass in recorded evidence (``tracing.PASS_TEACHER``
+        / ``tracing.PASS_STUDENT``). Omitting it runs the pass unrecorded.
 
         Returns:
             (command_output, trajectory_dict, actions, planning_steps)
             actions: snapshot (copy) of the WEC's in-process action log for this
                 pass — dicts with keys command, command_name, parameters, response
             planning_steps: list of PlanningStep objects capturing planning decisions
+        """
+        with self._pass_span(pass_id, _configured_model(agent_lm_role)) as pass_content:
+            return self._run_agent_pass_body(
+                message,
+                agent_lm_role=agent_lm_role,
+                agent_api_key_role=agent_api_key_role,
+                planner_lm_role=planner_lm_role,
+                planner_api_key_role=planner_api_key_role,
+                pass_content=pass_content,
+            )
+
+    def _run_agent_pass_body(
+        self,
+        message: str,
+        *,
+        agent_lm_role: str,
+        agent_api_key_role: str,
+        planner_lm_role: str,
+        planner_api_key_role: str,
+        pass_content: dict,
+    ) -> tuple[fastworkflow.CommandOutput, dict, list[dict], list[PlanningStep]]:
+        """The pass itself, writing what it produced into ``pass_content``.
+
+        Split from ``_run_agent_pass`` only so the span wraps the whole body
+        including its ``finally``: the pass is not over until the original agent
+        is back.
         """
         # Clean prior action log so this pass's records stand alone.
         self.chat_session.clear_action_log()
@@ -546,6 +670,12 @@ class DistillationSession:
                 else str(agent_result)
             )
 
+            # The two ways an agent stops without raising, read the same way
+            # WorkflowExecutionContext._build_turn_result reads them so a pass
+            # and a turn cannot disagree about what "failed" means.
+            exhausted = bool(getattr(agent_result, "exhausted", False))
+            suspended = getattr(agent_result, "suspended", None) is True
+
             # Build CommandOutput
             command_response = fastworkflow.CommandResponse(response=result_text)
             command_output = fastworkflow.CommandOutput(
@@ -574,6 +704,47 @@ class DistillationSession:
             planning_steps = list(
                 getattr(self.chat_session, '_planning_steps_capture', [])
             )
+
+            # What this pass produced, recorded as this pass's own. The turn row
+            # holds ONE answer for both passes, so quoting it under either
+            # heading would hide the divergence a teacher/student view is read
+            # for; these two keys are the only place a per-pass answer and plan
+            # exist at all. The pass's actions and artifacts are NOT copied
+            # here: they were dispatched inside this span, so they are already
+            # attributable to the pass through the span tree and the
+            # command_call_id join, and a second copy would be a second thing to
+            # drift.
+            pass_content["answer"] = result_text
+            # The plan the user would be shown: the ordered next-step sequence
+            # and which planning step produced it. The planner's `reasoning` is
+            # deliberately NOT folded in — `fw.planner.plan` records a plan as
+            # the next-step sequence, and putting chain-of-thought inside a
+            # field a reader renders as "the plan" would move agent-internal
+            # text into a user-visible one without anything having decided that.
+            pass_content["plan"] = json.dumps(
+                [
+                    {
+                        "step_number": step.step_number,
+                        "generated_plan": step.generated_plan,
+                    }
+                    for step in planning_steps
+                ],
+                default=str,
+            )
+            # The pass's own outcome, as the producer observed it. The agent can
+            # end without raising and still not have finished: `exhausted` means
+            # it ran out of iterations, `suspended` that it stopped to ask the
+            # user. Reading "no exception" as "completed" would report both as
+            # clean runs. This is EXECUTION completion and nothing more — a pass
+            # can produce a fluent final answer over a failed command, so no
+            # per-pass success is claimed anywhere (see `TurnProjection`).
+            if exhausted:
+                pass_content["status"] = TurnStatus.FAILED.value
+                pass_content["failure_reason"] = "max_iters_exhausted"
+            elif suspended:
+                pass_content["status"] = TurnStatus.AWAITING_USER.value
+            else:
+                pass_content["status"] = TurnStatus.COMPLETED.value
 
             return command_output, trajectory, actions, planning_steps
 
@@ -843,6 +1014,7 @@ def distill_message(
         agent_api_key_role="LITELLM_API_KEY_TEACHER_AGENT",
         planner_lm_role="LLM_TEACHER_PLANNER",
         planner_api_key_role="LITELLM_API_KEY_TEACHER_PLANNER",
+        pass_id=tracing.PASS_TEACHER,
     )
 
     # 3. Save teacher's final state
@@ -860,6 +1032,7 @@ def distill_message(
             agent_api_key_role="LITELLM_API_KEY_STUDENT_AGENT",
             planner_lm_role="LLM_STUDENT_PLANNER",
             planner_api_key_role="LITELLM_API_KEY_STUDENT_PLANNER",
+            pass_id=tracing.PASS_STUDENT,
         )
     except Exception as e:
         logger.warning(f"Distillation: student agent failed: {e}")
@@ -867,6 +1040,12 @@ def distill_message(
         return DistillationResult(command_output=teacher_output)
 
     any_divergence = False
+
+    # Everything below runs OUTSIDE both pass spans, which is what makes the
+    # insight-extraction LLM calls attributable to neither pass: they are
+    # emitted under the turn root, so neither pass's cost roll-up sees them.
+    # Moving any of this inside a pass would charge one model for the analysis
+    # of both.
 
     # 6a. Compare and extract PLANNING insights
     planning_diverged, planning_summary = ds.compare_planning_traces(

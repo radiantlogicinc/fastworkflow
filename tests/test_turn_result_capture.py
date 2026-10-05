@@ -36,6 +36,7 @@ from fastworkflow.turn import (
     warn_on_unserializable_artifacts,
 )
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from tests.todo_list_workflow.application.todo_manager import TodoListManager
 
 TURN_KEY_RE = re.compile(r"^\d{8}T\d{6}\.\d{6}Z-[0-9a-f]{12}$")
 
@@ -67,13 +68,10 @@ def initialized_fastworkflow(monkeypatch):
     RoutingRegistry.clear_registry()
 
 
-def _set_agents(ctx, agent, clarification_agent=None):
-    """Set the workflow tool agent plus a non-None clarification agent (parity
-    with WorkflowExecutionContext._initialize_agent_functionality)."""
+def _set_agents(ctx, agent):
+    """Set the workflow tool agent (parity with
+    WorkflowExecutionContext._initialize_agent_functionality)."""
     ctx._workflow_tool_agent = agent
-    ctx._intent_clarification_agent = (
-        clarification_agent if clarification_agent is not None else MagicMock()
-    )
 
 
 def _make_agent_ctx(todo_workflow_path, monkeypatch):
@@ -130,6 +128,18 @@ def _make_assistant_ctx(todo_workflow_path, monkeypatch, response_text="ok"):
 
 def _patch_invoke_with(monkeypatch, fn):
     monkeypatch.setattr(CommandExecutor, "invoke_command", classmethod(fn))
+
+
+def _enter_todo_list_manager(wf, tmp_path) -> TodoListManager:
+    """Put the workflow in the context `startup` leaves it in.
+
+    The agent tool only dispatches command names available in the current
+    context, and before startup that is the bare `*` context, which offers none
+    of the todo commands.
+    """
+    manager = TodoListManager(str(tmp_path / "todo_list.json"))
+    wf.root_command_context = manager
+    return manager
 
 
 # ----------------------------------------------------------------------
@@ -326,15 +336,20 @@ class TestAgentTurn:
         mock_agent.assert_called_once()
 
     def test_agent_turn_success_false_when_a_command_failed(
-        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch, tmp_path
     ):
         # The agent always phrases its final answer as success; the turn must
         # still report success=False because an underlying command failed.
         ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch)
+        todo_list = _enter_todo_list_manager(_wf, tmp_path).create_todo_list("chores")
 
         from fastworkflow.workflow_agent import _execute_workflow_query
 
         def fake_invoke(cls, session, command: str):
+            # As the real get_todo_list does: it enters the list, which is the
+            # context mark_completed is offered in.
+            if command == "get_todo_list":
+                _wf.current_command_context = todo_list
             return fastworkflow.CommandOutput(
                 command_name=command,
                 command_response=
@@ -401,13 +416,18 @@ class TestAgentTurn:
 
 class TestSuspendResumeTurnCapture:
     def test_suspend_resume_same_turn_key_and_ordering(
-        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch, tmp_path
     ):
         ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch)
+        todo_list = _enter_todo_list_manager(_wf, tmp_path).create_todo_list("chores")
 
         from fastworkflow.workflow_agent import _execute_workflow_query
 
         def fake_invoke(cls, session, command: str):
+            # As the real get_todo_list does: it enters the list, which is the
+            # context mark_completed is offered in.
+            if command == "get_todo_list":
+                _wf.current_command_context = todo_list
             return fastworkflow.CommandOutput(
                 command_name=command,
                 command_response=
@@ -477,9 +497,10 @@ class TestSuspendResumeTurnCapture:
 
 class TestFailureCapture:
     def test_failed_tool_call_captured_and_exception_propagates(
-        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch, tmp_path
     ):
         ctx, _wf = _make_assistant_ctx(todo_workflow_path, monkeypatch)
+        _enter_todo_list_manager(_wf, tmp_path)
 
         from fastworkflow.workflow_agent import _execute_workflow_query
 
@@ -489,8 +510,14 @@ class TestFailureCapture:
         _patch_invoke_with(monkeypatch, exploding_invoke)
 
         ctx._begin_turn("trigger failure")
-        with pytest.raises(RuntimeError, match="storage offline"):
-            _execute_workflow_query("delete_todo_list", ctx)
+        # A turn has the app workflow active while its tools run; the agent tool
+        # reads that workflow's context to decide which names it may dispatch.
+        ctx.push_active_workflow(_wf)
+        try:
+            with pytest.raises(RuntimeError, match="storage offline"):
+                _execute_workflow_query("delete_todo_list", ctx)
+        finally:
+            ctx.pop_active_workflow()
 
         assert len(ctx._turn_outputs) == 1
         entry = ctx._turn_outputs[0]
@@ -582,9 +609,10 @@ class TestArtifactProjection:
         assert target.artifacts["shared_1"] == "incoming"
 
     def test_agent_finalize_surfaces_command_artifacts(
-        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch, tmp_path
     ):
         ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch)
+        _enter_todo_list_manager(_wf, tmp_path)
 
         from fastworkflow.workflow_agent import _execute_workflow_query
 
@@ -605,7 +633,7 @@ class TestArtifactProjection:
         _patch_invoke_with(monkeypatch, fake_invoke)
 
         def fake_forward(**kwargs):
-            _execute_workflow_query("export_csv", ctx)
+            _execute_workflow_query("list_todo_lists", ctx)
             return SimpleNamespace(final_answer="Exported your data")
 
         mock_agent = MagicMock(side_effect=fake_forward)
@@ -620,9 +648,10 @@ class TestArtifactProjection:
         assert answer.artifacts["client_kind"] == "text/csv"
 
     def test_process_turn_answer_unaffected_by_projection(
-        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch, tmp_path
     ):
         ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch)
+        _enter_todo_list_manager(_wf, tmp_path)
 
         from fastworkflow.workflow_agent import _execute_workflow_query
 
@@ -639,7 +668,7 @@ class TestArtifactProjection:
         _patch_invoke_with(monkeypatch, fake_invoke)
 
         def fake_forward(**kwargs):
-            _execute_workflow_query("export_csv", ctx)
+            _execute_workflow_query("list_todo_lists", ctx)
             return SimpleNamespace(final_answer="Done")
 
         mock_agent = MagicMock(side_effect=fake_forward)
@@ -654,7 +683,7 @@ class TestArtifactProjection:
         # command_outputs_with_artifacts is derived from the per-command outputs
         assert len(result.command_outputs_with_artifacts) == 1
         artifact_output = result.command_outputs_with_artifacts[0]
-        assert artifact_output.command_name == "export_csv"
+        assert artifact_output.command_name == "list_todo_lists"
         assert artifact_output.command_response.artifacts["client_blob"] == "x,y\n3,4"
 
 

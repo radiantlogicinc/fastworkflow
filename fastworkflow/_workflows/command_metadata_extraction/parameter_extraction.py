@@ -248,6 +248,17 @@ class ParameterExtraction:
 
         # If we have missing fields (in parameter extraction error state), try to apply the command directly
         diagnostics["retry_round"] = bool(stored_params)
+        # WHICH round, not just whether this is one (fix-8ko2). The flag alone
+        # left a consumer counting extraction spans and hoping the count was
+        # the ordinal, which it is not when a span was dropped.
+        #
+        # The round can be genuinely unknown, and then the attribute is OMITTED
+        # rather than sent as a 0 that would read as "first attempt". See
+        # _get_stored_round for when that happens; the short version is that
+        # this module is not the only writer of the state it counts.
+        round_ordinal = self._get_stored_round(self.cme_workflow)
+        if round_ordinal is not None:
+            diagnostics["retry_round_ordinal"] = round_ordinal
         if stored_params:
             new_params = self._extract_and_merge_missing_parameters(stored_params, self.command)
             diagnostics["extraction_method"] = "stored_merge"
@@ -331,13 +342,68 @@ class ParameterExtraction:
         return cme_workflow.context.get("stored_parameters")
 
     @staticmethod
+    def _get_stored_round(cme_workflow: fastworkflow.Workflow) -> Optional[int]:
+        """How many extraction attempts already ran for the stored parameters.
+
+        This is the 0-based ordinal of the attempt about to run: 0 is the first
+        attempt, 1 is the first retry. `None` means genuinely unknown, and the
+        caller omits the attribute rather than sending a 0 that would read as
+        "first attempt".
+
+        Unknown is not hypothetical. `stored_parameters` has writers this module
+        does not control, and none of them know about the counter:
+
+        - `Workflow.end_command_processing` deletes `stored_parameters` and
+          leaves the counter behind. A stale counter therefore cannot be
+          trusted to describe whatever is in the context now -- so the absence
+          of stored parameters is the authority, and it means round 0.
+        - `WorkflowExecutionContext._serialize_cme_continuation` persists
+          `stored_parameters` and `_apply_cme_continuation` rebuilds it, but
+          neither carries the counter. A rehydrated session therefore has real
+          stored parameters whose round nobody recorded. That is unknown, and
+          claiming 0 there would report a resumed third attempt as a first one.
+
+        Both writers live in files this change may not edit (see fix-7gp9 for
+        the persistence follow-up), so the rule is read-side: the counter is
+        believed only when it is present, an integer, positive, and sitting
+        beside the stored parameters it claims to count.
+        """
+        context = cme_workflow.context
+        if context.get("stored_parameters") is None:
+            # No error state for a round to be a round OF. Whatever an orphaned
+            # counter says, the next extraction is a first attempt.
+            return 0
+        round_index = context.get("stored_parameter_round")
+        if isinstance(round_index, bool) or not isinstance(round_index, int):
+            return None
+        # Storing always writes >= 1, so 0-or-negative beside stored parameters
+        # is corruption, not a first attempt.
+        return round_index if round_index > 0 else None
+
+    @staticmethod
     def _store_parameters(cme_workflow: fastworkflow.Workflow, parameters):
+        # Read the prior round BEFORE installing, because the answer depends on
+        # whether stored parameters were already there: installing first would
+        # make every call look like a continuation of itself.
+        prior = ParameterExtraction._get_stored_round(cme_workflow)
         cme_workflow.context["stored_parameters"] = parameters
+        if prior is None:
+            # Unknown does not become known by counting up from it. Leave the
+            # counter absent so the next read stays unknown instead of
+            # inventing an ordinal mid-sequence.
+            cme_workflow.context.pop("stored_parameter_round", None)
+        else:
+            cme_workflow.context["stored_parameter_round"] = prior + 1
 
     @staticmethod
     def _clear_parameters(cme_workflow: fastworkflow.Workflow):
         if "stored_parameters" in cme_workflow.context:
             del cme_workflow.context["stored_parameters"]
+        # The round counts this error state's attempts, so it ends with it.
+        # Leaving it behind would number the NEXT command's first extraction as
+        # a retry of a command that already succeeded.
+        if "stored_parameter_round" in cme_workflow.context:
+            del cme_workflow.context["stored_parameter_round"]
 
     @staticmethod
     def _extract_missing_fields(input_for_param_extraction, sws, command_name, stored_params):

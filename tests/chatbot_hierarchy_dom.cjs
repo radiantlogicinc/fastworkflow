@@ -40,11 +40,23 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   await until(()=>d.getElementById('detail').textContent.includes('Review this benchmark'));
   click(expName);
   await until(()=>d.getElementById('detail').textContent.includes('RECORDED EXPERIMENT'));
+  // The winner card reads the contest after the page is otherwise drawn, so a
+  // snapshot of the whole pane is only stable once that read has landed.
+  // Comparing an arriving pane against a settled one is a coin flip, not a
+  // navigation assertion.
+  const contestSettled = () =>
+    !d.getElementById('detail').textContent.includes('reading the contest');
+  await until(contestSettled);
   const railView = d.getElementById('detail').textContent;
   assert.ok(railView.includes('Postmortem'), railView);
   assert.ok(!railView.includes('Save notes'), railView);
   assert.ok(!railView.includes('Notes'), railView);
-  assert.deepEqual([...d.querySelectorAll('#detail dl.kv > dt')].map(e=>e.textContent),
+  // Scoped to the result's own key list. The winner panel renders into the
+  // same card and carries a key list of its own, so a query across the pane
+  // describes whichever panels happen to have finished loading rather than
+  // the result being asserted.
+  assert.deepEqual(
+    [...d.querySelector('#detail dl.kv').querySelectorAll('dt')].map(e=>e.textContent),
     ['status', 'declared', 'scored attempts', 'pass@1', 'pass^1', 'verdict sources']);
   assert.equal(d.querySelector('#detail details.provenance'), null);
   assert.ok(![...d.querySelectorAll('#detail h2')].some(e=>e.textContent==='Evidence runs'));
@@ -61,11 +73,36 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   await until(()=>cards().length);
   cards()[0].click();
   await until(()=>d.getElementById('detail').textContent.includes('RECORDED EXPERIMENT'));
+  await until(contestSettled);
   assert.equal(d.getElementById('detail').textContent, railView);
-  assert.equal(w.benchmarkExperimentSource, eid);
+  // The experiment and its task pages spell the whole trail from Benchmarks,
+  // not from the legacy flat Experiments list.
+  const pageCrumbs = () => d.querySelector('#detail .crumbs');
+  const assertTrail = (...tail) => {
+    const text = pageCrumbs().textContent;
+    assert.ok(text.startsWith('Benchmarks'), text);
+    assert.ok(!text.startsWith('Experiments'), text);
+    for (const label of ['Tuning benchmark', ...tail]) assert.ok(text.includes(label), text);
+  };
+  assertTrail(expName);
+  const tasksHead = [...d.querySelectorAll('#detail h2')].find(e=>e.textContent==='Tasks');
+  const taskRow = [...d.querySelectorAll('#detail .listItem')]
+    .find(e=>tasksHead.compareDocumentPosition(e) & w.Node.DOCUMENT_POSITION_FOLLOWING);
+  const taskId = taskRow.querySelector('.title').textContent;
+  taskRow.click();
+  await until(()=>[...d.querySelectorAll('#detail h2')].some(e=>e.textContent==='Attempts'));
+  assertTrail(expName, taskId);
+  for (const view of ['compare', 'feedback']) {
+    d.querySelector(`#detail [data-task-view="${view}"]`).click();
+    await until(()=>d.querySelector(`#detail [data-task-view="${view}"]`)?.getAttribute('aria-selected')==='true');
+    assertTrail(expName, taskId);
+  }
+  [...pageCrumbs().querySelectorAll('button')].find(e=>e.textContent==='Tuning benchmark').click();
+  await until(()=>d.querySelector('#detail h1')?.textContent==='Tuning benchmark');
+  assert.ok(find('Tuning benchmark').parentElement.classList.contains('selected'));
+  assert.equal(d.querySelector('#detail [data-task-view]'), null);
   click('task'); // conversation node
   assert.ok(d.getElementById('detail').textContent.includes('1 turns'));
-  assert.equal(w.benchmarkExperimentSource, eid);
   assert.ok(find('task').parentElement.open);
   click('experiment-turn'); // turns hang off their conversation in the rail
   await until(()=>d.getElementById('detail').textContent.includes('Feedback'));

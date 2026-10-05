@@ -47,12 +47,14 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Iterable, Iterator, Mapping, Optional
 
 from pydantic import BaseModel, ConfigDict
 
 import fastworkflow
 from fastworkflow.observability import capture_policy as capture_policy_module
+from fastworkflow.observability import control
+from fastworkflow.observability.feedback import human_feedback_row
 from fastworkflow import agent_runtime, runtime_manifest, state_paths, tracing
 from fastworkflow.utils.logging import logger
 
@@ -62,20 +64,22 @@ from fastworkflow.utils.logging import logger
 #
 # Fresh schema (fix-49m.3): the `_SCHEMA_STATEMENTS` literal is the ONLY
 # creator of every table and column. There is no ALTER/migration path. A
-# populated store whose user_version is older than this constant is DELETED
-# and recreated empty when the writer opens it (the store has never shipped in
-# a release, so such a file can only be a developer's local DB); the read-only
-# store refuses it and never deletes anything.
+# populated store whose user_version is older than this constant is refused by
+# the writer (`OlderObservabilityStore`) and by the read-only store, and is
+# never deleted: it holds somebody's recorded evidence (fix-10vj.9).
 #
 # v3 (fix-qe2): experiment_attempts.runtime_snapshot_json -- the binding
 # server's credential-free runtime snapshot, stamped at claim time. Create-time
-# column only; a v2 store is replaced on open like every older one.
+# column only; a v2 store is refused on open like every older one.
 # v4 (fix-aw5): human feedback and its evidence anchors live in this DB.
 # v5 (fix-46l.2): feedback provenance distinguishes human, coding-agent, and
 # distillation-agent annotations.
 # v6 (fix-w6w): experiment archival is a durable annotation.
+# v7 (fix-9eg.16/.19.1): the agent-memory `feedback` table is gone, and review
+# notes carry their category, subcategory, stable identity and frozen evidence
+# anchors as columns.
 # Fresh schema only, with no migration of previously recorded evidence.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Which capture profile this deployment records under (arch §12.0 delta 3).
 # Defaults to `debug`, which is byte-for-byte today's behavior: EXP-003 is a
@@ -114,6 +118,18 @@ _PENDING_RETRY_MAX = 64
 
 _PRUNE_BATCH_ROWS = 5_000
 _PRUNE_MAX_BATCHES = 20
+# Experiments whose evidence prune keeps, past the horizon and over the cap,
+# until a seal or `release_experiment_evidence` lets it go (design §7). The
+# release clause is appended only when the control tables exist; a DB without
+# them has released nothing.
+_BOUND_EXPERIMENTS_SQL = (
+    "SELECT experiment_id FROM experiments WHERE evidence_sealed_at IS NULL"
+)
+_RELEASED_CLAUSE_SQL = (
+    " AND experiment_id NOT IN (SELECT experiment_id FROM evidence_releases)"
+)
+# Set while bound evidence alone holds the DB over its cap; cleared otherwise.
+PRUNE_OVER_CAP_BOUND_DIAGNOSTIC = "prune_over_cap_bound_bytes"
 
 # Poll interval for the quiesce handshake (fix-7de). Short, because it is only
 # ever spun on for the moment it takes the writer to finish the batch it is in
@@ -183,6 +199,11 @@ _HEALTH_MONOTONE_COUNTERS: tuple[str, ...] = (
 # time would collide across a fast restart inside one clock second, and a run
 # whose writer was replaced must never look like a run whose writer persisted.
 WRITER_INCARNATION_FIELD = "writer_incarnation"
+# One diagnostics row per writer incarnation, `writer_health/<id>` (single live
+# DB design §5). Concurrent writers on one live DB would otherwise overwrite
+# each other's stamp, and every evidence run captured while the interactive
+# server was up would read as a writer restart.
+WRITER_HEALTH_KEY_PREFIX = "writer_health/"
 
 
 def writer_incarnation_id(health: Optional[Mapping[str, Any]]) -> Optional[str]:
@@ -194,6 +215,30 @@ def writer_incarnation_id(health: Optional[Mapping[str, Any]]) -> Optional[str]:
         return None
     value = stamp.get("id")
     return str(value) if value else None
+
+
+def _writer_holds(stamp: Any) -> bool:
+    """Whether a health stamp names an open writer whose process is alive here.
+
+    A row left open by a writer whose process is gone is a crash marker, not a
+    live writer; a writer on another host cannot be checked and is not counted.
+    """
+    if not isinstance(stamp, Mapping) or not stamp.get("open"):
+        return False
+    if str(stamp.get("host") or "") != socket.gethostname():
+        return False
+    try:
+        pid = int(stamp.get("pid") or 0)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if pid != os.getpid():
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False  # the writer's process is gone; the marker is stale
+    return True
 
 
 def merge_writer_health(
@@ -280,91 +325,18 @@ FEATURE_OFFLOAD_EVIDENCE_V1 = "offload_evidence_v1"
 # archived, offloaded, searched and rehydrated, keyed by turn like the evidence
 # and erased and aged with it.
 FEATURE_OFFLOAD_EVENTS_V1 = "offload_events_v1"
-# The evidence used to live in a second SQLite file beside this one, named
-# `<db>` plus this suffix. Nothing reads it any more; opening a store deletes it.
-LEGACY_OFFLOAD_SIDECAR_SUFFIX = ".offload-handles.sqlite3"
 FEEDBACK_PROVENANCES = frozenset({"human", "coding_agent", "distillation_agent"})
-# Composer tabs and stored-comment labels. Existing comments already used these
-# headings (and "What did not work" as a synonym for went-wrong); reads parse
-# them without rewriting the comment column, so older stores stay intact.
-HUMAN_FEEDBACK_SECTIONS = (
-    ("went_wrong", "What went wrong", ("what went wrong", "what did not work")),
-    ("worked", "What worked", ("what worked",)),
-    ("should_change", "What should change", ("what should change",)),
-)
-_HUMAN_FEEDBACK_HEADER_RE = re.compile(
-    r"(?im)^[ \t]*(What went wrong|What did not work|What worked|What should change)"
-    r"[ \t]*:[ \t]*"
-)
-_HUMAN_FEEDBACK_HEADER_TO_KEY = {
-    alias: key
-    for key, _label, aliases in HUMAN_FEEDBACK_SECTIONS
-    for alias in aliases
-}
+FEEDBACK_COMMENT_MAX_CHARS = 100_000
 
-
-def parse_human_feedback_comment(comment: str) -> dict[str, str]:
-    """Split a stored comment into the three composer tabs.
-
-    Unlabelled text is left in ``comment`` only: guessing a tab would invent a
-    category the author did not choose. Duplicate headings concatenate.
-    """
-    sections = {key: "" for key, _label, _aliases in HUMAN_FEEDBACK_SECTIONS}
-    if not isinstance(comment, str) or not comment:
-        return sections
-    matches = list(_HUMAN_FEEDBACK_HEADER_RE.finditer(comment))
-    if not matches:
-        return sections
-    for index, match in enumerate(matches):
-        key = _HUMAN_FEEDBACK_HEADER_TO_KEY[match.group(1).strip().lower()]
-        start = match.end()
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(comment)
-        chunk = comment[start:end].strip()
-        if not chunk:
-            continue
-        sections[key] = f"{sections[key]}\n\n{chunk}".strip() if sections[key] else chunk
-    return sections
-
-
-def compose_human_feedback_comment(
-    *,
-    went_wrong: str = "",
-    worked: str = "",
-    should_change: str = "",
-    comment: str | None = None,
-) -> str:
-    """Build the stored comment from tab fields, or keep a legacy free-form comment."""
-    values = {
-        "went_wrong": went_wrong,
-        "worked": worked,
-        "should_change": should_change,
-    }
-    for key, value in values.items():
-        if value is None:
-            values[key] = ""
-        elif not isinstance(value, str):
-            raise ValueError(f"{key} must be text")
-    parts = []
-    for key, label, _aliases in HUMAN_FEEDBACK_SECTIONS:
-        text = values[key].strip()
-        if text:
-            parts.append(f"{label}: {text}")
-    if parts:
-        composed = "\n\n".join(parts)
-    elif isinstance(comment, str) and comment.strip():
-        composed = comment.strip()
-    else:
-        raise ValueError("feedback must contain text (at most 100000 characters)")
-    if len(composed) > 100000:
-        raise ValueError("feedback must contain text (at most 100000 characters)")
-    return composed
-
-
-def _human_feedback_row(row: Mapping[str, Any]) -> dict[str, Any]:
-    value = dict(row)
-    value["span_ids"] = json.loads(value.pop("span_ids_json"))
-    value.update(parse_human_feedback_comment(value.get("comment") or ""))
-    return value
+# The composer's three headings ("What went wrong:" / "What worked:" / "What
+# should change:") and the reader that split a stored comment on them lived
+# here until fix-9eg.19.1. They are gone rather than remapped: the owner-
+# confirmed taxonomy in `observability/feedback.py` carries category and
+# subcategory as explicit enum columns, and re-deriving one of its six
+# subcategories from a legacy heading would record a guess as the author's
+# choice. Comments written before the columns existed read back with
+# `category`/`subcategory` of None and are shown as unclassified, text
+# untouched.
 
 # Single source: the policy engine's own version (fix-49m.3 wiring).
 CAPTURE_POLICY_VERSION = capture_policy_module.CAPTURE_POLICY_VERSION
@@ -437,102 +409,6 @@ def resolve_capture_policy() -> "capture_policy_module.CapturePolicy":
         policy = capture_policy_module.policy_for_profile(name)
         _CAPTURE_POLICY_CACHE[name] = policy
     return policy
-
-
-# Turn columns the capture policy deliberately does NOT touch.
-#
-# These two are not evidence, they are operational state: `get_memory_window` and
-# `_USABLE_TURN_FILTER` read exactly `conversation_summary` and
-# `conversation_traces` to rebuild the agent's conversation memory, and the filter
-# requires the summary to be non-NULL. Withholding them would not reduce what a
-# bundle exposes — it would make the agent forget, which is a behavior change and
-# therefore outside a Phase 0 slice.
-#
-# PII in conversation memory is a real gap; it is fix-cj4's. It needs a redaction
-# that leaves memory usable, which is a different problem from withholding
-# evidence, and solving it by omission here would silently degrade every
-# evidence-profile run's agent.
-_POLICY_EXEMPT_TURN_COLUMNS = frozenset({"conversation_summary", "conversation_traces"})
-
-# Turn columns that are pure evidence — nothing operational reads them — paired
-# with what they actually contain. `failure_reason` is `opaque-payload` rather
-# than text because it can embed a provider error body (the [R20] scenario), so
-# nobody can say what is in it.
-_POLICED_TURN_COLUMNS: tuple[tuple[str, str], ...] = (
-    ("user_message", "user-text"),
-    ("refined_user_message", "user-text"),
-    ("answer", "user-text"),
-    ("failure_reason", "opaque-payload"),
-)
-
-# ----------------------------------------------------------------------
-# The write paths that do NOT ride the TurnResult pipeline (fix-ajv.9)
-# ----------------------------------------------------------------------
-#
-# `serialize_turn_result` is where the capture policy meets a turn, and
-# `upsert_turn_row` is where the credential scrub meets one. Five persisted
-# surfaces reach SQLite without passing through either: conversation labels,
-# feedback, train-run metrics, writer diagnostics, and the SCALAR columns beside
-# a span's (already scrubbed) `attributes` JSON. FW-REQ-002 clause 3 requires
-# every captured field to have a declared policy, so each of the five is decided
-# here rather than by omission — including the three that are deliberately
-# scrub-only, whose reasons are recorded at their write sites.
-#
-# Policy paths are named constants because a deployment re-admitting one of these
-# under the evidence profile has to spell the path exactly (see
-# `CapturePolicy.policy_for`), and a path that only exists as a literal inside a
-# method is a path nobody can find in order to spell it.
-POLICY_PATH_SPAN_NAME = "span.name"
-POLICY_PATH_SPAN_COMMAND_NAME = "span.command_name"
-POLICY_PATH_SPAN_CONTEXT = "span.context"
-POLICY_PATH_CONVERSATION_TOPIC = "conversation.topic"
-POLICY_PATH_CONVERSATION_SUMMARY = "conversation.summary"
-POLICY_PATH_TRAIN_METRICS = "train_run.metrics_json"
-# (ido-zlm) The sixth surface: the RAW command response that
-# `observation_offloading.archive` persists into `offload_evidence`. It does not
-# ride the TurnResult pipeline, so without this path it escaped both
-# protections entirely -- a credential in a command response was stored
-# verbatim where the same text inside a span attribute was scrubbed.
-POLICY_PATH_OFFLOAD_OBSERVATION = "offload.observation.text"
-
-
-def _protected_text(
-    value: Any,
-    *,
-    redactor: Redactor,
-    policy: "capture_policy_module.CapturePolicy",
-    field_path: str,
-    classification: str,
-) -> Any:
-    """Credential-scrub a persisted string, then apply the capture policy to it.
-
-    **Scrub first, policy second**, which is the opposite order from
-    `_POLICED_TURN_COLUMNS` (there the policy runs in `serialize_turn_result` and
-    the scrub runs later, in `upsert_turn_row`). Two reasons it has to be this way
-    on these paths:
-
-    * A conversation label can arrive by either of two routes —
-      `SQLiteTraceSink._apply_label`, which scrubs before calling
-      `apply_label_txn`, or `ObservabilityStore.record_conversation_label`, which
-      does not. Scrubbing first makes both produce `policy(scrub(text))`, because
-      the scrub is idempotent. Policing first would give the same label two
-      different digests depending on which route wrote it, and a digest that
-      depends on plumbing is not a digest anyone can compare.
-    * The badge left behind carries a digest of what it replaced. Digesting the
-      unscrubbed text would make the badge a confirmation oracle for a guessed
-      credential, which is a strange thing for a redaction record to be.
-
-    Returns TEXT, always: an envelope is serialized here because every caller
-    binds the result to a TEXT column and sqlite3 cannot bind a mapping. Same
-    reasoning as `_policed_column`, which does it for the turn row.
-    """
-    if not value:
-        return value
-    scrubbed = redactor.redact(value)
-    captured = policy.apply(field_path, scrubbed, classification=classification)
-    if capture_policy_module.is_capture_envelope(captured):
-        return json.dumps(captured, ensure_ascii=False)
-    return captured
 
 
 class WriterHealthDelta(BaseModel):
@@ -728,7 +604,7 @@ _POLICED_TURN_COLUMNS: tuple[tuple[str, str], ...] = (
 # `serialize_turn_result` is where the capture policy meets a turn, and
 # `upsert_turn_row` is where the credential scrub meets one. Five persisted
 # surfaces reach SQLite without passing through either: conversation labels,
-# feedback, train-run metrics, writer diagnostics, and the SCALAR columns beside
+# review notes, train-run metrics, writer diagnostics, and the SCALAR columns beside
 # a span's (already scrubbed) `attributes` JSON. FW-REQ-002 clause 3 requires
 # every captured field to have a declared policy, so each of the five is decided
 # here rather than by omission — including the three that are deliberately
@@ -744,6 +620,35 @@ POLICY_PATH_SPAN_CONTEXT = "span.context"
 POLICY_PATH_CONVERSATION_TOPIC = "conversation.topic"
 POLICY_PATH_CONVERSATION_SUMMARY = "conversation.summary"
 POLICY_PATH_TRAIN_METRICS = "train_run.metrics_json"
+POLICY_PATH_PASS_ANSWER = "span.pass.answer"
+POLICY_PATH_PASS_PLAN = "span.pass.plan"
+
+# The span name is restated rather than imported: this module is the sink and
+# does not import the runtime's `tracing`. `tests/test_distillation_pass_capture`
+# asserts the two spellings agree, because a drift here does not fail — it
+# silently stops policing the fields.
+_SPAN_DISTILLATION_PASS = "fw.distillation.pass"
+
+# The ONLY span attributes this store classifies. Span attributes are otherwise
+# credential-scrubbed wholesale (`upsert_span_rows`) and carry no per-key
+# policy, which is a general gap and NOT repaired here.
+#
+# These two are different in kind from everything else in an attribute bag:
+# `answer` is the text a pass showed the user and `plan` is the next-step
+# sequence it generated, both free text, and both already withheld under the
+# evidence profile everywhere else they are persisted — `turns.answer` through
+# `_POLICED_TURN_COLUMNS`, `span.context` through `_protected_text`. Recording
+# them here unclassified would make `fw.distillation.pass` the one route by
+# which user text reaches an evidence bundle, which is the definition of a
+# bypass. `user-text` is therefore the classification, and under `evidence` the
+# profile default withholds both with a badge (§12.0 delta 3) rather than
+# dropping them silently.
+_POLICED_SPAN_ATTRIBUTES: dict[str, dict[str, tuple[str, str]]] = {
+    _SPAN_DISTILLATION_PASS: {
+        "answer": (POLICY_PATH_PASS_ANSWER, "user-text"),
+        "plan": (POLICY_PATH_PASS_PLAN, "user-text"),
+    },
+}
 # (ido-zlm) The sixth surface: the RAW command response that
 # `observation_offloading.archive` persists into `offload_evidence`. It does not
 # ride the TurnResult pipeline, so without this path it escaped both
@@ -791,6 +696,110 @@ def _protected_text(
     return captured
 
 
+def _policed_span_attributes(
+    span_name: Any,
+    attributes: Any,
+    *,
+    redactor: Redactor,
+    policy: "capture_policy_module.CapturePolicy",
+) -> Any:
+    """A span's attribute bag with its classified fields policed.
+
+    Returns the bag unchanged for every span that declares none, which is every
+    span but one — so this costs a dict lookup on the hot path and changes
+    nothing else.
+
+    Scrub first, policy second, for the reasons `_protected_text` gives: the
+    digest in the badge must describe what was persisted, not the credential a
+    guesser is testing. Unlike `_protected_text` the envelope is left as a
+    MAPPING, because this value is nested inside the attributes JSON rather
+    than bound to a TEXT column; serializing it here would give a reader a
+    string that happens to parse.
+    """
+    declared = _POLICED_SPAN_ATTRIBUTES.get(span_name)
+    if not declared or not isinstance(attributes, Mapping):
+        return attributes
+    policed = dict(attributes)
+    for key, (field_path, classification) in declared.items():
+        value = policed.get(key)
+        if isinstance(value, str) and value:
+            policed[key] = policy.apply(
+                field_path, redactor.redact(value), classification=classification
+            )
+            continue
+        capped = _capped_prefix(value)
+        if capped is None:
+            continue
+        policed[key] = _police_capped(
+            value,
+            capped,
+            redactor=redactor,
+            policy=policy,
+            field_path=field_path,
+            classification=classification,
+        )
+    return policed
+
+
+def _capped_prefix(value: Any) -> Optional[str]:
+    """The surviving text of a `tracing.cap_attr_value` envelope, if that is what
+    this is.
+
+    An over-limit attribute never reaches the sink as a string: the emitter has
+    already replaced it with `{truncated, original_length, sha256, value}`,
+    where `value` is a RAW prefix of the text. Treating that mapping as "not a
+    string, nothing to police" is how a long answer walked past the evidence
+    profile while a short one was withheld — the longer the secret, the less
+    protected it was.
+    """
+    if not isinstance(value, Mapping) or value.get("truncated") is not True:
+        return None
+    prefix = value.get("value")
+    return prefix if isinstance(prefix, str) and prefix else None
+
+
+def _police_capped(
+    envelope: Mapping[str, Any],
+    prefix: str,
+    *,
+    redactor: Redactor,
+    policy: "capture_policy_module.CapturePolicy",
+    field_path: str,
+    classification: str,
+) -> Any:
+    """Apply the policy to text the emitter had already cut.
+
+    The policy sees the prefix, because the prefix is all that survived — there
+    is nothing else here to withhold, and pretending otherwise would put a
+    digest of text this process never held into the record.
+
+    When the policy acts, the cap envelope does NOT survive beside the result:
+
+    * its `value` is the raw prefix, which is the thing being withheld;
+    * its `sha256` digests the ORIGINAL, unscrubbed text. Keeping that next to a
+      withheld value turns the record into a confirmation oracle for a guessed
+      secret, which is the same reason `_protected_text` scrubs before it
+      digests.
+
+    What is kept is `original_length` and a `truncated_before_capture` flag, so
+    the badge stays truthful in the other direction too: the policy's own
+    `original_bytes` and `digest` describe the PREFIX, and without these two a
+    reader would take them for measurements of the whole value.
+    """
+    captured = policy.apply(
+        field_path, redactor.redact(prefix), classification=classification
+    )
+    if capture_policy_module.is_capture_envelope(captured):
+        return {
+            **captured,
+            "truncated_before_capture": True,
+            "original_length": envelope.get("original_length"),
+        }
+    # The debug profile, whose contract is that nothing changes: the cap
+    # envelope is returned as it came, carrying the scrubbed prefix.
+    return {**envelope, "value": captured}
+
+
 def protect_offload_observation(text: str) -> str:
     """Scrub-then-police one raw command response bound for `offload_evidence`.
 
@@ -830,16 +839,25 @@ class IncompatibleObservabilityDB(RuntimeError):
     """The DB cannot be opened by this build.
 
     Raised for a DB written by a newer fastWorkflow, which every reader and
-    writer refuses; by the read-only store for an older one, which it never
-    alters; and by the writer for an older one it could not delete.
+    writer refuses, and for an older one, which nothing alters.
     """
 
 
-class _OlderPopulatedStore(Exception):
-    """Internal: `_ensure_schema_once` met a populated DB from an older build."""
+class OlderObservabilityStore(IncompatibleObservabilityDB):
+    """The writer found a populated DB from an older build.
 
-    def __init__(self, version: int) -> None:
-        super().__init__(version)
+    It is refused, never deleted or migrated: the file is somebody's recorded
+    evidence. A subclass, so every caller that handles a newer-schema DB
+    handles this one the same way.
+    """
+
+    def __init__(self, db_path: str, version: int) -> None:
+        super().__init__(
+            f"{db_path} has schema v{version}; this build requires "
+            f"v{SCHEMA_VERSION} and carries no migration. fastWorkflow never "
+            "deletes evidence; move it aside (see fix-10vj.7), with its "
+            "-wal/-shm files, to start a new store."
+        )
         self.version = version
 
 
@@ -1391,7 +1409,7 @@ def serialize_turn_result(
 _SCHEMA_STATEMENTS = [
     # This literal is the ONLY creator of every table and column (fresh
     # schema, fix-49m.3): there is no ALTER/migration block anywhere, and a
-    # store from an older build is replaced by _ensure_schema rather than
+    # store from an older build is refused by _ensure_schema rather than
     # upgraded. experiment_id/task_id/attempt are the experiment container's
     # labels (`[XR4]`); NULL means "not part of an experiment".
     """CREATE TABLE IF NOT EXISTS conversations (
@@ -1415,18 +1433,27 @@ _SCHEMA_STATEMENTS = [
         experiment_id TEXT, task_id TEXT, attempt INTEGER,
         claim_epoch INTEGER, server_incarnation TEXT,
         record_json TEXT NOT NULL)""",
-    """CREATE TABLE IF NOT EXISTS feedback (
-        turn_key TEXT PRIMARY KEY, feedback_json TEXT NOT NULL,
-        updated_at TEXT NOT NULL)""",
+    # The agent-memory `feedback` table (one mutable row per turn, joined into
+    # dspy.History) was removed in fix-9eg.16. It is not recreated and it is
+    # not read.
     """CREATE TABLE IF NOT EXISTS human_feedback (
         feedback_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        feedback_uid TEXT NOT NULL UNIQUE,
         turn_key TEXT NOT NULL REFERENCES turns(turn_key),
         target_kind TEXT NOT NULL, span_ids_json TEXT NOT NULL,
         target_label TEXT NOT NULL, comment TEXT NOT NULL,
         provenance TEXT NOT NULL,
+        category TEXT, subcategory TEXT,
+        anchors_json TEXT NOT NULL,
+        pair_experiment_id TEXT, pair_task_id TEXT,
         created_at TEXT NOT NULL)""",
     """CREATE INDEX IF NOT EXISTS idx_human_feedback_turn
         ON human_feedback(turn_key, feedback_id)""",
+    # A comparison comment is about two executions and is reachable from the
+    # task on EITHER side. The primary side is found through `turns`; this is
+    # how the other side is found without scanning every anchor blob.
+    """CREATE INDEX IF NOT EXISTS idx_human_feedback_pair
+        ON human_feedback(pair_experiment_id, pair_task_id)""",
     """CREATE TRIGGER IF NOT EXISTS delete_turn_human_feedback
         AFTER DELETE ON turns BEGIN
         DELETE FROM human_feedback WHERE turn_key=OLD.turn_key;
@@ -1617,36 +1644,6 @@ _OFFLOAD_TABLE_TIMESTAMPS = {
 _OFFLOAD_PRUNE_BATCH_TURNS = 25
 
 
-def _remove_legacy_offload_sidecar(db_path: str) -> list[str]:
-    """Delete the evidence file older builds kept beside this DB, if any.
-
-    The old sidecar's evidence is deliberately NOT imported: it predates
-    turn-scoped erasure and write-time redaction, so it is removed together
-    with its WAL files and the ``.preserve`` sentinel that used to exempt it.
-    Best effort and never fatal -- a file that cannot be removed is logged
-    and the store opens anyway. Returns the paths that were removed.
-    """
-    sidecar = f"{db_path}{LEGACY_OFFLOAD_SIDECAR_SUFFIX}"
-    removed: list[str] = []
-    for path in (sidecar, f"{sidecar}-wal", f"{sidecar}-shm", f"{sidecar}.preserve"):
-        try:
-            os.remove(path)
-        except FileNotFoundError:
-            continue
-        except OSError as error:
-            logger.warning(
-                f"could not remove legacy offload evidence file {path}: {error}"
-            )
-            continue
-        removed.append(path)
-    if removed:
-        logger.info(
-            f"removed legacy offload evidence sidecar beside {db_path}: "
-            f"{', '.join(removed)}"
-        )
-    return removed
-
-
 def _present_offload_tables(conn: sqlite3.Connection) -> tuple[str, ...]:
     """The offload evidence tables this DB actually has.
 
@@ -1665,6 +1662,64 @@ def _present_offload_tables(conn: sqlite3.Connection) -> tuple[str, ...]:
     return tuple(table for table in _OFFLOAD_EVIDENCE_TABLES if table in found)
 
 
+# What an experiment seal copies (single live DB design §3), in order: each
+# table with the predicate that picks its rows. Rows kept by turn select
+# against the copy's own `turns`, so they follow it, and go through the
+# turn-key indexes rather than scanning the live DB's spans.
+_SEAL_KEPT_TURNS = "SELECT turn_key FROM main.turns"
+_EXPERIMENT_SEAL_ROWS: tuple[tuple[str, str], ...] = (
+    *(
+        (table, "experiment_id=:experiment_id")
+        for table in (
+            "experiments", "experiment_attempts", "experiment_attempt_declarations",
+            "experiment_attempt_claims", "experiment_evidence_runs",
+            "conversations", "turns",
+        )
+    ),
+    ("spans", f"trace_id IN ({_SEAL_KEPT_TURNS})"),
+    *(
+        (table, f"turn_key IN ({_SEAL_KEPT_TURNS})")
+        for table in ("artifacts", "human_feedback", *_OFFLOAD_EVIDENCE_TABLES)
+    ),
+    # Writer health describes the live DB's writers, not this experiment.
+    ("diagnostics", "key NOT GLOB 'writer_health*'"),
+)
+
+
+def _remove_scratch(*paths: Path) -> None:
+    """Delete an archive's scratch files and any sidecars they grew."""
+    for scratch in paths:
+        for suffix in ("", "-wal", "-shm"):
+            with contextlib.suppress(FileNotFoundError):
+                Path(f"{scratch}{suffix}").unlink()
+
+
+class _ClosingConnection:
+    """sqlite3.Connection wrapper that closes on ``with`` exit.
+
+    ``with sqlite3.Connection`` commits/rollbacks but does not close. This
+    wrapper restores ``with self._connect() as conn`` as a leak-free pattern
+    while still proxying attributes so ``conn = self._connect(); ...;
+    conn.close()`` keeps working for the few long-held-handle call sites.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        object.__setattr__(self, "_conn", conn)
+
+    def __enter__(self) -> sqlite3.Connection:
+        self._conn.__enter__()
+        return self._conn
+
+    def __exit__(self, exc_type, exc, tb) -> bool:  # type: ignore[no-untyped-def]
+        try:
+            return bool(self._conn.__exit__(exc_type, exc, tb))
+        finally:
+            self._conn.close()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+
 class ObservabilityStore:
     """Schema owner + synchronous operations on one observability DB.
 
@@ -1676,12 +1731,45 @@ class ObservabilityStore:
         self.db_path = db_path
         if migrate:
             self._ensure_schema()
+        # The version the FILE is at, which `_ensure_schema` has just pinned
+        # to `SCHEMA_VERSION` on the writable path. It is recorded rather than
+        # assumed because `open_for_annotation` and the read-only subclass
+        # both reach files this build did not create.
+        self.schema_version = self._read_schema_version()
         self._features = self._load_features()
 
     @staticmethod
     def open_for_annotation(db_path: str) -> "ObservabilityStore":
-        """Open an existing DB read-write without creating or migrating it."""
-        return ObservabilityStore(db_path, migrate=False)
+        """Open an existing DB read-write without creating or migrating it.
+
+        Refuses anything but the current schema. Annotating an older store
+        would mean writing a row shape its file has no columns for, and the
+        alternative — quietly adding them — is the migration this build does
+        not do to a database somebody else owns.
+        """
+        store = ObservabilityStore(db_path, migrate=False)
+        if store.schema_version != SCHEMA_VERSION:
+            raise IncompatibleObservabilityDB(
+                f"{db_path} has schema v{store.schema_version}; annotating "
+                f"requires v{SCHEMA_VERSION} and this build carries no "
+                "migration."
+            )
+        return store
+
+    def _read_schema_version(self) -> int:
+        # Closed explicitly, not merely committed: `with` on a sqlite3
+        # connection ends the transaction and leaves the handle open, and an
+        # open handle in WAL mode keeps the -wal sidecar alive. That sidecar
+        # is writable even when the database file is not, so a leak here
+        # would let a read-only store accept writes for as long as it took
+        # the garbage collector to get round to it.
+        conn = self._open_connection(timeout=5.0)
+        try:
+            return int(conn.execute("PRAGMA user_version").fetchone()[0])
+        except Exception:
+            return 0
+        finally:
+            conn.close()
 
     def _store_redactor(self) -> Redactor:
         redactor = getattr(self, "_redactor", None)
@@ -1705,72 +1793,33 @@ class ObservabilityStore:
 
     # -- connections ----------------------------------------------------
 
-    def _connect(self, timeout: float = 30.0) -> sqlite3.Connection:
+    def _open_connection(self, timeout: float = 30.0) -> sqlite3.Connection:
+        """Open a raw SQLite connection. Callers that hold it beyond a ``with``
+        block (snapshot pins, sink writer transactions) must close it themselves.
+        """
         conn = sqlite3.connect(self.db_path, timeout=timeout, check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.row_factory = sqlite3.Row
         return conn
 
+    def _connect(self, timeout: float = 30.0) -> "_ClosingConnection":
+        """A connection that closes when used as ``with self._connect()``.
+
+        ``with sqlite3.Connection`` commits/rollbacks but does NOT close, so the
+        plain form used to leak a handle per call until cyclic GC reclaimed it.
+        Attribute access still proxies to the underlying connection so the few
+        call sites that do ``conn = self._connect()`` keep working.
+        """
+        return _ClosingConnection(self._open_connection(timeout=timeout))
+
     def _ensure_schema(self) -> None:
-        """Create or open the schema; replace a populated DB from an older build.
+        """Create or open the schema.
 
-        The store has never shipped in a release, so a populated DB whose
-        ``user_version`` is below ``SCHEMA_VERSION`` can only be a developer's
-        local DB from an earlier revision. There is no migration, and refusing
-        it only degrades everything that records into it, so it is deleted --
-        with its ``-wal`` and ``-shm`` -- and a fresh store is created in its
-        place. A DB from a NEWER build is refused and never touched. When the
-        old files cannot be deleted, the older DB is refused as before.
+        A missing or empty file is initialised. A populated DB from an older
+        build raises `OlderObservabilityStore` and one from a newer build
+        raises `IncompatibleObservabilityDB`; neither is touched.
         """
-        try:
-            self._ensure_schema_once()
-            return
-        except _OlderPopulatedStore as older:
-            found = older.version
-        if not self._delete_older_store(found):
-            raise IncompatibleObservabilityDB(
-                f"{self.db_path} has schema v{found}; this build requires "
-                f"v{SCHEMA_VERSION}, carries no migration, and could not delete "
-                "the older store to replace it. Move or delete the file and its "
-                "-wal/-shm files to start a new store, or open it read-only with "
-                f"a v{found} build."
-            )
-        logger.warning(
-            f"Replaced observability store {self.db_path}: it had schema "
-            f"v{found} from an older build and this build requires "
-            f"v{SCHEMA_VERSION}, with no migration; its records were deleted."
-        )
-        try:
-            self._ensure_schema_once()
-        except _OlderPopulatedStore as again:
-            raise IncompatibleObservabilityDB(
-                f"{self.db_path} still has schema v{again.version} after it was "
-                f"deleted for replacement; this build requires v{SCHEMA_VERSION}."
-            ) from None
-
-    def _delete_older_store(self, found: int) -> bool:
-        """Delete an older-build DB so it can be recreated; ``False`` if it cannot be.
-
-        The write-ahead log and shared-memory files go first and the main file
-        last: a fresh DB must never meet a stale ``-wal`` from the old one, so
-        if either companion cannot be removed the main file is left alone and
-        the caller refuses the store instead.
-        """
-        for path in (f"{self.db_path}-wal", f"{self.db_path}-shm", self.db_path):
-            try:
-                os.remove(path)
-            except FileNotFoundError:
-                continue
-            except OSError as error:
-                logger.warning(
-                    f"Could not delete {path} to replace an observability store "
-                    f"with schema v{found}: {error}"
-                )
-                return False
-        return True
-
-    def _ensure_schema_once(self) -> None:
         parent = os.path.dirname(self.db_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -1791,30 +1840,25 @@ class ObservabilityStore:
                 conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
 
             # The version is read before the journal mode is touched, so a DB
-            # this build will refuse or replace is not switched to WAL first.
+            # this build will refuse is not switched to WAL first.
             found = conn.execute("PRAGMA user_version").fetchone()[0]
             if found > SCHEMA_VERSION:
                 raise IncompatibleObservabilityDB(
                     f"{self.db_path} has schema v{found}; this build reads up to "
                     f"v{SCHEMA_VERSION}. Refusing to open a newer DB [R11]."
                 )
-            if found < SCHEMA_VERSION:
-                # A populated store from an older build is not migrated:
-                # every column exists only in the CREATE TABLE literal (fresh
-                # schema, fix-49m.3). `_ensure_schema` replaces it, after this
-                # connection is closed. A fresh file (no tables yet) proceeds.
-                has_tables = (
-                    conn.execute(
-                        "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1"
-                    ).fetchone()
-                    is not None
-                )
-                if has_tables:
-                    raise _OlderPopulatedStore(found)
+            # A populated store from an older build is not migrated: every
+            # column exists only in the CREATE TABLE literal (fresh schema,
+            # fix-49m.3). A fresh file (no tables yet) proceeds.
+            if found < SCHEMA_VERSION and conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1"
+            ).fetchone() is not None:
+                raise OlderObservabilityStore(self.db_path, found)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             for statement in _SCHEMA_STATEMENTS:
                 conn.execute(statement)
+            control.ensure(conn)
             if found < SCHEMA_VERSION:
                 # Reached only on a fresh (table-less) file: stamp it.
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -1878,7 +1922,6 @@ class ObservabilityStore:
                     os.chmod(companion, 0o600)
         except OSError:
             pass
-        _remove_legacy_offload_sidecar(self.db_path)
 
     @staticmethod
     def _merge_schema_features(
@@ -1910,8 +1953,8 @@ class ObservabilityStore:
         The `schema_features` row is the only source. There is no
         column-sniffing fallback any more, and re-adding one would be a bug:
         under the fresh-schema rule every DB that reaches this
-        method is at `SCHEMA_VERSION` — `ObservabilityStore` replaces an older
-        DB and refuses a newer one, `ReadOnlyObservabilityStore` refuses both —
+        method is at `SCHEMA_VERSION` — `ObservabilityStore` and
+        `ReadOnlyObservabilityStore` both refuse an older or a newer DB —
         and such
         a DB was created from the literal `_SCHEMA_STATEMENTS` with
         `_merge_schema_features` writing its markers in the same transaction. So the sniff could only ever re-derive what the row
@@ -1923,7 +1966,7 @@ class ObservabilityStore:
         """
         conn = None
         try:
-            conn = self._connect(timeout=5.0)
+            conn = self._open_connection(timeout=5.0)
             row = conn.execute(
                 "SELECT value FROM diagnostics WHERE key='schema_features'"
             ).fetchone()
@@ -2335,7 +2378,17 @@ class ObservabilityStore:
             ):
                 continue
             attributes = redactor.redact(
-                json.dumps(_sanitize_json_value(span.attributes), ensure_ascii=False)
+                json.dumps(
+                    _sanitize_json_value(
+                        _policed_span_attributes(
+                            span.name,
+                            span.attributes,
+                            redactor=redactor,
+                            policy=policy,
+                        )
+                    ),
+                    ensure_ascii=False,
+                )
             )
             span_name = _protected_text(
                 span.name,
@@ -2669,34 +2722,35 @@ class ObservabilityStore:
     def get_memory_window(
         self, channel_id: str, conversation_id: int, max_turns: int
     ) -> list[dict[str, Any]]:
-        """The newest ``max_turns`` usable turns as canonical 3-key memory
-        dicts (oldest-first), feedback joined in — the read that
-        replaces the legacy ``get_conversation_window``."""
+        """The newest ``max_turns`` usable turns as canonical memory dicts
+        (oldest-first) — the gate-1 [R3] read that replaces the legacy
+        ``get_conversation_window``.
+
+        Two keys, not three. The third used to be `feedback`, joined from the
+        agent-memory `feedback` table so that whatever a caller had posted to
+        `/post_feedback` was replayed into the agent's `dspy.History` on the
+        next turn. fix-9eg.16 removed that table and that injection: it was an
+        unreviewed free-text channel straight into the model's context, and
+        the review notes the Observability loop actually uses are a different
+        thing entirely (`human_feedback`, append-only, categorized, never fed
+        back into a prompt by this build).
+        """
         with self._connect() as conn:
             rows = conn.execute(
-                f"""SELECT t.conversation_summary, t.conversation_traces, f.feedback_json
-                    FROM turns t LEFT JOIN feedback f ON f.turn_key = t.turn_key
+                f"""SELECT t.conversation_summary, t.conversation_traces
+                    FROM turns t
                     WHERE t.channel_id=? AND t.conversation_id=?
                       AND {self._USABLE_TURN_FILTER}
                     ORDER BY t.ordinal DESC, t.turn_key DESC LIMIT ?""",
                 (channel_id, conversation_id, max_turns),
             ).fetchall()
-        window = []
-        for row in reversed(rows):
-            feedback = None
-            if row["feedback_json"]:
-                try:
-                    feedback = json.loads(row["feedback_json"])
-                except ValueError:
-                    feedback = row["feedback_json"]
-            window.append(
-                {
-                    "conversation summary": row["conversation_summary"],
-                    "conversation_traces": row["conversation_traces"],
-                    "feedback": feedback,
-                }
-            )
-        return window
+        return [
+            {
+                "conversation summary": row["conversation_summary"],
+                "conversation_traces": row["conversation_traces"],
+            }
+            for row in reversed(rows)
+        ]
 
     def conversation_summaries(
         self, channel_id: str, conversation_id: int
@@ -2779,7 +2833,7 @@ class ObservabilityStore:
 
     def dump_all_conversations(self, channel_id: str) -> list[dict[str, Any]]:
         """Admin-dump reconstruction of the hydrated legacy shape (ruling C7):
-        one object per conversation with 3-key turns (+feedback) inlined."""
+        one object per conversation with its memory turns inlined."""
         dumped = []
         for conv in self.list_conversation_summaries(channel_id, limit=1_000_000):
             conv_id = conv["conversation_id"]
@@ -2796,72 +2850,12 @@ class ObservabilityStore:
             )
         return dumped
 
-    def upsert_feedback(self, turn_key: str, feedback_json: str) -> None:
-        """Upsert a turn's feedback. Credential-scrubbed, NOT policy-withheld.
-
-        The one column where the two protection layers disagree.
-        The scrub applies for the same reason it applies everywhere: it is
-        unconditional, and `nl_feedback` is free text a user typed, which is a
-        place a pasted token lands. Scrubbing serialized JSON cannot corrupt it —
-        every credential pattern is confined to characters that cannot appear
-        unescaped inside a JSON string, so a replacement can never cross a
-        delimiter (pinned by test).
-        WHY NO CAPTURE POLICY: this column is read by `get_memory_window`,
-        which passes the parsed value straight into `dspy.History` through
-        `conversation_history_io.restore_history_from_turns` — it is the agent's
-        memory of being corrected, not evidence about the agent. Under `evidence`
-        a withheld value would still parse, so the agent would silently receive a
-        badge dict where its feedback used to be and behave differently. That is a
-        behavior change, not a reduction in exposure, and this layer does not make
-        those; it is the same call `_POLICY_EXEMPT_TURN_COLUMNS` records for
-        `conversation_summary` and `conversation_traces`, and it belongs with
-        conversation-memory redaction generally, which has to leave memory usable.
-        """
-        feedback_json = self._store_redactor().redact(feedback_json)
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
-                """INSERT INTO feedback (turn_key, feedback_json, updated_at)
-                   VALUES (?, ?, ?)
-                   ON CONFLICT(turn_key) DO UPDATE SET
-                     feedback_json=excluded.feedback_json, updated_at=excluded.updated_at""",
-                (turn_key, feedback_json, _utcnow_iso()),
-            )
-            conn.commit()
-
-    def get_feedback(self, turn_key: str) -> Optional[dict[str, Any]]:
-        """Return the stored agent-memory feedback for one turn, unchanged.
-
-        This deliberately queries ``feedback`` directly. Feedback remains
-        readable when its turn has no conversation summary and is therefore
-        excluded from the conversation-memory window.
-        """
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT turn_key, feedback_json, updated_at "
-                "FROM feedback WHERE turn_key=?",
-                (turn_key,),
-            ).fetchone()
-        return dict(row) if row is not None else None
-
-    def list_feedback(
-        self, channel_id: Optional[str] = None, limit: int = 100
-    ) -> list[dict[str, Any]]:
-        """List stored agent-memory feedback without interpreting verdicts."""
-        if limit < 0:
-            raise ValueError("limit must be non-negative")
-        query = (
-            "SELECT f.turn_key, f.feedback_json, f.updated_at, t.channel_id "
-            "FROM feedback f LEFT JOIN turns t ON t.turn_key=f.turn_key"
-        )
-        params: list[Any] = []
-        if channel_id is not None:
-            query += " WHERE t.channel_id=?"
-            params.append(channel_id)
-        query += " ORDER BY f.updated_at DESC, f.turn_key DESC LIMIT ?"
-        params.append(limit)
-        with self._connect() as conn:
-            return [dict(row) for row in conn.execute(query, params).fetchall()]
+    # `upsert_feedback`, `get_feedback` and `list_feedback` were the whole of
+    # the agent-memory feedback table (fix-9eg.16). They were an upsert of one
+    # mutable row per turn, read straight back into `dspy.History`; the review
+    # loop uses `add_human_feedback` / `list_human_feedback` instead, which
+    # append, carry provenance and a category, and are never injected into a
+    # prompt. There is no dual read and no compatibility shim.
 
     def record_train_run(
         self,
@@ -2972,9 +2966,13 @@ class ObservabilityStore:
         Read-modify-write, so it must run inside the caller's `BEGIN IMMEDIATE`:
         every caller here already holds one, and the write lock is what keeps two
         writers from interleaving a read and a write of the same row.
+
+        The row is the incoming writer's own (`writer_health/<incarnation id>`),
+        so the floor holds within one incarnation and no writer touches another's.
         """
+        key = WRITER_HEALTH_KEY_PREFIX + str(writer_incarnation_id(incoming))
         row = conn.execute(
-            "SELECT value FROM diagnostics WHERE key='writer_health'"
+            "SELECT value FROM diagnostics WHERE key=?", (key,)
         ).fetchone()
         stored: Optional[dict[str, Any]] = None
         if row is not None:
@@ -2983,46 +2981,109 @@ class ObservabilityStore:
             except Exception:
                 stored = None
         merged = merge_writer_health(stored, incoming)
-        self.set_diagnostic(conn, "writer_health", merged)
+        self.set_diagnostic(conn, key, merged)
         return merged
 
     # -- reads (GET /turns, run_chatbot) ---------------------------------
 
     def list_human_feedback(self, turn_key: str) -> list[dict[str, Any]]:
-        """Human annotations, separate from agent-memory feedback in this DB."""
+        """Every recorded review note on one turn, oldest first."""
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM human_feedback WHERE turn_key=? ORDER BY feedback_id",
+                "SELECT * FROM human_feedback WHERE turn_key=? "
+                "ORDER BY feedback_id",
                 (turn_key,),
             ).fetchall()
-        return [_human_feedback_row(row) for row in rows]
+        return [human_feedback_row(row) for row in rows]
+
+    def list_task_feedback(
+        self, *, experiment_id: str, task_id: str
+    ) -> list[dict[str, Any]]:
+        """Every review note this store holds about one task.
+
+        "About one task" is deliberately two things ORed together, because a
+        comparison comment is about two executions and must be findable from
+        either of them:
+
+        - notes anchored to a turn the store records under this
+          experiment/task, across every attempt, turn and component; and
+        - notes whose FROZEN paired anchor names this experiment/task, which
+          is how the winner-versus-candidate remark written on the winner's
+          step shows up on the candidate's task page.
+
+        A row satisfying both appears once — it is one row. No component,
+        category or attempt filter is applied here: filtering is the caller's
+        choice and a default would quietly answer a narrower question. The
+        attempt/turn columns come from the turn row, so a reader can group by
+        attempt without the anchor having to restate it.
+
+        Ordered by `created_at` then `feedback_id` so that paging is stable.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT hf.*, t.experiment_id AS turn_experiment_id, "
+                "t.task_id AS turn_task_id, t.attempt AS attempt, "
+                "t.channel_id AS channel_id "
+                "FROM human_feedback hf JOIN turns t ON t.turn_key=hf.turn_key "
+                "WHERE (t.experiment_id=? AND t.task_id=?) "
+                "   OR (hf.pair_experiment_id=? AND hf.pair_task_id=?) "
+                "ORDER BY hf.created_at, hf.feedback_id",
+                (experiment_id, task_id, experiment_id, task_id),
+            ).fetchall()
+        return [human_feedback_row(row) for row in rows]
 
     def add_human_feedback(self, turn_key: str, *, target_kind: str,
                            span_ids: list[str], target_label: str,
-                           provenance: str, comment: str | None = None,
-                           went_wrong: str = "", worked: str = "",
-                           should_change: str = "") -> None:
-        """Append feedback after validating its provenance and evidence anchor."""
+                           provenance: str, comment: str,
+                           category: str, subcategory: str,
+                           anchors: Any = None) -> dict[str, Any]:
+        """Append one categorized review note against recorded evidence.
+
+        The same call for a person typing in the UI and for a coding agent
+        posting over HTTP: `provenance` says which, and nothing else differs.
+        `category`/`subcategory` are the owner-confirmed enums and are
+        required — this build records no new uncategorized comments, and it
+        does not read the comment's text to fill them in.
+
+        `anchors` is a validated `feedback.FeedbackAnchors`. It is validated
+        by `feedback.record_feedback`, which can see the OTHER store a
+        comparison's second side lives in; this method re-checks everything
+        that is answerable from here (the turn, its spans, the vocabularies)
+        so that a direct caller cannot skip those. When it is omitted, a
+        primary-only anchor is built from this store's identity and the turn's
+        own recorded scope.
+
+        Returns the stored row, so a caller does not have to re-read to learn
+        the identity and timestamp it was given.
+        """
+        from fastworkflow.observability import feedback as feedback_module
+
         if not isinstance(turn_key, str) or not turn_key:
             raise ValueError("turn_key is required")
-        if target_kind not in ("turn", "phase", "step", "span"):
-            raise ValueError("invalid feedback target kind")
-        if (not isinstance(span_ids, list) or len(span_ids) > 10000
-                or any(not isinstance(v, str) or not v for v in span_ids)):
-            raise ValueError("span_ids must be a list of recorded span IDs")
-        ids = sorted(set(span_ids))
-        if (target_kind == "turn" and ids) or (target_kind != "turn" and not ids):
-            raise ValueError("component feedback requires spans; turn feedback has none")
-        comment = compose_human_feedback_comment(
-            went_wrong=went_wrong, worked=worked, should_change=should_change,
+        note = feedback_module.normalize_note(
+            target_kind=target_kind,
+            span_ids=span_ids,
+            target_label=target_label,
+            provenance=provenance,
             comment=comment,
+            category=category,
+            subcategory=subcategory,
         )
-        if not isinstance(target_label, str) or not target_label or len(target_label) > 1000:
-            raise ValueError("target_label is required (at most 1000 characters)")
-        if provenance not in FEEDBACK_PROVENANCES:
-            raise ValueError(
-                "provenance must be human, coding_agent, or distillation_agent"
+        ids = note["span_ids"]
+        comment = note["comment"]
+        category, subcategory = note["category"], note["subcategory"]
+        if anchors is None:
+            anchors = self._own_anchor(
+                turn_key,
+                target_kind=target_kind,
+                span_ids=ids,
+                target_label=target_label,
             )
+        if anchors.primary.turn_key != turn_key:
+            raise ValueError("the primary anchor must name the turn being annotated")
+        paired = anchors.paired
+        feedback_uid = f"fb-{uuid.uuid4().hex}"
+        created_at = _utcnow_iso()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             if conn.execute("SELECT 1 FROM turns WHERE turn_key=?", (turn_key,)).fetchone() is None:
@@ -3033,11 +3094,58 @@ class ObservabilityStore:
                 raise ValueError("feedback spans must belong to the selected turn")
             conn.execute(
                 "INSERT INTO human_feedback "
-                "(turn_key,target_kind,span_ids_json,target_label,comment,provenance,created_at) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (turn_key, target_kind, json.dumps(ids), self._scrub(target_label),
-                 self._scrub(comment), provenance, _utcnow_iso()),
+                "(feedback_uid,turn_key,target_kind,span_ids_json,target_label,"
+                "comment,provenance,category,subcategory,anchors_json,"
+                "pair_experiment_id,pair_task_id,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (feedback_uid, turn_key, target_kind, json.dumps(ids),
+                 self._scrub(target_label), self._scrub(comment), provenance,
+                 category, subcategory,
+                 # Scrubbed through the same redactor as the columns: the
+                 # anchor repeats `target_label` and `ref.label`, and storing
+                 # those verbatim put a credential back into the row the
+                 # column scrub had just cleaned. Identity keys are untouched.
+                 json.dumps(
+                     feedback_module.scrubbed_anchor_dict(anchors, self._scrub),
+                     ensure_ascii=False,
+                 ),
+                 paired.ref.experiment_id if paired else None,
+                 paired.ref.task_id if paired else None,
+                 created_at),
             )
+            conn.commit()
+        stored = [
+            row for row in self.list_human_feedback(turn_key)
+            if row.get("feedback_uid") == feedback_uid
+        ]
+        return stored[0] if stored else {}
+
+    def _own_anchor(self, turn_key: str, *, target_kind: str,
+                    span_ids: list[str], target_label: str) -> Any:
+        """A primary-only anchor from this store's identity and the turn row.
+
+        The scope is COPIED from the recorded turn rather than asked for, so
+        the default path cannot record a claim the evidence does not support.
+        """
+        from fastworkflow.observability.comparison import ExecutionRef
+        from fastworkflow.observability import feedback as feedback_module
+
+        row = self.get_turn(turn_key) or {}
+        ref = ExecutionRef(
+            store_id=self.store_identity(),
+            turn_keys=(turn_key,),
+            experiment_id=row.get("experiment_id"),
+            task_id=row.get("task_id"),
+            attempt=row.get("attempt"),
+        )
+        return feedback_module.FeedbackAnchors(
+            primary=feedback_module.FeedbackTarget(
+                ref=ref,
+                target_kind=target_kind,
+                span_ids=tuple(span_ids),
+                target_label=target_label,
+            )
+        )
 
     def get_turn(self, turn_key: str) -> Optional[dict[str, Any]]:
         with self._connect() as conn:
@@ -3088,6 +3196,63 @@ class ObservabilityStore:
                     spans_by_turn[row["trace_id"]].append(dict(row))
         return spans_by_turn
 
+    def iter_spans_for_turn_batches(
+        self,
+        turn_keys: Iterable[str],
+        *,
+        batch_size: int = 15,
+    ) -> Iterable[tuple[list[str], dict[str, list[dict[str, Any]]]]]:
+        """Yield span rows in small turn-key batches on one shared connection.
+
+        Same row shape as `spans_for_turns`, but never materialises more than
+        ``batch_size`` turns' spans at once -- needed when a complete scan
+        would otherwise hold hundreds of MB of attribute JSON.
+        """
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
+        keys = list(dict.fromkeys(key for key in turn_keys if key))
+        if not keys:
+            return
+        with self._connect() as conn:
+            for batch in _chunked(keys, batch_size):
+                spans_by_turn: dict[str, list[dict[str, Any]]] = {
+                    key: [] for key in batch
+                }
+                placeholders = ",".join("?" * len(batch))
+                rows = conn.execute(
+                    f"SELECT * FROM spans WHERE trace_id IN ({placeholders}) "
+                    "ORDER BY trace_id, start_ns",
+                    batch,
+                ).fetchall()
+                for row in rows:
+                    spans_by_turn[row["trace_id"]].append(dict(row))
+                yield batch, spans_by_turn
+
+    def span_stats_for_turns(
+        self, turn_keys: Iterable[str]
+    ) -> dict[str, tuple[int, int]]:
+        """Cheap freshness fingerprint per turn: ``{turn_key: (count, max_rowid)}``.
+
+        Used by the derived-turn cache to decide whether a cached markers/stamps
+        entry is still valid without reading span attribute JSON. Every requested
+        key is present; turns with no spans map to ``(0, 0)``.
+        """
+        keys = list(dict.fromkeys(key for key in turn_keys if key))
+        stats: dict[str, tuple[int, int]] = {key: (0, 0) for key in keys}
+        if not keys:
+            return stats
+        with self._connect() as conn:
+            for chunk in _chunked(keys):
+                placeholders = ",".join("?" * len(chunk))
+                rows = conn.execute(
+                    f"SELECT trace_id, COUNT(*), MAX(rowid) FROM spans "
+                    f"WHERE trace_id IN ({placeholders}) GROUP BY trace_id",
+                    chunk,
+                ).fetchall()
+                for trace_id, count, max_rowid in rows:
+                    stats[str(trace_id)] = (int(count), int(max_rowid or 0))
+        return stats
+
     def list_conversations(
         self, channel_id: Optional[str] = None, limit: int = 100, offset: int = 0
     ) -> list[dict[str, Any]]:
@@ -3114,14 +3279,29 @@ class ObservabilityStore:
         attempt: Optional[int] = None,
         limit: int = 100,
         offset: int = 0,
+        before_turn_key: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """Turn rows, newest first, without record_json (fetch one turn for that).
 
         The experiment filters extend this route rather than getting a parallel
         implementation (`[XR9]`); they ride `idx_turns_experiment`.
+
+        `before_turn_key` is a KEYSET bound: rows strictly after it in this
+        route's own `turn_key DESC` order. Paging by `offset` alone is only
+        stable against a store nobody is writing to -- a turn recorded between
+        two pages shifts every later offset by one, so a live scan can repeat a
+        row or skip one entirely, and a count taken across such a scan is wrong
+        in a way nothing downstream can detect. A caller that resumes from the
+        last key it saw is immune to that, and is also able to walk a dataset
+        larger than any one bounded scan (`observability/diagnosis.py`, which is
+        why this exists). Combining it with `offset` is allowed and means what
+        it says: skip that many rows of the remainder.
         """
         clauses: list[str] = []
         params: list[Any] = []
+        if before_turn_key is not None:
+            clauses.append("turn_key<?")
+            params.append(before_turn_key)
         if channel_id is not None:
             clauses.append("channel_id=?")
             params.append(channel_id)
@@ -3204,16 +3384,48 @@ class ObservabilityStore:
             ).fetchall()
             return [dict(r) for r in rows]
 
-    def writer_health(self) -> Optional[dict[str, Any]]:
+    def get_train_run(self, run_id: str) -> Optional[dict[str, Any]]:
+        """One training run by its primary key, however old it is.
+
+        Separate from `list_train_runs` rather than derived from it, because
+        the list is a bounded newest-first window and a run older than that
+        window is still a run that exists. Reading a detail out of the list
+        would make "was this training run recorded?" depend on how many have
+        been recorded since, which is a 404 about the reader's paging rather
+        than about the evidence (`fix-9eg.2`).
+        """
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT value, updated_at FROM diagnostics WHERE key='writer_health'"
+                "SELECT * FROM train_runs WHERE run_id=?", (run_id,)
             ).fetchone()
-            if row is None:
-                return None
-            health = json.loads(row["value"])
-            health["updated_at"] = row["updated_at"]
-            return health
+            return dict(row) if row is not None else None
+
+    def writer_health_rows(self) -> list[dict[str, Any]]:
+        """Every writer incarnation's health row, least recently updated first."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT value, updated_at FROM diagnostics WHERE key GLOB ? "
+                "ORDER BY updated_at",
+                (WRITER_HEALTH_KEY_PREFIX + "*",),
+            ).fetchall()
+        return [
+            {**json.loads(row["value"]), "updated_at": row["updated_at"]}
+            for row in rows
+        ]
+
+    def writer_health(
+        self, incarnation_id: Optional[str] = None
+    ) -> Optional[dict[str, Any]]:
+        """One incarnation's row, or with no id every row folded into one floor.
+
+        The fold runs `merge_writer_health` in update order, so a store with one
+        writer at a time reads exactly as the single row it used to keep.
+        """
+        health: Optional[dict[str, Any]] = None
+        for row in self.writer_health_rows():
+            if incarnation_id is None or writer_incarnation_id(row) == incarnation_id:
+                health = {**merge_writer_health(health, row), "updated_at": row["updated_at"]}
+        return health
 
     # -- the experiment container (`fix-bn1`, experiment_container_design.md) --
     #
@@ -3326,8 +3538,14 @@ class ObservabilityStore:
         benchmark_id: Optional[str] = None,
         benchmark_version: Optional[str] = None,
         benchmark_digest_sha256: Optional[str] = None,
+        initialize_winner: bool = True,
+        declarations: Optional[Iterable[tuple[str, int, str]]] = None,
     ) -> None:
         """Pre-register an experiment. Written BEFORE any task runs.
+
+        `declarations`, when given, is the exact attempt plan
+        (`declare_experiment_attempts`), written in the same transaction so a
+        refused plan leaves the experiments row as it was (`fix-lr1z`).
 
         `declared_tasks` and `declared_attempts` are required and positive: they
         are the denominator every score is computed against (`[XR14]`), and a
@@ -3338,6 +3556,15 @@ class ObservabilityStore:
         `DO UPDATE` set deliberately excludes `status`, `invalid_reason` and
         `invalid_detail`: a resume must not be able to launder an `invalid`
         verdict back to `running`.
+
+        `initialize_winner` (`fix-9eg.17.1`) records the experiment in its
+        comparison group in the same transaction, where the FIRST experiment
+        of a group becomes its current winner automatically. That write lands
+        in this DB's control tables (`control.py`), which sealed copies never
+        carry: evidence is what happened, a winner is a judgement about it, and
+        sealed evidence must stay byte-identical while judgements about it keep
+        being made. Registration is idempotent, so the resume path above
+        re-registers without disturbing a winner that has since moved.
         """
         if not experiment_id:
             raise ValueError("experiment_id is required")
@@ -3468,6 +3695,18 @@ class ObservabilityStore:
                     _utcnow_iso(),
                 ),
             )
+            if declarations is not None:
+                self._declare_attempts_in_txn(conn, experiment_id, declarations)
+            if initialize_winner:
+                # Inline: `selection` imports this module.
+                from fastworkflow.observability import selection as selection_module
+
+                created = conn.execute(
+                    "SELECT * FROM experiments WHERE experiment_id=?", (experiment_id,)
+                ).fetchone()
+                selection_module.SelectionControlStore(self).join_in_txn(
+                    conn, experiment_id, dict(created)
+                )
             conn.commit()
 
     def declare_experiment_attempts(
@@ -3476,6 +3715,19 @@ class ObservabilityStore:
         declarations: Iterable[tuple[str, int, str]],
     ) -> None:
         """Persist one immutable, exact attempt plan before execution starts."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._declare_attempts_in_txn(conn, experiment_id, declarations)
+            conn.commit()
+
+    def _declare_attempts_in_txn(
+        self,
+        conn: sqlite3.Connection,
+        experiment_id: str,
+        declarations: Iterable[tuple[str, int, str]],
+    ) -> None:
+        """The plan write, inside the caller's `BEGIN IMMEDIATE`; a refusal
+        raises and the caller's connection rolls the whole transaction back."""
         normalized = {
             (self._scrub(task_id), int(native_attempt), self._scrub(source_key))
             for task_id, native_attempt, source_key in declarations
@@ -3498,73 +3750,65 @@ class ObservabilityStore:
             raise ValueError(
                 "each task_id/native_attempt pair must have exactly one source_key"
             )
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            experiment = conn.execute(
-                """SELECT status, declared_tasks, declared_attempts
-                     FROM experiments WHERE experiment_id=?""",
-                (experiment_id,),
-            ).fetchone()
-            if experiment is None:
-                conn.rollback()
-                raise ExperimentNotFound(experiment_id)
-            if experiment["status"] != "running":
-                conn.rollback()
-                raise ExperimentIsClosed(experiment_id, experiment["status"])
-            if conn.execute(
-                "SELECT 1 FROM experiment_attempts WHERE experiment_id=? LIMIT 1",
-                (experiment_id,),
-            ).fetchone():
-                conn.rollback()
-                raise ExperimentDeclarationConflict(
-                    f"experiment {experiment_id!r} has already started"
-                )
-            expected_rows = (
-                int(experiment["declared_tasks"])
-                * int(experiment["declared_attempts"])
+        experiment = conn.execute(
+            """SELECT status, declared_tasks, declared_attempts
+                 FROM experiments WHERE experiment_id=?""",
+            (experiment_id,),
+        ).fetchone()
+        if experiment is None:
+            raise ExperimentNotFound(experiment_id)
+        if experiment["status"] != "running":
+            raise ExperimentIsClosed(experiment_id, experiment["status"])
+        if conn.execute(
+            "SELECT 1 FROM experiment_attempts WHERE experiment_id=? LIMIT 1",
+            (experiment_id,),
+        ).fetchone():
+            raise ExperimentDeclarationConflict(
+                f"experiment {experiment_id!r} has already started"
             )
-            task_counts: dict[str, int] = {}
-            for task_id, _, _ in normalized:
-                task_counts[task_id] = task_counts.get(task_id, 0) + 1
-            if (
-                len(normalized) != expected_rows
-                or len(task_counts) != int(experiment["declared_tasks"])
-                or set(task_counts.values())
-                != {int(experiment["declared_attempts"])}
-            ):
-                conn.rollback()
-                raise ValueError(
-                    "exact declarations do not match the declared task/attempt "
-                    "display summaries"
-                )
-            stored = {
-                (row["task_id"], int(row["native_attempt"]), row["source_key"])
-                for row in conn.execute(
-                    """SELECT task_id, native_attempt, source_key
-                         FROM experiment_attempt_declarations
-                        WHERE experiment_id=?""",
-                    (experiment_id,),
-                ).fetchall()
-            }
-            if stored:
-                conn.rollback()
-                if stored == normalized:
-                    return
-                raise ExperimentDeclarationConflict(
-                    f"experiment {experiment_id!r} already has a different "
-                    "immutable attempt declaration"
-                )
-            now = _utcnow_iso()
-            conn.executemany(
-                """INSERT INTO experiment_attempt_declarations
-                   (experiment_id, task_id, native_attempt, source_key, created_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                [
-                    (experiment_id, task_id, native_attempt, source_key, now)
-                    for task_id, native_attempt, source_key in sorted(normalized)
-                ],
+        expected_rows = (
+            int(experiment["declared_tasks"])
+            * int(experiment["declared_attempts"])
+        )
+        task_counts: dict[str, int] = {}
+        for task_id, _, _ in normalized:
+            task_counts[task_id] = task_counts.get(task_id, 0) + 1
+        if (
+            len(normalized) != expected_rows
+            or len(task_counts) != int(experiment["declared_tasks"])
+            or set(task_counts.values())
+            != {int(experiment["declared_attempts"])}
+        ):
+            raise ValueError(
+                "exact declarations do not match the declared task/attempt "
+                "display summaries"
             )
-            conn.commit()
+        stored = {
+            (row["task_id"], int(row["native_attempt"]), row["source_key"])
+            for row in conn.execute(
+                """SELECT task_id, native_attempt, source_key
+                     FROM experiment_attempt_declarations
+                    WHERE experiment_id=?""",
+                (experiment_id,),
+            ).fetchall()
+        }
+        if stored:
+            if stored == normalized:
+                return
+            raise ExperimentDeclarationConflict(
+                f"experiment {experiment_id!r} already has a different "
+                "immutable attempt declaration"
+            )
+        now = _utcnow_iso()
+        conn.executemany(
+            """INSERT INTO experiment_attempt_declarations
+               (experiment_id, task_id, native_attempt, source_key, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (experiment_id, task_id, native_attempt, source_key, now)
+                for task_id, native_attempt, source_key in sorted(normalized)
+            ],
+        )
 
     def register_attempt(
         self,
@@ -4105,6 +4349,8 @@ class ObservabilityStore:
         *,
         sha256: str,
         store_identity: str,
+        path: str,
+        size_bytes: int,
     ) -> str:
         """Attach the sole sealed-evidence handle to an already-promoted run.
 
@@ -4114,6 +4360,10 @@ class ObservabilityStore:
         its own digest, which is why the digest lives on the source row and in
         the manifest while the STATUS lives in the archive too
         (`begin_workspace_seal`).
+
+        The same transaction records the archive in `sealed_archives`, the
+        only writer of that table, which is how `SelectionControlStore.store_for`
+        finds a sealed member without trusting any caller-supplied path.
         """
         if not re.fullmatch(r"[0-9a-f]{64}", sha256 or ""):
             raise ValueError("sha256 must be a lowercase 64-character digest")
@@ -4166,8 +4416,39 @@ class ObservabilityStore:
                     WHERE experiment_id=?""",
                 (sha256, store_identity, _utcnow_iso(), status, experiment_id),
             )
+            control.ensure(conn)
+            conn.execute(
+                """INSERT OR REPLACE INTO sealed_archives
+                   (experiment_id, archive_sha256, path, size_bytes, sealed_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (experiment_id, sha256, os.path.abspath(path), int(size_bytes),
+                 _utcnow_iso()),
+            )
             conn.commit()
         return str(status)
+
+    def release_experiment_evidence(
+        self, experiment_id: str, actor: str, reason: Optional[str] = None
+    ) -> None:
+        """Let `prune` reach an unsealed experiment's evidence (design §7).
+
+        Sealing releases on its own; this is the explicit release for evidence
+        that will never be sealed. Nothing calls it automatically -- not for an
+        invalid experiment, not for an old one. The first release is kept.
+        """
+        if not actor:
+            raise ValueError("actor is required")
+        with control.write(self) as conn:
+            known = conn.execute(
+                "SELECT 1 FROM experiments WHERE experiment_id=?", (experiment_id,)
+            ).fetchone()
+            if known is None:
+                raise ExperimentNotFound(experiment_id)
+            conn.execute(
+                """INSERT OR IGNORE INTO evidence_releases
+                   (experiment_id, released_at, actor, reason) VALUES (?, ?, ?, ?)""",
+                (experiment_id, _utcnow_iso(), actor, reason),
+            )
 
     def start_attempt(
         self,
@@ -4531,9 +4812,6 @@ class ObservabilityStore:
             if turn_keys:
                 for chunk in _chunked(turn_keys):
                     marks = ", ".join("?" for _ in chunk)
-                    conn.execute(
-                        f"DELETE FROM feedback WHERE turn_key IN ({marks})", chunk
-                    )
                     conn.execute(
                         f"DELETE FROM artifacts WHERE turn_key IN ({marks})", chunk
                     )
@@ -5240,9 +5518,17 @@ class ObservabilityStore:
             return None
 
     def archive_to(
-        self, destination: str, *, quiesce_live_writer: bool = True
+        self,
+        destination: str,
+        *,
+        experiment_id: Optional[str] = None,
+        quiesce_live_writer: bool = True,
     ) -> dict[str, Any]:
         """Seal a source-read-only snapshot, including committed WAL content.
+
+        With `experiment_id`, only that experiment's rows are sealed, copied in
+        one read transaction (`_seal_experiment_to`); other writers keep writing
+        and nothing below about the live writer applies.
 
         The source is opened with ``mode=ro`` and never through ``_connect``,
         whose journal-mode pragma is intentionally write-capable. SQLite's
@@ -5269,16 +5555,21 @@ class ObservabilityStore:
         provably of a stopped store or it is not taken.
 
         `quiesce_live_writer=False` restores the unconditional refusal for a
-        caller whose contract is "the writer must already be gone" — the seal
-        path checks that itself, before it promotes the experiment's status.
+        caller whose contract is "the writer must already be gone".
+
+        WHAT THIS IS NOT. Reaching this method still means constructing a store
+        on the source, and construction is a writer: `_connect`'s journal-mode
+        pragma is write-capable, so a database carrying a pending WAL is
+        checkpointed — main rewritten, `-wal`/`-shm` removed — before the
+        `before` snapshot below is taken. The unchanged-bytes claim is
+        therefore about the source as it stood AFTER this store opened it.
+        Archiving evidence this process does not own needs a baseline from
+        before any open: `fastworkflow.observability.archive`.
         """
-        target = Path(destination)
-        if target.exists():
-            raise FileExistsError(
-                f"refusing to overwrite an existing evidence archive: {target}"
-            )
-        target.parent.mkdir(parents=True, exist_ok=True)
+        target = self._prepare_archive_target(destination)
         source = os.path.abspath(self.db_path)
+        if experiment_id is not None:
+            return self._seal_experiment_to(target, source, experiment_id)
         live_sink = sink_for_db_path(source)
         if live_sink is not None and not live_sink._closed:
             if not quiesce_live_writer:
@@ -5289,6 +5580,34 @@ class ObservabilityStore:
                 return self._snapshot_to(target, source)
         self._refuse_if_an_unreachable_writer_holds(source)
         return self._snapshot_to(target, source)
+
+    def _prepare_archive_target(self, destination: str) -> Path:
+        """Refuse to overwrite an archive, and make room for a new one."""
+        target = Path(destination)
+        if target.exists():
+            raise FileExistsError(
+                f"refusing to overwrite an existing evidence archive: {target}"
+            )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        return target
+
+    def snapshot_settled_source_to(self, destination: str) -> dict[str, Any]:
+        """Snapshot a source the CALLER has already established is settled.
+
+        `archive_to` answers the "is anyone writing this?" question the only
+        way it can from inside the store — by looking for a sink this process
+        minted and, failing that, at the writer-health row. A caller archiving
+        a private copy it has just taken and byte-verified knows something
+        stronger than that row does: nothing can write this file, and the
+        health row is the historical writer's, copied in along with the rest of
+        the evidence. It would be a stale-pid coincidence away from refusing an
+        archive that is provably safe. Such a caller skips the negotiation and
+        asks for the snapshot itself; everybody else calls `archive_to`.
+        """
+        return self._snapshot_to(
+            self._prepare_archive_target(destination),
+            os.path.abspath(self.db_path),
+        )
 
     def _refuse_if_an_unreachable_writer_holds(self, source: str) -> None:
         """Refuse a snapshot of a store some OTHER writer is still holding.
@@ -5308,29 +5627,18 @@ class ObservabilityStore:
         taken is recoverable, and taking one of a store being written is not.
         """
         try:
-            stamp = (self.writer_health() or {}).get(WRITER_INCARNATION_FIELD)
+            rows = self.writer_health_rows()
         except Exception:  # pragma: no cover - defensive; health is diagnostics
             return
-        if not isinstance(stamp, Mapping) or not stamp.get("open"):
-            return
-        if str(stamp.get("host") or "") != socket.gethostname():
-            return
-        try:
-            pid = int(stamp.get("pid") or 0)
-        except (TypeError, ValueError):
-            return
-        if pid <= 0:
-            return
-        if pid != os.getpid():
-            try:
-                os.kill(pid, 0)
-            except OSError:
-                return  # the writer's process is gone; the marker is stale
-        raise WriterStillOpen(
-            f"refusing to seal {source!r}: writer incarnation "
-            f"{stamp.get('id')} (pid {pid}) still holds it and is not reachable "
-            f"from this process, so it cannot be held still for the snapshot"
-        )
+        for row in rows:
+            stamp = row.get(WRITER_INCARNATION_FIELD)
+            if _writer_holds(stamp):
+                raise WriterStillOpen(
+                    f"refusing to seal {source!r}: writer incarnation "
+                    f"{stamp.get('id')} (pid {stamp.get('pid')}) still holds it and "
+                    f"is not reachable from this process, so it cannot be held "
+                    f"still for the snapshot"
+                )
 
     def _snapshot_to(self, target: Path, source: str) -> dict[str, Any]:
         """Take the snapshot. The caller has already settled the source."""
@@ -5342,7 +5650,7 @@ class ObservabilityStore:
         # pin makes that close never the last one; no statement is ever run on
         # it, and it is what makes "source bytes verified unchanged" a fact
         # about the source rather than about the timing of a garbage collection.
-        pin = self._connect()
+        pin = self._open_connection()
         before = {path: self._file_digest(path) for path in source_paths}
         confirmed_before = {
             path: self._file_digest(path) for path in source_paths
@@ -5358,8 +5666,8 @@ class ObservabilityStore:
         compacted = target.with_name(f".{target.name}.{uuid.uuid4().hex}.compact")
         try:
             source_uri = Path(source).as_uri() + "?mode=ro"
-            with sqlite3.connect(source_uri, uri=True) as source_conn:
-                with sqlite3.connect(str(temporary)) as snapshot_conn:
+            with contextlib.closing(sqlite3.connect(source_uri, uri=True)) as source_conn:
+                with contextlib.closing(sqlite3.connect(str(temporary))) as snapshot_conn:
                     source_conn.backup(snapshot_conn)
             after_backup = {
                 path: self._file_digest(path) for path in source_paths
@@ -5368,7 +5676,10 @@ class ObservabilityStore:
                 raise SourceChangedDuringArchive(
                     "source DB/WAL bytes changed while taking the snapshot"
                 )
-            with sqlite3.connect(str(temporary)) as snapshot_conn:
+            with contextlib.closing(sqlite3.connect(str(temporary))) as snapshot_conn:
+                # Judgements stay in the live DB, so no later decision, mark or
+                # comment can change the sealed file or its digest.
+                control.strip(snapshot_conn)
                 snapshot_conn.execute("VACUUM INTO ?", (str(compacted),))
             os.replace(compacted, target)
             after_compaction = {
@@ -5378,38 +5689,9 @@ class ObservabilityStore:
                 raise SourceChangedDuringArchive(
                     "source DB/WAL bytes changed while compacting the destination"
                 )
-            for sidecar in (f"{target}-wal", f"{target}-shm"):
-                if os.path.exists(sidecar):
-                    raise RuntimeError(
-                        f"sealed archive unexpectedly has sidecar {sidecar!r}"
-                    )
-            archive_digest = self._file_digest(str(target))
-            if archive_digest is None:
-                raise RuntimeError("archive disappeared before verification")
-            archive_uri = target.resolve().as_uri() + "?mode=ro"
-            with sqlite3.connect(archive_uri, uri=True) as archive_conn:
-                identity_row = archive_conn.execute(
-                    "SELECT value FROM diagnostics WHERE key=?",
-                    (STORE_IDENTITY_DIAGNOSTIC,),
-                ).fetchone()
-                integrity = archive_conn.execute(
-                    "PRAGMA integrity_check"
-                ).fetchone()[0]
-            if integrity != "ok":
-                raise RuntimeError(f"archive integrity check failed: {integrity}")
-            if identity_row is None or not identity_row[0]:
-                raise RuntimeError("archive has no durable store identity")
-            target.chmod(0o444)
             return {
-                "path": str(target),
-                "size_bytes": archive_digest["size_bytes"],
-                "sha256": archive_digest["sha256"],
-                "store_identity": str(identity_row[0]),
-                "schema_version": SCHEMA_VERSION,
-                "read_only": True,
-                "sealed": True,
+                **self._verified_seal(target),
                 "source_bytes_verified_unchanged": True,
-                "sidecar_free": True,
             }
         except Exception:
             with contextlib.suppress(FileNotFoundError):
@@ -5418,12 +5700,99 @@ class ObservabilityStore:
         finally:
             with contextlib.suppress(Exception):
                 pin.close()
-            for scratch in (temporary, compacted):
-                with contextlib.suppress(FileNotFoundError):
-                    scratch.unlink()
-                for suffix in ("-wal", "-shm"):
-                    with contextlib.suppress(FileNotFoundError):
-                        Path(f"{scratch}{suffix}").unlink()
+            _remove_scratch(temporary, compacted)
+
+    def _seal_experiment_to(
+        self, target: Path, source: str, experiment_id: str
+    ) -> dict[str, Any]:
+        """Seal one experiment's rows, read in ONE transaction of the live DB (§3).
+
+        The copy is built from `_SCHEMA_STATEMENTS` alone, so no control table
+        exists in it to strip. A WAL read transaction is one consistent snapshot
+        and blocks no writer, which is what makes this safe on the live DB that
+        the interactive server and other runs keep writing.
+        """
+        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.snapshot")
+        compacted = target.with_name(f".{target.name}.{uuid.uuid4().hex}.compact")
+        try:
+            with contextlib.closing(
+                sqlite3.connect(str(temporary), uri=True, isolation_level=None)
+            ) as conn:
+                for statement in _SCHEMA_STATEMENTS:
+                    conn.execute(statement)
+                conn.execute(
+                    "ATTACH DATABASE ? AS live", (Path(source).as_uri() + "?mode=ro",)
+                )
+                conn.execute("BEGIN")
+                for table, where in _EXPERIMENT_SEAL_ROWS:
+                    columns = ", ".join(
+                        row[1] for row in conn.execute(f"PRAGMA main.table_info({table})")
+                    )
+                    copied = conn.execute(
+                        f"INSERT INTO main.{table} ({columns}) "
+                        f"SELECT {columns} FROM live.{table} WHERE {where}",
+                        {"experiment_id": experiment_id},
+                    ).rowcount
+                    if table == "experiments" and not copied:
+                        raise ExperimentNotFound(experiment_id)
+                features = json.loads(conn.execute(
+                    "SELECT value FROM main.diagnostics WHERE key='schema_features'"
+                ).fetchone()[0])
+                conn.execute(
+                    "UPDATE main.diagnostics SET value=? WHERE key='schema_features'",
+                    (json.dumps(sorted(set(features) - {control.FEATURE_CONTROL_V1})),),
+                )
+                conn.execute(f"PRAGMA main.user_version = {SCHEMA_VERSION}")
+                conn.execute("COMMIT")
+                conn.execute("DETACH DATABASE live")
+                conn.execute("VACUUM INTO ?", (str(compacted),))
+            os.replace(compacted, target)
+            return {
+                **self._verified_seal(target),
+                "experiment_id": experiment_id,
+                "consistent_snapshot": True,
+            }
+        except Exception:
+            with contextlib.suppress(FileNotFoundError):
+                target.unlink()
+            raise
+        finally:
+            _remove_scratch(temporary, compacted)
+
+    def _verified_seal(self, target: Path) -> dict[str, Any]:
+        """Verify a just-written archive, make it read-only, and describe it."""
+        for sidecar in (f"{target}-wal", f"{target}-shm"):
+            if os.path.exists(sidecar):
+                raise RuntimeError(
+                    f"sealed archive unexpectedly has sidecar {sidecar!r}"
+                )
+        archive_digest = self._file_digest(str(target))
+        if archive_digest is None:
+            raise RuntimeError("archive disappeared before verification")
+        archive_uri = target.resolve().as_uri() + "?mode=ro"
+        with contextlib.closing(sqlite3.connect(archive_uri, uri=True)) as archive_conn:
+            identity_row = archive_conn.execute(
+                "SELECT value FROM diagnostics WHERE key=?",
+                (STORE_IDENTITY_DIAGNOSTIC,),
+            ).fetchone()
+            integrity = archive_conn.execute(
+                "PRAGMA integrity_check"
+            ).fetchone()[0]
+        if integrity != "ok":
+            raise RuntimeError(f"archive integrity check failed: {integrity}")
+        if identity_row is None or not identity_row[0]:
+            raise RuntimeError("archive has no durable store identity")
+        target.chmod(0o444)
+        return {
+            "path": str(target),
+            "size_bytes": archive_digest["size_bytes"],
+            "sha256": archive_digest["sha256"],
+            "store_identity": str(identity_row[0]),
+            "schema_version": SCHEMA_VERSION,
+            "read_only": True,
+            "sealed": True,
+            "sidecar_free": True,
+        }
 
     def prune(
         self,
@@ -5436,9 +5805,15 @@ class ObservabilityStore:
         records are exempt (config §5). Offload evidence is pruned by the same
         horizon and cap, one whole turn at a time. Runs incremental_vacuum.
 
+        Evidence of a bound experiment (`_BOUND_EXPERIMENTS_SQL`) is exempt
+        from both the horizon and the cap. When it alone keeps the DB over the
+        cap, the bytes it holds are recorded under
+        `PRUNE_OVER_CAP_BOUND_DIAGNOSTIC`; nothing bound is deleted.
+
         ``include_conversationless_turns`` (operator opt-in) also
         deletes conversation-less turn records (e.g. per-invocation CLI
-        channels) older than the horizon, with their feedback — otherwise no
+        channels) older than the horizon, with their spans, artifacts and review
+        notes — otherwise no
         retention knob ever reaches them.
         """
         if pruning_suppressed():
@@ -5463,6 +5838,11 @@ class ObservabilityStore:
             **{table: 0 for table in _OFFLOAD_EVIDENCE_TABLES},
         }
         erased_scopes: set[str] = set()
+        bound = _BOUND_EXPERIMENTS_SQL + (
+            _RELEASED_CLAUSE_SQL if control.present(self) else ""
+        )
+        unbound = f"(experiment_id IS NULL OR experiment_id NOT IN ({bound}))"
+        bound_turns = f"SELECT turn_key FROM turns WHERE experiment_id IN ({bound})"
 
         with self._connect() as conn:
             # As in `forget_channel`: retention deletes evidence text, and a
@@ -5472,13 +5852,15 @@ class ObservabilityStore:
                 conn.execute("BEGIN IMMEDIATE")
                 spans_cur = conn.execute(
                     "DELETE FROM spans WHERE span_id IN "
-                    "(SELECT span_id FROM spans WHERE start_ns < ? LIMIT ?)",
+                    f"(SELECT span_id FROM spans WHERE start_ns < ? AND {unbound} "
+                    "LIMIT ?)",
                     (horizon_ns, _PRUNE_BATCH_ROWS),
                 )
                 deleted["spans"] += spans_cur.rowcount
                 artifacts_cur = conn.execute(
                     "DELETE FROM artifacts WHERE artifact_id IN "
-                    "(SELECT artifact_id FROM artifacts WHERE turn_key < ? LIMIT ?)",
+                    "(SELECT artifact_id FROM artifacts WHERE turn_key < ? "
+                    f"AND {unbound} LIMIT ?)",
                     (horizon_key, _PRUNE_BATCH_ROWS),
                 )
                 deleted["artifacts"] += artifacts_cur.rowcount
@@ -5488,7 +5870,8 @@ class ObservabilityStore:
                 # bound turn key is keyed by its channel id, which does not
                 # sort by time.
                 aged_turns = self._offload_turns_in_txn(
-                    conn, before=horizon_evidence, limit=_OFFLOAD_PRUNE_BATCH_TURNS
+                    conn, before=horizon_evidence, limit=_OFFLOAD_PRUNE_BATCH_TURNS,
+                    exempt=bound_turns,
                 )
                 self._delete_offload_turns_in_txn(
                     conn, aged_turns, deleted, erased_scopes
@@ -5509,12 +5892,11 @@ class ObservabilityStore:
                         r[0]
                         for r in conn.execute(
                             "SELECT turn_key FROM turns WHERE conversation_id IS NULL "
-                            "AND turn_key < ? LIMIT ?",
+                            f"AND turn_key < ? AND {unbound} LIMIT ?",
                             (horizon_key, _PRUNE_BATCH_ROWS),
                         ).fetchall()
                     ]
                     for key in keys:
-                        conn.execute("DELETE FROM feedback WHERE turn_key=?", (key,))
                         conn.execute("DELETE FROM spans WHERE trace_id=?", (key,))
                         conn.execute("DELETE FROM artifacts WHERE turn_key=?", (key,))
                         conn.execute("DELETE FROM turns WHERE turn_key=?", (key,))
@@ -5530,29 +5912,55 @@ class ObservabilityStore:
             # and the oldest offload evidence turns beside them: the evidence
             # shares this file, so it shares this cap. Each batch vacuums, so
             # the next measurement sees the pages the deletes freed.
+            only_bound_left = False
             for _ in range(_PRUNE_MAX_BATCHES):
                 if self.db_size_bytes() <= max_bytes:
                     break
                 conn.execute("BEGIN IMMEDIATE")
                 cur = conn.execute(
                     "DELETE FROM spans WHERE span_id IN "
-                    "(SELECT span_id FROM spans ORDER BY start_ns LIMIT ?)",
+                    f"(SELECT span_id FROM spans WHERE {unbound} "
+                    "ORDER BY start_ns LIMIT ?)",
                     (_PRUNE_BATCH_ROWS,),
                 )
                 oldest_turns = self._offload_turns_in_txn(
-                    conn, before=None, limit=_OFFLOAD_PRUNE_BATCH_TURNS
+                    conn, before=None, limit=_OFFLOAD_PRUNE_BATCH_TURNS,
+                    exempt=bound_turns,
                 )
                 self._delete_offload_turns_in_txn(
                     conn, oldest_turns, deleted, erased_scopes
                 )
                 conn.commit()
                 if cur.rowcount == 0 and not oldest_turns:
+                    only_bound_left = True
                     break
                 # Fetched to completion: each step of this pragma frees one page.
                 conn.execute("PRAGMA incremental_vacuum").fetchall()
                 conn.commit()
                 conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
+            bound_bytes = (
+                self._bound_evidence_bytes_in_txn(conn, bound, bound_turns)
+                if only_bound_left else 0
+            )
+            if bound_bytes:
+                self.set_diagnostic(conn, PRUNE_OVER_CAP_BOUND_DIAGNOSTIC, {
+                    "bound_bytes": bound_bytes,
+                    "db_size_bytes": self.db_size_bytes(),
+                    "max_bytes": max_bytes,
+                })
+            else:
+                conn.execute(
+                    "DELETE FROM diagnostics WHERE key=?",
+                    (PRUNE_OVER_CAP_BOUND_DIAGNOSTIC,),
+                )
+            # Health rows of writers that are gone, once past the horizon (§5).
+            for key, value in conn.execute(
+                "SELECT key, value FROM diagnostics WHERE key GLOB ? AND updated_at < ?",
+                (WRITER_HEALTH_KEY_PREFIX + "*", horizon_moment.isoformat()),
+            ).fetchall():
+                if not _writer_holds(json.loads(value).get(WRITER_INCARNATION_FIELD)):
+                    conn.execute("DELETE FROM diagnostics WHERE key=?", (key,))
             conn.execute("PRAGMA incremental_vacuum")
             conn.commit()
             # Fold the deletes back into the main file now, so the evidence
@@ -5566,15 +5974,34 @@ class ObservabilityStore:
         return deleted
 
     @staticmethod
+    def _bound_evidence_bytes_in_txn(
+        conn: sqlite3.Connection, bound: str, bound_turns: str
+    ) -> int:
+        """Payload bytes held by bound experiments: span attributes, artifact
+        values and offload evidence text."""
+        held = [
+            f"SELECT SUM(length(attributes)) FROM spans WHERE experiment_id IN ({bound})",
+            f"SELECT SUM(length(inline_value)) FROM artifacts WHERE experiment_id IN ({bound})",
+        ]
+        if "offload_evidence" in _present_offload_tables(conn):
+            held.append(
+                "SELECT SUM(length(text_utf8)) FROM offload_evidence "
+                f"WHERE turn_key IN ({bound_turns})"
+            )
+        return int(conn.execute(
+            "SELECT " + " + ".join(f"COALESCE(({sql}), 0)" for sql in held)
+        ).fetchone()[0])
+
+    @staticmethod
     def _offload_turns_in_txn(
-        conn: sqlite3.Connection, *, before: Optional[str], limit: int
+        conn: sqlite3.Connection, *, before: Optional[str], limit: int, exempt: str
     ) -> list[str]:
         """The oldest offload-evidence turns, optionally only those begun before *before*.
 
         A turn's age is the earliest timestamp on any of its evidence,
         subject or event rows -- when the turn began -- so a turn is always
         dropped whole and never leaves a subject or an event whose evidence is
-        gone.
+        gone. Turns *exempt* selects are never returned.
         """
         tables = _present_offload_tables(conn)
         if not tables:
@@ -5589,7 +6016,8 @@ class ObservabilityStore:
         return [
             str(row[0])
             for row in conn.execute(
-                f"SELECT turn_key FROM ({dated}) GROUP BY turn_key {having} "
+                f"SELECT turn_key FROM ({dated}) WHERE turn_key NOT IN ({exempt}) "
+                f"GROUP BY turn_key {having} "
                 "ORDER BY MIN(at), turn_key LIMIT ?",
                 params,
             ).fetchall()
@@ -5658,7 +6086,7 @@ class ObservabilityStore:
         if limit is not None:
             query += " LIMIT ?"
             params.append(int(limit))
-        with contextlib.closing(self._connect()) as conn:
+        with self._connect() as conn:
             if "offload_events" not in _present_offload_tables(conn):
                 return []
             rows = conn.execute(query, params).fetchall()
@@ -5710,11 +6138,10 @@ class ObservabilityStore:
                     (channel_id,),
                 ).fetchall()
             ]
-            deleted["feedback"] = conn.execute(
-                "DELETE FROM feedback WHERE turn_key IN "
-                "(SELECT turn_key FROM turns WHERE channel_id=?)",
-                (channel_id,),
-            ).rowcount
+            # `human_feedback` needs no delete of its own: the
+            # `delete_turn_human_feedback` trigger removes a turn's review
+            # notes with the turn, which is what erasure [R21] has to mean now
+            # that the notes are the only feedback rows left.
             deleted["spans"] = conn.execute(
                 "DELETE FROM spans WHERE channel_id=? OR trace_id IN "
                 "(SELECT turn_key FROM turns WHERE channel_id=?)",
@@ -5808,7 +6235,7 @@ class ObservabilityStore:
                     ).fetchall()
                 )
             for table in (
-                "feedback", "spans", "artifacts", *offload_tables,
+                "spans", "artifacts", *offload_tables,
                 "turns", "conversations",
             ):
                 deleted[table] = conn.execute(f"DELETE FROM {table}").rowcount
@@ -5829,13 +6256,12 @@ class ReadOnlyObservabilityStore(ObservabilityStore):
     able to open a post-mortem snapshot it does not own, and inspecting a DB
     must not mutate it. Construction raises when the file is absent/unopenable
     (``sqlite3.OperationalError``) or written by a different build, newer or
-    older (``IncompatibleObservabilityDB``); callers degrade gracefully. Unlike
-    the writer, it never replaces an older DB: it only refuses it.
+    older (``IncompatibleObservabilityDB``); callers degrade gracefully.
     """
 
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
-        conn = self._connect()
+        conn = self._open_connection()
         try:
             found = conn.execute("PRAGMA user_version").fetchone()[0]
             if found > SCHEMA_VERSION:
@@ -5844,29 +6270,51 @@ class ReadOnlyObservabilityStore(ObservabilityStore):
                     f"v{SCHEMA_VERSION}. Refusing to open a newer DB [R11]."
                 )
             if found < SCHEMA_VERSION:
-                # No migration (fresh schema, fix-49m.3): an older store is
-                # refused up front with the reason, instead of failing later on
-                # a column the reader assumes exists. The writer replaces such
-                # a store; a reader must never delete what it inspects.
+                # Same rule as the writable store (fresh schema, fix-49m.3):
+                # an older store is refused up front with the reason, instead
+                # of failing later on a column the reader assumes exists.
                 raise IncompatibleObservabilityDB(
-                    f"{self.db_path} has schema v{found}; this build requires "
-                    f"v{SCHEMA_VERSION} and carries no migration (fresh "
-                    "observability schema, fix-49m.3). Open it with a "
+                    f"{self.db_path} has schema v{found}; this build reads "
+                    f"v{SCHEMA_VERSION} only and carries no migration (fresh "
+                    f"observability schema, fix-49m.3). Open it with a "
                     f"v{found} build."
                 )
         finally:
             conn.close()
+        self.schema_version = found
         self._features = self._load_features()
 
-    def _connect(self, timeout: float = 30.0) -> sqlite3.Connection:
+    def _open_connection(self, timeout: float = 30.0) -> sqlite3.Connection:
         conn = sqlite3.connect(
-            f"file:{self.db_path}?mode=ro",
+            Path(os.path.abspath(self.db_path)).as_uri() + "?mode=ro",
             uri=True,
             timeout=timeout,
             check_same_thread=False,
         )
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _connect(self, timeout: float = 30.0) -> "_ClosingConnection":
+        return _ClosingConnection(self._open_connection(timeout=timeout))
+
+
+def open_live_store(db_path: str, *, write: bool = False) -> Optional[ObservabilityStore]:
+    """A workflow's live DB for a control read or write, never creating it.
+
+    A read gets the read-only store, or None when the file is absent — every
+    control read then answers empty. A write gets a `migrate=False` store, so a
+    click never rewrites the capture-regime diagnostic, and an absent file
+    refuses with `control.ControlUnavailable` (design §2.1).
+    """
+    if not os.path.isfile(db_path):
+        if write:
+            raise control.ControlUnavailable(
+                f"there is no live evidence database at {db_path}"
+            )
+        return None
+    if write:
+        return ObservabilityStore.open_for_annotation(db_path)
+    return ReadOnlyObservabilityStore(db_path)
 
 
 # ----------------------------------------------------------------------
@@ -6058,7 +6506,7 @@ class SQLiteTraceSink:
         started = time.monotonic()
         conn = None
         try:
-            conn = self.store._connect(
+            conn = self.store._open_connection(
                 timeout=float(
                     _env_int("FW_OBS_SYNC_WRITE_TIMEOUT_S", _DEFAULT_SYNC_WRITE_TIMEOUT_S)
                 )
@@ -6205,7 +6653,7 @@ class SQLiteTraceSink:
         with self._health_lock:
             snapshot = dict(self._health)
         try:
-            conn = self.store._connect()
+            conn = self.store._open_connection()
             try:
                 conn.execute("BEGIN IMMEDIATE")
                 self.store.merge_writer_health_row(conn, snapshot)
@@ -6223,7 +6671,7 @@ class SQLiteTraceSink:
         "healthy" about a run that dropped records after the last heartbeat.
         """
         try:
-            conn = self.store._connect()
+            conn = self.store._open_connection()
             try:
                 self._maybe_write_health(conn, force=True)
             finally:
@@ -6394,7 +6842,7 @@ class SQLiteTraceSink:
         the digest comparison is still the thing that decides.
         """
         try:
-            conn = self.store._connect()
+            conn = self.store._open_connection()
             try:
                 self._maybe_write_health(conn, force=True)
                 with contextlib.suppress(Exception):
@@ -6437,7 +6885,7 @@ class SQLiteTraceSink:
     def _writer_loop(self) -> None:
         conn: Optional[sqlite3.Connection] = None
         try:
-            conn = self.store._connect()
+            conn = self.store._open_connection()
             while not self._stop.is_set():
                 # The one place this thread stops touching the DB on request
                 # (fix-7de). At the top of the loop, so a parked writer is
@@ -6520,7 +6968,7 @@ class SQLiteTraceSink:
                 return
         conn = None
         try:
-            conn = self.store._connect(
+            conn = self.store._open_connection(
                 timeout=float(
                     _env_int("FW_OBS_SYNC_WRITE_TIMEOUT_S", _DEFAULT_SYNC_WRITE_TIMEOUT_S)
                 )

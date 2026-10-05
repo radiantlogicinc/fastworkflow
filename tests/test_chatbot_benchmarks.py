@@ -173,6 +173,8 @@ class TestBenchmarkReadApi:
         assert "not found" in data["error"]
 
     def test_experiments_are_listed_newest_first(self, live_server, workflow_dir):
+        # The contest lives in the live DB, which registration never creates.
+        obs.ObservabilityStore(state_paths.observability_db(str(workflow_dir)))
         older = benchmark_setup.create_experiment(workflow_dir, "smoke", "v1")
         newer = benchmark_setup.create_experiment(workflow_dir, "smoke", "v1")
 
@@ -183,6 +185,13 @@ class TestBenchmarkReadApi:
             newer["experiment_id"],
             older["experiment_id"],
         ]
+        # The first experiment holds the contest until somebody promotes
+        # another. The list stays newest-first; the pointer is a separate fact.
+        by_id = {row["experiment_id"]: row for row in data["experiments"]}
+        assert data["winner_experiment_id"] == older["experiment_id"]
+        assert data["winner_automatic"] is True
+        assert by_id[older["experiment_id"]]["is_winner"] is True
+        assert by_id[newer["experiment_id"]]["is_winner"] is False
 
 
 class TestBenchmarkWriteApi:

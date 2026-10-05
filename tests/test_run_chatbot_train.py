@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import os
 import signal
+import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -18,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from fastworkflow import state_paths
+from fastworkflow.observability.store import ObservabilityStore
 from fastworkflow.run_chatbot import launcher
 from fastworkflow.run_chatbot import server as run_chatbot_server
 
@@ -83,6 +87,24 @@ def _kill(pid: int) -> None:
         os.kill(pid, signal.SIGKILL)
     except (OSError, ProcessLookupError):
         pass
+
+
+def _train_rows(wf: Path) -> list[tuple[int, int]]:
+    """The live DB's `training_process` rows as ``(pid, proc_start_ticks)``."""
+    db_path = state_paths.observability_db(str(wf))
+    if not os.path.isfile(db_path):
+        return []
+    conn = sqlite3.connect(db_path)
+    try:
+        return conn.execute(
+            "SELECT pid, proc_start_ticks FROM training_process"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def _pid_files(root: Path) -> list[Path]:
+    return list(root.rglob("*.pid"))
 
 
 @pytest.fixture
@@ -168,13 +190,12 @@ class TestPlanTrainSpawn:
     def test_refuses_when_another_train_is_live(self, tmp_path, state_root):
         wf = _untrained_workflow(tmp_path)
         env, passwords = _env_pair(wf)
-        pid_path, _log = launcher.train_artifact_paths(str(wf), create=True)
         plan = launcher.plan_train_spawn(
             workflow_path=str(wf),
             env_file_path=env,
             passwords_file_path=passwords,
             bundled_root=str(tmp_path / "not_examples"),
-            live_train=(pid_path, 99999),
+            live_train=(state_paths.observability_db(str(wf)), 99999),
             datasets_missing=False,
         )
         assert plan.ok is False
@@ -216,23 +237,23 @@ class TestPlanTrainSpawn:
 
 
 class TestSpawnDetachedTrain:
-    def test_writes_pid_redirects_log_and_survives_chatbot_shutdown(
+    def test_records_row_redirects_log_and_survives_chatbot_shutdown(
         self, tmp_path, state_root
     ):
         wf = _untrained_workflow(tmp_path)
         stub = _write_stub(tmp_path / "stub.py", STUB_SLEEP.format(sleep=20))
-        pid_path, log_path = launcher.train_artifact_paths(str(wf), create=True)
+        log_path = launcher.train_log_path(str(wf), create=True)
         plan = launcher.TrainSpawnPlan(
             ok=True,
             cmd=[sys.executable, str(stub)],
             workflow_path=str(wf),
-            pid_path=pid_path,
             log_path=log_path,
         )
         pid = launcher.spawn_detached_train(plan)
         try:
             assert pid > 0
-            assert launcher.read_pid_file(pid_path) == pid
+            assert [row[0] for row in _train_rows(wf)] == [pid]
+            assert _pid_files(state_root) == []
             assert launcher.process_is_alive(pid)
             assert launcher.is_train_running(str(wf)) is True
             assert log_path.endswith(launcher.TRAIN_LOG_FILENAME)
@@ -251,12 +272,11 @@ class TestSpawnDetachedTrain:
     def test_second_live_train_is_refused(self, tmp_path, state_root):
         wf = _untrained_workflow(tmp_path)
         stub = _write_stub(tmp_path / "stub.py", STUB_SLEEP.format(sleep=20))
-        pid_path, log_path = launcher.train_artifact_paths(str(wf), create=True)
+        log_path = launcher.train_log_path(str(wf), create=True)
         plan = launcher.TrainSpawnPlan(
             ok=True,
             cmd=[sys.executable, str(stub)],
             workflow_path=str(wf),
-            pid_path=pid_path,
             log_path=log_path,
         )
         pid = launcher.spawn_detached_train(plan)
@@ -282,12 +302,11 @@ class TestSpawnDetachedTrain:
             tmp_path / "stub.py",
             STUB_WRITE_THRESHOLD.format(sleep=0.2, wf=str(wf)),
         )
-        pid_path, log_path = launcher.train_artifact_paths(str(wf), create=True)
+        log_path = launcher.train_log_path(str(wf), create=True)
         plan = launcher.TrainSpawnPlan(
             ok=True,
             cmd=[sys.executable, str(stub)],
             workflow_path=str(wf),
-            pid_path=pid_path,
             log_path=log_path,
         )
         pid = launcher.spawn_detached_train(plan)
@@ -363,9 +382,9 @@ class TestTrainHttp:
         assert status == 400
         assert "Select this workflow" in body["error"]
 
-    def test_post_train_spawns_stub_and_lists_training(
-        self, server, tmp_path, monkeypatch
-    ):
+    @pytest.fixture
+    def stub_train(self, tmp_path, monkeypatch) -> Path:
+        """An untrained workflow whose POST /api/train spawns a sleeping stub."""
         wf = _untrained_workflow(tmp_path)
         _env_pair(wf)
         stub = _write_stub(tmp_path / "stub.py", STUB_SLEEP.format(sleep=20))
@@ -380,6 +399,10 @@ class TestTrainHttp:
             return plan
 
         monkeypatch.setattr(launcher, "plan_train_spawn", plan_with_stub)
+        return wf
+
+    def test_post_train_spawns_stub_and_lists_training(self, server, stub_train):
+        wf = stub_train
         status, body = _post(server, "/api/train", {"path": str(wf)})
         pid = body.get("pid")
         try:
@@ -395,36 +418,70 @@ class TestTrainHttp:
             if pid:
                 _kill(pid)
 
+    def test_start_and_stop_train_keeps_a_row_and_no_pid_file(
+        self, server, stub_train, state_root
+    ):
+        """fix-10vj.8 acceptance: the train's liveness is a `training_process`
+        row that appears with the child and disappears when it is gone."""
+        status, body = _post(server, "/api/train", {"path": str(stub_train)})
+        pid = body.get("pid")
+        try:
+            assert status == 200, body
+            assert [row[0] for row in _train_rows(stub_train)] == [pid]
+            assert _pid_files(state_root) == []
+        finally:
+            if pid:
+                _kill(pid)
+        deadline = time.time() + 5
+        while _train_rows(stub_train) and time.time() < deadline:
+            time.sleep(0.05)
+        assert _train_rows(stub_train) == []
+        assert launcher.is_train_running(str(stub_train)) is False
+        assert _pid_files(state_root) == []
+
 
 class TestPidReuseHardening:
-    def test_recycled_pid_is_not_mistaken_for_a_train(self, tmp_path, monkeypatch):
+    def test_recycled_pid_is_not_mistaken_for_a_train(self, tmp_path, state_root):
         """A live pid with a DIFFERENT kernel start time is a stranger wearing
-        a recycled number: it must not report training, and the stale pid file
+        a recycled number: it must not report training, and the stale row
         must be cleared so it can never block training globally."""
-        import os
-
-        monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
         wf = tmp_path / "app_wf"
         wf.mkdir()
-        pid_path, _log = launcher.train_artifact_paths(str(wf), create=True)
+        log_path = launcher.train_log_path(str(wf), create=True)
         # Our own (live) pid, but recorded with a fabricated start time.
-        with open(pid_path, "w", encoding="utf-8") as f:
-            f.write(f"{os.getpid()} 1")
+        launcher._record_train(str(wf), os.getpid(), 1, log_path)
         assert launcher.is_train_running(str(wf)) is False
-        assert not os.path.exists(pid_path)
+        assert _train_rows(wf) == []
 
-    def test_finished_train_pid_file_is_cleared_on_next_check(
-        self, tmp_path, monkeypatch
-    ):
-        import os
-        import subprocess
-
-        monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
+    def test_finished_train_row_is_cleared_on_next_check(self, tmp_path, state_root):
         wf = tmp_path / "app_wf"
         wf.mkdir()
-        pid_path, _log = launcher.train_artifact_paths(str(wf), create=True)
+        log_path = launcher.train_log_path(str(wf), create=True)
         proc = subprocess.Popen(["true"])
-        launcher.write_pid_file(pid_path, proc.pid)
+        launcher._record_train(
+            str(wf), proc.pid, launcher._proc_start_time(proc.pid) or 0, log_path
+        )
         proc.wait()
         assert launcher.is_train_running(str(wf)) is False
-        assert not os.path.exists(pid_path)
+        assert _train_rows(wf) == []
+
+    def test_no_live_db_means_no_train_and_creates_nothing(self, tmp_path, state_root):
+        wf = tmp_path / "app_wf"
+        wf.mkdir()
+        assert launcher.is_train_running(str(wf)) is False
+        assert launcher.find_live_train() is None
+        assert not state_root.exists()
+
+    def test_a_db_without_the_table_means_no_train(self, tmp_path, state_root):
+        wf = tmp_path / "app_wf"
+        wf.mkdir()
+        db_path = state_paths.observability_db(str(wf))
+        ObservabilityStore(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("DROP TABLE training_process")
+            conn.commit()
+        finally:
+            conn.close()
+        assert launcher.is_train_running(str(wf)) is False
+        assert launcher.find_live_train() is None

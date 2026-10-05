@@ -304,6 +304,33 @@ def _reasoning_from(value: Any) -> Any:
     return found[0] if len(found) == 1 else found
 
 
+def _recorded_cache_hit(response: Any) -> Optional[bool]:
+    """The response's own `cache_hit` flag, or None when it has none.
+
+    `LMResponse.cache_hit` is a real boolean on every normalized DSPy response
+    (`dspy/core/types.py`), so a hit AND a miss are both genuinely on record and
+    both are worth recording.
+
+    What is not on record is a history entry whose `response` is absent, is a
+    plain mapping, or is a provider object from before the field existed. This
+    used to be `bool(getattr(response, "cache_hit", False))`, which turned every
+    one of those absences into a recorded MISS -- a claim that the provider was
+    called, invented out of having nothing to read. None means unknown, and the
+    caller then omits the attribute entirely rather than writing a value a
+    reader would take at face value.
+
+    This changes what is CAPTURED from here on. Spans already on record that say
+    `cache_hit: false` cannot be reinterpreted: there is no way to tell, after
+    the fact, which of them read a real flag. Nothing about caching itself
+    changes -- this function only decides whether the observation is publishable.
+    """
+    if isinstance(response, Mapping):
+        value = response.get("cache_hit")
+    else:
+        value = getattr(response, "cache_hit", None)
+    return value if isinstance(value, bool) else None
+
+
 class DSPyObservabilityCallback(BaseCallback):
     """Emit one ``fw.llm.call`` span per DSPy LM invocation.
 
@@ -445,12 +472,12 @@ class DSPyObservabilityCallback(BaseCallback):
                     "cost": entry.get("cost"),
                     "history_uuid": entry.get("uuid"),
                     "response_model": entry.get("response_model"),
-                    "cache_hit": bool(
-                        getattr(entry.get("response"), "cache_hit", False)
-                    ),
                     "provider_response": _json_text(entry.get("response")),
                 }
             )
+            cached = _recorded_cache_hit(entry.get("response"))
+            if cached is not None:
+                attributes["cache_hit"] = cached
         elif entry is not None:
             attributes["provider_response"] = _json_text(entry)
         else:

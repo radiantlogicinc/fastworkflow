@@ -1,7 +1,7 @@
 ### FastWorkflow FastAPI Service — Specification
 
 #### 1. Overview
-- **Goal**: Expose FastWorkflow workflows as a FastAPI web service, enabling clients to initialize for a given workflow (per channel), then interact in agent mode (forced). If a query starts with `/`, all leading slashes are stripped before processing. The service supports explicit actions, resetting conversations, listing conversations, dumping all conversations to JSONL, and posting feedback. `invoke_agent` returns the turn's `TurnOutput` projection (see §6a) and, when enabled, includes collected trace events in the final response. Streaming is supported via NDJSON or SSE at `/invoke_agent_stream`, and MCP tools map to the same NDJSON-based streaming implementation.
+- **Goal**: Expose FastWorkflow workflows as a FastAPI web service, enabling clients to initialize for a given workflow (per channel), then interact in agent mode (forced). If a query starts with `/`, all leading slashes are stripped before processing. The service supports explicit actions, resetting conversations, listing conversations, dumping all conversations to JSONL, and recording review comments about recorded evidence. `invoke_agent` returns the turn's `TurnOutput` projection (see §6a) and, when enabled, includes collected trace events in the final response. Streaming is supported via NDJSON or SSE at `/invoke_agent_stream`, and MCP tools map to the same NDJSON-based streaming implementation.
 - **Source parity**: Behavior mirrors the CLI runner in `fastworkflow/run/__main__.py` while replacing its interactive loop with synchronous and streaming HTTP endpoints.
 
 #### 2. Non‑Goals
@@ -21,7 +21,7 @@
 - For each live `channel_id`, a `ChannelRuntime` holds:
   - A `WorkflowExecutionContext` (`run_as_agent=True`) — synchronous, transport-free; no `user_message_queue` / `command_output_queue` on the FastAPI path.
   - A per-channel `asyncio.Lock` held for the duration of one turn *attempt* (released on terminal outcome **or** `awaiting_user`, never held across a suspension).
-  - A `ConversationStore` (Rdict, one DB file per channel): `conversation_id`, `topic`, `summary`, timestamps, per-turn history, optional feedback.
+  - A `ConversationStore` (Rdict, one DB file per channel): `conversation_id`, `topic`, `summary`, timestamps, per-turn history. Turns no longer carry a `feedback` key; review comments live in the observability store, not in conversation memory.
   - Session metadata: stream format, startup state / idempotency, session incarnation, durable turn high-water mark.
 - **Turns engine** (`TurnRegistry` in `turns.py`): every unit of work is a registered `TurnExecution`. Endpoints call `submit_turn` (wait-or-defer): wait up to `timeout_seconds`; if still running, return **202** while the execution keeps going. The registry's per-channel **active-execution pointer** is the source of truth for liveness and the 409 busy guard (not `lock.locked()`).
 - Blocking WEC work runs in `loop.run_in_executor`; a `ContextVar` stack isolates the active workflow per thread/task so concurrent channels are safe in one process.
@@ -267,24 +267,66 @@ there is no top-level field to map. MCP clients read the outcome from the
 - Errors: 404 if channel missing.
 
 8) POST `/post_feedback`
-- Purpose: Attach optional feedback to the latest turn in the current conversation for a channel.
+- Purpose: Record ONE free-form comment about recorded evidence, anchored to an
+  explicit turn or to a component within it.
+- History: this route used to attach `{binary_or_numeric_score, nl_feedback}` to
+  the latest turn of the active conversation, held in the agent-memory
+  `feedback` table. That table and that body are gone (fix-9eg.16); the score is
+  not reintroduced under another name, and a request in the old shape is
+  rejected rather than scored. There is no implicit "latest turn": the anchor is
+  always named.
 - Request:
 ```json
 {
-  "channel_id": "channel-123",
-  "binary_or_numeric_score": true,
-  "nl_feedback": null
+  "target_kind": "turn",
+  "span_ids": [],
+  "target_label": "Turn",
+  "provenance": "human",
+  "category": "conclusions",
+  "subcategory": "what_went_wrong",
+  "comment": "Answered without the third item the request asked for."
 }
 ```
+  with the anchor in the query string (`?turn_key=<turn_key>`), optionally
+  scoped by `&store_id=` (workspace) or `&benchmark_experiment=` (registered
+  experiment).
 - Rules:
-  - A conversation is a list of turns: `[ {"conversation summary": str, "conversation_traces": str, "feedback": dict|null}, ... ]`.
-  - At least one of `binary_or_numeric_score` or `nl_feedback` must be provided. Both may be provided.
-  - Feedback always applies to the latest (most recent) turn in the active conversation.
+  - `category` and `subcategory` are enums and must pair:
+    `observations_analysis` → `observation` | `analysis`;
+    `conclusions` → `what_went_right` | `what_went_wrong`;
+    `recommendations` → `what_to_do` | `what_not_to_do`.
+  - `provenance` is `human`, `coding_agent` or `distillation_agent`; humans and
+    coding agents post the same body to the same route.
+  - `comment` is arbitrary text, stored as written apart from credential
+    scrubbing. No heading is parsed to infer metadata.
+  - A comparison comment adds `paired` — `store_id`, `turn_keys`,
+    `experiment_id`, `task_id`, `attempt` and the same target fields — naming an
+    execution in its own authorized store. It is ONE row, visible from both
+    tasks.
 - Behavior:
-  - Validate presence (reject only when both are null); store feedback on the latest turn in `ConversationStore` with a timestamp.
-  - Feedback is optional per turn; multiple feedback updates overwrite the previous entry for that turn.
-- Response: `{ "status": "ok" }`.
-- Errors: 404 channel missing; 422 invalid input (both fields null).
+  - Validate the anchor against the evidence (the turn is recorded, the spans
+    belong to it) and append. Nothing is overwritten: a second comment is a
+    second row.
+  - Evidence that cannot be appended to — a sealed archive, or a store written
+    by an older schema — still accepts the comment: it is recorded in annotation
+    storage beside the evidence, and the evidence file is not modified. Reads
+    merge the two, so a client cannot tell which file answered.
+- Response: `201` with `{ "feedback": [...], "read_only": bool, "annotated": bool }`.
+- Errors: 404 turn not found; 400 invalid category/subcategory pair, unknown
+  anchor or malformed body; 409 unreadable or foreign annotation storage.
+
+8a) Reading feedback — separate GETs, never a POST
+- `GET /api/feedback-notes?turn_key=…` — the comments on one turn.
+- `GET /api/task-feedback?experiment=…&task=…` — every authorized comment on one
+  task, across attempts, turns and components, including comparison comments
+  anchored on the other side of a pair. Optional `category`, `subcategory`,
+  `provenance`, `target_kind`, `component`, `attempt`, `limit`, `offset`; no
+  filter is applied by default.
+- `GET /api/workspace/task-feedback?experiment=…&task=…` — the same read scoped
+  by a workspace manifest's segments.
+- `GET /api/feedback-taxonomy` — the categories and subcategories above.
+- Comments recorded before the taxonomy existed read back with no category and
+  are shown as unclassified; their text is never rewritten.
 
 9) GET `/` (root)
 - Simple HTML page with a link to `/docs`. Serves also as a health check (no dedicated `/healthz`).
@@ -316,10 +358,17 @@ class PerformActionRequest(BaseModel):
     action: Action
     timeout_seconds: int = 60
 
-class PostFeedbackRequest(BaseModel):
-    channel_id: str
-    binary_or_numeric_score: bool | float | None = None
-    nl_feedback: str | None = None
+class FeedbackRequest(BaseModel):
+    target_kind: Literal["turn", "phase", "step", "span"]
+    span_ids: list[str]
+    target_label: str
+    provenance: Literal["human", "coding_agent", "distillation_agent"]
+    category: Literal["observations_analysis", "conclusions", "recommendations"]
+    subcategory: Literal["observation", "analysis", "what_went_right",
+                         "what_went_wrong", "what_to_do", "what_not_to_do"]
+    comment: str
+    ref: dict | None = None        # the full ExecutionRef this comment is about
+    paired: dict | None = None     # the other side of a comparison
 
 class Action(BaseModel):
     command_name: str
@@ -358,7 +407,7 @@ Notes:
 #### 8. Error Handling
 - 404 Not Found: Missing `channel_id` / session.
 - 409 Conflict: A different turn is already in progress for the same `channel_id` (registry active-execution pointer; retry with the same args rejoins instead).
-- 422 Unprocessable Entity: Validation failures (invalid paths/action schema/channel input) and XOR violation in `/post_feedback`.
+- 422 Unprocessable Entity: Validation failures (invalid paths/action schema/channel input). `/post_feedback` reports an invalid category/subcategory pair or a bad anchor as 400.
 - 500 Internal Server Error: Unexpected errors (log with stack trace; avoid broad except without logging).
 - 202 Accepted: Wait window elapsed; execution still running (wait-or-defer). Retry the same request to rejoin. **Not** a hard abort of the work.
 
@@ -395,7 +444,7 @@ Error body format (example):
       "summary": str,
       "created_at": int,
       "updated_at": int,
-      "turns": [ { "conversation summary": str, "conversation_traces": str (JSON), "feedback": { "binary_or_numeric_score": bool|float|null, "nl_feedback": str|null, "timestamp": int } | null } ]
+      "turns": [ { "conversation summary": str, "conversation_traces": str (JSON) } ]
     }
 - Functional constraint: one active conversation per channel to avoid write concurrency.
 - `/conversations` accepts `limit` (default `20`) controlling the max conversations returned (latest N by `updated_at`).

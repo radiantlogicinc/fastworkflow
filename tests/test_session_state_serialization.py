@@ -66,7 +66,6 @@ def _wire_mock_agent(ctx, suspended, completed):
     mock_agent.resume.return_value = completed
     mock_agent.export_suspended.return_value = _suspended_react_blob()
     ctx._workflow_tool_agent = mock_agent
-    ctx._intent_clarification_agent = MagicMock()
 
 
 def test_serialize_restore_resume_across_contexts(

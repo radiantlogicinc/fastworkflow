@@ -14,7 +14,7 @@ from fastapi import HTTPException
 
 import fastworkflow
 from fastworkflow.observability import store as obs
-from fastworkflow import tracing
+from fastworkflow import state_paths, tracing
 from fastworkflow.checkpoint_store import (
     PROTOCOL_VERSION,
     ChannelCheckpointStore,
@@ -32,10 +32,10 @@ from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 @pytest.fixture
 def controller(tmp_path, monkeypatch):
     monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
-    path = str(tmp_path / "observability.sqlite3")
-    store = obs.ObservabilityStore(path)
+    folder = str(tmp_path / "workflow")
+    store = obs.ObservabilityStore(state_paths.observability_db(folder))
     controller = ExperimentController(
-        path, store.store_identity(), migrate=False, external=True
+        folder, store.store_identity(), migrate=False, external=True
     )
     controller.create_experiment(
         "exp-1",

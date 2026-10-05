@@ -27,8 +27,9 @@ from pathlib import Path
 import pytest
 
 import fastworkflow
+from fastworkflow.observability import control
 from fastworkflow.observability import store as obs
-from fastworkflow import state_paths
+from fastworkflow import state_paths, tracing
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.experiment.runner import (
     ExperimentHarness,
@@ -232,16 +233,18 @@ class TestAdditiveSchema:
         assert {"experiment_id", "task_id", "attempt"} <= conv_cols
         assert {"idx_turns_experiment", "idx_conv_experiment_attempt"} <= indexes
 
-    def test_schema_version_is_six_for_create_time_only_columns(self, db_path):
+    def test_schema_version_is_seven_for_create_time_only_columns(self, db_path):
         """fix-42b added create-time-only experiment columns and bumped v1->v2;
         fix-qe2 added experiment_attempts.runtime_snapshot_json and bumped
         v2->v3; fix-aw5 added feedback in v4; fix-46l.2 added feedback
-        provenance in v5; fix-w6w added experiment archival in v6. All are
-        create-time columns with no migration path."""
+        provenance in v5; fix-w6w added experiment archival in v6; fix-9eg.16
+        dropped the agent-memory `feedback` table and gave `human_feedback`
+        its taxonomy, identity and anchor columns in v7. All are create-time
+        columns with no migration path."""
         obs.ObservabilityStore(db_path)
         conn = sqlite3.connect(db_path)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
             attempt_cols = {
                 r[1] for r in conn.execute("PRAGMA table_info(experiment_attempts)")
             }
@@ -250,14 +253,13 @@ class TestAdditiveSchema:
             }
         finally:
             conn.close()
-        assert obs.SCHEMA_VERSION == 6
+        assert obs.SCHEMA_VERSION == 7
         assert "runtime_snapshot_json" in attempt_cols
         assert "archived" in experiment_cols
 
-    def test_a_pre_v6_db_is_replaced_instead_of_migrated(self, db_path):
+    def test_a_pre_v7_db_is_refused_instead_of_migrated(self, db_path):
         """No legacy support: a populated v1 store is never migrated. The writer
-        deletes it and creates a fresh store in its place; the read-only view
-        refuses it and leaves it untouched.
+        and the read-only view both refuse it and leave it untouched.
 
         Built with the pre-`fix-bn1` CREATE TABLE statements at user_version 1.
         There is no ALTER/migration path at all any more (fresh schema,
@@ -306,8 +308,11 @@ class TestAdditiveSchema:
             obs.ReadOnlyObservabilityStore(db_path)
         message = str(excinfo.value)
         assert "schema v1" in message
-        assert "requires v6" in message
+        assert f"reads v{obs.SCHEMA_VERSION} only" in message
         assert "carries no migration" in message
+        # Nor does the writer.
+        with pytest.raises(obs.OlderObservabilityStore, match="never deletes evidence"):
+            obs.ObservabilityStore(db_path)
 
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
@@ -337,22 +342,6 @@ class TestAdditiveSchema:
         assert "experiments" not in tables
         assert row["user_message"] == "hi"
         assert features == {"distillation_v1"}
-
-        # The writer replaces it: the legacy row is gone and the file is a
-        # current store.
-        store = obs.ObservabilityStore(db_path)
-        assert store.has_feature(obs.FEATURE_EXPERIMENTS_V1)
-        conn = sqlite3.connect(db_path)
-        try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
-            assert conn.execute(
-                "SELECT count(*) FROM turns WHERE turn_key='legacy'"
-            ).fetchone()[0] == 0
-            assert "experiment_id" in {
-                r[1] for r in conn.execute("PRAGMA table_info(turns)")
-            }
-        finally:
-            conn.close()
 
     def test_the_marker_row_is_the_only_source_of_features(self, db_path):
         """fix-9zb: the column-sniffing fallback is gone, and must stay gone.
@@ -1424,7 +1413,7 @@ class TestHarness:
         assert path.parent == bundle
         assert _sha256_file(path) == archive["sha256"]
         assert archive["sealed"] is True
-        assert archive["source_bytes_verified_unchanged"] is True
+        assert archive["consistent_snapshot"] is True
         assert stat.S_IMODE(path.stat().st_mode) == 0o444
         assert not Path(f"{path}-wal").exists()
 
@@ -1669,6 +1658,143 @@ class TestErasure:
         store.prune(retention_days=0, max_bytes=1)
         assert store.get_experiment("exp-1") is not None
         assert store.experiment_attempt_rows("exp-1")
+
+
+# ----------------------------------------------------------------------
+# `fix-10vj.2`: a bound experiment's evidence outlives the horizon and the cap
+# ----------------------------------------------------------------------
+
+_EXP_TURN = "20000101T000000-exp"
+_CHAT_TURN = "20000101T000001-chat"
+
+
+def _evidence_ids(db_path: str, table: str, column: str) -> set[str]:
+    with sqlite3.connect(db_path) as conn:
+        return {row[0] for row in conn.execute(f"SELECT {column} FROM {table}")}
+
+
+def _over_cap_diagnostic(db_path: str):
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT value FROM diagnostics WHERE key=?",
+            (obs.PRUNE_OVER_CAP_BOUND_DIAGNOSTIC,),
+        ).fetchone()
+    return None if row is None else json.loads(row[0])
+
+
+class TestBoundEvidenceRetention:
+    """Both turns are 26 years old and the cap is one byte: everything is due."""
+
+    def _turn(self, store, turn_key, channel, conversation_id=None, **labels):
+        old_ns = int((time.time() - 400 * 86_400) * 1_000_000_000)
+        span = tracing.Span(
+            span_id=f"span-{turn_key}", trace_id=turn_key, name="fw.turn",
+            start_ns=old_ns, status="ok", attributes={"pad": "x" * 2_000},
+            channel_id=channel, **labels,
+        )
+        artifact = {
+            "artifact_id": f"art-{turn_key}", "turn_key": turn_key,
+            "channel_id": channel, "key": "answer", "inline_value": b"y" * 2_000,
+            **labels,
+        }
+        with store._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            store.upsert_span_rows(conn, [span], store._store_redactor())
+            store.upsert_turn_row(
+                conn,
+                _turn_row(turn_key, channel, conversation_id=conversation_id, **labels),
+                [artifact],
+                store._store_redactor(),
+            )
+            conn.commit()
+
+    def _seeded(self, store):
+        """One finished experiment attempt and one ordinary chat turn."""
+        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1)
+        channel = channel_for("exp-1", "t0", 1)
+        store.start_attempt("exp-1", "t0", 1, channel)
+        conv = store.mint_conversation_id(
+            channel, experiment_id="exp-1", task_id="t0", attempt=1
+        )
+        self._turn(store, _EXP_TURN, channel, conv,
+                   experiment_id="exp-1", task_id="t0", attempt=1)
+        self._turn(store, _CHAT_TURN, "chat")
+        store.finish_attempt("exp-1", "t0", 1, outcome="pass", outcome_source="g")
+        assert store.complete_experiment("exp-1") == "complete"
+
+    def _assert_survivors(self, db_path, *turn_keys):
+        assert _evidence_ids(db_path, "spans", "trace_id") == set(turn_keys)
+        assert _evidence_ids(db_path, "artifacts", "turn_key") == set(turn_keys)
+
+    def test_bound_evidence_survives_horizon_and_cap_ordinary_does_not(
+        self, store, db_path
+    ):
+        self._seeded(store)
+
+        deleted = store.prune(retention_days=30, max_bytes=1)
+
+        assert deleted["spans"] == 1 and deleted["artifacts"] == 1
+        self._assert_survivors(db_path, _EXP_TURN)
+        recorded = _over_cap_diagnostic(db_path)
+        assert recorded["bound_bytes"] >= 4_000
+        assert recorded["max_bytes"] == 1
+
+    def test_sealing_releases(self, store, db_path):
+        self._seeded(store)
+        store.begin_workspace_seal("exp-1")
+
+        store.prune(retention_days=30, max_bytes=1)
+
+        self._assert_survivors(db_path)
+        assert _over_cap_diagnostic(db_path) is None
+
+    def test_explicit_release_releases(self, store, db_path):
+        self._seeded(store)
+        store.release_experiment_evidence("exp-1", "tester", "scored elsewhere")
+
+        store.prune(retention_days=30, max_bytes=1_000_000_000)
+
+        self._assert_survivors(db_path)
+
+    def test_release_of_an_unknown_experiment_is_refused(self, store, db_path):
+        with pytest.raises(obs.ExperimentNotFound):
+            store.release_experiment_evidence("exp-nope", "tester")
+        with sqlite3.connect(db_path) as conn:
+            assert conn.execute(
+                "SELECT count(*) FROM evidence_releases"
+            ).fetchone()[0] == 0
+
+    def test_an_invalid_experiment_is_not_released(self, store, db_path):
+        self._seeded(store)
+        with store._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            store.invalidate_experiments_in_txn(conn, ["exp-1"], "test", "test")
+            conn.commit()
+        assert store.get_experiment("exp-1")["status"] == "invalid"
+
+        store.prune(retention_days=30, max_bytes=1_000_000_000)
+
+        self._assert_survivors(db_path, _EXP_TURN)
+
+    def test_a_store_without_control_tables_prunes_as_before(self, store, db_path):
+        self._seeded(store)
+        with store._connect() as conn:
+            control.strip(conn)
+        assert not control.present(store)
+
+        store.prune(retention_days=30, max_bytes=1_000_000_000)
+
+        self._assert_survivors(db_path, _EXP_TURN)
+
+    def test_a_stale_over_cap_record_is_cleared_once_under_cap(self, store, db_path):
+        self._seeded(store)
+        store.prune(retention_days=30, max_bytes=1)
+        assert _over_cap_diagnostic(db_path) is not None
+
+        store.prune(retention_days=30, max_bytes=1_000_000_000)
+
+        assert _over_cap_diagnostic(db_path) is None
+        self._assert_survivors(db_path, _EXP_TURN)
 
 
 # ----------------------------------------------------------------------
@@ -1986,12 +2112,12 @@ class TestRuntimeSnapshotStamp:
     """Stamped at claim, read back decoded, null when the server had none."""
 
     @staticmethod
-    def _controller(db_path):
+    def _controller(workflow_path):
         from fastworkflow.experiment.runner import ExperimentController
 
-        store = obs.ObservabilityStore(db_path)
+        store = obs.ObservabilityStore(state_paths.observability_db(workflow_path))
         controller = ExperimentController(
-            db_path, store.store_identity(), migrate=False, external=True
+            workflow_path, store.store_identity(), migrate=False, external=True
         )
         controller.create_experiment(
             "exp-stamp",
@@ -2013,9 +2139,9 @@ class TestRuntimeSnapshotStamp:
         )
 
     def test_a_claimed_attempt_carries_its_servers_snapshot_readable_back(
-        self, db_path
+        self, workflow_path, db_path
     ):
-        controller = self._controller(db_path)
+        controller = self._controller(workflow_path)
         snapshot = {
             "configuration_valid": True,
             "effective_features": {"decision_signals_v1": "shadow"},
@@ -2048,8 +2174,8 @@ class TestRuntimeSnapshotStamp:
             "runtime_snapshot"
         ] == snapshot
 
-    def test_an_attempt_bound_without_a_snapshot_reads_back_null(self, db_path):
-        controller = self._controller(db_path)
+    def test_an_attempt_bound_without_a_snapshot_reads_back_null(self, workflow_path):
+        controller = self._controller(workflow_path)
 
         controller.claim_attempt(
             self._bootstrap(controller, 2), server_incarnation="server-b"
@@ -2061,11 +2187,11 @@ class TestRuntimeSnapshotStamp:
         assert "runtime_snapshot_json" not in row
 
     def test_the_chatbot_attempts_api_exposes_the_decoded_stamp(
-        self, experiment_server, db_path
+        self, experiment_server, workflow_path
     ):
         """The UI (fix-49m.6) reads `runtime_snapshot` off the attempt rows the
         chatbot server already returns; rows that never bound read null."""
-        controller = self._controller(db_path)
+        controller = self._controller(workflow_path)
         snapshot = {"configuration_valid": True, "pid": 7, "effective_features": {}}
         controller.claim_attempt(
             self._bootstrap(controller, 1),
@@ -2080,22 +2206,3 @@ class TestRuntimeSnapshotStamp:
 
         _, data = _request(experiment_server, "/api/experiment/exp-a/attempts?task=t1")
         assert [a["runtime_snapshot"] for a in data["attempts"]] == [None, None]
-
-    def test_a_v2_store_is_replaced_on_open_not_migrated(self, db_path):
-        """The column is create-time only; a populated v2 store is recreated
-        rather than altered, so the column exists afterwards."""
-        obs.ObservabilityStore(db_path)
-        conn = sqlite3.connect(db_path)
-        conn.execute("PRAGMA user_version = 2")
-        conn.commit()
-        conn.close()
-
-        obs.ObservabilityStore(db_path)
-        conn = sqlite3.connect(db_path)
-        try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
-            assert "runtime_snapshot_json" in {
-                r[1] for r in conn.execute("PRAGMA table_info(experiment_attempts)")
-            }
-        finally:
-            conn.close()

@@ -196,7 +196,7 @@ and command time. A cached call is not inherently stale; missing usage is not ze
   envelope; oversized artifacts become `__fw_artifact_ref__` envelopes whose
   content lives in the `artifacts` table.
 - Spans are best-effort: under load they can be dropped (counted in the
-  `writer_health` diagnostics row — check it before concluding "no spans means
+  `writer_health/<incarnation>` diagnostics rows — check them before concluding "no spans means
   nothing ran"). Turn records are near-lossless.
 - A turn resumed in a different process finalizes without `context_mutations`
   (the baseline is not serialized), and `--generate_insights` CLI runs emit

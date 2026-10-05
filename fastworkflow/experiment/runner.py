@@ -74,6 +74,29 @@ class MissingExperimentLifecycleFeature(RuntimeError):
     """The target store was not installed for driver-neutral lifecycle writes."""
 
 
+class ExperimentNotRegisteredHere(LookupError):
+    """A registered experiment is absent from the live DB this process resolves.
+
+    Raised rather than recording it as ad-hoc into a second live DB, which is
+    how the 2026-10-04 Nemotron run's evidence went missing from the winner
+    and runs views (single live DB design §6).
+    """
+
+    def __init__(self, experiment_id: str, db_path: str) -> None:
+        self.experiment_id = experiment_id
+        self.db_path = db_path
+        overrides = state_paths.location_overrides()
+        settings = ", ".join(
+            f"{name}={overrides.get(name, '<unset>')}"
+            for name in state_paths.LOCATION_VARS
+        )
+        super().__init__(
+            f"experiment {experiment_id!r} is registered, but not in {db_path!r}, "
+            f"the live DB this process resolves ({settings}); run it with the "
+            "state root and workflow id it was registered under"
+        )
+
+
 class BenchmarkPinDigestMismatch(ValueError):
     """A supplied benchmark digest does not match the workflow catalog file."""
 
@@ -271,27 +294,34 @@ def channel_for(experiment_id: str, task_id: str, attempt: int) -> str:
 class ExperimentController:
     """Synchronous metadata-only experiment lifecycle controller.
 
+    It records into the workflow's live DB, resolved by `state_paths` the same
+    way every server and the UI resolve it; no caller can point it elsewhere.
     External controllers open an already-installed store with ``migrate=False``.
     Construction never acquires a trace sink, starts a writer, or prunes.
     """
 
     def __init__(
         self,
-        db_path: str,
+        workflow_folderpath: str,
         expected_store_identity: str,
         *,
         migrate: bool = False,
         external: bool = True,
         capture_profile: Optional[str] = None,
         capture_policy_version: Optional[str] = None,
-        workflow_folderpath: Optional[str] = None,
     ) -> None:
-        if not db_path:
-            raise ValueError("db_path is required")
+        if not workflow_folderpath:
+            raise ValueError("workflow_folderpath is required")
         if not expected_store_identity:
             raise ValueError("expected_store_identity is required")
         if external and migrate:
             raise ValueError("external controllers must open with migrate=False")
+        # The folder this controller's runs come from. Not stored in the DB (no
+        # schema change): it is the caller's own fact about this machine, and it
+        # travels out again at seal time so a workspace manifest can name the
+        # workflow whose benchmark catalogue the run was pinned against.
+        self.workflow_folderpath = os.path.abspath(workflow_folderpath)
+        db_path = state_paths.observability_db(self.workflow_folderpath)
         if external and not os.path.isfile(db_path):
             raise MissingExperimentLifecycleFeature(
                 f"{db_path!r} does not exist; the server must install the "
@@ -299,14 +329,6 @@ class ExperimentController:
             )
         self.db_path = db_path
         self.external = bool(external)
-        # The folder this controller's runs come from, when the caller knows
-        # it. Not stored in the DB (no schema change): it is the caller's own
-        # fact about this machine, and it travels out again at seal time so a
-        # workspace manifest can name the workflow whose benchmark catalogue
-        # the run was pinned against.
-        self.workflow_folderpath = (
-            os.path.abspath(workflow_folderpath) if workflow_folderpath else None
-        )
         self.store = observability_store.ObservabilityStore(
             db_path, migrate=migrate
         )
@@ -370,7 +392,11 @@ class ExperimentController:
                 raise observability_store.WriterStillOpen(
                     f"writer for {self.db_path!r} did not stop within {timeout}s"
                 )
-        health = self.store.writer_health()
+        health = self.store.writer_health(
+            observability_store.writer_incarnation_id(sink.health_snapshot())
+            if sink is not None
+            else None
+        )
         if health is None:
             raise RuntimeError(
                 f"{self.db_path!r} has no final persisted writer health"
@@ -448,19 +474,35 @@ class ExperimentController:
         benchmark_id: Optional[str] = None,
         benchmark_version: Optional[str] = None,
         benchmark_digest_sha256: Optional[str] = None,
-        workflow_folderpath: Optional[str] = None,
+        registered: bool = False,
     ) -> None:
+        """Pre-register an experiment and its exact attempt plan.
+
+        `registered=True` says the id came from a registration (the UI or
+        `benchmark.setup`); one absent from this live DB raises
+        `ExperimentNotRegisteredHere` instead of being recorded as ad-hoc.
+        Registration and the benchmark-pin digest are both read from the
+        controller's own workflow folder, the one whose live DB it records into.
+        """
         # A UI-created identity pins the benchmark even when a driver supplies
         # only experiment/task IDs. Unregistered experiments keep their API.
         from fastworkflow.benchmark import setup as benchmark_setup
 
-        folder = workflow_folderpath or self.workflow_folderpath
         registration = None
-        if folder:
-            try:
-                registration, manifest = benchmark_setup.experiment_manifest(folder, experiment_id)
-            except KeyError:
-                pass
+        try:
+            registration, manifest = benchmark_setup.experiment_manifest(
+                self.workflow_folderpath, experiment_id
+            )
+        except KeyError:
+            if registered:
+                raise ExperimentNotRegisteredHere(experiment_id, self.db_path) from None
+            overrides = state_paths.location_overrides()
+            if overrides:
+                logger.warning(
+                    f"Ad-hoc experiment {experiment_id!r} records into "
+                    f"{self.db_path!r}, resolved under {overrides}; it is "
+                    "visible only to servers and UIs resolving the same DB"
+                )
         if registration is not None:
             declarations = list(declarations)
             if {item[0] for item in declarations} != set(registration["task_ids"]):
@@ -470,9 +512,6 @@ class ExperimentController:
                                   (benchmark_digest_sha256, "benchmark_digest_sha256")):
                 if supplied is not None and supplied != registration[key]:
                     raise ValueError(f"{key} differs from the registered experiment")
-            target = {"db_path": os.path.abspath(self.db_path), "store_id": self.store_identity}
-            if registration.get("store") not in (None, target):
-                raise ValueError("experiment is already bound to another evidence store")
             benchmark_id = registration["benchmark_id"]
             benchmark_version = registration["benchmark_version"]
             benchmark_digest_sha256 = registration["benchmark_digest_sha256"]
@@ -480,10 +519,9 @@ class ExperimentController:
             benchmark_id is not None
             and benchmark_version is not None
             and benchmark_digest_sha256 is not None
-            and workflow_folderpath is not None
         ):
             loaded = load_version(
-                workflow_folderpath, benchmark_id, benchmark_version
+                self.workflow_folderpath, benchmark_id, benchmark_version
             )
             if loaded["digest_sha256"] != benchmark_digest_sha256:
                 raise BenchmarkPinDigestMismatch(
@@ -492,10 +530,14 @@ class ExperimentController:
                     loaded["digest_sha256"],
                     benchmark_digest_sha256,
                 )
-        # Reserve the registration before writing evidence. Deletion uses the
-        # same setup lock; a deleted ID is refused and a bound ID is protected.
+        # Reserve the registration before writing evidence. Deletion takes the
+        # same row in its own transaction; a deleted ID is refused and a bound
+        # ID is protected.
         if registration is not None:
-            benchmark_setup.bind_experiment(folder, experiment_id, self.db_path, self.store_identity)
+            benchmark_setup.bind_experiment(self.workflow_folderpath, experiment_id)
+        # The experiment joins its contest in the store it is recorded into
+        # (`fix-9eg.17.1`), in the same transaction; one registered at UI
+        # creation is already a member there and keeps its group.
         self.store.create_experiment(
             experiment_id,
             description,
@@ -510,8 +552,8 @@ class ExperimentController:
             benchmark_digest_sha256=benchmark_digest_sha256,
             capture_profile=self.capture_profile,
             capture_policy_version=self.capture_policy_version,
+            declarations=declarations,
         )
-        self.store.declare_experiment_attempts(experiment_id, declarations)
 
     def start_attempt(
         self,
@@ -636,8 +678,6 @@ class ExperimentController:
         self,
         experiment_id: str,
         destination: str,
-        *,
-        workflow_folderpath: Optional[str] = None,
     ) -> dict[str, Any]:
         """Freeze captured data, then attach its digest as the sole handle.
 
@@ -657,9 +697,9 @@ class ExperimentController:
         which this method re-enters rather than rejects, so a seal that lost its
         archive to a full disk is retryable instead of terminal.
 
-        `workflow_folderpath` rides out on the same return value, defaulting to
-        the controller's own, for the manifest writer to record as the sealed
-        workspace's `workflow_folderpath` (fix-zns). It is what makes a sealed
+        The controller's `workflow_folderpath` rides out on the same return
+        value, for the manifest writer to record as the sealed workspace's
+        `workflow_folderpath` (fix-zns). It is what makes a sealed
         archive able to say which workflow's benchmark catalogue its pin refers
         to; without it, a reader can see the pinned digest and has nothing to
         check it against. It is not written to the store: the experiments table
@@ -680,39 +720,31 @@ class ExperimentController:
                 f"experiment {experiment_id!r} is {experiment['status']!r}; "
                 "workspace evidence can only seal capture_complete data"
             )
-        # `archive_to` refuses while a live writer holds the DB, and it would do
-        # so AFTER the promotion — leaving an unfinished seal for a condition
-        # that was knowable beforehand. `_require_writer_drained` above only
-        # checks this for an external controller, so check it here for every
-        # caller and fail before touching the row. (fix-7de is the related
-        # narrower race: a writer that opens BETWEEN this check and the
-        # snapshot is still caught by `archive_to`, which is where the
-        # authoritative check has to live.)
+        # A writer in this process may still hold this experiment's records
+        # unwritten, and refusing it AFTER the promotion would leave an
+        # unfinished seal for a condition that was knowable beforehand.
+        # `_require_writer_drained` above only checks this for an external
+        # controller, so check it here for every caller and fail before
+        # touching the row.
         if observability_store.sink_for_db_path(self.db_path) is not None:
             raise observability_store.WriterStillOpen(
                 f"refusing to seal {self.db_path!r} while its writer is open"
             )
         self.store.begin_workspace_seal(experiment_id)
-        # `quiesce_live_writer=False` keeps the seal's refusal unconditional
-        # (fix-7de). `archive_to` will now hold a live writer still rather than
-        # refuse it, which is right for an evidence run archiving its own DB
-        # mid-flight — and wrong here, where the promotion above has already
-        # declared the capture complete. A writer that appears between the two
-        # is a contract violation, not a scheduling detail, and quiescing it
-        # would seal a store somebody is still writing to under a status that
-        # says nobody is.
-        archive = self.store.archive_to(destination, quiesce_live_writer=False)
+        # Only this experiment's rows, in one read transaction (single live DB
+        # design §3): the other processes writing the live DB keep writing, and
+        # a late write to this experiment is refused by claim-epoch fencing.
+        archive = self.store.archive_to(destination, experiment_id=experiment_id)
         status = self.store.record_workspace_archive(
             experiment_id,
             sha256=archive["sha256"],
             store_identity=archive["store_identity"],
+            path=archive["path"],
+            size_bytes=archive["size_bytes"],
         )
         archive["experiment_id"] = experiment_id
         archive["experiment_status"] = status
-        folder = workflow_folderpath or self.workflow_folderpath
-        archive["workflow_folderpath"] = (
-            os.path.abspath(folder) if folder else None
-        )
+        archive["workflow_folderpath"] = self.workflow_folderpath
         return archive
 
     def invalidate_experiment(
@@ -755,6 +787,7 @@ class ExperimentHarness:
         archive_dir: Optional[str] = None,
         defeat_caches: bool = True,
         install_memory_policy: bool = False,
+        runs_per_task: int = 1,
     ) -> None:
         self.workflow_folderpath = workflow_folderpath
         self.description = description
@@ -769,6 +802,9 @@ class ExperimentHarness:
         self.archive_dir = archive_dir
         self.defeat_caches = defeat_caches
         self.install_memory_policy = install_memory_policy
+        from fastworkflow.benchmark.setup import validate_runs_per_task
+
+        self.runs_per_task = validate_runs_per_task(runs_per_task)
         self._db_path = state_paths.observability_db(workflow_folderpath)
         bootstrap_store = observability_store.ObservabilityStore(
             self._db_path, migrate=True
@@ -779,7 +815,7 @@ class ExperimentHarness:
                 f"{self._db_path!r} has no installed store identity"
             )
         self._controller = ExperimentController(
-            self._db_path,
+            workflow_folderpath,
             store_identity,
             migrate=False,
             external=False,
@@ -794,13 +830,26 @@ class ExperimentHarness:
 
         Task prompts are optional in setup, so the harness supplies actual
         messages through ExperimentTask as usual. No model runs here.
-        """
-        from fastworkflow.benchmark.setup import experiment_manifest
 
-        record, _ = experiment_manifest(workflow_folderpath, experiment_id)
+        The registration's `runs_per_task` becomes this harness's default
+        repeat count, so the number chosen at setup is the number that runs
+        without the caller passing it again — the same value the UI and an
+        agent both read.
+        """
+        from fastworkflow.benchmark.setup import experiment_manifest, validate_runs_per_task
+
+        try:
+            record, _ = experiment_manifest(workflow_folderpath, experiment_id)
+        except KeyError:
+            raise ExperimentNotRegisteredHere(
+                experiment_id, state_paths.observability_db(workflow_folderpath)
+            ) from None
         # The registration's description is a default, not an override: a runner
         # that names its own run wins over what setup recorded.
         kwargs.setdefault("description", record["description"])
+        kwargs.setdefault(
+            "runs_per_task", validate_runs_per_task(record.get("runs_per_task", 1))
+        )
         return cls(workflow_folderpath, experiment_id=experiment_id,
                    benchmark_id=record["benchmark_id"],
                    benchmark_version=record["benchmark_version"],
@@ -925,7 +974,7 @@ class ExperimentHarness:
         self,
         tasks: Iterable[ExperimentTask],
         *,
-        attempts: int = 1,
+        attempts: Optional[int] = None,
         grader: Optional[Grader] = None,
     ) -> dict[str, Any]:
         """Run every task `attempts` times as one experiment.
@@ -934,13 +983,24 @@ class ExperimentHarness:
         task executes. Everything else runs inside `evidence_run()`, so the run
         gets zero-drop assertion, prune suppression, archival and provenance —
         and an invalid verdict from it makes the experiment invalid.
+
+        `attempts` defaults to this harness's `runs_per_task`, which
+        `from_benchmark_experiment` took from the registration — so the repeat
+        count chosen at setup is the one that runs. n repeats are n attempts of
+        ONE experiment, with distinct attempt identities and channels: they are
+        repeated samples of one setup, not n unrelated experiments. Planned,
+        running, finished and failed attempts are all preserved; nothing reruns
+        until n successes.
         """
+        from fastworkflow.benchmark import setup as benchmark_setup
+        from fastworkflow.benchmark.setup import validate_runs_per_task
+
         task_list = list(tasks)
         if not task_list:
             raise ValueError("a task set with no tasks is not an experiment")
-        attempts = int(attempts)
-        if attempts <= 0:
-            raise ValueError("attempts must be positive")
+        attempts = validate_runs_per_task(
+            self.runs_per_task if attempts is None else attempts, field="attempts"
+        )
         seen = {t.task_id for t in task_list}
         if len(seen) != len(task_list):
             raise ValueError(
@@ -962,13 +1022,13 @@ class ExperimentHarness:
             required_evidence_segments=1,
             arm=self.arm,
             baseline_experiment_id=self.baseline_experiment_id,
-            workflow_name=os.path.basename(
-                self.workflow_folderpath.rstrip("/\\")
-            ),
+            # The same helper setup uses. A comparison group is derived from
+            # this string, so registration and execution disagreeing about it
+            # opens a second contest instead of raising anything.
+            workflow_name=benchmark_setup.workflow_name_for(self.workflow_folderpath),
             benchmark_id=self.benchmark_id,
             benchmark_version=self.benchmark_version,
             benchmark_digest_sha256=self.benchmark_digest_sha256,
-            workflow_folderpath=self.workflow_folderpath,
         )
         pairs = [(task, n) for task in task_list for n in range(1, attempts + 1)]
         return self._execute(pairs, grader, seq=1)
@@ -1044,7 +1104,9 @@ class ExperimentHarness:
         body_error: Optional[BaseException] = None
 
         with evidence_run_module.evidence_run(
-            self.workflow_folderpath, archive_dir=self.archive_dir
+            self.workflow_folderpath,
+            archive_dir=self.archive_dir,
+            experiment_id=self.experiment_id,
         ) as evidence:
             try:
                 if pairs:

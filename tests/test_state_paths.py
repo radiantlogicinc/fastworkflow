@@ -73,7 +73,6 @@ def test_subdirs_are_namespaced_and_created(tmp_path):
     base = str((tmp_path / "workflows" / "my_workflow").resolve())
     assert state_paths.workflow_state_dir(wp) == base
     for leaf, fn in (
-        ("conversations", state_paths.conversations_dir),
         ("session_state", state_paths.session_state_dir),
         ("checkpoints", state_paths.checkpoints_dir),
     ):

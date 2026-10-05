@@ -110,21 +110,20 @@ def _manifest(
     *,
     experiments: list[dict] | None = None,
     projected_attempts: list[dict] | None = None,
+    workflow_folderpath: str | None = None,
 ) -> Path:
     path = root / "workspace.json"
-    path.write_text(
-        json.dumps(
-            {
-                "schema": WORKSPACE_SCHEMA,
-                "workspace_id": "workspace-1",
-                "label": "Historical runs",
-                "stores": stores,
-                "experiments": experiments or [],
-                "projected_attempts": projected_attempts or [],
-            }
-        ),
-        encoding="utf-8",
-    )
+    manifest = {
+        "schema": WORKSPACE_SCHEMA,
+        "workspace_id": "workspace-1",
+        "label": "Historical runs",
+        "stores": stores,
+        "experiments": experiments or [],
+        "projected_attempts": projected_attempts or [],
+    }
+    if workflow_folderpath is not None:
+        manifest["workflow_folderpath"] = workflow_folderpath
+    path.write_text(json.dumps(manifest), encoding="utf-8")
     return path
 
 
@@ -266,7 +265,8 @@ def test_sealed_digest_mismatch_is_integrity_failure(tmp_path):
         load_observability_workspace(_manifest(tmp_path, [declaration]))
 
 
-def test_live_store_digest_change_is_not_integrity_failure(tmp_path):
+def test_a_live_store_is_refused_and_left_as_it_was(tmp_path):
+    """A workspace reads sealed archives only; a live DB is the workflow's own."""
     live_path = tmp_path / "live.sqlite3"
     store = obs.ObservabilityStore(str(live_path))
     declaration = {
@@ -276,9 +276,12 @@ def test_live_store_digest_change_is_not_integrity_failure(tmp_path):
         "sha256": "0" * 64,
         "store_identity": store.store_identity(),
     }
-    workspace = load_observability_workspace(_manifest(tmp_path, [declaration]))
+    before = live_path.read_bytes()
 
-    assert workspace.stores()[0]["integrity"] == "live"
+    with pytest.raises(WorkspaceManifestError, match="sealed archives only"):
+        load_observability_workspace(_manifest(tmp_path, [declaration]))
+
+    assert live_path.read_bytes() == before
 
 
 def test_unknown_store_and_unscoped_turn_are_refused(tmp_path):
@@ -714,8 +717,8 @@ def test_token_gated_structured_trace_link_redirects_to_scoped_spa_hash(tmp_path
 
 def test_spa_pins_store_aware_workspace_navigation():
     page = run_chatbot_server.load_index_html()
-    assert b'location.hash = "store="' in page
-    assert b'"store=" + encodeURIComponent(storeId)' in page
+    assert b"writePageLink({store: storeId, turn: logicalTurnKey})" in page
+    assert b"{store: state.storeId, turn: state.turnKey}" in page
     assert b"/api/workspace/turn/" in page
     assert b"/api/workspace/trace/" in page
     assert b"Unscoped turn links are refused in workspace mode" in page

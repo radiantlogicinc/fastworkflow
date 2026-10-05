@@ -1,5 +1,4 @@
 import asyncio
-import json
 import os
 import queue
 import time
@@ -9,7 +8,7 @@ from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from queue import Queue
-from typing import Annotated, Any, Callable, Optional
+from typing import Annotated, Any, Callable, Literal, Optional
 
 from fastapi import HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -41,13 +40,27 @@ from fastworkflow.checkpoint_store import (
     RetentionPolicy,
 )
 from fastworkflow.conversation_history_io import restore_history_from_turns
+from fastworkflow.observability import feedback as observability_feedback
+from fastworkflow.observability.comparison import (
+    PassSelector,
+    discover_pass_selectors,
+    # Private by name, shared by intent: `observability.feedback` already
+    # imports `_check_scope` and `_SpanTree` from here for exactly this reason.
+    # A second implementation of "which pass does this span belong to" is the
+    # drift the shared-reference design exists to prevent, and this is the
+    # function the comparison projection attributes steps with.
+    _pass_id_for,
+    _SpanTree,
+)
 from fastworkflow.observability.store import (
+    FEEDBACK_PROVENANCES,
     AttemptClaimError,
     ObservabilityStore,
     SQLiteTraceSink,
     StoreIdentityMismatch,
     get_observability_sink,
 )
+from fastworkflow.tracing import ATTR_PASS
 from . import checkpoint
 from .jwt_manager import verify_token
 
@@ -222,23 +235,83 @@ class PerformActionRequest(BaseModel):
     timeout_seconds: int = 60
 
 
-class PostFeedbackRequest(BaseModel):
-    """
-    Request to post feedback on the latest turn.
-    Requires channel_id to be passed in the Authorization header (via JWT token).
-    
-    Note: binary_or_numeric_score accepts numeric values (float).
-    Boolean values (True/False) are automatically converted to 1.0/0.0.
-    """
-    binary_or_numeric_score: Optional[float] = None
-    nl_feedback: Optional[str] = None
+# The taxonomy as TYPES, so the three categories, the six subcategories, the
+# target kinds and the provenances appear as enumerations in the generated
+# OpenAPI schema and in the MCP tool description. A coding agent reading the
+# schema can then see the allowed values instead of having to be told them in
+# prose, and an unknown value is refused by the model rather than by a string
+# comparison further in. Derived from the taxonomy rather than restated, so the
+# schema cannot drift from what the writer accepts.
+FeedbackCategory = Literal[tuple(observability_feedback.FEEDBACK_CATEGORIES)]
+FeedbackSubcategory = Literal[
+    tuple(
+        value
+        for values in observability_feedback.FEEDBACK_SUBCATEGORIES.values()
+        for value in values
+    )
+]
+FeedbackTargetKind = Literal[tuple(observability_feedback.FEEDBACK_TARGET_KINDS)]
+FeedbackProvenance = Literal[tuple(sorted(FEEDBACK_PROVENANCES))]
 
-    @field_validator('nl_feedback')
+
+class FeedbackAnchorRequest(BaseModel):
+    """The second execution a comparison comment refers to.
+
+    Same vocabulary as the primary target. `store_id` may be given and is
+    checked; it must be this channel's evidence store, because the live
+    runtime holds exactly one and resolving another database from a request
+    would be reaching for evidence nobody authorized. Cross-store pairs are
+    recorded through the Observability server, which knows which experiment
+    stores are registered.
+    """
+    turn_key: str
+    target_label: str
+    target_kind: FeedbackTargetKind = "turn"
+    span_ids: list[str] = Field(default_factory=list)
+    store_id: Optional[str] = None
+    experiment_id: Optional[str] = None
+    task_id: Optional[str] = None
+    attempt: Optional[int] = None
+    pass_id: Optional[str] = None
+
+
+class PostFeedbackRequest(BaseModel):
+    """Request to record one review note against recorded evidence.
+
+    This replaced the agent-memory feedback post in fix-9eg.16. The old body
+    (`binary_or_numeric_score` / `nl_feedback`) wrote one mutable row per turn
+    that was read straight back into the agent's `dspy.History`; that table,
+    that route and that injection are gone. What is recorded now is an
+    append-only review note on a turn or a component of it, categorized with
+    the owner-confirmed taxonomy, and never fed back into a prompt.
+
+    A coding agent and a person post the SAME body. `provenance` says which,
+    and `comment` is free-form for both: structure it however you like, but
+    the category and subcategory arrive as enums rather than being inferred
+    from the text.
+    """
+    turn_key: str
+    target_label: str
+    comment: str
+    category: FeedbackCategory
+    subcategory: FeedbackSubcategory
+    target_kind: FeedbackTargetKind = "turn"
+    span_ids: list[str] = Field(default_factory=list)
+    provenance: FeedbackProvenance = "coding_agent"
+    experiment_id: Optional[str] = None
+    task_id: Optional[str] = None
+    attempt: Optional[int] = None
+    pass_id: Optional[str] = None
+    paired: Optional[FeedbackAnchorRequest] = None
+
+    @field_validator('subcategory')
     @classmethod
-    def validate_feedback_presence(cls, v, info):
-        """Ensure at least one feedback field is provided"""
-        if v is None and info.data.get('binary_or_numeric_score') is None:
-            raise ValueError("At least one of binary_or_numeric_score or nl_feedback must be provided")
+    def validate_taxonomy(cls, v, info):
+        """Refuse an unpaired category/subcategory at the door, as a 422."""
+        category = info.data.get('category')
+        if category is None:
+            return v
+        observability_feedback.validate_category(category, v)
         return v
 
 
@@ -970,12 +1043,6 @@ def get_channel_session_state_dir(workflow_path: str) -> str:
     """Workflow-namespaced folder for suspended Topology-B blobs (created)."""
     from fastworkflow import state_paths
     return state_paths.session_state_dir(workflow_path)
-
-
-def get_channelconversations_dir(workflow_path: str) -> str:
-    """Workflow-namespaced folder for per-channel conversation DBs (created)."""
-    from fastworkflow import state_paths
-    return state_paths.conversations_dir(workflow_path)
 
 
 def _is_awaiting_user_output(output: Optional[fastworkflow.TurnOutput]) -> bool:
@@ -1815,40 +1882,217 @@ def trim_conversation_window(runtime: ChannelRuntime, logger) -> int:
     return trimmed
 
 
-def save_last_turn_feedback(runtime: ChannelRuntime, logger) -> None:
-    """Persist feedback against the turn it was given on (rulings I3/C4).
+class FeedbackTurnNotFound(ValueError):
+    """A referenced turn is not this channel's to read or write about.
 
-    Feedback is keyed by the turn_key the WEC recorded at terminal finalize,
-    never inferred from SQL. A max-ordinal query would attach it to whatever
-    row was written last, which after a suspended or cancelled turn is not the
-    turn the user was looking at when they clicked.
-
-    The feedback table is mutable by design [R3] and joined into the memory
-    window, so this stays a plain upsert while turn rows remain write-once. The
-    row may not exist yet if the turn record is still queued; the join reunites
-    them when it lands.
+    A ``ValueError`` subclass so the direct callers that already treat an
+    unrecorded turn as one keep working; the HTTP layer catches this subclass
+    FIRST and answers 404, because an unknown turn and another channel's turn
+    have to be indistinguishable ([A39], the rule GET /turns already follows).
     """
-    turn_key = runtime.execution_context.last_completed_turn_key
-    store = runtime.observability_store
-    if store is None or not turn_key:
-        logger.warning(
-            f"Skipping feedback write for channel_id {runtime.channel_id}: "
-            + (
-                "no conversation store is active"
-                if store is None
-                else "no completed turn to attach it to"
-            )
-        )
-        return
 
-    messages = runtime.execution_context.conversation_history.messages
-    feedback = messages[-1].get("feedback") if messages else None
-    if feedback is None:
-        return
-    store.upsert_feedback(turn_key, json.dumps(feedback))
-    logger.debug(
-        f"Recorded feedback on turn {turn_key} for channel_id {runtime.channel_id}"
+    def __init__(self, turn_key: str) -> None:
+        super().__init__(f"Turn not found: {turn_key}")
+        self.turn_key = turn_key
+
+
+def assert_channel_owns_turn(
+    store: ObservabilityStore, channel_id: str, turn_key: str
+) -> dict[str, Any]:
+    """Return the turn row, but only when THIS channel recorded it.
+
+    The evidence store is per workflow, not per channel: every session this
+    server serves appends to the same database. "The store has this turn" is
+    therefore not an authorization, it is the bare-handle read [A39] forbids,
+    and a feedback route that settles for it lets one channel read and annotate
+    another's turns (fix-bnym).
+
+    Unknown and foreign collapse into one refusal for the same reason they do
+    in ``_turn_not_found``: distinguishing them confirms that somebody else's
+    turn key exists. A NULL-channel row is foreign too — nothing unattributed
+    is served through a channel-scoped route.
+    """
+    row = store.get_turn(turn_key)
+    if row is None or row.get("channel_id") != channel_id:
+        raise FeedbackTurnNotFound(turn_key)
+    return row
+
+
+def _anchor_turn_keys(
+    target: "observability_feedback.FeedbackTarget",
+) -> tuple[str, ...]:
+    """Every turn one side of a note claims, anchored or merely referenced.
+
+    ``validate_target`` checks the whole reference against the evidence, so the
+    whole reference has to be owned: a scope frozen into the row forever is an
+    assertion about turns this caller must have been allowed to see.
+    """
+    keys = list(target.ref.turn_keys)
+    if target.turn_key not in keys:
+        keys.append(target.turn_key)
+    return tuple(keys)
+
+
+def _assert_spans_are_in_pass(
+    target: "observability_feedback.FeedbackTarget",
+    selector: PassSelector,
+    spans: list[dict[str, Any]],
+) -> None:
+    """Refuse a component anchor whose spans belong to a different pass.
+
+    ``feedback.validate_target`` does NOT answer this, and the two questions it
+    does answer look enough like it to hide the gap: it checks that the span
+    ids are recorded ON THE TURN, and it calls ``PassSelector.resolve_against``,
+    which only asks whether the selector matches SOME span of the turn. On a
+    turn holding a teacher pass and a student pass, both are satisfied for
+    either pass — so ``pass_id="teacher"`` anchored to the student's span was
+    accepted and frozen into the row as a claim about the teacher.
+
+    Membership comes from ``comparison._pass_id_for``, the same function the
+    projection attributes steps with, so a span is in the pass here exactly
+    when the compare view would show it under that pass. It walks ancestry
+    rather than comparing stamps, which is what a producer opening one span per
+    pass relies on: everything the pass did inherits membership from the pass
+    span, and a check written against stamps alone would refuse every nested
+    dispatch of a real distillation trace.
+
+    Spans the turn does not record are left to ``validate_target``'s own
+    "not recorded on turn" refusal. They are a different mistake and deserve
+    their own message; answering both here would restate that rule and let the
+    two drift.
+    """
+    tree = _SpanTree(spans)
+    outside = sorted(
+        span_id
+        for span_id in target.span_ids
+        if span_id in tree.by_id
+        and _pass_id_for(selector, tree, span_id) != selector.pass_id
     )
+    if outside:
+        raise observability_feedback.FeedbackError(
+            f"span(s) {outside} recorded on turn {target.turn_key!r} are not "
+            f"part of pass {selector.pass_id!r}; a comment anchored to a pass "
+            "names that pass's own recorded activity"
+        )
+
+
+def _recorded_pass_selector(
+    store: ObservabilityStore, target: "observability_feedback.FeedbackTarget"
+) -> Optional[PassSelector]:
+    """The selector for the pass a reference names, built from recorded spans.
+
+    ``pass_id`` has been on the wire since the anchors landed, and nothing
+    supplied the selector that makes it resolvable, so every reference naming a
+    real pass was refused as if it named an imaginary one (fix-jxkk). The
+    selector is DISCOVERED here rather than accepted from the request — the
+    same rule ``selection_api._pass_scope`` follows — so a caller names a pass
+    and never describes one, and there is no way to assert membership for
+    activity the span tree does not place in the pass.
+
+    Discovery runs over the anchored turn's spans, which is the turn
+    ``feedback.validate_target`` resolves the selector against; a pass recorded
+    only on some other turn is not this anchor's pass. A ``pass_id`` no span of
+    that turn stamps is refused by name, listing what the turn does record,
+    rather than being relabelled onto a neighbouring pass or waved through.
+
+    Naming a recorded pass is necessary and not sufficient: the anchor's own
+    spans are then checked against it by ``_assert_spans_are_in_pass``, which
+    is the part ``validate_target`` leaves open.
+    """
+    pass_id = target.ref.pass_id
+    if pass_id is None:
+        return None
+    spans = store.get_spans(target.turn_key)
+    recorded = {
+        selector.pass_id: selector
+        for selector in discover_pass_selectors(spans, attribute_key=ATTR_PASS)
+    }
+    selector = recorded.get(pass_id)
+    if selector is None:
+        raise observability_feedback.FeedbackError(
+            f"turn {target.turn_key!r} records no pass {pass_id!r} under "
+            f"attribute {ATTR_PASS!r}; recorded passes here: "
+            + (", ".join(sorted(recorded)) or "none")
+        )
+    _assert_spans_are_in_pass(target, selector, spans)
+    return selector
+
+
+def _feedback_target(
+    store: ObservabilityStore, anchor: Any
+) -> "observability_feedback.FeedbackTarget":
+    """One posted anchor as a validated feedback target in THIS store.
+
+    The store id is filled in from the store actually serving the channel, and
+    a request that names a different one is refused rather than resolved: the
+    live runtime holds one evidence database and has no authorized way to
+    reach another.
+    """
+    identity = store.store_identity()
+    claimed = getattr(anchor, "store_id", None)
+    if claimed and claimed != identity:
+        raise ValueError(
+            f"store {claimed!r} is not this channel's evidence store; record "
+            "a cross-store comparison through the observability server"
+        )
+    return observability_feedback.FeedbackTarget.from_mapping({
+        "store_id": identity,
+        "turn_key": anchor.turn_key,
+        "experiment_id": anchor.experiment_id,
+        "task_id": anchor.task_id,
+        "attempt": anchor.attempt,
+        "pass_id": anchor.pass_id,
+        "target_kind": anchor.target_kind,
+        "span_ids": anchor.span_ids,
+        "target_label": anchor.target_label,
+    })
+
+
+def record_turn_feedback(
+    runtime: ChannelRuntime, request: Any, logger
+) -> dict[str, Any]:
+    """Append one review note to this channel's evidence store.
+
+    `save_last_turn_feedback` stood here until fix-9eg.16. It upserted the
+    agent-memory feedback row for whatever turn the WEC had last completed,
+    and `get_memory_window` joined it back into `dspy.History` on the next
+    turn. Both the table and that injection are gone; a note now names the
+    turn it is about explicitly, is appended rather than replaced, and is
+    validated against recorded evidence before it is stored.
+    """
+    store = runtime.observability_store
+    if store is None:
+        raise ValueError(
+            "no observability store is active for this channel; feedback is "
+            "recorded against recorded evidence and there is none"
+        )
+    primary = _feedback_target(store, request)
+    paired = _feedback_target(store, request.paired) if request.paired else None
+    # Ownership BEFORE evidence. Every later refusal is specific about what the
+    # store recorded — which spans a turn has, which passes it stamped — so
+    # asking those questions about a foreign turn first would answer them.
+    for target in (primary, paired):
+        if target is not None:
+            for turn_key in _anchor_turn_keys(target):
+                assert_channel_owns_turn(store, runtime.channel_id, turn_key)
+    stored = observability_feedback.record_feedback(
+        store,
+        primary=primary,
+        comment=request.comment,
+        category=request.category,
+        subcategory=request.subcategory,
+        provenance=request.provenance,
+        paired=paired,
+        primary_pass_selector=_recorded_pass_selector(store, primary),
+        paired_pass_selector=(
+            _recorded_pass_selector(store, paired) if paired is not None else None
+        ),
+    )
+    logger.debug(
+        f"Recorded {request.category}/{request.subcategory} feedback on turn "
+        f"{primary.turn_key} for channel_id {runtime.channel_id}"
+    )
+    return stored
 
 
 # ============================================================================

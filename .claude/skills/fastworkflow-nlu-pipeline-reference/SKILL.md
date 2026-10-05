@@ -318,8 +318,8 @@ Run-time parameter extraction detail (`utils/signatures.py`):
   see §6).
 - Agent-loop `AdapterParseError` (DSPy failed to parse the LLM's structured reply) is
   retried up to **2 attempts total** at `workflow_execution_context.py:696-707`.
-- The intent-clarification agent is a tool-free `ChainOfThought` over
-  `IntentClarificationAgentSignature` (`intent_clarification_agent.py:11-54`).
+- There is no intent-clarification agent any more (the tool-free `ChainOfThought` over
+  `IntentClarificationAgentSignature` was removed 2026-10-05); see the ambiguity bullet in §5.
 
 **Parameter-example validation — fixed 2026-08-02, with narrower limitations remaining.**
 Previously `generate_dspy_examples` accumulated `validated_examples` and then transformed
@@ -387,9 +387,12 @@ probe write-up in `docs/intent_training_improvements_spec.md` §11 (M1/M2).
 
 - Suggested commands for the constrained re-selection are persisted in the app workflow's
   `___convo_info/cache.db` Rdict (`intent_detection.py:189-217`).
-- In agent mode, ambiguity is delegated to the tool-free intent-clarification agent; if it
-  can't resolve, it executes `abort` to reset the stage and tells the outer agent to
-  `ask_user` (`workflow_agent.py:105-119, 229-259`).
+- In agent mode, ambiguity and misunderstanding are not resolved on the agent's behalf:
+  `_execute_workflow_query` runs `abort` to reset the stage and returns the NLU's reply
+  (the candidate list, or this context's commands) unchanged plus the abort confirmation,
+  so the agent picks the command itself. Until 2026-10-05 a separate tool-free
+  intent-clarification agent tried first and, when it gave up, told the outer agent to
+  `ask_user`; in measured ido runs it resolved 0 of 9 cases.
 - Successful clarification feeds the layer-3 learning cache (§1).
 - Stale-state warning: `'command'`, `'stored_parameters'`, `'NLU_Pipeline_Stage'` in the CME
   context are reset by `Workflow.end_command_processing` (`workflow.py:291-303`); a leaked

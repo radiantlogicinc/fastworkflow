@@ -403,11 +403,17 @@ def test_the_mcp_tools_still_generate(action_app_module):
 def test_a_turn_still_feeds_the_conversation_endpoints(action_app_module):
     """Returning a TurnOutput must not starve conversation history.
 
-    /new_conversation, /post_feedback and /activate_conversation all work off
+    /new_conversation and /activate_conversation work off
     ``ctx.conversation_history``, which the turn path populates as a side effect
     rather than through the return value. A cutover that changed only the return
     type could still have broken them by routing through a different dispatch,
     so this asserts the side effect survived.
+
+    /post_feedback used to belong in that list and no longer does: since
+    fix-9eg.16 it records a review note against the recorded turn in the
+    evidence store and does not touch the conversation history at all. It is
+    still exercised here, because the turn path is what has to produce a
+    ``turn_key`` the note can anchor to.
     """
     channel_id = _channel("convo")
     app_module = action_app_module
@@ -429,11 +435,23 @@ def test_a_turn_still_feeds_the_conversation_endpoints(action_app_module):
         messages = runtime.execution_context.conversation_history.messages
         assert messages, "the turn recorded no conversation history"
 
+        before = list(messages)
         feedback = client.post(
-            "/post_feedback", headers=headers, json={"binary_or_numeric_score": True}
+            "/post_feedback",
+            headers=headers,
+            json={
+                "turn_key": action.json()["turn_key"],
+                "target_kind": "turn",
+                "target_label": "Turn",
+                "comment": "The action ran, but the response did not name the result.",
+                "category": "conclusions",
+                "subcategory": "what_went_wrong",
+                "provenance": "human",
+            },
         )
-        assert feedback.status_code == 200
-        assert messages[-1]["feedback"]["binary_or_numeric_score"] == 1.0
+        assert feedback.status_code == 201, feedback.text
+        assert feedback.json()["feedback"][-1]["category"] == "conclusions"
+        assert runtime.execution_context.conversation_history.messages == before
 
         # The turn completed, so there is nothing suspended to abandon — and
         # cancel_pending must say so rather than claim it cleared something.

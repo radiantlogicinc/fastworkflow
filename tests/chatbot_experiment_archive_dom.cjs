@@ -24,6 +24,14 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   const detailButton = text => [...d.querySelectorAll('#detail button')]
     .find(node => node.textContent === text);
 
+  // Startup is two reads, not one: /api/session lands first and only then does
+  // the page read /api/navigation under that session's scope. Navigating before
+  // the session arrives reads the rail under the empty scope, and the scope
+  // change that follows drops the selection made in between -- which left this
+  // walk clicking the experiment and then watching the benchmarks placeholder
+  // repaint over it. So wait for the session AND for the navigation that scope
+  // owns before touching anything.
+  await until(() => w.session && w.hierarchyRoot);
   d.getElementById('modeDebug').click();
   await until(() => summaries().length);
   d.getElementById('navBenchmarks').click();
@@ -44,7 +52,8 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   await until(() => summary(experimentName));
   assert.ok(summary(experimentName).parentElement.classList.contains('archived'));
   await until(() => d.querySelector('#detail .recordCard.archived'));
-  assert.equal(d.querySelector('#detail .recordCard.archived .pill').textContent, 'Archived');
+  assert.ok([...d.querySelectorAll('#detail .recordCard.archived .pill')]
+    .some(pill => pill.textContent === 'Archived'));
   assert.ok(d.querySelector('#convList [aria-label="Hide archived experiments"]'));
 
   d.querySelector('#convList [aria-label="Hide archived experiments"]').click();

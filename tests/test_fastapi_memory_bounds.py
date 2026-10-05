@@ -36,7 +36,8 @@ from fastworkflow.run_fastapi_mcp import server_memory
 from fastworkflow.run_fastapi_mcp.turns import TurnRegistry, submit_turn
 from fastworkflow.run_fastapi_mcp.utils import (
     MAX_CONVERSATION_TURNS_IN_MEMORY,
-    save_last_turn_feedback,
+    PostFeedbackRequest,
+    record_turn_feedback,
     trim_conversation_window,
 )
 from fastworkflow.utils.logging import logger
@@ -178,7 +179,6 @@ def _payload_turn(index: int, size_bytes: int = 4096) -> dict:
     return {
         "conversation summary": f"turn-{index}",
         "conversation_traces": f"{index}:" + ("x" * size_bytes),
-        "feedback": None,
     }
 
 
@@ -573,10 +573,15 @@ def test_in_memory_conversation_bytes_plateau(app_module):
 
 
 def test_feedback_on_an_already_durable_turn_is_persisted(app_module):
-    """Feedback edits a recorded turn, which a write-once turn row cannot express.
+    """A note about a recorded turn, which a write-once turn row cannot hold.
 
-    Hence the separate ``feedback`` table, joined into the memory window: turn
-    rows stay write-once while feedback stays mutable [R3].
+    Hence a separate table. It used to be the mutable agent-memory
+    ``feedback`` row, joined into the memory window so the agent read its own
+    corrections back; fix-9eg.16 replaced it with append-only review notes in
+    ``human_feedback`` and removed the join. The turn row is still write-once,
+    the note still lands, and the memory window is now unchanged by it —
+    which this asserts, because a note silently re-entering the prompt is the
+    regression that matters.
     """
     channel_id = _channel("feedback")
 
@@ -590,26 +595,42 @@ def test_feedback_on_an_already_durable_turn_is_persisted(app_module):
         for i in range(3):
             _record_turn(runtime, f"turn-{i}")
         runtime.execution_context.trace_sink.flush()
-        return runtime.active_conversation_id
+        return (
+            runtime.active_conversation_id,
+            runtime.execution_context.last_completed_turn_key,
+        )
 
-    conv_id = asyncio.run(seed())
+    conv_id, turn_key = asyncio.run(seed())
 
     resp = client.post(
         "/post_feedback",
         headers=headers,
-        json={"binary_or_numeric_score": 1, "nl_feedback": "useful"},
+        json={
+            "turn_key": turn_key,
+            "target_kind": "turn",
+            "target_label": "Turn",
+            "comment": "useful",
+            "category": "conclusions",
+            "subcategory": "what_went_right",
+            "provenance": "human",
+        },
     )
-    assert resp.status_code == 200
+    assert resp.status_code == 201, resp.text
 
     async def check():
         runtime = await app_module.session_manager.get_session(channel_id)
         runtime.execution_context.trace_sink.flush()
-        window = runtime.observability_store.get_memory_window(
-            channel_id, conv_id, 1_000_000
+        store = runtime.observability_store
+        window = store.get_memory_window(channel_id, conv_id, 1_000_000)
+        assert len(window) == 3, "a note must not duplicate the turn"
+        assert all(
+            set(entry) == {"conversation summary", "conversation_traces"}
+            for entry in window
         )
-        assert len(window) == 3, "feedback must not duplicate the turn"
-        assert window[-1]["feedback"]["nl_feedback"] == "useful"
-        assert window[0]["feedback"] is None
+        assert "useful" not in json.dumps(window)
+        notes = store.list_human_feedback(turn_key)
+        assert [note["comment"] for note in notes] == ["useful"]
+        assert notes[0]["subcategory"] == "what_went_right"
 
     asyncio.run(check())
 
@@ -779,13 +800,16 @@ def test_a_cold_restore_steps_back_to_the_last_conversation_with_turns(app_modul
     )
 
 
-def test_feedback_after_an_activation_lands_on_the_activated_conversation(app_module):
-    """Activating a conversation moves the feedback target with it (ruling I3).
+def test_feedback_after_an_activation_lands_on_the_turn_it_names(app_module):
+    """An activation cannot move where a note lands (ruling I3, restated).
 
-    Feedback is keyed by ``last_completed_turn_key``, which names the turn this
-    process ran last. An activation replaces the in-memory history with another
-    conversation's, so leaving that key alone would file the user's feedback
-    against a turn of the conversation they just navigated away from.
+    It used to be able to. Feedback was keyed by ``last_completed_turn_key``
+    — the turn this PROCESS ran last — so an activation that swapped the
+    in-memory history for another conversation's had to move that key too, or
+    the user's remark was filed against the conversation they had just
+    navigated away from. The note now names its turn in the request, so the
+    hazard is gone rather than guarded: the same post before and after an
+    activation lands on the same turn either way.
     """
     channel_id = _channel("activatefeedback")
 
@@ -801,6 +825,7 @@ def test_feedback_after_an_activation_lands_on_the_activated_conversation(app_mo
         # process's last completed turn belongs to B while A is activated.
         _record_turn(runtime, "conversation A turn")
         conv_a = runtime.active_conversation_id
+        turn_in_a = runtime.execution_context.last_completed_turn_key
         runtime.active_conversation_id = store.mint_conversation_id(channel_id)
         runtime.execution_context.bind_observability_identity(
             conversation_id=runtime.active_conversation_id
@@ -808,46 +833,68 @@ def test_feedback_after_an_activation_lands_on_the_activated_conversation(app_mo
         runtime.execution_context.clear_conversation_history()
         _record_turn(runtime, "conversation B turn")
         conv_b = runtime.active_conversation_id
+        turn_in_b = runtime.execution_context.last_completed_turn_key
         runtime.execution_context.trace_sink.flush()
-        return conv_a, conv_b
+        return conv_a, conv_b, turn_in_a, turn_in_b
 
-    conv_a, conv_b = asyncio.run(seed())
+    conv_a, conv_b, turn_in_a, turn_in_b = asyncio.run(seed())
 
     resp = client.post(
         "/activate_conversation", headers=headers, json={"conversation_id": conv_a}
     )
     assert resp.status_code == 200
 
-    resp = client.post(
-        "/post_feedback",
-        headers=headers,
-        json={"binary_or_numeric_score": 1, "nl_feedback": "about A"},
-    )
-    assert resp.status_code == 200
+    def post(turn_key, comment):
+        return client.post(
+            "/post_feedback",
+            headers=headers,
+            json={
+                "turn_key": turn_key,
+                "target_kind": "turn",
+                "target_label": "Turn",
+                "comment": comment,
+                "category": "observations_analysis",
+                "subcategory": "observation",
+                "provenance": "human",
+            },
+        )
+
+    assert post(turn_in_a, "about A").status_code == 201
+    # And the turn of the conversation the user navigated AWAY from is still
+    # a perfectly good target: the activation decides what is on screen, not
+    # what a reviewer is allowed to remark on.
+    assert post(turn_in_b, "about B").status_code == 201
 
     async def check():
         runtime = await app_module.session_manager.get_session(channel_id)
         runtime.execution_context.trace_sink.flush()
         store = runtime.observability_store
-        window_a = store.get_memory_window(channel_id, conv_a, 100)
-        window_b = store.get_memory_window(channel_id, conv_b, 100)
-        return window_a, window_b
+        return (
+            store.get_memory_window(channel_id, conv_a, 100),
+            store.get_memory_window(channel_id, conv_b, 100),
+            [row["comment"] for row in store.list_human_feedback(turn_in_a)],
+            [row["comment"] for row in store.list_human_feedback(turn_in_b)],
+        )
 
-    window_a, window_b = asyncio.run(check())
+    window_a, window_b, notes_a, notes_b = asyncio.run(check())
 
-    assert [entry["feedback"] for entry in window_b] == [None], (
-        "the feedback landed on the conversation the user navigated away from"
-    )
-    assert len(window_a) == 1
-    assert window_a[0]["feedback"]["nl_feedback"] == "about A"
+    assert notes_a == ["about A"]
+    assert notes_b == ["about B"]
+    assert len(window_a) == len(window_b) == 1
+    # Neither note reached the agent's memory of either conversation.
+    assert "about A" not in json.dumps(window_a + window_b)
+    assert "about B" not in json.dumps(window_a + window_b)
 
 
 def test_feedback_is_not_written_into_a_mismatched_conversation(app_module):
-    """Feedback follows the turn it was given on, not the active conversation.
+    """A note follows the turn it names, not the active conversation.
 
-    Keying by turn_key (ruling I3/C4) is what makes this structural rather than
-    guarded: repointing the runtime at another conversation cannot move the
-    feedback, because the key names a row, not a position.
+    Keying by turn_key (ruling I3/C4) is what makes this structural rather
+    than guarded: repointing the runtime at another conversation cannot move
+    the note, because the key names a row, not a position. The key used to be
+    read off the runtime (``last_completed_turn_key``), which is why the
+    hazard existed; it now arrives in the request and is validated against
+    recorded evidence, so a turn that is not there is refused outright.
     """
     channel_id = _channel("mismatch")
     seen: dict = {}
@@ -860,20 +907,44 @@ def test_feedback_is_not_written_into_a_mismatched_conversation(app_module):
         seen["fed_turn_key"] = runtime.execution_context.last_completed_turn_key
 
         # Point the runtime at a different, shorter conversation after the turn
-        # the feedback belongs to has already been recorded.
+        # the note belongs to has already been recorded.
         store = runtime.observability_store
         other_id = store.mint_conversation_id(channel_id)
         runtime.active_conversation_id = other_id
-        runtime.execution_context.conversation_history.messages[-1]["feedback"] = {
-            "nl_feedback": "belongs to the other conversation"
-        }
 
-        save_last_turn_feedback(runtime, logger)
+        record_turn_feedback(
+            runtime,
+            PostFeedbackRequest(
+                turn_key=seen["fed_turn_key"],
+                target_label="Turn",
+                comment="belongs to the turn, not the conversation",
+                category="conclusions",
+                subcategory="what_went_wrong",
+                provenance="human",
+            ),
+            logger,
+        )
+        with pytest.raises(ValueError):
+            record_turn_feedback(
+                runtime,
+                PostFeedbackRequest(
+                    turn_key="turn-that-was-never-recorded",
+                    target_label="Turn",
+                    comment="nowhere",
+                    category="conclusions",
+                    subcategory="what_went_wrong",
+                ),
+                logger,
+            )
         runtime.execution_context.trace_sink.flush()
         seen["other_window"] = store.get_memory_window(channel_id, other_id, 100)
         seen["original_window"] = store.get_memory_window(
             channel_id, seen["original_conv"], 100
         )
+        seen["notes"] = store.list_human_feedback(seen["fed_turn_key"])
+        seen["summaries"] = [
+            (row["conversation summary"]) for row in seen["original_window"]
+        ]
         return runtime
 
     asyncio.run(body())
@@ -881,11 +952,10 @@ def test_feedback_is_not_written_into_a_mismatched_conversation(app_module):
     assert seen["other_window"] == [], (
         "the other conversation gained a turn it never had"
     )
-    fed = [entry for entry in seen["original_window"] if entry["feedback"]]
-    assert len(fed) == 1, "the feedback did not land on exactly one turn"
-    assert fed[0]["conversation summary"] == "turn-1", (
-        "the feedback landed on the wrong turn of the original conversation"
-    )
+    assert len(seen["notes"]) == 1, "the note did not land on exactly one turn"
+    assert seen["notes"][0]["turn_key"] == seen["fed_turn_key"]
+    assert seen["summaries"] == ["turn-0", "turn-1"]
+    assert "belongs to the turn" not in json.dumps(seen["original_window"])
 
 
 def test_readiness_probe_reports_memory_metrics_on_demand(app_module):

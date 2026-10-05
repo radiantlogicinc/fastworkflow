@@ -143,8 +143,22 @@ clears the durable session-state blob. Returns `{"status": "ok", "cleared": <boo
 ### POST /new_conversation (auth) — rejected with 409 while a turn is active (`_reject_if_busy`).
 ### GET /conversations?limit=20 (auth) — list past conversations for the channel.
 ### POST /post_feedback (auth) — also busy-guarded
-Body: `{binary_or_numeric_score?: float, nl_feedback?: str}` — at least one required (validator);
-booleans coerce to 1.0/0.0. Applies to the latest turn.
+Records ONE review note against a named recorded turn; returns 201 and the turn's notes.
+Body: `{turn_key, target_label, comment, category, subcategory, target_kind?="turn",
+span_ids?=[], provenance?="coding_agent", experiment_id?, task_id?, attempt?, pass_id?,
+paired?}`. `category`/`subcategory` must pair or it is a 422: `observations_analysis` →
+`observation`|`analysis`, `conclusions` → `what_went_right`|`what_went_wrong`,
+`recommendations` → `what_to_do`|`what_not_to_do`. `comment` is free text and is never
+parsed for metadata. Appends — a second post does not replace the first.
+
+Until fix-9eg.16 this endpoint took `{binary_or_numeric_score?, nl_feedback?}` and upserted
+the agent-memory `feedback` table for whatever turn the process had last completed, and
+`get_memory_window` joined that row back into the agent's `dspy.History`. Table, route body
+and injection were removed together; no shim.
+
+### GET /feedback?turn_key=... (auth) — the notes on one turn, oldest first.
+Pre-taxonomy rows read back `category: null`, `subcategory: null`, `classified: false`.
+### GET /feedback_taxonomy (auth) — the enums, labels and composer prompts the UI uses.
 ### POST /activate_conversation (auth) — resume an archived conversation by ID; also busy-guarded.
 
 (Busy guard verified: `_reject_if_busy` is called by exactly three endpoints —

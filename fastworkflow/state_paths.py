@@ -23,7 +23,6 @@ This module fixes both problems:
 Layout::
 
     <state-root>/workflows/<workflow-id>/
-        conversations/<channel_id>.sqlite3
         session_state/<channel_id>.pending.json
         checkpoints/channels/<deployment>/<fingerprint>/<channel_key>/...
         function_cache/<fingerprint>/<function_name>/cache.sqlite3
@@ -47,7 +46,6 @@ from fastworkflow.storage_keys import encode_path_component
 _DEFAULT_STATE_ROOT = os.path.join("~", ".local", "state", "fastworkflow")
 
 _WORKFLOWS_DIRNAME = "workflows"
-_CONVERSATIONS_DIRNAME = "conversations"
 _SESSION_STATE_DIRNAME = "session_state"
 _CHECKPOINTS_DIRNAME = "checkpoints"
 _FUNCTION_CACHE_DIRNAME = "function_cache"
@@ -64,6 +62,19 @@ def _optional_env(name: str) -> str | None:
     if value is None:
         value = os.getenv(name)
     return value
+
+
+# The two variables that decide which live DB a process resolves.
+LOCATION_VARS = ("FASTWORKFLOW_STATE_ROOT", "FASTWORKFLOW_WORKFLOW_ID")
+
+
+def location_overrides() -> dict[str, str]:
+    """The location variables set for this process, env file or OS env."""
+    return {
+        name: str(value).strip()
+        for name in LOCATION_VARS
+        if (value := _optional_env(name)) and str(value).strip()
+    }
 
 
 def state_root() -> str:
@@ -104,22 +115,6 @@ def workflow_id(workflow_path: str) -> str:
 def workflow_state_dir(workflow_path: str) -> str:
     """``<state-root>/workflows/<workflow-id>`` (created)."""
     path = os.path.join(state_root(), _WORKFLOWS_DIRNAME, workflow_id(workflow_path))
-    os.makedirs(path, exist_ok=True)
-    return path
-
-
-def conversations_dir(workflow_path: str) -> str:
-    """LEGACY per-channel conversation SQLite DBs for this workflow (created).
-
-    Nothing writes these since the Phase-7 consolidation made
-    ``observability_db`` the single source of truth for conversations
-    (docs/observability_phase7_consolidation_design.md §2.8). Pre-cutover files
-    are left in place — readable by older builds, deletable by the operator,
-    erased with the channel by ``run_forget_channel``. This function stays until
-    the next major so those paths remain addressable; the directory it creates
-    on a fresh install is simply empty.
-    """
-    path = os.path.join(workflow_state_dir(workflow_path), _CONVERSATIONS_DIRNAME)
     os.makedirs(path, exist_ok=True)
     return path
 

@@ -9,6 +9,7 @@ import stat
 
 import pytest
 
+from fastworkflow.observability import control, selection
 from fastworkflow.observability import store as obs
 from fastworkflow import state_paths
 from fastworkflow.experiment.runner import ExperimentController, experiment_store_readiness
@@ -17,17 +18,18 @@ from fastworkflow.experiment.runner import ExperimentController, experiment_stor
 @pytest.fixture
 def installed_db(tmp_path, monkeypatch):
     monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
-    path = str(tmp_path / "observability.sqlite3")
+    folder = str(tmp_path / "workflow")
+    path = state_paths.observability_db(folder)
     store = obs.ObservabilityStore(path)
     identity = store.store_identity()
     assert identity is not None
-    return path, identity
+    return path, identity, folder
 
 
 def _controller(installed_db, *, external=True):
-    path, identity = installed_db
+    _, identity, folder = installed_db
     return ExperimentController(
-        path,
+        folder,
         identity,
         migrate=False,
         external=external,
@@ -132,7 +134,7 @@ def test_drain_blocks_certification_until_owned_writer_stops(
     assert sink is not None
     path = state_paths.observability_db(str(workflow))
     identity = experiment_store_readiness(path)["store_id"]
-    controller = ExperimentController(path, identity, migrate=False, external=True)
+    controller = ExperimentController(str(workflow), identity, migrate=False, external=True)
     _create(controller, required_segments=0)
     _finish(controller)
 
@@ -147,7 +149,7 @@ def test_drain_blocks_certification_until_owned_writer_stops(
 def test_archive_includes_committed_wal_without_mutating_source(
     installed_db, tmp_path
 ):
-    path, identity = installed_db
+    path, identity, _ = installed_db
     writer = sqlite3.connect(path)
     writer.execute("PRAGMA wal_autocheckpoint=0")
     writer.execute("CREATE TABLE wal_evidence (value TEXT NOT NULL)")
@@ -187,7 +189,7 @@ def test_archive_includes_committed_wal_without_mutating_source(
 def test_source_change_aborts_seal_and_removes_destination(
     installed_db, tmp_path, monkeypatch
 ):
-    path, _ = installed_db
+    path, _, _ = installed_db
     store = obs.ObservabilityStore(path, migrate=False)
     original = store._file_digest
     source_calls = 0
@@ -210,7 +212,7 @@ def test_source_change_aborts_seal_and_removes_destination(
 
 
 def test_archive_open_never_migrates_source(installed_db, tmp_path, monkeypatch):
-    path, _ = installed_db
+    path, _, _ = installed_db
     store = obs.ObservabilityStore(path, migrate=False)
 
     def forbidden(self):
@@ -277,6 +279,29 @@ def test_the_sealed_archive_reports_the_experiment_complete(installed_db, tmp_pa
     assert source["workspace_store_identity"] == installed_db[1]
 
 
+def test_the_seal_registers_its_archive_and_the_contest_reads_it(installed_db, tmp_path):
+    """`sealed_archives` is written in the seal's own transaction, and
+    `store_for` then hands back the archive rather than the live DB."""
+    controller = _sealable(installed_db)
+    archive_path = tmp_path / "workspace.sqlite3"
+    contest = selection.SelectionControlStore(controller.store)
+    assert contest.store_for("exp-1") is controller.store
+
+    archive = controller.seal_workspace_evidence("exp-1", str(archive_path))
+
+    assert control.rows(
+        controller.store,
+        "SELECT experiment_id, archive_sha256, path, size_bytes FROM sealed_archives",
+    ) == [{
+        "experiment_id": "exp-1", "archive_sha256": archive["sha256"],
+        "path": str(archive_path), "size_bytes": archive_path.stat().st_size,
+    }]
+    sealed = contest.store_for("exp-1")
+    assert isinstance(sealed, obs.ReadOnlyObservabilityStore)
+    assert sealed.db_path == str(archive_path)
+    assert sealed.get_experiment("exp-1")["status"] == "complete"
+
+
 def test_the_archive_stays_byte_immutable_after_the_status_stamp(
     installed_db, tmp_path
 ):
@@ -291,7 +316,7 @@ def test_the_archive_stays_byte_immutable_after_the_status_stamp(
     assert not os.path.exists(f"{archive_path}-shm")
     assert archive["sealed"] is True
     assert archive["read_only"] is True
-    assert archive["source_bytes_verified_unchanged"] is True
+    assert archive["consistent_snapshot"] is True
     before = _sha256(archive_path)
     assert _archive_status(archive_path)[0] == "complete"
     assert _sha256(archive_path) == before == archive["sha256"]
@@ -355,9 +380,9 @@ def test_sealing_refuses_an_experiment_whose_capture_is_still_open(installed_db,
 def test_a_live_writer_blocks_the_seal_before_the_status_is_stamped(
     tmp_path, monkeypatch
 ):
-    """`archive_to` refuses a seal while a writer holds the DB, but it does so
-    after the promotion. Checking it first keeps a knowable refusal from leaving
-    an unfinished seal behind."""
+    """A writer in this process may still hold the experiment's records, so the
+    seal refuses it, and before the promotion: a knowable refusal must not
+    leave an unfinished seal behind."""
     monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
     workflow = tmp_path / "workflow"
@@ -366,7 +391,7 @@ def test_a_live_writer_blocks_the_seal_before_the_status_is_stamped(
     assert sink is not None
     path = state_paths.observability_db(str(workflow))
     identity = experiment_store_readiness(path)["store_id"]
-    controller = ExperimentController(path, identity, migrate=False, external=True)
+    controller = ExperimentController(str(workflow), identity, migrate=False, external=True)
     _create(controller, required_segments=0)
     _finish(controller)
     controller.drain_before_certify()

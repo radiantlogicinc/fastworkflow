@@ -109,9 +109,14 @@ with the store.
 ### 2.3 Memory rebuild from the new store (gate 1, [R3])
 
 New read: `ObservabilityStore.get_memory_window(channel_id, conversation_id,
-max_turns)` → newest `max_turns` turns (ordered by ordinal, `LEFT JOIN
-feedback`) projected to the canonical 3-key dicts
-(`{"conversation summary", "conversation_traces", "feedback"}`), oldest-first.
+max_turns)` → newest `max_turns` turns (ordered by ordinal) projected to the
+canonical dicts (`{"conversation summary", "conversation_traces"}`),
+oldest-first. **Two keys, not three, as of fix-9eg.16:** the third was
+`feedback`, joined from the agent-memory `feedback` table so that whatever had
+been posted to `/post_feedback` was replayed into the agent's `dspy.History`.
+That table, that join and that injection are gone; the review comments the
+Observability loop records (`human_feedback`) are append-only, categorized, and
+are not fed back into any prompt.
 `_create_channel_runtime` restore switches from
 `conversation_store.get_conversation_window` to this; conversation to restore
 = `MAX(conversation_id)` for the channel (replaces

@@ -244,7 +244,7 @@ def loopback_observability(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             "experiment_store_readiness"
         ]
         controller = ExperimentController(
-            readiness["resolved_path"],
+            workflow_path,
             readiness["store_id"],
             migrate=False,
             external=True,
@@ -684,7 +684,12 @@ def test_external_experiment_observability_end_to_end(loopback_observability):
         for path in (evidence["archive_a"], evidence["archive_b"])
     } == archive_before
     controller = evidence["controller"]
-    assert controller.store.get_feedback(evidence["turn_key_a"]) is None
+    # The agent-memory feedback row was the other way a blinded answer could
+    # have leaked back into the model's context: it was joined into
+    # `get_memory_window` and replayed as `dspy.History`. fix-9eg.16 removed
+    # the table and the join, so the check is now that the API is gone rather
+    # than that the row is empty — an absent surface cannot leak.
+    assert not hasattr(controller.store, "get_feedback")
     turn = controller.store.get_turn(evidence["turn_key_a"])
     assert turn is not None
     memory = controller.store.get_memory_window(

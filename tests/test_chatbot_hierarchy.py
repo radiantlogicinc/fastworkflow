@@ -2,7 +2,10 @@
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
+import urllib.error
+import urllib.request
 
 import pytest
 
@@ -29,15 +32,15 @@ def walk(node):
 
 
 @pytest.fixture
-def hierarchy_server(experiment_server, tmp_path):
+def hierarchy_server(experiment_server):
     server, default = experiment_server
     for key, day in [('plain today', '2026-09-08'), ('plain yesterday', '2026-09-07')]:
         add_turn(default, key, day=day)
     add_turn(default, 'outside benchmark', eid='exp-1', channel='unassigned')
     spec = setup.save_benchmark(server.workflow_path, {'title': 'Tuning benchmark', 'description': 'Review this benchmark', 'tasks': [{}]})
     registration = setup.create_experiment(server.workflow_path, spec['benchmark_id'], 'v1')
-    store = obs.ObservabilityStore(str(tmp_path / 'registered.sqlite3'))
-    controller = ExperimentController(store.db_path, store.store_identity(), external=False, workflow_folderpath=server.workflow_path)
+    store = default
+    controller = ExperimentController(server.workflow_path, store.store_identity(), external=False)
     eid = registration['experiment_id']
     controller.create_experiment(eid, 'Recorded experiment', declared_tasks=1, declared_attempts=1,
         declarations=[(registration['task_ids'][0], 1, 'registered')])
@@ -70,7 +73,7 @@ def test_hierarchy_separates_benchmarks_experiments_and_dates(hierarchy_server):
     recorded = next(n for n in benchmark['children'] if n['experiment_id'] == eid)
     assert recorded['recorded']
     turn = next(n for n in walk(recorded) if n['kind'] == 'turn')
-    assert turn['turn_key'] == 'experiment-turn' and turn['source'] == {'benchmark_experiment': eid}
+    assert turn['turn_key'] == 'experiment-turn' and turn['source'] is None
     adhoc = next(n for n in root['children'] if n['kind'] == 'adhoc')
     assert [n['label'] for n in adhoc['children']] == ['2026-09-08', '2026-09-07']
     assert {n['turn_key'] for n in walk(adhoc) if n['kind'] == 'turn'} == {'plain today', 'plain yesterday'}
@@ -107,6 +110,43 @@ def test_navigation_orders_benchmark_experiments_newest_first():
     ]
 
 
+def _navigation_http(server, *, etag=None):
+    url = f'http://127.0.0.1:{server.port}/api/navigation'
+    req = urllib.request.Request(url)
+    req.add_header('Authorization', f'Bearer {server.token}')
+    if etag is not None:
+        req.add_header('If-None-Match', etag)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, dict(resp.headers), resp.read()
+    except urllib.error.HTTPError as err:
+        return err.code, dict(err.headers), err.read()
+
+
+def test_navigation_payload_is_slim_and_supports_etag(hierarchy_server):
+    """Turn info is whitelisted; other kinds keep full info for showHierarchyInfo."""
+    server, _spec, _eid, _default, _store = hierarchy_server
+    status, headers, body = _navigation_http(server)
+    assert status == 200
+    data = json.loads(body)
+    turns = [n for n in walk(data['root']) if n['kind'] == 'turn']
+    assert turns
+    for turn in turns:
+        assert set(turn.get('info') or {}).issubset({'status', 'started_at'})
+    conversations = [n for n in walk(data['root']) if n['kind'] == 'conversation']
+    assert conversations
+    assert any(
+        {'channel_id', 'conversation_id'} <= set(c.get('info') or {})
+        for c in conversations
+    )
+    etag = headers.get('ETag') or headers.get('etag')
+    assert etag
+    status304, headers304, body304 = _navigation_http(server, etag=etag)
+    assert status304 == 304
+    assert body304 == b''
+    assert (headers304.get('ETag') or headers304.get('etag')) == etag
+
+
 def test_navigation_workspace_is_scoped(workspace_server):
     server, _workflow, _before = workspace_server
     status, data = _request(server, '/api/navigation')
@@ -129,7 +169,6 @@ def test_page_separates_navigation_into_tabs():
 
 
 def test_incompatible_default_does_not_hide_registered_experiment(hierarchy_server, tmp_path):
-    import sqlite3
     server, _spec, eid, _default, _store = hierarchy_server
     old = tmp_path / 'old.sqlite3'
     with sqlite3.connect(old) as conn:
@@ -137,7 +176,7 @@ def test_incompatible_default_does_not_hide_registered_experiment(hierarchy_serv
     server.db_path = str(old)
     status, data = _request(server, '/api/navigation')
     assert status == 200 and data['root']['info']['warnings']
-    assert any(n.get('experiment_id') == eid and n['recorded'] for n in walk(data['root']) if n['kind'] == 'experiment')
+    assert any(n.get('experiment_id') == eid and n['registered'] for n in walk(data['root']) if n['kind'] == 'experiment')
 
 
 def test_hierarchy_dom_clicks(hierarchy_server):
@@ -209,3 +248,70 @@ def test_record_navigator_dom(record_nav_server):
         f'http://127.0.0.1:{server.port}/?token={server.token}', *NAV_TURNS],
         capture_output=True, text=True, timeout=40)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.fixture
+def crumb_climb_server(experiment_server):
+    """One turn deep enough to stand on a step: Planning, then Execution of two steps."""
+    server, default = experiment_server
+    key = 'crumb-turn'
+    row = _turn_row(key, None, None, None)
+    row.update(channel_id='chat', conversation_id=9, ordinal=1,
+               user_message='climb the crumbs', started_at='2026-09-08T01:00:00+00:00')
+    spans = [
+        ('crumb-plan', None, 'fw.planner.plan', 1, 1000, '{}'),
+        ('crumb-exec', None, 'fw.agent.execute', 2000, 9000, '{}'),
+        ('crumb-step-1', 'crumb-exec', 'fw.agent.step', 2100, 5000,
+         '{"tool_name": "first_tool", "observation": "first seen"}'),
+        ('crumb-step-2', 'crumb-exec', 'fw.agent.step', 5100, 8900,
+         '{"tool_name": "second_tool"}'),
+    ]
+    with default._connect() as conn:
+        assert default.upsert_turn_row(conn, row, [], default._store_redactor())
+        for span_id, parent, name, start, end, attrs in spans:
+            conn.execute(
+                'INSERT INTO spans(span_id,trace_id,parent_span_id,name,kind,start_ns,end_ns,status,attributes)'
+                ' VALUES(?,?,?,?,?,?,?,?,?)',
+                (span_id, key, parent, name, 'internal', start, end, 'ok', attrs))
+    yield server
+
+
+def test_breadcrumb_climbs_out_of_a_step_dom(crumb_climb_server):
+    _run_dom('chatbot_crumb_climb_dom.cjs', crumb_climb_server, 'crumb-turn')
+
+
+def _run_dom(script_name, server, *extra, timeout=40):
+    dependency = os.environ.get('TEST_JSDOM_ROOT')
+    if not dependency:
+        pytest.skip('Set TEST_JSDOM_ROOT to run DOM integration with jsdom')
+    script = Path(__file__).with_name(script_name)
+    result = subprocess.run(
+        ['node', str(script), dependency,
+         f'http://127.0.0.1:{server.port}/?token={server.token}', *extra],
+        capture_output=True, text=True, timeout=timeout)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_navigation_etag_dom(hierarchy_server):
+    server, _spec, _eid, _default, _store = hierarchy_server
+    _run_dom('chatbot_nav_etag_dom.cjs', server)
+
+
+def test_polling_visibility_dom(hierarchy_server):
+    server, _spec, _eid, _default, _store = hierarchy_server
+    _run_dom('chatbot_polling_visibility_dom.cjs', server, timeout=60)
+
+
+def test_keyboard_rail_dom(hierarchy_server):
+    server, _spec, _eid, _default, _store = hierarchy_server
+    _run_dom('chatbot_keyboard_rail_dom.cjs', server, timeout=90)
+
+
+def test_unreachable_and_clear_rotation_dom(hierarchy_server):
+    server, _spec, _eid, _default, _store = hierarchy_server
+    _run_dom('chatbot_unreachable_clear_dom.cjs', server)
+
+
+def test_perf_render_dom(hierarchy_server):
+    server, _spec, _eid, _default, _store = hierarchy_server
+    _run_dom('chatbot_perf_render_dom.cjs', server)

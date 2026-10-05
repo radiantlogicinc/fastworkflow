@@ -65,7 +65,6 @@ from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 REDACTION_ENV = archive_module.REDACTION_ENV
 REDACTION_ON = archive_module.REDACTION_ON
 REDACTION_OFF = archive_module.REDACTION_OFF
-LEGACY_SIDECAR_SUFFIX = ".offload-handles.sqlite3"
 
 #: A credential shape ``Redactor._SECRET_PATTERNS`` recognises with no help
 #: from the environment.
@@ -467,17 +466,6 @@ class NoSealLifecycleTests(EvidenceFixture):
         with sqlite3.connect(self.db_path) as conn:
             after = conn.execute("SELECT text_utf8 FROM offload_evidence").fetchall()
         self.assertEqual(before, after)
-
-    def test_a_legacy_preserve_sentinel_is_removed_with_its_sidecar(self) -> None:
-        sidecar = self.db_path + LEGACY_SIDECAR_SUFFIX
-        for path in (sidecar, sidecar + ".preserve"):
-            with open(path, "wb") as handle:
-                handle.write(b"legacy")
-
-        RuntimeHandleArchive(self.db_path)
-
-        self.assertFalse(os.path.exists(sidecar))
-        self.assertFalse(os.path.exists(sidecar + ".preserve"))
 
     def test_no_raw_row_ledger_is_created(self) -> None:
         self.persist(response_with_credential())

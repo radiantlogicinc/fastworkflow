@@ -65,9 +65,13 @@ not a human rater, and a saved review decision does not implement this responder
 
 ## External / HTTP collectors
 
-Use `ExperimentController` with the actual database path, expected store identity and
-`workflow_folderpath`. External controllers open an already initialized compatible store with
-`migrate=False`. Pass the UI's `experiment_id` and the complete task set to `create_experiment`:
+Use `ExperimentController(workflow_folderpath, expected_store_identity, ...)`; it records into
+the workflow's one live DB, `state_paths.observability_db(workflow_folderpath)`, which the server
+and the UI resolve too. Do not give the run its own `FASTWORKFLOW_STATE_ROOT`: a different root is
+a different DB, so a registered experiment raises `ExperimentNotRegisteredHere` (naming the path
+and both location variables) and an ad-hoc one logs a WARNING. External controllers open an
+already initialized compatible store with `migrate=False`. Pass the UI's `experiment_id`, the
+complete task set and `registered=True` to `create_experiment`:
 `declarations` contains `(task_id, attempt_number, channel_id)` tuples; `declared_tasks` is the
 number of unique tasks and `declared_attempts` is the repetitions per task.
 
@@ -125,7 +129,7 @@ programmatic UI requests. URL-encode IDs. These are `run_chatbot` APIs, not `/in
 | Read/write benchmark analysis | `GET` / `PUT /api/benchmarks/<benchmark_id>/analysis`; PUT body `{"analysis": value}` |
 | Read/write experiment notes | `GET /api/experiment/<experiment_id>` / `PATCH /api/experiment/<experiment_id>` with `{"notes": "..."}` |
 
-For execution reads/writes against a registered experiment's store, preserve
-`benchmark_experiment=<experiment_id>` source selection. For workspace reads use the appropriate
+Execution reads/writes go to the workflow's one live database, so a registered experiment's
+evidence is visible only once it is recorded there. For workspace reads use the appropriate
 `store_id`; workspace writes are refused. Do not confuse a registration with a recorded experiment:
 a registration can exist before there are attempts or conversations to show.

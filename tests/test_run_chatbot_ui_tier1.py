@@ -300,7 +300,7 @@ def seeded_db(workflow_path) -> str:
     store = obs.ObservabilityStore(db_path)
     policy = evidence_policy()
     controller = ExperimentController(
-        db_path, store.store_identity(), migrate=False, external=True
+        workflow_path, store.store_identity(), migrate=False, external=True
     )
 
     # -- (d) one attempt bound by a server that stamped its snapshot, one by a
@@ -852,8 +852,8 @@ class TestPage:
         assert b"function tokenLimitChip(count)" in page
         assert b'"cut at limit"' in page
         assert b'" cut at limit"' in page
-        assert b"appendTokenLimitChip(sub, t.llm_calls_cut_at_limit)" in page       # rail turns
-        assert b"appendTokenLimitChip(subLine, row.llm_calls_cut_at_limit)" in page # attempt rows
+        # Rail turn rows are label-only (owner decision 2026-09-29); the chips live in the turn view.
+        assert b"appendTokenLimitChip(subLine, extra.llm_calls_cut_at_limit)" in page # attempt rows (tally lives on the evidence row)
         assert b"appendTokenLimitChip(outcomeLine, row.llm_calls_cut_at_limit)" in page  # workspace card
         assert b"cut: (llmCallCutAtLimit(span) ? 1 : 0) + sumCut(children)" in page
         # (b) evidence verdict, reasons quoted, deltas rendered by key
@@ -861,7 +861,7 @@ class TestPage:
         assert b"function renderEvidenceVerdict(container, verdict, opts)" in page
         assert b"function renderEvidenceSegments(container, segments)" in page
         assert b"renderEvidenceVerdict(card, exp.evidence)" in page
-        assert b"renderEvidenceVerdict(verdictBox, row.evidence, { segments: false })" in page
+        assert b"renderEvidenceVerdict(verdictBox, extra.evidence, { segments: false })" in page
         assert b"renderEvidenceVerdict(segBox, segment.evidence)" in page
         assert b"writer-health delta" in page
         assert b"evidence INVALID" in page and b"no evidence run recorded" in page
@@ -873,9 +873,8 @@ class TestPage:
         assert b'"cut by policy: "' in page
         assert b'var CAPTURE_MARKER = "__fw_capture__"' in page
         for site in (
-            b"policedText(conv.topic)",
-            b"policedText(conv.summary)",
-            b"policedText(t.user_message)",
+            b"return policedText(node.label);",  # rail labels carry conversation topics
+            b'el("h2", null, policedText(node.label))',
             b"policedText(turn.user_message)",
             b"appendPoliced(um, turn.user_message",
             b"appendPoliced(ans, turn.answer)",
@@ -883,11 +882,13 @@ class TestPage:
             b"policedText(span.command_name)",
             b"policedText(span.name)",
             b"policedText(span.context)",
-            b"policedText(latest.topic)",
             b"tmBubble(\"user\", policedText(turn.user_message))",
             b"answer: policedText(turn.answer)",
         ):
             assert site in page, site
+        # The restored-conversation "Continuing ..." bubble was removed; if a
+        # restored topic is shown again it must still go through the policy.
+        assert b"latest.topic" not in page or b"policedText(latest.topic)" in page
         # pretty() itself walks envelopes, which covers record_json dumps,
         # artifacts and span attribute sections.
         assert b"var env = captureEnvelope(item);" in page
@@ -895,7 +896,7 @@ class TestPage:
         assert b"function renderServerConfiguration(container, attempt)" in page
         assert b'"server configuration"' in page
         assert b'"not recorded for this attempt"' in page
-        assert b"renderServerConfiguration(item, row)" in page
+        assert b"renderServerConfiguration(item, extra)" in page
         assert b"renderServerConfiguration(box," in page
         # Inside #detail, not a new panel; the rules the page already keeps.
         assert b"innerHTML" not in page

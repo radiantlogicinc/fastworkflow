@@ -168,6 +168,9 @@ def _raising_registry(monkeypatch, exc_factory):
                 return RaisingRG
             return None
 
+        def get_command_names(self, context):
+            return ["fail"]
+
     monkeypatch.setattr(
         fastworkflow.RoutingRegistry, "get_definition", lambda _: RaisingCRD()
     )
@@ -443,6 +446,12 @@ def test_a_cme_hop_failure_reaches_the_failure_output_and_the_error_span(monkeyp
                 return _RaisingRG
             return None
 
+        # The agent tool refuses names off the current surface before any hop
+        # runs; `anything` only has to get past that gate, since intent
+        # detection raises before the name is resolved to a class.
+        def get_command_names(self, context):
+            return ["anything"]
+
     monkeypatch.setattr(
         fastworkflow.RoutingRegistry, "get_definition", lambda _: CRD()
     )
@@ -510,7 +519,8 @@ def test_a_hostile_getattr_cannot_mask_the_real_exception():
 # was written with its own isinstance check they disagreed — AskUserSuspend was
 # a control signal for the first and a FAILURE for the second — so an ordinary
 # pause for input closed as STATUS_ERROR, and the chatbot waterfall draws any
-# span with that status as a red ERROR node (index.html:1671). Both decisions
+# span with that status as a red ERROR node (`renderWaterfall`, in
+# run_chatbot/static/src/220-turn-nav.js). Both decisions
 # now read the one predicate; these tests pin them together so a future edit to
 # one has to face the other.
 

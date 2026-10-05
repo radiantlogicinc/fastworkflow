@@ -1,7 +1,20 @@
 """What the durable turn's "conversation summary" holds (bead fix-dzs.5).
 
-Every durable turn is the 3-key shape ``{"conversation summary",
-"conversation_traces", "feedback"}`` (see fastworkflow/conversation_history_io.py).
+Every durable turn carries ``"conversation summary"`` and
+``"conversation_traces"`` (see fastworkflow/conversation_history_io.py).
+
+Two keys on BOTH paths, which is what the assertions below now pin. There used
+to be a third, ``feedback``, appended only by the in-session path in
+``WorkflowExecutionContext.append_conversation_turn``: fix-9eg.16 removed the
+table that once filled it and the store join that read it, so it could only
+ever be None, while ``_refine_user_query`` renders every key of every
+remembered turn into the refiner's prompt and so fed a literal ``feedback:
+None`` line to the refiner LLM. The restored-from-checkpoint shape
+`conversation_history_io` produces never carried it, so the two paths also
+disagreed until a restart normalized them. fix-24da removed the key from the
+in-session path; the refine-prompt test below is the regression that keeps it
+out, and ``tests/test_conversation_window_reads.py`` pins the same two-key
+shape on the restored side.
 The deterministic and direct-action paths used to hardcode that field to the
 constants ``"assistant_mode_command"`` and ``"process_action command"``, which
 made it useless to the three consumers that read it and only it:
@@ -40,6 +53,10 @@ import pytest
 
 import fastworkflow
 from fastworkflow.command_executor import CommandExecutor
+from fastworkflow.conversation_history_io import (
+    extract_turns_from_history,
+    restore_history_from_turns,
+)
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
@@ -193,7 +210,6 @@ def test_refine_user_query_sees_the_command_instead_of_a_constant(action_ctx):
 
     assert refined.splitlines() == [
         f"conversation summary: {summary}",
-        "feedback: None",
         "new_user_query: what did that do?",
     ]
     assert OLD_ACTION_CONSTANT not in refined
@@ -201,6 +217,9 @@ def test_refine_user_query_sees_the_command_instead_of_a_constant(action_ctx):
     # Traces are excluded from the refine prompt, so the record never leaks in
     # through the back door.
     assert "conversation_traces" not in refined
+    # fix-24da: the prompt is built by walking the remembered turn's keys, so a
+    # key nothing fills any more is a line of prose the refiner reads as fact.
+    assert "feedback" not in refined
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +273,7 @@ def test_action_traces_still_carry_the_full_record(action_ctx):
     assert record["command_name"] == CREATE_LIST_COMMAND
     assert record["parameters"] == {"description": LARGE_VALUE}
     assert LARGE_VALUE in record["response"]
-    assert turn["feedback"] is None
+    assert set(turn) == {"conversation summary", "conversation_traces"}
 
 
 def test_deterministic_traces_still_carry_the_full_record(message_ctx, monkeypatch):
@@ -270,4 +289,51 @@ def test_deterministic_traces_still_carry_the_full_record(message_ctx, monkeypat
     assert record["command_name"] == "set_notes"
     assert record["parameters"] == {"note": LARGE_VALUE}
     assert LARGE_VALUE in record["response"]
-    assert turn["feedback"] is None
+    assert set(turn) == {"conversation summary", "conversation_traces"}
+
+
+# ---------------------------------------------------------------------------
+# The in-session shape is the restored shape (fix-24da)
+# ---------------------------------------------------------------------------
+
+
+def test_the_live_turn_survives_a_checkpoint_round_trip_unchanged(action_ctx):
+    """The two paths produced different dicts, and only a restart hid it.
+
+    ``extract_turns_from_history`` / ``restore_history_from_turns`` are what a
+    checkpoint writes and reads, and they have always produced two keys. While
+    the live path appended a third, a turn changed shape the first time a
+    session was restored -- so the refiner saw one prompt before a restart and
+    a different one after, from the same recorded conversation.
+    """
+    action_ctx.process_action(_create_list_action("groceries"))
+
+    live = _last_turn(action_ctx)
+    restored = restore_history_from_turns(
+        extract_turns_from_history(action_ctx.conversation_history)
+    ).messages
+
+    assert [live] == restored
+
+
+def test_the_refiner_prompt_names_only_keys_a_turn_still_carries(action_ctx):
+    """Non-vacuous companion to the shape assertion above.
+
+    ``_refine_user_query`` renders ``key: value`` for every key of every
+    remembered turn, so the prompt's field names ARE the dict's keys. Reading
+    them back off the rendered prompt is what proves no obsolete key can be
+    reintroduced without a line appearing in front of the model.
+    """
+    action_ctx.process_action(_create_list_action("groceries"))
+
+    refined = action_ctx._refine_user_query(
+        "and then?", action_ctx.conversation_history
+    )
+    fields = [
+        line.split(":", 1)[0]
+        for line in refined.splitlines()
+        if line != "new_user_query: and then?"
+    ]
+
+    assert fields == ["conversation summary"]
+    assert set(_last_turn(action_ctx)) >= set(fields)

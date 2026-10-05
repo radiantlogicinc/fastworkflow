@@ -319,7 +319,7 @@ def test_ingest_keeps_sealed_archive_and_feedback_byte_identical(tmp_path):
     before_digest = hashlib.sha256(before).hexdigest()
     immutable_uri = f"{archive.resolve().as_uri()}?mode=ro&immutable=1"
     with sqlite3.connect(immutable_uri, uri=True) as conn:
-        feedback_before = conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0]
+        feedback_before = conn.execute("SELECT COUNT(*) FROM human_feedback").fetchone()[0]
 
     with _serve(manifest) as server:
         status, _response = _request(
@@ -332,7 +332,7 @@ def test_ingest_keeps_sealed_archive_and_feedback_byte_identical(tmp_path):
 
     after = archive.read_bytes()
     with sqlite3.connect(immutable_uri, uri=True) as conn:
-        feedback_after = conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0]
+        feedback_after = conn.execute("SELECT COUNT(*) FROM human_feedback").fetchone()[0]
     assert after == before
     assert hashlib.sha256(after).hexdigest() == before_digest
     assert feedback_after == feedback_before

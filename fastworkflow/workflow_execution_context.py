@@ -42,7 +42,7 @@ from fastworkflow.turn import TurnResult, TurnStatus, mint_turn_key
 from fastworkflow.turn_plan import TurnPlan
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_logger, dspy_utils
-from fastworkflow.utils.react import AskUserSuspend, NoSuspendedAgentStateError
+from fastworkflow.utils.react import NoSuspendedAgentStateError
 
 #: Why the turn has the plan it has. The finish check records the cause of a
 #: missing plan as ``no_plan_cause``.
@@ -170,7 +170,6 @@ class WorkflowExecutionContext:
         self._CommandExecutor = CommandExecutor
 
         self._workflow_tool_agent = None
-        self._intent_clarification_agent = None
         self._context_change_listener = None
 
         self._awaiting_user = False
@@ -803,10 +802,6 @@ class WorkflowExecutionContext:
         return self._workflow_tool_agent
 
     @property
-    def intent_clarification_agent(self):
-        return self._intent_clarification_agent
-
-    @property
     def conversation_history(self) -> dspy.History:
         return self._conversation_history
 
@@ -1259,15 +1254,21 @@ class WorkflowExecutionContext:
         self,
         conversation_summary: str,
         conversation_traces: Optional[str] = None,
-        feedback: Optional[str] = None,
     ) -> None:
-        """Append one turn to conversation history in the canonical 3-key shape."""
+        """Append one turn to conversation history in the canonical 2-key shape.
+
+        Two keys, the shape `conversation_history_io` restores. The third was
+        `feedback`, and fix-9eg.16 removed the agent-memory table that was its
+        only source, so it could only ever be None here -- while
+        `_refine_user_query` renders every key of every remembered turn into the
+        refiner's prompt, which put a literal `feedback: None` line in front of
+        the model on in-session turns and nowhere on restored ones (fix-24da).
+        """
 
         self._conversation_history.messages.append(
             {
                 "conversation summary": conversation_summary,
                 "conversation_traces": conversation_traces,
-                "feedback": feedback,
             }
         )
 
@@ -1844,9 +1845,6 @@ class WorkflowExecutionContext:
         if self._app_workflow is not None:
             self._app_workflow.add_context_change_listener(self._on_app_context_change)
             self._context_change_listener = self._on_app_context_change
-
-        from fastworkflow.intent_clarification_agent import initialize_intent_clarification_agent
-        self._intent_clarification_agent = initialize_intent_clarification_agent(self)
 
     def _ensure_agent_initialized(self) -> None:
         if self._workflow_tool_agent is None:
@@ -2430,12 +2428,21 @@ class WorkflowExecutionContext:
                 desc="A multiline paragraph summary"
             )
 
-        planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
-        with dspy.context(lm=planner_lm):
-            cs_func = dspy.ChainOfThought(ConversationSummarySignature)
-            prediction = cs_func(
-                user_query=user_query,
-                workflow_actions=workflow_actions,
-                final_agent_response=final_agent_response,
-            )
-            return prediction.conversation_summary, json.dumps(conversation_traces)
+        from fastworkflow.conversation_summary import bounded_summary_inputs
+
+        inputs = bounded_summary_inputs(user_query, workflow_actions, final_agent_response)
+        try:
+            planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
+            with dspy.context(lm=planner_lm):
+                prediction = dspy.ChainOfThought(ConversationSummarySignature)(**inputs)
+            summary = prediction.conversation_summary
+        except Exception as exc:
+            # Conversation memory is ancillary: failure must not discard the
+            # executor's completed answer. Preserve raw evidence in traces.
+            logger.warning("Conversation summary failed; using bounded fallback (%s)",
+                           type(exc).__name__)
+            conversation_traces["summary_fallback_error_type"] = type(exc).__name__
+            summary = ("Conversation summary unavailable. User request excerpt: "
+                       + inputs["user_query"] + "\nAgent response excerpt: "
+                       + inputs["final_agent_response"])
+        return summary, json.dumps(conversation_traces)
