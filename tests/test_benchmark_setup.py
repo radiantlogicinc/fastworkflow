@@ -370,6 +370,35 @@ def test_description_is_optional_free_text_the_author_owns(setup_server, tmp_pat
     assert setup.load_experiment(folder, eid)["description"] == "Rewritten by its author"
 
 
+def test_refused_redeclaration_of_a_started_experiment_changes_nothing(tmp_path):
+    """`fix-spvf`: the refusal used to land after the experiments row was
+    rewritten, so the stored description no longer matched the run."""
+    benchmark = create(tmp_path)
+    record = setup.create_experiment(tmp_path, benchmark["benchmark_id"], "v1", "Attempt 1")
+    eid = record["experiment_id"]
+    db_path = state_paths.observability_db(str(tmp_path))
+    store = obs.ObservabilityStore(db_path)
+    controller = ExperimentController(str(tmp_path), store.store_identity(), external=False)
+    declarations = [(task_id, 1, "channel-" + task_id) for task_id in record["task_ids"]]
+    controller.create_experiment(eid, "Attempt 1", declared_tasks=2, declared_attempts=1,
+                                 declarations=declarations, arm="first")
+    task_id = record["task_ids"][0]
+    controller.start_attempt(eid, task_id, 1, "channel-" + task_id)
+
+    def snapshot():
+        with sqlite3.connect(db_path) as conn:
+            return list(conn.iterdump())
+
+    before = snapshot()
+    assert any("Attempt 1" in line and "INSERT INTO \"experiments\"" in line for line in before)
+    with pytest.raises(obs.ExperimentDeclarationConflict, match="already started"):
+        controller.create_experiment(
+            eid, "Attempt 2", declared_tasks=2, declared_attempts=1, arm="second",
+            declarations=[(tid, 1, "other-" + tid) for tid in record["task_ids"]])
+    assert snapshot() == before
+    assert store.get_experiment(eid)["description"] == "Attempt 1"
+
+
 def test_http_creation_accepts_the_authors_description(setup_server):
     server, folder = setup_server
     benchmark = create(folder)
