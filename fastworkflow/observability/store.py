@@ -3539,8 +3539,13 @@ class ObservabilityStore:
         benchmark_version: Optional[str] = None,
         benchmark_digest_sha256: Optional[str] = None,
         initialize_winner: bool = True,
+        declarations: Optional[Iterable[tuple[str, int, str]]] = None,
     ) -> None:
         """Pre-register an experiment. Written BEFORE any task runs.
+
+        `declarations`, when given, is the exact attempt plan
+        (`declare_experiment_attempts`), written in the same transaction so a
+        refused plan leaves the experiments row as it was (`fix-lr1z`).
 
         `declared_tasks` and `declared_attempts` are required and positive: they
         are the denominator every score is computed against (`[XR14]`), and a
@@ -3690,6 +3695,8 @@ class ObservabilityStore:
                     _utcnow_iso(),
                 ),
             )
+            if declarations is not None:
+                self._declare_attempts_in_txn(conn, experiment_id, declarations)
             if initialize_winner:
                 # Inline: `selection` imports this module.
                 from fastworkflow.observability import selection as selection_module
@@ -3708,6 +3715,19 @@ class ObservabilityStore:
         declarations: Iterable[tuple[str, int, str]],
     ) -> None:
         """Persist one immutable, exact attempt plan before execution starts."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._declare_attempts_in_txn(conn, experiment_id, declarations)
+            conn.commit()
+
+    def _declare_attempts_in_txn(
+        self,
+        conn: sqlite3.Connection,
+        experiment_id: str,
+        declarations: Iterable[tuple[str, int, str]],
+    ) -> None:
+        """The plan write, inside the caller's `BEGIN IMMEDIATE`; a refusal
+        raises and the caller's connection rolls the whole transaction back."""
         normalized = {
             (self._scrub(task_id), int(native_attempt), self._scrub(source_key))
             for task_id, native_attempt, source_key in declarations
@@ -3730,73 +3750,65 @@ class ObservabilityStore:
             raise ValueError(
                 "each task_id/native_attempt pair must have exactly one source_key"
             )
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            experiment = conn.execute(
-                """SELECT status, declared_tasks, declared_attempts
-                     FROM experiments WHERE experiment_id=?""",
-                (experiment_id,),
-            ).fetchone()
-            if experiment is None:
-                conn.rollback()
-                raise ExperimentNotFound(experiment_id)
-            if experiment["status"] != "running":
-                conn.rollback()
-                raise ExperimentIsClosed(experiment_id, experiment["status"])
-            if conn.execute(
-                "SELECT 1 FROM experiment_attempts WHERE experiment_id=? LIMIT 1",
-                (experiment_id,),
-            ).fetchone():
-                conn.rollback()
-                raise ExperimentDeclarationConflict(
-                    f"experiment {experiment_id!r} has already started"
-                )
-            expected_rows = (
-                int(experiment["declared_tasks"])
-                * int(experiment["declared_attempts"])
+        experiment = conn.execute(
+            """SELECT status, declared_tasks, declared_attempts
+                 FROM experiments WHERE experiment_id=?""",
+            (experiment_id,),
+        ).fetchone()
+        if experiment is None:
+            raise ExperimentNotFound(experiment_id)
+        if experiment["status"] != "running":
+            raise ExperimentIsClosed(experiment_id, experiment["status"])
+        if conn.execute(
+            "SELECT 1 FROM experiment_attempts WHERE experiment_id=? LIMIT 1",
+            (experiment_id,),
+        ).fetchone():
+            raise ExperimentDeclarationConflict(
+                f"experiment {experiment_id!r} has already started"
             )
-            task_counts: dict[str, int] = {}
-            for task_id, _, _ in normalized:
-                task_counts[task_id] = task_counts.get(task_id, 0) + 1
-            if (
-                len(normalized) != expected_rows
-                or len(task_counts) != int(experiment["declared_tasks"])
-                or set(task_counts.values())
-                != {int(experiment["declared_attempts"])}
-            ):
-                conn.rollback()
-                raise ValueError(
-                    "exact declarations do not match the declared task/attempt "
-                    "display summaries"
-                )
-            stored = {
-                (row["task_id"], int(row["native_attempt"]), row["source_key"])
-                for row in conn.execute(
-                    """SELECT task_id, native_attempt, source_key
-                         FROM experiment_attempt_declarations
-                        WHERE experiment_id=?""",
-                    (experiment_id,),
-                ).fetchall()
-            }
-            if stored:
-                conn.rollback()
-                if stored == normalized:
-                    return
-                raise ExperimentDeclarationConflict(
-                    f"experiment {experiment_id!r} already has a different "
-                    "immutable attempt declaration"
-                )
-            now = _utcnow_iso()
-            conn.executemany(
-                """INSERT INTO experiment_attempt_declarations
-                   (experiment_id, task_id, native_attempt, source_key, created_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                [
-                    (experiment_id, task_id, native_attempt, source_key, now)
-                    for task_id, native_attempt, source_key in sorted(normalized)
-                ],
+        expected_rows = (
+            int(experiment["declared_tasks"])
+            * int(experiment["declared_attempts"])
+        )
+        task_counts: dict[str, int] = {}
+        for task_id, _, _ in normalized:
+            task_counts[task_id] = task_counts.get(task_id, 0) + 1
+        if (
+            len(normalized) != expected_rows
+            or len(task_counts) != int(experiment["declared_tasks"])
+            or set(task_counts.values())
+            != {int(experiment["declared_attempts"])}
+        ):
+            raise ValueError(
+                "exact declarations do not match the declared task/attempt "
+                "display summaries"
             )
-            conn.commit()
+        stored = {
+            (row["task_id"], int(row["native_attempt"]), row["source_key"])
+            for row in conn.execute(
+                """SELECT task_id, native_attempt, source_key
+                     FROM experiment_attempt_declarations
+                    WHERE experiment_id=?""",
+                (experiment_id,),
+            ).fetchall()
+        }
+        if stored:
+            if stored == normalized:
+                return
+            raise ExperimentDeclarationConflict(
+                f"experiment {experiment_id!r} already has a different "
+                "immutable attempt declaration"
+            )
+        now = _utcnow_iso()
+        conn.executemany(
+            """INSERT INTO experiment_attempt_declarations
+               (experiment_id, task_id, native_attempt, source_key, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (experiment_id, task_id, native_attempt, source_key, now)
+                for task_id, native_attempt, source_key in sorted(normalized)
+            ],
+        )
 
     def register_attempt(
         self,

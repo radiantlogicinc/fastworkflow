@@ -399,6 +399,32 @@ def test_refused_redeclaration_of_a_started_experiment_changes_nothing(tmp_path)
     assert store.get_experiment(eid)["description"] == "Attempt 1"
 
 
+def test_refused_pre_start_redeclaration_changes_nothing(tmp_path):
+    """`fix-lr1z`: before any attempt starts, a differing plan used to be
+    refused only after the experiments row had been rewritten."""
+    benchmark = create(tmp_path)
+    record = setup.create_experiment(tmp_path, benchmark["benchmark_id"], "v1", "Attempt 1")
+    eid = record["experiment_id"]
+    db_path = state_paths.observability_db(str(tmp_path))
+    store = obs.ObservabilityStore(db_path)
+    controller = ExperimentController(str(tmp_path), store.store_identity(), external=False)
+    controller.create_experiment(
+        eid, "Attempt 1", declared_tasks=2, declared_attempts=1, arm="first",
+        declarations=[(tid, 1, "channel-" + tid) for tid in record["task_ids"]])
+
+    def snapshot():
+        with sqlite3.connect(db_path) as conn:
+            return list(conn.iterdump())
+
+    before = snapshot()
+    with pytest.raises(obs.ExperimentDeclarationConflict, match="different immutable"):
+        controller.create_experiment(
+            eid, "Attempt 2", declared_tasks=2, declared_attempts=1, arm="second",
+            declarations=[(tid, 1, "other-" + tid) for tid in record["task_ids"]])
+    assert snapshot() == before
+    assert store.get_experiment(eid)["description"] == "Attempt 1"
+
+
 def test_http_creation_accepts_the_authors_description(setup_server):
     server, folder = setup_server
     benchmark = create(folder)

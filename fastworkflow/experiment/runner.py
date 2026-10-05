@@ -530,12 +530,6 @@ class ExperimentController:
                     loaded["digest_sha256"],
                     benchmark_digest_sha256,
                 )
-        # `declare_experiment_attempts` refuses a started experiment; refuse it
-        # here too, before the writes below, so the refusal changes nothing.
-        if self.store.experiment_attempt_rows(experiment_id):
-            raise observability_store.ExperimentDeclarationConflict(
-                f"experiment {experiment_id!r} has already started"
-            )
         # Reserve the registration before writing evidence. Deletion takes the
         # same row in its own transaction; a deleted ID is refused and a bound
         # ID is protected.
@@ -558,8 +552,8 @@ class ExperimentController:
             benchmark_digest_sha256=benchmark_digest_sha256,
             capture_profile=self.capture_profile,
             capture_policy_version=self.capture_policy_version,
+            declarations=declarations,
         )
-        self.store.declare_experiment_attempts(experiment_id, declarations)
 
     def start_attempt(
         self,
