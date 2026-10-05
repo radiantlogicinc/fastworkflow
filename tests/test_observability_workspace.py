@@ -717,8 +717,8 @@ def test_token_gated_structured_trace_link_redirects_to_scoped_spa_hash(tmp_path
 
 def test_spa_pins_store_aware_workspace_navigation():
     page = run_chatbot_server.load_index_html()
-    assert b'location.hash = "store="' in page
-    assert b'"store=" + encodeURIComponent(storeId)' in page
+    assert b"writePageLink({store: storeId, turn: logicalTurnKey})" in page
+    assert b"{store: state.storeId, turn: state.turnKey}" in page
     assert b"/api/workspace/turn/" in page
     assert b"/api/workspace/trace/" in page
     assert b"Unscoped turn links are refused in workspace mode" in page

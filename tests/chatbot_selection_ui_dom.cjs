@@ -150,11 +150,13 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   /* A decision that loses a race. The candidate is promoted out of band --
      exactly what a second reviewer in another tab would do -- and then the
      button this page rendered before that happened is clicked. */
+  /* From the launch URL, not the page's address bar: the page drops the
+     token from its address once it has it. */
+  const token = new URL(url).searchParams.get('token');
   const winner = await (await w.fetch(
     '/api/experiments/' + encodeURIComponent(ids.experiment) + '/winner',
-    {headers: {Authorization: 'Bearer ' + new w.URLSearchParams(w.location.search).get('token')}}
+    {headers: {Authorization: 'Bearer ' + token}}
   )).json();
-  const token = new w.URLSearchParams(w.location.search).get('token');
   const raced = await w.fetch(
     '/api/experiments/' + encodeURIComponent(ids.candidate) + '/winner/decisions',
     {method: 'POST',

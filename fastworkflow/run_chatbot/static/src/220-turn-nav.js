@@ -296,6 +296,7 @@ function renderLevel() {
     d.appendChild(el("div", "empty", "Select a turn to inspect it."));
     return;
   }
+  writePageLink(traceLevelLink());
   d.appendChild(renderCrumbs());
 
   var info = el("div", "card");

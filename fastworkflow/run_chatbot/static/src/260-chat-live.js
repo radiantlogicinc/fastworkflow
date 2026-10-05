@@ -868,14 +868,14 @@ function openTurnInDebug(turnKey) {
   setTopMode("debug");
   selectTurnWithRetry(turnKey, 8);
 }
-function selectTurnWithRetry(turnKey, attemptsLeft) {
+function selectTurnWithRetry(turnKey, attemptsLeft, spanId, level) {
   /* The observability writer is asynchronous: the turn may land in the DB a
      moment after the HTTP response. Retry briefly before giving up. */
   api("/api/turn/" + encodeURIComponent(turnKey)).then(function () {
-    selectTurn(turnKey);
+    selectTurn(turnKey, spanId, null, level);
   }).catch(function () {
     if (attemptsLeft > 0) {
-      setTimeout(function () { selectTurnWithRetry(turnKey, attemptsLeft - 1); }, 700);
+      setTimeout(function () { selectTurnWithRetry(turnKey, attemptsLeft - 1, spanId, level); }, 700);
     } else {
       var d = document.getElementById("detail");
       clear(d);

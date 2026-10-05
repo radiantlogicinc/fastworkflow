@@ -384,6 +384,7 @@ function turnFindRender() {
   if (status) { status.textContent = turnFindStatusText(); }
   if (!turnFind.active) { return; }
   turnFind.nav = expNavToken();
+  writePageLink({});
   var d = document.getElementById("detail");
   clear(d);
   var card = el("div", "card");

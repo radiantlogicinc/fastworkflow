@@ -2,9 +2,11 @@
 /* `spanId` and `note` are optional and used by `openPairSpan` only: the span is
    focused inside the stale guard below, after the trace it belongs to has been
    rendered, so a focus request can never be applied to another run's trace.
-   Every existing caller opens the turn and passes neither. */
-function selectTurn(turnKey, spanId, note) {
+   Every existing caller opens the turn and passes neither. `level` is the
+   position a page link names inside the turn, focused the same way. */
+function selectTurn(turnKey, spanId, note, level) {
   var nav = expNavToken();   // this view now owns #detail
+  writePageLink({turn: turnKey});
   state.turnKey = turnKey;
   state.turn = null;
   state.path = [];
@@ -19,6 +21,7 @@ function selectTurn(turnKey, spanId, note) {
     if (expNavStale(nav)) { return; }
     renderDetail(results[0].turn, results[1].spans || []);
     focusLoadedSpan(spanId, note);
+    focusLoadedLevel(level);
   }).catch(function (e) {
     if (requestWasAborted(e) || expNavStale(nav)) { return; }
     var d = document.getElementById("detail");

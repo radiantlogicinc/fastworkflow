@@ -1075,6 +1075,7 @@ function benchmarkPrompt(task) {
 function showBenchmarks() {
   focusHierarchy(function (n) { return n.kind === "root"; });
   var nav = benchNavToken(), d = document.getElementById("detail"); clear(d);
+  writePageLink({page: "benchmarks"});
   var actions = pageHeader(d, "BENCHMARK LIBRARY", "Build confidence in every change", "Define repeatable tasks, compare experiments, and turn observations into better workflows.");
   if (!(session && session.workspace_mode)) {
     var create = el("button", "primary", "New benchmark");
@@ -1197,6 +1198,7 @@ function renderBenchmarkWinner(host, result, benchmarkId) {
 function showBenchmark(benchmarkId, selectedVersion) {
   focusHierarchy(function (n) { return n.kind === "benchmark" && n.benchmark_id === benchmarkId; });
   var nav = benchNavToken(), d = document.getElementById("detail"); clear(d);
+  writePageLink({benchmark: benchmarkId, version: selectedVersion});
   d.appendChild(el("div", "empty", "Loading benchmark…"));
   api("/api/benchmarks/" + encodeURIComponent(benchmarkId)).then(function (data) {
     if (benchNavStale(nav)) { return; }
@@ -1321,6 +1323,7 @@ function openBenchmarkRecord(row) {
 function showBenchmarkExperiment(id) {
   focusHierarchy(function (n) { return n.kind === "experiment" && n.experiment_id === id; });
   var nav = benchNavToken(), d = document.getElementById("detail"); clear(d);
+  writePageLink({experiment: id});
   d.appendChild(el("div", "empty", "Loading experiment…"));
   api("/api/benchmark-experiments/" + encodeURIComponent(id)).then(function (data) {
     if (benchNavStale(nav)) { return; }

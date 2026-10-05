@@ -362,7 +362,19 @@ through port forwarders (WSL localhost relay, IDE port forwards), whose
 re-exposed local port lands in the browser's Host header. Loopback-only is
 the property that defeats DNS rebinding (a rebound request carries the
 attacker's hostname); the bearer token remains the authentication on every
-request, so a loopback origin without the token still gets 401. The absorbed server endpoint
+request, so a loopback origin without the token still gets 401.
+*Amendment (2026-10-05, fix-e759):* opening the page with the token also sets
+a session cookie holding it — `fw_chatbot_<port>`, `HttpOnly; SameSite=Strict;
+Path=/`, named per port because cookies ignore ports — and the page then
+drops `?token=` from the address bar, reading its API token from a meta tag
+in the authenticated page instead. The cookie stands in for the token only on
+GET/HEAD, and only when `Sec-Fetch-Site` is `same-origin`, `none` or absent.
+SameSite counts every loopback port as one site, so without that rule a page
+served by any other local server would be sent this cookie; with it, the
+property above holds unchanged — a loopback origin without the token still
+gets 401, and every write still needs the token itself. A token the request
+presents outright is judged alone, never rescued by a valid cookie. The page
+CSP adds `frame-ancestors 'self'`. The absorbed server endpoint
 `GET /turns/{turn_key}` authorizes the record's channel against the caller's
 JWT — no bare-handle reads, per final spec `[A39]`.
 

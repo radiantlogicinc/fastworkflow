@@ -4,7 +4,20 @@
    (srcdoc, meta CSP default-src 'none'); the parent page CSP also governs
    srcdoc documents. */
 
-var TOKEN = new URLSearchParams(location.search).get("token") || "";
+var TOKEN = (document.querySelector('meta[name="fw-chatbot-token"]') || {}).content
+  || new URLSearchParams(location.search).get("token") || "";
+
+/* Opening the page with ?token= set the session cookie, which authenticates
+   reloads and pasted links from here on, so the token leaves the address
+   bar. Anything else in the query (a review link's parameters) stays. */
+(function dropTokenFromAddress() {
+  var query = new URLSearchParams(location.search);
+  if (!query.has("token")) { return; }
+  query.delete("token");
+  var rest = query.toString();
+  history.replaceState(history.state, "",
+    location.pathname + (rest ? "?" + rest : "") + location.hash);
+})();
 
 var API_NOT_MODIFIED = { notModified: true };
 

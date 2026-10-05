@@ -138,6 +138,7 @@ function resetSourceScopedState() {
   var detail = document.getElementById("detail");
   clear(detail);
   detail.appendChild(el("div", "empty", "Select a turn in this source."));
+  writePageLink({});
 
   /* The live chat belonged to the previous workflow's server. Dropping the
      binding is what stops a message going to it: tmFetch has nowhere to send
@@ -233,26 +234,13 @@ function applySession() {
 api("/api/session").then(function (data) {
   session = data.session;
   applySession();
-  /* deep links override the default landing view */
-  var hashParams = new URLSearchParams(location.hash.replace(/^#/, ""));
+  /* deep links override the default landing view. The fragment is the one
+     the page was opened with: applySession has already written the landing
+     mode over the address bar. */
   if (session.workspace_mode && review.assignmentId && review.capability) {
     /* loadReviewAssignment owns row and trace resume for review links. */
-  } else if (session.workspace_mode && hashParams.get("store") && hashParams.get("turn")) {
-    setTopMode("debug");
-    selectWorkspaceTurn(hashParams.get("store"), hashParams.get("turn"));
-  } else if (session.workspace_mode && hashParams.get("turn")) {
-    var d = document.getElementById("detail");
-    clear(d);
-    d.appendChild(el("div", "empty",
-      "Unscoped turn links are refused in workspace mode; include store and turn."));
-  } else if (location.hash.indexOf("#turn=") === 0) {
-    var deepKey = decodeURIComponent(location.hash.slice("#turn=".length));
-    setTopMode("debug");
-    selectTurnWithRetry(deepKey, 3);
-  } else if (location.hash === "#test") {
-    setTopMode("test");
-  } else if (location.hash === "#debug") {
-    setTopMode("debug");
+  } else {
+    openPageLink(initialPageLink);
   }
 }).catch(function () {
   /* No control plane (very old server?) — behave like the plain viewer. */

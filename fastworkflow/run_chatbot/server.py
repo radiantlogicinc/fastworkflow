@@ -11,6 +11,12 @@ Design invariants (docs/fastworkflow_observability_studio_design.md §3.4):
   forwarders (WSL relays, IDE port forwards) legitimately re-expose the
   server on a different local port — while the loopback-only rule is what
   defeats DNS rebinding, and the token stays the authentication.
+  Opening the page with the token also sets a per-port HttpOnly,
+  SameSite=Strict cookie holding it, so the page can drop ``?token=`` from
+  the address bar. The cookie authenticates reads (GET/HEAD) only, and only
+  when ``Sec-Fetch-Site`` is same-origin, none or absent: SameSite counts
+  every loopback port as one site, so without that a page on another local
+  port would be sent this cookie. Writes still need the token itself.
 - Rendering safety: the SPA page ships with a restrictive CSP
   (inline script allowed only via its own sha256 hashes — the page is one
   self-contained file); artifact responses carry
@@ -132,6 +138,7 @@ _HTMLISH_TYPES = ("text/html", "application/xhtml+xml", "image/svg+xml")
 
 
 _INDEX_HTML_CACHE: bytes | None = None
+_TOKEN_META_PLACEHOLDER = b'<meta name="fw-chatbot-token" content="">'
 
 
 def load_index_html() -> bytes:
@@ -474,8 +481,26 @@ class ChatbotServer:
             "style-src 'self' 'unsafe-inline'; "
             "connect-src 'self' http://127.0.0.1:* http://localhost:*; "
             "img-src 'self' data:; "
-            "frame-src 'self'"
+            "frame-src 'self'; "
+            # The session cookie authenticates the page itself, so another
+            # page (another loopback port included) must not frame it.
+            "frame-ancestors 'self'"
         )
+        # The page reads its API token from this tag rather than from the
+        # address bar, which is what lets it drop ?token= once the cookie is
+        # set. Only an authenticated request is ever served the page.
+        self.served_index_html = self.index_html.replace(
+            _TOKEN_META_PLACEHOLDER,
+            _TOKEN_META_PLACEHOLDER.replace(
+                b'content=""', b'content="' + self.token.encode("ascii") + b'"'
+            ),
+            1,
+        )
+        if self.served_index_html == self.index_html:
+            raise RuntimeError(
+                "the bundled SPA has no token meta tag; the page could not "
+                "authenticate its own API calls"
+            )
 
         server = self
 
@@ -486,6 +511,8 @@ class ChatbotServer:
         self.httpd = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
         self.httpd.daemon_threads = True
         self.port = self.httpd.server_address[1]
+        # Cookies ignore ports, so two chatbots on one machine need two names.
+        self.cookie_name = f"fw_chatbot_{self.port}"
 
     def open_store(self) -> Optional[ReadOnlyObservabilityStore]:
         """Per-request READ-ONLY store handle, or None while the DB is absent
@@ -1285,16 +1312,56 @@ class _ChatbotRequestHandler(
                 return False
         return True
 
-    def _token_valid(self, query: dict[str, list[str]]) -> bool:
-        presented = ""
-        auth = self.headers.get("Authorization") or ""
-        if auth.startswith("Bearer "):
-            presented = auth[len("Bearer ") :].strip()
-        elif query.get("token"):
-            presented = query["token"][0]
+    def _matches_token(self, presented: str) -> bool:
         return hmac.compare_digest(
             presented.encode("utf-8"), self.chatbot.token.encode("utf-8")
         )
+
+    def _presented_token(self, query: dict[str, list[str]]) -> Optional[str]:
+        """The token the request carries itself, or None when it carries none."""
+        auth = self.headers.get("Authorization") or ""
+        if auth.startswith("Bearer "):
+            return auth[len("Bearer ") :].strip()
+        if query.get("token"):
+            return query["token"][0]
+        return None
+
+    def _cookie_tokens(self) -> list[str]:
+        """Values of this server's session cookie, parsed by hand: the header
+        also carries cookies of every other app on 127.0.0.1, and one of
+        those being malformed must not make this server's unreadable."""
+        name = self.chatbot.cookie_name
+        values = []
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            key, sep, value = part.strip().partition("=")
+            if sep and key == name:
+                values.append(value)
+        return values
+
+    def _cookie_admissible(self) -> bool:
+        """Whether the session cookie may stand in for the token on this request.
+
+        Cookies are scoped to the host, not the port, and SameSite treats
+        every loopback port as one site, so a page served by ANY local
+        server would have the browser attach this cookie to its requests.
+        The cookie therefore only reads, and only for this page's own
+        requests or the user's own navigation (Sec-Fetch-Site same-origin or
+        none). A browser that sends no Sec-Fetch-Site is admitted for reads:
+        a cross-origin read still cannot see the response, and framing is
+        refused by the page's frame-ancestors.
+        """
+        if self.command not in ("GET", "HEAD"):
+            return False
+        site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        return site in ("", "same-origin", "none")
+
+    def _token_valid(self, query: dict[str, list[str]]) -> bool:
+        presented = self._presented_token(query)
+        if presented is not None:
+            return self._matches_token(presented)
+        if not self._cookie_admissible():
+            return False
+        return any(self._matches_token(value) for value in self._cookie_tokens())
 
     def _gate(self, query: dict[str, list[str]], *, forbidden: str) -> bool:
         """Host/Origin, then the bearer token. False means 403 or 401 was sent.
@@ -1344,11 +1411,19 @@ class _ChatbotRequestHandler(
             return
 
         if path in ("/", "/index.html"):
+            headers = {"Content-Security-Policy": self.chatbot.page_csp}
+            if self._presented_token(query) is not None:
+                # Opened with the launch token: from here on the browser
+                # carries it, and the page can drop ?token= from the address.
+                headers["Set-Cookie"] = (
+                    f"{self.chatbot.cookie_name}={self.chatbot.token}; "
+                    "Path=/; HttpOnly; SameSite=Strict"
+                )
             self._send(
                 200,
-                self.chatbot.index_html,
+                self.chatbot.served_index_html,
                 "text/html; charset=utf-8",
-                {"Content-Security-Policy": self.chatbot.page_csp},
+                headers,
             )
             return
         if path == "/trace" or path.startswith("/trace/"):

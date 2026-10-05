@@ -363,6 +363,86 @@ class TestAccessControl:
         assert server.token in server.url
 
 
+class TestSessionCookie:
+    """Opening the page with the token sets a cookie so ?token= can leave the
+    address bar. Cookies ignore ports and SameSite counts every loopback port
+    as one site, so the cookie only ever stands in for the token on reads
+    this page made itself or the user navigated to."""
+
+    def _cookie(self, server, value=None):
+        return f"{server.cookie_name}={server.token if value is None else value}"
+
+    def test_opening_the_page_with_the_token_sets_a_per_port_session_cookie(self, server):
+        status, headers, body = _get(server, f"/?token={server.token}", token=None)
+        assert status == 200
+        cookie = headers["Set-Cookie"]
+        assert cookie.startswith(f"fw_chatbot_{server.port}={server.token};")
+        for attribute in ("Path=/", "HttpOnly", "SameSite=Strict"):
+            assert attribute in cookie
+        assert "Max-Age" not in cookie and "Expires" not in cookie
+        # The page carries its API token itself, so it can drop it from the URL.
+        assert f'<meta name="fw-chatbot-token" content="{server.token}">'.encode() in body
+
+    def test_a_page_authenticated_by_the_cookie_is_not_reissued_one(self, server):
+        status, headers, body = _get(
+            server, "/", token=None, headers={"Cookie": self._cookie(server)})
+        assert status == 200
+        assert "Set-Cookie" not in headers
+        assert server.token.encode() in body
+
+    def test_the_page_refuses_to_be_framed(self, server):
+        _, headers, _ = _get(server, "/")
+        assert "frame-ancestors 'self'" in headers["Content-Security-Policy"]
+
+    def test_the_cookie_authenticates_this_pages_reads_and_the_users_navigation(self, server):
+        for site in ("same-origin", "none", None):
+            headers = {"Cookie": self._cookie(server)}
+            if site:
+                headers["Sec-Fetch-Site"] = site
+            status, _, _ = _get(server, "/api/session", token=None, headers=headers)
+            assert status == 200, site
+
+    def test_another_site_or_another_local_port_cannot_use_the_cookie(self, server):
+        for site in ("same-site", "cross-site"):
+            status, _, _ = _get(server, "/api/session", token=None, headers={
+                "Cookie": self._cookie(server), "Sec-Fetch-Site": site})
+            assert status == 401, site
+            status, _, _ = _get(server, "/", token=None, headers={
+                "Cookie": self._cookie(server), "Sec-Fetch-Site": site})
+            assert status == 401, site
+
+    def test_the_cookie_never_authorizes_a_write(self, server):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{server.port}/api/select_workflow",
+            method="POST",
+            data=json.dumps({"path": "/nowhere"}).encode(),
+            headers={"Content-Type": "application/json",
+                     "Cookie": self._cookie(server), "Sec-Fetch-Site": "same-origin"},
+        )
+        with pytest.raises(urllib.error.HTTPError) as refused:
+            urllib.request.urlopen(req, timeout=10)
+        assert refused.value.code == 401
+
+    def test_a_wrong_or_other_ports_cookie_is_401(self, server):
+        for cookie in (self._cookie(server, "not-the-token"),
+                       f"fw_chatbot_{server.port + 1}={server.token}"):
+            status, _, _ = _get(server, "/api/session", token=None,
+                                headers={"Cookie": cookie})
+            assert status == 401, cookie
+
+    def test_a_presented_token_is_judged_alone(self, server):
+        # A wrong token in the request is refused even beside a valid cookie:
+        # what the request says outright is what it is authenticated by.
+        status, _, _ = _get(server, "/api/session", token="not-the-token",
+                            headers={"Cookie": self._cookie(server)})
+        assert status == 401
+
+    def test_other_apps_cookies_do_not_hide_this_one(self, server):
+        header = "other=1; =broken; junk; " + self._cookie(server) + '; quoted="a;b"'
+        status, _, _ = _get(server, "/api/session", token=None, headers={"Cookie": header})
+        assert status == 200
+
+
 # ----------------------------------------------------------------------
 # SPA page + CSP [R22]
 # ----------------------------------------------------------------------
@@ -379,6 +459,7 @@ class TestPage:
         assert "script-src 'self'" in csp
         assert "connect-src 'self'" in csp
         assert "frame-src 'self'" in csp
+        assert "frame-ancestors 'self'" in csp
         # The page's inline script is hash-sourced, not 'unsafe-inline'.
         assert "'sha256-" in csp
         assert "script-src 'self' 'unsafe-inline'" not in csp

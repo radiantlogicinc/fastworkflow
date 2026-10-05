@@ -165,6 +165,7 @@ function showNavigationTabEmpty() {
      until a navigation gesture releases it (turnFindRelease). */
   if (turnFind.active) { return; }
   expNavToken();
+  writePageLink({tab: navigationTab});
   state.turnKey = null;
   state.turn = null;
   state.path = [];
@@ -371,6 +372,7 @@ function renderHierarchy() {
 
 function showHierarchyInfo(node) {
   expNavToken();
+  writePageLink(railNodeLink(node));
   var d = document.getElementById("detail"); clear(d);
   /* .crumbs cancels #detail's padding with negative margins so it can sit flush
      at the top of the pane and stick there; nested inside the card it painted

@@ -141,6 +141,7 @@ function showExperiments() {
 function showExperiment(experimentId) {
   focusHierarchy(experimentNodeMatches(experimentId));
   var nav = expNavToken();
+  writePageLink({experiment: experimentId});
   state.experimentId = experimentId;
   state.experimentTask = null;
   var d = document.getElementById("detail");
@@ -415,6 +416,8 @@ function showExperimentTask(experimentId, taskId, label) {
     renderHierarchy();
   }
   var nav = expNavToken();
+  writePageLink({experiment: experimentId, task: taskId,
+    view: taskView === "runs" ? null : taskView});
   state.experimentId = experimentId;
   state.experimentTask = taskId;
   var d = document.getElementById("detail");

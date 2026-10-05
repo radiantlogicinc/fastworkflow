@@ -117,6 +117,7 @@ function renderWorkspaceAttempt(container, row, provenance) {
 
 function showWorkspaceExperiment(experiment) {
   var nav = ++workspaceNav;
+  writePageLink({experiment: experiment.experiment_id});
   state.experimentId = experiment.experiment_id;
   var d = document.getElementById("detail");
   clear(d);
@@ -192,9 +193,10 @@ function loadWorkspaceChrome() {
 
 /* `spanId` and `note` are optional and used by `openPairSpan` only: a caller
    that wants one exact recorded call focused once this archive's trace is on
-   screen. Every existing caller opens the turn and passes neither. */
+   screen. Every existing caller opens the turn and passes neither. `level` is
+   the position a page link names inside the turn. */
 var turnLoadAbort = null;
-function selectWorkspaceTurn(storeId, logicalTurnKey, spanId, note) {
+function selectWorkspaceTurn(storeId, logicalTurnKey, spanId, note, level) {
   var detailNav = expNavToken();
   var nav = ++workspaceNav;
   /* Clear first: a slow read from another archive must never leave the old
@@ -211,8 +213,7 @@ function selectWorkspaceTurn(storeId, logicalTurnKey, spanId, note) {
   if (review.progress) {
     location.hash = reviewHash(review.progress.assignment.rows[review.rowIndex]);
   } else {
-    location.hash = "store=" + encodeURIComponent(storeId)
-      + "&turn=" + encodeURIComponent(logicalTurnKey);
+    writePageLink({store: storeId, turn: logicalTurnKey});
   }
   if (turnLoadAbort) { turnLoadAbort.abort(); }
   turnLoadAbort = (typeof AbortController !== "undefined") ? new AbortController() : null;
@@ -241,6 +242,7 @@ function selectWorkspaceTurn(storeId, logicalTurnKey, spanId, note) {
     turn.turn_key = turn.logical_turn_key || turn.turn_key;
     renderDetail(turn, results[1].spans || []);
     focusLoadedSpan(spanId, note);
+    focusLoadedLevel(level);
   }).catch(function (e) {
     if (requestWasAborted(e) || nav !== workspaceNav || state.storeId !== storeId || expNavStale(detailNav)) { return; }
     clear(d);

@@ -12,6 +12,9 @@ function setTopMode(mode) {
       && !session.workspace_mode) ? "" : "none";
   document.getElementById("newConvBtn").style.display =
     (mode === "test" && tm.connected) ? "" : "none";
+  document.getElementById("copyLinkBtn").style.display =
+    (mode === "debug" && !reviewOwnsFragment()) ? "" : "none";
+  replaceFragment(mode === "debug" ? (debugPageLink || "debug") : mode === "test" ? "test" : "");
   if (mode !== "debug") { setTurnFindOpen(false); }
   if (mode !== "picker") { stopPickerPolling(); }
   renderRecordNavigator();
