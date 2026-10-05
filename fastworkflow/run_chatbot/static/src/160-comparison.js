@@ -1126,9 +1126,8 @@ function renderArtifactPane(which, projection, run, ctx) {
 /* One artifact's value, from the side's own store.
 
    Read through `pairReadScope`, the same rule the deep links use: a sealed
-   archive is read by store id through the workspace turn route, a side in the
-   current database needs no scope named, and a side in another live database is
-   scoped by its registered experiment. An inline value is lifted out of the
+   archive is read by store id through the workspace turn route, and a side in
+   the current database needs no scope named. An inline value is lifted out of the
    turn record, so BOTH modes can show it; only offloaded bytes need the live
    artifact endpoint, and a sealed archive exposes no route for them, which is
    said rather than shown as empty. */
@@ -1156,8 +1155,7 @@ function loadArtifactPreview(host, artifact, side, ctx, forced) {
   host.appendChild(el("div", "aMeta", "loading…"));
   /* Offloaded bytes: only the live artifact endpoint serves them. */
   if (artifact.artifact_id && scope.kind !== "workspace") {
-    scopedRaw("/api/artifact/" + encodeURIComponent(artifact.artifact_id),
-              scope.kind === "other" ? scope.experimentId : null)
+    apiRaw("/api/artifact/" + encodeURIComponent(artifact.artifact_id))
       .then(function (r) {
         if (r.status === 404) {
           clear(host);
@@ -1188,8 +1186,7 @@ function loadArtifactPreview(host, artifact, side, ctx, forced) {
           + "/" + encodeURIComponent(artifact.turn_key))
         .then(function (data) { return data; },
               function (e) { return { unavailable: true, error: e.message }; })
-    : scopedRead("/api/turn/" + encodeURIComponent(artifact.turn_key),
-                 scope.kind === "other" ? scope.experimentId : null);
+    : selectionRead("/api/turn/" + encodeURIComponent(artifact.turn_key));
   read.then(function (data) {
       clear(host);
       if (data.unavailable) {
@@ -1264,20 +1261,16 @@ function pairSide(cmp, which) {
    every inline preview, from the recorded reference rather than from the
    experiment id or from whichever source the page happens to be pointed at.
 
-   Four answers, and the difference between them is the whole point:
+   Three answers, and the difference between them is the whole point:
 
    - `workspace`: a sealed archive addresses evidence by store id, and its
      routes refuse an unscoped read. Two archives in one manifest can hold the
      same logical turn key, so the store travels with the read.
    - `current`: the side is in the database this page is already reading, so no
-     change of scope. Naming one would break an ad-hoc experiment that has no
-     authoring registration to resolve — a perfectly readable run in the
-     default store, whose evidence is right here.
-   - `other`: the side is in ANOTHER live database, reachable only through the
-     experiment registered against it, which is the only handle the server
-     resolves.
-   - `unaddressable`: the reference names no way in. Said out loud, because a
-     silent no-op reads as a broken link. */
+     change of scope.
+   - `unaddressable`: the reference names no way in, including a side recorded
+     in another live database, which this build does not read. Said out loud,
+     because a silent no-op reads as a broken link. */
 function pairReadScope(ctx, side) {
   if (session && session.workspace_mode) {
     /* Addressed by the MANIFEST's name for the archive, which is the only one
@@ -1292,23 +1285,12 @@ function pairReadScope(ctx, side) {
   if (!side.storeId || !ctx.storeId || side.storeId === ctx.storeId) {
     return { kind: "current" };
   }
-  if (!side.experimentId) {
-    return { kind: "unaddressable",
-             why: "This side's evidence is in another database that names no "
-                  + "experiment to open it by." };
-  }
-  return { kind: "other", experimentId: side.experimentId };
+  return { kind: "unaddressable",
+           why: "This side's evidence is in another database, which this "
+                + "workflow does not read." };
 }
 
-/* Open the turn a row points at, in the database that RECORDED it.
-
-   The cross-store case is probed before the page's scope moves, so a
-   registration that cannot be resolved reports itself instead of leaving the
-   page pointed at a store it cannot read. */
-/* Which cross-source probe is the current one. Monotonic, like `expNav`, and
-   read by the only two places that touch it. */
-var pairProbeNav = 0;
-
+/* Open the turn a row points at, in the database that RECORDED it. */
 function openPairTurn(ctx, side, turnKey, note, spanId) {
   var scope = pairReadScope(ctx, side);
   if (scope.kind === "unaddressable") {
@@ -1319,50 +1301,7 @@ function openPairTurn(ctx, side, turnKey, note, spanId) {
     selectWorkspaceTurn(scope.storeId, turnKey, spanId, note);
     return;
   }
-  if (scope.kind === "current") {
-    selectTurn(turnKey, spanId, note);
-    return;
-  }
-  /* Two guards, because two different things can overtake this probe while it is
-     in flight.
-
-     `pairProbeNav` sequences the probes themselves: the NEWEST click owns the
-     navigation, so a slower answer to an earlier click cannot win the race and
-     open the run the reader has already clicked past.
-
-     `expNav` is the page's existing navigation token, read here and compared
-     below rather than claimed: a reader who changed source or view meanwhile
-     gets told nothing was opened. It is deliberately not claimed at this point,
-     because a probe that ends up REFUSED leaves the comparison pane on screen,
-     and claiming the token would leave that pane's own repaint guard
-     permanently stale -- its picker would stop working after a failed link. The
-     navigation token is claimed where navigation actually happens, by
-     `selectTurn`. */
-  var probe = ++pairProbeNav;
-  var opened = expNav;
-  if (note) { note.textContent = "opening the other experiment's records…"; }
-  scopedRead("/api/turn/" + encodeURIComponent(turnKey), scope.experimentId)
-    .then(function (data) {
-      if (data.unavailable) {
-        if (note) {
-          note.textContent = "That trace is recorded in another evidence "
-            + "database this workflow cannot open from here: " + data.error;
-        }
-        return;
-      }
-      if (probe !== pairProbeNav || expNav !== opened) {
-        if (note) {
-          note.textContent = "The page moved on before that other database "
-            + "answered, so nothing was opened.";
-        }
-        return;
-      }
-      if (note) { note.textContent = ""; }
-      benchmarkExperimentSource = scope.experimentId;
-      selectTurn(turnKey, spanId, note);
-    }).catch(function (e) {
-      if (note) { note.textContent = e.message; }
-    });
+  selectTurn(turnKey, spanId, note);
 }
 
 /* ONE exact recorded call, on the side that recorded it, by the canonical span
@@ -1465,18 +1404,6 @@ function countPairComments(node, cmp, ctx) {
       : "/api/task-feedback?experiment=")
     + encodeURIComponent(ctx.experimentId)
     + "&task=" + encodeURIComponent(ctx.taskId) + "&limit=200";
-  if (!(session && session.workspace_mode)) {
-    /* Named by experiment id, which is what resolves to a store. The LEFT
-       side's store is the base because that is where a paired comment is
-       recorded; the right side is added as a second source so a comment
-       written from the other experiment's own screen is counted too, rather
-       than the count depending on which page somebody happened to open. */
-    path += "&benchmark_experiment=" + encodeURIComponent(ctx.experimentId);
-    var right = cmp.right_run && cmp.right_run.experiment_id;
-    if (right && right !== ctx.experimentId) {
-      path += "&store=" + encodeURIComponent(right);
-    }
-  }
   api(path).then(function (data) {
     var mine = (data.feedback || []).filter(function (row) {
       return row.pair_key === cmp.review_pair_key;

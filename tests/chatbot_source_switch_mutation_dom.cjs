@@ -32,7 +32,6 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
   w.selectTurn(sharedTurn);
   await until(() => detail().includes('recorded in source_a'),
     'source A never rendered its turn');
-  w.benchmarkExperimentSource = 'exp-selected-in-source-a';
   w.tm.baseUrl = new URL(url).origin;
   w.tm.token = 'token-minted-for-source-a';
   w.tm.connected = true;
@@ -45,10 +44,9 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
 
   /* What the page carried into the new source without the boundary. The
      nav's own repaint eventually drops the selected turn and the detail pane
-     on its next refresh, so those are not the leak; the chat binding and the
-     experiment scoping are, and they persist indefinitely. */
+     on its next refresh, so those are not the leak; the chat binding is, and
+     it persists indefinitely. */
   const carriedOver = {
-    experimentScope: w.benchmarkExperimentSource,
     chatConnected: w.tm.connected,
     chatBaseUrl: w.tm.baseUrl,
     chatToken: w.tm.token,
@@ -56,7 +54,6 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
     oldTranscript: d.getElementById('chatLog').textContent.includes('hello from source A')
   };
   assert.deepEqual(carriedOver, {
-    experimentScope: 'exp-selected-in-source-a',
     chatConnected: true,
     chatBaseUrl: new URL(url).origin,
     chatToken: 'token-minted-for-source-a',

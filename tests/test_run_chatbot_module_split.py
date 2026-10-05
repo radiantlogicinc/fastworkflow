@@ -196,7 +196,6 @@ PRE_SPLIT_HANDLER_METHODS = (
     "_pass_selector",
     "_handle_workspace_task_feedback",
     "_handle_task_feedback",
-    "_registered_store",
     "_handle_benchmark_registration",
     "_handle_registration_patch",
     "_benchmark_experiments",

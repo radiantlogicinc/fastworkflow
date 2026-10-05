@@ -27,11 +27,9 @@ each file as present-with-digest or absent, and both halves must match.
 WHAT THIS DOES NOT CHANGE. Ordinary writer construction is untouched and is
 still a writer; `archive_to` is still the entrypoint for a store this process
 owns and is recording into, where the writer is held still instead of copied
-around. Nothing here migrates, and a v6 database is archived exactly as it is
-read — through `ReadOnlyObservabilityStore`, which accepts v6 and v7 alike.
-The returned `schema_version` says so, and says it for every archive rather
-than only for this path: `_snapshot_to` reads the pragma out of the file it
-produced instead of reporting the archiving build's `SCHEMA_VERSION`.
+around. Nothing here migrates: the copy is read through
+`ReadOnlyObservabilityStore`, which accepts only the current schema, so an
+older store is refused rather than archived.
 """
 
 from __future__ import annotations

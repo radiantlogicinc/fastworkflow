@@ -2,32 +2,19 @@
 
 Real stores, real HTTP, no mocks.
 
-The legacy half of this module proves the one thing a schema bump can quietly
-break: that feedback somebody already wrote is still readable, still says
-exactly what its author typed, and is shown as unclassified rather than
-guessed into one of the six new subcategories — and that a reader can still
-record a NEW categorized comment about that old evidence without a byte of it
-moving.
-
-It runs against a compact v6 database built at test time BY THE REAL v6 STORE
-CODE, loaded out of this repository's own git history. Nothing about the old
-schema is restated and no database is committed, so the guarantee is checked
-on every machine rather than only where a private corpus happens to sit. The
-private corpus is still read once, by `test_the_private_audit_corpus_reads_
-the_same_way`, from a copy of a copy; the source database is never opened.
+The read-only half of this module proves that a reader can record a NEW
+categorized comment about evidence this build must not write to -- a database
+file it cannot write -- without a byte of that evidence moving.
 """
 
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import os
 import shutil
 import sqlite3
 import subprocess
-import sys
-import tempfile
 import threading
 import urllib.error
 import urllib.parse
@@ -49,8 +36,6 @@ from tests.test_observability_workspace import _turn_row
 # redefined at every test that asks for it, which buries real lint findings
 # in this file under thirty false ones.
 pytest_plugins = ("tests.test_chatbot_benchmarks",)
-
-AUDIT_COPY = Path("/tmp/fw-audit-copies/ido_live.sqlite3")
 
 
 def _seed_task(store, *, experiment_id="exp-1", task_id="task-1", attempts=(1, 2)):
@@ -484,11 +469,8 @@ def test_the_feedback_ui_works_in_a_real_dom(experiment_server):
             "target_kind": "turn", "span_ids": [], "target_label": "Turn",
         },
     )
-    # An unclassified comment, as a pre-taxonomy row projects when a v6 store
-    # is consolidated into this view: no category, no subcategory, text
-    # untouched. Written directly because no writer in this build produces
-    # one — which is the point. `feedback_uid` is NOT NULL here; a real v6
-    # file has no such column at all and the reader synthesizes the identity.
+    # An unclassified comment: no category, no subcategory, text untouched.
+    # Written directly because no writer in this build produces one.
     with store._connect() as conn:
         conn.execute(
             "INSERT INTO human_feedback (feedback_uid, turn_key, target_kind,"
@@ -737,117 +719,67 @@ def test_the_attempt_filter_still_answers_for_rows_with_no_pair(
 
 
 # ---------------------------------------------------------------------------
-# Legacy: a real v6 corpus, read-only, never rewritten
+# Read-only evidence: annotated beside, never written to
 # ---------------------------------------------------------------------------
 
 
-def _v6_store_module():
-    """The real v6 store code, loaded out of this repository's own history.
-
-    The v6 schema is not restated here and no v6 database is committed. The
-    newest commit whose `store.py` still says `SCHEMA_VERSION = 6` IS the
-    build that wrote every v6 corpus in existence, so a fixture it creates has
-    the authentic old shape by construction and cannot drift from it the way a
-    hand-copied CREATE TABLE would. It is loaded under its own module name, so
-    the v6 and v7 stores coexist in one process.
-    """
-    log = subprocess.run(
-        ["git", "log", "--format=%H", "--", "fastworkflow/observability/store.py"],
-        capture_output=True, text=True, cwd=str(Path(__file__).parents[1]),
-    )
-    if log.returncode != 0:
-        pytest.skip("not a git checkout; the v6 baseline comes from history")
-    for commit in log.stdout.split():
-        shown = subprocess.run(
-            ["git", "show", f"{commit}:fastworkflow/observability/store.py"],
-            capture_output=True, text=True, cwd=str(Path(__file__).parents[1]),
-        )
-        if shown.returncode == 0 and "\nSCHEMA_VERSION = 6\n" in shown.stdout:
-            break
-    else:
-        pytest.skip("no v6 store.py in history to build a legacy fixture from")
-    directory = tempfile.mkdtemp(prefix="fw-v6-baseline-")
-    source = Path(directory) / "store_v6.py"
-    source.write_text(shown.stdout)
-    spec = importlib.util.spec_from_file_location("fastworkflow_store_v6", source)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["fastworkflow_store_v6"] = module
-    spec.loader.exec_module(module)
-    assert module.SCHEMA_VERSION == 6
-    return module
-
-
-@pytest.fixture(scope="session")
-def v6_baseline():
-    return _v6_store_module()
-
-
-# Public, synthetic, and deliberately including the OLD three-heading composer
-# output: those headings were presentation baked into comment text, and the
-# point of the legacy tests is that this build shows them verbatim instead of
-# reading `what_went_wrong` out of them.
-LEGACY_NOTES = (
-    ("turn", [], "Turn", "human", {"comment": "the answer stopped after two items"}),
-    ("phase", ["span"], "Planning", "coding_agent",
-     {"went_wrong": "never revisited the third item",
-      "worked": "asked a clarifying question first"}),
-    ("turn", [], "Turn", "human", {"should_change": "plan all three before answering"}),
-    ("turn", [], "Turn", "distillation_agent",
-     {"comment": "What went wrong: this line is content, not a category"}),
+RECORDED_NOTES = (
+    ("turn", [], "Turn", "human", "the answer stopped after two items",
+     "conclusions", "what_went_wrong"),
+    ("phase", ["span"], "Planning", "coding_agent", "asked a clarifying question first",
+     "conclusions", "what_went_right"),
+    ("turn", [], "Turn", "human", "plan all three before answering",
+     "recommendations", "what_to_do"),
+    ("turn", [], "Turn", "distillation_agent", "the third item was never revisited",
+     "observations_analysis", "observation"),
 )
 
 
 @pytest.fixture
-def legacy_v6_copy(v6_baseline, tmp_path):
-    """A compact, REAL v6 database, written by the real v6 writer.
+def read_only_copy(tmp_path):
+    """A current-schema store this build cannot write to.
 
-    Built at test time rather than committed, and seeded with public synthetic
-    text, so the legacy guarantees are checked on every machine instead of
-    only where a private corpus happens to exist. The private corpus is still
-    read, once, by `test_the_private_audit_corpus_reads_the_same_way`.
+    Its notes are recorded first; then the file is closed out of WAL and made
+    read-only, which is what sends a new comment to the annotation sidecar.
     """
-    path = tmp_path / "legacy_v6.sqlite3"
-    store = v6_baseline.ObservabilityStore(str(path))
+    path = tmp_path / "read_only.sqlite3"
+    store = obs.ObservabilityStore(str(path))
     with store._connect() as conn:
         for ordinal, attempt in ((1, 1), (2, 1), (3, 2)):
-            key = f"legacy-t{ordinal}"
-            row = _turn_row(key, "exp-legacy", "task-legacy", attempt)
+            key = f"recorded-t{ordinal}"
+            row = _turn_row(key, "exp-recorded", "task-recorded", attempt)
             assert store.upsert_turn_row(conn, row, [], store._store_redactor())
             conn.execute(
                 "INSERT INTO spans(span_id,trace_id,name,kind,start_ns,status,attributes) "
                 "VALUES(?,?,?,?,?,?,?)",
-                (f"span-legacy-t{ordinal}", key, "fw.planner.plan", "internal",
+                (f"span-recorded-t{ordinal}", key, "fw.planner.plan", "internal",
                  1, "ok", "{}"),
             )
-    for index, (kind, spans, label, provenance, text) in enumerate(LEGACY_NOTES):
-        turn_key = f"legacy-t{(index % 3) + 1}"
+    for index, (kind, spans, label, provenance, comment, category, subcategory) in (
+        enumerate(RECORDED_NOTES)
+    ):
+        turn_key = f"recorded-t{(index % 3) + 1}"
         store.add_human_feedback(
             turn_key,
             target_kind=kind,
             span_ids=[f"span-{turn_key}" for _ in spans],
             target_label=label,
             provenance=provenance,
-            **text,
+            comment=comment,
+            category=category,
+            subcategory=subcategory,
         )
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("PRAGMA journal_mode=DELETE")
+    finally:
+        connection.close()
+    path.chmod(0o444)
     yield path
+    path.chmod(0o644)
 
 
-@pytest.fixture(scope="session")
-def audit_corpus_copy(tmp_path_factory):
-    """One copy of the private historical corpus for the whole session.
-
-    Optional by design: it is 600MB of private payload that exists on one
-    machine, and copying it per test bought nothing the synthetic fixture does
-    not already prove. The source is never opened — this copies a copy.
-    """
-    if not AUDIT_COPY.exists():
-        pytest.skip("no private audit copy available on this machine")
-    path = tmp_path_factory.mktemp("audit") / "legacy_v6.sqlite3"
-    shutil.copyfile(AUDIT_COPY, path)
-    return path
-
-
-def _legacy_rows(path):
+def _recorded_rows(path):
     connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
         connection.row_factory = sqlite3.Row
@@ -859,136 +791,6 @@ def _legacy_rows(path):
         ]
     finally:
         connection.close()
-
-
-def test_the_v6_fixture_is_the_shape_this_test_claims(legacy_v6_copy):
-    """Guards the rest of the module: if the fixture stops being v6 feedback
-    written before the taxonomy, these tests prove nothing and should say so
-    rather than pass vacuously."""
-    connection = sqlite3.connect(f"file:{legacy_v6_copy}?mode=ro", uri=True)
-    try:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
-        columns = {
-            row[1] for row in connection.execute("PRAGMA table_info(human_feedback)")
-        }
-        assert columns == {
-            "feedback_id", "turn_key", "target_kind", "span_ids_json",
-            "target_label", "comment", "provenance", "created_at",
-        }
-        assert connection.execute(
-            "SELECT COUNT(*) FROM human_feedback"
-        ).fetchone()[0] == len(LEGACY_NOTES)
-        # The old composer's headings are in the TEXT of two rows. Nothing may
-        # read a category out of them.
-        assert connection.execute(
-            "SELECT COUNT(*) FROM human_feedback WHERE comment LIKE 'What went wrong:%'"
-        ).fetchone()[0] == 2
-    finally:
-        connection.close()
-
-
-def test_legacy_feedback_reads_back_verbatim_and_unclassified(legacy_v6_copy):
-    """The whole point of keeping v6 readable.
-
-    Every recorded comment still reads, character for character, with its
-    original provenance, target and timestamp — and with no category, because
-    its author never chose one. Deriving `what_went_wrong` from a heading in
-    the text would record a guess as the author's decision.
-    """
-    expected = _legacy_rows(legacy_v6_copy)
-    store = obs.ReadOnlyObservabilityStore(str(legacy_v6_copy))
-    assert store.schema_version == 6
-    by_turn = {}
-    for row in expected:
-        by_turn.setdefault(row["turn_key"], []).append(row)
-    seen = 0
-    for turn_key, original in by_turn.items():
-        rows = fb.present(store.list_human_feedback(turn_key))
-        assert len(rows) == len(original)
-        for read, was in zip(rows, original):
-            assert read["comment"] == was["comment"]
-            assert read["provenance"] == was["provenance"]
-            assert read["target_kind"] == was["target_kind"]
-            assert read["target_label"] == was["target_label"]
-            assert read["created_at"] == was["created_at"]
-            assert read["span_ids"] == json.loads(was["span_ids_json"] or "[]")
-            assert read["category"] is None and read["subcategory"] is None
-            assert read["classified"] is False
-            assert read["category_label"] is None
-            assert read["subcategory_label"] is None
-            assert read["paired"] is None and read["pair_key"] is None
-            seen += 1
-    assert seen == len(expected) > 0
-
-
-def test_legacy_rows_still_deduplicate_and_consolidate(legacy_v6_copy):
-    """Unclassified rows are real feedback and appear in the task view."""
-    store = obs.ReadOnlyObservabilityStore(str(legacy_v6_copy))
-    rows = _legacy_rows(legacy_v6_copy)
-    keys = {
-        fb.dedupe_key({**row, "store_id": "legacy", "feedback_uid": None})
-        for row in rows
-    }
-    assert len(keys) == len(rows)
-    assert all(key.startswith("legacy:") for key in keys)
-    # Whatever task the corpus's own turns belong to, consolidation over the
-    # read-only store must not raise and must never claim a classification.
-    turn = store.get_turn(rows[0]["turn_key"])
-    if turn and turn.get("experiment_id") and turn.get("task_id"):
-        page = fb.consolidate_task_feedback(
-            {"legacy": store},
-            experiment_id=turn["experiment_id"],
-            task_id=turn["task_id"],
-        )
-        assert page.total >= 1
-        assert all(row["category"] is None for row in page.rows)
-
-
-def test_a_legacy_row_is_filtered_by_its_own_attempt(legacy_v6_copy):
-    """A v6 row has no pair columns at all, so the turn it is anchored to is
-    the only side there is -- and the attempt filter still answers from it."""
-    store = obs.ReadOnlyObservabilityStore(str(legacy_v6_copy))
-    rows = _legacy_rows(legacy_v6_copy)
-    by_attempt = {1: 0, 2: 0}
-    for index in range(len(rows)):
-        by_attempt[2 if (index % 3) + 1 == 3 else 1] += 1
-    for attempt, expected in by_attempt.items():
-        page = fb.consolidate_task_feedback(
-            {"legacy": store},
-            experiment_id="exp-legacy",
-            task_id="task-legacy",
-            attempt=attempt,
-        )
-        assert page.total == expected
-        assert all(row["attempt"] == attempt for row in page.rows)
-    assert sum(by_attempt.values()) == len(rows) > 0
-
-
-def test_reading_the_legacy_copy_does_not_write_to_it(legacy_v6_copy):
-    """No source evidence write, and no migration on open either."""
-    before = hashlib.sha256(legacy_v6_copy.read_bytes()).hexdigest()
-    store = obs.ReadOnlyObservabilityStore(str(legacy_v6_copy))
-    for row in _legacy_rows(legacy_v6_copy)[:5]:
-        store.list_human_feedback(row["turn_key"])
-    assert hashlib.sha256(legacy_v6_copy.read_bytes()).hexdigest() == before
-    connection = sqlite3.connect(f"file:{legacy_v6_copy}?mode=ro", uri=True)
-    try:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
-    finally:
-        connection.close()
-
-
-def test_a_v6_store_refuses_a_taxonomy_write_instead_of_half_doing_one(
-    legacy_v6_copy,
-):
-    """The consequence of the bump, stated plainly.
-
-    A v6 database has no category, subcategory, anchor or identity columns.
-    The writer refuses it at open rather than inserting a row that the task
-    view could never file or deduplicate.
-    """
-    with pytest.raises(obs.IncompatibleObservabilityDB):
-        obs.ObservabilityStore.open_for_annotation(str(legacy_v6_copy))
 
 
 def _serving(db_path):
@@ -1012,26 +814,24 @@ def _http(server, path, method="GET", body=None):
         return response.status, json.loads(response.read())
 
 
-def test_the_chatbot_records_a_note_beside_a_legacy_store_without_touching_it(
-    legacy_v6_copy,
+def test_the_chatbot_records_a_note_beside_a_read_only_store_without_touching_it(
+    read_only_copy,
 ):
     """The whole of fix-9eg.19.1 on evidence this build must not write to.
 
-    A v6 database has nowhere to put a category, an anchor or an identity, and
-    this build does not migrate a database it did not create. Refusing the
-    comment was the wrong answer: it goes to the annotation sidecar beside the
-    evidence, the evidence file is byte-identical afterwards, and the reads —
-    the turn's notes and the consolidated task view — return the new
-    categorized note and the old unclassified ones as one list, deduplicated
-    by stable identity.
+    Refusing the comment was the wrong answer: it goes to the annotation
+    sidecar beside the evidence, the evidence file is byte-identical
+    afterwards, and the reads — the turn's notes and the consolidated task
+    view — return the new note and the recorded ones as one list,
+    deduplicated by stable identity.
     """
-    rows = _legacy_rows(legacy_v6_copy)
+    rows = _recorded_rows(read_only_copy)
     turn_key = rows[0]["turn_key"]
     encoded = urllib.parse.quote(turn_key, safe="")
-    before = hashlib.sha256(legacy_v6_copy.read_bytes()).hexdigest()
-    sidecar = Path(feedback_sidecar.feedback_db_path_for(str(legacy_v6_copy)))
+    before = hashlib.sha256(read_only_copy.read_bytes()).hexdigest()
+    sidecar = Path(feedback_sidecar.feedback_db_path_for(str(read_only_copy)))
     assert not sidecar.exists()
-    server, thread = _serving(legacy_v6_copy)
+    server, thread = _serving(read_only_copy)
     try:
         status, payload = _http(
             server, f"/api/feedback-notes?turn_key={encoded}"
@@ -1040,14 +840,13 @@ def test_the_chatbot_records_a_note_beside_a_legacy_store_without_touching_it(
         assert [row["comment"] for row in payload["feedback"]] == [
             row["comment"] for row in rows if row["turn_key"] == turn_key
         ]
-        assert all(row["classified"] is False for row in payload["feedback"])
         # Reading does not create the sidecar.
         assert not sidecar.exists()
         status, written = _http(
             server, f"/post_feedback?turn_key={encoded}", "POST",
             {
                 "target_kind": "turn", "span_ids": [], "target_label": "Turn",
-                "comment": "recorded today, about evidence from before",
+                "comment": "recorded today, about evidence it cannot write",
                 "provenance": "human",
                 "category": "recommendations", "subcategory": "what_to_do",
             },
@@ -1055,46 +854,42 @@ def test_the_chatbot_records_a_note_beside_a_legacy_store_without_touching_it(
         assert status == 201, written
         new = [
             row for row in written["feedback"]
-            if row["comment"] == "recorded today, about evidence from before"
+            if row["comment"] == "recorded today, about evidence it cannot write"
         ]
         assert len(new) == 1
         assert new[0]["category"] == "recommendations" and new[0]["classified"]
         assert new[0]["feedback_uid"].startswith("fb-")
-        # The old comments are still there, still unclassified, in one list.
+        # The recorded comments are still there, in one list.
         assert len(written["feedback"]) == len(payload["feedback"]) + 1
         status, task = _http(
-            server, "/api/task-feedback?experiment=exp-legacy&task=task-legacy"
+            server, "/api/task-feedback?experiment=exp-recorded&task=task-recorded"
         )
         assert status == 200
-        assert task["total"] == len(LEGACY_NOTES) + 1
-        assert sorted(row["classified"] for row in task["feedback"]) == [
-            False, False, False, False, True,
-        ]
+        assert task["total"] == len(RECORDED_NOTES) + 1
         assert len({row["feedback_uid"] or row["feedback_id"]
                     for row in task["feedback"]}) == len(task["feedback"])
     finally:
         server.shutdown()
         thread.join(timeout=5)
-    assert hashlib.sha256(legacy_v6_copy.read_bytes()).hexdigest() == before
+    assert hashlib.sha256(read_only_copy.read_bytes()).hexdigest() == before
     assert sidecar.exists()
-    with sqlite3.connect(f"file:{legacy_v6_copy}?mode=ro", uri=True) as evidence:
+    with sqlite3.connect(f"file:{read_only_copy}?mode=ro", uri=True) as evidence:
         assert evidence.execute(
             "SELECT COUNT(*) FROM human_feedback"
-        ).fetchone()[0] == len(LEGACY_NOTES)
-        assert evidence.execute("PRAGMA user_version").fetchone()[0] == 6
+        ).fetchone()[0] == len(RECORDED_NOTES)
 
 
-def test_a_recorded_note_is_append_only_even_in_the_sidecar(legacy_v6_copy):
+def test_a_recorded_note_is_append_only_even_in_the_sidecar(read_only_copy):
     """A comment is somebody's statement; editing one in place would leave no
     trace that it had said something else."""
-    evidence = obs.ReadOnlyObservabilityStore(str(legacy_v6_copy))
+    evidence = obs.ReadOnlyObservabilityStore(str(read_only_copy))
     annotated = feedback_sidecar.AnnotatedEvidence.for_writing(evidence)
     annotated.add_human_feedback(
-        "legacy-t1", target_kind="turn", span_ids=[], target_label="Turn",
-        provenance="human", comment="a note about old evidence",
+        "recorded-t1", target_kind="turn", span_ids=[], target_label="Turn",
+        provenance="human", comment="a note about read-only evidence",
         category="observations_analysis", subcategory="observation",
     )
-    path = feedback_sidecar.feedback_db_path_for(str(legacy_v6_copy))
+    path = feedback_sidecar.feedback_db_path_for(str(read_only_copy))
     connection = sqlite3.connect(path)
     try:
         with pytest.raises(sqlite3.IntegrityError):
@@ -1155,7 +950,7 @@ def test_a_paired_side_may_name_its_anchored_turn_unambiguously(
     assert status == 400 and "anchored to" in error["error"]
 
 
-def test_reading_feedback_never_brings_a_sidecar_into_existence(legacy_v6_copy):
+def test_reading_feedback_never_brings_a_sidecar_into_existence(read_only_copy):
     """A read creates nothing beside somebody's evidence.
 
     Listing a turn's comments, or a whole task's, on a store nobody has
@@ -1164,48 +959,48 @@ def test_reading_feedback_never_brings_a_sidecar_into_existence(legacy_v6_copy):
     archive stamped a control file next to it — one that then had to be
     explained to whoever verified the archive's directory.
     """
-    directory = legacy_v6_copy.parent
+    directory = read_only_copy.parent
     before = sorted(path.name for path in directory.iterdir())
-    evidence = obs.ReadOnlyObservabilityStore(str(legacy_v6_copy))
+    evidence = obs.ReadOnlyObservabilityStore(str(read_only_copy))
     reader = feedback_sidecar.reader_for(evidence)
     assert reader is evidence, "with no sidecar there is nothing to merge"
-    assert reader.list_human_feedback("legacy-t1")
+    assert reader.list_human_feedback("recorded-t1")
     assert fb.consolidate_task_feedback(
-        {"legacy": reader}, experiment_id="exp-legacy", task_id="task-legacy"
-    ).total == len(LEGACY_NOTES)
+        {"recorded": reader}, experiment_id="exp-recorded", task_id="task-recorded"
+    ).total == len(RECORDED_NOTES)
     assert sorted(path.name for path in directory.iterdir()) == before
 
 
-def test_an_existing_sidecar_is_read_without_being_written_to(legacy_v6_copy):
+def test_an_existing_sidecar_is_read_without_being_written_to(read_only_copy):
     """The merged read opens the control file read-only.
 
     Checked by byte digest rather than by inspection: a reader that stamps a
     schema version, a journal or an identity into the file it is reading is
     writing, whatever it calls itself.
     """
-    evidence = obs.ReadOnlyObservabilityStore(str(legacy_v6_copy))
+    evidence = obs.ReadOnlyObservabilityStore(str(read_only_copy))
     feedback_sidecar.AnnotatedEvidence.for_writing(evidence).add_human_feedback(
-        "legacy-t1", target_kind="turn", span_ids=[], target_label="Turn",
-        provenance="human", comment="a note about old evidence",
+        "recorded-t1", target_kind="turn", span_ids=[], target_label="Turn",
+        provenance="human", comment="a note about read-only evidence",
         category="observations_analysis", subcategory="observation",
     )
-    path = Path(feedback_sidecar.feedback_db_path_for(str(legacy_v6_copy)))
+    path = Path(feedback_sidecar.feedback_db_path_for(str(read_only_copy)))
     before = hashlib.sha256(path.read_bytes()).hexdigest()
     directory = sorted(item.name for item in path.parent.iterdir())
     reader = feedback_sidecar.reader_for(evidence)
     assert isinstance(reader, feedback_sidecar.AnnotatedEvidence)
     assert reader.sidecar.read_only is True
-    rows = reader.list_human_feedback("legacy-t1")
-    assert [row["comment"] for row in rows][-1] == "a note about old evidence"
+    rows = reader.list_human_feedback("recorded-t1")
+    assert [row["comment"] for row in rows][-1] == "a note about read-only evidence"
     assert len(rows) == 1 + sum(
-        1 for index in range(len(LEGACY_NOTES)) if (index % 3) + 1 == 1
+        1 for index in range(len(RECORDED_NOTES)) if (index % 3) + 1 == 1
     )
     assert hashlib.sha256(path.read_bytes()).hexdigest() == before
     assert sorted(item.name for item in path.parent.iterdir()) == directory
     # And it refuses to become a writer behind the caller's back.
     with pytest.raises(feedback_sidecar.FeedbackSidecarError):
         reader.add_human_feedback(
-            "legacy-t1", target_kind="turn", span_ids=[], target_label="Turn",
+            "recorded-t1", target_kind="turn", span_ids=[], target_label="Turn",
             provenance="human", comment="not through a read handle",
             category="conclusions", subcategory="what_went_wrong",
         )
@@ -1214,7 +1009,7 @@ def test_an_existing_sidecar_is_read_without_being_written_to(legacy_v6_copy):
 
 @pytest.mark.parametrize("damage", ["version", "identity", "not_a_database"])
 def test_a_sidecar_this_build_does_not_understand_is_refused_untouched(
-    legacy_v6_copy, damage
+    read_only_copy, damage
 ):
     """Refused before any DDL, with its bytes exactly as they were.
 
@@ -1222,8 +1017,8 @@ def test_a_sidecar_this_build_does_not_understand_is_refused_untouched(
     "repair" a file this build has already decided it cannot read — and the
     repair is indistinguishable, afterwards, from the file having been fine.
     """
-    evidence = obs.ReadOnlyObservabilityStore(str(legacy_v6_copy))
-    path = Path(feedback_sidecar.feedback_db_path_for(str(legacy_v6_copy)))
+    evidence = obs.ReadOnlyObservabilityStore(str(read_only_copy))
+    path = Path(feedback_sidecar.feedback_db_path_for(str(read_only_copy)))
     if damage == "not_a_database":
         path.write_bytes(b"this is not sqlite")
     else:
@@ -1251,16 +1046,16 @@ def test_a_sidecar_this_build_does_not_understand_is_refused_untouched(
 
 
 def test_the_http_reads_create_no_sidecar_and_report_an_unreadable_one(
-    legacy_v6_copy,
+    read_only_copy,
 ):
     """The same two properties over real HTTP, where it actually matters."""
-    sidecar = Path(feedback_sidecar.feedback_db_path_for(str(legacy_v6_copy)))
-    encoded = urllib.parse.quote("legacy-t1", safe="")
-    server, thread = _serving(legacy_v6_copy)
+    sidecar = Path(feedback_sidecar.feedback_db_path_for(str(read_only_copy)))
+    encoded = urllib.parse.quote("recorded-t1", safe="")
+    server, thread = _serving(read_only_copy)
     try:
         assert _http(server, f"/api/feedback-notes?turn_key={encoded}")[0] == 200
         assert _http(
-            server, "/api/task-feedback?experiment=exp-legacy&task=task-legacy"
+            server, "/api/task-feedback?experiment=exp-recorded&task=task-recorded"
         )[0] == 200
         assert not sidecar.exists(), "a GET must not create a control file"
         sidecar.write_bytes(b"this is not sqlite")
@@ -1275,41 +1070,15 @@ def test_the_http_reads_create_no_sidecar_and_report_an_unreadable_one(
 
 
 def test_a_sidecar_refuses_to_answer_about_a_different_store(
-    legacy_v6_copy, tmp_path
+    read_only_copy, tmp_path
 ):
     """Bound to the evidence it was opened against, so a control file carried
     to another store is refused rather than reporting somebody else's runs."""
-    evidence = obs.ReadOnlyObservabilityStore(str(legacy_v6_copy))
+    evidence = obs.ReadOnlyObservabilityStore(str(read_only_copy))
     feedback_sidecar.AnnotatedEvidence.for_writing(evidence)
     carried = tmp_path / "carried.feedback.sqlite3"
-    shutil.copyfile(feedback_sidecar.feedback_db_path_for(str(legacy_v6_copy)), carried)
+    shutil.copyfile(feedback_sidecar.feedback_db_path_for(str(read_only_copy)), carried)
     with pytest.raises(feedback_sidecar.FeedbackSidecarError):
         feedback_sidecar.FeedbackAnnotationStore(
             str(carried), evidence_store_identity="some-other-store"
         )
-
-
-def test_the_private_audit_corpus_reads_the_same_way(audit_corpus_copy):
-    """The optional historical probe.
-
-    The synthetic fixture above proves the contract everywhere; this checks it
-    against real recorded feedback from before the taxonomy, on the one
-    machine that has a copy. It reads and never writes.
-    """
-    before = hashlib.sha256(audit_corpus_copy.read_bytes()).hexdigest()
-    expected = _legacy_rows(audit_corpus_copy)
-    assert len(expected) > 0
-    store = obs.ReadOnlyObservabilityStore(str(audit_corpus_copy))
-    assert store.schema_version == 6
-    seen = 0
-    for turn_key in dict.fromkeys(row["turn_key"] for row in expected):
-        original = [row for row in expected if row["turn_key"] == turn_key]
-        read = fb.present(store.list_human_feedback(turn_key))
-        assert [row["comment"] for row in read] == [
-            row["comment"] for row in original
-        ]
-        assert all(row["classified"] is False for row in read)
-        assert all(row["category"] is None for row in read)
-        seen += len(read)
-    assert seen == len(expected)
-    assert hashlib.sha256(audit_corpus_copy.read_bytes()).hexdigest() == before

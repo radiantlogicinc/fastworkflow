@@ -164,77 +164,6 @@ def finder_world(tmp_path, monkeypatch):
     thread.join(timeout=5)
 
 
-# The second world: an experiment REGISTERED against the workflow whose
-# evidence lives in its own database, plus decoy turns in the workflow's
-# default store carrying the very same experiment/task/attempt labels. The
-# decoys are the point: a scoped read routed to the wrong store would answer
-# with them, and an answer that merely looked plausible would pass.
-EXTERNAL_A1 = ["turn-ext-a1-0", "turn-ext-a1-1"]
-EXTERNAL_A2_FAILED = "turn-ext-a2-failed"
-DEFAULT_DECOYS = ["turn-default-decoy-0", "turn-default-decoy-1"]
-
-
-@pytest.fixture
-def registered_world(tmp_path, monkeypatch):
-    """One registered experiment in an external store, shadowed in the default."""
-    monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
-    folder = tmp_path / "registered_workflow"
-    (folder / "_commands").mkdir(parents=True)
-    benchmark = setup.save_benchmark(
-        folder, {"title": "Registered", "tasks": [{"prompt": "Do it"}]}
-    )
-    registration = setup.create_experiment(
-        folder, benchmark["benchmark_id"], "v1", runs_per_task=2
-    )
-    experiment_id = registration["experiment_id"]
-    task_id = registration["task_ids"][0]
-
-    external_db = str(tmp_path / "evidence-external.sqlite3")
-    external = obs.ObservabilityStore(external_db)
-    controller = ExperimentController(
-        external_db, external.store_identity(), external=False,
-        workflow_folderpath=str(folder),
-    )
-    controller.create_experiment(
-        experiment_id, registration["description"], declared_tasks=1,
-        declared_attempts=2,
-        declarations=[(task_id, number, f"ch-ext-{number}") for number in (1, 2)],
-        workflow_name=setup.workflow_name_for(folder),
-    )
-    controller.start_attempt(experiment_id, task_id, 1, "ch-ext-1")
-    for turn_key in EXTERNAL_A1:
-        _plain_turn(external, turn_key, experiment_id=experiment_id,
-                    task_id=task_id, attempt=1)
-    controller.finish_attempt(experiment_id, task_id, 1, outcome="pass",
-                              outcome_source="test")
-    controller.start_attempt(experiment_id, task_id, 2, "ch-ext-2")
-    _failed_turn(external, EXTERNAL_A2_FAILED, experiment_id=experiment_id,
-                 task_id=task_id, attempt=2)
-    controller.finish_attempt(experiment_id, task_id, 2, outcome="fail",
-                              outcome_source="test")
-
-    # The workflow's own store, holding turns under the SAME labels. They are
-    # written as turn rows rather than through a second controller because that
-    # is what the collision is: two databases labelling different runs alike.
-    default_db = state_paths.observability_db(str(folder))
-    Path(default_db).parent.mkdir(parents=True, exist_ok=True)
-    default_store = obs.ObservabilityStore(default_db)
-    for turn_key in DEFAULT_DECOYS:
-        _plain_turn(default_store, turn_key, experiment_id=experiment_id,
-                    task_id=task_id, attempt=1)
-
-    server = run_chatbot_server.ChatbotServer(
-        db_path=default_db, workflow_path=str(folder), port=0,
-        spawn_options={"no_server": True},
-    )
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield {"server": server, "experiment": experiment_id, "task": task_id,
-           "folder": str(folder)}
-    server.shutdown()
-    thread.join(timeout=5)
-
-
 def _turns(server, query: str) -> dict:
     status, data = _request(server, "/api/turns?" + query)
     assert status == 200, data
@@ -384,76 +313,6 @@ def test_a_command_scope_means_the_turn_contained_it_not_that_it_failed(
 
 
 # ----------------------------------------------------------------------
-# The selected source answers its own scope
-# ----------------------------------------------------------------------
-
-
-def test_a_scope_on_the_selected_registered_source_reads_that_source(
-    registered_world,
-):
-    """The acceptance the leaf is held to: UI and API select the SAME source.
-
-    Both databases label turns with this experiment, this task and attempt 1.
-    The scoped read carrying the selected source returns the registered
-    store's turns; the same scope without it returns the workflow's own. A
-    route that ignored the selection would answer with the decoys.
-    """
-    server = registered_world["server"]
-    experiment = registered_world["experiment"]
-    task = registered_world["task"]
-
-    selected = _turns(
-        server,
-        f"benchmark_experiment={experiment}&experiment={experiment}"
-        f"&task={task}&limit=50",
-    )
-    unselected = _turns(server, f"experiment={experiment}&task={task}&limit=50")
-
-    assert sorted(_keys(selected)) == sorted(EXTERNAL_A1 + [EXTERNAL_A2_FAILED])
-    assert not set(_keys(selected)) & set(DEFAULT_DECOYS)
-    assert sorted(_keys(unselected)) == sorted(DEFAULT_DECOYS)
-
-
-def test_an_attempt_scope_on_the_selected_source_reads_that_attempt(
-    registered_world,
-):
-    server = registered_world["server"]
-    experiment = registered_world["experiment"]
-    task = registered_world["task"]
-
-    first = _turns(
-        server,
-        f"benchmark_experiment={experiment}&experiment={experiment}"
-        f"&task={task}&attempt=1&limit=50",
-    )
-    second = _turns(
-        server,
-        f"benchmark_experiment={experiment}&experiment={experiment}"
-        f"&task={task}&attempt=2&markers_any=step_unsuccessful&limit=50",
-    )
-
-    assert sorted(_keys(first)) == sorted(EXTERNAL_A1)
-    assert _keys(second) == [EXTERNAL_A2_FAILED]
-    # The decoys share attempt 1 in the other database and stay out of both.
-    assert not set(_keys(first)) & set(DEFAULT_DECOYS)
-
-
-def test_a_registered_source_the_workflow_never_registered_is_refused(
-    registered_world,
-):
-    """So a selection the page cannot honour fails closed, not quietly wrong."""
-    server = registered_world["server"]
-    status, data = _request(
-        server,
-        f"/api/turns?benchmark_experiment=exp-nobody"
-        f"&experiment={registered_world['experiment']}&limit=25",
-    )
-
-    assert status == 409
-    assert "exp-nobody" in data["error"]
-
-
-# ----------------------------------------------------------------------
 # What the page ships
 # ----------------------------------------------------------------------
 
@@ -521,7 +380,6 @@ def test_turn_finder_scope_dom(finder_world):
             json.dumps(
                 {
                     "experiment": ALPHA,
-                    "otherExperiment": BETA,
                     "task": TASK_ONE,
                     "otherTask": TASK_TWO,
                     "attemptTwoTurns": ALPHA_ONE_A2,
@@ -538,32 +396,3 @@ def test_turn_finder_scope_dom(finder_world):
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
-
-def test_turn_finder_scope_on_a_selected_registered_source_dom(registered_world):
-    """The same controls, driven against an external store the page has open."""
-    dependency = os.environ.get("TEST_JSDOM_ROOT")
-    if not dependency:
-        pytest.skip("Set TEST_JSDOM_ROOT to run DOM integration with jsdom")
-    server = registered_world["server"]
-    script = Path(__file__).with_name("chatbot_finder_registered_source_dom.cjs")
-    result = subprocess.run(
-        [
-            "node",
-            str(script),
-            dependency,
-            f"http://127.0.0.1:{server.port}/?token={server.token}",
-            json.dumps(
-                {
-                    "experiment": registered_world["experiment"],
-                    "task": registered_world["task"],
-                    "attemptOneTurns": EXTERNAL_A1,
-                    "failedTurn": EXTERNAL_A2_FAILED,
-                    "decoys": DEFAULT_DECOYS,
-                }
-            ),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr

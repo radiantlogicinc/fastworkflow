@@ -42,7 +42,7 @@ import pytest
 from fastworkflow import state_paths
 from fastworkflow.benchmark import setup
 from fastworkflow.experiment.runner import ExperimentController
-from fastworkflow.observability import comparison, selection
+from fastworkflow.observability import selection
 from fastworkflow.observability import store as obs
 from fastworkflow.run_chatbot import server as run_chatbot_server
 from tests.test_chatbot_benchmarks import _request
@@ -487,6 +487,7 @@ class TestComparison:
     def test_review_progress_and_the_comment_count_are_separate_facts(
         self, server, world
     ):
+        server.db_path = world["store_one"].db_path  # where its comments are written
         cmp = _comparison(server, world, left_attempt=1, right_attempt=2)[1]
 
         before = _request(
@@ -518,8 +519,7 @@ class TestComparison:
             server,
             "/api/task-feedback?experiment="
             + urllib.parse.quote(world["experiment_id"])
-            + "&task=" + urllib.parse.quote(world["task_id"])
-            + "&benchmark_experiment=" + urllib.parse.quote(world["experiment_id"]),
+            + "&task=" + urllib.parse.quote(world["task_id"]),
         )[1]
         assert [row for row in feedback_page["feedback"]
                 if row["pair_key"] == cmp["review_pair_key"]] == []
@@ -559,11 +559,7 @@ def _comment_on_row(server, world, cmp, row, *, comment, category, subcategory):
             "span_ids": paired["span_ids"],
             "target_label": "step in this pair (other side)",
         }
-    path = (
-        "/post_feedback?turn_key=" + urllib.parse.quote(primary["turn_key"], safe="")
-        + "&benchmark_experiment="
-        + urllib.parse.quote(primary["ref"]["experiment_id"], safe="")
-    )
+    path = "/post_feedback?turn_key=" + urllib.parse.quote(primary["turn_key"], safe="")
     return _request(server, path, "POST", body)
 
 
@@ -582,6 +578,7 @@ def test_a_comment_written_from_a_comparison_survives_a_new_best_run(
     a selection produces a NEW pair and must not reinterpret or orphan what
     somebody already said about the old one.
     """
+    server.db_path = world["store_one"].db_path  # where its comments are written
     runs = _request(server, _tasks(world, "/runs"))[1]
     assert runs["best_run"] is None and runs["reference"]["attempt"] == 1
 
@@ -616,8 +613,7 @@ def test_a_comment_written_from_a_comparison_survives_a_new_best_run(
             server,
             "/api/task-feedback?experiment="
             + urllib.parse.quote(world["experiment_id"])
-            + "&task=" + urllib.parse.quote(world["task_id"])
-            + "&benchmark_experiment=" + urllib.parse.quote(world["experiment_id"]),
+            + "&task=" + urllib.parse.quote(world["task_id"]),
         )[1]["feedback"]
 
     seen = [item for item in task_feedback() if item["pair_key"] == pair_key]
@@ -651,6 +647,7 @@ def test_the_pair_identity_is_the_references_not_the_step(server, world):
     would be its own pair and a heavily annotated comparison would report as
     unannotated.
     """
+    server.db_path = world["store_one"].db_path  # where its comments are written
     cmp = _comparison(server, world, left_attempt=1, right_attempt=2, view="steps")[1]
     rows = [row for row in cmp["alignment"]["rows"]
             if row["anchors"]["left"] and row["anchors"]["right"]]
@@ -672,31 +669,30 @@ def test_the_pair_identity_is_the_references_not_the_step(server, world):
     assert keys == {cmp["review_pair_key"]}
 
 
-def test_a_comparison_of_two_stores_records_a_comment_naming_both(server, world):
-    """The cross-database pair, which is the winner-versus-candidate shape."""
+def test_a_comment_pairing_a_side_in_another_database_is_refused(server, world):
+    """The workflow reads one live database; the candidate's is not it.
+
+    A pair whose other side lives in a second live database cannot be
+    validated from here, so the comment fails closed instead of recording an
+    anchor nothing can read back.
+    """
+    server.db_path = world["store_one"].db_path  # where its comments are written
     cmp = _comparison(server, world, right_experiment=world["candidate_id"],
                       right_attempt=1, view="steps")[1]
     row = next(row for row in cmp["alignment"]["rows"]
                if row["anchors"]["left"] and row["anchors"]["right"])
 
-    status, written = _comment_on_row(
+    status, refused = _comment_on_row(
         server, world, cmp, row,
         comment="the candidate sorted the list where this one listed it",
         category="recommendations", subcategory="what_to_do",
     )
 
-    assert status == 201
-    recorded = next(item for item in written["feedback"]
-                    if "sorted the list" in item["comment"])
-    assert recorded["pair_key"] == cmp["review_pair_key"]
-    assert recorded["paired"]["ref"]["store_id"] == cmp["right"]["ref"]["store_id"]
-    assert recorded["paired"]["ref"]["experiment_id"] == world["candidate_id"]
-    # The same key the pair-review sidecar would record it under, so the
-    # compare view's progress line and its comment count agree.
-    assert comparison.review_pair_key(
-        comparison.ExecutionRef.from_mapping(cmp["left"]["ref"]),
-        comparison.ExecutionRef.from_mapping(cmp["right"]["ref"]),
-    ) == recorded["pair_key"]
+    assert status == 400
+    assert "was not authorized" in refused["error"]
+    assert not [item for item in world["store_one"].list_task_feedback(
+        experiment_id=world["experiment_id"], task_id=world["task_id"])
+        if "sorted the list" in item["comment"]]
 
 
 # ----------------------------------------------------------------------
@@ -800,12 +796,6 @@ def test_one_rule_decides_where_every_side_of_a_pair_is_read_from(server, world)
             f"{consumer} reads the side's experiment id directly instead of "
             "going through the one rule"
         )
-    links = page[page.index("function openPairTurn("):
-                 page.index("function renderPairReview(")]
-    # No unconditional assignment of the global source: the probe comes first.
-    assert links.index("scopedRead(") < links.index(
-        "benchmarkExperimentSource = scope.experimentId"
-    )
 
 
 def test_selection_ui_dom(server, world):
@@ -822,6 +812,7 @@ def test_selection_ui_dom(server, world):
     dependency = os.environ.get("TEST_JSDOM_ROOT")
     if not dependency:
         pytest.skip("Set TEST_JSDOM_ROOT to run DOM integration with jsdom")
+    server.db_path = world["store_one"].db_path  # the experiment it opens
     script = Path(__file__).with_name("chatbot_selection_ui_dom.cjs")
     result = subprocess.run(
         [
@@ -985,9 +976,7 @@ def adhoc_world(tmp_path, monkeypatch):
     Written by a real `ExperimentController` against the canonical default
     database, which authorizes the source in the shared selection control, so
     its attempts are listed and comparable. What it has NOT got is an authoring
-    registration, and `?benchmark_experiment=` resolves only registrations --
-    the exact run a view that scoped every live read by experiment id would
-    break.
+    registration.
     """
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
     folder = tmp_path / "adhoc_workflow"
@@ -1095,10 +1084,8 @@ class TestWhereEachSideIsRead:
         status, payload = _request(srv, "/api/turn/shared-turn")
         assert status == 400 and "store-aware" in payload["error"]
 
-    def test_an_unregistered_run_is_readable_and_refuses_to_be_scoped(
-        self, adhoc_world
-    ):
-        """Both halves of the ad-hoc case, which pull in opposite directions."""
+    def test_an_unregistered_run_is_readable(self, adhoc_world):
+        """The ad-hoc case: no registration, and nothing it needs one for."""
         srv = adhoc_world["server"]
 
         status, runs = _request(
@@ -1119,14 +1106,7 @@ class TestWhereEachSideIsRead:
         assert payload["left"]["ref"]["store_id"] == runs["store_id"]
         assert payload["right"]["ref"]["store_id"] == runs["store_id"]
 
-        # Readable unscoped...
         assert _request(srv, "/api/turn/adhoc-a1")[0] == 200
-        # ...and refused when scoped by an experiment id with no registration
-        # behind it. A page that always named the source would 409 here.
-        status, refusal = _request(
-            srv, "/api/turn/adhoc-a1?benchmark_experiment=adhoc-exp"
-        )
-        assert status == 409 and "adhoc-exp" in refusal["error"]
 
 
 class TestCommentingOnASealedPair:
@@ -1490,9 +1470,8 @@ def test_a_sealed_pair_previews_each_side_in_its_own_archive(colliding_workspace
 def test_an_unregistered_live_run_previews_without_inventing_a_source(adhoc_world):
     """The opposite failure: a scope named where none was needed.
 
-    This run has no authoring registration, so `?benchmark_experiment=` answers
-    409 for it. The page has to read it out of the source it is already pointed
-    at, and leave the global source alone.
+    This run has no authoring registration. The page has to read it out of the
+    live database it is already pointed at.
     """
     sides = adhoc_world["sides"]
     _run_scope_dom(adhoc_world["server"], {

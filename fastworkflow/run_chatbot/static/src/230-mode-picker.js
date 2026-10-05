@@ -1,6 +1,5 @@
 /* -- top-level views: picker | chat (test) | debug ---------------------- */
 function setTopMode(mode) {
-  if (mode === "test" || mode === "picker") { benchmarkExperimentSource = null; }
   if (session && session.workspace_mode && mode !== "debug") { mode = "debug"; }
   document.getElementById("pickerMain").className = mode === "picker" ? "visible" : "";
   document.getElementById("debugMain").className = mode === "debug" ? "visible" : "";
@@ -18,7 +17,7 @@ function setTopMode(mode) {
   renderRecordNavigator();
   if (mode === "debug") { placeRecordNavigator(); refreshAll(); }
 }
-document.getElementById("modeDebug").addEventListener("click", function () { benchmarkExperimentSource = null; setTopMode("debug"); });
+document.getElementById("modeDebug").addEventListener("click", function () { setTopMode("debug"); });
 document.getElementById("modeTest").addEventListener("click", function () { setTopMode("test"); });
 document.getElementById("switchWfBtn").addEventListener("click", function () {
   setTopMode("picker");

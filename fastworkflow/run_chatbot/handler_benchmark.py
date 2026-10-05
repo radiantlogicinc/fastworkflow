@@ -18,10 +18,7 @@ from fastworkflow.benchmark.catalog import (
     write_analysis,
     write_version,
 )
-from fastworkflow.observability.store import (
-    IncompatibleObservabilityDB,
-    ReadOnlyObservabilityStore,
-)
+from fastworkflow.observability.store import IncompatibleObservabilityDB
 from fastworkflow.run_chatbot.http_common import STORE_UNAVAILABLE
 
 
@@ -124,22 +121,6 @@ class _BenchmarkRoutes:
             return None
         return workflow_path
 
-    def _registered_store(self, experiment_id):
-        if self.chatbot.workspace is not None or not self.chatbot.workflow_path:
-            raise ValueError("registered experiments require a selected live workflow")
-        record = benchmark_setup.load_experiment(self.chatbot.workflow_path, experiment_id)
-        target = record.get("store")
-        if not target:
-            raise ValueError("experiment has not started")
-        store = ReadOnlyObservabilityStore(target["db_path"])
-        if store.store_identity() != target["store_id"]:
-            raise ValueError("registered experiment evidence store identity changed")
-        detail = store.get_experiment(experiment_id)
-        if not detail or any(detail.get(key) != record[key] for key in
-                ("benchmark_id", "benchmark_version", "benchmark_digest_sha256")):
-            raise ValueError("recorded experiment does not match its benchmark registration")
-        return store
-
     def _handle_benchmark_registration(self, experiment_id):
         folder = self._benchmark_workflow_path()
         if folder is None:
@@ -155,9 +136,16 @@ class _BenchmarkRoutes:
         recorded, warning = False, None
         if record.get("store"):
             try:
-                self._registered_store(experiment_id)
-                recorded = True
-            except (ValueError, OSError, sqlite3.Error, IncompatibleObservabilityDB) as exc:
+                store = self.chatbot.open_store()
+                detail = store.get_experiment(experiment_id) if store else None
+                if detail is None:
+                    warning = "experiment is not recorded in this workflow's live database"
+                elif any(detail.get(key) != record[key] for key in
+                        ("benchmark_id", "benchmark_version", "benchmark_digest_sha256")):
+                    warning = "recorded experiment does not match its benchmark registration"
+                else:
+                    recorded = True
+            except (OSError, sqlite3.Error, IncompatibleObservabilityDB) as exc:
                 warning = str(exc)
         # The winner is read here, not fetched separately, because the detail
         # screen has to say whether THIS experiment is the one the contest
@@ -258,24 +246,9 @@ class _BenchmarkRoutes:
                     )
         else:
             registrations = benchmark_setup.registered_experiments(folder, benchmark_id)
-            rows = [dict(row, registered=True, status="registered") for row in registrations]
-            for row in rows:
-                if not row.get("store"):
-                    row["archived"] = False
-                    continue
-                try:
-                    detail = self._registered_store(row["experiment_id"]).get_experiment(
-                        row["experiment_id"]
-                    )
-                    row["archived"] = bool(detail and detail.get("archived"))
-                except (
-                    ValueError,
-                    KeyError,
-                    OSError,
-                    sqlite3.Error,
-                    IncompatibleObservabilityDB,
-                ):
-                    row["archived"] = False
+            rows = [dict(row, registered=True, status="registered", archived=False)
+                    for row in registrations]
+            registered = {row["experiment_id"]: row for row in rows}
             try:
                 store = self.chatbot.open_store()
                 if store:
@@ -284,9 +257,11 @@ class _BenchmarkRoutes:
                         batch = store.list_experiments(limit=200, offset=offset)
                         for row in batch:
                             if row.get("benchmark_id") == benchmark_id:
-                                if any(r["experiment_id"] == row["experiment_id"] for r in rows):
-                                    continue
-                                rows.append(row)
+                                known = registered.get(row["experiment_id"])
+                                if known is None:
+                                    rows.append(row)
+                                elif known.get("store"):
+                                    known["archived"] = row["archived"]
                         if len(batch) < 200:
                             break
                         offset += len(batch)

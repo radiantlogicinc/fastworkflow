@@ -146,9 +146,10 @@ def test_http_create_register_execute_drilldown_and_plain_conversations(
     detail_path = "/api/benchmark-experiments/" + experiment_id
     assert _request(server, detail_path)[1]["recorded"] is False
 
-    # External driver points to a real separate store, not the UI's default DB.
-    db = str(tmp_path / "external.sqlite3")
+    # The driver records into the workflow's one live database.
+    db = str(tmp_path / "live.sqlite3")
     store = obs.ObservabilityStore(db)
+    server.db_path = db
     controller = ExperimentController(
         db, store.store_identity(), external=False, workflow_folderpath=str(folder)
     )
@@ -191,29 +192,26 @@ def test_http_create_register_execute_drilldown_and_plain_conversations(
         experiment_id, task_id, 1, outcome="pass", outcome_source="fixture"
     )
     assert _request(server, detail_path)[1]["recorded"] is True
-    suffix = "?benchmark_experiment=" + experiment_id
     assert (
-        _request(server, "/api/experiment/" + experiment_id + suffix)[1]["experiment"][
+        _request(server, "/api/experiment/" + experiment_id)[1]["experiment"][
             "benchmark_id"
         ]
         == benchmark_id
     )
     assert (
-        _request(server, "/api/experiment/" + experiment_id + "/attempts" + suffix)[1][
+        _request(server, "/api/experiment/" + experiment_id + "/attempts")[1][
             "attempts"
         ][0]["conversation_id"]
         == conv
     )
-    assert _request(server, "/api/turns" + suffix)[1]["turns"][0]["task_id"] == task_id
+    assert _request(server, "/api/turns")[1]["turns"][0]["task_id"] == task_id
     assert (
-        _request(server, "/api/turn/registered-turn" + suffix)[1]["turn"][
+        _request(server, "/api/turn/registered-turn")[1]["turn"][
             "experiment_id"
         ]
         == experiment_id
     )
-    # Annotations are written to this registered source, even when the UI's
-    # default database points elsewhere. Cross-experiment writes are refused.
-    scope = "?turn_key=registered-turn&benchmark_experiment=" + experiment_id
+    scope = "?turn_key=registered-turn"
     # One write route and a separate read route since fix-9eg.16.
     write_path = "/post_feedback" + scope
     read_path = "/api/feedback-notes" + scope
@@ -223,27 +221,11 @@ def test_http_create_register_execute_drilldown_and_plain_conversations(
                "subcategory": "what_to_do"}
     assert _request(server, write_path, "POST", comment)[0] == 201
     assert store.list_human_feedback("registered-turn")[0]["comment"] == comment["comment"]
-    assert _request(server, "/api/experiment/" + experiment_id + "/analysis" + suffix,
-                    "PUT", {"analysis": "Free-form review"})[0] == 405
-    assert _request(server, "/api/experiment/" + second + "/analysis" + suffix,
-                    "PUT", {"analysis": "wrong target"})[0] == 405
-    # Ordinary conversation browsing stays independent of the registration.
-    default = obs.ObservabilityStore(str(tmp_path / "default.sqlite3"))
-    _write_turn(default, _turn_row("plain-turn", "chatbot"))
-    server.db_path = default.db_path
     assert _request(server, read_path)[1]["feedback"][0]["comment"] == comment["comment"]
-    assert default.list_human_feedback("plain-turn") == []
-    assert _request(server, "/post_feedback?turn_key=plain-turn&benchmark_experiment=" + experiment_id,
-                    "POST", comment)[0] == 404
-    assert _request(server, "/api/turns")[1]["turns"][0]["turn_key"] == "plain-turn"
-    assert (
-        _request(server, "/api/turns" + suffix)[1]["turns"][0]["turn_key"]
-        == "registered-turn"
-    )
-
-    _write_turn(store, _turn_row("unrelated-turn", "chatbot"))
-    assert _request(server, "/post_feedback?turn_key=unrelated-turn&benchmark_experiment=" + experiment_id,
-                    "POST", comment)[0] == 400
+    assert _request(server, "/api/experiment/" + experiment_id + "/analysis",
+                    "PUT", {"analysis": "Free-form review"})[0] == 405
+    assert _request(server, "/api/experiment/" + second + "/analysis",
+                    "PUT", {"analysis": "wrong target"})[0] == 405
 
 
 def test_registered_pins_cannot_be_overridden(tmp_path):

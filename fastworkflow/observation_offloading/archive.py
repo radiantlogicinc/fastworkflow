@@ -247,9 +247,9 @@ class RuntimeHandleArchive:
         # Opening the store is what creates the evidence tables, hardens the
         # file to 0600 in a 0700 directory, and removes the legacy sidecar
         # older builds kept beside it -- whether or not a trace sink ever
-        # opened this database. It replaces a database from an older build
-        # and refuses one from a newer build, which ``open_handle_archive``
-        # degrades into ``UnavailableHandleArchive``.
+        # opened this database. It refuses a populated database from an older
+        # or a newer build, which ``open_handle_archive`` degrades into
+        # ``UnavailableHandleArchive``.
         observability_store.ObservabilityStore(self.db_path)
         #: The one connection event writes reuse. Events are frequent and
         #: small, and opening and closing a connection per event cost more than

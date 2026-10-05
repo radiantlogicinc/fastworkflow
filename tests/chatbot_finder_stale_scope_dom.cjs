@@ -1,7 +1,7 @@
-/* The turn finder under an experiment scope the store cannot resolve (fix-neo2).
+/* The turn finder under a scope the server refuses (fix-neo2).
 
-   The server refuses a scoped read it cannot honour with 409 and says why in
-   the body. The finder must show that refusal and stop; a search that stays
+   The server refuses a scoped read it cannot honour and says why in the
+   body. The finder must show that refusal and stop; a search that stays
    "in progress" forever reads as a slow store rather than a dead scope. */
 const assert = require('node:assert/strict');
 const {JSDOM, VirtualConsole} = require(process.argv[2] + '/node_modules/jsdom');
@@ -30,8 +30,8 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
 
   await until(() => w.session && w.session.workflow_path, 'the page never loaded a session');
 
-  /* A scope the store does not have: the server answers 409. */
-  w.benchmarkExperimentSource = missingScope;
+  /* An attempt that is not a number: the server refuses the read. */
+  w.turnFind.scope = {experiment: null, task: null, attempt: missingScope};
   search('recorded');
   await until(() => w.turnFind.running === false,
     'the search never stopped running under a dead scope');
@@ -43,7 +43,7 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
     'the status did not say which scope was refused: ' + status);
 
   /* And the finder recovers: clearing the scope searches the store again. */
-  w.benchmarkExperimentSource = null;
+  w.turnFind.scope = null;
   search('recorded');
   await until(() => w.turnFind.rows.length > 0,
     'the finder did not recover once the dead scope was cleared');
@@ -61,7 +61,7 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
     'overlapping searches left the finder running');
 
   /* The same overlap under the dead scope: still a reported refusal. */
-  w.benchmarkExperimentSource = missingScope;
+  w.turnFind.scope = {experiment: null, task: null, attempt: missingScope};
   d.getElementById('turnFindText').value = 'recorded';
   d.getElementById('turnFindText').dispatchEvent(new w.Event('input'));
   w.turnFindStart();

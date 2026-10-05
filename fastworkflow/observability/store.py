@@ -62,16 +62,13 @@ from fastworkflow.utils.logging import logger
 #
 # Fresh schema (fix-49m.3): the `_SCHEMA_STATEMENTS` literal is the ONLY
 # creator of every table and column. There is no ALTER/migration path. A
-# populated store whose user_version is older than this constant is DELETED
-# and recreated empty when the writer opens it (the store has never shipped in
-# a release, so such a file can only be a developer's local DB); the read-only
-# store refuses it and never deletes anything. Stores at
-# MIN_READABLE_SCHEMA_VERSION or newer shipped, so the writer refuses them
-# instead of deleting them.
+# populated store whose user_version is older than this constant is refused by
+# the writer (`OlderObservabilityStore`) and by the read-only store, and is
+# never deleted: it holds somebody's recorded evidence (fix-10vj.9).
 #
 # v3 (fix-qe2): experiment_attempts.runtime_snapshot_json -- the binding
 # server's credential-free runtime snapshot, stamped at claim time. Create-time
-# column only; a v2 store is replaced on open like every older one.
+# column only; a v2 store is refused on open like every older one.
 # v4 (fix-aw5): human feedback and its evidence anchors live in this DB.
 # v5 (fix-46l.2): feedback provenance distinguishes human, coding-agent, and
 # distillation-agent annotations.
@@ -81,21 +78,6 @@ from fastworkflow.utils.logging import logger
 # anchors as columns.
 # Fresh schema only, with no migration of previously recorded evidence.
 SCHEMA_VERSION = 7
-
-# ...but a v6 store still READS. This is the one place the fresh-schema rule
-# (fix-49m.3) is relaxed, and only for `ReadOnlyObservabilityStore`: v6 is the
-# shipped format, real recorded evidence exists in it, and refusing to open it
-# would make this change destroy the ability to look at last week's runs. The
-# relaxation is narrow and checkable — v7 differs from v6 in the feedback
-# surface alone, so `list_human_feedback` reads the older row shape and every
-# other read is byte-identical. Writes are NOT relaxed: a v6 file is still
-# refused by the writable store and by `open_for_annotation`, because adding a
-# categorized row to it would mean migrating a user's live database, which no
-# part of this change is authorized to do.
-MIN_READABLE_SCHEMA_VERSION = 6
-# The schema version that first recorded a feedback row's category,
-# subcategory, stable identity and frozen anchors.
-FEEDBACK_TAXONOMY_SCHEMA_VERSION = 7
 
 # Which capture profile this deployment records under (arch §12.0 delta 3).
 # Defaults to `debug`, which is byte-for-byte today's behavior: EXP-003 is a
@@ -318,19 +300,9 @@ FEEDBACK_COMMENT_MAX_CHARS = 100_000
 
 
 def _human_feedback_row(row: Mapping[str, Any]) -> dict[str, Any]:
-    """One stored comment in wire shape, whether v6 or v7 recorded it.
-
-    A v6 row has no taxonomy, identity or anchor columns, so they read as
-    None. That is the honest answer for a comment written before they existed;
-    `feedback.dedupe_key` knows how to give such a row an identity for a
-    consolidated read without writing one back into a store this build will
-    not migrate.
-    """
+    """One stored comment in wire shape."""
     value = dict(row)
     value["span_ids"] = json.loads(value.pop("span_ids_json"))
-    value.setdefault("feedback_uid", None)
-    value.setdefault("category", None)
-    value.setdefault("subcategory", None)
     raw_anchors = value.pop("anchors_json", None)
     anchors: Any = None
     if isinstance(raw_anchors, str) and raw_anchors:
@@ -847,16 +819,25 @@ class IncompatibleObservabilityDB(RuntimeError):
     """The DB cannot be opened by this build.
 
     Raised for a DB written by a newer fastWorkflow, which every reader and
-    writer refuses; by the read-only store for an older one, which it never
-    alters; and by the writer for an older one it could not delete.
+    writer refuses, and for an older one, which nothing alters.
     """
 
 
-class _OlderPopulatedStore(Exception):
-    """Internal: `_ensure_schema_once` met a populated DB from an older build."""
+class OlderObservabilityStore(IncompatibleObservabilityDB):
+    """The writer found a populated DB from an older build.
 
-    def __init__(self, version: int) -> None:
-        super().__init__(version)
+    It is refused, never deleted or migrated: the file is somebody's recorded
+    evidence. A subclass, so every caller that handles a newer-schema DB
+    handles this one the same way.
+    """
+
+    def __init__(self, db_path: str, version: int) -> None:
+        super().__init__(
+            f"{db_path} has schema v{version}; this build requires "
+            f"v{SCHEMA_VERSION} and carries no migration. fastWorkflow never "
+            "deletes evidence; move it aside (see fix-10vj.7), with its "
+            "-wal/-shm files, to start a new store."
+        )
         self.version = version
 
 
@@ -1408,7 +1389,7 @@ def serialize_turn_result(
 _SCHEMA_STATEMENTS = [
     # This literal is the ONLY creator of every table and column (fresh
     # schema, fix-49m.3): there is no ALTER/migration block anywhere, and a
-    # store from an older build is replaced by _ensure_schema rather than
+    # store from an older build is refused by _ensure_schema rather than
     # upgraded. experiment_id/task_id/attempt are the experiment container's
     # labels (`[XR4]`); NULL means "not part of an experiment".
     """CREATE TABLE IF NOT EXISTS conversations (
@@ -1434,9 +1415,7 @@ _SCHEMA_STATEMENTS = [
         record_json TEXT NOT NULL)""",
     # The agent-memory `feedback` table (one mutable row per turn, joined into
     # dspy.History) was removed in fix-9eg.16. It is not recreated and it is
-    # not read: a v6 file still carries the table, and this build leaves those
-    # bytes alone rather than dropping them out from under a store it does not
-    # own.
+    # not read.
     """CREATE TABLE IF NOT EXISTS human_feedback (
         feedback_id INTEGER PRIMARY KEY AUTOINCREMENT,
         feedback_uid TEXT NOT NULL UNIQUE,
@@ -1751,7 +1730,7 @@ class ObservabilityStore:
             raise IncompatibleObservabilityDB(
                 f"{db_path} has schema v{store.schema_version}; annotating "
                 f"requires v{SCHEMA_VERSION} and this build carries no "
-                "migration. It can still be read."
+                "migration."
             )
         return store
 
@@ -1813,69 +1792,12 @@ class ObservabilityStore:
         return _ClosingConnection(self._open_connection(timeout=timeout))
 
     def _ensure_schema(self) -> None:
-        """Create or open the schema; replace a populated DB from an older build.
+        """Create or open the schema.
 
-        The store has never shipped in a release, so a populated DB whose
-        ``user_version`` is below ``SCHEMA_VERSION`` can only be a developer's
-        local DB from an earlier revision. There is no migration, and refusing
-        it only degrades everything that records into it, so it is deleted --
-        with its ``-wal`` and ``-shm`` -- and a fresh store is created in its
-        place. A DB from a NEWER build is refused and never touched. When the
-        old files cannot be deleted, the older DB is refused as before.
-
-        A DB at ``MIN_READABLE_SCHEMA_VERSION`` or newer is the exception: that
-        format shipped and holds real recorded evidence, so it is refused and
-        left untouched rather than deleted. Only the pre-release formats below
-        it are replaced.
+        A missing or empty file is initialised. A populated DB from an older
+        build raises `OlderObservabilityStore` and one from a newer build
+        raises `IncompatibleObservabilityDB`; neither is touched.
         """
-        try:
-            self._ensure_schema_once()
-            return
-        except _OlderPopulatedStore as older:
-            found = older.version
-        if not self._delete_older_store(found):
-            raise IncompatibleObservabilityDB(
-                f"{self.db_path} has schema v{found}; this build requires "
-                f"v{SCHEMA_VERSION}, carries no migration, and could not delete "
-                "the older store to replace it. Move or delete the file and its "
-                "-wal/-shm files to start a new store, or open it read-only with "
-                f"a v{found} build."
-            )
-        logger.warning(
-            f"Replaced observability store {self.db_path}: it had schema "
-            f"v{found} from an older build and this build requires "
-            f"v{SCHEMA_VERSION}, with no migration; its records were deleted."
-        )
-        try:
-            self._ensure_schema_once()
-        except _OlderPopulatedStore as again:
-            raise IncompatibleObservabilityDB(
-                f"{self.db_path} still has schema v{again.version} after it was "
-                f"deleted for replacement; this build requires v{SCHEMA_VERSION}."
-            ) from None
-
-    def _delete_older_store(self, found: int) -> bool:
-        """Delete an older-build DB so it can be recreated; ``False`` if it cannot be.
-
-        The write-ahead log and shared-memory files go first and the main file
-        last: a fresh DB must never meet a stale ``-wal`` from the old one, so
-        if either companion cannot be removed the main file is left alone and
-        the caller refuses the store instead.
-        """
-        for path in (f"{self.db_path}-wal", f"{self.db_path}-shm", self.db_path):
-            try:
-                os.remove(path)
-            except FileNotFoundError:
-                continue
-            except OSError as error:
-                logger.warning(
-                    f"Could not delete {path} to replace an observability store "
-                    f"with schema v{found}: {error}"
-                )
-                return False
-        return True
-
-    def _ensure_schema_once(self) -> None:
         parent = os.path.dirname(self.db_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -1896,40 +1818,20 @@ class ObservabilityStore:
                 conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
 
             # The version is read before the journal mode is touched, so a DB
-            # this build will refuse or replace is not switched to WAL first.
+            # this build will refuse is not switched to WAL first.
             found = conn.execute("PRAGMA user_version").fetchone()[0]
             if found > SCHEMA_VERSION:
                 raise IncompatibleObservabilityDB(
                     f"{self.db_path} has schema v{found}; this build reads up to "
                     f"v{SCHEMA_VERSION}. Refusing to open a newer DB [R11]."
                 )
-            if found < SCHEMA_VERSION:
-                # A populated store from an older build is not migrated:
-                # every column exists only in the CREATE TABLE literal (fresh
-                # schema, fix-49m.3). `_ensure_schema` replaces it, after this
-                # connection is closed. A fresh file (no tables yet) proceeds.
-                has_tables = (
-                    conn.execute(
-                        "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1"
-                    ).fetchone()
-                    is not None
-                )
-                if has_tables and found >= MIN_READABLE_SCHEMA_VERSION:
-                    # A shipped schema holds real recorded evidence: it is
-                    # refused, never deleted (see MIN_READABLE_SCHEMA_VERSION).
-                    raise IncompatibleObservabilityDB(
-                        f"{self.db_path} has schema v{found}; this build requires "
-                        f"v{SCHEMA_VERSION} and carries no migration (fresh "
-                        "observability schema, fix-49m.3; experiments."
-                        "benchmark_id, benchmark_version, benchmark_digest_sha256 "
-                        "and experiment_attempts."
-                        "runtime_snapshot_json, human_feedback.provenance and "
-                        "experiments.archived are create-time columns). It still "
-                        "opens read-only. Move or delete the file and its "
-                        "-wal/-shm sidecars to start a new store."
-                    )
-                if has_tables:
-                    raise _OlderPopulatedStore(found)
+            # A populated store from an older build is not migrated: every
+            # column exists only in the CREATE TABLE literal (fresh schema,
+            # fix-49m.3). A fresh file (no tables yet) proceeds.
+            if found < SCHEMA_VERSION and conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1"
+            ).fetchone() is not None:
+                raise OlderObservabilityStore(self.db_path, found)
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             for statement in _SCHEMA_STATEMENTS:
@@ -2029,8 +1931,8 @@ class ObservabilityStore:
         The `schema_features` row is the only source. There is no
         column-sniffing fallback any more, and re-adding one would be a bug:
         under the fresh-schema rule every DB that reaches this
-        method is at `SCHEMA_VERSION` — `ObservabilityStore` replaces an older
-        DB and refuses a newer one, `ReadOnlyObservabilityStore` refuses both —
+        method is at `SCHEMA_VERSION` — `ObservabilityStore` and
+        `ReadOnlyObservabilityStore` both refuse an older or a newer DB —
         and such
         a DB was created from the literal `_SCHEMA_STATEMENTS` with
         `_merge_schema_features` writing its markers in the same transaction. So the sniff could only ever re-derive what the row
@@ -3059,21 +2961,10 @@ class ObservabilityStore:
     # -- reads (GET /turns, run_chatbot) ---------------------------------
 
     def list_human_feedback(self, turn_key: str) -> list[dict[str, Any]]:
-        """Every recorded review note on one turn, oldest first.
-
-        Works against a v6 store too: the taxonomy, identity and anchor
-        columns simply are not there, and `_human_feedback_row` reports them
-        as None rather than inventing them.
-        """
-        columns = (
-            "*"
-            if self._records_feedback_taxonomy()
-            else "feedback_id, turn_key, target_kind, span_ids_json, "
-                 "target_label, comment, provenance, created_at"
-        )
+        """Every recorded review note on one turn, oldest first."""
         with self._connect() as conn:
             rows = conn.execute(
-                f"SELECT {columns} FROM human_feedback WHERE turn_key=? "
+                "SELECT * FROM human_feedback WHERE turn_key=? "
                 "ORDER BY feedback_id",
                 (turn_key,),
             ).fetchall()
@@ -3102,33 +2993,17 @@ class ObservabilityStore:
 
         Ordered by `created_at` then `feedback_id` so that paging is stable.
         """
-        if not self._records_feedback_taxonomy():
-            # v6: no pair columns exist, so the paired side cannot be stored
-            # and the primary side is all there is.
-            query = (
-                "SELECT hf.feedback_id, hf.turn_key, hf.target_kind, "
-                "hf.span_ids_json, hf.target_label, hf.comment, hf.provenance, "
-                "hf.created_at, t.experiment_id AS turn_experiment_id, "
-                "t.task_id AS turn_task_id, t.attempt AS attempt, "
-                "t.channel_id AS channel_id "
-                "FROM human_feedback hf JOIN turns t ON t.turn_key=hf.turn_key "
-                "WHERE t.experiment_id=? AND t.task_id=? "
-                "ORDER BY hf.created_at, hf.feedback_id"
-            )
-            params: tuple[Any, ...] = (experiment_id, task_id)
-        else:
-            query = (
+        with self._connect() as conn:
+            rows = conn.execute(
                 "SELECT hf.*, t.experiment_id AS turn_experiment_id, "
                 "t.task_id AS turn_task_id, t.attempt AS attempt, "
                 "t.channel_id AS channel_id "
                 "FROM human_feedback hf JOIN turns t ON t.turn_key=hf.turn_key "
                 "WHERE (t.experiment_id=? AND t.task_id=?) "
                 "   OR (hf.pair_experiment_id=? AND hf.pair_task_id=?) "
-                "ORDER BY hf.created_at, hf.feedback_id"
-            )
-            params = (experiment_id, task_id, experiment_id, task_id)
-        with self._connect() as conn:
-            rows = conn.execute(query, params).fetchall()
+                "ORDER BY hf.created_at, hf.feedback_id",
+                (experiment_id, task_id, experiment_id, task_id),
+            ).fetchall()
         return [_human_feedback_row(row) for row in rows]
 
     def add_human_feedback(self, turn_key: str, *, target_kind: str,
@@ -3157,13 +3032,6 @@ class ObservabilityStore:
         """
         from fastworkflow.observability import feedback as feedback_module
 
-        if not self._records_feedback_taxonomy():
-            raise IncompatibleObservabilityDB(
-                f"{self.db_path} was written by a build whose review notes "
-                "carry no category; this build does not migrate an existing "
-                "store. Read it, or record new notes in a store this build "
-                "created."
-            )
         if not isinstance(turn_key, str) or not turn_key:
             raise ValueError("turn_key is required")
         note = feedback_module.normalize_note(
@@ -3225,16 +3093,6 @@ class ObservabilityStore:
             if row.get("feedback_uid") == feedback_uid
         ]
         return stored[0] if stored else {}
-
-    def _records_feedback_taxonomy(self) -> bool:
-        """Whether this file's `human_feedback` has the v7 columns.
-
-        Answered from the schema version the store was opened at, not by
-        looking at column names: the fresh-schema rule (fix-49m.3) exists so
-        that one build never guesses another build's shape, and the version is
-        what both open paths already checked.
-        """
-        return self.schema_version >= FEEDBACK_TAXONOMY_SCHEMA_VERSION
 
     def _own_anchor(self, turn_key: str, *, target_kind: str,
                     span_ids: list[str], target_label: str) -> Any:
@@ -5767,13 +5625,6 @@ class ObservabilityStore:
                 integrity = archive_conn.execute(
                     "PRAGMA integrity_check"
                 ).fetchone()[0]
-                # Read from the archive rather than reported from this build's
-                # SCHEMA_VERSION. Archiving does not migrate, so a v6 database
-                # sealed by a v7 build is a v6 archive, and saying seven would
-                # describe the archiver instead of the file it produced.
-                archive_schema_version = archive_conn.execute(
-                    "PRAGMA user_version"
-                ).fetchone()[0]
             if integrity != "ok":
                 raise RuntimeError(f"archive integrity check failed: {integrity}")
             if identity_row is None or not identity_row[0]:
@@ -5784,7 +5635,7 @@ class ObservabilityStore:
                 "size_bytes": archive_digest["size_bytes"],
                 "sha256": archive_digest["sha256"],
                 "store_identity": str(identity_row[0]),
-                "schema_version": archive_schema_version,
+                "schema_version": SCHEMA_VERSION,
                 "read_only": True,
                 "sealed": True,
                 "source_bytes_verified_unchanged": True,
@@ -6207,8 +6058,7 @@ class ReadOnlyObservabilityStore(ObservabilityStore):
     able to open a post-mortem snapshot it does not own, and inspecting a DB
     must not mutate it. Construction raises when the file is absent/unopenable
     (``sqlite3.OperationalError``) or written by a different build, newer or
-    older (``IncompatibleObservabilityDB``); callers degrade gracefully. Unlike
-    the writer, it never replaces an older DB: it only refuses it.
+    older (``IncompatibleObservabilityDB``); callers degrade gracefully.
     """
 
     def __init__(self, db_path: str) -> None:
@@ -6221,22 +6071,18 @@ class ReadOnlyObservabilityStore(ObservabilityStore):
                     f"{self.db_path} has schema v{found}; this build reads up to "
                     f"v{SCHEMA_VERSION}. Refusing to open a newer DB [R11]."
                 )
-            if found < MIN_READABLE_SCHEMA_VERSION:
+            if found < SCHEMA_VERSION:
                 # Same rule as the writable store (fresh schema, fix-49m.3):
                 # an older store is refused up front with the reason, instead
                 # of failing later on a column the reader assumes exists.
                 raise IncompatibleObservabilityDB(
                     f"{self.db_path} has schema v{found}; this build reads "
-                    f"v{MIN_READABLE_SCHEMA_VERSION} and newer and carries no "
-                    "migration (fresh observability schema, fix-49m.3). Open "
-                    f"it with a v{found} build."
+                    f"v{SCHEMA_VERSION} only and carries no migration (fresh "
+                    f"observability schema, fix-49m.3). Open it with a "
+                    f"v{found} build."
                 )
         finally:
             conn.close()
-        # Reading v6 as well as v7 is deliberate and is the ONLY tolerated
-        # version spread (see MIN_READABLE_SCHEMA_VERSION). The difference is
-        # confined to `human_feedback`, so this is what the two feedback reads
-        # branch on; no other read has a second shape.
         self.schema_version = found
         self._features = self._load_features()
 

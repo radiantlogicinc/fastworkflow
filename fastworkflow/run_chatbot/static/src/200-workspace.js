@@ -196,7 +196,6 @@ function loadWorkspaceChrome() {
 var turnLoadAbort = null;
 function selectWorkspaceTurn(storeId, logicalTurnKey, spanId, note) {
   var detailNav = expNavToken();
-  benchmarkExperimentSource = null;
   var nav = ++workspaceNav;
   /* Clear first: a slow read from another archive must never leave the old
      trace visible under the newly selected store label. */

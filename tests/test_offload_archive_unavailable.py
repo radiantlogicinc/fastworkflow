@@ -15,7 +15,6 @@ temporary directory, a permission bit and scripted ReAct decisions.
 """
 from __future__ import annotations
 
-import hashlib
 import os
 import sqlite3
 import tempfile
@@ -151,25 +150,16 @@ class ArchiveInitialisationFailure(unittest.TestCase):
         with open(self.archive_path, "rb") as handle:
             self.assertEqual(handle.read(), before)
 
-    def test_a_store_from_an_older_build_is_replaced_and_offloading_works(self) -> None:
-        """An older populated DB is recreated in place, so the archive is usable."""
+    def test_a_store_from_an_older_build_degrades_and_is_never_deleted(self) -> None:
+        """An older populated DB is somebody's evidence: refused, left as it was."""
         plant_an_older_schema(self.archive_path)
+        with open(self.archive_path, "rb") as handle:
+            before = handle.read()
         store = open_handle_archive(self.archive_path)
-        self.assertIsInstance(store, RuntimeHandleArchive)
-        scope = RuntimeHandleScope(
-            store_identity="s", channel_id="c", experiment_id="e",
-            task_id="t", attempt=0, turn_key="k",
-        )
-        text = "holder row\n" * 50
-        store.persist(scope, alias="O1", offload_order=1, command_name="c",
-                      step_index=0, text=text,
-                      text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest())
-        self.assertEqual(store.get(scope, "O1")["text"], text)
-        with sqlite3.connect(self.archive_path) as conn:
-            self.assertEqual(
-                conn.execute("SELECT count(*) FROM turns").fetchone()[0], 0)
-        self.assertEqual(
-            [e for e in snapshot_events() if e["kind"] == "archive_unavailable"], [])
+        self.assertIsInstance(store, UnavailableHandleArchive)
+        self.assertIn("OlderObservabilityStore", store.reason)
+        with open(self.archive_path, "rb") as handle:
+            self.assertEqual(handle.read(), before)
 
     # -- the degradation -----------------------------------------------------
 

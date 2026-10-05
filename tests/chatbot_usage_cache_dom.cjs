@@ -56,7 +56,6 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   /* ================================================================
    * The comparison pane, over the real API
    * ================================================================ */
-  w.benchmarkExperimentSource = experiment;
   w.taskView = 'compare';
   /* Re-issued until it sticks. The server is opened on a real evidence DB, so
      the rail's own first load resolves asynchronously and repaints `#detail`

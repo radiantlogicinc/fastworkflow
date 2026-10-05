@@ -1816,20 +1816,24 @@ def test_the_dom(server, repeats):
     if not dependency:
         pytest.skip("Set TEST_JSDOM_ROOT to run DOM integration with jsdom")
     script = Path(__file__).with_name("chatbot_consistency_dom.cjs")
-    result = subprocess.run(
-        [
-            "node",
-            str(script),
-            dependency,
-            f"http://127.0.0.1:{server.port}/?token={server.token}",
-            json.dumps({
-                "baseline": repeats["baseline_id"],
-                "candidate": repeats["candidate_id"],
-                "task": repeats["task_id"],
-            }),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=240,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
+    for phase, db_path in (("baseline", repeats["db_one"]),
+                           ("candidate", repeats["db_two"])):
+        server.db_path = db_path
+        result = subprocess.run(
+            [
+                "node",
+                str(script),
+                dependency,
+                f"http://127.0.0.1:{server.port}/?token={server.token}",
+                json.dumps({
+                    "baseline": repeats["baseline_id"],
+                    "candidate": repeats["candidate_id"],
+                    "task": repeats["task_id"],
+                }),
+                phase,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=240,
+        )
+        assert result.returncode == 0, phase + ": " + result.stdout + result.stderr

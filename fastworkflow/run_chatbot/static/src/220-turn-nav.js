@@ -165,7 +165,6 @@ function renderFeedback(parent, node) {
      its own path, and /post_feedback only ever appends one. */
   var scope = "turn_key=" + encodeURIComponent(state.turn.turn_key);
   if (session && session.workspace_mode) { scope += "&store_id=" + encodeURIComponent(state.storeId); }
-  else if (benchmarkExperimentSource) { scope += "&benchmark_experiment=" + encodeURIComponent(benchmarkExperimentSource); }
   var readPath = "/api/feedback-notes?" + scope;
   var writePath = "/post_feedback?" + scope;
   var history = el("div"), note = el("p", "sub", "Loading feedback\u2026");

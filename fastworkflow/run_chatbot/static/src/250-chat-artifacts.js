@@ -13,9 +13,7 @@ var TM_RESTORED_ARTIFACT_AUTOLOAD = 10;
 
 function tmArtifactPath(ref) {
   /* The chat's artifacts live in the LIVE workflow's store, which is this
-     route's default source. Deliberately not benchmarkEvidencePath(): that
-     appends whichever recorded experiment the Debug tab last selected, and an
-     offloaded reference must resolve in the store that produced it. */
+     route's default source. */
   return "/api/artifact/" + encodeURIComponent(ref);
 }
 function tmArtifactFetch(ref) {
@@ -24,11 +22,8 @@ function tmArtifactFetch(ref) {
   });
 }
 function tmChatApi(path) {
-  /* api() routes through benchmarkEvidencePath(), which scopes /api/turn/ and
-     /api/artifact/ to whichever recorded experiment the Debug tab currently
-     has selected. A chat turn's record and artifacts belong to the store that
-     produced them, so the chat reads are deliberately unscoped rather than
-     trusting a global the other tab owns and mutates. */
+  /* A chat turn's record and artifacts belong to the store that produced
+     them, so the chat reads are deliberately unscoped. */
   return fetch(path, { headers: chatbotAuthHeaders() })
     .then(function (r) {
       if (!r.ok) { throw new Error("API " + path + " -> " + r.status); }

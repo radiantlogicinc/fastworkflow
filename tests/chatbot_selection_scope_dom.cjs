@@ -13,9 +13,7 @@
  *
  * Mode `adhoc`: a live experiment recorded in the workflow's default store with
  * no authoring registration -- typed at a prompt rather than declared. Its two
- * attempts are perfectly readable, but `?benchmark_experiment=` resolves only
- * REGISTERED experiments and answers 409 for this one. A view that scoped every
- * live read by experiment id would break a run that is sitting right there. */
+ * attempts are perfectly readable from the store the page is pointed at. */
 const assert = require('node:assert/strict');
 const {JSDOM, VirtualConsole} = require(process.argv[2] + '/node_modules/jsdom');
 const url = process.argv[3], plan = JSON.parse(process.argv[4]);
@@ -110,12 +108,6 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
 
   d.getElementById('modeDebug').click();
   await until(() => w.session, 'the session');
-  if (plan.mode === 'adhoc') {
-    /* Deliberately NOT set: this run has no registration to scope by, and the
-       page must read it out of the source it is already pointed at. */
-    assert.equal(w.benchmarkExperimentSource, null,
-      'the ad-hoc run is in the default store, so nothing scopes it');
-  }
 
   /* ================================================================
    * The pair, with both sides' answers and artifacts
@@ -175,9 +167,6 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
       + w.state.turn.answer);
   } else {
     await until(() => w.state.turn, 'the turn to load with no scope invented');
-    assert.equal(w.benchmarkExperimentSource, null,
-      'an unregistered run is not scoped by an experiment id that resolves to '
-      + 'nothing: benchmarkExperimentSource=' + w.benchmarkExperimentSource);
     assert.ok(w.state.turn.answer.includes(plan.right_answer),
       'and the right side\'s turn is what opened: ' + w.state.turn.answer);
   }
@@ -199,9 +188,6 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   await until(() => w.state.turn, 'the step\'s turn');
   if (plan.mode === 'workspace') {
     assert.ok(w.state.storeId, 'a sealed step opened through its store id');
-  } else {
-    assert.equal(w.benchmarkExperimentSource, null,
-      'and a live step needed no scope named either');
   }
 
   /* ================================================================

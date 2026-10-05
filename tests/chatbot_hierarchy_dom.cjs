@@ -75,7 +75,6 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   await until(()=>d.getElementById('detail').textContent.includes('RECORDED EXPERIMENT'));
   await until(contestSettled);
   assert.equal(d.getElementById('detail').textContent, railView);
-  assert.equal(w.benchmarkExperimentSource, eid);
   // The experiment and its task pages spell the whole trail from Benchmarks,
   // not from the legacy flat Experiments list.
   const pageCrumbs = () => d.querySelector('#detail .crumbs');
@@ -104,7 +103,6 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   assert.equal(d.querySelector('#detail [data-task-view]'), null);
   click('task'); // conversation node
   assert.ok(d.getElementById('detail').textContent.includes('1 turns'));
-  assert.equal(w.benchmarkExperimentSource, eid);
   assert.ok(find('task').parentElement.open);
   click('experiment-turn'); // turns hang off their conversation in the rail
   await until(()=>d.getElementById('detail').textContent.includes('Feedback'));

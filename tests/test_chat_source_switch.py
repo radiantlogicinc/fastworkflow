@@ -227,8 +227,8 @@ def test_switching_sources_in_a_real_dom(
     """Workflow → workflow → workspace, in a browser, over real servers.
 
     Asserts the boundary in both directions: everything scoped to the source
-    being left is gone (selected turn, rendered detail, experiment scoping,
-    chat transcript and server binding), and a re-apply of the SAME session
+    being left is gone (selected turn, rendered detail, chat transcript and
+    server binding), and a re-apply of the SAME session
     destroys none of it.
     """
     jsdom_root = os.environ.get("TEST_JSDOM_ROOT")
@@ -255,11 +255,11 @@ def test_switching_sources_in_a_real_dom(
 def test_the_finder_reports_a_scope_the_store_cannot_resolve(
     two_sources, live_server
 ):
-    """fix-neo2: a 409 refusal must end the search, not hang it.
+    """fix-neo2: a refused scoped read must end the search, not hang it.
 
-    The refusal is real — the chatbot server answers 409 for a
-    benchmark_experiment it has no registration for — and the recovery is
-    real: clearing the scope searches the same store successfully.
+    The refusal is real — the chatbot server answers 400 for an attempt that
+    is not a number — and the recovery is real: clearing the scope searches
+    the same store successfully.
     """
     jsdom_root = os.environ.get("TEST_JSDOM_ROOT")
     if not jsdom_root:
@@ -269,7 +269,7 @@ def test_the_finder_reports_a_scope_the_store_cannot_resolve(
         [
             "node", str(script), jsdom_root,
             f"http://127.0.0.1:{live_server.port}/?token={live_server.token}",
-            "experiment-this-store-never-had",
+            "not-an-attempt",
         ],
         capture_output=True, text=True, timeout=180,
     )

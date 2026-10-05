@@ -89,7 +89,6 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   /* ================================================================
    * Attempt 1 beside attempt 2, through the real controls
    * ================================================================ */
-  w.benchmarkExperimentSource = experiment;
   w.taskView = 'compare';
   /* Re-issued until it sticks: the server is opened on a real evidence DB, so
      the rail's own first load resolves asynchronously and repaints `#detail`
@@ -370,36 +369,24 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   assert.ok(detail().includes('is open at its top level'),
     'saying what was opened instead: ' + detail().slice(0, 300));
 
-  /* -- two rapid cross-source clicks: the newest one owns the page ----- */
-  /* `storeId` is deliberately not this ctx's store, so both links take the
-     cross-source path: the side's evidence is resolved through the experiment it
-     is registered against, exactly as a winner-versus-candidate pair is. The
-     probes then race, and the older click must not land. */
+  /* -- a side recorded in another database ---------------------------- */
+  /* `storeId` is deliberately not this ctx's store. The workflow reads one
+     live database, so the side is not opened anywhere: the link says why and
+     the page stays on the run the reader is looking at. */
   const crossCtx = {
     experimentId: experiment, taskId: task, storeId: 'some-other-store',
     winnerId: null, comparison: wide, reload: function () {}
   };
-  const firstNote = d.createElement('div'), secondNote = d.createElement('div');
-  const leftSide = w.pairSide(wide, 'left'), rightSide = w.pairSide(wide, 'right');
-  assert.equal(w.pairReadScope(crossCtx, leftSide).kind, 'other',
-    'the side is read through its own experiment, not this page\u2019s store');
-  w.openPairSpan(crossCtx, leftSide, 'cost-a3-t1', 'a3-00', firstNote);
-  w.openPairSpan(crossCtx, rightSide, 'cost-a4-t1', 'ex-cost-a4-t1', secondNote);
-
-  await until(() => w.state.turnKey === 'cost-a4-t1',
-    'the newest click to own the navigation');
-  /* Awaited rather than read the instant the newest click lands: the overtaken
-     probe writes its note when its OWN slower answer comes back, which is by
-     definition after the winner's. Requiring the sentence immediately would be
-     a race on probe ordering rather than a claim about behaviour -- the claim
-     is that the loser does say it, and that it never moves the page. */
-  await until(() => firstNote.textContent.includes('The page moved on'),
-    'the overtaken click to say it opened nothing. note=' + firstNote.textContent);
-  /* Held for a moment: the losing probe answering later must not move the page
-     off the run the reader actually asked for. */
-  await new Promise(r => setTimeout(r, 400));
-  assert.equal(w.state.turnKey, 'cost-a4-t1',
-    'and no late answer to the older click steals the navigation');
+  const crossNote = d.createElement('div');
+  const leftSide = w.pairSide(wide, 'left');
+  assert.equal(w.pairReadScope(crossCtx, leftSide).kind, 'unaddressable',
+    'a side in another database is not read through this page\u2019s store');
+  const openBefore = w.state.turnKey;
+  w.openPairSpan(crossCtx, leftSide, 'cost-a3-t1', 'a3-00', crossNote);
+  assert.ok(crossNote.textContent.includes('another database'),
+    'the link says why it opened nothing: ' + crossNote.textContent);
+  await new Promise(r => setTimeout(r, 200));
+  assert.equal(w.state.turnKey, openBefore, 'and the page did not move');
 
   /* ================================================================
    * A side whose evidence could not be read, beside one that really

@@ -27,12 +27,9 @@ function expCrumbs(container, trail) {
   container.appendChild(bar);
 }
 
-/* The same experiment id can be recorded in more than one store, so a node is
-   this page's only when its source is the one the page reads from. */
 function experimentNodeMatches(experimentId) {
   return function (n) {
-    return n.kind === "experiment" && n.experiment_id === experimentId &&
-      (n.source && n.source.benchmark_experiment || null) === benchmarkExperimentSource;
+    return n.kind === "experiment" && n.experiment_id === experimentId;
   };
 }
 
@@ -47,17 +44,16 @@ function hierarchyCrumb(path) {
    branch the experiment sits under, each landing where its rail row would.
    The rail can hold no node for it (a workspace, an evidence store it could
    not open, a run recorded since the last refresh), so the benchmark the
-   experiment record names stands in, remembered per source for the task page,
-   which renders before any experiment record is read. */
+   experiment record names stands in, remembered for the task page, which
+   renders before any experiment record is read. */
 var experimentBenchmarks = {};
 function experimentAncestorCrumbs(experimentId, exp) {
-  var scoped = String(benchmarkExperimentSource) + "\u001f" + experimentId;
-  if (exp) { experimentBenchmarks[scoped] = exp.benchmark_id || null; }
+  if (exp) { experimentBenchmarks[experimentId] = exp.benchmark_id || null; }
   var path = findHierarchy(experimentNodeMatches(experimentId));
   if (path) { return path.slice(0, -1).map(function (_, i) { return hierarchyCrumb(path.slice(0, i + 1)); }); }
   var crumbs = [hierarchyRoot ? hierarchyCrumb([hierarchyRoot]) : { label: "Benchmarks", onClick: showBenchmarks }];
-  if (!(scoped in experimentBenchmarks)) { return crumbs; }
-  var benchmarkId = experimentBenchmarks[scoped];
+  if (!(experimentId in experimentBenchmarks)) { return crumbs; }
+  var benchmarkId = experimentBenchmarks[experimentId];
   var branch = findHierarchy(function (n) { return n.kind === "benchmark" && (n.benchmark_id || null) === benchmarkId; });
   if (branch) { crumbs.push(hierarchyCrumb(branch)); }
   else if (benchmarkId) { crumbs.push({ label: benchmarkId, onClick: function () { showBenchmark(benchmarkId); } }); }
@@ -75,7 +71,6 @@ function expStatusPill(status) {
 }
 
 function showExperiments() {
-  benchmarkExperimentSource = null;
   var nav = expNavToken();
   state.experimentId = null;
   state.experimentTask = null;
@@ -409,9 +404,12 @@ function taskViewStrip(container, experimentId, taskId, label) {
 }
 
 function showExperimentTask(experimentId, taskId, label) {
-  var conversationPath = findHierarchy(function (n) { return n.kind === "conversation" &&
-    n.info.task_id === taskId && n.source && n.source.benchmark_experiment === experimentId; });
-  if (conversationPath) {
+  var experimentPath = findHierarchy(function (n) { return n.kind === "experiment" &&
+    n.registered && n.experiment_id === experimentId; });
+  var conversation = experimentPath && experimentPath[experimentPath.length - 1].children
+    .filter(function (n) { return n.kind === "conversation" && n.info.task_id === taskId; })[0];
+  if (conversation) {
+    var conversationPath = experimentPath.concat([conversation]);
     hierarchyPath = conversationPath;
     conversationPath.forEach(function (n) { hierarchyExpanded[n.key] = true; });
     renderHierarchy();
@@ -545,9 +543,6 @@ function renderTaskFeedback(container, experimentId, taskId) {
         path += "&" + name + "=" + encodeURIComponent(taskFeedbackFilters[name]);
       }
     });
-    if (benchmarkExperimentSource) {
-      path += "&benchmark_experiment=" + encodeURIComponent(benchmarkExperimentSource);
-    }
     api(path).then(function (data) {
       clear(list); clear(pager);
       var rows = data.feedback || [];
@@ -737,35 +732,6 @@ function selectionWrite(path, method, body) {
       return { ok: r.ok, status: r.status, data: data };
     });
   });
-}
-
-/* A read scoped to ONE named source, never to the page's current global one.
-
-   The two sides of a comparison routinely live in different evidence
-   databases, so a link or a preview on the right-hand side must not be served
-   by whatever store the page happens to be pointed at — that is how a turn key
-   that exists in both databases opens the wrong side's trace. These two take
-   the source explicitly and add nothing implicitly.
-
-   `benchmark_experiment` is the only handle the server resolves: it refuses to
-   find a store by searching the disk, so a database is addressed by the
-   experiment registered against it. When that registration does not exist the
-   refusal is the answer, and the caller says so rather than guessing. */
-function scopedRead(path, experimentId) {
-  var scoped = path;
-  if (experimentId) {
-    scoped += (path.indexOf("?") < 0 ? "?" : "&")
-      + "benchmark_experiment=" + encodeURIComponent(experimentId);
-  }
-  return selectionRead(scoped);
-}
-function scopedRaw(path, experimentId) {
-  var scoped = path;
-  if (experimentId) {
-    scoped += (path.indexOf("?") < 0 ? "?" : "&")
-      + "benchmark_experiment=" + encodeURIComponent(experimentId);
-  }
-  return fetch(scoped, { headers: chatbotAuthHeaders() });
 }
 
 function selectionNote(container, title, detail) {

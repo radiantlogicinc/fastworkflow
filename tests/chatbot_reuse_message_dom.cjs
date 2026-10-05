@@ -51,8 +51,6 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
   assert.equal(input.tagName, 'TEXTAREA');
   /* It lands in the live chat, which is where it can be sent from. */
   assert.equal(d.getElementById('testMain').className, 'visible');
-  assert.equal(w.benchmarkExperimentSource, null,
-    'the live composer stayed scoped to another tab’s evidence source');
   /* And it says what sending will do, without claiming a replay. */
   const notice = d.getElementById('reuseNotice');
   assert.equal(notice.className, 'visible');

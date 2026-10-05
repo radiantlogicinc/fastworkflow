@@ -41,11 +41,7 @@ class _ExperimentRoutes:
         self._handle_selection_api("DELETE", path, body=body)
 
     def _patch_experiment(self, path: str, body: Any, query: dict[str, list[str]]) -> None:
-        self._handle_experiment_patch(
-            path,
-            body,
-            (query.get("benchmark_experiment") or [None])[0],
-        )
+        self._handle_experiment_patch(path, body)
 
     @staticmethod
     def _training_limit(q: Any) -> int:
@@ -65,9 +61,8 @@ class _ExperimentRoutes:
     def _handle_training_history(self, store: Any, path: str, q: Any) -> None:
         """`GET /api/training-runs` and `/api/training-run/<run_id>`.
 
-        Read-only and store-scoped: whichever store the request already
-        resolved (the live one, or a registered experiment's evidence store via
-        `benchmark_experiment`) is the one read. No training is started, no
+        Read-only and store-scoped: the store the request already resolved is
+        the one read. No training is started, no
         artifact directory is opened and nothing is downloaded -- every field
         comes from rows `train.metrics_persistence` already wrote.
 
@@ -319,12 +314,7 @@ class _ExperimentRoutes:
         else:
             self._error(404, "not found")
 
-    def _handle_experiment_patch(
-        self,
-        path: str,
-        body: dict[str, Any],
-        source_experiment_id: Optional[str] = None,
-    ) -> None:
+    def _handle_experiment_patch(self, path: str, body: dict[str, Any]) -> None:
         """`PATCH /api/experiment/<id>` -- editable annotations.
 
         Admitted on the annotation argument in `[DR30]`: the invariant
@@ -343,16 +333,9 @@ class _ExperimentRoutes:
         if not experiment_id or sub:
             self._error(404, "not found")
             return
-        if source_experiment_id is not None and source_experiment_id != experiment_id:
-            self._error(400, "benchmark experiment does not match the URL experiment")
-            return
         try:
-            store = (
-                self._registered_store(source_experiment_id)
-                if source_experiment_id
-                else self.chatbot.open_store()
-            )
-        except (ValueError, KeyError, OSError, sqlite3.Error, IncompatibleObservabilityDB) as exc:
+            store = self.chatbot.open_store()
+        except IncompatibleObservabilityDB as exc:
             self._error(409, str(exc))
             return
         if store is None or not store.has_feature(FEATURE_EXPERIMENTS_V1):

@@ -107,8 +107,7 @@ var SELECTED_RUNS_MAX = 20;
 var selectedRunsClick = 0;
 
 function selectedRunsKey(experimentId, taskId) {
-  return String(benchmarkExperimentSource) + "\u001f" + experimentId
-    + "\u001f" + taskId;
+  return experimentId + "\u001f" + taskId;
 }
 
 function resetSelectedRuns(experimentId, taskId) {

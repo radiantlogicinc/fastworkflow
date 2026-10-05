@@ -414,7 +414,6 @@ function activateHierarchy(path, expanded) {
   var node = path[path.length - 1];
   path.slice(0, -1).forEach(function (n) { hierarchyExpanded[n.key] = true; });
   hierarchyExpanded[node.key] = expanded;
-  benchmarkExperimentSource = node.source && node.source.benchmark_experiment || null;
   if (node.source && node.source.store_id) { state.storeId = node.source.store_id; }
   renderHierarchy();
   if (node.kind === "component") {
@@ -440,7 +439,7 @@ function alignHierarchyTurn(turnKey) {
   var path = findHierarchy(function (n) {
     if (n.kind !== "turn" || n.turn_key !== turnKey) { return false; }
     if (session && session.workspace_mode) { return n.source && n.source.store_id === state.storeId; }
-    return (n.source && n.source.benchmark_experiment || null) === benchmarkExperimentSource;
+    return true;
   });
   if (path) {
     navigationTab = hierarchyTab(path);

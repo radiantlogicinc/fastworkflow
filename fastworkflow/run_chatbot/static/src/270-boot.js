@@ -119,7 +119,6 @@ function resetSourceScopedState() {
   turnFindRenderScope();
   turnFindRender();
 
-  benchmarkExperimentSource = null;
   state.channel = "";
   state.storeId = null;
   state.turnKey = null;

@@ -3,9 +3,7 @@
    Real clicks on the shipped controls against a real server and a real store.
    What is being proven is not that a scope can be set, but that every request
    the walk makes carries it, that the page says which scope it is answering
-   about, that continuation stays inside it, and that a scope never outlives
-   the source it was chosen in -- the failure mode being "the rest of this
-   walk was answered by a different database under this run's heading".
+   about, and that continuation stays inside it.
 
    Every navigation is retried rather than assumed: the rail's periodic
    refresh repaints #detail whenever no record is selected and the finder is
@@ -202,36 +200,6 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
   assert.equal(new Set(keys()).size, keys().length, 'the continuation repeated a row');
   assert.ok(w.turnFind.rows.every(row => row.attempt === 1 && row.task_id === world.task),
     'the continuation reached outside the attempt');
-
-  /* -- and never outlives its source ----------------------------------- */
-  /* Navigation into a registered archive, with the walk still open. The
-     remaining segments would otherwise be asked of a different database while
-     the page still showed this attempt's heading and this attempt's rows. */
-  w.benchmarkExperimentSource = world.otherExperiment;
-  mark = requests.length;
-  d.getElementById('turnFindMore').click();
-  await until(() => w.turnFind.sourceMoved === true,
-    'the scoped walk survived a source change');
-
-  assert.deepEqual(searches(mark), [],
-    'a scoped continuation was sent to the source that was just opened');
-  assert.equal(w.turnFind.scope, null, 'the scope outlived its source');
-  assert.equal(w.turnFind.rows.length, 0, 'rows from the old source stayed on screen');
-  assert.ok(status().includes('source changed'), 'status: ' + status());
-  assert.equal(scopeBox().className, '');
-  assert.ok(d.getElementById('detail').textContent.includes('source changed'),
-    'the discarded walk left no explanation in the pane it was holding');
-
-  /* The control is not withheld while a registered source is selected: that
-     source is searched through the same routing, and discarding the open walk
-     is the guard. Its own scoped searches are driven in
-     chatbot_finder_registered_source_dom.cjs. */
-  assert.equal(w.turnFindEntrySupported(), true);
-  const probe = d.createElement('div');
-  w.turnFindEntryButton(probe, {experiment: world.experiment}, 'Find problems', 'help');
-  assert.equal(probe.childNodes.length, 1,
-    'the selected source was offered no scoped search');
-  w.benchmarkExperimentSource = null;
 
   /* -- an overlapping search: the later one owns the view -------------- */
   entry = await openUntil(experimentPage, '[data-find-scope="experiment"]',

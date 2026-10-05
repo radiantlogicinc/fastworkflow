@@ -76,9 +76,6 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
   w.taskCompare.key = 'todo-list-v1\u001fadd an item';
   w.taskCompare.left = '1';
   w.taskCompare.right = '2';
-  /* The Debug tab's experiment scope, which every turn and artifact read is
-     filtered by while it is set. */
-  w.benchmarkExperimentSource = 'exp-selected-in-source-a';
 
   /* ---- re-applying the SAME session changes nothing --------------------- */
   const epochBefore = w.tm.epoch;
@@ -87,7 +84,6 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
   assert.equal(w.tm.epoch, epochBefore, 'a same-source refresh reset the page');
   assert.equal(w.tm.connected, true, 'a same-source refresh dropped the live chat');
   assert.equal(w.tm.baseUrl, serverOrigin);
-  assert.equal(w.benchmarkExperimentSource, 'exp-selected-in-source-a');
   assert.equal(w.state.turnKey, sharedTurn);
   assert.ok(d.getElementById('chatLog').textContent.includes('hello from source A'));
   assert.equal(w.turnFind.active, true, 'a same-source refresh cancelled the search');
@@ -109,10 +105,9 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
   assert.ok(composerLocked(), 'a viewer-only source left the composer live');
   assert.ok(!d.getElementById('chatLog').textContent.includes('hello from source A'));
   assert.match(d.getElementById('chatLog').textContent, /Switched evidence source/);
-  /* Nor of A's evidence: selection, detail, artifact payload, experiment scope. */
+  /* Nor of A's evidence: selection, detail, artifact payload. */
   assert.equal(w.state.turnKey, null);
   assert.equal(w.state.storeId, null);
-  assert.equal(w.benchmarkExperimentSource, null);
   assert.ok(!detail().includes('recorded in source_a'), detail().slice(0, 200));
   assert.ok(!d.body.textContent.includes(payloadA),
     "source A's artifact payload survived the switch");
@@ -131,10 +126,8 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
     'the comparison pair survived the switch (is onSourceSwitch still defined?)');
   assert.equal(w.taskCompare.left, null);
 
-  /* And no traffic to A's scope or A's server since the switch. */
+  /* And no traffic to A's server since the switch. */
   const afterSwitch = since(atSwitch);
-  assert.deepEqual(afterSwitch.filter(p => p.includes('benchmark_experiment')), [],
-    'a read after the switch was still scoped to the old experiment');
   assert.deepEqual(afterSwitch.filter(p => p.includes('/api/artifact/' + artifactA)), [],
     "the old source's artifact was re-read after the switch");
 
@@ -151,12 +144,10 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
     'a chat call escaped after the source switch');
 
   /* ---- the colliding key now resolves to B, and only to B --------------- */
-  const beforeB = requested.length;
   w.selectTurn(sharedTurn);
   await until(() => detail().includes('recorded in source_b'),
     'source B never rendered the shared turn');
   assert.ok(!detail().includes('recorded in source_a'));
-  assert.deepEqual(since(beforeB).filter(p => p.includes('benchmark_experiment')), []);
 
   /* ---- switch again, this time to a sealed workspace --------------------
      The workspace holds the same workflow and can hold the same experiment
@@ -164,19 +155,16 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
      under this one's labels. */
   w.taskCompare.key = 'todo-list-v1\u001fadd an item';
   w.taskCompare.left = '3';
-  const atWorkspace = requested.length;
   w.chooseWorkspace(manifest1);
   await until(() => w.session.workspace_mode === true, 'the workspace never opened');
   await new Promise(r => setTimeout(r, 200));
   assert.ok(!detail().includes('recorded in source_b'),
     "source B's turn survived into the workspace");
   assert.equal(w.state.turnKey, null);
-  assert.equal(w.benchmarkExperimentSource, null);
   assert.equal(w.taskCompare.key, null,
     'the comparison pair followed the same task id into another source');
   assert.ok(composerLocked(), 'a read-only workspace left the composer live');
   assert.equal(d.getElementById('modeTest').style.display, 'none');
-  assert.deepEqual(since(atWorkspace).filter(p => p.includes('benchmark_experiment')), []);
   const workspaceEpoch = w.tm.epoch;
   const workspaceOne = w.session;
 

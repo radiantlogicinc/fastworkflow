@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import urllib.error
 import urllib.request
@@ -31,14 +32,14 @@ def walk(node):
 
 
 @pytest.fixture
-def hierarchy_server(experiment_server, tmp_path):
+def hierarchy_server(experiment_server):
     server, default = experiment_server
     for key, day in [('plain today', '2026-09-08'), ('plain yesterday', '2026-09-07')]:
         add_turn(default, key, day=day)
     add_turn(default, 'outside benchmark', eid='exp-1', channel='unassigned')
     spec = setup.save_benchmark(server.workflow_path, {'title': 'Tuning benchmark', 'description': 'Review this benchmark', 'tasks': [{}]})
     registration = setup.create_experiment(server.workflow_path, spec['benchmark_id'], 'v1')
-    store = obs.ObservabilityStore(str(tmp_path / 'registered.sqlite3'))
+    store = default
     controller = ExperimentController(store.db_path, store.store_identity(), external=False, workflow_folderpath=server.workflow_path)
     eid = registration['experiment_id']
     controller.create_experiment(eid, 'Recorded experiment', declared_tasks=1, declared_attempts=1,
@@ -72,7 +73,7 @@ def test_hierarchy_separates_benchmarks_experiments_and_dates(hierarchy_server):
     recorded = next(n for n in benchmark['children'] if n['experiment_id'] == eid)
     assert recorded['recorded']
     turn = next(n for n in walk(recorded) if n['kind'] == 'turn')
-    assert turn['turn_key'] == 'experiment-turn' and turn['source'] == {'benchmark_experiment': eid}
+    assert turn['turn_key'] == 'experiment-turn' and turn['source'] is None
     adhoc = next(n for n in root['children'] if n['kind'] == 'adhoc')
     assert [n['label'] for n in adhoc['children']] == ['2026-09-08', '2026-09-07']
     assert {n['turn_key'] for n in walk(adhoc) if n['kind'] == 'turn'} == {'plain today', 'plain yesterday'}
@@ -168,7 +169,6 @@ def test_page_separates_navigation_into_tabs():
 
 
 def test_incompatible_default_does_not_hide_registered_experiment(hierarchy_server, tmp_path):
-    import sqlite3
     server, _spec, eid, _default, _store = hierarchy_server
     old = tmp_path / 'old.sqlite3'
     with sqlite3.connect(old) as conn:
@@ -176,7 +176,7 @@ def test_incompatible_default_does_not_hide_registered_experiment(hierarchy_serv
     server.db_path = str(old)
     status, data = _request(server, '/api/navigation')
     assert status == 200 and data['root']['info']['warnings']
-    assert any(n.get('experiment_id') == eid and n['recorded'] for n in walk(data['root']) if n['kind'] == 'experiment')
+    assert any(n.get('experiment_id') == eid and n['registered'] for n in walk(data['root']) if n['kind'] == 'experiment')
 
 
 def test_hierarchy_dom_clicks(hierarchy_server):

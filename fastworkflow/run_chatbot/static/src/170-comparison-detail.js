@@ -608,7 +608,7 @@ function renderPairComposer(container, cmp, ctx, row, labelFor) {
   var primary = anchors.left || anchors.right;
   var paired = (anchors.left && anchors.right) ? anchors.right : null;
   var primarySide = pairSide(cmp, anchors.left ? "left" : "right");
-  var scope = pairWriteScope(ctx, primarySide, primary);
+  var scope = pairWriteScope(primarySide, primary);
   if (scope.refusal) {
     save.disabled = true;
     note.textContent = scope.refusal;
@@ -1011,17 +1011,15 @@ function pairTurnAnchors(cmp) {
 /* WHERE a pair comment is recorded — the authorized source of the side the
    comment is anchored to, decided by the same rule the reads use.
 
-   The two scopes the write route accepts are not two spellings of one thing. A
-   sealed archive is named by the MANIFEST's store id, which is how every
-   workspace route addresses it. A live experiment is named by its registration,
-   which is the only handle the server resolves a working database by. And in
-   neither case is it the evidence identity the references inside the body
-   carry: the server resolves the paired side through that separately, and
-   handing it the identity as a scope is refused.
+   A sealed archive is named by the MANIFEST's store id, which is how every
+   workspace route addresses it, and not by the evidence identity the
+   references inside the body carry: the server resolves the paired side
+   through that separately, and handing it the identity as a scope is refused.
+   Live evidence is the workflow's own database, which needs no scope.
 
-   A side whose source is not named by either is refused here rather than
-   posted somewhere adjacent and plausible. */
-function pairWriteScope(ctx, side, anchor) {
+   A sealed side whose store the manifest does not name is refused here rather
+   than posted somewhere adjacent and plausible. */
+function pairWriteScope(side, anchor) {
   if (session && session.workspace_mode) {
     var storeId = side.manifestStoreId
       || (anchor && anchor.manifest_store_id) || null;
@@ -1032,13 +1030,7 @@ function pairWriteScope(ctx, side, anchor) {
     return { query: "&store_id=" + encodeURIComponent(storeId),
              annotated: true };
   }
-  var experimentId = (anchor && anchor.ref && anchor.ref.experiment_id)
-    || side.experimentId || ctx.experimentId;
-  if (!experimentId) {
-    return { refusal: "This side names no experiment, so there is no recorded "
-      + "database to file a comment against." };
-  }
-  return { query: "&benchmark_experiment=" + encodeURIComponent(experimentId) };
+  return { query: "" };
 }
 
 function describePairSides(cmp, anchors) {
@@ -1082,7 +1074,6 @@ function benchmarkPrompt(task) {
 }
 function showBenchmarks() {
   focusHierarchy(function (n) { return n.kind === "root"; });
-  benchmarkExperimentSource = null;
   var nav = benchNavToken(), d = document.getElementById("detail"); clear(d);
   var actions = pageHeader(d, "BENCHMARK LIBRARY", "Build confidence in every change", "Define repeatable tasks, compare experiments, and turn observations into better workflows.");
   if (!(session && session.workspace_mode)) {
@@ -1205,7 +1196,6 @@ function renderBenchmarkWinner(host, result, benchmarkId) {
 
 function showBenchmark(benchmarkId, selectedVersion) {
   focusHierarchy(function (n) { return n.kind === "benchmark" && n.benchmark_id === benchmarkId; });
-  benchmarkExperimentSource = null;
   var nav = benchNavToken(), d = document.getElementById("detail"); clear(d);
   d.appendChild(el("div", "empty", "Loading benchmark…"));
   api("/api/benchmarks/" + encodeURIComponent(benchmarkId)).then(function (data) {
@@ -1309,7 +1299,7 @@ function showBenchmarkVersion(benchmarkId, version) { showBenchmark(benchmarkId,
 function openBenchmarkExecution(id) {
   var path = findExperimentPath(id);
   if (path) { activateHierarchy(path, true); }
-  else { benchmarkExperimentSource = id; showExperiment(id); refreshConvs(); }
+  else { showExperiment(id); }
 }
 
 /* One experiment, one page, whichever route the reader took. The rail opens an
@@ -1325,12 +1315,11 @@ function openBenchmarkRecord(row) {
   var path = findExperimentPath(row.experiment_id);
   if (path) { activateHierarchy(path, true); }
   else if (row.registered) { showBenchmarkExperiment(row.experiment_id); }
-  else { benchmarkExperimentSource = null; showExperiment(row.experiment_id); }
+  else { showExperiment(row.experiment_id); }
 }
 
 function showBenchmarkExperiment(id) {
   focusHierarchy(function (n) { return n.kind === "experiment" && n.experiment_id === id; });
-  benchmarkExperimentSource = null;
   var nav = benchNavToken(), d = document.getElementById("detail"); clear(d);
   d.appendChild(el("div", "empty", "Loading experiment…"));
   api("/api/benchmark-experiments/" + encodeURIComponent(id)).then(function (data) {
@@ -1402,7 +1391,6 @@ function showBenchmarkExperiment(id) {
   }).catch(function (e) { if (!benchNavStale(nav)) { clear(d); d.appendChild(el("p", "err fieldError", e.message)); } });
 }
 function openBenchmarkSetup() {
-  benchmarkExperimentSource = null;
   if (!session || (!session.workflow_path && !session.workspace_mode)) {
     setTopMode("picker"); loadPicker();
     document.getElementById("pickerStatus").textContent = "Choose a workflow, then open Benchmark setup."; return;

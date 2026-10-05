@@ -57,11 +57,6 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   d.getElementById('modeDebug').click();
   await until(() => w.session, 'the session');
 
-  /* The two evidence databases are registered against the workflow rather than
-     being the server's default store, so the page is scoped the way opening a
-     benchmark experiment scopes it. */
-  w.benchmarkExperimentSource = ids.experiment;
-
   /* ================================================================
    * The Runs view: the whole record of a repeated task
    * ================================================================ */

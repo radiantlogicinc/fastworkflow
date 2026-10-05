@@ -266,7 +266,8 @@ def test_sealed_digest_mismatch_is_integrity_failure(tmp_path):
         load_observability_workspace(_manifest(tmp_path, [declaration]))
 
 
-def test_live_store_digest_change_is_not_integrity_failure(tmp_path):
+def test_a_live_store_is_refused_and_left_as_it_was(tmp_path):
+    """A workspace reads sealed archives only; a live DB is the workflow's own."""
     live_path = tmp_path / "live.sqlite3"
     store = obs.ObservabilityStore(str(live_path))
     declaration = {
@@ -276,9 +277,12 @@ def test_live_store_digest_change_is_not_integrity_failure(tmp_path):
         "sha256": "0" * 64,
         "store_identity": store.store_identity(),
     }
-    workspace = load_observability_workspace(_manifest(tmp_path, [declaration]))
+    before = live_path.read_bytes()
 
-    assert workspace.stores()[0]["integrity"] == "live"
+    with pytest.raises(WorkspaceManifestError, match="sealed archives only"):
+        load_observability_workspace(_manifest(tmp_path, [declaration]))
+
+    assert live_path.read_bytes() == before
 
 
 def test_unknown_store_and_unscoped_turn_are_refused(tmp_path):

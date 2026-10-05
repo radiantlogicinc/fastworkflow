@@ -174,11 +174,7 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
     'the activity record must survive a repaint');
   assert.equal((live.querySelector('.bubble').textContent.match(/attached/g) || []).length, 1);
 
-  /* ---- reopened history shows stored artifacts, marked as stored -------
-     With a recorded experiment selected in the Debug tab: a chat turn's
-     record and artifacts live in the store that produced them, so the chat
-     reads must not be scoped to whatever that other tab last selected. */
-  w.benchmarkExperimentSource = 'exp-selected-in-the-debug-tab';
+  /* ---- reopened history shows stored artifacts, marked as stored ------- */
   const before = requested.length;
   const stored = w.tmRenderStoredTurn(
     {turn_key: turnKey, status: 'completed', success: true, answer: 'stored answer',
@@ -195,9 +191,6 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
   const chatReads = requested.slice(before);
   assert.ok(chatReads.some(p => p.startsWith('/api/turn/')), JSON.stringify(chatReads));
   assert.ok(chatReads.some(p => p.startsWith('/api/artifact/')), JSON.stringify(chatReads));
-  assert.deepEqual(chatReads.filter(p => p.includes('benchmark_experiment')), [],
-    'a chat read was scoped to the Debug tab selection');
-  w.benchmarkExperimentSource = null;
 
   /* An older turn keeps a button instead of a round trip, and still loads. */
   const older = w.tmRenderStoredTurn(

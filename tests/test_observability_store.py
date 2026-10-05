@@ -177,67 +177,40 @@ class TestSchema:
         finally:
             conn.close()
 
-    def test_replaces_an_older_populated_store(self, db_path, caplog):
-        """Fresh schema (fix-49m.3): never migrated. The store never shipped in a
-        release, so an older populated DB is a developer's local file: it is
-        deleted and recreated empty at the current version, owner-only, with a
-        warning naming the path and both versions. Only the pre-release formats
-        below MIN_READABLE_SCHEMA_VERSION are replaced; a shipped one is refused
-        (see `test_the_writable_store_still_refuses_everything_older`)."""
-        obs.ObservabilityStore(db_path)
-        conn = sqlite3.connect(db_path)
-        conn.execute("INSERT INTO diagnostics VALUES ('older-build-row', 'gone', 'x')")
-        conn.execute(f"PRAGMA user_version = {obs.MIN_READABLE_SCHEMA_VERSION - 1}")
-        conn.commit()
-        conn.close()
-        with caplog.at_level("WARNING"):
-            store = obs.ObservabilityStore(db_path)
-        warning = "\n".join(record.getMessage() for record in caplog.records)
-        assert db_path in warning
-        assert f"v{obs.MIN_READABLE_SCHEMA_VERSION - 1}" in warning
-        assert f"v{obs.SCHEMA_VERSION}" in warning
-        conn = sqlite3.connect(db_path)
-        try:
-            assert (
-                conn.execute("PRAGMA user_version").fetchone()[0]
-                == obs.SCHEMA_VERSION
-            )
-            assert conn.execute(
-                "SELECT count(*) FROM diagnostics WHERE key='older-build-row'"
-            ).fetchone()[0] == 0
-            assert conn.execute("PRAGMA auto_vacuum").fetchone()[0] == 2
-        finally:
-            conn.close()
-        assert stat.S_IMODE(os.stat(db_path).st_mode) == 0o600
-        assert stat.S_IMODE(os.stat(os.path.dirname(db_path)).st_mode) == 0o700
-        assert store.has_feature(obs.FEATURE_OFFLOAD_EVIDENCE_V1)
+    @pytest.mark.parametrize("version", [obs.SCHEMA_VERSION - 1, 1])
+    def test_refuses_an_older_populated_store_and_never_touches_it(self, db_path, version):
+        """Fresh schema (fix-49m.3): never migrated, and never deleted either.
 
-    def test_an_older_store_that_cannot_be_deleted_is_refused(self, db_path):
-        """If replacement is impossible the old refusal stands, and nothing is lost.
-
-        A directory where the ``-shm`` file would be cannot be removed with
-        ``os.remove``, and the companions go before the main file, so the main
-        file must be left exactly as it was. The older DB is switched to a
-        rollback journal, which never opens ``-shm``, so it can still be read
-        with that directory in the way.
+        An older populated DB is somebody's recorded evidence, so the writable
+        open refuses it with the path, the version it found and what to do,
+        and the file is left byte-identical with its rows intact.
         """
         obs.ObservabilityStore(db_path)
         conn = sqlite3.connect(db_path)
-        conn.execute("PRAGMA journal_mode=DELETE")
-        conn.execute(f"PRAGMA user_version = {obs.MIN_READABLE_SCHEMA_VERSION - 1}")
+        conn.execute("INSERT INTO diagnostics VALUES ('older-build-row', 'kept', 'x')")
+        conn.execute(f"PRAGMA user_version = {version}")
         conn.commit()
         conn.close()
-        for companion in (f"{db_path}-wal", f"{db_path}-shm"):
-            if os.path.exists(companion):
-                os.remove(companion)
-        os.makedirs(f"{db_path}-shm")
         before = open(db_path, "rb").read()
+        with pytest.raises(obs.OlderObservabilityStore) as refused:
+            obs.ObservabilityStore(db_path)
+        message = str(refused.value)
+        assert db_path in message
+        assert f"v{version}" in message
+        assert "fastWorkflow never deletes evidence; move it aside" in message
+        assert refused.value.version == version
+        assert isinstance(refused.value, obs.IncompatibleObservabilityDB)
+        with pytest.raises(obs.IncompatibleObservabilityDB):
+            obs.ObservabilityStore.open_for_annotation(db_path)
+        assert open(db_path, "rb").read() == before
+        conn = sqlite3.connect(db_path)
         try:
-            with pytest.raises(obs.IncompatibleObservabilityDB, match="could not delete"):
-                obs.ObservabilityStore(db_path)
-            assert open(db_path, "rb").read() == before
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == version
+            assert conn.execute(
+                "SELECT value FROM diagnostics WHERE key='older-build-row'"
+            ).fetchone()[0] == "kept"
         finally:
-            os.rmdir(f"{db_path}-shm")
+            conn.close()
 
     def test_an_empty_file_is_treated_as_fresh(self, db_path):
         """A file that was only touched has no tables and initialises like a
@@ -302,49 +275,12 @@ class TestSchema:
         conn.commit()
         conn.close()
 
-    def test_read_only_store_refuses_a_schema_it_cannot_read(self, db_path):
-        """The read-only view is refused up front with the reason, instead of
-        failing later on a column the reader assumes (fix-49m.3 adjustment b).
-
-        The boundary moved down by exactly one version at the v7 feedback
-        bump: v6 is the oldest READABLE schema, because real recorded evidence
-        exists at v6 and the only difference the reader has to survive is the
-        feedback columns v6 does not have. Anything older is still refused.
-        """
-        obs.ObservabilityStore(db_path)
-        self._stamp_version(db_path, obs.MIN_READABLE_SCHEMA_VERSION - 1)
-        with pytest.raises(obs.IncompatibleObservabilityDB, match="carries no migration"):
-            obs.ReadOnlyObservabilityStore(db_path)
-        self._stamp_version(db_path, obs.MIN_READABLE_SCHEMA_VERSION)
-        older = obs.ReadOnlyObservabilityStore(db_path)
-        assert older.schema_version == obs.MIN_READABLE_SCHEMA_VERSION
-        self._stamp_version(db_path, obs.SCHEMA_VERSION)
-        current = obs.ReadOnlyObservabilityStore(db_path)
-        assert current.schema_version == obs.SCHEMA_VERSION
-
-    def test_the_writable_store_still_refuses_everything_older(self, db_path):
-        """Reading old evidence is not permission to write to it.
-
-        A v6 database has no category, subcategory, anchor or identity column,
-        so an append would either fail on the insert or record a note the task
-        view could never file. The refusal is at open, before either.
-        """
-        obs.ObservabilityStore(db_path)
-        self._stamp_version(db_path, obs.MIN_READABLE_SCHEMA_VERSION)
-        before = open(db_path, "rb").read()
-        with pytest.raises(obs.IncompatibleObservabilityDB, match="carries no migration"):
-            obs.ObservabilityStore(db_path)
-        with pytest.raises(obs.IncompatibleObservabilityDB):
-            obs.ObservabilityStore.open_for_annotation(db_path)
-        # A shipped schema is evidence: refused, never replaced.
-        assert open(db_path, "rb").read() == before
-
     def test_read_only_store_refuses_an_older_schema_and_never_deletes_it(self, db_path):
         """The read-only view refuses an older store up front with the reason
         (fix-49m.3 adjustment b), instead of failing later on a column the
-        reader assumes -- and, unlike the writer, never replaces it."""
+        reader assumes -- and never alters it."""
         obs.ObservabilityStore(db_path)
-        self._stamp_version(db_path, obs.MIN_READABLE_SCHEMA_VERSION - 1)
+        self._stamp_version(db_path, obs.SCHEMA_VERSION - 1)
         before = open(db_path, "rb").read()
         with pytest.raises(obs.IncompatibleObservabilityDB, match="carries no migration"):
             obs.ReadOnlyObservabilityStore(db_path)

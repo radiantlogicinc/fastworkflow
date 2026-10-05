@@ -1521,9 +1521,8 @@ class _ChatbotRequestHandler(
 
         # Per-request read-only store; never migrate incompatible evidence.
         try:
-            source = q("benchmark_experiment")
-            store = self._registered_store(source) if source else self.chatbot.open_store()
-        except (IncompatibleObservabilityDB, ValueError, KeyError) as exc:
+            store = self.chatbot.open_store()
+        except IncompatibleObservabilityDB as exc:
             self._error(409, str(exc))
             return
         if path.startswith("/api/review/assignments/"):

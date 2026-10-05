@@ -6,13 +6,6 @@
 
 var TOKEN = new URLSearchParams(location.search).get("token") || "";
 
-var benchmarkExperimentSource = null;
-function benchmarkEvidencePath(path) {
-  if (benchmarkExperimentSource && /^\/api\/(experiment\/|conversations(?:\?|$)|turns(?:\?|$)|turn\/|spans\/|artifact\/)/.test(path)) {
-    return path + (path.indexOf("?") < 0 ? "?" : "&") + "benchmark_experiment=" + encodeURIComponent(benchmarkExperimentSource);
-  }
-  return path;
-}
 var API_NOT_MODIFIED = { notModified: true };
 
 function chatbotAuthHeaders(extra) {
@@ -26,7 +19,6 @@ function chatbotAuthHeaders(extra) {
 }
 function api(path, options) {
   options = options || {};
-  path = benchmarkEvidencePath(path);
   var headers = chatbotAuthHeaders(options.headers);
   var init = { headers: headers };
   if (options.signal) { init.signal = options.signal; }
@@ -66,7 +58,6 @@ function requestWasAborted(error) {
    error to report, it is the comparison result saying "these two are not
    comparable, here is why" — so it resolves rather than rejects. */
 function apiAllowing409(path) {
-  path = benchmarkEvidencePath(path);
   return fetch(path, { headers: chatbotAuthHeaders() })
     .then(function (r) {
       return r.json().then(function (data) {
@@ -79,7 +70,6 @@ function apiAllowing409(path) {
     });
 }
 function apiRaw(path) {
-  path = benchmarkEvidencePath(path);
   return fetch(path, { headers: chatbotAuthHeaders() });
 }
 function apiPost(path, body) { return mutationRequest(path, "POST", body); }
@@ -104,14 +94,9 @@ function reviewApi(path, method, body) {
 }
 
 function apiPatch(path, body, successMessage) {
-  return mutationRequest(
-    benchmarkEvidencePath(path),
-    "PATCH",
-    body,
-    successMessage
-  );
+  return mutationRequest(path, "PATCH", body, successMessage);
 }
-function apiPut(path, body) { return mutationRequest(benchmarkEvidencePath(path), "PUT", body); }
+function apiPut(path, body) { return mutationRequest(path, "PUT", body); }
 
 function analysisText(value) {
   if (value === null || value === undefined) { return ""; }

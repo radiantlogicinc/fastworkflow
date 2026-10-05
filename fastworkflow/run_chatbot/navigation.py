@@ -49,12 +49,12 @@ def _slim_turn_info(turn):
     return {key: turn[key] for key in _TURN_INFO_KEYS if key in turn and turn[key] is not None}
 
 
-def read_source(store, source, experiment_id=None):
+def read_source(store, source):
     return {
-        'source': source, 'experiment_id': experiment_id,
-        'experiments': [store.get_experiment(experiment_id)] if experiment_id else list(_pages(store.list_experiments)),
+        'source': source,
+        'experiments': list(_pages(store.list_experiments)),
         'conversations': list(_pages(store.list_conversations)),
-        'turns': list(_pages(store.list_turns, **({'experiment_id': experiment_id} if experiment_id else {}))),
+        'turns': list(_pages(store.list_turns)),
     }
 
 
@@ -69,7 +69,6 @@ def build_navigation(benchmarks, registrations, sources, warnings=()):
         root['children'].append(node)
     adhoc = _node('adhoc', 'ad-hoc conversations', info={'dates': 'UTC'})
     experiments, dates, conversations = {}, {}, {}
-    registered_ids = {r['experiment_id'] for r in registrations}
 
     def experiment(row, source, registered=False):
         eid = row['experiment_id']
@@ -91,18 +90,14 @@ def build_navigation(benchmarks, registrations, sources, warnings=()):
         return node
 
     for row in registrations:
-        experiment(dict(row, status='registered'), {'benchmark_experiment': row['experiment_id']}, True)
+        experiment(dict(row, status='registered'), None, True)
 
     for spec in sources:
         if 'store' in spec:
-            spec = read_source(spec['store'], spec['source'], spec.get('experiment_id'))
+            spec = read_source(spec['store'], spec['source'])
         source = spec['source']
-        restricted = spec.get('experiment_id')
-        rows = spec['experiments']
-        for row in rows:
-            if not row or (source is None and row['experiment_id'] in registered_ids):
-                continue
-            node = experiment(row, source, bool(restricted))
+        for row in spec['experiments']:
+            node = experiment(row, source)
             node['recorded'] = True
             node['info'] = row
             node['label'] = row.get('description') or ''
@@ -113,10 +108,6 @@ def build_navigation(benchmarks, registrations, sources, warnings=()):
 
         def parent_for(row):
             eid = row.get('experiment_id')
-            if source is None and eid in registered_ids:
-                return None
-            if restricted and eid != restricted:
-                return None
             if eid:
                 return experiment(row if 'benchmark_id' in row else {'experiment_id': eid}, source)
             date = _date(row.get('started_at'))
@@ -139,19 +130,14 @@ def build_navigation(benchmarks, registrations, sources, warnings=()):
             return conversations[key]
 
         for turn in reversed(turns):
-            parent = parent_for(turn)
-            if parent is None:
-                continue
-            conv = conversation(turn, parent)
+            conv = conversation(turn, parent_for(turn))
             seen.add((turn.get('channel_id'), turn.get('conversation_id')))
             conv['children'].append(_node('turn', ((turn.get('user_message') or '(no message)')[:100] + ('…' if len(turn.get('user_message') or '') > 100 else '')), source, turn['turn_key'],
                 turn_key=turn['turn_key'], source=source, info=_slim_turn_info(turn)))
         for row in conv_rows:
             if (row['channel_id'], row['conversation_id']) in seen:
                 continue
-            parent = parent_for(row)
-            if parent is not None:
-                conversation(row, parent)
+            conversation(row, parent_for(row))
     adhoc['children'].sort(key=lambda n: n['label'], reverse=True)
     for branch in branches.values():
         branch['children'] = sorted(

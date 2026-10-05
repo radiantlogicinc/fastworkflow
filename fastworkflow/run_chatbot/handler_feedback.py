@@ -9,7 +9,6 @@ from typing import Any
 from fastworkflow.observability import feedback, feedback_sidecar
 from fastworkflow.observability.comparison import InvalidExecutionRef, PassSelector
 from fastworkflow.observability.store import (
-    FEEDBACK_TAXONOMY_SCHEMA_VERSION,
     IncompatibleObservabilityDB,
     ObservabilityStore,
 )
@@ -78,14 +77,9 @@ class _FeedbackRoutes:
                         status=201 if writing else 200,
                     )
                 return
-            source = q("benchmark_experiment")
-            store = self._registered_store(source) if source else self.chatbot.open_store()
-            turn = store.get_turn(turn_key) if store else None
-            if turn is None:
+            store = self.chatbot.open_store()
+            if store is None or store.get_turn(turn_key) is None:
                 self._error(404, "turn not found")
-                return
-            if source and turn.get("experiment_id") != source:
-                self._error(400, "turn does not belong to the selected experiment")
                 return
             reader = self._feedback_reader(store)
             if writing:
@@ -119,23 +113,16 @@ class _FeedbackRoutes:
         """Where a new note lands: the evidence database, or a sidecar.
 
         Appending to the evidence is the ordinary case and stays the default.
-        Two kinds of evidence must not be appended to, and neither is a reason
-        to refuse somebody's comment:
+        A file this process cannot write, which is what a read-only or sealed
+        archive on disk looks like from here, must not be appended to, and
+        that is not a reason to refuse somebody's comment.
 
-        - a store an older build wrote, which has no columns to put a
-          category, an anchor or an identity in, and which this build does not
-          migrate (fresh schema, fix-49m.3); and
-        - a file this process cannot write, which is what a read-only or
-          sealed archive on disk looks like from here.
-
-        Both route to `feedback_sidecar`, a mutable control file beside the
+        It routes to `feedback_sidecar`, a mutable control file beside the
         evidence. Workspace mode never reaches this — it is unconditionally
         annotated, because "writable on disk" is not permission to break a
         seal somebody attested to.
         """
-        if store.schema_version < FEEDBACK_TAXONOMY_SCHEMA_VERSION or not os.access(
-            store.db_path, os.W_OK
-        ):
+        if not os.access(store.db_path, os.W_OK):
             return feedback_sidecar.AnnotatedEvidence.for_writing(store)
         return ObservabilityStore.open_for_annotation(store.db_path)
 
@@ -155,7 +142,7 @@ class _FeedbackRoutes:
         The body's `ref` is optional scope on the PRIMARY side; its
         experiment/task/attempt are checked against the turn row rather than
         believed. `paired` names the second execution of a comparison and may
-        live in another registered store, which is resolved and authorized
+        live in another workspace store, which is resolved and authorized
         here (`_feedback_source_for`) rather than trusted from the request.
         """
         if not self._FEEDBACK_WRITE_REQUIRED <= set(body) or not set(body) <= self._FEEDBACK_WRITE_ALLOWED:
@@ -213,12 +200,10 @@ class _FeedbackRoutes:
     def _feedback_source_for(self, target, writable, identity, stack=None):
         """The store a paired reference names, or a refusal.
 
-        Three authorized answers and no fourth: the database being written
-        to, another store the loaded workspace manifest DECLARES by evidence
-        identity, and a benchmark experiment registered against the selected
-        workflow whose recorded store identity matches what the reference
-        claims. A store id nobody declared or registered is not resolved by
-        searching the disk.
+        Two authorized answers and no third: the database being written to,
+        and another store the loaded workspace manifest DECLARES by evidence
+        identity. A store id nobody declared is not resolved by searching the
+        disk.
         """
         if target.store_id == identity:
             return writable
@@ -239,19 +224,11 @@ class _FeedbackRoutes:
             # annotations are visible to anything that reads back from the
             # authorized set, and creating nothing if it has none.
             return feedback_sidecar.reader_for(other)
-        if not target.ref.experiment_id:
-            raise feedback.FeedbackError(
-                f"store {target.store_id!r} was not authorized for this write; "
-                "a paired reference in another store must name the registered "
-                "experiment it belongs to"
-            )
-        other = self._registered_store(target.ref.experiment_id)
-        if other.store_identity() != target.store_id:
-            raise feedback.FeedbackError(
-                f"experiment {target.ref.experiment_id!r} records evidence in a "
-                f"different store than the reference's {target.store_id!r}"
-            )
-        return other
+        raise feedback.FeedbackError(
+            f"store {target.store_id!r} was not authorized for this write; "
+            "only the workflow's live database and the workspace's sealed "
+            "archives are readable"
+        )
 
     @staticmethod
     def _pass_selector(value):
@@ -333,17 +310,12 @@ class _FeedbackRoutes:
         self._send_json(payload)
 
     def _handle_task_feedback(self, store, query):
-        """Every authorized comment on one task, across attempts and stores.
+        """Every authorized comment on one task, across attempts.
 
         No hidden default filter: without query parameters this answers the
         whole authorized record for the task, including comparison comments
         anchored on the other side of a pair and task-level summaries. The
         filters below narrow it only when a reader asks.
-
-        Sources follow the experiment rather than a default database: the
-        store serving the request, plus any `store=<experiment_id>` the
-        selected workflow has registered, so an experiment whose evidence is
-        split across databases still reads as one task.
         """
         q = lambda name: (query.get(name) or [None])[0]  # noqa: E731
         experiment_id, task_id = q("experiment"), q("task")
@@ -359,11 +331,6 @@ class _FeedbackRoutes:
             # id and deduplicate on the same `feedback_uid`.
             sources[identity] = self._feedback_reader(store)
         try:
-            for extra in query.get("store") or []:
-                other = self._registered_store(extra)
-                other_identity = other.store_identity()
-                if other_identity:
-                    sources[other_identity] = self._feedback_reader(other)
             page = feedback.consolidate_task_feedback(
                 sources,
                 experiment_id=experiment_id,

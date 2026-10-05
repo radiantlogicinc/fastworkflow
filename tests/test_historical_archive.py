@@ -11,13 +11,9 @@ regression has to use. No store outside `tmp_path` is read or written.
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import os
 import shutil
 import sqlite3
-import subprocess
-import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -32,7 +28,6 @@ from fastworkflow.observability.archive import (
 
 WAL_ONLY_KEY = "wal_evidence"
 WAL_ONLY_VALUE = "committed-in-wal"
-REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _file_bytes(path: Path) -> dict[str, str | None]:
@@ -88,63 +83,6 @@ def historical_store(tmp_path, monkeypatch) -> Path:
         _seed_pending_wal(conn)
         return _copy_away_from_the_writer(
             live, tmp_path / "historical" / "observability.sqlite3"
-        )
-    finally:
-        conn.close()
-
-
-@pytest.fixture(scope="session")
-def v6_store_module():
-    """The real v6 store code, loaded out of this repository's own history.
-
-    Same construction as the legacy fixture in `test_task_feedback.py`: the
-    newest commit whose `store.py` still says `SCHEMA_VERSION = 6` IS the
-    build that wrote every v6 corpus in existence, so a database it creates
-    has the authentic old shape instead of a v7 file with its version pragma
-    edited. No v6 database is committed and no schema is restated here.
-    """
-    log = subprocess.run(
-        ["git", "log", "--format=%H", "--", "fastworkflow/observability/store.py"],
-        capture_output=True,
-        text=True,
-        cwd=str(REPO_ROOT),
-    )
-    if log.returncode != 0:
-        pytest.skip("not a git checkout; the v6 baseline comes from history")
-    for commit in log.stdout.split():
-        shown = subprocess.run(
-            ["git", "show", f"{commit}:fastworkflow/observability/store.py"],
-            capture_output=True,
-            text=True,
-            cwd=str(REPO_ROOT),
-        )
-        if shown.returncode == 0 and "\nSCHEMA_VERSION = 6\n" in shown.stdout:
-            break
-    else:
-        pytest.skip("no v6 store.py in history to build a legacy fixture from")
-    directory = tempfile.mkdtemp(prefix="fw-v6-archive-baseline-")
-    source = Path(directory) / "store_v6.py"
-    source.write_text(shown.stdout)
-    spec = importlib.util.spec_from_file_location(
-        "fastworkflow_store_v6_archive", source
-    )
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["fastworkflow_store_v6_archive"] = module
-    spec.loader.exec_module(module)
-    assert module.SCHEMA_VERSION == obs.MIN_READABLE_SCHEMA_VERSION
-    return module
-
-
-@pytest.fixture
-def historical_v6_store(tmp_path, v6_store_module) -> Path:
-    """A real v6 database, written by the real v6 writer, WAL still pending."""
-    live = tmp_path / "v6-live" / "observability.sqlite3"
-    live.parent.mkdir()
-    conn = v6_store_module.ObservabilityStore(str(live))._connect()
-    try:
-        _seed_pending_wal(conn)
-        return _copy_away_from_the_writer(
-            live, tmp_path / "v6-historical" / "observability.sqlite3"
         )
     finally:
         conn.close()
@@ -228,66 +166,26 @@ def test_the_writer_construction_this_entrypoint_exists_to_avoid_still_damages(
     assert result["source_bytes_verified_unchanged"] is True
 
 
-def test_a_real_v6_store_is_archived_as_v6_and_reported_as_v6(
-    historical_v6_store, tmp_path
+def test_a_store_from_an_older_build_is_refused_and_left_as_it_was(
+    tmp_path,
 ):
-    """v6 is readable, so v6 is archivable — and stays v6 either way.
+    """Nothing migrates, so an older store is not archivable by this build.
 
-    The archive of a v6 database is a v6 database, so the metadata has to say
-    six. Reporting the archiving build's `SCHEMA_VERSION` instead would claim
-    a migration that this build explicitly does not perform, about a file
-    whose own pragma disagrees.
+    The copy is read through the current-schema reader, which refuses it; the
+    source keeps every byte and no half-made archive is left behind.
     """
-    before = _file_bytes(historical_v6_store)
-    destination = tmp_path / "v6.sqlite3"
+    live = tmp_path / "older" / "observability.sqlite3"
+    obs.ObservabilityStore(str(live))
+    with sqlite3.connect(live) as conn:
+        conn.execute(f"PRAGMA user_version = {obs.SCHEMA_VERSION - 1}")
+    before = _file_bytes(live)
+    destination = tmp_path / "sealed" / "older.sqlite3"
 
-    result = archive_historical_store(str(historical_v6_store), str(destination))
+    with pytest.raises(obs.IncompatibleObservabilityDB, match="carries no migration"):
+        archive_historical_store(str(live), str(destination))
 
-    assert _file_bytes(historical_v6_store) == before
-    assert result["schema_version"] == obs.MIN_READABLE_SCHEMA_VERSION
-    assert obs.SCHEMA_VERSION != obs.MIN_READABLE_SCHEMA_VERSION
-    with sqlite3.connect(
-        f"{destination.resolve().as_uri()}?mode=ro", uri=True
-    ) as conn:
-        assert (
-            conn.execute("PRAGMA user_version").fetchone()[0]
-            == obs.MIN_READABLE_SCHEMA_VERSION
-        )
-        # The v7 feedback columns are the visible half of the version gap, so
-        # their absence is what "nothing was migrated" looks like on disk.
-        columns = {
-            row[1]
-            for row in conn.execute("PRAGMA table_info(human_feedback)")
-        }
-        assert "comment" in columns and "category" not in columns
-        assert conn.execute(
-            "SELECT value FROM diagnostics WHERE key=?", (WAL_ONLY_KEY,)
-        ).fetchone() == (WAL_ONLY_VALUE,)
-
-
-def test_the_shared_archive_path_also_reports_the_version_it_produced(
-    historical_v6_store, tmp_path
-):
-    """The same claim, made by `archive_to` rather than by the new helper.
-
-    `_snapshot_to` used to return this build's `SCHEMA_VERSION` for every
-    archive it took, so a v6 file came back labelled v7. Nothing in either
-    path migrates, so the number has to come out of the archive.
-    """
-    destination = tmp_path / "shared-path.sqlite3"
-
-    result = obs.ReadOnlyObservabilityStore(
-        str(historical_v6_store)
-    ).archive_to(str(destination))
-
-    assert result["schema_version"] == obs.MIN_READABLE_SCHEMA_VERSION
-    with sqlite3.connect(
-        f"{destination.resolve().as_uri()}?mode=ro", uri=True
-    ) as conn:
-        assert (
-            conn.execute("PRAGMA user_version").fetchone()[0]
-            == result["schema_version"]
-        )
+    assert _file_bytes(live) == before
+    assert not destination.exists()
 
 
 def test_an_existing_archive_is_never_overwritten(historical_store, tmp_path):

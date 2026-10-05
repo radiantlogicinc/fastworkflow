@@ -125,8 +125,12 @@ def _store_mode(value: dict[str, Any], field: str) -> str:
     )
     if explicit is None and "sealed" in value:
         explicit = "sealed" if value["sealed"] is True else "live"
-    if explicit not in {"sealed", "live"}:
-        raise WorkspaceManifestError(f"{field}.mode must be 'sealed' or 'live'")
+    if explicit == "live":
+        raise WorkspaceManifestError(
+            f"{field} is a live store; a workspace reads sealed archives only"
+        )
+    if explicit != "sealed":
+        raise WorkspaceManifestError(f"{field}.mode must be 'sealed'")
     return str(explicit)
 
 
@@ -163,16 +167,11 @@ class WorkspaceStore:
 class _WorkspaceReadOnlyStore(ReadOnlyObservabilityStore):
     """Read-only store using an escaped URI; sealed archives are immutable."""
 
-    def __init__(self, db_path: str, *, immutable: bool) -> None:
-        self._immutable = immutable
-        super().__init__(db_path)
-
     # Overrides the raw opener, not `_connect`: the base class builds every
     # connection (construction probes and closing `with` blocks) from it.
     def _open_connection(self, timeout: float = 30.0) -> sqlite3.Connection:
-        query = "mode=ro&immutable=1" if self._immutable else "mode=ro"
         conn = sqlite3.connect(
-            f"{Path(self.db_path).resolve().as_uri()}?{query}",
+            f"{Path(self.db_path).resolve().as_uri()}?mode=ro&immutable=1",
             uri=True,
             timeout=timeout,
             check_same_thread=False,
@@ -242,9 +241,7 @@ class ReadOnlyWorkspaceStoreRegistry:
             raise WorkspaceBusyError("read-only workspace handle limit reached")
         try:
             _verify_store(descriptor)
-            yield _WorkspaceReadOnlyStore(
-                str(descriptor.path), immutable=descriptor.mode == "sealed"
-            )
+            yield _WorkspaceReadOnlyStore(str(descriptor.path))
         finally:
             self._handles.release()
 
@@ -256,26 +253,22 @@ def _verify_store(store: WorkspaceStore) -> dict[str, Any]:
         if Path(f"{store.path}{suffix}").exists()
     ]
     actual_digest = _sha256(store.path)
-    if store.mode == "sealed":
-        if sidecars:
-            raise WorkspaceIntegrityError(
-                f"sealed store {store.store_id!r} has SQLite sidecar(s): "
-                + ", ".join(sidecars)
-            )
-        if store.sha256 is None:
-            raise WorkspaceIntegrityError(
-                f"sealed store {store.store_id!r} has no declared digest"
-            )
-        if actual_digest != store.sha256:
-            raise WorkspaceIntegrityError(
-                f"sealed store {store.store_id!r} sha256 mismatch: "
-                f"expected {store.sha256}, found {actual_digest}"
-            )
-    try:
-        reader = _WorkspaceReadOnlyStore(
-            str(store.path), immutable=store.mode == "sealed"
+    if sidecars:
+        raise WorkspaceIntegrityError(
+            f"sealed store {store.store_id!r} has SQLite sidecar(s): "
+            + ", ".join(sidecars)
         )
-        actual_identity = reader.store_identity()
+    if store.sha256 is None:
+        raise WorkspaceIntegrityError(
+            f"sealed store {store.store_id!r} has no declared digest"
+        )
+    if actual_digest != store.sha256:
+        raise WorkspaceIntegrityError(
+            f"sealed store {store.store_id!r} sha256 mismatch: "
+            f"expected {store.sha256}, found {actual_digest}"
+        )
+    try:
+        actual_identity = _WorkspaceReadOnlyStore(str(store.path)).store_identity()
     except (sqlite3.Error, IncompatibleObservabilityDB) as exc:
         raise WorkspaceIntegrityError(
             f"store {store.store_id!r} cannot be opened read-only: {exc}"
@@ -290,8 +283,8 @@ def _verify_store(store: WorkspaceStore) -> dict[str, Any]:
         "label": store.label,
         "path": store.relative_path,
         "mode": store.mode,
-        "sealed": store.mode == "sealed",
-        "integrity": "verified" if store.mode == "sealed" else "live",
+        "sealed": True,
+        "integrity": "verified",
         "sha256": store.sha256,
         "observed_sha256": actual_digest,
         "store_identity": actual_identity,
@@ -373,7 +366,7 @@ class ObservabilityWorkspace:
             known.add(store_id)
             mode = _store_mode(raw, field)
             digest = _declared_digest(raw, field)
-            if mode == "sealed" and digest is None:
+            if digest is None:
                 raise WorkspaceManifestError(
                     f"{field}.sha256 is required for a sealed store"
                 )

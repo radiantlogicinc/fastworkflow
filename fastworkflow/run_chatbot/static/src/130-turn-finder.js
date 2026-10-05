@@ -38,12 +38,11 @@ var turnFind = {
    the whole store and reading past every other run to find out.
 
    A scope belongs to the SOURCE it was chosen in. One experiment id can
-   exist in this workflow's store and in a registered archive and mean two
-   different sets of runs, so a scope carried across a source change would
-   ask the new database for the old one's labels and present whatever came
-   back under the old one's heading. The scope is stamped with the source it
-   was chosen in -- this workflow's store or the selected registered one --
-   and is dropped, with the walk and its cursor, when that source moves.
+   exist in two stores and mean two different sets of runs, so a scope
+   carried across a source change would ask the new database for the old
+   one's labels and present whatever came back under the old one's heading.
+   The scope is stamped with the source it was chosen in and is dropped, with
+   the walk and its cursor, when that source moves.
 
    What a scoped result is: the turns RECORDED under that experiment, task
    or attempt. A marker on one of them says that turn recorded it; it does
@@ -51,11 +50,9 @@ var turnFind = {
    own the way they are for an unscoped search. */
 function turnFindSourceKey() {
   /* What `api()` will actually read: a workspace read is pinned to its
-     store by turnFindPath below, a registered archive is pinned by
-     benchmarkEvidencePath from a global, and everything else is this
-     workflow's own store. */
+     store by turnFindPath below, and everything else is this workflow's own
+     store. */
   if (session && session.workspace_mode) { return "workspace:" + (state.storeId || ""); }
-  if (benchmarkExperimentSource) { return "registered:" + benchmarkExperimentSource; }
   return "current";
 }
 
@@ -252,14 +249,6 @@ function turnFindStart() {
 }
 
 /* Entry from the run being read, on the source that is SELECTED.
-
-   A registered evidence source is searched by this finder already:
-   benchmarkEvidencePath appends `benchmark_experiment=` to /api/turns from
-   the same global this gate reads, and the route resolves it to that
-   registration's own store. So the scoped search a reader starts while that
-   source is open is answered by the database whose experiment they are
-   looking at, which is the acceptance this leaf is held to -- UI and API
-   selecting the same authorized source.
 
    Carrying a scope ACROSS a source change is a different thing and is not
    offered: the guards above discard an open walk, its cursor and its scope the

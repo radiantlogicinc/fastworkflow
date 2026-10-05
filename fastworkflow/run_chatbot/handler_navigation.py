@@ -98,19 +98,6 @@ class _NavigationRoutes:
                 sources.append({"store": store, "source": None})
         except (IncompatibleObservabilityDB, OSError, sqlite3.Error) as exc:
             warnings.append(STORE_UNAVAILABLE + str(exc))
-        for record in registrations:
-            if not record.get("store"):
-                continue
-            try:
-                store = self._registered_store(record["experiment_id"])
-                detail = store.get_experiment(record["experiment_id"])
-                if detail is not None:
-                    record["archived"] = bool(detail.get("archived"))
-                sources.append({"store": store,
-                    "source": {"benchmark_experiment": record["experiment_id"]},
-                    "experiment_id": record["experiment_id"]})
-            except (ValueError, KeyError, OSError, sqlite3.Error, IncompatibleObservabilityDB) as exc:
-                record["warning"] = str(exc)
         self._send_navigation(
             {"root": build_navigation(benchmarks, registrations, sources, warnings)}
         )
