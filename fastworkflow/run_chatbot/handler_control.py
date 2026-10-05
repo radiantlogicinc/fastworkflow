@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from typing import Any
 
+from fastworkflow.observability.store import IncompatibleObservabilityDB
 from fastworkflow.observability.workspace import WorkspaceError
 from fastworkflow.run_chatbot.http_common import run_clear_conversations
 from fastworkflow.run_chatbot.workflow_discovery import _looks_like_workflow
@@ -63,7 +65,7 @@ class _ControlPlaneRoutes:
             return
         try:
             result = self.chatbot.start_train(path)
-        except OSError as exc:
+        except (OSError, sqlite3.Error, IncompatibleObservabilityDB) as exc:
             self._error(500, f"could not start training: {exc}")
             return
         except ValueError as exc:
@@ -88,7 +90,5 @@ class _ControlPlaneRoutes:
         if not self.chatbot.db_path or not os.path.exists(self.chatbot.db_path):
             self._send_json({"deleted": {}})
             return
-        deleted = run_clear_conversations(
-            self.chatbot.db_path, self.chatbot.workflow_path
-        )
+        deleted = run_clear_conversations(self.chatbot.db_path)
         self._send_json({"deleted": deleted})

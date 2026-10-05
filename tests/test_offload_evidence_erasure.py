@@ -36,10 +36,6 @@ from fastworkflow.observation_offloading.state import (
 )
 from fastworkflow.run_chatbot.server import run_clear_conversations, run_forget_channel
 
-#: The file older builds kept the evidence in, spelled out rather than imported
-#: so this module states the name it proves is gone.
-LEGACY_SIDECAR_SUFFIX = ".offload-handles.sqlite3"
-
 #: The evidence tables and the column that dates each row.
 EVIDENCE_TABLES = {
     "offload_evidence": "persisted_at",
@@ -279,11 +275,10 @@ class ChannelErasureTests(EvidenceFixture):
         self.assert_erased(first, "confidential-one")
         self.assert_erased(second, "confidential-two")
 
-    def test_forget_channel_does_not_create_a_legacy_sidecar(self):
+    def test_forget_channel_of_an_unknown_channel_erases_nothing(self):
         deleted = obs.ObservabilityStore(self.db_path).forget_channel("nobody")
         self.assertEqual(deleted["offload_evidence"], 0)
         self.assertEqual(deleted["offload_subjects"], 0)
-        self.assertFalse(os.path.exists(self.db_path + LEGACY_SIDECAR_SUFFIX))
 
     def test_erasure_drops_the_raw_copy_a_live_turn_was_reading(self):
         """In-process memory is part of the channel too.
@@ -395,57 +390,6 @@ class ExperimentEvidenceTests(EvidenceFixture):
     def test_the_erasure_module_is_gone(self):
         with self.assertRaises(ModuleNotFoundError):
             importlib.import_module("fastworkflow.observation_offloading.erasure")
-
-
-class LegacySidecarTests(EvidenceFixture):
-    """The old evidence file is deleted, never imported."""
-
-    def plant_legacy_files(self) -> list[str]:
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        sidecar = self.db_path + LEGACY_SIDECAR_SUFFIX
-        with sqlite3.connect(sidecar) as conn:
-            conn.execute(
-                "CREATE TABLE observation_offload_handles "
-                "(scope_id TEXT, scope_json TEXT, alias TEXT, text_utf8 BLOB)"
-            )
-            conn.execute(
-                "INSERT INTO observation_offload_handles VALUES (?,?,?,?)",
-                ("s", "{}", "O1", b"legacy-confidential-row"),
-            )
-            conn.commit()
-        planted = [sidecar]
-        for suffix in ("-wal", "-shm", ".preserve"):
-            with open(sidecar + suffix, "wb") as handle:
-                handle.write(b"legacy")
-            planted.append(sidecar + suffix)
-        return planted
-
-    def test_opening_the_archive_deletes_the_legacy_sidecar(self):
-        planted = self.plant_legacy_files()
-
-        RuntimeHandleArchive(self.db_path)
-
-        for path in planted:
-            with self.subTest(path=os.path.basename(path)):
-                self.assertFalse(os.path.exists(path))
-        self.assertNotIn(b"legacy-confidential-row", self.file_bytes())
-        self.assertNotIn("observation_offload_handles", table_names(self.db_path))
-
-    def test_opening_the_store_deletes_the_legacy_sidecar_and_its_sentinel(self):
-        planted = self.plant_legacy_files()
-
-        obs.ObservabilityStore(self.db_path)
-
-        for path in planted:
-            with self.subTest(path=os.path.basename(path)):
-                self.assertFalse(os.path.exists(path))
-
-    def test_an_undeletable_legacy_sidecar_does_not_stop_the_open(self):
-        """Best effort: a sidecar that cannot be removed is logged, not raised."""
-        os.makedirs(self.db_path + LEGACY_SIDECAR_SUFFIX)
-        archive = RuntimeHandleArchive(self.db_path)
-        self.assertTrue(archive.available)
-        self.assertTrue(os.path.isdir(self.db_path + LEGACY_SIDECAR_SUFFIX))
 
 
 class FileModeTests(EvidenceFixture):
@@ -560,10 +504,9 @@ class RetentionTests(EvidenceFixture):
         self.assertEqual(deleted["conversationless_turns"], 1)
         self.assert_erased(scope, "confidential-cli")
 
-    def test_retention_does_not_create_a_legacy_sidecar(self):
+    def test_retention_of_recent_evidence_erases_nothing(self):
         deleted = obs.ObservabilityStore(self.db_path).prune(retention_days=1)
         self.assertEqual(deleted["offload_evidence"], 0)
-        self.assertFalse(os.path.exists(self.db_path + LEGACY_SIDECAR_SUFFIX))
 
 
 class EventErasureTests(EvidenceFixture):

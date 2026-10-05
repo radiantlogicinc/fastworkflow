@@ -284,9 +284,6 @@ FEATURE_OFFLOAD_EVIDENCE_V1 = "offload_evidence_v1"
 # archived, offloaded, searched and rehydrated, keyed by turn like the evidence
 # and erased and aged with it.
 FEATURE_OFFLOAD_EVENTS_V1 = "offload_events_v1"
-# The evidence used to live in a second SQLite file beside this one, named
-# `<db>` plus this suffix. Nothing reads it any more; opening a store deletes it.
-LEGACY_OFFLOAD_SIDECAR_SUFFIX = ".offload-handles.sqlite3"
 FEEDBACK_PROVENANCES = frozenset({"human", "coding_agent", "distillation_agent"})
 FEEDBACK_COMMENT_MAX_CHARS = 100_000
 
@@ -1606,36 +1603,6 @@ _OFFLOAD_TABLE_TIMESTAMPS = {
 _OFFLOAD_PRUNE_BATCH_TURNS = 25
 
 
-def _remove_legacy_offload_sidecar(db_path: str) -> list[str]:
-    """Delete the evidence file older builds kept beside this DB, if any.
-
-    The old sidecar's evidence is deliberately NOT imported: it predates
-    turn-scoped erasure and write-time redaction, so it is removed together
-    with its WAL files and the ``.preserve`` sentinel that used to exempt it.
-    Best effort and never fatal -- a file that cannot be removed is logged
-    and the store opens anyway. Returns the paths that were removed.
-    """
-    sidecar = f"{db_path}{LEGACY_OFFLOAD_SIDECAR_SUFFIX}"
-    removed: list[str] = []
-    for path in (sidecar, f"{sidecar}-wal", f"{sidecar}-shm", f"{sidecar}.preserve"):
-        try:
-            os.remove(path)
-        except FileNotFoundError:
-            continue
-        except OSError as error:
-            logger.warning(
-                f"could not remove legacy offload evidence file {path}: {error}"
-            )
-            continue
-        removed.append(path)
-    if removed:
-        logger.info(
-            f"removed legacy offload evidence sidecar beside {db_path}: "
-            f"{', '.join(removed)}"
-        )
-    return removed
-
-
 def _present_offload_tables(conn: sqlite3.Connection) -> tuple[str, ...]:
     """The offload evidence tables this DB actually has.
 
@@ -1882,7 +1849,6 @@ class ObservabilityStore:
                     os.chmod(companion, 0o600)
         except OSError:
             pass
-        _remove_legacy_offload_sidecar(self.db_path)
 
     @staticmethod
     def _merge_schema_features(

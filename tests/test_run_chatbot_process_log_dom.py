@@ -31,7 +31,7 @@ def log_server(tmp_path, monkeypatch):
         "server-ready-line\nOPENAI_API_KEY=fw-dom-secret\n",
         encoding="utf-8",
     )
-    train_log = launcher.train_artifact_paths(str(wf), create=True)[1]
+    train_log = launcher.train_log_path(str(wf), create=True)
     Path(train_log).write_text(
         "train-ready-line\nAPP_SECRET=fw-dom-train-secret\n",
         encoding="utf-8",

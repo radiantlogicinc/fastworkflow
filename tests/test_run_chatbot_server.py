@@ -910,36 +910,6 @@ class TestServerSideContextFilter:
         assert _get_json(server, "/api/turns?context=%25")["turns"] == []
 
 
-class TestForgetChannelLegacyErasure:
-    def test_forget_channel_deletes_legacy_conversation_db(
-        self, seeded_db, workflow_path
-    ):
-        # Ruling C1: during the Phase-A dual-write window, erasure must also
-        # remove the legacy per-channel conversations/<channel_id>.sqlite3.
-        legacy_dir = Path(state_paths.conversations_dir(workflow_path))
-        legacy_dir.mkdir(parents=True, exist_ok=True)
-        legacy = legacy_dir / "chan1.sqlite3"
-        legacy.write_bytes(b"legacy payload")
-        (legacy_dir / "chan1.sqlite3-wal").write_bytes(b"wal")
-        deleted = run_chatbot_server.run_forget_channel(
-            seeded_db, "chan1", workflow_path
-        )
-        assert deleted["legacy_conversation_db_files"] == 2
-        assert not legacy.exists()
-        assert not (legacy_dir / "chan1.sqlite3-wal").exists()
-
-    def test_forget_channel_refuses_path_traversal_channel_ids(
-        self, seeded_db, workflow_path, tmp_path
-    ):
-        outside = tmp_path / "outside.sqlite3"
-        outside.write_bytes(b"do not delete")
-        deleted = run_chatbot_server.run_forget_channel(
-            seeded_db, "../../outside", workflow_path
-        )
-        assert "legacy_conversation_db_files" not in deleted
-        assert outside.exists()
-
-
 # ----------------------------------------------------------------------
 # Control plane: /api/session, workflow picker, POST /api/select_workflow
 # ----------------------------------------------------------------------
@@ -1386,9 +1356,7 @@ class TestProcessLogs:
     def test_train_log_is_the_workflow_state_file(self, server, workflow_path):
         from fastworkflow.run_chatbot import launcher
 
-        _pid_path, log_path = launcher.train_artifact_paths(
-            workflow_path, create=True
-        )
+        log_path = launcher.train_log_path(workflow_path, create=True)
         Path(log_path).write_text(
             "train-line\nLITELLM_API_KEY=fw-train-secret\n", encoding="utf-8"
         )

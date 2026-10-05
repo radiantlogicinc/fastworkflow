@@ -1045,12 +1045,6 @@ def get_channel_session_state_dir(workflow_path: str) -> str:
     return state_paths.session_state_dir(workflow_path)
 
 
-def get_channelconversations_dir(workflow_path: str) -> str:
-    """Workflow-namespaced folder for per-channel conversation DBs (created)."""
-    from fastworkflow import state_paths
-    return state_paths.conversations_dir(workflow_path)
-
-
 def _is_awaiting_user_output(output: Optional[fastworkflow.TurnOutput]) -> bool:
     """Read suspension off the turn's own status, not out of a command's artifacts.
 

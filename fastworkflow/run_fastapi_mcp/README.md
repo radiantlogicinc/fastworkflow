@@ -54,7 +54,7 @@ Configure in your environment (loaded at process startup via CLI args or env loa
 Set these in the workflow's `fastworkflow.env`, not as shell exports: values are read from the env files loaded at startup.
 
 Notes:
-- Conversation DBs are stored under `FASTWORKFLOW_STATE_ROOT/workflows/<workflow-id>/conversations` (directory is auto-created).
+- Conversations are stored in `FASTWORKFLOW_STATE_ROOT/workflows/<workflow-id>/observability.sqlite3`.
 - `/conversations` now accepts a `limit` query parameter (default `20`).
 - Shutdown waits up to 30 seconds for active turns (hard-coded).
 - Shutdown does **not** generate conversation topics or summaries. It makes any

@@ -70,7 +70,6 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from .mcp_specific import setup_mcp
 from .utils import (
-    get_channelconversations_dir,
     CHECKPOINT_REAP_INTERVAL_SECONDS,
     SHUTDOWN_DRAIN_SECONDS,
     ChannelSessionManager,
@@ -2599,10 +2598,7 @@ async def dump_all_conversations(
     Reads the observability DB, which is the whole conversation record since the
     Phase-7 consolidation. The per-conversation shape is unchanged (ruling C7):
     the same hydrated object with 3-key turns inlined, reconstructed from
-    conversations ⋈ turns ⋈ feedback. When pre-cutover
-    ``conversations/*.sqlite3`` files are still present beside the DB, the dump
-    says so in ``legacy_stores_present`` rather than silently omitting whatever
-    only they hold.
+    conversations ⋈ turns ⋈ feedback.
     """
     try:
         os.makedirs(request.output_folder, exist_ok=True)
@@ -2618,15 +2614,10 @@ async def dump_all_conversations(
                 all_conversations.extend(store.dump_all_conversations(channel_id))
                 session_count += 1
 
-        legacy_folder = get_channelconversations_dir(ARGS.workflow_path)
-        legacy_present = os.path.isdir(legacy_folder) and any(
-            name.endswith(".sqlite3") for name in os.listdir(legacy_folder)
-        )
-
         # Write to JSONL
         with open(output_file, 'w') as f:
             for conv in all_conversations:
-                f.write(json.dumps({**conv, "legacy_stores_present": legacy_present}) + '\n')
+                f.write(json.dumps(conv) + '\n')
         
         logger.info(
             f"Channel {session.channel_id} dumped {len(all_conversations)} "

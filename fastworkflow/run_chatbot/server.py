@@ -446,7 +446,7 @@ class ChatbotServer:
         self._session_state_lock = threading.Lock()
         self._train_lock = threading.Lock()
         # Most recent train log this process started, or "" until then.
-        # Readers also fall back to the conventional path / a live pid file.
+        # Readers also fall back to the conventional path / a live training row.
         self.train_log_path = ""
         # Serialize complete-dataset turn scans: concurrent ThreadingHTTPServer
         # handlers otherwise thrash the GIL decoding the same span JSON.
@@ -558,9 +558,7 @@ class ChatbotServer:
         if remembered:
             return remembered
         if workflow_path:
-            _pid_path, log_path = launcher.train_artifact_paths(
-                workflow_path, create=False
-            )
+            log_path = launcher.train_log_path(workflow_path)
             if launcher.is_train_running(workflow_path) or os.path.isfile(log_path):
                 return log_path
         return ""
@@ -664,8 +662,6 @@ class ChatbotServer:
         FastAPI server is running. Selecting a different workflow replaces the
         spawned server. Never raises: failures land in ``spawn_error`` and the
         chatbot stays usable as a trace viewer."""
-        from fastworkflow import state_paths
-
         with self._activate_lock:
             workflow_path = os.path.abspath(workflow_path)
             db_path = state_paths.observability_db(workflow_path)
@@ -894,7 +890,7 @@ class ChatbotServer:
         """Spawn a detached ``fastworkflow train`` and return immediately.
 
         The child outlives this chatbot process. Shutdown does not signal it.
-        Status is the pid file + ``_workflow_is_trained`` on later polls.
+        Status is the training row + ``_workflow_is_trained`` on later polls.
         """
         workflow_path = os.path.abspath(workflow_path)
         with self._train_lock:
@@ -1784,38 +1780,20 @@ def run_prune(db_path: str) -> dict[str, int]:
     return ObservabilityStore(db_path).prune()
 
 
-def run_forget_channel(
-    db_path: str, channel_id: str, workflow_path: str = ""
-) -> dict[str, int]:
+def run_forget_channel(db_path: str, channel_id: str) -> dict[str, int]:
     """Library erasure utility: delete one channel everywhere.
 
     Not wired to any CLI flag or HTTP route — the chatbot UI exposes the
     all-channel Clear-conversations action instead; this remains the
     single-channel primitive for scripts/tests (e.g. a deletion request for
-    one API channel). Also deletes the LEGACY per-channel conversation DB
-    (``conversations/<channel_id>.sqlite3`` + sidecars) while the Phase-A
-    dual-write period lasts — without this, "forgotten" conversations remain
-    fully readable in the legacy store.
+    one API channel).
 
     The channel's offload evidence -- the archived execute responses its
     turns produced -- lives in the same database and is erased by
     ``forget_channel`` in the same transaction as its turn records, experiment
     runs included; there is no second evidence file to sweep.
     """
-    deleted = ObservabilityStore(db_path).forget_channel(channel_id)
-    if workflow_path and channel_id == os.path.basename(channel_id):
-        legacy_db = os.path.join(
-            state_paths.conversations_dir(workflow_path), f"{channel_id}.sqlite3"
-        )
-        removed = 0
-        for path in (legacy_db, f"{legacy_db}-wal", f"{legacy_db}-shm"):
-            try:
-                os.remove(path)
-                removed += 1
-            except FileNotFoundError:
-                pass
-        deleted["legacy_conversation_db_files"] = removed
-    return deleted
+    return ObservabilityStore(db_path).forget_channel(channel_id)
 
 
 PREFERRED_SPAWN_PORT = 8000

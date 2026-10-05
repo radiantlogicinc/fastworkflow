@@ -30,11 +30,20 @@ import importlib.util
 import logging
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Optional
+
+from fastworkflow.observability import control
+from fastworkflow.observability.store import (
+    IncompatibleObservabilityDB,
+    ObservabilityStore,
+    open_live_store,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +174,7 @@ SERVER_LOG_FILENAME = "server.log"
 def server_log_path(workflow_path: str, *, create: bool = False) -> str:
     """Current FastAPI server log under the workflow state dir.
 
-    Same directory convention as :func:`train_artifact_paths`. The previous
+    Same directory convention as :func:`train_log_path`. The previous
     spawn is kept beside it as ``server.log.1``. ``create=False`` (session
     polls, plan construction) must not mkdir.
     """
@@ -265,12 +274,13 @@ def terminate_server(proc: subprocess.Popen, grace_seconds: float = 10.0) -> Non
 #
 # Training can take an hour and must survive chatbot exit. The chatbot does
 # not keep the Popen, does not terminate it on shutdown, and learns status
-# from a pid file + `is_workflow_trained`-equivalent filesystem check.
-# Stdio is redirected to a log under the workflow state dir: inheriting the
-# chatbot's pipes would SIGPIPE the child when the chatbot process exits.
+# from the live DB's `training_process` row + `is_workflow_trained`-equivalent
+# filesystem check. Stdio is redirected to a log under the workflow state dir:
+# inheriting the chatbot's pipes would SIGPIPE the child when the chatbot
+# process exits.
 
-TRAIN_PID_FILENAME = "chatbot_train.pid"
 TRAIN_LOG_FILENAME = "chatbot_train.log"
+LIVE_DB_FILENAME = "observability.sqlite3"
 
 
 @dataclass
@@ -281,7 +291,6 @@ class TrainSpawnPlan:
     reason: str = ""
     cmd: list[str] = field(default_factory=list)
     workflow_path: str = ""
-    pid_path: str = ""
     log_path: str = ""
 
 
@@ -299,40 +308,21 @@ def is_bundled_example_path(path: str, root: Optional[str] = None) -> bool:
     return path == root or path.startswith(root + os.sep)
 
 
-def train_artifact_paths(workflow_path: str, *, create: bool = False) -> tuple[str, str]:
-    """``(pid_path, log_path)`` under the workflow state dir.
+def train_log_path(workflow_path: str, *, create: bool = False) -> str:
+    """``chatbot_train.log`` under the workflow state dir.
 
     ``create=False`` (the poll path) must not mkdir: listing 100 candidates
     would otherwise stamp empty state dirs for every untrained workflow.
     """
-    state_dir = _workflow_state_dir(workflow_path, create=create)
-    return (
-        os.path.join(state_dir, TRAIN_PID_FILENAME),
-        os.path.join(state_dir, TRAIN_LOG_FILENAME),
+    return os.path.join(
+        _workflow_state_dir(workflow_path, create=create), TRAIN_LOG_FILENAME
     )
 
 
-def read_pid_file(pid_path: str) -> Optional[int]:
-    return _read_pid_record(pid_path)[0]
-
-
-def _read_pid_record(pid_path: str) -> tuple[Optional[int], Optional[str]]:
-    """(pid, recorded process start time) from a pid file; (None, None) when
-    absent/garbled. The start time is the second whitespace-separated token,
-    present since the pid-reuse hardening; older single-token files parse
-    with a None start time."""
-    try:
-        text = open(pid_path, encoding="utf-8").read().strip()
-    except OSError:
-        return None, None
-    tokens = text.split()
-    try:
-        pid = int(tokens[0])
-    except (IndexError, ValueError):
-        return None, None
-    if pid <= 0:
-        return None, None
-    return pid, (tokens[1] if len(tokens) > 1 else None)
+def _live_db_path(workflow_path: str, *, create: bool = False) -> str:
+    return os.path.join(
+        _workflow_state_dir(workflow_path, create=create), LIVE_DB_FILENAME
+    )
 
 
 def process_is_alive(pid: int) -> bool:
@@ -347,7 +337,7 @@ def process_is_alive(pid: int) -> bool:
     return True
 
 
-def _proc_start_time(pid: int) -> Optional[str]:
+def _proc_start_time(pid: int) -> Optional[int]:
     """The kernel's start-time ticks for *pid* (Linux /proc), or None.
 
     (pid, start_time) identifies a process across pid reuse; the comm field
@@ -357,59 +347,95 @@ def _proc_start_time(pid: int) -> Optional[str]:
         with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as f:
             stat = f.read()
         fields = stat.rsplit(")", 1)[1].split()
-        return fields[19]  # field 22 overall; 20th after (comm)
-    except (OSError, IndexError):
+        return int(fields[19])  # field 22 overall; 20th after (comm)
+    except (OSError, IndexError, ValueError):
         return None
 
 
-def _pid_is_recorded_train(pid: int, recorded_start: Optional[str]) -> bool:
-    """Guard against PID reuse: pid files persist after a train finishes, and
-    an unrelated process recycling the pid would otherwise block training
-    forever ('another training run is already in progress' with no override).
-    The pid file records the process start time at spawn; a live pid whose
-    start time differs is a stranger wearing a recycled number. Records
-    without a start time (older files, non-Linux) fall back to liveness."""
+def _pid_is_recorded_train(pid: int, recorded_start: int) -> bool:
+    """Guard against PID reuse: a row outlives a train whose observer was
+    gone, and an unrelated process recycling the pid would otherwise block
+    training forever ('another training run is already in progress' with no
+    override). The row records the process start time at spawn; a live pid
+    whose start time differs is a stranger wearing a recycled number. Rows
+    without a start time (0: non-Linux) fall back to liveness."""
     if not process_is_alive(pid):
         return False
-    if recorded_start is None:
+    if not recorded_start:
         return True
     current = _proc_start_time(pid)
     return current is None or current == recorded_start
 
 
-def _clear_stale_pid_file(pid_path: str) -> None:
-    with contextlib.suppress(OSError):
-        os.remove(pid_path)
+def _recorded_train(db_path: str) -> Optional[tuple[int, int]]:
+    """``(pid, proc_start_ticks)`` from one live DB's `training_process` row.
+
+    Read-only; a missing file, table or row is None (design §2.7).
+    """
+    try:
+        found = control.rows(
+            open_live_store(db_path),
+            "SELECT pid, proc_start_ticks FROM training_process",
+        )
+    except (sqlite3.Error, IncompatibleObservabilityDB):
+        return None
+    return (found[0]["pid"], found[0]["proc_start_ticks"]) if found else None
 
 
-def write_pid_file(pid_path: str, pid: int) -> None:
-    parent = os.path.dirname(pid_path)
-    os.makedirs(parent, exist_ok=True)
-    start_time = _proc_start_time(pid)
-    record = f"{pid} {start_time}" if start_time is not None else str(pid)
-    tmp_path = pid_path + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as stream:
-        stream.write(record)
-    os.replace(tmp_path, pid_path)
+def _record_train(
+    workflow_path: str, pid: int, recorded_start: int, log_path: str
+) -> None:
+    """Write the row right after ``Popen``.
+
+    The one control write allowed to create the live DB (design §2.1): a
+    workflow nobody has chatted with yet has none, and `train` creates it
+    anyway when it records its run.
+    """
+    db_path = _live_db_path(workflow_path, create=True)
+    store = (
+        open_live_store(db_path, write=True)
+        if os.path.isfile(db_path)
+        else ObservabilityStore(db_path)
+    )
+    with control.write(store) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO training_process "
+            "(slot, pid, proc_start_ticks, log_path, started_at) "
+            "VALUES (1, ?, ?, ?, ?)",
+            (pid, recorded_start, log_path, datetime.now(timezone.utc).isoformat()),
+        )
+
+
+def _clear_train(db_path: str, pid: int, recorded_start: int) -> None:
+    """Delete the row of a train observed gone; a newer train's row survives."""
+    with contextlib.suppress(
+        control.ControlUnavailable, sqlite3.Error, IncompatibleObservabilityDB
+    ):
+        with control.write(open_live_store(db_path, write=True)) as conn:
+            conn.execute(
+                "DELETE FROM training_process WHERE pid=? AND proc_start_ticks=?",
+                (pid, recorded_start),
+            )
+
+
+def _live_train_pid(db_path: str) -> Optional[int]:
+    """The recorded train's pid if it is still that process; a stale row is
+    deleted as it is encountered, so it can never block training."""
+    recorded = _recorded_train(db_path)
+    if recorded is None:
+        return None
+    if _pid_is_recorded_train(*recorded):
+        return recorded[0]
+    _clear_train(db_path, *recorded)  # finished train, or a recycled pid
+    return None
 
 
 def is_train_running(workflow_path: str) -> bool:
-    pid_path, _log_path = train_artifact_paths(workflow_path, create=False)
-    pid, recorded_start = _read_pid_record(pid_path)
-    if pid is None:
-        return False
-    if _pid_is_recorded_train(pid, recorded_start):
-        return True
-    _clear_stale_pid_file(pid_path)  # finished train, or a recycled pid
-    return False
+    return _live_train_pid(_live_db_path(workflow_path)) is not None
 
 
 def find_live_train() -> Optional[tuple[str, int]]:
-    """``(pid_path, pid)`` of any live chatbot-spawned train, else None.
-
-    Stale pid files (finished trains, recycled pids) are removed as they are
-    encountered, so one forgotten file can never block training globally.
-    """
+    """``(live_db_path, pid)`` of any live chatbot-spawned train, else None."""
     from fastworkflow import state_paths
 
     root = os.path.join(state_paths.state_root(), "workflows")
@@ -418,13 +444,10 @@ def find_live_train() -> Optional[tuple[str, int]]:
     except OSError:
         return None
     for name in names:
-        pid_path = os.path.join(root, name, TRAIN_PID_FILENAME)
-        pid, recorded_start = _read_pid_record(pid_path)
-        if pid is None:
-            continue
-        if _pid_is_recorded_train(pid, recorded_start):
-            return pid_path, pid
-        _clear_stale_pid_file(pid_path)
+        db_path = os.path.join(root, name, LIVE_DB_FILENAME)
+        pid = _live_train_pid(db_path)
+        if pid is not None:
+            return db_path, pid
     return None
 
 
@@ -449,7 +472,7 @@ def plan_train_spawn(
     and *datasets_missing*. Default probes match production.
     """
     workflow_path = os.path.abspath(workflow_path)
-    pid_path, log_path = train_artifact_paths(workflow_path, create=False)
+    log_path = train_log_path(workflow_path)
 
     if is_bundled_example_path(workflow_path, bundled_root):
         return TrainSpawnPlan(
@@ -468,7 +491,6 @@ def plan_train_spawn(
             ok=False,
             reason="This workflow is already trained.",
             workflow_path=workflow_path,
-            pid_path=pid_path,
             log_path=log_path,
         )
 
@@ -476,7 +498,9 @@ def plan_train_spawn(
         live_train = find_live_train()
     if live_train is not None:
         live_path, live_pid = live_train
-        if os.path.realpath(live_path) == os.path.realpath(pid_path):
+        if os.path.realpath(live_path) == os.path.realpath(
+            _live_db_path(workflow_path)
+        ):
             reason = (
                 f"Training is already running for this workflow (pid {live_pid})."
             )
@@ -489,7 +513,6 @@ def plan_train_spawn(
             ok=False,
             reason=reason,
             workflow_path=workflow_path,
-            pid_path=pid_path,
             log_path=log_path,
         )
 
@@ -539,23 +562,21 @@ def plan_train_spawn(
         ok=True,
         cmd=cmd,
         workflow_path=workflow_path,
-        pid_path=pid_path,
         log_path=log_path,
     )
 
 
 def spawn_detached_train(plan: TrainSpawnPlan) -> int:
-    """Start train detached: new session, stdio to the log, pid file, reaper.
+    """Start train detached: new session, stdio to the log, row, reaper.
 
     Returns the child pid. The Popen is not returned — a daemon thread reaps
     it so a finished train does not stay a zombie (which would look `kill 0`
-    alive) while the chatbot is still up. Chatbot shutdown must NOT signal
-    this process.
+    alive) while the chatbot is still up, and then deletes its row. Chatbot
+    shutdown must NOT signal this process.
     """
     if not plan.ok:
         raise ValueError(f"refused train plan cannot be executed: {plan.reason}")
     os.makedirs(os.path.dirname(plan.log_path), exist_ok=True)
-    os.makedirs(os.path.dirname(plan.pid_path), exist_ok=True)
     log_f = open(plan.log_path, "ab")
     try:
         proc = subprocess.Popen(
@@ -568,8 +589,12 @@ def spawn_detached_train(plan: TrainSpawnPlan) -> int:
         )
     finally:
         log_f.close()
-    write_pid_file(plan.pid_path, proc.pid)
-    threading.Thread(
-        target=proc.wait, name="chatbot-train-reaper", daemon=True
-    ).start()
+    recorded_start = _proc_start_time(proc.pid) or 0
+    _record_train(plan.workflow_path, proc.pid, recorded_start, plan.log_path)
+
+    def _reap() -> None:
+        proc.wait()
+        _clear_train(_live_db_path(plan.workflow_path), proc.pid, recorded_start)
+
+    threading.Thread(target=_reap, name="chatbot-train-reaper", daemon=True).start()
     return proc.pid
