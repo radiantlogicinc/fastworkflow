@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sqlite3
 from typing import Any
 
-from fastworkflow.observability import feedback, feedback_sidecar
+from fastworkflow import state_paths
+from fastworkflow.observability import control, feedback
 from fastworkflow.observability.comparison import InvalidExecutionRef, PassSelector
 from fastworkflow.observability.store import (
     IncompatibleObservabilityDB,
     ObservabilityStore,
+    open_live_store,
 )
 from fastworkflow.observability.workspace import (
     UnknownLogicalExperiment,
@@ -47,25 +50,19 @@ class _FeedbackRoutes:
         try:
             workspace = self.chatbot.workspace
             if workspace is not None:
-                with workspace.registry.open(q("store_id") or "") as store:
+                store_id = q("store_id") or ""
+                with workspace.registry.open(store_id) as store:
                     if store.get_turn(turn_key) is None:
                         self._error(404, "turn not found")
                         return
-                    # Sealed or not, workspace evidence is never appended to.
-                    # The note goes to the annotation sidecar beside it, and
-                    # the read is the union, so a reader cannot tell which
-                    # file a comment came out of (fix-9eg.19.1). A GET goes
-                    # through `reader_for`, which creates nothing: listing
-                    # comments must not be what puts a control file beside
-                    # somebody's sealed archive.
+                    # Sealed evidence is never appended to. The note goes to
+                    # `sealed_turn_comments` in the workflow's live DB, keyed
+                    # by the archive's sha256, and the read is the merge, so a
+                    # reader cannot tell which table a comment came out of
+                    # (fix-9eg.19.1). A GET creates nothing anywhere.
+                    reader = self._sealed_evidence(workspace, store_id, store, write=writing)
                     if writing:
-                        writable = feedback_sidecar.AnnotatedEvidence.for_writing(store)
-                        self._append_feedback_note(
-                            writable, turn_key, body, writable=writable
-                        )
-                        reader = writable
-                    else:
-                        reader = feedback_sidecar.reader_for(store)
+                        self._append_feedback_note(reader, turn_key, body, writable=reader)
                     self._send_json(
                         {
                             "feedback": feedback.present(
@@ -81,21 +78,24 @@ class _FeedbackRoutes:
             if store is None or store.get_turn(turn_key) is None:
                 self._error(404, "turn not found")
                 return
-            reader = self._feedback_reader(store)
             if writing:
                 self._append_feedback_note(store, turn_key, body)
-                reader = self._feedback_reader(store)
             self._send_json(
                 {
-                    "feedback": feedback.present(reader.list_human_feedback(turn_key)),
+                    "feedback": feedback.present(store.list_human_feedback(turn_key)),
                     "read_only": False,
-                    "annotated": reader is not store,
+                    "annotated": False,
                 },
                 status=201 if writing else 200,
             )
         except (IncompatibleObservabilityDB, UnknownWorkspaceStore,
-                feedback_sidecar.FeedbackSidecarError) as exc:
+                control.ControlUnavailable) as exc:
             self._error(409, str(exc))
+        except sqlite3.OperationalError as exc:
+            status = control.write_refusal_status(exc)
+            if status is None:
+                raise
+            self._error(status, str(exc))
         except (feedback.FeedbackError, InvalidExecutionRef) as exc:
             self._error(400, str(exc))
         except (ValueError, TypeError, KeyError) as exc:
@@ -110,31 +110,41 @@ class _FeedbackRoutes:
     }
 
     def _feedback_writer(self, store):
-        """Where a new note lands: the evidence database, or a sidecar.
+        """Where a new note lands: the live evidence database.
 
-        Appending to the evidence is the ordinary case and stays the default.
-        A file this process cannot write, which is what a read-only or sealed
-        archive on disk looks like from here, must not be appended to, and
-        that is not a reason to refuse somebody's comment.
-
-        It routes to `feedback_sidecar`, a mutable control file beside the
-        evidence. Workspace mode never reaches this — it is unconditionally
-        annotated, because "writable on disk" is not permission to break a
-        seal somebody attested to.
+        A file this process cannot write is refused rather than diverted:
+        there is no second file for a comment to land in, so a note that
+        cannot be appended is reported as not recorded (§2.5). Workspace mode
+        never reaches this — its archives are sealed, and their comments go
+        through `_sealed_evidence`.
         """
         if not os.access(store.db_path, os.W_OK):
-            return feedback_sidecar.AnnotatedEvidence.for_writing(store)
+            raise control.ControlUnavailable(
+                f"the live evidence database {store.db_path} is read-only for "
+                "this process, so the comment was not recorded"
+            )
         return ObservabilityStore.open_for_annotation(store.db_path)
 
     @staticmethod
-    def _feedback_reader(store):
-        """The store plus its annotation sidecar, if one was ever written.
+    def _workspace_live(workspace, *, write=False):
+        """The live DB of the workflow a workspace's archives came from, or None.
 
-        A store with no sidecar file reads exactly as before, and reading does
-        not create one: `reader_for` opens an existing sidecar read-only and
-        otherwise hands back the evidence store untouched.
+        None when the manifest names no workflow folder or that workflow has
+        no live DB on this machine; reads then show each archive's own
+        comments, and a write refuses (`control.SealedEvidence`).
         """
-        return feedback_sidecar.reader_for(store)
+        if workspace.workflow_folderpath is None:
+            return None
+        path = state_paths.observability_db(workspace.workflow_folderpath)
+        return open_live_store(path, write=write) if os.path.isfile(path) else None
+
+    def _sealed_evidence(self, workspace, store_id, store, *, write=False, live=None):
+        """A leased workspace archive read with its comments from the live DB."""
+        if live is None:
+            live = self._workspace_live(workspace, write=write)
+        return control.SealedEvidence(
+            store, live, workspace.registry.descriptor(store_id).sha256
+        )
 
     def _append_feedback_note(self, store, turn_key, body, writable=None):
         """Validate one posted note and append it where it is allowed to go.
@@ -220,10 +230,10 @@ class _FeedbackRoutes:
             if stack is None:  # pragma: no cover - callers pass one
                 stack = contextlib.ExitStack()
             other = stack.enter_context(workspace.registry.open(other_id))
-            # Read through the sidecar reader so the paired side's own
+            # Read with its live-DB comments so the paired side's own
             # annotations are visible to anything that reads back from the
-            # authorized set, and creating nothing if it has none.
-            return feedback_sidecar.reader_for(other)
+            # authorized set, creating nothing.
+            return self._sealed_evidence(workspace, other_id, other)
         raise feedback.FeedbackError(
             f"store {target.store_id!r} was not authorized for this write; "
             "only the workflow's live database and the workspace's sealed "
@@ -254,8 +264,8 @@ class _FeedbackRoutes:
         The store-aware twin of `/api/task-feedback`. The scope is not a
         `store_id` the caller supplies but the segments the manifest already
         declares for the logical experiment, which is what makes a comparison
-        comment visible from BOTH of its tasks: the note lives in the sidecar
-        beside the left-hand archive, and the right-hand task's view finds it
+        comment visible from BOTH of its tasks: the note is keyed by the
+        left-hand archive's sha256, and the right-hand task's view finds it
         because that archive is one of the experiment's own segments. Asking
         the reader to know which archive somebody happened to write in would
         make the read depend on where the comment landed.
@@ -270,12 +280,15 @@ class _FeedbackRoutes:
         try:
             with contextlib.ExitStack() as stack:
                 sources, locals_ = {}, []
+                live = self._workspace_live(workspace)
                 for segment in workspace.segments(experiment_id):
                     store = stack.enter_context(
                         workspace.registry.open(segment["store_id"])
                     )
                     identity = store.store_identity() or segment["store_id"]
-                    sources[identity] = feedback_sidecar.reader_for(store)
+                    sources[identity] = self._sealed_evidence(
+                        workspace, segment["store_id"], store, live=live
+                    )
                     if segment["local_experiment_id"] not in locals_:
                         locals_.append(segment["local_experiment_id"])
                 page = feedback.consolidate_task_feedback(
@@ -297,8 +310,7 @@ class _FeedbackRoutes:
                     offset=self._int(q("offset"), 0),
                 )
         except (UnknownLogicalExperiment, UnknownWorkspaceStore,
-                IncompatibleObservabilityDB,
-                feedback_sidecar.FeedbackSidecarError) as exc:
+                IncompatibleObservabilityDB) as exc:
             self._error(409, str(exc))
             return
         except (feedback.FeedbackError, ValueError, TypeError, KeyError) as exc:
@@ -322,14 +334,8 @@ class _FeedbackRoutes:
         if not experiment_id or not task_id:
             self._error(400, "experiment and task are required")
             return
-        sources = {}
         identity = store.store_identity()
-        if identity:
-            # Each source is read through `_feedback_reader`, so a store whose
-            # evidence could not be appended to still contributes the notes
-            # recorded in its sidecar. They merge into one list under one store
-            # id and deduplicate on the same `feedback_uid`.
-            sources[identity] = self._feedback_reader(store)
+        sources = {identity: store} if identity else {}
         try:
             page = feedback.consolidate_task_feedback(
                 sources,
@@ -344,8 +350,7 @@ class _FeedbackRoutes:
                 limit=self._int(q("limit"), 100),
                 offset=self._int(q("offset"), 0),
             )
-        except (IncompatibleObservabilityDB, UnknownWorkspaceStore,
-                feedback_sidecar.FeedbackSidecarError) as exc:
+        except (IncompatibleObservabilityDB, UnknownWorkspaceStore) as exc:
             self._error(409, str(exc))
             return
         except (feedback.FeedbackError, ValueError, TypeError, KeyError) as exc:

@@ -48,16 +48,11 @@ from fastworkflow.observability.comparison import (
     project_execution,
     review_pair_key,
 )
+from fastworkflow.observability import control
 from fastworkflow.observability.pair_review import (
     STATE_NOT_REVIEWED,
     STATE_REVIEWED,
-    PairReviewIdentityMismatch,
-    PairReviewModeMismatch,
     PairReviewStore,
-    UnauthorizedEvidenceSource,
-    open_shared_pair_review,
-    pair_review_db_path_for,
-    shared_pair_review_db_path_for,
 )
 from fastworkflow.observability.workspace import (
     WORKSPACE_SCHEMA,
@@ -1751,7 +1746,7 @@ class TestWorkspaceReader:
 
 @pytest.fixture
 def review(store: obs.ObservabilityStore) -> PairReviewStore:
-    return PairReviewStore.for_evidence(store)
+    return PairReviewStore(store)
 
 
 def _ref(turn_key: str, **kwargs) -> ExecutionRef:
@@ -1759,16 +1754,16 @@ def _ref(turn_key: str, **kwargs) -> ExecutionRef:
 
 
 class TestPairReview:
-    def test_the_sidecar_sits_beside_the_evidence_and_is_bound_to_it(
+    def test_marks_live_in_the_evidence_db_and_no_other_file(
         self, store, review, tmp_path: Path
     ):
-        expected = pair_review_db_path_for(store.db_path)
-        assert review.control_db_path == expected
-        assert Path(expected).exists()
-        assert review.evidence_store_identity() == store.store_identity()
-        other = obs.ObservabilityStore(str(tmp_path / "other.sqlite3"))
-        with pytest.raises(PairReviewIdentityMismatch):
-            PairReviewStore(expected, evidence_store_identity=other.store_identity())
+        before = sorted(p.name for p in Path(store.db_path).parent.glob("*.sqlite3"))
+        review.mark_reviewed(_ref("turn-a"), _ref("turn-b"), reviewer="dhar",
+                             reviewer_kind="human")
+        assert control.present(store)
+        assert sorted(
+            p.name for p in Path(store.db_path).parent.glob("*.sqlite3")
+        ) == before
 
     def test_a_pair_reviewed_with_no_comment_is_reviewed(self, review):
         best, other = _ref("turn-best"), _ref("turn-other")
@@ -1853,83 +1848,16 @@ class TestPairReview:
             review.mark_reviewed(best, other, reviewer="  ", reviewer_kind="human")
 
     def test_a_pair_spanning_two_stores_is_recordable(self, tmp_path: Path):
-        # The real product shape: the winner and the candidate were registered
-        # in different evidence stores, so a sidecar bound to one of them could
-        # not record that anybody reviewed the pair.
+        # The winner and the candidate were recorded in different evidence
+        # stores; the mark is still one row in the live DB, keyed by both refs.
         left_store = obs.ObservabilityStore(str(tmp_path / "left.sqlite3"))
-        right_store = obs.ObservabilityStore(str(tmp_path / "right.sqlite3"))
-        control_root = tmp_path / "workspace"
-        control_root.mkdir()
-        review = open_shared_pair_review(
-            str(control_root),
-            sources={"store-left": left_store, "store-right": right_store},
-        )
-        assert review.control_db_path == shared_pair_review_db_path_for(
-            str(control_root)
-        )
-        assert {source["source_id"] for source in review.list_sources()} == {
-            "store-left",
-            "store-right",
-        }
+        review = PairReviewStore(left_store)
         left = ExecutionRef(store_id="store-left", turn_keys=("turn-winner",))
         right = ExecutionRef(store_id="store-right", turn_keys=("turn-candidate",))
         review.mark_reviewed(left, right, reviewer="dhar", reviewer_kind="human")
         key = review_pair_key(left, right)
         assert review.state(key, "dhar")["state"] == STATE_REVIEWED
         assert review.progress("dhar", [key])["next_pair_key"] is None
-
-    def test_a_shared_control_store_refuses_a_store_it_was_not_told_to_trust(
-        self, tmp_path: Path
-    ):
-        known = obs.ObservabilityStore(str(tmp_path / "known.sqlite3"))
-        control_root = tmp_path / "ws2"
-        control_root.mkdir()
-        review = open_shared_pair_review(
-            str(control_root), sources={"store-known": known}
-        )
-        with pytest.raises(UnauthorizedEvidenceSource):
-            review.mark_reviewed(
-                ExecutionRef(store_id="store-known", turn_keys=("t1",)),
-                ExecutionRef(store_id="store-unknown", turn_keys=("t2",)),
-                reviewer="dhar",
-                reviewer_kind="human",
-            )
-        # Authorizing it makes the same pair recordable, and re-authorizing the
-        # same store under the same id is a no-op.
-        later = obs.ObservabilityStore(str(tmp_path / "later.sqlite3"))
-        review.authorize_source("store-unknown", later)
-        review.authorize_source("store-unknown", later)
-        review.mark_reviewed(
-            ExecutionRef(store_id="store-known", turn_keys=("t1",)),
-            ExecutionRef(store_id="store-unknown", turn_keys=("t2",)),
-            reviewer="dhar",
-            reviewer_kind="human",
-        )
-        assert len(review.list_sources()) == 2
-
-    def test_a_source_id_names_one_store_for_the_life_of_the_progress(
-        self, tmp_path: Path
-    ):
-        first = obs.ObservabilityStore(str(tmp_path / "first.sqlite3"))
-        second = obs.ObservabilityStore(str(tmp_path / "second.sqlite3"))
-        control_root = tmp_path / "ws3"
-        control_root.mkdir()
-        review = open_shared_pair_review(str(control_root), sources={"s": first})
-        with pytest.raises(PairReviewIdentityMismatch):
-            review.authorize_source("s", second)
-
-    def test_the_two_control_shapes_are_never_confused(self, tmp_path: Path):
-        evidence = obs.ObservabilityStore(str(tmp_path / "single.sqlite3"))
-        single = PairReviewStore.for_evidence(evidence)
-        with pytest.raises(PairReviewModeMismatch):
-            open_shared_pair_review(
-                str(tmp_path), control_db_path=single.control_db_path
-            )
-        shared_root = tmp_path / "ws4"
-        shared_root.mkdir()
-        shared = open_shared_pair_review(str(shared_root))
-        with pytest.raises(PairReviewModeMismatch):
-            PairReviewStore(shared.control_db_path)
 
     def test_refs_round_trip_through_the_stored_pair(self, review):
         best, other = _ref("turn-best", task_id="task-1", attempt=3), _ref("turn-b")

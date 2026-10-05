@@ -15,9 +15,10 @@ from pathlib import Path
 
 import pytest
 
+from fastworkflow import state_paths
 from fastworkflow.run_chatbot import server as run_chatbot_server
 from fastworkflow.observability import feedback as fb
-from fastworkflow.observability import feedback_sidecar
+from fastworkflow.observability import control
 from fastworkflow.observability import store as obs
 from tests.test_chatbot_benchmarks import _request
 from tests.test_observability_workspace import (
@@ -288,41 +289,34 @@ def test_the_taxonomy_route_serves_the_same_vocabulary_as_the_module(experiment_
     assert status == 200 and data == fb.taxonomy_payload()
 
 
-def test_workspace_feedback_is_recorded_beside_the_archive_not_in_it(
+def test_workspace_feedback_with_no_live_db_is_refused_and_writes_nothing(
     workspace_server,
 ):
-    """Sealed evidence is not appended to, and the comment is still recorded.
+    """A comment on sealed evidence belongs in its workflow's live DB (§2.5).
 
-    Refusing the write was the old behavior and the wrong half of the
-    contract: a reader looking at archived evidence has as much to say about
-    it as anyone. The note goes to the annotation sidecar beside the archive
-    (fix-9eg.19.1), the archive's bytes do not move, and the read is the union
-    so the reader cannot tell which file answered.
+    This manifest names no workflow, so there is no live DB on this machine
+    to hold it: the write is refused with a message saying so, rather than
+    being appended to the archive or to a new file beside it. The read still
+    answers, from the archive alone.
     """
     server, _workflow, _before = workspace_server
     stores = server.workspace.stores()
     sid = stores[0]['store_id']
     descriptor = server.workspace.registry.descriptor(sid)
     before = hashlib.sha256(descriptor.path.read_bytes()).hexdigest()
+    beside = sorted(path.name for path in descriptor.path.parent.iterdir())
     read = '/api/feedback-notes?turn_key=turn&store_id=' + sid
     status, data = _request(server, read)
     assert status == 200
     assert data == {"feedback": [], "read_only": True, "annotated": True}
-    status, written = _request(
+    status, refused = _request(
         server, '/post_feedback?turn_key=turn&store_id=' + sid, 'POST', payload(),
     )
-    assert status == 201, written
-    assert [row['comment'] for row in written['feedback']] == ['Needs a clearer answer.']
-    assert written['feedback'][0]['category'] == 'conclusions'
-    assert written['read_only'] is True
+    assert status == 409, refused
+    assert "live database" in refused['error']
     assert hashlib.sha256(descriptor.path.read_bytes()).hexdigest() == before
-    sidecar = Path(feedback_sidecar.feedback_db_path_for(str(descriptor.path)))
-    assert sidecar.exists() and sidecar != descriptor.path
-    with sqlite3.connect(f'file:{descriptor.path}?mode=ro', uri=True) as evidence:
-        assert evidence.execute(
-            'SELECT COUNT(*) FROM human_feedback'
-        ).fetchone()[0] == 0
-    assert _request(server, read)[1]['feedback'][0]['comment'] == 'Needs a clearer answer.'
+    assert sorted(path.name for path in descriptor.path.parent.iterdir()) == beside
+    assert _request(server, read)[1]['feedback'] == []
 
 
 @pytest.fixture
@@ -332,8 +326,12 @@ def two_sealed_stores(tmp_path):
     The shape .19.1 names directly: a comparison whose two executions live in
     their own authorized stores. Nothing here is a stand-in — each archive is
     produced by `ObservabilityStore.archive_to` and declared in a manifest
-    that names its digest and its evidence identity.
+    that names its digest and its evidence identity, and the workflow whose
+    live DB holds the comments made about them.
     """
+    workflow = tmp_path / "archived_workflow"
+    workflow.mkdir()
+    obs.ObservabilityStore(state_paths.observability_db(str(workflow)))
     left = _seed_archive(
         tmp_path, "left", experiment_id="left-local",
         task_id="task-left", turn_key="turn-left",
@@ -355,6 +353,7 @@ def two_sealed_stores(tmp_path):
                  "local_experiment_id": "right-local"},
             ],
         }],
+        workflow_folderpath=str(workflow),
     )
     server = run_chatbot_server.ChatbotServer(
         port=0, workspace_manifest_path=str(manifest)
@@ -368,6 +367,13 @@ def two_sealed_stores(tmp_path):
     yield server, left, right, digests
     server.shutdown()
     thread.join(timeout=5)
+
+
+def _sealed_comments(server):
+    live = state_paths.observability_db(server.workspace.workflow_folderpath)
+    return control.rows(
+        obs.ReadOnlyObservabilityStore(live), "SELECT * FROM sealed_turn_comments"
+    )
 
 
 def _paired_note(right, *, store_id=None, turn_key="turn-right"):
@@ -440,9 +446,10 @@ def test_a_comparison_across_two_sealed_archives_is_recordable(two_sealed_stores
         for side in (left, right)
         for suffix in ("-wal", "-shm")
     )
-    # The note is in the sidecar beside the left archive, not inside it.
-    sidecar = Path(feedback_sidecar.feedback_db_path_for(left["path"]))
-    assert sidecar.exists()
+    # The note is in the live DB, keyed by the left archive, not inside it.
+    assert [row["archive_sha256"] for row in _sealed_comments(server)] == [
+        left["sha256"]
+    ]
     with sqlite3.connect(f"file:{left['path']}?mode=ro", uri=True) as evidence:
         assert evidence.execute(
             "SELECT COUNT(*) FROM human_feedback"
@@ -632,8 +639,9 @@ def test_the_composer_works_on_sealed_evidence_in_a_real_dom(two_sealed_stores):
         side["path"]: hashlib.sha256(Path(side["path"]).read_bytes()).hexdigest()
         for side in (left, right)
     }
-    sidecar = Path(feedback_sidecar.feedback_db_path_for(left["path"]))
-    assert sidecar.exists(), "the comment went to the sidecar beside the archive"
+    assert {row["archive_sha256"] for row in _sealed_comments(server)} == {
+        left["sha256"]
+    }, "the comment went to the live DB, keyed by the archive"
 
 
 def test_experiment_analysis_route_is_gone(experiment_server):

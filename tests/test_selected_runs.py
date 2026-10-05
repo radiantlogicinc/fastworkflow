@@ -2,8 +2,8 @@
 
 Integration throughout, per `.cursor/rules/testing_rules.mdc`: real
 `ObservabilityStore` databases on disk, attempts written through the real
-`ExperimentController`, real span rows and real turn records, the real shared
-selection control, the real HTTP server over a real socket and a real sealed
+`ExperimentController`, real span rows and real turn records, the real control
+tables of the live DB, the real HTTP server over a real socket and a real sealed
 archive. No mocks: the whole question here is whether pooled figures agree
 with the evidence they claim to be about, and a fake store would not test it.
 
@@ -35,7 +35,7 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow import tracing
+from fastworkflow import state_paths, tracing
 from fastworkflow.benchmark import setup
 from fastworkflow.experiment.runner import ExperimentController
 from fastworkflow.observability import best_run, comparison
@@ -131,6 +131,8 @@ def runs_world(tmp_path, monkeypatch):
     folder = tmp_path / "selected_runs_workflow"
     folder.mkdir()
     (folder / "_commands").mkdir()
+    db = state_paths.observability_db(str(folder))
+    store = obs.ObservabilityStore(db)
     benchmark = setup.save_benchmark(
         folder, {"title": "Pooling", "tasks": [{"prompt": "Do the thing"}]}
     )
@@ -140,8 +142,6 @@ def runs_world(tmp_path, monkeypatch):
     experiment_id = experiment["experiment_id"]
     task_id = experiment["task_ids"][0]
 
-    db = str(tmp_path / "evidence.sqlite3")
-    store = obs.ObservabilityStore(db)
     controller = ExperimentController(
         db, store.store_identity(), external=False, workflow_folderpath=str(folder)
     )
@@ -543,10 +543,11 @@ class TestCost:
 
 
 class TestSources:
-    def test_the_same_attempt_number_in_another_source_is_another_run(self, world):
-        """Attempt 1 exists under both experiments, in two different
-        databases. Each path reads the store ITS experiment is authorized
-        against; there is no default store to fall back to."""
+    def test_the_same_attempt_number_of_another_experiment_is_another_run(
+        self, world
+    ):
+        """Attempt 1 exists under both experiments, in the one live DB. Each
+        path reads the attempt ITS experiment recorded, never the other's."""
         first = selection_api.handle_get(
             world["folder"],
             f"/api/experiments/{world['experiment_id']}"
@@ -559,7 +560,7 @@ class TestSources:
             f"/tasks/{world['task_id']}/selected-runs",
             {"attempt": ["1"]},
         )[1]
-        assert first["store_id"] != second["store_id"]
+        assert first["store_id"] == second["store_id"]
         assert first["members"][0]["ref_id"] != second["members"][0]["ref_id"]
         assert first["evidence_digest"] != second["evidence_digest"]
         first_commands = {
@@ -644,7 +645,7 @@ class TestDigest:
     """What the digest has to notice, and what it must ignore."""
 
     def _rows(self, runs_world, attempts):
-        control = setup.open_workflow_control(runs_world["folder"], create=False)
+        control = setup.workflow_control(runs_world["folder"])
         resolved = best_run.select_task_attempts(
             control, runs_world["experiment_id"], runs_world["task_id"], attempts
         )
@@ -657,7 +658,6 @@ class TestDigest:
         kwargs = {
             "experiment_id": runs_world["experiment_id"],
             "task_id": runs_world["task_id"],
-            "source_id": resolved["source_id"],
             "store_id": resolved["store_id"],
             "requested": [int(row["attempt"]) for row in rows],
             "duplicate_requests": 0,
@@ -736,7 +736,7 @@ class TestPartialEvidence:
         and it is the same shape the projection already reports: the readable
         turns project, the rest is named in `unavailable`.
         """
-        control = setup.open_workflow_control(runs_world["folder"], create=False)
+        control = setup.workflow_control(runs_world["folder"])
         resolved = best_run.select_task_attempts(
             control, runs_world["experiment_id"], runs_world["task_id"], [1]
         )
@@ -751,7 +751,6 @@ class TestPartialEvidence:
         return sr.aggregate_selected_runs(
             experiment_id=runs_world["experiment_id"],
             task_id=runs_world["task_id"],
-            source_id=resolved["source_id"],
             store_id=resolved["store_id"],
             requested=[1],
             duplicate_requests=0,

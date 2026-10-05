@@ -300,12 +300,13 @@ turns and components (optional `category`, `subcategory`, `provenance`, `target_
 Preserve the UI's authentication and source selection: reads go to the workflow's one live
 database, or add `store_id=<id>` for workspace reads.
 
-A POST is accepted even when the evidence must not be written. For a workspace store and for a
-database file this process cannot write, the note is appended to an annotation sidecar,
-`<stem>.feedback.sqlite3` beside the evidence, and the evidence file is byte-identical
-afterwards; the response carries `"annotated": true` and the reads return the union. Otherwise
-the server uses the narrow `ObservabilityStore.open_for_annotation` path; that is not a reason to
-open a writer during analysis.
+A POST on a sealed workspace store is accepted without writing the archive: the note goes to the
+`sealed_turn_comments` table of the archive's workflow's live database, keyed by the archive's
+sha256, so the archive file is byte-identical afterwards; the response carries
+`"annotated": true` and the reads return the merge. It is refused (409) when that workflow has
+no live database on this machine, and so is a POST on a live database file this process cannot
+write. Otherwise the server uses the narrow `ObservabilityStore.open_for_annotation` path; that
+is not a reason to open a writer during analysis.
 
 The agent-memory `feedback` table and the `/api/feedback` read routes it backed were removed with
 their `dspy.History` injection (fix-9eg.16); those paths now 404. Formal human review assignments

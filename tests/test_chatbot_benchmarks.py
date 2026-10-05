@@ -173,6 +173,8 @@ class TestBenchmarkReadApi:
         assert "not found" in data["error"]
 
     def test_experiments_are_listed_newest_first(self, live_server, workflow_dir):
+        # The contest lives in the live DB, which registration never creates.
+        obs.ObservabilityStore(state_paths.observability_db(str(workflow_dir)))
         older = benchmark_setup.create_experiment(workflow_dir, "smoke", "v1")
         newer = benchmark_setup.create_experiment(workflow_dir, "smoke", "v1")
 

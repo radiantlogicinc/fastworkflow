@@ -20,7 +20,8 @@ The policy, which is deliberately small:
 - Nothing rewrites history: withdrawal appends a `retire` row.
 
 Integration throughout, per `.cursor/rules/testing_rules.mdc`: real
-registration files, a real shared selection control, a real `ObservabilityStore`
+registration files, the control tables of the workflow's real live DB, a real
+`ObservabilityStore`
 written through a real `ExperimentController`, real filesystem failures, and the
 real `ChatbotServer` over a real socket. No Mock fixtures, and nothing here runs
 a model or spends anything -- every experiment below is an identity and a
@@ -31,13 +32,13 @@ from __future__ import annotations
 
 import os
 import threading
-from pathlib import Path
 
 import pytest
 
 from fastworkflow import state_paths
 from fastworkflow.benchmark import setup
 from fastworkflow.experiment.runner import ExperimentController
+from fastworkflow.observability import control as control_module
 from fastworkflow.observability import selection
 from fastworkflow.observability import store as obs
 from fastworkflow.run_chatbot import server as run_chatbot_server
@@ -48,11 +49,12 @@ HUMAN = {"actor": "dhar", "actor_kind": "human"}
 
 @pytest.fixture
 def folder(tmp_path, monkeypatch):
-    """A live workflow whose control and source map live under a temp state root."""
+    """A live workflow whose live DB lives under a temp state root."""
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
     workflow = tmp_path / "roster_workflow"
     workflow.mkdir()
     (workflow / "_commands").mkdir()
+    obs.ObservabilityStore(state_paths.observability_db(str(workflow)))
     return workflow
 
 
@@ -68,7 +70,7 @@ def _create(folder, benchmark_id):
 
 
 def _control(folder):
-    return setup.open_workflow_control(folder, create=False)
+    return setup.workflow_control(folder, write=True)
 
 
 def _winner_id(folder, experiment_id):
@@ -461,20 +463,20 @@ class TestANonWinnerLeavesTheContest:
         assert retirement[2] == doomed  # candidate: what was withdrawn
         assert retirement[3] == winner  # the winner, unchanged by it
 
-    def test_a_workflow_with_no_selection_control_still_deletes(
+    def test_a_workflow_with_no_live_db_still_deletes(
         self, folder, benchmark_id
     ):
         """Withdrawal is not a new prerequisite for deleting a registration."""
         only = _create(folder, benchmark_id)
-        control_path = setup.workflow_control_db_path(folder)
+        live = state_paths.observability_db(str(folder))
         for suffix in ("", "-wal", "-shm"):
             try:
-                os.unlink(control_path + suffix)
+                os.unlink(live + suffix)
             except FileNotFoundError:
                 pass
 
         assert setup.delete_empty_experiment(folder, only)["experiment_id"] == only
-        assert selection.control_mode_of(control_path) is None
+        assert not os.path.exists(live)
 
 
 # ----------------------------------------------------------------------
@@ -491,7 +493,7 @@ class TestEvidenceIsNeverRetired:
         caller two layers up having checked."""
         _create(folder, benchmark_id)  # the winner, so this one is not
         record = setup.create_experiment(folder, benchmark_id, "v1")
-        _declare(folder, str(tmp_path / "evidence.sqlite3"), record)
+        _declare(folder, state_paths.observability_db(str(folder)), record)
         experiment_id = record["experiment_id"]
 
         with pytest.raises(selection.SelectionRetirementRefused) as refusal:
@@ -505,7 +507,7 @@ class TestEvidenceIsNeverRetired:
     ):
         _create(folder, benchmark_id)
         record = setup.create_experiment(folder, benchmark_id, "v1")
-        store = _declare(folder, str(tmp_path / "evidence.sqlite3"), record)
+        store = _declare(folder, state_paths.observability_db(str(folder)), record)
 
         with pytest.raises(setup.BenchmarkSetupConflict):
             setup.delete_empty_experiment(folder, record["experiment_id"])
@@ -520,7 +522,7 @@ class TestEvidenceIsNeverRetired:
     ):
         """The winner has evidence; the thing being deleted never ran."""
         recorded = setup.create_experiment(folder, benchmark_id, "v1")
-        _declare(folder, str(tmp_path / "evidence.sqlite3"), recorded)
+        _declare(folder, state_paths.observability_db(str(folder)), recorded)
         empty = _create(folder, benchmark_id)
 
         setup.delete_empty_experiment(folder, empty)
@@ -585,35 +587,15 @@ class TestPartialDeletionIsRepaired:
         _promote(folder, doomed)
         assert _winner_id(folder, winner) == doomed
 
-    def test_a_withdrawal_with_no_tombstone_is_re_seeded_by_the_next_bootstrap(
-        self, folder, benchmark_id
-    ):
-        """The crash case, reproduced by doing exactly half the deletion.
-
-        Nothing compensates a process that dies between the two writes, so the
-        recovery has to come from the next bootstrap: registration is
-        idempotent, and re-seeding puts the member row back.
-        """
-        winner = _create(folder, benchmark_id)
-        stranded = _create(folder, benchmark_id)
-        group_id = _group_id(folder, winner)
-        setup.retire_experiment_selection(folder, stranded)
-        assert _member_ids(folder, group_id) == {winner}
-
-        setup.ensure_selection_bootstrap(folder, create=True)
-
-        assert _member_ids(folder, group_id) == {winner, stranded}
-        assert _winner_id(folder, winner) == winner
-
 
 # ----------------------------------------------------------------------
-# Deletion racing the bootstrap that re-seeds registrations
+# Deletion racing a delayed registration
 # ----------------------------------------------------------------------
 
 
 class TestADelayedRegistrationCannotResurrectADeletion:
-    """`create_experiment` writes the file, releases the lock, bootstraps, and
-    only then registers the record it is still holding. Everything after the
+    """`create_experiment` writes the file, releases the lock, and only then
+    registers the record it is still holding. Everything after the
     release is a window, and the record it carries into that window is a copy
     of a file that may no longer exist.
     """
@@ -691,73 +673,6 @@ class TestADelayedRegistrationCannotResurrectADeletion:
             assert _winner_id(folder, winner) == winner
 
 
-class TestABootstrapCannotResurrectADeletedRegistration:
-    def test_a_bootstrap_that_read_its_list_first_still_does_not_re_register(
-        self, folder, benchmark_id
-    ):
-        """The interleaving root named, reproduced with real components.
-
-        A bootstrap enumerates the registrations, then blocks on the setup lock
-        this test is holding. The real deletion runs INSIDE that lock. When the
-        lock is released the bootstrap proceeds with a records list that still
-        contains the deleted experiment -- and must not register it, because
-        `_seed_registrations` re-reads each registration under the lock.
-
-        The timing below maximises the chance of hitting that interleaving; the
-        assertion holds either way, because a bootstrap that enumerated after
-        the deletion never saw the registration at all.
-        """
-        winner = _create(folder, benchmark_id)
-        doomed = _create(folder, benchmark_id)
-        group_id = _group_id(folder, winner)
-        report = {}
-        finished = threading.Event()
-
-        def bootstrap():
-            report["value"] = setup.ensure_selection_bootstrap(folder, create=True)
-            finished.set()
-
-        booting = threading.Thread(target=bootstrap, daemon=True)
-        with setup._lock(folder):
-            booting.start()
-            # It cannot have finished: seeding waits for this lock.
-            assert not finished.wait(1.0)
-            setup._delete_locked(folder, doomed)
-        assert finished.wait(30)
-        booting.join(timeout=5)
-
-        assert doomed not in report["value"]["seeded"]
-        assert _member_ids(folder, group_id) == {winner}
-        assert _winner_id(folder, winner) == winner
-        with pytest.raises(setup.ExperimentDeleted):
-            setup.load_experiment(folder, doomed)
-
-    def test_concurrent_bootstraps_and_deletions_agree_on_the_outcome(
-        self, folder, benchmark_id
-    ):
-        """Unsynchronised, repeated, and the invariant is the same one."""
-        winner = _create(folder, benchmark_id)
-        group_id = _group_id(folder, winner)
-        for _ in range(8):
-            doomed = _create(folder, benchmark_id)
-            threads = [
-                threading.Thread(
-                    target=lambda: setup.ensure_selection_bootstrap(folder, create=True)
-                ),
-                threading.Thread(
-                    target=lambda: setup.delete_empty_experiment(folder, doomed)
-                ),
-            ]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join(timeout=30)
-                assert not thread.is_alive()
-
-            assert _member_ids(folder, group_id) == {winner}
-            assert _winner_id(folder, winner) == winner
-
-
 # ----------------------------------------------------------------------
 # A group can retire before it elects
 # ----------------------------------------------------------------------
@@ -767,15 +682,12 @@ class TestAnElectionAfterARetirementKeepsItsSequence:
     def test_a_group_that_retired_before_electing_still_elects(self, folder):
         """The `seq` the initial election used to hardcode.
 
-        A bootstrap that cannot see every evidence source registers members and
-        elects nobody. If one of those members is withdrawn in the meantime,
-        `retire` takes seq 1, and the election that finally arrives collided on
-        the UNIQUE (scope, group, scope_key, seq) -- swallowed by the seeding
-        loop's warning, leaving the group permanently winner-less.
+        Members registered without an election, one withdrawn in the
+        meantime: `retire` takes seq 1, and the election that finally arrives
+        used to collide on the UNIQUE (scope, group, scope_key, seq), leaving
+        the group permanently winner-less.
         """
-        control = selection.open_shared_control(
-            selection.shared_control_db_path_for(str(folder))
-        )
+        control = setup.workflow_control(folder, write=True)
         older = selection.ExperimentReference(
             experiment_id="exp-older", workflow_name="w", benchmark_id="b",
             created_at="2026-01-01T00:00:00Z",
@@ -963,34 +875,70 @@ class TestOverHttp:
     def test_a_decision_in_a_group_with_no_winner_yet_says_why(
         self, server, benchmark_id, folder
     ):
-        """`NoCurrentSelection`, still a 409, now saying what it means.
+        """`NoCurrentSelection`, still a 409, saying what it means.
 
-        The group is winner-less the ordinary way: this workflow's own history
-        cannot be read, so registration withholds the election.
+        The group is winner-less the way a pre-existing experiment's is: it
+        was recorded before contests lived in the live DB and never enrolled.
         """
-        default_db = state_paths.observability_db(str(folder))
-        Path(default_db).parent.mkdir(parents=True, exist_ok=True)
-        Path(default_db).write_bytes(b"this is not a database")
-        first = _create_over_http(server, benchmark_id)
-        second = _create_over_http(server, benchmark_id)
+        store = obs.ObservabilityStore(state_paths.observability_db(str(folder)))
+        store.create_experiment(
+            "exp-older", "recorded before", declared_tasks=1, declared_attempts=1,
+            workflow_name=setup.workflow_name_for(folder),
+            benchmark_id=benchmark_id, benchmark_version="v1",
+            benchmark_digest_sha256="a" * 64, initialize_winner=False,
+        )
 
         status, payload = _request(
-            server, f"/api/experiments/{first}/winner/decisions", "POST",
+            server, "/api/experiments/exp-older/winner/decisions", "POST",
             {**HUMAN, "decision": "promote", "expected_selection_id": "anything",
-             "candidate_experiment_id": second},
+             "candidate_experiment_id": "exp-older"},
         )
 
         assert status == 409, payload
         assert "no current winner yet" in payload["error"]
-        assert "evidence store" in payload["error"]
-        assert "retries the election" in payload["error"]
+        assert "enrols it" in payload["error"]
+
+    def test_a_promotion_over_http_enrols_and_a_read_enrols_nothing(
+        self, server, benchmark_id, folder
+    ):
+        """Explicit enrolment of a pre-existing experiment, end to end (§2.3).
+
+        Reading its winner and its runs leaves it outside the contest; the
+        promote that says "I saw no winner" is what enrols and elects it.
+        """
+        store = obs.ObservabilityStore(state_paths.observability_db(str(folder)))
+        store.create_experiment(
+            "exp-older", "recorded before", declared_tasks=1, declared_attempts=1,
+            workflow_name=setup.workflow_name_for(folder),
+            benchmark_id=benchmark_id, benchmark_version="v1",
+            benchmark_digest_sha256="a" * 64, initialize_winner=False,
+        )
+
+        status, read = _request(server, "/api/experiments/exp-older/winner")
+        assert status == 200, read
+        assert read["winner"] is None
+        assert _request(server, "/api/experiments/exp-older/winner/history")[0] == 200
+        assert control_module.rows(
+            store, "SELECT * FROM comparison_group_members"
+        ) == []
+
+        status, payload = _request(
+            server, "/api/experiments/exp-older/winner/decisions", "POST",
+            {**HUMAN, "decision": "promote", "expected_selection_id": None,
+             "candidate_experiment_id": "exp-older"},
+        )
+
+        assert status == 201, payload
+        assert _control(folder).group_for_experiment("exp-older") is not None
+        assert _request(server, "/api/experiments/exp-older/winner")[1][
+            "winner"]["experiment_id"] == "exp-older"
 
     def test_a_recorded_experiment_is_not_deletable_winner_or_not(
         self, server, benchmark_id, folder, tmp_path
     ):
         """The pre-existing reasons to refuse are untouched by the winner one."""
         recorded = setup.create_experiment(folder, benchmark_id, "v1")
-        _declare(folder, str(tmp_path / "evidence.sqlite3"), recorded)
+        _declare(folder, state_paths.observability_db(str(folder)), recorded)
         empty = _create_over_http(server, benchmark_id)
 
         detail = _request(

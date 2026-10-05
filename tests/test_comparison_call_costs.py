@@ -40,7 +40,7 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow import tracing
+from fastworkflow import state_paths, tracing
 from fastworkflow.benchmark import setup
 from fastworkflow.experiment.runner import ExperimentController
 from fastworkflow.observability import store as obs
@@ -232,6 +232,8 @@ def cost_world(tmp_path, monkeypatch):
     folder = tmp_path / "cost_workflow"
     folder.mkdir()
     (folder / "_commands").mkdir()
+    db = state_paths.observability_db(str(folder))
+    store = obs.ObservabilityStore(db)
     benchmark = setup.save_benchmark(
         folder, {"title": "Call costs", "tasks": [{"prompt": "Add a todo"}]}
     )
@@ -241,8 +243,6 @@ def cost_world(tmp_path, monkeypatch):
     experiment_id = experiment["experiment_id"]
     task_id = experiment["task_ids"][0]
 
-    db = str(tmp_path / "evidence.sqlite3")
-    store = obs.ObservabilityStore(db)
     controller = ExperimentController(
         db, store.store_identity(), external=False, workflow_folderpath=str(folder)
     )

@@ -10,7 +10,8 @@ whole reason this module exists rather than a flag on `selection.py`:
   example for distillation, not proof of correctness, and choosing it deploys
   nothing, reruns nothing, and moves no winner.
 
-The two share storage — one control sidecar, one append-only decision table —
+The two share storage — the live DB's control tables, one append-only decision
+table —
 and are kept apart by the pointer's primary key: this scope writes
 `scope_kind='task_best'` with a non-empty `scope_key`, and
 `SelectionControlStore.apply_scoped_decision` refuses the experiment scope
@@ -48,9 +49,9 @@ from typing import Any, Mapping, Optional, Sequence
 
 from fastworkflow.observability.comparison import ExecutionRef
 from fastworkflow.observability.selection import (
-    SelectionControlError,
     SelectionControlStore,
     TASK_BEST_SCOPE,
+    comparison_group_identity,
 )
 
 # The decision vocabulary of THIS scope. Deliberately not the winner's words:
@@ -167,7 +168,7 @@ def task_scope_key(experiment_id: str, task_id: str) -> str:
 class _TaskScope:
     """Everything one task's selection needs, resolved once per call."""
 
-    __slots__ = ("control", "experiment_id", "task_id", "group_id", "source_id",
+    __slots__ = ("control", "experiment_id", "task_id", "group_id",
                  "store", "store_id", "scope_key")
 
     def __init__(
@@ -183,30 +184,33 @@ class _TaskScope:
         self.experiment_id = str(experiment_id or "").strip()
         self.task_id = str(task_id or "").strip()
         self.scope_key = task_scope_key(self.experiment_id, self.task_id)
+        self.store = control.store_for(self.experiment_id)
         group = control.group_for_experiment(self.experiment_id)
+        if group is None and self.store is not None:
+            # Recorded before this build and not enrolled yet: the group it
+            # derives, which the first scoped decision enrols it into (§2.3).
+            recorded = self.store.get_experiment(self.experiment_id)
+            group = None if recorded is None else comparison_group_identity(recorded)
         if group is None:
             raise TaskBestUnavailable(
                 f"experiment {self.experiment_id!r} is not registered in this "
-                "control store; register it before selecting a best run so the "
-                "selection lands in the contest the experiment belongs to"
+                "workflow's contest; register it before selecting a best run so "
+                "the selection lands in the contest the experiment belongs to"
             )
         self.group_id = str(group["group_id"])
-        self.source_id = control.source_for_experiment(self.experiment_id)
-        try:
-            self.store = control.store_for_source(self.source_id)
-        except SelectionControlError as exc:
-            raise TaskBestUnavailable(str(exc)) from exc
         if self.store is None and require_store:
             raise TaskBestUnavailable(
-                f"no evidence store was supplied for source {self.source_id!r}; "
-                "the attempts of this task cannot be read, so none of them can "
-                "be verified as a finished attempt of it"
+                "this workflow has no live evidence database; the attempts of "
+                "this task cannot be read, so none of them can be verified as a "
+                "finished attempt of it"
             )
         # `ExecutionRef.store_id` names the store a reader will open this turn
-        # through. The control's source id IS that name in a shared workspace;
-        # an embedder whose reader keys stores differently overrides it, and
-        # then its own refs and its own reader agree.
-        self.store_id = store_id or self.source_id or "primary"
+        # through: the store's own identity. An embedder whose reader keys
+        # stores differently overrides it, and then its own refs and its own
+        # reader agree.
+        self.store_id = store_id or (
+            None if self.store is None else self.store.store_identity()
+        ) or "primary"
 
     def attempt_rows(self) -> list[dict[str, Any]]:
         if self.store is None:
@@ -305,7 +309,6 @@ def project_attempt(
         "experiment_id": scope.experiment_id,
         "task_id": scope.task_id,
         "attempt": attempt,
-        "source_id": scope.source_id,
         "store_id": scope.store_id,
         "channel_id": row.get("channel_id"),
         "conversation_id": row.get("conversation_id"),
@@ -438,7 +441,6 @@ def select_task_attempts(
         "experiment_id": scope.experiment_id,
         "task_id": scope.task_id,
         "group_id": scope.group_id,
-        "source_id": scope.source_id,
         "store_id": scope.store_id,
         "scope_key": scope.scope_key,
         "evidence_readable": scope.store is not None,
@@ -517,7 +519,6 @@ def best_run(
         "experiment_id": str(pointer["experiment_id"]),
         "task_id": None if pointer["task_id"] is None else str(pointer["task_id"]),
         "attempt": attempt,
-        "source_id": scope.source_id,
         "selection_id": str(pointer["selection_id"]),
         "decision": str(pointer["decision"]),
         "decision_seq": int(pointer["decision_seq"]),
@@ -588,7 +589,6 @@ def task_run_summary(
         "experiment_id": scope.experiment_id,
         "task_id": scope.task_id,
         "group_id": scope.group_id,
-        "source_id": scope.source_id,
         "store_id": scope.store_id,
         "scope_key": scope.scope_key,
         "evidence_readable": scope.store is not None,

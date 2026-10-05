@@ -53,6 +53,8 @@ from pydantic import BaseModel, ConfigDict
 
 import fastworkflow
 from fastworkflow.observability import capture_policy as capture_policy_module
+from fastworkflow.observability import control
+from fastworkflow.observability.feedback import human_feedback_row
 from fastworkflow import agent_runtime, runtime_manifest, state_paths, tracing
 from fastworkflow.utils.logging import logger
 
@@ -297,26 +299,6 @@ FEEDBACK_COMMENT_MAX_CHARS = 100_000
 # choice. Comments written before the columns existed read back with
 # `category`/`subcategory` of None and are shown as unclassified, text
 # untouched.
-
-
-def _human_feedback_row(row: Mapping[str, Any]) -> dict[str, Any]:
-    """One stored comment in wire shape."""
-    value = dict(row)
-    value["span_ids"] = json.loads(value.pop("span_ids_json"))
-    raw_anchors = value.pop("anchors_json", None)
-    anchors: Any = None
-    if isinstance(raw_anchors, str) and raw_anchors:
-        try:
-            anchors = json.loads(raw_anchors)
-        except ValueError:
-            anchors = None
-    value["anchors"] = anchors
-    paired = anchors.get("paired") if isinstance(anchors, Mapping) else None
-    value["paired"] = paired
-    value["pair_key"] = (
-        anchors.get("pair_key") if isinstance(anchors, Mapping) else None
-    )
-    return value
 
 # Single source: the policy engine's own version (fix-49m.3 wiring).
 CAPTURE_POLICY_VERSION = capture_policy_module.CAPTURE_POLICY_VERSION
@@ -1836,6 +1818,7 @@ class ObservabilityStore:
             conn.execute("PRAGMA synchronous=NORMAL")
             for statement in _SCHEMA_STATEMENTS:
                 conn.execute(statement)
+            control.ensure(conn)
             if found < SCHEMA_VERSION:
                 # Reached only on a fresh (table-less) file: stamp it.
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -2968,7 +2951,7 @@ class ObservabilityStore:
                 "ORDER BY feedback_id",
                 (turn_key,),
             ).fetchall()
-        return [_human_feedback_row(row) for row in rows]
+        return [human_feedback_row(row) for row in rows]
 
     def list_task_feedback(
         self, *, experiment_id: str, task_id: str
@@ -3004,7 +2987,7 @@ class ObservabilityStore:
                 "ORDER BY hf.created_at, hf.feedback_id",
                 (experiment_id, task_id, experiment_id, task_id),
             ).fetchall()
-        return [_human_feedback_row(row) for row in rows]
+        return [human_feedback_row(row) for row in rows]
 
     def add_human_feedback(self, turn_key: str, *, target_kind: str,
                            span_ids: list[str], target_label: str,
@@ -3497,7 +3480,6 @@ class ObservabilityStore:
         benchmark_version: Optional[str] = None,
         benchmark_digest_sha256: Optional[str] = None,
         initialize_winner: bool = True,
-        selection_control_db_path: Optional[str] = None,
     ) -> None:
         """Pre-register an experiment. Written BEFORE any task runs.
 
@@ -3512,21 +3494,13 @@ class ObservabilityStore:
         verdict back to `running`.
 
         `initialize_winner` (`fix-9eg.17.1`) records the experiment in its
-        comparison group afterwards, where the FIRST experiment of a group
-        becomes its current winner automatically. That write lands in a control
-        sidecar, never in this DB: evidence is what happened, a winner is a
-        judgement about it, and sealed evidence must stay byte-identical while
-        judgements about it keep being made. Registration is idempotent, so the
-        resume path above re-registers without disturbing a winner that has
-        since moved. It is deliberately AFTER the commit: a control sidecar
-        that cannot be written must not be able to fail an experiment's
-        creation. Because it is after the commit it cannot raise either —
-        `initialize_winner_for` reports every control-side problem through its
-        return value and the log, since there is nothing this method could roll
-        back and nothing the caller could retry. An experiment whose group
-        already holds older unadopted runs is registered WITHOUT becoming their
-        winner; the embedder bootstraps that group explicitly
-        (`SelectionControlStore.adopt_existing_experiments`).
+        comparison group in the same transaction, where the FIRST experiment
+        of a group becomes its current winner automatically. That write lands
+        in this DB's control tables (`control.py`), which sealed copies never
+        carry: evidence is what happened, a winner is a judgement about it, and
+        sealed evidence must stay byte-identical while judgements about it keep
+        being made. Registration is idempotent, so the resume path above
+        re-registers without disturbing a winner that has since moved.
         """
         if not experiment_id:
             raise ValueError("experiment_id is required")
@@ -3657,19 +3631,17 @@ class ObservabilityStore:
                     _utcnow_iso(),
                 ),
             )
-            conn.commit()
-            created = conn.execute(
-                "SELECT * FROM experiments WHERE experiment_id=?", (experiment_id,)
-            ).fetchone()
-        if initialize_winner and created is not None:
-            from fastworkflow.observability import selection as selection_module
+            if initialize_winner:
+                # Inline: `selection` imports this module.
+                from fastworkflow.observability import selection as selection_module
 
-            selection_module.initialize_winner_for(
-                self,
-                experiment_id,
-                control_db_path=selection_control_db_path,
-                experiment=dict(created),
-            )
+                created = conn.execute(
+                    "SELECT * FROM experiments WHERE experiment_id=?", (experiment_id,)
+                ).fetchone()
+                selection_module.SelectionControlStore(self).join_in_txn(
+                    conn, experiment_id, dict(created)
+                )
+            conn.commit()
 
     def declare_experiment_attempts(
         self,
@@ -5599,6 +5571,9 @@ class ObservabilityStore:
                     "source DB/WAL bytes changed while taking the snapshot"
                 )
             with contextlib.closing(sqlite3.connect(str(temporary))) as snapshot_conn:
+                # Judgements stay in the live DB, so no later decision, mark or
+                # comment can change the sealed file or its digest.
+                control.strip(snapshot_conn)
                 snapshot_conn.execute("VACUUM INTO ?", (str(compacted),))
             os.replace(compacted, target)
             after_compaction = {
@@ -6088,7 +6063,7 @@ class ReadOnlyObservabilityStore(ObservabilityStore):
 
     def _open_connection(self, timeout: float = 30.0) -> sqlite3.Connection:
         conn = sqlite3.connect(
-            f"file:{self.db_path}?mode=ro",
+            Path(os.path.abspath(self.db_path)).as_uri() + "?mode=ro",
             uri=True,
             timeout=timeout,
             check_same_thread=False,
@@ -6098,6 +6073,25 @@ class ReadOnlyObservabilityStore(ObservabilityStore):
 
     def _connect(self, timeout: float = 30.0) -> "_ClosingConnection":
         return _ClosingConnection(self._open_connection(timeout=timeout))
+
+
+def open_live_store(db_path: str, *, write: bool = False) -> Optional[ObservabilityStore]:
+    """A workflow's live DB for a control read or write, never creating it.
+
+    A read gets the read-only store, or None when the file is absent — every
+    control read then answers empty. A write gets a `migrate=False` store, so a
+    click never rewrites the capture-regime diagnostic, and an absent file
+    refuses with `control.ControlUnavailable` (design §2.1).
+    """
+    if not os.path.isfile(db_path):
+        if write:
+            raise control.ControlUnavailable(
+                f"there is no live evidence database at {db_path}"
+            )
+        return None
+    if write:
+        return ObservabilityStore.open_for_annotation(db_path)
+    return ReadOnlyObservabilityStore(db_path)
 
 
 # ----------------------------------------------------------------------

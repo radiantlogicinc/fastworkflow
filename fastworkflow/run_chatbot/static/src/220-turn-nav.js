@@ -258,9 +258,9 @@ function renderFeedback(parent, node) {
       history.appendChild(renderFeedbackHistoryRow(row));
     });
     /* Read-only evidence is not read-only feedback. When the server answers
-       `annotated`, the comment is recorded in the annotation sidecar beside
-       the archive (fix-9eg.19.1) and the evidence file is not touched, so the
-       composer stays open on a sealed or older store. */
+       `annotated`, the comment is recorded in the workflow's live database,
+       keyed by the archive's digest (fix-9eg.19.1), and the evidence file is
+       not touched, so the composer stays open on a sealed store. */
     var recordable = !data.read_only || !!data.annotated;
     composer.hidden = save.hidden = head.hidden = !recordable;
     save.disabled = !recordable;

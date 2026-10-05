@@ -12,7 +12,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import sqlite3
 import subprocess
 import threading
@@ -24,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from fastworkflow.observability import feedback as fb
-from fastworkflow.observability import feedback_sidecar
+from fastworkflow.observability import control
 from fastworkflow.observability import store as obs
 from fastworkflow.observability.comparison import ExecutionRef, review_pair_key
 from fastworkflow.run_chatbot import server as run_chatbot_server
@@ -740,7 +739,8 @@ def read_only_copy(tmp_path):
     """A current-schema store this build cannot write to.
 
     Its notes are recorded first; then the file is closed out of WAL and made
-    read-only, which is what sends a new comment to the annotation sidecar.
+    read-only. As a live DB that refuses a new comment; as a sealed archive's
+    bytes it is what `sealed_turn_comments` rows are keyed by.
     """
     path = tmp_path / "read_only.sqlite3"
     store = obs.ObservabilityStore(str(path))
@@ -814,23 +814,21 @@ def _http(server, path, method="GET", body=None):
         return response.status, json.loads(response.read())
 
 
-def test_the_chatbot_records_a_note_beside_a_read_only_store_without_touching_it(
+def test_a_read_only_live_db_refuses_a_note_and_is_left_untouched(
     read_only_copy,
 ):
-    """The whole of fix-9eg.19.1 on evidence this build must not write to.
+    """A live DB this build cannot write is refused, not worked around.
 
-    Refusing the comment was the wrong answer: it goes to the annotation
-    sidecar beside the evidence, the evidence file is byte-identical
-    afterwards, and the reads — the turn's notes and the consolidated task
-    view — return the new note and the recorded ones as one list,
-    deduplicated by stable identity.
+    Comments on live turns live in the live DB's `human_feedback`; there is
+    no second file to put one in instead. So the write is a 409 saying why,
+    the reads still answer with what was recorded, and the file is
+    byte-identical afterwards with nothing new beside it.
     """
     rows = _recorded_rows(read_only_copy)
     turn_key = rows[0]["turn_key"]
     encoded = urllib.parse.quote(turn_key, safe="")
     before = hashlib.sha256(read_only_copy.read_bytes()).hexdigest()
-    sidecar = Path(feedback_sidecar.feedback_db_path_for(str(read_only_copy)))
-    assert not sidecar.exists()
+    directory = sorted(path.name for path in read_only_copy.parent.iterdir())
     server, thread = _serving(read_only_copy)
     try:
         status, payload = _http(
@@ -840,62 +838,51 @@ def test_the_chatbot_records_a_note_beside_a_read_only_store_without_touching_it
         assert [row["comment"] for row in payload["feedback"]] == [
             row["comment"] for row in rows if row["turn_key"] == turn_key
         ]
-        # Reading does not create the sidecar.
-        assert not sidecar.exists()
-        status, written = _http(
-            server, f"/post_feedback?turn_key={encoded}", "POST",
-            {
-                "target_kind": "turn", "span_ids": [], "target_label": "Turn",
-                "comment": "recorded today, about evidence it cannot write",
-                "provenance": "human",
-                "category": "recommendations", "subcategory": "what_to_do",
-            },
-        )
-        assert status == 201, written
-        new = [
-            row for row in written["feedback"]
-            if row["comment"] == "recorded today, about evidence it cannot write"
-        ]
-        assert len(new) == 1
-        assert new[0]["category"] == "recommendations" and new[0]["classified"]
-        assert new[0]["feedback_uid"].startswith("fb-")
-        # The recorded comments are still there, in one list.
-        assert len(written["feedback"]) == len(payload["feedback"]) + 1
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            _http(
+                server, f"/post_feedback?turn_key={encoded}", "POST",
+                {
+                    "target_kind": "turn", "span_ids": [], "target_label": "Turn",
+                    "comment": "recorded today, about evidence it cannot write",
+                    "provenance": "human",
+                    "category": "recommendations", "subcategory": "what_to_do",
+                },
+            )
+        assert caught.value.code == 409
         status, task = _http(
             server, "/api/task-feedback?experiment=exp-recorded&task=task-recorded"
         )
         assert status == 200
-        assert task["total"] == len(RECORDED_NOTES) + 1
-        assert len({row["feedback_uid"] or row["feedback_id"]
-                    for row in task["feedback"]}) == len(task["feedback"])
+        assert task["total"] == len(RECORDED_NOTES)
     finally:
         server.shutdown()
         thread.join(timeout=5)
     assert hashlib.sha256(read_only_copy.read_bytes()).hexdigest() == before
-    assert sidecar.exists()
-    with sqlite3.connect(f"file:{read_only_copy}?mode=ro", uri=True) as evidence:
-        assert evidence.execute(
-            "SELECT COUNT(*) FROM human_feedback"
-        ).fetchone()[0] == len(RECORDED_NOTES)
+    assert sorted(path.name for path in read_only_copy.parent.iterdir()) == directory
 
 
-def test_a_recorded_note_is_append_only_even_in_the_sidecar(read_only_copy):
+def _sealed_note(evidence, live, *, comment="a note about sealed evidence"):
+    sha = hashlib.sha256(Path(evidence.db_path).read_bytes()).hexdigest()
+    return control.SealedEvidence(evidence, live, sha).add_human_feedback(
+        "recorded-t1", target_kind="turn", span_ids=[], target_label="Turn",
+        provenance="human", comment=comment,
+        category="observations_analysis", subcategory="observation",
+    ), sha
+
+
+def test_a_note_about_sealed_evidence_is_append_only_in_the_live_db(
+    read_only_copy, tmp_path
+):
     """A comment is somebody's statement; editing one in place would leave no
     trace that it had said something else."""
-    evidence = obs.ReadOnlyObservabilityStore(str(read_only_copy))
-    annotated = feedback_sidecar.AnnotatedEvidence.for_writing(evidence)
-    annotated.add_human_feedback(
-        "recorded-t1", target_kind="turn", span_ids=[], target_label="Turn",
-        provenance="human", comment="a note about read-only evidence",
-        category="observations_analysis", subcategory="observation",
-    )
-    path = feedback_sidecar.feedback_db_path_for(str(read_only_copy))
-    connection = sqlite3.connect(path)
+    live = obs.ObservabilityStore(str(tmp_path / "live.sqlite3"))
+    _sealed_note(obs.ReadOnlyObservabilityStore(str(read_only_copy)), live)
+    connection = sqlite3.connect(live.db_path)
     try:
         with pytest.raises(sqlite3.IntegrityError):
-            connection.execute("UPDATE feedback_notes SET comment='edited'")
+            connection.execute("UPDATE sealed_turn_comments SET comment='edited'")
         with pytest.raises(sqlite3.IntegrityError):
-            connection.execute("DELETE FROM feedback_notes")
+            connection.execute("DELETE FROM sealed_turn_comments")
     finally:
         connection.close()
 
@@ -950,106 +937,85 @@ def test_a_paired_side_may_name_its_anchored_turn_unambiguously(
     assert status == 400 and "anchored to" in error["error"]
 
 
-def test_reading_feedback_never_brings_a_sidecar_into_existence(read_only_copy):
+def test_reading_feedback_brings_nothing_into_existence(read_only_copy):
     """A read creates nothing beside somebody's evidence.
 
     Listing a turn's comments, or a whole task's, on a store nobody has
-    annotated must leave the directory exactly as it found it. The earlier
-    wrapper opened the sidecar for writing on every read, so browsing a sealed
-    archive stamped a control file next to it — one that then had to be
-    explained to whoever verified the archive's directory.
+    annotated must leave the directory exactly as it found it. An earlier
+    wrapper opened a control file for writing on every read, so browsing a
+    sealed archive stamped one next to it — one that then had to be explained
+    to whoever verified the archive's directory.
     """
     directory = read_only_copy.parent
     before = sorted(path.name for path in directory.iterdir())
     evidence = obs.ReadOnlyObservabilityStore(str(read_only_copy))
-    reader = feedback_sidecar.reader_for(evidence)
-    assert reader is evidence, "with no sidecar there is nothing to merge"
-    assert reader.list_human_feedback("recorded-t1")
+    sealed = control.SealedEvidence(evidence, None, "0" * 64)
+    assert sealed.list_human_feedback("recorded-t1")
     assert fb.consolidate_task_feedback(
-        {"recorded": reader}, experiment_id="exp-recorded", task_id="task-recorded"
+        {"recorded": sealed}, experiment_id="exp-recorded", task_id="task-recorded"
     ).total == len(RECORDED_NOTES)
     assert sorted(path.name for path in directory.iterdir()) == before
 
 
-def test_an_existing_sidecar_is_read_without_being_written_to(read_only_copy):
-    """The merged read opens the control file read-only.
+def test_a_sealed_note_reads_back_merged_without_writing(read_only_copy, tmp_path):
+    """The merged read opens the live DB read-only.
 
-    Checked by byte digest rather than by inspection: a reader that stamps a
+    Checked by row digest rather than by inspection: a reader that stamps a
     schema version, a journal or an identity into the file it is reading is
     writing, whatever it calls itself.
     """
     evidence = obs.ReadOnlyObservabilityStore(str(read_only_copy))
-    feedback_sidecar.AnnotatedEvidence.for_writing(evidence).add_human_feedback(
-        "recorded-t1", target_kind="turn", span_ids=[], target_label="Turn",
-        provenance="human", comment="a note about read-only evidence",
-        category="observations_analysis", subcategory="observation",
+    live_path = str(tmp_path / "live.sqlite3")
+    _note, sha = _sealed_note(evidence, obs.ObservabilityStore(live_path))
+    before = _row_digest(live_path)
+    reader = control.SealedEvidence(
+        evidence, obs.ReadOnlyObservabilityStore(live_path), sha
     )
-    path = Path(feedback_sidecar.feedback_db_path_for(str(read_only_copy)))
-    before = hashlib.sha256(path.read_bytes()).hexdigest()
-    directory = sorted(item.name for item in path.parent.iterdir())
-    reader = feedback_sidecar.reader_for(evidence)
-    assert isinstance(reader, feedback_sidecar.AnnotatedEvidence)
-    assert reader.sidecar.read_only is True
     rows = reader.list_human_feedback("recorded-t1")
-    assert [row["comment"] for row in rows][-1] == "a note about read-only evidence"
+    assert [row["comment"] for row in rows][-1] == "a note about sealed evidence"
     assert len(rows) == 1 + sum(
         1 for index in range(len(RECORDED_NOTES)) if (index % 3) + 1 == 1
     )
-    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
-    assert sorted(item.name for item in path.parent.iterdir()) == directory
+    assert fb.consolidate_task_feedback(
+        {"sealed": reader}, experiment_id="exp-recorded", task_id="task-recorded"
+    ).total == len(RECORDED_NOTES) + 1
+    # Another archive's sha reads none of it.
+    assert len(control.SealedEvidence(
+        evidence, obs.ReadOnlyObservabilityStore(live_path), "f" * 64
+    ).list_human_feedback("recorded-t1")) == len(rows) - 1
+    assert _row_digest(live_path) == before
     # And it refuses to become a writer behind the caller's back.
-    with pytest.raises(feedback_sidecar.FeedbackSidecarError):
+    with pytest.raises(sqlite3.OperationalError):
         reader.add_human_feedback(
             "recorded-t1", target_kind="turn", span_ids=[], target_label="Turn",
             provenance="human", comment="not through a read handle",
             category="conclusions", subcategory="what_went_wrong",
         )
-    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+    assert _row_digest(live_path) == before
 
 
-@pytest.mark.parametrize("damage", ["version", "identity", "not_a_database"])
-def test_a_sidecar_this_build_does_not_understand_is_refused_untouched(
-    read_only_copy, damage
-):
-    """Refused before any DDL, with its bytes exactly as they were.
-
-    Running CREATE TABLE first and checking the version afterwards would
-    "repair" a file this build has already decided it cannot read — and the
-    repair is indistinguishable, afterwards, from the file having been fine.
-    """
+def test_a_sealed_note_with_no_live_db_is_refused(read_only_copy):
     evidence = obs.ReadOnlyObservabilityStore(str(read_only_copy))
-    path = Path(feedback_sidecar.feedback_db_path_for(str(read_only_copy)))
-    if damage == "not_a_database":
-        path.write_bytes(b"this is not sqlite")
-    else:
-        feedback_sidecar.AnnotatedEvidence.for_writing(evidence)
-        connection = sqlite3.connect(path)
-        try:
-            if damage == "version":
-                connection.execute(
-                    "UPDATE meta SET value='99' WHERE key='schema_version'"
-                )
-            else:
-                connection.execute(
-                    "UPDATE meta SET value='someone-elses-store' "
-                    "WHERE key='evidence_store_identity'"
-                )
-            connection.commit()
-        finally:
-            connection.close()
-    before = hashlib.sha256(path.read_bytes()).hexdigest()
-    with pytest.raises(feedback_sidecar.FeedbackSidecarError):
-        feedback_sidecar.reader_for(evidence)
-    with pytest.raises(feedback_sidecar.FeedbackSidecarError):
-        feedback_sidecar.AnnotatedEvidence.for_writing(evidence)
-    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+
+    with pytest.raises(control.ControlUnavailable, match="live database"):
+        _sealed_note(evidence, None)
 
 
-def test_the_http_reads_create_no_sidecar_and_report_an_unreadable_one(
-    read_only_copy,
-):
-    """The same two properties over real HTTP, where it actually matters."""
-    sidecar = Path(feedback_sidecar.feedback_db_path_for(str(read_only_copy)))
+def _row_digest(path):
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return hashlib.sha256(json.dumps([
+            list(row) for row in connection.execute(
+                "SELECT * FROM sealed_turn_comments ORDER BY feedback_id"
+            )
+        ]).encode()).hexdigest()
+    finally:
+        connection.close()
+
+
+def test_the_http_reads_create_nothing(read_only_copy):
+    """The same property over real HTTP, where it actually matters."""
+    directory = sorted(path.name for path in read_only_copy.parent.iterdir())
     encoded = urllib.parse.quote("recorded-t1", safe="")
     server, thread = _serving(read_only_copy)
     try:
@@ -1057,28 +1023,7 @@ def test_the_http_reads_create_no_sidecar_and_report_an_unreadable_one(
         assert _http(
             server, "/api/task-feedback?experiment=exp-recorded&task=task-recorded"
         )[0] == 200
-        assert not sidecar.exists(), "a GET must not create a control file"
-        sidecar.write_bytes(b"this is not sqlite")
-        before = hashlib.sha256(sidecar.read_bytes()).hexdigest()
-        with pytest.raises(urllib.error.HTTPError) as caught:
-            _http(server, f"/api/feedback-notes?turn_key={encoded}")
-        assert caught.value.code == 409
-        assert hashlib.sha256(sidecar.read_bytes()).hexdigest() == before
     finally:
         server.shutdown()
         thread.join(timeout=5)
-
-
-def test_a_sidecar_refuses_to_answer_about_a_different_store(
-    read_only_copy, tmp_path
-):
-    """Bound to the evidence it was opened against, so a control file carried
-    to another store is refused rather than reporting somebody else's runs."""
-    evidence = obs.ReadOnlyObservabilityStore(str(read_only_copy))
-    feedback_sidecar.AnnotatedEvidence.for_writing(evidence)
-    carried = tmp_path / "carried.feedback.sqlite3"
-    shutil.copyfile(feedback_sidecar.feedback_db_path_for(str(read_only_copy)), carried)
-    with pytest.raises(feedback_sidecar.FeedbackSidecarError):
-        feedback_sidecar.FeedbackAnnotationStore(
-            str(carried), evidence_store_identity="some-other-store"
-        )
+    assert sorted(path.name for path in read_only_copy.parent.iterdir()) == directory

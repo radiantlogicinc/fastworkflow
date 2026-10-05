@@ -52,7 +52,7 @@ import pytest
 
 import fastworkflow
 from fastworkflow import TurnStatus, tracing
-from fastworkflow.observability import feedback, feedback_sidecar
+from fastworkflow.observability import control, feedback
 from fastworkflow.observability import store as obs
 from fastworkflow.observability.capture_policy import (
     CaptureFieldPolicy,
@@ -589,20 +589,23 @@ class TestFeedback:
         assert stored["pair_key"] == pair_key
         assert left_row is not None
 
-    def test_the_sidecar_scrubs_its_anchors_the_same_way(
+    def test_a_sealed_turn_comment_scrubs_its_anchors_the_same_way(
         self, db_path, tmp_path, planted_credentials
     ):
         """The second writer is the one nobody remembers to check.
 
-        A note recorded against sealed or v6 evidence takes a different code
-        path into a different file, and the scrub has to be on both or the
+        A note recorded against sealed evidence takes a different code path
+        into a different table, and the scrub has to be on both or the
         redaction guarantee depends on which store happened to be writable.
         """
         store = obs.ObservabilityStore(db_path)
         turn_key = _feedback_turn(db_path)
         assert store.get_turn(turn_key) is not None
         evidence = obs.ReadOnlyObservabilityStore(db_path)
-        annotated = feedback_sidecar.AnnotatedEvidence.for_writing(evidence)
+        live_path = str(tmp_path / "live.sqlite3")
+        annotated = control.SealedEvidence(
+            evidence, obs.ObservabilityStore(live_path), "0" * 64
+        )
         annotated.add_human_feedback(
             turn_key, target_kind="turn", span_ids=[],
             target_label=f"Turn {SK_TOKEN}", provenance="human",
@@ -610,8 +613,7 @@ class TestFeedback:
             category="observations_analysis", subcategory="observation",
         )
 
-        sidecar_path = feedback_sidecar.feedback_db_path_for(db_path)
-        row = _rows(sidecar_path, "SELECT * FROM feedback_notes")[0]
+        row = _rows(live_path, "SELECT * FROM sealed_turn_comments")[0]
         whole = "\n".join(str(value) for value in row.values())
         assert SK_TOKEN not in whole and ENV_SECRET not in whole
         assert REDACTED in row["anchors_json"]

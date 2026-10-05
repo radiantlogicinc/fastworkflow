@@ -1,8 +1,8 @@
 """Best run for one task within one experiment (`fix-9eg.17.4`).
 
 Integration tests against a real `ObservabilityStore`, real attempt rows
-written through the real `ExperimentController`, and the real shared selection
-control. No Mock fixtures, per `.cursor/rules/testing_rules.mdc`. Nothing here
+written through the real `ExperimentController`, and the real control tables
+of the workflow's live DB. No Mock fixtures, per `.cursor/rules/testing_rules.mdc`. Nothing here
 runs a model: the attempts are recorded evidence, written the way a runner
 writes it.
 
@@ -20,6 +20,7 @@ import os
 
 import pytest
 
+from fastworkflow import state_paths
 from fastworkflow.benchmark import setup
 from fastworkflow.experiment.runner import ExperimentController
 from fastworkflow.observability import best_run, selection
@@ -35,6 +36,7 @@ ATTEMPTS = 3
 def folder(tmp_path):
     wf = tmp_path / "my_workflow"
     wf.mkdir()
+    obs.ObservabilityStore(state_paths.observability_db(str(wf)))
     return wf
 
 
@@ -53,7 +55,7 @@ def world(folder, tmp_path):
     )
     experiment_id = record["experiment_id"]
     task_id = record["task_ids"][0]
-    db_path = str(tmp_path / "evidence.sqlite3")
+    db_path = state_paths.observability_db(str(folder))
     store = obs.ObservabilityStore(db_path)
     controller = ExperimentController(
         db_path, store.store_identity(), external=False, workflow_folderpath=str(folder)
@@ -104,14 +106,13 @@ def world(folder, tmp_path):
         execution_status="failed",
     )
     # Attempt 3 stays open on purpose: started, turns written, never finished.
-    control = setup.open_workflow_control(folder)
+    control = setup.workflow_control(folder, write=True)
     return {
         "folder": folder,
         "control": control,
         "store": store,
         "experiment_id": experiment_id,
         "task_id": task_id,
-        "source_id": store.store_identity(),
     }
 
 
@@ -215,7 +216,7 @@ def long_attempt(folder, tmp_path):
     )
     record = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
     experiment_id, task_id = record["experiment_id"], record["task_ids"][0]
-    db_path = str(tmp_path / "long.sqlite3")
+    db_path = state_paths.observability_db(str(folder))
     store = obs.ObservabilityStore(db_path)
     controller = ExperimentController(
         db_path, store.store_identity(), external=False, workflow_folderpath=str(folder)
@@ -249,7 +250,7 @@ def long_attempt(folder, tmp_path):
         experiment_id, task_id, 1, outcome="pass", outcome_source="derived"
     )
     return {
-        "control": setup.open_workflow_control(folder),
+        "control": setup.workflow_control(folder, write=True),
         "experiment_id": experiment_id,
         "task_id": task_id,
         "turns": turns,
@@ -320,7 +321,7 @@ def no_turns(folder, tmp_path):
     )
     record = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
     experiment_id, task_id = record["experiment_id"], record["task_ids"][0]
-    db_path = str(tmp_path / "empty.sqlite3")
+    db_path = state_paths.observability_db(str(folder))
     store = obs.ObservabilityStore(db_path)
     controller = ExperimentController(
         db_path, store.store_identity(), external=False, workflow_folderpath=str(folder)
@@ -338,7 +339,7 @@ def no_turns(folder, tmp_path):
         experiment_id, task_id, 1, outcome="pass", outcome_source="derived"
     )
     return {
-        "control": setup.open_workflow_control(folder),
+        "control": setup.workflow_control(folder, write=True),
         "experiment_id": experiment_id,
         "task_id": task_id,
     }
@@ -623,7 +624,7 @@ class TestRefusals:
         )
         record = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
         task_a, task_b = record["task_ids"]
-        db_path = str(tmp_path / "evidence.sqlite3")
+        db_path = state_paths.observability_db(str(folder))
         store = obs.ObservabilityStore(db_path)
         controller = ExperimentController(
             db_path,
@@ -669,7 +670,7 @@ class TestRefusals:
                 record["experiment_id"], task_id, attempt,
                 outcome="pass", outcome_source="derived",
             )
-        control = setup.open_workflow_control(folder)
+        control = setup.workflow_control(folder, write=True)
 
         with pytest.raises(best_run.AttemptNotSelectable):
             best_run.select_best_run(
@@ -881,39 +882,24 @@ class TestReferencesNeverRetarget:
 
 
 class TestEvidenceAndControl:
-    def test_no_selection_row_lands_in_the_evidence_database(self, world):
+    def test_the_selection_lands_in_the_live_db_and_no_other_file(self, world):
+        state_dir = os.path.dirname(world["store"].db_path)
         _select(world, 1)
 
+        assert [
+            name for name in sorted(os.listdir(state_dir)) if name.endswith(".sqlite3")
+        ] == ["observability.sqlite3"]
         with world["store"]._connect() as conn:
-            names = {
-                row[0]
-                for row in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                )
-            }
-        assert not {n for n in names if "selection" in n}
+            assert conn.execute(
+                "SELECT COUNT(*) FROM selection_pointers WHERE scope_kind=?",
+                (selection.TASK_BEST_SCOPE,),
+            ).fetchone()[0] == 1
 
-    def test_read_only_inspection_creates_no_control_database(self, tmp_path):
+    def test_read_only_inspection_creates_no_live_database(self, tmp_path):
         """Showing a task that nobody has judged must leave the disk alone."""
         wf = tmp_path / "untouched_workflow"
         wf.mkdir()
 
-        with pytest.raises(selection.SelectionControlUnavailable):
-            setup.open_workflow_control(wf, create=False)
+        assert setup.workflow_control(wf).list_groups() == []
 
-        assert not os.path.exists(setup.workflow_control_db_path(wf))
-
-    def test_a_selection_whose_evidence_is_unreadable_is_still_a_fact(self, world):
-        """The decision happened; what the run did is simply unknown now."""
-        _select(world, 1)
-        detached = selection.open_shared_control(
-            world["control"].control_db_path, sources={}
-        )
-
-        current = best_run.best_run(
-            detached, world["experiment_id"], world["task_id"]
-        )
-
-        assert current["attempt"] == 1
-        assert current["attempt_resolved"] is False
-        assert current["run"] is None
+        assert not os.path.exists(state_paths.observability_db(str(wf)))

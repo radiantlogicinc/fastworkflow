@@ -110,21 +110,20 @@ def _manifest(
     *,
     experiments: list[dict] | None = None,
     projected_attempts: list[dict] | None = None,
+    workflow_folderpath: str | None = None,
 ) -> Path:
     path = root / "workspace.json"
-    path.write_text(
-        json.dumps(
-            {
-                "schema": WORKSPACE_SCHEMA,
-                "workspace_id": "workspace-1",
-                "label": "Historical runs",
-                "stores": stores,
-                "experiments": experiments or [],
-                "projected_attempts": projected_attempts or [],
-            }
-        ),
-        encoding="utf-8",
-    )
+    manifest = {
+        "schema": WORKSPACE_SCHEMA,
+        "workspace_id": "workspace-1",
+        "label": "Historical runs",
+        "stores": stores,
+        "experiments": experiments or [],
+        "projected_attempts": projected_attempts or [],
+    }
+    if workflow_folderpath is not None:
+        manifest["workflow_folderpath"] = workflow_folderpath
+    path.write_text(json.dumps(manifest), encoding="utf-8")
     return path
 
 

@@ -7,8 +7,8 @@ Two halves, and the split is deliberate.
 The Python half drives the SAME HTTP surface the page calls, over a real
 socket, through the real `ChatbotServer`: real workflow folders, real benchmark
 manifests, real `ObservabilityStore` databases, attempts written through the
-real `ExperimentController`, the real shared selection control, the real
-pair-review sidecar and the real feedback writer. It exists because the
+real `ExperimentController`, the real control tables of the live DB and the
+real feedback writer. It exists because the
 sequence the owner asked to be proven -- a repeated task, a Reference that is
 not a Best run, a best-run decision, a comparison, a categorized comment on
 the pair, that comment appearing under the task's Feedback, and then a
@@ -42,7 +42,7 @@ import pytest
 from fastworkflow import state_paths
 from fastworkflow.benchmark import setup
 from fastworkflow.experiment.runner import ExperimentController
-from fastworkflow.observability import selection
+from fastworkflow.observability import control, selection
 from fastworkflow.observability import store as obs
 from fastworkflow.run_chatbot import server as run_chatbot_server
 from tests.test_chatbot_benchmarks import _request
@@ -53,7 +53,7 @@ from tests.test_selection_api import T0
 # The API worker's world is the one this page is built against: one workflow,
 # a task run four different ways in one database (completed, failed, never
 # finished, finished with no recorded turns) and a second experiment recording
-# the same task in a SECOND database. Rebuilding it here would be a second
+# the same task in the same live database. Rebuilding it here would be a second
 # fixture free to drift from the contract the routes were written against.
 #
 # Loaded as a PLUGIN rather than imported. Importing the two fixture functions
@@ -441,21 +441,21 @@ class TestComparison:
         assert set(kinds.get("left_only", [])) >= {"list_items", "complete_item"}
         assert cmp["summary"]["left_only"] >= 2 and cmp["summary"]["right_only"] >= 1
 
-    def test_the_two_sides_carry_their_own_store_so_a_link_cannot_open_the_wrong_one(
+    def test_every_anchor_carries_the_store_its_side_was_read_from(
         self, server, world
     ):
         """Why the page reads `store_id` off each reference.
 
-        The candidate's evidence is in a second database. A deep link built
-        from the experiment id alone, or served by whatever store the page is
-        currently pointed at, is how a turn key that exists in both databases
-        opens the wrong side.
+        Both experiments are recorded in the workflow's one live DB, so both
+        sides name it; a sealed archive names its own. A deep link built from
+        the experiment id alone, or served by whatever store the page is
+        currently pointed at, is how a turn key opens the wrong side.
         """
         status, cmp = _comparison(server, world, right_experiment=world["candidate_id"],
                                   right_attempt=1, view="steps")
 
         assert status == 200
-        assert cmp["left"]["ref"]["store_id"] != cmp["right"]["ref"]["store_id"]
+        assert cmp["left"]["ref"]["store_id"] == cmp["right"]["ref"]["store_id"]
         assert cmp["right"]["ref"]["experiment_id"] == world["candidate_id"]
         for row in cmp["alignment"]["rows"]:
             for side in ("left", "right"):
@@ -487,7 +487,7 @@ class TestComparison:
     def test_review_progress_and_the_comment_count_are_separate_facts(
         self, server, world
     ):
-        server.db_path = world["store_one"].db_path  # where its comments are written
+        server.db_path = world["store"].db_path  # where its comments are written
         cmp = _comparison(server, world, left_attempt=1, right_attempt=2)[1]
 
         before = _request(
@@ -578,7 +578,7 @@ def test_a_comment_written_from_a_comparison_survives_a_new_best_run(
     a selection produces a NEW pair and must not reinterpret or orphan what
     somebody already said about the old one.
     """
-    server.db_path = world["store_one"].db_path  # where its comments are written
+    server.db_path = world["store"].db_path  # where its comments are written
     runs = _request(server, _tasks(world, "/runs"))[1]
     assert runs["best_run"] is None and runs["reference"]["attempt"] == 1
 
@@ -647,7 +647,7 @@ def test_the_pair_identity_is_the_references_not_the_step(server, world):
     would be its own pair and a heavily annotated comparison would report as
     unannotated.
     """
-    server.db_path = world["store_one"].db_path  # where its comments are written
+    server.db_path = world["store"].db_path  # where its comments are written
     cmp = _comparison(server, world, left_attempt=1, right_attempt=2, view="steps")[1]
     rows = [row for row in cmp["alignment"]["rows"]
             if row["anchors"]["left"] and row["anchors"]["right"]]
@@ -669,30 +669,73 @@ def test_the_pair_identity_is_the_references_not_the_step(server, world):
     assert keys == {cmp["review_pair_key"]}
 
 
-def test_a_comment_pairing_a_side_in_another_database_is_refused(server, world):
-    """The workflow reads one live database; the candidate's is not it.
+def test_every_judgement_over_http_lands_in_the_live_db_and_no_other_file(
+    server, world
+):
+    """Selection, pair review and feedback, each written the way the page does.
 
-    A pair whose other side lives in a second live database cannot be
-    validated from here, so the comment fails closed instead of recording an
-    anchor nothing can read back.
+    Judgement state used to live in sidecar SQLite files beside the evidence;
+    it is all control tables in the workflow's one live DB now (§2), so after
+    a best run, a promotion, a reviewed pair and a comment, that DB is still
+    the only database anywhere under the state root.
     """
-    server.db_path = world["store_one"].db_path  # where its comments are written
+    server.db_path = world["store"].db_path
+    expected = _request(server, _tasks(world, "/runs"))[1]["expected_selection_id"]
+    assert _decide_best(server, world, 2, expected)[0] == 201
+    winner = _request(server, _experiments(world, "/winner"))[1]
+    status, promoted = _request(
+        server, _experiments(world, "/winner/decisions"), "POST",
+        {**HUMAN, "decision": "promote", "candidate_experiment_id": world["candidate_id"],
+         "expected_selection_id": winner["expected_selection_id"]},
+    )
+    assert status == 201, promoted
+    status, reviewed = _request(
+        server, _tasks(world, "/review-pairs"), "POST",
+        {"reviewer": "dhar", "reviewer_kind": "human", "right_attempt": 1,
+         "state": "reviewed"},
+    )
+    assert status == 201, reviewed
+    cmp = _comparison(server, world, left_attempt=1, right_attempt=2, view="steps")[1]
+    row = next(row for row in cmp["alignment"]["rows"]
+               if row["anchors"]["left"] and row["anchors"]["right"])
+    assert _comment_on_row(
+        server, world, cmp, row, comment="both runs listed the items first",
+        category="observations_analysis", subcategory="observation",
+    )[0] == 201
+
+    state_root = Path(os.environ["FASTWORKFLOW_STATE_ROOT"])
+    assert [path for path in state_root.rglob("*.sqlite3")] == [
+        Path(world["store"].db_path)
+    ]
+    assert [path.name for path in Path(world["folder"]).rglob("*.sqlite3")] == []
+    for table in ("selection_decisions", "pair_review_events", "human_feedback"):
+        assert control.rows(world["store"], f"SELECT 1 FROM {table}"), table
+
+
+def test_a_comment_pairing_two_experiments_in_the_live_db_is_recorded(
+    server, world
+):
+    """Both experiments are recorded in the workflow's one live database.
+
+    So a pair across them is validated from here like any other pair, and the
+    comment lands under the task the left side ran.
+    """
+    server.db_path = world["store"].db_path  # where its comments are written
     cmp = _comparison(server, world, right_experiment=world["candidate_id"],
                       right_attempt=1, view="steps")[1]
     row = next(row for row in cmp["alignment"]["rows"]
                if row["anchors"]["left"] and row["anchors"]["right"])
 
-    status, refused = _comment_on_row(
+    status, written = _comment_on_row(
         server, world, cmp, row,
         comment="the candidate sorted the list where this one listed it",
         category="recommendations", subcategory="what_to_do",
     )
 
-    assert status == 400
-    assert "was not authorized" in refused["error"]
-    assert not [item for item in world["store_one"].list_task_feedback(
+    assert status == 201, written
+    assert [item["pair_key"] for item in world["store"].list_task_feedback(
         experiment_id=world["experiment_id"], task_id=world["task_id"])
-        if "sorted the list" in item["comment"]]
+        if "sorted the list" in item["comment"]] == [cmp["review_pair_key"]]
 
 
 # ----------------------------------------------------------------------
@@ -812,7 +855,7 @@ def test_selection_ui_dom(server, world):
     dependency = os.environ.get("TEST_JSDOM_ROOT")
     if not dependency:
         pytest.skip("Set TEST_JSDOM_ROOT to run DOM integration with jsdom")
-    server.db_path = world["store_one"].db_path  # the experiment it opens
+    server.db_path = world["store"].db_path  # the experiment it opens
     script = Path(__file__).with_name("chatbot_selection_ui_dom.cjs")
     result = subprocess.run(
         [
@@ -910,11 +953,16 @@ def colliding_workspace(tmp_path, monkeypatch):
     with a different value, which is the shape that makes an unscoped read
     indistinguishable from a correct one. Real archives: written with the
     ordinary store API and sealed with `archive_to`, then stitched into one
-    logical experiment by a real manifest.
+    logical experiment by a real manifest. The manifest names the workflow
+    they came from, whose live DB is where comments on them are recorded.
     """
     from tests.test_observability_workspace import _manifest, _store_decl
 
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
+    folder = tmp_path / "archived_workflow"
+    folder.mkdir()
+    live_db = state_paths.observability_db(str(folder))
+    obs.ObservabilityStore(live_db)
     declarations, values = [], {}
     for store_id, attempt, answer, value in (
         ("alpha", 1, "left answer", "LEFT-ONLY-VALUE"),
@@ -947,6 +995,7 @@ def colliding_workspace(tmp_path, monkeypatch):
             # which one it expects rather than matching either.
             "identity": archive["store_identity"],
             "path": str(tmp_path / f"sealed-{store_id}.sqlite3"),
+            "sha256": archive["sha256"],
         }
 
     manifest = _manifest(
@@ -958,13 +1007,14 @@ def colliding_workspace(tmp_path, monkeypatch):
                 {"store_id": "beta", "local_experiment_id": "local"},
             ],
         }],
+        workflow_folderpath=str(folder),
     )
     srv = run_chatbot_server.ChatbotServer(port=0,
                                            workspace_manifest_path=str(manifest))
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
     yield {"server": srv, "sides": values, "turn_key": "shared-turn",
-           "root": tmp_path}
+           "root": tmp_path, "live_db": live_db}
     srv.shutdown()
     thread.join(timeout=5)
 
@@ -973,9 +1023,9 @@ def colliding_workspace(tmp_path, monkeypatch):
 def adhoc_world(tmp_path, monkeypatch):
     """A live experiment in the workflow's DEFAULT store, never registered.
 
-    Written by a real `ExperimentController` against the canonical default
-    database, which authorizes the source in the shared selection control, so
-    its attempts are listed and comparable. What it has NOT got is an authoring
+    Written by a real `ExperimentController` against the workflow's live
+    database, whose contest it joins in the same transaction, so its attempts
+    are listed and comparable. What it has NOT got is an authoring
     registration.
     """
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
@@ -1389,14 +1439,14 @@ def _archive_bytes(colliding_workspace):
     }
 
 
-def test_a_comment_about_two_sealed_archives_is_saved_beside_them(
+def test_a_comment_about_two_sealed_archives_is_saved_in_the_live_db(
     colliding_workspace
 ):
     """The whole affordance, in a real DOM, over two read-only archives.
 
     Sealed evidence is not a reason to refuse the comment -- it is a reason to
-    keep it somewhere else -- so the composer stays open, the note is filed in a
-    sidecar, and the task's Feedback view lists it exactly ONCE even though the
+    keep it somewhere else -- so the composer stays open, the note is filed in
+    the workflow's live DB, and the task's Feedback view lists it exactly ONCE even though the
     logical experiment is stitched from two stores. The archives themselves are
     hashed before and after: if either changed by a byte, or grew a `-wal`, the
     comment was appended to frozen evidence and the pass is worthless.
@@ -1428,10 +1478,14 @@ def test_a_comment_about_two_sealed_archives_is_saved_beside_them(
     unchanged = {name: digest for name, digest in after.items()
                  if name in before}
     assert unchanged == before, "the sealed archives were written to"
-    # What DID appear is a sidecar beside the archive that was commented on,
-    # and nothing that looks like an open database.
+    # Nothing appeared beside them; the comment is in the live DB, keyed by
+    # the archive it is about.
     appeared = sorted(set(after) - set(before))
-    assert appeared == ["sealed-alpha.feedback.sqlite3"], appeared
+    assert appeared == [], appeared
+    assert {row["archive_sha256"] for row in control.rows(
+        obs.ReadOnlyObservabilityStore(colliding_workspace["live_db"]),
+        "SELECT archive_sha256 FROM sealed_turn_comments",
+    )} == {colliding_workspace["sides"]["alpha"]["sha256"]}
 
 
 def _run_scope_dom(server, plan):

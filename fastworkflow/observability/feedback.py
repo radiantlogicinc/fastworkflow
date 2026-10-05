@@ -49,6 +49,7 @@ is the pair that existed when somebody wrote it.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
@@ -240,7 +241,7 @@ def normalize_note(
 ) -> dict[str, Any]:
     """Check and normalize one note's own fields, wherever it will be stored.
 
-    The evidence store and the annotation sidecar record the same row and must
+    The evidence store and `sealed_turn_comments` record the same row and must
     refuse the same things, so the rules live here once rather than in two
     writers that would drift the first time one of them was relaxed. Evidence
     questions — does the turn exist, do the spans belong to it — are NOT asked
@@ -479,6 +480,26 @@ class FeedbackAnchors:
             "paired": self.paired.as_dict() if self.paired else None,
             "pair_key": self.pair_key,
         }
+
+
+def human_feedback_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """One stored comment in wire shape."""
+    value = dict(row)
+    value["span_ids"] = json.loads(value.pop("span_ids_json"))
+    raw_anchors = value.pop("anchors_json", None)
+    anchors: Any = None
+    if isinstance(raw_anchors, str) and raw_anchors:
+        try:
+            anchors = json.loads(raw_anchors)
+        except ValueError:
+            anchors = None
+    value["anchors"] = anchors
+    paired = anchors.get("paired") if isinstance(anchors, Mapping) else None
+    value["paired"] = paired
+    value["pair_key"] = (
+        anchors.get("pair_key") if isinstance(anchors, Mapping) else None
+    )
+    return value
 
 
 def scrubbed_anchor_dict(anchors: FeedbackAnchors, scrub: Optional[Any] = None) -> dict[str, Any]:
@@ -757,9 +778,10 @@ def _sort_key(row: Mapping[str, Any]) -> tuple[str, str, str, int]:
     row came out of, then the row id: two comments written in the same second
     in two databases still have exactly one order, and paging over it cannot
     show or skip a row because the merge happened to run differently. `origin`
-    is in the key because a store whose evidence is read-only keeps its notes
-    in a sidecar (`feedback_sidecar`) whose row ids run independently of the
-    evidence file's, so the row id alone does not break every tie.
+    is in the key because comments on a sealed archive's turns are kept in the
+    live DB's `sealed_turn_comments` (`control.SealedEvidence`), whose row ids
+    run independently of the archive's, so the row id alone does not break
+    every tie.
     """
     return (
         str(row.get("created_at") or ""),

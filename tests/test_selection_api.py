@@ -4,7 +4,7 @@
 `fix-9eg.4`. Integration throughout, per `.cursor/rules/testing_rules.mdc`: a
 real workflow folder, a real benchmark manifest, real `ObservabilityStore`
 databases, attempts written through the real `ExperimentController`, real span
-rows, the real shared selection control and the real pair-review sidecar. No
+rows, and the real control tables of the workflow's live DB. No
 Mock fixtures and nothing paid -- every attempt below is recorded evidence,
 written the way a runner writes it.
 
@@ -16,7 +16,7 @@ client meets them rather than as the module imagines them.
 
 The distinction most of these tests defend is that the experiment WINNER and a
 task's BEST RUN share storage and mean different things, and that a read never
-becomes a write: a GET must not create a control file, must not elect anybody
+becomes a write: a GET must not create a database, must not elect anybody
 and must not mark anything reviewed.
 """
 
@@ -28,10 +28,11 @@ import threading
 
 import pytest
 
+from fastworkflow import state_paths
 from fastworkflow.benchmark import setup
 from fastworkflow.experiment.runner import ExperimentController
 from fastworkflow.observability import feedback as fb
-from fastworkflow.observability import best_run, comparison, pair_review, selection
+from fastworkflow.observability import best_run, comparison, control, pair_review, selection
 from fastworkflow.observability import store as obs
 from fastworkflow.run_chatbot import selection_api
 from fastworkflow.run_chatbot import server as run_chatbot_server
@@ -51,7 +52,7 @@ AGENT = {"actor": "cursor", "actor_kind": "coding_agent"}
 
 
 # ----------------------------------------------------------------------
-# One workflow, two experiments, two evidence stores
+# One workflow, two experiments, one live evidence store
 # ----------------------------------------------------------------------
 
 
@@ -134,8 +135,8 @@ def world(tmp_path, monkeypatch):
     Attempt 1 completed over two turns, attempt 2 FAILED, attempt 3 was started
     and never finished, and attempt 4 finished with no recorded turns at all.
     Those four shapes are what the selectable/comparable rules are about. A
-    second experiment records one completed attempt of the SAME task in a
-    SECOND database, which is the winner-versus-candidate shape.
+    second experiment records one completed attempt of the SAME task, which is
+    the winner-versus-candidate shape. Both live in the workflow's live DB.
     """
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
     folder = tmp_path / "roster_workflow"
@@ -145,18 +146,18 @@ def world(tmp_path, monkeypatch):
         folder, {"title": "Roster review", "tasks": [{"prompt": "Review the roster"}]}
     )
     benchmark_id = benchmark["benchmark_id"]
+    db_path = state_paths.observability_db(str(folder))
+    store = obs.ObservabilityStore(db_path)
 
     first = setup.create_experiment(folder, benchmark_id, "v1", runs_per_task=4)
     experiment_id = first["experiment_id"]
     task_id = first["task_ids"][0]
 
-    db_one = str(tmp_path / "evidence-one.sqlite3")
-    store_one = obs.ObservabilityStore(db_one)
-    controller_one = ExperimentController(
-        db_one, store_one.store_identity(), external=False,
+    controller = ExperimentController(
+        db_path, store.store_identity(), external=False,
         workflow_folderpath=str(folder),
     )
-    controller_one.create_experiment(
+    controller.create_experiment(
         experiment_id,
         first["description"],
         declared_tasks=1,
@@ -165,30 +166,24 @@ def world(tmp_path, monkeypatch):
         workflow_name=setup.workflow_name_for(folder),
     )
     _run_attempt(
-        store_one, controller_one, experiment_id, task_id, 1,
+        store, controller, experiment_id, task_id, 1,
         [["add_item", "list_items"], ["complete_item"]], outcome="pass",
     )
     _run_attempt(
-        store_one, controller_one, experiment_id, task_id, 2,
+        store, controller, experiment_id, task_id, 2,
         [["add_item", "remove_item"]], outcome="fail", execution_status="failed",
     )
     _run_attempt(
-        store_one, controller_one, experiment_id, task_id, 3,
+        store, controller, experiment_id, task_id, 3,
         [["add_item"]], finish=False,
     )
     _run_attempt(
-        store_one, controller_one, experiment_id, task_id, 4, [], outcome="pass",
+        store, controller, experiment_id, task_id, 4, [], outcome="pass",
     )
 
     second = setup.create_experiment(folder, benchmark_id, "v1", runs_per_task=1)
     candidate_id = second["experiment_id"]
-    db_two = str(tmp_path / "evidence-two.sqlite3")
-    store_two = obs.ObservabilityStore(db_two)
-    controller_two = ExperimentController(
-        db_two, store_two.store_identity(), external=False,
-        workflow_folderpath=str(folder),
-    )
-    controller_two.create_experiment(
+    controller.create_experiment(
         candidate_id,
         second["description"],
         declared_tasks=1,
@@ -197,7 +192,7 @@ def world(tmp_path, monkeypatch):
         workflow_name=setup.workflow_name_for(folder),
     )
     _run_attempt(
-        store_two, controller_two, candidate_id, task_id, 1,
+        store, controller, candidate_id, task_id, 1,
         [["add_item", "sort_items"]], outcome="pass",
     )
 
@@ -207,9 +202,7 @@ def world(tmp_path, monkeypatch):
         "experiment_id": experiment_id,
         "candidate_id": candidate_id,
         "task_id": task_id,
-        "store_one": store_one,
-        "store_two": store_two,
-        "control_path": setup.workflow_control_db_path(str(folder)),
+        "store": store,
     }
 
 
@@ -294,19 +287,18 @@ class TestWinnerRead:
         assert status == 404
         assert "exp-nobody" in payload["error"]
 
-    def test_a_workflow_with_no_control_is_not_given_one_by_a_read(self, tmp_path,
+    def test_a_workflow_with_no_live_db_is_not_given_one_by_a_read(self, tmp_path,
                                                                    monkeypatch):
         monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
         empty = tmp_path / "untouched_workflow"
         empty.mkdir()
-        control = setup.workflow_control_db_path(str(empty))
 
-        status, payload = selection_api.handle_get(
+        status, _payload = selection_api.handle_get(
             str(empty), "/api/experiments/exp-1/winner", {}
         )
 
-        assert status == 409 and payload["control_exists"] is False
-        assert not os.path.exists(control)
+        assert status == 404
+        assert not os.path.exists(state_paths.observability_db(str(empty)))
 
 
 class TestWinnerHistory:
@@ -399,13 +391,16 @@ class TestWinnerDecisions:
             "experiment_id"
         ] == world["candidate_id"]
 
-    def test_a_decision_with_no_expected_selection_is_refused(self, world):
+    def test_a_decision_that_saw_no_winner_is_stale_when_there_is_one(self, world):
+        # No `expected_selection_id` means "I read no winner"; one exists, so
+        # the decision was made against a contest that is not this one.
         status, payload = _post(
             world, _experiment(world, "/winner/decisions"),
             {**HUMAN, "decision": "keep"},
         )
 
-        assert status == 400 and "expected_selection_id" in payload["error"]
+        assert status == 409 and payload["stale"] is True
+        assert payload["current_experiment_id"] == world["experiment_id"]
 
     @pytest.mark.parametrize("decision", ["initial", "delete", "", "PROMOTE"])
     def test_only_the_three_client_decisions_are_accepted(self, world, decision):
@@ -722,14 +717,14 @@ class TestComparison:
         assert one_sided, "the two attempts ran different commands"
         assert all(row["feedback_pair_key"] is None for row in one_sided)
 
-    def test_the_winner_can_be_compared_with_a_candidate_in_another_store(self, world):
+    def test_the_winner_can_be_compared_with_a_candidate(self, world):
         payload = _get(
             world, _task(world, "/comparison"),
             right_experiment=world["candidate_id"], right_attempt=1,
         )[1]
 
         assert payload["right_run"]["experiment_id"] == world["candidate_id"]
-        assert payload["left"]["ref"]["store_id"] != payload["right"]["ref"]["store_id"]
+        assert payload["left"]["ref"]["store_id"] == payload["right"]["ref"]["store_id"]
         assert payload["right"]["readable"] is True
 
     def test_an_attempt_with_no_recorded_turns_is_explicitly_not_comparable(self, world):
@@ -791,11 +786,11 @@ def two_pass_world(tmp_path, monkeypatch):
     benchmark = setup.save_benchmark(
         folder, {"title": "Two passes", "tasks": [{"prompt": "Do it twice"}]}
     )
+    db = state_paths.observability_db(str(folder))
+    store = obs.ObservabilityStore(db)
     record = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
     experiment_id, task_id = record["experiment_id"], record["task_ids"][0]
 
-    db = str(tmp_path / "two-pass.sqlite3")
-    store = obs.ObservabilityStore(db)
     controller = ExperimentController(
         db, store.store_identity(), external=False,
         workflow_folderpath=str(folder),
@@ -980,24 +975,16 @@ class TestRecordedPasses:
 
 
 class TestPairReview:
-    def _sidecar_path(self, world):
-        from fastworkflow import state_paths
-
-        return pair_review.shared_pair_review_db_path_for(
-            state_paths.workflow_state_dir(world["folder"])
-        )
-
-    def test_reading_progress_creates_no_sidecar_and_reports_nothing_reviewed(
+    def test_reading_progress_writes_nothing_and_reports_nothing_reviewed(
         self, world
     ):
         status, payload = _get(world, _task(world, "/review-pairs"), reviewer="dhar")
 
         assert status == 200
-        assert payload["control_exists"] is False
         assert payload["progress"]["reviewed"] == 0
         assert payload["progress"]["pairs"] == len(payload["pairs"])
         assert all(row["state"]["recorded"] is False for row in payload["pairs"])
-        assert not os.path.exists(self._sidecar_path(world))
+        assert control.rows(world["store"], "SELECT * FROM pair_review_events") == []
 
     def test_the_pairs_are_the_pinned_run_against_every_comparable_other_run(
         self, world
@@ -1145,7 +1132,6 @@ class TestDuplication:
         )[1]
 
         assert payload["attempts"] == [] and payload["best_run"] is None
-        assert payload["evidence_readable"] is False
 
     @pytest.mark.parametrize("runs", [0, 101, 2.5, True, "3x"])
     def test_an_impossible_repeat_count_is_refused(self, world, runs):

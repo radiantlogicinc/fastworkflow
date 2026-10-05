@@ -496,17 +496,9 @@ class ExperimentController:
         # same setup lock; a deleted ID is refused and a bound ID is protected.
         if registration is not None:
             benchmark_setup.bind_experiment(folder, experiment_id, self.db_path, self.store_identity)
-        # Bind the evidence source for selection (`fix-9eg.17.1`/`.17.2`). The
-        # experiment may already be registered in the workflow's contest — from
-        # UI creation, before this store existed — and this is where its
-        # evidence is attached to that registration. One control file for the
-        # whole workflow: a private sidecar beside this DB would give the same
-        # experiment two winners, one of which nobody is looking at.
-        control_db_path = None
-        if folder:
-            control_db_path = benchmark_setup.bind_runner_evidence(
-                folder, self.store, self.db_path
-            )
+        # The experiment joins its contest in the store it is recorded into
+        # (`fix-9eg.17.1`), in the same transaction; one registered at UI
+        # creation is already a member there and keeps its group.
         self.store.create_experiment(
             experiment_id,
             description,
@@ -521,11 +513,6 @@ class ExperimentController:
             benchmark_digest_sha256=benchmark_digest_sha256,
             capture_profile=self.capture_profile,
             capture_policy_version=self.capture_policy_version,
-            # No workflow folder means no workflow contest to join, and the
-            # per-store sidecar stays the default. A folder we could not join
-            # records nothing rather than a second, conflicting winner.
-            initialize_winner=control_db_path is not None or not folder,
-            selection_control_db_path=control_db_path,
         )
         self.store.declare_experiment_attempts(experiment_id, declarations)
 

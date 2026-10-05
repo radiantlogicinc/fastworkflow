@@ -41,7 +41,7 @@ import pytest
 from dspy.dsp.utils.utils import dotdict
 
 import fastworkflow
-from fastworkflow import tracing
+from fastworkflow import state_paths, tracing
 from fastworkflow.benchmark import setup
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.distillation import DistillationSession, PlanningStep
@@ -1289,6 +1289,7 @@ def test_the_selection_api_serves_each_pass_its_own_recorded_answer(
     attempt, the store and the pass exactly as it does for a benchmark run.
     """
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
+    db_path = state_paths.observability_db(todo_workflow_path)
     store = obs.ObservabilityStore(db_path)
     controller = ExperimentController(
         db_path,
@@ -1404,7 +1405,7 @@ def pass_world(initialized_fastworkflow, todo_workflow_path, tmp_path, monkeypat
     trace recorded before `fix-txxy` has. The page must not render them alike.
     """
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
-    db = str(tmp_path / "evidence.sqlite3")
+    db = state_paths.observability_db(todo_workflow_path)
     store = obs.ObservabilityStore(db)
     controller = ExperimentController(
         db,

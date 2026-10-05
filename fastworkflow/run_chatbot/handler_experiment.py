@@ -153,8 +153,8 @@ class _ExperimentRoutes:
         """Winner, best-run, comparison and pair-review routes (`selection_api`).
 
         Judgements are live-workflow only. The winner of a contest and the best
-        run of a task live in the WORKFLOW's control sidecar, not in the
-        evidence; a sealed workspace carries the evidence and not that sidecar,
+        run of a task live in the WORKFLOW's live DB control tables, not in the
+        evidence; a sealed workspace carries the evidence and not those tables,
         so answering those from workspace mode would report the live machine's
         decisions as if they were the archive's.
 

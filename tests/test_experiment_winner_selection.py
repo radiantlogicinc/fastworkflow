@@ -2,7 +2,8 @@
 
 Integration tests against real SQLite stores — a real `ObservabilityStore`, a
 real `ReadOnlyObservabilityStore`, real sealed archives, and real concurrent
-writers on one file. No Mock fixtures, per `.cursor/rules/testing_rules.mdc`.
+writers on one file. The contest lives in the control tables of the live DB
+(`observability/control.py`). No Mock fixtures, per `.cursor/rules/testing_rules.mdc`.
 
 Each test names the property it pins. Several of these exist to prevent a
 *silent wrong answer* — a winner that claims success while its experiment is
@@ -22,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from fastworkflow import state_paths
+from fastworkflow.observability import control as control_module
 from fastworkflow.observability import selection
 from fastworkflow.observability import store as obs
 
@@ -51,7 +53,7 @@ def store(db_path) -> obs.ObservabilityStore:
 
 @pytest.fixture
 def control(store) -> selection.SelectionControlStore:
-    return selection.SelectionControlStore.for_evidence(store)
+    return selection.SelectionControlStore(store)
 
 
 PIN = {
@@ -73,10 +75,10 @@ def _create(store, experiment_id, *, workflow_name="my_workflow", **pin):
 
 
 def _create_unregistered(store, experiment_id, *, workflow_name="my_workflow", **pin):
-    """Create evidence WITHOUT registering it in any control store.
+    """Create evidence WITHOUT joining its contest.
 
-    The shape an embedder with a shared workspace control uses — and the shape
-    a store that predates selection has — so the tests below can build both.
+    The shape an experiment recorded before contests lived in the live DB has:
+    a row in `experiments` and no member row, until something enrols it.
     """
     store.create_experiment(
         experiment_id,
@@ -228,32 +230,11 @@ class TestAutomaticInitialWinner:
             selection.DECISION_INITIAL,
         ]
 
-    def test_initialize_winner_false_records_nothing(self, store, db_path):
+    def test_initialize_winner_false_records_nothing(self, store, control):
         _create(store, "exp-quiet", initialize_winner=False, **PIN)
 
-        assert not os.path.exists(selection.control_db_path_for(db_path))
-
-    def test_unwritable_sidecar_does_not_fail_experiment_creation(
-        self, store, tmp_path
-    ):
-        """An environmental problem must not look like a corrupt store."""
-        if os.geteuid() == 0:
-            pytest.skip("root ignores directory permissions")
-        locked = tmp_path / "locked"
-        locked.mkdir()
-        locked.chmod(0o500)
-        try:
-            store.create_experiment(
-                "exp-1",
-                "label",
-                declared_tasks=1,
-                declared_attempts=1,
-                selection_control_db_path=str(locked / "sel.sqlite3"),
-            )
-        finally:
-            locked.chmod(0o700)
-
-        assert store.get_experiment("exp-1")["status"] == "running"
+        assert control.group_for_experiment("exp-quiet") is None
+        assert control.list_groups() == []
 
 
 # ----------------------------------------------------------------------
@@ -574,9 +555,7 @@ class TestConcurrency:
             thread.join(timeout=60)
 
         assert not errors, errors
-        control = selection.SelectionControlStore.for_evidence(
-            obs.ObservabilityStore(db_path)
-        )
+        control = selection.SelectionControlStore(obs.ObservabilityStore(db_path))
         groups = control.list_groups()
         assert len(groups) == 1
         group_id = groups[0]["group_id"]
@@ -592,7 +571,7 @@ class TestConcurrency:
         _create(store, "exp-1", **PIN)
         _create(store, "exp-2", **PIN)
         _create(store, "exp-3", **PIN)
-        control = selection.SelectionControlStore.for_evidence(store)
+        control = selection.SelectionControlStore(store)
         group_id = control.group_for_experiment("exp-1")["group_id"]
         expected = control.current_winner(group_id)["selection_id"]
 
@@ -601,9 +580,7 @@ class TestConcurrency:
         stale: list[selection.StaleSelection] = []
 
         def promote(candidate: str) -> None:
-            writer = selection.SelectionControlStore.for_evidence(
-                obs.ObservabilityStore(db_path)
-            )
+            writer = selection.SelectionControlStore(obs.ObservabilityStore(db_path))
             barrier.wait(timeout=30)
             try:
                 writer.record_decision(
@@ -638,148 +615,65 @@ class TestConcurrency:
 
 
 # ----------------------------------------------------------------------
-# Evidence stays immutable; judgements live in the control sidecar
+# Sealed evidence stays immutable; judgements live in the live DB
 # ----------------------------------------------------------------------
 
 
 class TestEvidenceImmutability:
-    def test_no_selection_tables_are_added_to_the_evidence_db(self, store, db_path):
-        _create(store, "exp-1", **PIN)
-
-        with sqlite3.connect(db_path) as conn:
-            tables = {
-                row[0]
-                for row in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                ).fetchall()
-            }
-        assert not {
-            "comparison_groups",
-            "comparison_group_members",
-            "selection_pointers",
-            "selection_decisions",
-        } & tables
-        assert os.path.exists(selection.control_db_path_for(db_path))
-
-    def test_decisions_about_read_only_evidence_change_no_evidence_byte(
-        self, store, db_path, tmp_path
-    ):
-        control_path = str(tmp_path / "elsewhere" / "sel.sqlite3")
-        for experiment_id in ("exp-1", "exp-2"):
-            store.create_experiment(
-                experiment_id,
-                f"label-{experiment_id}",
-                declared_tasks=1,
-                declared_attempts=1,
-                workflow_name="my_workflow",
-                selection_control_db_path=control_path,
-                **PIN,
-            )
-        del store
-        _settle(db_path)
-        before = _evidence_fingerprint(db_path)
-        assert not os.path.exists(selection.control_db_path_for(db_path))
-
-        reader = obs.ReadOnlyObservabilityStore(db_path)
-        control = selection.SelectionControlStore.for_evidence(
-            reader, control_db_path=control_path
-        )
-        group_id = control.group_for_experiment("exp-1")["group_id"]
-        _promote(control, group_id, "exp-2", rationale="read-only review")
-
-        assert control.current_winner(group_id)["experiment_id"] == "exp-2"
-        assert _evidence_fingerprint(db_path) == before
-
     def test_a_sealed_archive_keeps_its_own_bytes_while_being_judged(
-        self, store, db_path, tmp_path
+        self, store, control, tmp_path
     ):
-        """The archive is the evidence; the sidecar carries the judgement."""
+        """The archive is the evidence; the live DB carries the judgement.
+
+        A copy sealed AFTER decisions carries none of them (§3 Rule 1), so a
+        later promotion cannot change the file or its digest.
+        """
         _create(store, "exp-1", **PIN)
         _create(store, "exp-2", **PIN)
+        _create(store, "exp-3", **PIN)
+        group_id = control.group_for_experiment("exp-1")["group_id"]
+        _promote(control, group_id, "exp-2")
         archive = tmp_path / "archive" / "sealed.sqlite3"
         store.archive_to(str(archive))
         sealed_digest = _digest(str(archive))
 
-        reader = obs.ReadOnlyObservabilityStore(str(archive))
-        # The archive carries the source's store identity, so the live sidecar
-        # is the right place for decisions about it.
-        control = selection.SelectionControlStore.for_evidence(
-            reader, control_db_path=selection.control_db_path_for(db_path)
-        )
-        group_id = control.group_for_experiment("exp-1")["group_id"]
-        _promote(control, group_id, "exp-2")
+        with sqlite3.connect(str(archive)) as conn:
+            tables = {row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )}
+        assert not set(control_module.CONTROL_TABLES) & tables
+        assert not control_module.present(obs.ReadOnlyObservabilityStore(str(archive)))
 
-        assert control.current_winner(group_id)["experiment_id"] == "exp-2"
+        _promote(control, group_id, "exp-3")
+
+        assert control.current_winner(group_id)["experiment_id"] == "exp-3"
         assert _digest(str(archive)) == sealed_digest
 
-    def test_a_sidecar_from_another_store_is_refused(self, store, tmp_path):
+    def test_a_read_of_a_store_without_control_tables_writes_nothing(
+        self, store, db_path
+    ):
         _create(store, "exp-1", **PIN)
-        sidecar = selection.control_db_path_for(store.db_path)
+        with store._connect() as conn:
+            control_module.strip(conn)
+        del store
+        _settle(db_path)
+        before = _evidence_fingerprint(db_path)
 
-        other_db = str(tmp_path / "other" / "observability.sqlite3")
-        os.makedirs(os.path.dirname(other_db), exist_ok=True)
-        other = obs.ObservabilityStore(other_db)
+        reader = selection.SelectionControlStore(obs.ReadOnlyObservabilityStore(db_path))
+        assert reader.group_for_experiment("exp-1") is None
+        assert reader.list_groups() == []
+        assert reader.winner_for_experiment("exp-1") is None
 
-        with pytest.raises(selection.ControlStoreIdentityMismatch):
-            selection.SelectionControlStore.for_evidence(
-                other, control_db_path=sidecar
-            )
-
-    def test_opening_an_absent_sidecar_without_create_is_reported(self, store):
-        with pytest.raises(selection.SelectionControlUnavailable):
-            selection.SelectionControlStore.for_evidence(store, create=False)
+        assert _evidence_fingerprint(db_path) == before
+        assert not control_module.present(obs.ReadOnlyObservabilityStore(db_path))
 
 
 # ----------------------------------------------------------------------
-# Imported groups, and the scope the next bead will use
+# The scope the next bead will use
 # ----------------------------------------------------------------------
 
 
 class TestAdoptionAndScope:
-    def test_imported_experiments_elect_the_earliest_as_first_winner(
-        self, store, db_path
-    ):
-        """The documented rule: ascending (created_at, experiment_id)."""
-        for experiment_id in ("exp-c", "exp-a", "exp-b"):
-            _create(store, experiment_id, initialize_winner=False, **PIN)
-        # All three were created within the same second in this test, so the
-        # tie-break by id is what decides — which is the point of stating it.
-        with sqlite3.connect(db_path) as conn:
-            conn.execute(
-                "UPDATE experiments SET created_at=? WHERE experiment_id=?",
-                ("2026-01-01T00:00:00Z", "exp-c"),
-            )
-            conn.execute(
-                "UPDATE experiments SET created_at=? WHERE experiment_id=?",
-                ("2026-01-02T00:00:00Z", "exp-a"),
-            )
-            conn.execute(
-                "UPDATE experiments SET created_at=? WHERE experiment_id=?",
-                ("2026-01-02T00:00:00Z", "exp-b"),
-            )
-            conn.commit()
-
-        control = selection.SelectionControlStore.for_evidence(store)
-        report = control.adopt_existing_experiments()
-
-        assert report["experiments_seen"] == 3
-        assert report["experiments_adopted"] == 3
-        assert report["sources_read"] == [selection.PRIMARY_SOURCE_ID]
-        assert report["sources_skipped"] == []
-        group_id = control.group_for_experiment("exp-a")["group_id"]
-        assert control.current_winner(group_id)["experiment_id"] == "exp-c"
-        assert control.adopt_existing_experiments()["experiments_adopted"] == 0
-
-    def test_adoption_leaves_a_moved_winner_alone(self, store, control):
-        _create(store, "exp-1", **PIN)
-        _create(store, "exp-2", **PIN)
-        group_id = control.group_for_experiment("exp-1")["group_id"]
-        _promote(control, group_id, "exp-2")
-
-        control.adopt_existing_experiments()
-
-        assert control.current_winner(group_id)["experiment_id"] == "exp-2"
-
     def test_task_best_scope_cannot_overwrite_the_experiment_winner(
         self, store, control, db_path
     ):
@@ -791,7 +685,7 @@ class TestAdoptionAndScope:
         group_id = control.group_for_experiment("exp-1")["group_id"]
         before = control.current_winner(group_id)
 
-        with sqlite3.connect(selection.control_db_path_for(db_path)) as conn:
+        with sqlite3.connect(db_path) as conn:
             conn.execute(
                 """INSERT INTO selection_pointers
                    (scope_kind, group_id, scope_key, experiment_id, task_id,
@@ -810,13 +704,13 @@ class TestAdoptionAndScope:
             selection.DECISION_INITIAL
         ]
 
-    def test_reader_entry_point_opens_evidence_read_only(self, store, db_path):
+    def test_a_read_only_reader_changes_no_evidence_byte(self, store, db_path):
         _create(store, "exp-1", **PIN)
         del store
         _settle(db_path)
         before = _evidence_fingerprint(db_path)
 
-        control = selection.selection_control_for(db_path)
+        control = selection.SelectionControlStore(obs.ReadOnlyObservabilityStore(db_path))
         group_id = control.group_for_experiment("exp-1")["group_id"]
 
         assert control.current_winner(group_id)["experiment_id"] == "exp-1"
@@ -927,80 +821,24 @@ class TestCandidateOnNonPromotingDecisions:
 
 
 # ----------------------------------------------------------------------
-# Historical adoption: a new run must not inherit a contest it never entered
+# Experiments recorded before contests lived in the live DB (§2.3)
 # ----------------------------------------------------------------------
 
 
-class TestHistoricalAdoptionBootstrap:
-    def test_a_new_experiment_does_not_win_over_older_unadopted_runs(
-        self, store, db_path
-    ):
-        """The silent wrong answer this prevents: the NEWEST run of a store
-        that predates selection quietly becoming 'the winner' of every run
-        before it, with an `initial` decision nobody made."""
+class TestPreExistingExperiments:
+    def test_nothing_adopts_older_runs_automatically(self, store, control):
+        """Owner resolution 8: an older experiment joins only when a decision
+        names it, so a new experiment of its lineage is elected as usual."""
         _create_unregistered(store, "old-1", **PIN)
-        _create_unregistered(store, "old-2", **PIN)
         _backdate(store, "old-1", "2026-01-01T00:00:00Z")
-        _backdate(store, "old-2", "2026-01-02T00:00:00Z")
 
         _create(store, "new-1", **PIN)
 
-        control = selection.SelectionControlStore.for_evidence(store)
         group_id = control.group_for_experiment("new-1")["group_id"]
-        assert control.current_winner(group_id) is None
-        assert control.decision_history(group_id) == []
-
-    def test_the_earliest_experiment_may_still_initialize(self, store, control):
-        """The check is about experiments OLDER than this one, not about any
-        unregistered experiment: adoption itself relies on that."""
-        _create_unregistered(store, "old-1", **PIN)
-        _create_unregistered(store, "new-1", **PIN)
-        _backdate(store, "old-1", "2026-01-01T00:00:00Z")
-
-        result = control.register_experiment(
-            "old-1", experiment=store.get_experiment("old-1")
-        )
-
-        assert result["initialized"] is True
-        assert result["bootstrap_required"] is False
-
-    def test_registration_reports_bootstrap_required_with_the_older_ids(
-        self, store, control
-    ):
-        _create_unregistered(store, "old-1", **PIN)
-        _create_unregistered(store, "new-1", **PIN)
-        _backdate(store, "old-1", "2026-01-01T00:00:00Z")
-
-        result = control.register_experiment(
-            "new-1", experiment=store.get_experiment("new-1")
-        )
-
-        assert result["registered"] is True
-        assert result["initialized"] is False
-        assert result["bootstrap_required"] is True
-        assert result["unadopted_experiment_ids"] == ["old-1"]
-        assert result["evidence_scanned"] is True
-        assert result["winner"] is None
-
-    def test_the_bootstrap_resolves_it_deterministically(self, store, control):
-        _create_unregistered(store, "old-1", **PIN)
-        _backdate(store, "old-1", "2026-01-01T00:00:00Z")
-        _create(store, "new-1", **PIN)
-        group_id = control.group_for_experiment("new-1")["group_id"]
-        assert control.current_winner(group_id) is None
-
-        control.adopt_existing_experiments()
-
-        winner = control.current_winner(group_id)
-        assert winner["experiment_id"] == "old-1"
-        assert winner["automatic"] is True
-        assert {m["experiment_id"] for m in control.group_members(group_id)} == {
-            "old-1",
-            "new-1",
-        }
+        assert control.current_winner(group_id)["experiment_id"] == "new-1"
+        assert control.group_for_experiment("old-1") is None
 
     def test_an_empty_store_still_elects_its_first_experiment(self, store, control):
-        """The ordinary case must not be collateral damage of the check."""
         _create(store, "exp-1", **PIN)
 
         group_id = control.group_for_experiment("exp-1")["group_id"]
@@ -1017,262 +855,74 @@ class TestHistoricalAdoptionBootstrap:
         group_id = control.group_for_experiment("fresh")["group_id"]
         assert control.current_winner(group_id)["experiment_id"] == "fresh"
 
-    def test_a_reference_registration_says_it_read_no_evidence(self, tmp_path):
-        """With no store to read, absence of older runs cannot be verified, and
-        the result says so rather than implying it was checked."""
-        path = selection.shared_control_db_path_for(str(tmp_path))
-        control = selection.open_shared_control(path)
+    def test_an_explicit_promotion_enrols_and_elects_an_unenrolled_experiment(
+        self, store, control, db_path
+    ):
+        _create_unregistered(store, "old-1", **PIN)
+        group_id = selection.comparison_group_identity(store.get_experiment("old-1"))["group_id"]
+        reader = selection.SelectionControlStore(obs.ReadOnlyObservabilityStore(db_path))
+        assert reader.winner_for_experiment("old-1") is None
+        assert reader.group_for_experiment("old-1") is None
 
-        result = control.register_experiment_reference(
-            selection.ExperimentReference(
-                experiment_id="exp-ui-1",
-                workflow_name="my_workflow",
-                benchmark_id="todo-smoke",
-            )
+        state = control.record_decision(
+            group_id,
+            selection.DECISION_PROMOTE,
+            expected_selection_id=None,
+            candidate_experiment_id="old-1",
+            actor="dhar",
+            actor_kind="human",
+            provenance="ui:experiments",
         )
 
-        assert result["initialized"] is True
-        assert result["evidence_scanned"] is False
-        assert result["bootstrap_required"] is False
+        assert state["experiment_id"] == "old-1"
+        assert control.group_for_experiment("old-1")["group_id"] == group_id
+        assert [d["decision"] for d in control.decision_history(group_id)] == [
+            selection.DECISION_INITIAL
+        ]
 
-
-# ----------------------------------------------------------------------
-# One control location, several evidence stores (the real product shape)
-# ----------------------------------------------------------------------
-
-
-@pytest.fixture
-def two_stores(tmp_path):
-    a = obs.ObservabilityStore(str(tmp_path / "runner-a" / "observability.sqlite3"))
-    b = obs.ObservabilityStore(str(tmp_path / "runner-b" / "observability.sqlite3"))
-    return a, b
-
-
-@pytest.fixture
-def workspace_control(tmp_path, two_stores):
-    a, b = two_stores
-    root = tmp_path / "workspace"
-    root.mkdir()
-    control = selection.open_shared_control(
-        selection.shared_control_db_path_for(str(root)),
-        sources={"runner-a": a, "runner-b": b},
-    )
-    control.authorize_source("runner-a", a, label="runner a")
-    control.authorize_source("runner-b", b)
-    return control
-
-
-class TestSharedControlAcrossStores:
-    def test_one_lineage_in_two_stores_has_exactly_one_winner(
-        self, two_stores, workspace_control
+    def test_an_explicit_promotion_enrols_into_a_contest_that_has_a_winner(
+        self, store, control
     ):
-        """The comparison the product actually runs: a winner recorded by one
-        runner, a candidate recorded by another, judged against each other."""
-        a, b = two_stores
-        _create_unregistered(a, "exp-a", **PIN)
-        _create_unregistered(b, "exp-b", **PIN)
+        _create_unregistered(store, "old-1", **PIN)
+        _create(store, "new-1", **PIN)
+        group_id = control.group_for_experiment("new-1")["group_id"]
 
-        workspace_control.register_experiment("exp-a", source_id="runner-a")
-        workspace_control.register_experiment("exp-b", source_id="runner-b")
+        _promote(control, group_id, "old-1")
 
-        groups = workspace_control.list_groups()
-        assert len(groups) == 1
-        group_id = groups[0]["group_id"]
-        assert {
-            m["experiment_id"]: m["source_id"]
-            for m in workspace_control.group_members(group_id)
-        } == {"exp-a": "runner-a", "exp-b": "runner-b"}
-        winner = workspace_control.current_winner(group_id)
-        assert winner["experiment_id"] == "exp-a"
-        assert winner["source_id"] == "runner-a"
-        assert winner["experiment"]["status"] == "running"
-
-        _promote(workspace_control, group_id, "exp-b")
-
-        winner = workspace_control.current_winner(group_id)
-        assert winner["experiment_id"] == "exp-b"
-        assert winner["source_id"] == "runner-b"
-        # The winner's live state is read from ITS store, not the first one.
-        assert winner["experiment"]["description"] == "label-exp-b"
-        assert winner["experiment_resolved"] is True
-        # And there is still exactly one contest, not one per store.
-        assert len(workspace_control.list_groups()) == 1
-
-    def test_deciding_across_two_stores_changes_no_evidence_byte(
-        self, two_stores, workspace_control
-    ):
-        a, b = two_stores
-        _create_unregistered(a, "exp-a", **PIN)
-        _create_unregistered(b, "exp-b", **PIN)
-        workspace_control.register_experiment("exp-a", source_id="runner-a")
-        workspace_control.register_experiment("exp-b", source_id="runner-b")
-        _settle(a.db_path)
-        _settle(b.db_path)
-        before = (
-            _evidence_fingerprint(a.db_path),
-            _evidence_fingerprint(b.db_path),
-        )
-
-        group_id = workspace_control.list_groups()[0]["group_id"]
-        _promote(workspace_control, group_id, "exp-b", rationale="fewer retries")
-
-        assert (
-            _evidence_fingerprint(a.db_path),
-            _evidence_fingerprint(b.db_path),
-        ) == before
-        # No per-store sidecar was created either: the workspace has one.
-        assert not os.path.exists(selection.control_db_path_for(a.db_path))
-        assert not os.path.exists(selection.control_db_path_for(b.db_path))
-
-    def test_an_unauthorized_source_is_refused(self, two_stores, workspace_control):
-        a, _ = two_stores
-        _create_unregistered(a, "exp-a", **PIN)
-
-        with pytest.raises(selection.UnauthorizedEvidenceSource):
-            workspace_control.register_experiment("exp-a", source_id="runner-z")
-
-    def test_a_source_id_names_one_store_forever(self, two_stores, workspace_control):
-        a, b = two_stores
-
-        with pytest.raises(selection.ControlStoreIdentityMismatch):
-            workspace_control.authorize_source("runner-a", b)
-
-    def test_one_store_cannot_be_authorized_twice(self, two_stores, workspace_control):
-        """Otherwise one run competes with itself under two names."""
-        a, _ = two_stores
-
-        with pytest.raises(selection.ControlStoreIdentityMismatch):
-            workspace_control.authorize_source("runner-a-again", a)
-
-    def test_a_resolver_handing_back_the_wrong_store_is_refused(
-        self, tmp_path, two_stores, workspace_control
-    ):
-        a, b = two_stores
-        _create_unregistered(a, "exp-a", **PIN)
-        workspace_control.register_experiment("exp-a", source_id="runner-a")
-        group_id = workspace_control.list_groups()[0]["group_id"]
-
-        # Same control file, a misconfigured resolver: 'runner-a' now yields b.
-        misconfigured = selection.open_shared_control(
-            workspace_control.control_db_path,
-            sources={"runner-a": b, "runner-b": b},
-        )
-        with pytest.raises(selection.ControlStoreIdentityMismatch):
-            misconfigured.current_winner(group_id)
-
-    def test_the_same_experiment_id_in_two_stores_is_a_collision_not_a_merge(
-        self, two_stores, workspace_control
-    ):
-        """Ids are unique per store. Two stores can both hold 'exp-1'."""
-        a, b = two_stores
-        _create_unregistered(a, "exp-1", **PIN)
-        _create_unregistered(b, "exp-1", **PIN)
-        workspace_control.register_experiment("exp-1", source_id="runner-a")
-
-        with pytest.raises(selection.ExperimentSourceCollision) as caught:
-            workspace_control.register_experiment("exp-1", source_id="runner-b")
-
-        assert caught.value.bound_source_id == "runner-a"
-        group_id = workspace_control.list_groups()[0]["group_id"]
-        assert len(workspace_control.group_members(group_id)) == 1
-
-    def test_adoption_spans_both_stores_and_elects_one_winner(
-        self, two_stores, workspace_control
-    ):
-        a, b = two_stores
-        _create_unregistered(a, "exp-a", **PIN)
-        _create_unregistered(b, "exp-b", **PIN)
-        with sqlite3.connect(a.db_path) as conn:
-            conn.execute(
-                "UPDATE experiments SET created_at=? WHERE experiment_id=?",
-                ("2026-03-02T00:00:00Z", "exp-a"),
-            )
-            conn.commit()
-        with sqlite3.connect(b.db_path) as conn:
-            conn.execute(
-                "UPDATE experiments SET created_at=? WHERE experiment_id=?",
-                ("2026-03-01T00:00:00Z", "exp-b"),
-            )
-            conn.commit()
-
-        report = workspace_control.adopt_existing_experiments()
-
-        assert report["experiments_seen"] == 2
-        assert report["sources_read"] == ["runner-a", "runner-b"]
-        assert report["sources_skipped"] == []
-        group_id = workspace_control.list_groups()[0]["group_id"]
-        # The earliest across BOTH stores wins, not the earliest of each.
-        assert workspace_control.current_winner(group_id)["experiment_id"] == "exp-b"
-
-    def test_adoption_reports_sources_it_could_not_read(
-        self, two_stores, workspace_control
-    ):
-        """Adopting a partial view would make exactly the wrong answer this
-        contract exists to prevent, so the gap is reported rather than implied.
-
-        A later session is the realistic shape: the authorizations are in the
-        file, but this process was only handed one of the two stores.
-        """
-        a, _ = two_stores
-        _create_unregistered(a, "exp-a", **PIN)
-        partial = selection.open_shared_control(
-            workspace_control.control_db_path, sources={"runner-a": a}
-        )
-
-        report = partial.adopt_existing_experiments()
-
-        assert report["sources_read"] == ["runner-a"]
-        assert report["sources_skipped"] == ["runner-b"]
-        assert report["experiments_adopted"] == 1
-
-    def test_a_partial_view_says_which_sources_it_read(
-        self, two_stores, workspace_control
-    ):
-        """A runner holds its own store, not the workspace's. The registration
-        result says which sources the history check could see, so a caller is
-        never told 'no older runs exist' about a store nobody opened."""
-        a, _ = two_stores
-        _create_unregistered(a, "exp-a", **PIN)
-        partial = selection.open_shared_control(
-            workspace_control.control_db_path, sources={"runner-a": a}
-        )
-
-        result = partial.register_experiment("exp-a", source_id="runner-a")
-
-        assert result["sources_scanned"] == ["runner-a"]
-        assert {str(r["source_id"]) for r in partial.list_sources()} == {
-            "runner-a",
-            "runner-b",
+        assert control.current_winner(group_id)["experiment_id"] == "old-1"
+        assert {m["experiment_id"] for m in control.group_members(group_id)} == {
+            "old-1", "new-1",
         }
 
-    def test_a_shared_sidecar_is_not_a_single_store_sidecar(
-        self, two_stores, workspace_control
+    def test_a_promotion_that_saw_no_winner_is_stale_when_there_is_one(
+        self, store, control
     ):
-        a, _ = two_stores
-
-        with pytest.raises(selection.ControlModeMismatch):
-            selection.SelectionControlStore.for_evidence(
-                a, control_db_path=workspace_control.control_db_path
-            )
-
-    def test_a_single_store_sidecar_is_not_a_shared_one(self, store, db_path):
         _create(store, "exp-1", **PIN)
+        _create(store, "exp-2", **PIN)
+        group_id = control.group_for_experiment("exp-1")["group_id"]
 
-        with pytest.raises(selection.ControlModeMismatch):
-            selection.open_shared_control(selection.control_db_path_for(db_path))
+        with pytest.raises(selection.StaleSelection):
+            control.record_decision(
+                group_id,
+                selection.DECISION_PROMOTE,
+                expected_selection_id=None,
+                candidate_experiment_id="exp-2",
+                actor="dhar",
+                actor_kind="human",
+                provenance="ui:experiments",
+            )
+        assert control.current_winner(group_id)["experiment_id"] == "exp-1"
 
 
-class TestRegistrationBeforeAnyStore:
-    """Registration at UI-creation time, binding at execution time."""
+# ----------------------------------------------------------------------
+# Registration before anything is recorded
+# ----------------------------------------------------------------------
 
-    def test_a_reference_can_win_before_a_store_exists(self, tmp_path, two_stores):
-        a, _ = two_stores
-        control = selection.open_shared_control(
-            selection.shared_control_db_path_for(str(tmp_path)),
-            sources={"runner-a": a},
-        )
-        control.authorize_source("runner-a", a)
 
+class TestRegistrationBeforeAnyRun:
+    """Registration at UI-creation time, recording at execution time."""
+
+    def test_a_reference_can_win_before_anything_is_recorded(self, control):
         result = control.register_experiment_reference(
             selection.ExperimentReference(
                 experiment_id="exp-planned",
@@ -1282,21 +932,13 @@ class TestRegistrationBeforeAnyStore:
             )
         )
 
-        group_id = result["group_id"]
-        winner = control.current_winner(group_id)
+        winner = control.current_winner(result["group_id"])
         assert winner["experiment_id"] == "exp-planned"
-        assert winner["source_id"] is None
         # The decision is real; the run's state is simply not knowable yet.
         assert winner["experiment"] is None
         assert winner["experiment_resolved"] is False
 
-    def test_binding_the_store_later_changes_no_selection(self, tmp_path, two_stores):
-        a, _ = two_stores
-        control = selection.open_shared_control(
-            selection.shared_control_db_path_for(str(tmp_path)),
-            sources={"runner-a": a},
-        )
-        control.authorize_source("runner-a", a)
+    def test_recording_it_later_changes_no_selection(self, store, control):
         control.register_experiment_reference(
             selection.ExperimentReference(
                 experiment_id="exp-planned",
@@ -1307,123 +949,57 @@ class TestRegistrationBeforeAnyStore:
         group_id = control.list_groups()[0]["group_id"]
         before = control.current_winner(group_id)
 
-        _create_unregistered(a, "exp-planned", **PIN)
-        control.bind_experiment_source("exp-planned", "runner-a")
+        _create(store, "exp-planned", **PIN)
 
         after = control.current_winner(group_id)
         assert after["selection_id"] == before["selection_id"]
         assert after["decision_seq"] == before["decision_seq"]
-        assert after["source_id"] == "runner-a"
         assert after["experiment_resolved"] is True
         assert after["experiment"]["status"] == "running"
         assert [d["decision"] for d in control.decision_history(group_id)] == [
             selection.DECISION_INITIAL
         ]
 
-    def test_binding_to_a_second_store_is_refused(self, tmp_path, two_stores):
-        a, b = two_stores
-        control = selection.open_shared_control(
-            selection.shared_control_db_path_for(str(tmp_path)),
-            sources={"runner-a": a, "runner-b": b},
-        )
-        control.authorize_source("runner-a", a)
-        control.authorize_source("runner-b", b)
-        control.register_experiment_reference(
-            selection.ExperimentReference(
-                experiment_id="exp-planned", workflow_name="my_workflow"
+    def test_a_write_with_no_live_db_refuses_and_creates_nothing(self, tmp_path):
+        missing = tmp_path / "nowhere" / "observability.sqlite3"
+        with pytest.raises(control_module.ControlUnavailable):
+            obs.open_live_store(str(missing), write=True)
+        assert obs.open_live_store(str(missing)) is None
+        absent = selection.SelectionControlStore(None)
+        assert absent.list_groups() == []
+        with pytest.raises(control_module.ControlUnavailable):
+            absent.register_experiment_reference(
+                selection.ExperimentReference(experiment_id="e", workflow_name="w")
             )
-        )
-        control.bind_experiment_source("exp-planned", "runner-a")
-
-        with pytest.raises(selection.ExperimentSourceCollision):
-            control.bind_experiment_source("exp-planned", "runner-b")
-
-    def test_binding_an_unknown_experiment_is_reported(self, tmp_path, two_stores):
-        a, _ = two_stores
-        control = selection.open_shared_control(
-            selection.shared_control_db_path_for(str(tmp_path)),
-            sources={"runner-a": a},
-        )
-        control.authorize_source("runner-a", a)
-
-        with pytest.raises(obs.ExperimentNotFound):
-            control.bind_experiment_source("never-registered", "runner-a")
+        assert not missing.parent.exists()
 
 
 # ----------------------------------------------------------------------
-# The control sidecar's own schema creation and post-commit behaviour
+# The control tables' own creation on a store opened without migrating
 # ----------------------------------------------------------------------
 
 
-class TestControlSchemaAndPostCommit:
-    def test_concurrent_first_open_of_a_fresh_sidecar_succeeds(self, store, tmp_path):
-        """The sidecar's own cold-start race, which is the new schema's to own.
-
-        Fresh-schema creation outside a transaction is the shape of `fix-upxs`
-        in the evidence store: a second opener sees user_version=0 with tables
-        already present and refuses a healthy file. The control schema creates
-        itself inside BEGIN IMMEDIATE so that cannot happen here.
-        """
-        path = str(tmp_path / "race" / "sel.sqlite3")
-        count = 8
-        barrier = threading.Barrier(count)
-        errors: list[BaseException] = []
-        opened: list[selection.SelectionControlStore] = []
-
-        def open_control() -> None:
-            try:
-                barrier.wait(timeout=30)
-                opened.append(
-                    selection.SelectionControlStore.for_evidence(
-                        store, control_db_path=path
-                    )
-                )
-            except BaseException as exc:  # pragma: no cover - surfaced below
-                errors.append(exc)
-
-        threads = [threading.Thread(target=open_control) for _ in range(count)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join(timeout=60)
-
-        assert not errors, errors
-        assert len(opened) == count
-        with sqlite3.connect(path) as conn:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == (
-                selection.CONTROL_SCHEMA_VERSION
-            )
-            tables = {
-                row[0]
-                for row in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                ).fetchall()
-            }
-        assert {"evidence_sources", "comparison_groups", "selection_pointers"} <= tables
-        assert len(opened[0].list_sources()) == 1
-
-    def test_concurrent_registration_into_a_fresh_sidecar_elects_one_winner(
-        self, store, db_path, tmp_path
+class TestControlSchemaCreation:
+    def test_concurrent_registration_creates_the_tables_once_and_elects_one_winner(
+        self, store, db_path
     ):
-        """Schema creation and first registration racing together.
-
-        Also pins the property that keeps the historical-adoption check from
-        stranding a batch: every sibling but the oldest defers, and the oldest
-        has nothing older to defer to, so a winner is always elected.
-        """
-        path = str(tmp_path / "race2" / "sel.sqlite3")
+        """A writer on a `migrate=False` store creates the control tables in its
+        own `BEGIN IMMEDIATE`, so six racing first writers neither fail nor
+        elect twice; the first to join is elected."""
         for index in range(6):
             _create_unregistered(store, f"exp-{index}", **PIN)
+        with store._connect() as conn:
+            control_module.strip(conn)
         barrier = threading.Barrier(6)
         errors: list[BaseException] = []
 
         def register(index: int) -> None:
             try:
-                control = selection.SelectionControlStore.for_evidence(
-                    obs.ObservabilityStore(db_path), control_db_path=path
+                writer = selection.SelectionControlStore(
+                    obs.ObservabilityStore(db_path, migrate=False)
                 )
                 barrier.wait(timeout=30)
-                control.register_experiment(f"exp-{index}")
+                writer.register_experiment(f"exp-{index}")
             except BaseException as exc:  # pragma: no cover - surfaced below
                 errors.append(exc)
 
@@ -1434,213 +1010,12 @@ class TestControlSchemaAndPostCommit:
             thread.join(timeout=60)
 
         assert not errors, errors
-        control = selection.SelectionControlStore.for_evidence(
-            obs.ObservabilityStore(db_path), control_db_path=path
-        )
+        control = selection.SelectionControlStore(store)
+        assert control_module.present(store)
         group_id = control.list_groups()[0]["group_id"]
         history = control.decision_history(group_id)
         assert [d["decision"] for d in history] == [selection.DECISION_INITIAL]
         assert len(control.group_members(group_id)) == 6
-        assert control.current_winner(group_id)["experiment_id"] == "exp-0"
-
-    def test_a_post_commit_refusal_does_not_fail_experiment_creation(
-        self, store, tmp_path, two_stores
-    ):
-        """A misconfigured sidecar must not make a created experiment look
-        uncreated: the evidence row is already committed and there is nothing
-        to roll back."""
-        a, b = two_stores
-        shared = selection.shared_control_db_path_for(str(tmp_path))
-        selection.open_shared_control(shared, sources={})
-
-        store.create_experiment(
-            "exp-1",
-            "label",
-            declared_tasks=1,
-            declared_attempts=1,
-            workflow_name="my_workflow",
-            selection_control_db_path=shared,
-            **PIN,
+        assert control.current_winner(group_id)["experiment_id"] == (
+            history[0]["new_experiment_id"]
         )
-
-        assert store.get_experiment("exp-1")["status"] == "running"
-
-    def test_the_refusal_is_reported_not_swallowed(self, store, tmp_path):
-        """An unauthorized store must not enrol itself in a shared contest by
-        the side effect of creating an experiment."""
-        shared = selection.shared_control_db_path_for(str(tmp_path))
-        control = selection.open_shared_control(shared, sources={})
-        _create_unregistered(store, "exp-1", **PIN)
-
-        result = selection.initialize_winner_for(
-            store, "exp-1", control_db_path=shared
-        )
-
-        assert result["status"] == selection.INIT_REFUSED
-        assert "not authorized" in result["error"]
-        assert control.list_sources() == []
-        assert control.list_groups() == []
-
-    def test_an_unavailable_sidecar_is_reported_as_environmental(
-        self, store, tmp_path
-    ):
-        if os.geteuid() == 0:
-            pytest.skip("root ignores directory permissions")
-        locked = tmp_path / "locked"
-        locked.mkdir()
-        locked.chmod(0o500)
-        _create_unregistered(store, "exp-1", **PIN)
-        try:
-            result = selection.initialize_winner_for(
-                store, "exp-1", control_db_path=str(locked / "sel.sqlite3")
-            )
-        finally:
-            locked.chmod(0o700)
-
-        assert result["status"] == selection.INIT_UNAVAILABLE
-
-    def test_strict_initialization_raises_for_an_explicit_caller(
-        self, store, tmp_path
-    ):
-        """A UI bootstrap wants the error; `create_experiment` cannot use it."""
-        shared = selection.shared_control_db_path_for(str(tmp_path))
-        selection.open_shared_control(shared, sources={})
-        _create_unregistered(store, "exp-1", **PIN)
-
-        with pytest.raises(selection.UnauthorizedEvidenceSource):
-            selection.initialize_winner_for(
-                store, "exp-1", control_db_path=shared, strict=True
-            )
-
-    def test_two_runners_pointed_at_one_workspace_control_share_a_contest(
-        self, two_stores, workspace_control
-    ):
-        """The whole shared use case, driven the way a runner drives it: each
-        store creates its experiment normally and points at the workspace
-        control file. Neither is told its source id — it is found by identity,
-        which is also why an unauthorized store cannot join.
-
-        Each runner process holds only its OWN store, so neither can see
-        whether the other holds older runs of this lineage, and neither elects
-        a winner — see the partial/full resolver regression below. Both
-        register, into ONE group, under their own sources. An embedder that can
-        resolve both (the workflow bootstrap, or `adopt_existing_experiments`)
-        is what elects, and it elects the earliest across both stores.
-        """
-        a, b = two_stores
-        shared = workspace_control.control_db_path
-
-        for store, experiment_id in ((a, "exp-a"), (b, "exp-b")):
-            store.create_experiment(
-                experiment_id,
-                f"label-{experiment_id}",
-                declared_tasks=1,
-                declared_attempts=1,
-                workflow_name="my_workflow",
-                selection_control_db_path=shared,
-                **PIN,
-            )
-
-        assert len(workspace_control.list_groups()) == 1
-        group_id = workspace_control.list_groups()[0]["group_id"]
-        assert {
-            m["experiment_id"]: m["source_id"]
-            for m in workspace_control.group_members(group_id)
-        } == {"exp-a": "runner-a", "exp-b": "runner-b"}
-        assert workspace_control.current_winner(group_id) is None
-
-        workspace_control.adopt_existing_experiments()
-
-        assert workspace_control.current_winner(group_id)["experiment_id"] == "exp-a"
-        # Still no per-store sidecars: the workspace file is the only control.
-        assert not os.path.exists(selection.control_db_path_for(a.db_path))
-        assert not os.path.exists(selection.control_db_path_for(b.db_path))
-
-    def test_a_runner_holding_one_store_does_not_elect_over_an_unread_one(
-        self, two_stores, workspace_control
-    ):
-        """The regression for the bootstrap contract.
-
-        `runner-b` holds the OLDER experiment, and the process registering
-        `exp-a` cannot open it. "I found no older runs" from that process means
-        only "I did not look", and electing on it is exactly how a new
-        candidate silently outranks an older experiment. So it registers, says
-        which source it could not read, and elects nobody.
-        """
-        a, b = two_stores
-        _create_unregistered(b, "exp-old", **PIN)
-        _backdate(b, "exp-old", "2020-01-01T00:00:00.000000+00:00")
-        _create_unregistered(a, "exp-new", **PIN)
-        partial = selection.open_shared_control(
-            workspace_control.control_db_path, sources={"runner-a": a}
-        )
-
-        result = partial.register_experiment("exp-new", source_id="runner-a")
-
-        assert result["registered"] is True
-        assert result["initialized"] is False
-        assert result["bootstrap_required"] is True
-        assert result["unresolved_sources"] == ["runner-b"]
-        assert result["sources_scanned"] == ["runner-a"]
-        assert result["winner"] is None
-
-    def test_the_same_control_elects_once_the_missing_store_is_resolvable(
-        self, two_stores, workspace_control
-    ):
-        """...and recovers by itself when the store comes back.
-
-        Same control file, same authorizations, nothing re-registered by hand:
-        the only thing that changed is that this process can open both stores.
-        The older experiment wins, which is the answer the partial view
-        refused to guess.
-        """
-        a, b = two_stores
-        _create_unregistered(b, "exp-old", **PIN)
-        _backdate(b, "exp-old", "2020-01-01T00:00:00.000000+00:00")
-        _create_unregistered(a, "exp-new", **PIN)
-        partial = selection.open_shared_control(
-            workspace_control.control_db_path, sources={"runner-a": a}
-        )
-        partial.register_experiment("exp-new", source_id="runner-a")
-        group_id = partial.list_groups()[0]["group_id"]
-        assert partial.current_winner(group_id) is None
-
-        report = workspace_control.adopt_existing_experiments()
-
-        assert report["complete"] is True
-        assert report["sources_skipped"] == []
-        assert report["groups_without_winner"] == []
-        winner = workspace_control.current_winner(group_id)
-        assert winner["experiment_id"] == "exp-old"
-        assert winner["source_id"] == "runner-b"
-
-    def test_a_partial_adoption_registers_but_elects_nobody(
-        self, two_stores, workspace_control
-    ):
-        """Adoption is held to the same rule as registration.
-
-        Adopting through a partial view would install "the earliest I could
-        see" as the group's first winner, which is the silent wrong answer the
-        whole contract exists to prevent. It reports the gap instead.
-        """
-        a, _ = two_stores
-        _create_unregistered(a, "exp-a", **PIN)
-        partial = selection.open_shared_control(
-            workspace_control.control_db_path, sources={"runner-a": a}
-        )
-
-        report = partial.adopt_existing_experiments()
-
-        assert report["experiments_adopted"] == 1
-        assert report["complete"] is False
-        assert report["sources_skipped"] == ["runner-b"]
-        assert report["groups_without_winner"] == [partial.list_groups()[0]["group_id"]]
-
-    def test_a_successful_initialization_reports_what_it_did(self, store):
-        _create_unregistered(store, "exp-1", **PIN)
-
-        result = selection.initialize_winner_for(store, "exp-1")
-
-        assert result["status"] == selection.INIT_RECORDED
-        assert result["registration"]["initialized"] is True
-        assert result["registration"]["winner"]["experiment_id"] == "exp-1"

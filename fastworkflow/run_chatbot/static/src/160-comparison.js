@@ -24,7 +24,7 @@ function renderWinnerPanel(container, experimentId, reload) {
       selectionNote(body,
         data.sealed
           ? "Sealed evidence records no winner."
-          : "This experiment is not in a contest this workflow can decide.",
+          : "This experiment is not in this workflow's contest.",
         data.error);
       return;
     }
@@ -68,8 +68,8 @@ function renderWinnerPanel(container, experimentId, reload) {
        so beats an empty status that would read as "no status was recorded". */
     if (winner && winner.experiment_resolved === false) {
       body.appendChild(el("div", "sub",
-        "The winner is recorded, but the evidence store holding experiment "
-        + winner.experiment_id + " was not supplied, so its current state is "
+        "The winner is recorded, but experiment " + winner.experiment_id
+        + " has no recorded run in this workflow yet, so its current state is "
         + "unknown rather than absent."));
     }
     if (winner && winner.experiment_id !== experimentId) {
@@ -94,27 +94,25 @@ function renderWinnerPanel(container, experimentId, reload) {
    All three carry the selection id this panel was rendered from, which is what
    the contest requires: a "keep" recorded against a winner that was replaced
    while somebody was reading is a judgement about a different experiment than
-   the one it would be filed under. */
+   the one it would be filed under. A contest with no winner yet (experiments
+   recorded before contests were kept in the live database) offers promotion
+   alone, recorded against "nobody", which makes this experiment its first. */
 function renderWinnerDecision(body, experimentId, data, reload) {
   if (session && session.workspace_mode) { return; }
-  if (!data.expected_selection_id) {
-    selectionNote(body,
-      "This contest has no winner to decide against yet.",
-      "Every decision -- including promoting this experiment -- is recorded "
-      + "against the pointer it was read from, and there is no pointer here. "
-      + "This happens when an evidence store a registration names cannot be "
-      + "opened, so nothing is elected automatically. Restore the store and "
-      + "the contest elects its oldest registration.");
-    return;
-  }
   var box = el("div");
   box.appendChild(el("h2", null, "Decide"));
+  if (!data.expected_selection_id) {
+    box.appendChild(el("div", "sub",
+      "This contest has no winner yet. Promoting this experiment makes it the first."));
+  }
   var reason = reasonField(box, "Reason (optional)");
   var status = el("div", "sub", "");
   var row = el("div", "runDecision");
   [["promote", "Promote this experiment", "primary"],
    ["keep", "Keep the current winner", null],
-   ["undecided", "Leave it undecided", null]].forEach(function (choice) {
+   ["undecided", "Leave it undecided", null]].filter(function (choice) {
+    return data.expected_selection_id || choice[0] === "promote";
+  }).forEach(function (choice) {
     var button = el("button", choice[2], choice[1]);
     button.type = "button";
     if (choice[0] === "promote" && data.is_winner) {
@@ -126,7 +124,7 @@ function renderWinnerDecision(body, experimentId, data, reload) {
       selectionWrite(selectionPath(experimentId, "/winner/decisions"), "POST",
         decisionBody({
           decision: choice[0],
-          expected_selection_id: data.expected_selection_id,
+          expected_selection_id: data.expected_selection_id || null,
           /* Named on every decision, not only on a promotion: without it the
              history can say a winner was kept but not which challenger was
              turned down. */

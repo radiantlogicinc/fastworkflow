@@ -65,9 +65,9 @@ Keep three mechanisms distinct:
 | Independent human review assignments | Rubric-based ratings with their own review flow; comments and simulated-operator replies are not substitutes |
 
 Snapshots are read-only evidence, which is not the same as read-only feedback. A comment on a
-sealed archive, or on a database file this process cannot write, is appended to an annotation sidecar
-(`<stem>.feedback.sqlite3`) beside it; the archive's bytes do not change and the reads return
-the union. Never modify a sealed archive to insert feedback.
+sealed archive is recorded in the `sealed_turn_comments` table of its workflow's live database,
+keyed by the archive's sha256; the archive's bytes do not change and the reads return the merge.
+Never modify a sealed archive to insert feedback.
 
 ## Diagnose and choose the smallest useful change
 

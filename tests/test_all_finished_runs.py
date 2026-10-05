@@ -31,6 +31,7 @@ from pathlib import Path
 
 import pytest
 
+from fastworkflow import state_paths
 from fastworkflow.benchmark import setup
 from fastworkflow.experiment.runner import ExperimentController
 from fastworkflow.observability import selected_runs as sr
@@ -131,6 +132,8 @@ def drift_world(tmp_path, monkeypatch):
     folder = tmp_path / "all_finished_workflow"
     folder.mkdir()
     (folder / "_commands").mkdir()
+    db = state_paths.observability_db(str(folder))
+    store = obs.ObservabilityStore(db)
     benchmark = setup.save_benchmark(
         folder,
         {
@@ -144,8 +147,6 @@ def drift_world(tmp_path, monkeypatch):
     experiment_id = experiment["experiment_id"]
     task_id, empty_task, big_task = experiment["task_ids"][:3]
 
-    db = str(tmp_path / "evidence.sqlite3")
-    store = obs.ObservabilityStore(db)
     controller = ExperimentController(
         db, store.store_identity(), external=False, workflow_folderpath=str(folder)
     )
@@ -1241,6 +1242,8 @@ def crowded_world(tmp_path, monkeypatch):
     folder = tmp_path / "crowded_workflow"
     folder.mkdir()
     (folder / "_commands").mkdir()
+    db = state_paths.observability_db(str(folder))
+    store = obs.ObservabilityStore(db)
     benchmark = setup.save_benchmark(
         folder, {"title": "Crowded", "tasks": [{"prompt": "one"}]}
     )
@@ -1249,8 +1252,6 @@ def crowded_world(tmp_path, monkeypatch):
     )
     experiment_id = experiment["experiment_id"]
     task_id = experiment["task_ids"][0]
-    db = str(tmp_path / "evidence.sqlite3")
-    store = obs.ObservabilityStore(db)
     controller = ExperimentController(
         db, store.store_identity(), external=False, workflow_folderpath=str(folder)
     )

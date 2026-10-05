@@ -18,9 +18,10 @@ socket AND over real HTTP -- both are exercised.
 Discipline this module keeps, because the state it touches is judgements about
 immutable evidence:
 
-- **Reads never create a control.** Every GET opens the workflow control with
-  `create=False`. A control file conjured by a page load is indistinguishable,
-  afterwards, from one whose decisions were lost.
+- **Reads never create a control.** Every GET reads the workflow's live DB
+  read-only and answers empty where it or its control tables are absent.
+  Control tables conjured by a page load are indistinguishable, afterwards,
+  from ones whose decisions were lost.
 - **Reads never move a pointer.** Nothing here writes on GET, including the
   automatic first-experiment winner: that is elected by `setup.create_experiment`
   at creation time, which is a write the user asked for.
@@ -29,9 +30,8 @@ immutable evidence:
   turn keys and the `ExecutionRef` come from `best_run`'s projection of the
   attempt rows. There is no route that accepts a turn key, a store path or a
   store id, so there is no path resolver to abuse and no forged scope to check.
-- **Only stores this workflow authorized are readable.** `_AuthorizedReader`
-  resolves a `store_id` through the control's own `store_for_source`, which
-  re-checks store identity. An id the control never authorized raises.
+- **Only the workflow's own evidence is readable.** `_reader` serves the live
+  DB under its recorded identity; a ref naming any other store raises.
 - **Pass scope is exposed, never fabricated.** `?left_pass=&right_pass=`
   compare two recorded passes -- including two passes of the SAME turn, which
   is the teacher/student case. The selectors are DISCOVERED from span
@@ -50,6 +50,7 @@ from HTTP, so no client can forge a decision as the machine's own.
 from __future__ import annotations
 
 import os
+import sqlite3
 from typing import Any, Callable, Mapping, Optional
 from urllib.parse import unquote
 
@@ -59,6 +60,7 @@ from fastworkflow.observability import best_run as best_run_module
 from fastworkflow.observability import command_summary as command_summary_module
 from fastworkflow.observability import comparison as comparison_module
 from fastworkflow.observability import consistency as consistency_module
+from fastworkflow.observability import control as control_module
 from fastworkflow.observability import pair_review as pair_review_module
 from fastworkflow.observability import selected_runs as selected_runs_module
 from fastworkflow.observability import selection
@@ -288,16 +290,8 @@ def _reviewer(body: dict[str, Any]) -> dict[str, str]:
 # ----------------------------------------------------------------------
 
 
-def _open_control(workflow_path: str, *, create: bool) -> selection.SelectionControlStore:
-    try:
-        return benchmark_setup.open_workflow_control(workflow_path, create=create)
-    except selection.SelectionControlUnavailable as exc:
-        raise ApiError(
-            409,
-            "this workflow has no selection control yet; create an experiment "
-            f"before reading or recording decisions ({exc})",
-            control_exists=False,
-        ) from exc
+def _open_control(workflow_path: str, *, write: bool = False) -> selection.SelectionControlStore:
+    return benchmark_setup.workflow_control(workflow_path, write=write)
 
 
 def _registration(workflow_path: str, experiment_id: str) -> Optional[dict[str, Any]]:
@@ -317,95 +311,32 @@ def _require_member(
     Three different facts, kept apart. An unknown id is 404. A registration
     that exists but never joined the contest (its best-effort registration
     failed) is 409 and says so, because rendering it as "no winner" would
-    invite somebody to decide inside a contest they are not looking at.
+    invite somebody to decide inside a contest they are not looking at. An
+    experiment recorded before this build and never enrolled answers with the
+    group it derives: a decision naming it enrols it (§2.3), a read does not.
     """
     group = control.group_for_experiment(experiment_id)
     if group is not None:
         return group
+    recorded = None if control.store is None else control.store.get_experiment(experiment_id)
+    if recorded is not None:
+        return selection.comparison_group_identity(recorded)
     if _registration(workflow_path, experiment_id) is None:
         raise ApiError(404, f"unknown experiment {experiment_id!r}")
     raise ApiError(
         409,
         f"experiment {experiment_id!r} is registered but is not a member of "
-        "any comparison group in this workflow's selection control",
+        "any comparison group in this workflow's contest",
         registered=True,
     )
 
 
-class _AuthorizedReader:
-    """`ExecutionReader` over exactly the stores this control authorizes.
-
-    Each `store_id` is resolved through `SelectionControlStore.store_for_source`,
-    which re-checks the store's recorded identity, and each resolved store is
-    wrapped in the existing `StoreExecutionReader` rather than a second access
-    path. A store id the control never authorized raises instead of being
-    answered from a neighbouring database.
-    """
-
-    def __init__(self, control: selection.SelectionControlStore) -> None:
-        self._control = control
-        self._readers: dict[str, comparison_module.StoreExecutionReader] = {}
-
-    def _reader(self, store_id: str) -> comparison_module.StoreExecutionReader:
-        existing = self._readers.get(store_id)
-        if existing is not None:
-            return existing
-        try:
-            store = self._control.store_for_source(store_id)
-        except selection.SelectionControlError as exc:
-            raise ApiError(409, str(exc)) from exc
-        if store is None:
-            raise ApiError(
-                409,
-                f"the evidence store behind source {store_id!r} is not readable "
-                "right now; its runs cannot be projected",
-            )
-        reader = comparison_module.StoreExecutionReader(store_id, store)
-        self._readers[store_id] = reader
-        return reader
-
-    def turn(self, store_id: str, turn_key: str) -> Optional[dict[str, Any]]:
-        return self._reader(store_id).turn(store_id, turn_key)
-
-    def trace(self, store_id: str, turn_key: str) -> list[dict[str, Any]]:
-        return self._reader(store_id).trace(store_id, turn_key)
-
-
-def _authorized_sources(control: selection.SelectionControlStore) -> dict[str, Any]:
-    """`{source_id: store}` for every authorized source that resolves today.
-
-    The same ids `ExecutionRef.store_id` carries, so pair-review authorization
-    and comparison reads agree about what a store is called.
-    """
-    sources: dict[str, Any] = {}
-    for row in control.list_sources():
-        source_id = str(row["source_id"])
-        try:
-            store = control.store_for_source(source_id)
-        except selection.SelectionControlError:
-            continue
-        if store is not None:
-            sources[source_id] = store
-    return sources
-
-
-def _pair_review(
-    workflow_path: str, control: selection.SelectionControlStore, *, create: bool
-) -> Optional[pair_review_module.PairReviewStore]:
-    """The workflow's shared pair-review sidecar, beside the selection control.
-
-    Returns None on a read when no sidecar exists: "nobody has marked anything"
-    is the honest answer and it does not require creating a file to give it.
-    """
-    root = state_paths.workflow_state_dir(str(workflow_path))
-    try:
-        return pair_review_module.open_shared_pair_review(
-            root, sources=_authorized_sources(control), create=create
-        )
-    except pair_review_module.PairReviewUnavailable:
-        if create:
-            raise
-        return None
+def _reader(control: selection.SelectionControlStore) -> comparison_module.StoreExecutionReader:
+    """`ExecutionReader` over the live DB, under the identity its refs carry."""
+    identity = None if control.store is None else control.store.store_identity()
+    if identity is None:
+        raise ApiError(409, "this workflow has no live evidence database to read runs from")
+    return comparison_module.StoreExecutionReader(identity, control.store)
 
 
 # ----------------------------------------------------------------------
@@ -670,8 +601,8 @@ def _selected_scope(
     if not resolved["evidence_readable"]:
         raise ApiError(
             409,
-            f"the evidence store behind source {resolved['source_id']!r} is "
-            "not readable right now, so these runs cannot be summarized",
+            "this workflow's evidence is not readable right now, so these runs "
+            "cannot be summarized",
         )
     return resolved
 
@@ -694,7 +625,6 @@ def _live_population(
         selection_rule=selection_rule,
         experiment_id=experiment_id,
         task_id=task_id,
-        source_id=resolved["source_id"],
         store_id=resolved["store_id"],
         recorded_attempts=resolved["recorded_attempts"],
         finished_attempts=resolved["finished_attempts"],
@@ -735,13 +665,12 @@ def _selected_runs_payload(
     return selected_runs_module.aggregate_selected_runs(
         experiment_id=experiment_id,
         task_id=task_id,
-        source_id=resolved["source_id"],
         store_id=resolved["store_id"],
         requested=resolved["requested_attempts"],
         duplicate_requests=duplicates,
         recorded_attempts=resolved["recorded_attempts"],
         candidate_rows=resolved["selected"],
-        reader=_AuthorizedReader(control),
+        reader=_reader(control),
         selection_rule=rule,
         task_population=population,
     )
@@ -776,12 +705,11 @@ def _selected_runs_validation(
         # The same scope the aggregate was computed under: the result
         # digest is bound to it, so validating without it would
         # compare against a digest this route never published.
-        source_id=resolved["source_id"],
         store_id=resolved["store_id"],
         requested=attempts,
         recorded_attempts=resolved["recorded_attempts"],
         candidate_rows=resolved["selected"],
-        reader=_AuthorizedReader(control),
+        reader=_reader(control),
         expect=_text((query.get("expect") or [None])[0], "expect", required=False),
         expect_members=_expected_members(query),
         task_population=population,
@@ -1023,7 +951,6 @@ def _winner_payload(
         "is_winner": winner is not None and winner["experiment_id"] == experiment_id,
         "automatic": bool(winner and winner.get("automatic")),
         "members": control.group_members(group_id),
-        "source_id": control.source_for_experiment(experiment_id),
         "registration": registration,
         "runs_per_task": None if registration is None else registration.get("runs_per_task"),
         "control_exists": True,
@@ -1040,7 +967,7 @@ def _get_experiments(
 ) -> tuple[int, dict[str, Any]]:
     experiment_id = parts[0]
     rest = parts[1:]
-    control = _open_control(workflow_path, create=False)
+    control = _open_control(workflow_path)
 
     if rest == ["winner"]:
         return 200, _winner_payload(workflow_path, control, experiment_id)
@@ -1096,7 +1023,7 @@ def _get_task(
         run = _side(summary, attempt, which="requested")
         ref = _require_comparable(run, "requested")
         _pass_id, attribute = _pass_request(_scalars(query), side="left")
-        recorded = _discovered_passes(_AuthorizedReader(control), ref, attribute)
+        recorded = _discovered_passes(_reader(control), ref, attribute)
         return 200, {
             "run": _run_header(run),
             "pass_attribute": attribute,
@@ -1115,7 +1042,7 @@ def _get_task(
         run = _side(summary, attempt, which="requested")
         ref = _require_comparable(run, "requested")
         view = _view(query)
-        reader = _AuthorizedReader(control)
+        reader = _reader(control)
         pass_id, attribute = _pass_request(_scalars(query), side="left")
         selector = None
         omitted: list[str] = []
@@ -1161,15 +1088,10 @@ def _get_task(
     if rest == ["review-pairs", "history"]:
         pair_key = _text((query.get("pair_key") or [None])[0], "pair_key")
         limit, _offset = _page(query)
-        sidecar = _pair_review(workflow_path, control, create=False)
-        history = (
-            []
-            if sidecar is None
-            else sidecar.history(
-                pair_key,
-                reviewer=(query.get("reviewer") or [None])[0],
-                limit=limit,
-            )
+        history = pair_review_module.PairReviewStore(control.store).history(
+            pair_key,
+            reviewer=(query.get("reviewer") or [None])[0],
+            limit=limit,
         )
         return 200, {
             "experiment_id": experiment_id,
@@ -1177,7 +1099,7 @@ def _get_task(
             "pair_key": pair_key,
             "history": history,
             "limit": limit,
-            "control_exists": sidecar is not None,
+            "control_exists": control_module.present(control.store),
         }
 
     raise ApiError(404, "not found")
@@ -1227,7 +1149,7 @@ def _comparison_payload(
     left_ref = _require_comparable(left, "left")
     right_ref = _require_comparable(right, "right")
     view = _view(query)
-    reader = _AuthorizedReader(control)
+    reader = _reader(control)
     scalars = _scalars(query)
     # Two passes of ONE turn is the case this exists for -- teacher and
     # student recorded side by side -- so each side resolves independently and
@@ -1339,7 +1261,7 @@ def _pair_rows(
     """The pinned side and every pair it forms with the other recorded runs.
 
     The universe of pairs is the caller's question, so it is stated here and
-    handed to the sidecar rather than invented inside it: pinned-versus-each
+    handed to the pair-review store rather than invented inside it: pinned-versus-each
     comparable attempt of this task, in attempt order, optionally against
     another experiment's attempts of the same task.
     """
@@ -1351,7 +1273,7 @@ def _pair_rows(
         which="left",
     )
     left_ref = _require_comparable(left, "left")
-    reader = _AuthorizedReader(control)
+    reader = _reader(control)
     scalars = _scalars(query)
     left_pass, attribute = _pass_request(scalars, side="left")
     right_pass, _attribute = _pass_request(scalars, side="right")
@@ -1409,30 +1331,9 @@ def _review_pairs_payload(
     if right_experiment and right_experiment != experiment_id:
         _require_member(workflow_path, control, right_experiment)
     left, rows = _pair_rows(control, experiment_id, task_id, query)
-    sidecar = _pair_review(workflow_path, control, create=False)
-    keys = [row["pair_key"] for row in rows]
-    if sidecar is None:
-        progress = {
-            "reviewer": reviewer,
-            "pairs": len(keys),
-            "reviewed": 0,
-            "remaining": len(keys),
-            "next_pair_key": keys[0] if keys else None,
-            "states": [
-                {
-                    "pair_key": key,
-                    "reviewer": reviewer,
-                    "state": pair_review_module.STATE_NOT_REVIEWED,
-                    "recorded": False,
-                    "seq": 0,
-                    "updated_at": None,
-                    "note": None,
-                }
-                for key in keys
-            ],
-        }
-    else:
-        progress = sidecar.progress(reviewer, keys)
+    progress = pair_review_module.PairReviewStore(control.store).progress(
+        reviewer, [row["pair_key"] for row in rows]
+    )
     by_key = {state["pair_key"]: state for state in progress["states"]}
     return {
         "experiment_id": experiment_id,
@@ -1443,7 +1344,7 @@ def _review_pairs_payload(
         "pairs": [dict(row, state=by_key.get(row["pair_key"])) for row in rows],
         "progress": {key: progress[key] for key in
                      ("reviewer", "pairs", "reviewed", "remaining", "next_pair_key")},
-        "control_exists": sidecar is not None,
+        "control_exists": control_module.present(control.store),
     }
 
 
@@ -1543,7 +1444,7 @@ def _consistency_payload(
     # One process-wide load. A page view must not re-read the weights, and a
     # machine without the model must not re-fail the lookup per request.
     embedder, unavailable = consistency_module.shared_embedder()
-    reader = _AuthorizedReader(control)
+    reader = _reader(control)
     payload = _consistency_report(
         workflow_path,
         control,
@@ -1588,7 +1489,7 @@ def _consistency_payload(
 def _post_winner_decision(
     workflow_path: str, experiment_id: str, body: dict[str, Any]
 ) -> tuple[int, dict[str, Any]]:
-    control = _open_control(workflow_path, create=False)
+    control = _open_control(workflow_path, write=True)
     group = _require_member(workflow_path, control, experiment_id)
     decision = _text(body.get("decision"), "decision")
     if decision not in selection.CLIENT_DECISIONS:
@@ -1605,8 +1506,10 @@ def _post_winner_decision(
     result = control.record_decision(
         str(group["group_id"]),
         decision,
+        # Null when the reader saw no winner: a promotion into an empty
+        # contest is still a compare-and-set, against "nobody".
         expected_selection_id=_text(
-            body.get("expected_selection_id"), "expected_selection_id"
+            body.get("expected_selection_id"), "expected_selection_id", required=False
         ),
         candidate_experiment_id=None if candidate is None else _text(
             candidate, "candidate_experiment_id"
@@ -1626,7 +1529,7 @@ def _post_winner_decision(
 def _post_best_run(
     workflow_path: str, experiment_id: str, task_id: str, body: dict[str, Any]
 ) -> tuple[int, dict[str, Any]]:
-    control = _open_control(workflow_path, create=False)
+    control = _open_control(workflow_path, write=True)
     _require_member(workflow_path, control, experiment_id)
     if "attempt" not in body:
         raise ApiError(400, "attempt is required")
@@ -1648,7 +1551,7 @@ def _post_best_run(
 def _delete_best_run(
     workflow_path: str, experiment_id: str, task_id: str, body: dict[str, Any]
 ) -> tuple[int, dict[str, Any]]:
-    control = _open_control(workflow_path, create=False)
+    control = _open_control(workflow_path, write=True)
     _require_member(workflow_path, control, experiment_id)
     who = _actor(body)
     result = best_run_module.clear_best_run(
@@ -1667,7 +1570,7 @@ def _delete_best_run(
 def _post_undecided(
     workflow_path: str, experiment_id: str, task_id: str, body: dict[str, Any]
 ) -> tuple[int, dict[str, Any]]:
-    control = _open_control(workflow_path, create=False)
+    control = _open_control(workflow_path, write=True)
     _require_member(workflow_path, control, experiment_id)
     who = _actor(body)
     candidate = body.get("candidate_attempt")
@@ -1690,7 +1593,7 @@ def _post_undecided(
 def _post_review_pair(
     workflow_path: str, experiment_id: str, task_id: str, body: dict[str, Any]
 ) -> tuple[int, dict[str, Any]]:
-    control = _open_control(workflow_path, create=False)
+    control = _open_control(workflow_path, write=True)
     _require_member(workflow_path, control, experiment_id)
     state = _text(body.get("state"), "state")
     if state not in (
@@ -1722,7 +1625,7 @@ def _post_review_pair(
     left, right = _comparison_sides(control, experiment_id, task_id, query)
     left_ref = _require_comparable(left, "left")
     right_ref = _require_comparable(right, "right")
-    reader = _AuthorizedReader(control)
+    reader = _reader(control)
     left_pass, attribute = _pass_request(body, side="left")
     right_pass, _attribute = _pass_request(body, side="right")
     if left_pass is not None:
@@ -1733,8 +1636,7 @@ def _post_review_pair(
         right_ref, _selector, _omitted = _pass_scope(
             reader, right_ref, right_pass, attribute, which="right"
         )
-    sidecar = _pair_review(workflow_path, control, create=True)
-    recorded = sidecar.set_state(
+    recorded = pair_review_module.PairReviewStore(control.store).set_state(
         left_ref,
         right_ref,
         state=state,
@@ -1849,15 +1751,7 @@ def _guard(fn: Callable[[], tuple[int, dict[str, Any]]]) -> tuple[int, dict[str,
         return 409, {"error": str(exc)}
     except (selection.UnknownComparisonGroup, selection.ExperimentNotInGroup) as exc:
         return 404, {"error": str(exc.args[0] if exc.args else exc)}
-    except pair_review_module.UnauthorizedEvidenceSource as exc:
-        return 403, {"error": str(exc)}
-    except pair_review_module.PairReviewUnavailable as exc:
-        return 409, {"error": str(exc)}
-    except (
-        selection.EvidenceSourceUnresolved,
-        selection.UnauthorizedEvidenceSource,
-        selection.SelectionControlError,
-    ) as exc:
+    except (selection.SelectionControlError, control_module.ControlUnavailable) as exc:
         return 409, {"error": str(exc)}
     except workspace_module.UnknownLogicalExperiment as exc:
         return 404, {"error": f"unknown experiment: {exc.args[0] if exc.args else exc}"}
@@ -1883,6 +1777,11 @@ def _guard(fn: Callable[[], tuple[int, dict[str, Any]]]) -> tuple[int, dict[str,
         return 404, {"error": str(exc)}
     except benchmark_setup.BenchmarkSetupConflict as exc:
         return 409, {"error": str(exc)}
+    except sqlite3.OperationalError as exc:
+        status = control_module.write_refusal_status(exc)
+        if status is None:
+            raise
+        return status, {"error": str(exc)}
     except KeyError as exc:
         return 404, {"error": f"not found: {exc.args[0] if exc.args else exc}"}
     except (ValueError, TypeError) as exc:

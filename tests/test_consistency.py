@@ -257,6 +257,8 @@ def repeats(tmp_path, monkeypatch):
     resolved = Path(state_paths.workflow_state_dir(str(folder))).resolve()
     assert resolved.is_relative_to((tmp_path / "state").resolve()), resolved
 
+    db = state_paths.observability_db(str(folder))
+    store = obs.ObservabilityStore(db)
     benchmark = setup.save_benchmark(
         folder, {"title": "Roster review", "tasks": [{"prompt": "Review the roster"}]}
     )
@@ -266,10 +268,8 @@ def repeats(tmp_path, monkeypatch):
     baseline_id = baseline["experiment_id"]
     task_id = baseline["task_ids"][0]
 
-    db_one = str(tmp_path / "evidence-baseline.sqlite3")
-    store_one = obs.ObservabilityStore(db_one)
     controller_one = ExperimentController(
-        db_one, store_one.store_identity(), external=False,
+        db, store.store_identity(), external=False,
         workflow_folderpath=str(folder),
     )
     controller_one.create_experiment(
@@ -278,23 +278,21 @@ def repeats(tmp_path, monkeypatch):
         workflow_name=setup.workflow_name_for(folder),
     )
     _run_attempt(
-        store_one, controller_one, baseline_id, task_id, 1,
+        store, controller_one, baseline_id, task_id, 1,
         [{"commands": ["add_item", "list_items"], "plan": PLAN_OPEN,
           "answer": ANSWER_DONE}],
     )
     _run_attempt(
-        store_one, controller_one, baseline_id, task_id, 2,
+        store, controller_one, baseline_id, task_id, 2,
         [{"commands": ["add_item", "list_items", "sort_items", "remove_item"],
           "plan": None, "answer": ANSWER_DONE}],
     )
-    _run_attempt(store_one, controller_one, baseline_id, task_id, 3, [])
+    _run_attempt(store, controller_one, baseline_id, task_id, 3, [])
 
     candidate = setup.create_experiment(folder, benchmark_id, "v1", runs_per_task=3)
     candidate_id = candidate["experiment_id"]
-    db_two = str(tmp_path / "evidence-candidate.sqlite3")
-    store_two = obs.ObservabilityStore(db_two)
     controller_two = ExperimentController(
-        db_two, store_two.store_identity(), external=False,
+        db, store.store_identity(), external=False,
         workflow_folderpath=str(folder),
     )
     controller_two.create_experiment(
@@ -310,12 +308,12 @@ def repeats(tmp_path, monkeypatch):
         {"commands": ["complete_item"], "plan": PLAN_FINISH,
          "answer": ANSWER_DONE},
     ]
-    _run_attempt(store_two, controller_two, candidate_id, task_id, 1,
+    _run_attempt(store, controller_two, candidate_id, task_id, 1,
                  [dict(spec) for spec in repeated])
-    _run_attempt(store_two, controller_two, candidate_id, task_id, 2,
+    _run_attempt(store, controller_two, candidate_id, task_id, 2,
                  [dict(spec) for spec in repeated])
     _run_attempt(
-        store_two, controller_two, candidate_id, task_id, 3,
+        store, controller_two, candidate_id, task_id, 3,
         [
             {"commands": ["open_export", "delete_export"], "plan": PLAN_OTHER,
              "answer": "removing the export"},
@@ -331,10 +329,8 @@ def repeats(tmp_path, monkeypatch):
         "task_id": task_id,
         "baseline_id": baseline_id,
         "candidate_id": candidate_id,
-        "store_one": store_one,
-        "store_two": store_two,
-        "db_one": db_one,
-        "db_two": db_two,
+        "store": store,
+        "db": db,
         "state_root": tmp_path / "state",
     }
 
@@ -735,7 +731,7 @@ class TestRunEvidence:
         ref["turn_keys"] = list(ref["turn_keys"]) + ["turn-that-was-pruned"]
         row["execution_ref"] = ref
 
-        reader = selection_api._AuthorizedReader(_open_control(repeats))
+        reader = selection_api._reader(_open_control(repeats))
         run = consistency.collect_run_evidence(row, reader)
 
         assert run.step_count == 2
@@ -802,7 +798,7 @@ class TestRunEvidence:
         ref["turn_keys"] = surviving + ["last-turn-that-was-pruned"]
         row["execution_ref"] = ref
 
-        reader = selection_api._AuthorizedReader(_open_control(repeats))
+        reader = selection_api._reader(_open_control(repeats))
         run = consistency.collect_run_evidence(row, reader)
 
         assert run.answer.state == consistency.TEXT_UNREADABLE
@@ -827,7 +823,7 @@ class TestRunEvidence:
         ref["turn_keys"] = list(ref["turn_keys"]) + ["turn-that-was-pruned"]
         row["execution_ref"] = ref
 
-        reader = selection_api._AuthorizedReader(_open_control(repeats))
+        reader = selection_api._reader(_open_control(repeats))
         incomplete = consistency.collect_run_evidence(row, reader)
         whole = consistency.collect_run_evidence(
             next(r for r in summary["attempts"] if r["attempt"] == 2), reader
@@ -1033,10 +1029,8 @@ class TestRecordedOrder:
         assert projection.answers()[-1]["answer"] == "done"
 
 
-def _open_control(repeats):
-    from fastworkflow.benchmark import setup as benchmark_setup
-
-    return benchmark_setup.open_workflow_control(repeats["folder"], create=False)
+def _open_control(repeats, *, write=False):
+    return setup.workflow_control(repeats["folder"], write=write)
 
 
 def _evidence_digest(path):
@@ -1072,7 +1066,7 @@ def _choose_best(repeats, experiment_id, attempt, reason=None):
     decision made against a selection somebody has already replaced; these
     tests replace one deliberately, so they have to carry what they last read.
     """
-    control = _open_control(repeats)
+    control = _open_control(repeats, write=True)
     summary = best_run_module.task_run_summary(
         control, experiment_id, repeats["task_id"]
     )
@@ -1433,7 +1427,7 @@ def _sealed(repeats, tmp_path):
 
     from tests.test_observability_workspace import _manifest, _store_decl
 
-    archived = obs.ObservabilityStore(repeats["db_two"], migrate=False).archive_to(
+    archived = obs.ObservabilityStore(repeats["db"], migrate=False).archive_to(
         str(tmp_path / "sealed-candidate.sqlite3")
     )
     manifest = _manifest(
@@ -1581,7 +1575,7 @@ class TestSealedWorkspace:
         sealed = self._read(
             workspace, SEALED_EXPERIMENT, repeats["task_id"]
         )[1]
-        reader = selection_api._AuthorizedReader(_open_control(repeats))
+        reader = selection_api._reader(_open_control(repeats))
         row = _by_attempt(_consistency(repeats, repeats["candidate_id"])[1], 1)
         ref = comparison.ExecutionRef.from_mapping(row["execution_ref"])
         assert len(ref.turn_keys) > 1, "needs a multi-turn run to have an order"
@@ -1740,13 +1734,12 @@ class TestOverHttp:
         does. Hashing the rows asserts the thing actually worth asserting, and
         would still fail if the route wrote, updated or deleted anything.
         """
-        watched = [repeats["db_one"], repeats["db_two"]]
-        before = [_evidence_digest(path) for path in watched]
+        before = _evidence_digest(repeats["db"])
 
         assert _request(server, self._path(repeats))[0] == 200
         assert _request(server, self._path(repeats, repeats["candidate_id"]))[0] == 200
 
-        assert [_evidence_digest(path) for path in watched] == before
+        assert _evidence_digest(repeats["db"]) == before
 
     def test_derived_vectors_are_cached_outside_the_evidence(self, server, repeats):
         cache_root = (
@@ -1816,9 +1809,8 @@ def test_the_dom(server, repeats):
     if not dependency:
         pytest.skip("Set TEST_JSDOM_ROOT to run DOM integration with jsdom")
     script = Path(__file__).with_name("chatbot_consistency_dom.cjs")
-    for phase, db_path in (("baseline", repeats["db_one"]),
-                           ("candidate", repeats["db_two"])):
-        server.db_path = db_path
+    server.db_path = repeats["db"]
+    for phase in ("baseline", "candidate"):
         result = subprocess.run(
             [
                 "node",
