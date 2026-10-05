@@ -35,6 +35,7 @@ import os
 import sqlite3
 import subprocess
 import threading
+from array import array
 from dataclasses import replace
 from pathlib import Path
 
@@ -615,8 +616,8 @@ class TestLocalEmbedder:
 
 
 class TestVectorCache:
-    def test_a_vector_round_trips_by_content_and_model_identity(self, tmp_path):
-        cache = consistency.VectorCache(tmp_path / "vectors")
+    def test_a_vector_round_trips_by_content_and_model_identity(self):
+        cache = consistency.VectorCache()
         embedded = consistency.EmbeddedText(
             vector=(0.5, 0.5), token_count=4, truncated=False
         )
@@ -629,18 +630,33 @@ class TestVectorCache:
         assert cache.get("fp-2", "some plan") is None
         assert cache.get("fp-1", "some other plan") is None
 
-    def test_the_cache_lives_where_it_was_told_and_nowhere_else(self, tmp_path):
-        root = tmp_path / "vectors"
-        cache = consistency.VectorCache(root)
-        cache.put(
-            "fp-1", "text",
-            consistency.EmbeddedText(vector=(1.0,), token_count=1, truncated=False),
+    def test_a_hit_returns_exactly_the_floats_the_encoder_produced(self):
+        """Held as float32, which is what the encoder emits: lossless for it."""
+        cache = consistency.VectorCache()
+        vector = tuple(float(value) for value in array("f", [0.1, -0.2, 0.3]))
+        embedded = consistency.EmbeddedText(
+            vector=vector, token_count=700, truncated=True, windows=3
         )
 
-        written = list(root.rglob("*.json"))
-        assert written, "the cache wrote nothing"
-        for path in written:
-            assert path.resolve().is_relative_to(root.resolve())
+        cache.put("fp-1", "a long plan", embedded)
+
+        assert cache.get("fp-1", "a long plan") == embedded
+
+    def test_the_least_recently_used_entry_is_evicted_past_the_cap(self):
+        cache = consistency.VectorCache(max_entries=2)
+        embedded = consistency.EmbeddedText(
+            vector=(1.0,), token_count=1, truncated=False
+        )
+        cache.put("fp", "a", embedded)
+        cache.put("fp", "b", embedded)
+        # Reading "a" makes "b" the least recently used.
+        assert cache.get("fp", "a") == embedded
+
+        cache.put("fp", "c", embedded)
+
+        assert cache.get("fp", "b") is None
+        assert cache.get("fp", "a") == embedded
+        assert cache.get("fp", "c") == embedded
 
 
 # ----------------------------------------------------------------------
@@ -1641,6 +1657,7 @@ class TestSealedWorkspace:
         workspace, archive = _sealed(repeats, tmp_path)
         path = Path(archive["path"])
         before = (path.stat().st_size, path.stat().st_mtime_ns, path.read_bytes())
+        beside = sorted(path.parent.iterdir())
 
         assert self._read(
             workspace, SEALED_EXPERIMENT, repeats["task_id"]
@@ -1648,7 +1665,7 @@ class TestSealedWorkspace:
 
         after = (path.stat().st_size, path.stat().st_mtime_ns, path.read_bytes())
         assert before == after
-        assert not list(path.parent.glob("*consistency-vectors*")), (
+        assert sorted(path.parent.iterdir()) == beside, (
             "a read of sealed evidence created a derived cache beside it"
         )
 
@@ -1741,25 +1758,38 @@ class TestOverHttp:
 
         assert _evidence_digest(repeats["db"]) == before
 
-    def test_derived_vectors_are_cached_outside_the_evidence(self, server, repeats):
-        cache_root = (
-            Path(state_paths.workflow_state_dir(repeats["folder"]))
-            / selection_api._CONSISTENCY_CACHE_DIRNAME
+    def test_derived_vectors_are_cached_in_memory_and_write_no_file(
+        self, server, repeats, monkeypatch
+    ):
+        monkeypatch.setattr(
+            selection_api, "_CONSISTENCY_CACHE", consistency.VectorCache()
         )
+        state_root = Path(repeats["state_root"])
+
+        def files():
+            # SQLite's own -wal/-shm appear when the live store is opened.
+            return sorted(
+                path for path in state_root.rglob("*")
+                if not path.name.endswith(("-wal", "-shm"))
+            )
+
+        files_before = files()
+
         first = _request(server, self._path(repeats, repeats["candidate_id"]))[1]
         if not first["metric_identity"]["embedding"]["available"]:
             pytest.skip("no local embedding model on this machine")
-
         assert first["coverage"]["vectors_computed"] > 0
-        assert cache_root.exists(), "no derived cache was written"
-        assert cache_root.resolve().is_relative_to(
-            Path(repeats["state_root"]).resolve()
-        )
 
         second = _request(server, self._path(repeats, repeats["candidate_id"]))[1]
         assert second["coverage"]["vectors_from_cache"] > 0
         assert second["coverage"]["vectors_computed"] == 0, (
             "the second read recomputed vectors the first one cached"
+        )
+        # A cache changes the time a report takes, never the report.
+        assert second["pairs"] == first["pairs"]
+        assert second["summary"] == first["summary"]
+        assert files() == files_before, (
+            "reading consistency created files under the state dir"
         )
 
     def test_the_cross_experiment_block_comes_back_over_the_wire(

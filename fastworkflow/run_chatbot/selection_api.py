@@ -49,12 +49,10 @@ from HTTP, so no client can forge a decision as the machine's own.
 
 from __future__ import annotations
 
-import os
 import sqlite3
 from typing import Any, Callable, Mapping, Optional
 from urllib.parse import unquote
 
-from fastworkflow import state_paths
 from fastworkflow.benchmark import setup as benchmark_setup
 from fastworkflow.observability import best_run as best_run_module
 from fastworkflow.observability import command_summary as command_summary_module
@@ -87,10 +85,10 @@ _MAX_PAGE = 500
 _DEFAULT_PAGE = 100
 _MAX_TEXT = 4000
 
-# Where derived consistency vectors live: under the workflow's own state
-# directory, beside its other derived caches and deliberately NOT inside any
-# evidence database. Deleting it costs a recomputation and nothing else.
-_CONSISTENCY_CACHE_DIRNAME = "consistency-vectors"
+# Where derived consistency vectors live: in this process's memory, shared by
+# every workflow and deliberately NOT inside any evidence database. Losing it
+# costs a recomputation and nothing else.
+_CONSISTENCY_CACHE = consistency_module.VectorCache()
 
 # The span attribute a pass-stamping producer records. `distillation.py` stamps
 # it once per teacher/student pass (`fix-txxy`), so `discover_pass_selectors`
@@ -1357,17 +1355,8 @@ def _review_pairs_payload(
 # nothing to any evidence store, and elects nobody: the payload is descriptive
 # and says so in its own words.
 #
-# Derived vectors are cached under the workflow's state directory, never inside
-# an evidence database, so this route cannot modify what it measures.
-
-
-def _consistency_cache(workflow_path: str) -> consistency_module.VectorCache:
-    return consistency_module.VectorCache(
-        os.path.join(
-            state_paths.workflow_state_dir(str(workflow_path)),
-            _CONSISTENCY_CACHE_DIRNAME,
-        )
-    )
+# Derived vectors are cached in process memory, never inside an evidence
+# database, so this route cannot modify what it measures.
 
 
 def _consistency_bounds(scalars: Mapping[str, Any]) -> tuple[int, int]:
@@ -1395,7 +1384,6 @@ def _consistency_bounds(scalars: Mapping[str, Any]) -> tuple[int, int]:
 
 
 def _consistency_report(
-    workflow_path: str,
     control: selection.SelectionControlStore,
     experiment_id: str,
     task_id: str,
@@ -1418,7 +1406,7 @@ def _consistency_report(
         best_attempt=best.get("attempt"),
         embedder=embedder,
         embedding_unavailable=unavailable,
-        cache=_consistency_cache(workflow_path),
+        cache=_CONSISTENCY_CACHE,
         max_pairs=max_pairs,
         runs_capped=capped,
     )
@@ -1446,7 +1434,6 @@ def _consistency_payload(
     embedder, unavailable = consistency_module.shared_embedder()
     reader = _reader(control)
     payload = _consistency_report(
-        workflow_path,
         control,
         experiment_id,
         task_id,
@@ -1461,7 +1448,6 @@ def _consistency_payload(
     if compare_experiment and compare_experiment != experiment_id:
         _require_member(workflow_path, control, compare_experiment)
         other = _consistency_report(
-            workflow_path,
             control,
             compare_experiment,
             task_id,

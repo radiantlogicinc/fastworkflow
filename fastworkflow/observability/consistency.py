@@ -59,8 +59,9 @@ HuggingFace model with `local_files_only=True`. There is no download, no paid
 provider and no LLM judge, and there is no lexical stand-in either: a missing
 model yields an actionable `unavailable` state carrying the command that would
 install it, while the step-count metrics -- which need no model -- still
-compute. Derived vectors are cached by content/model/projection identity
-OUTSIDE the evidence store, so nothing here writes to sealed evidence.
+compute. Derived vectors are cached in process memory by content/model/
+projection identity OUTSIDE the evidence store, so nothing here writes to
+sealed evidence.
 """
 
 from __future__ import annotations
@@ -69,6 +70,9 @@ import hashlib
 import json
 import math
 import os
+import threading
+from array import array
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
@@ -125,6 +129,8 @@ LONG_TEXT_RULE = (
 # explicitly CAPPED report naming what was left out, never a quiet sample.
 DEFAULT_MAX_RUNS = 30
 DEFAULT_MAX_PAIRS = 300
+# About 3 MB of MiniLM vectors; a full view of DEFAULT_MAX_RUNS runs needs ~60.
+VECTOR_CACHE_MAX_ENTRIES = 2048
 
 # Text states. `absent` is "the evidence records none", which is not `withheld`
 # ("the capture policy removed it") and not `unreadable` ("the turn could not
@@ -761,62 +767,59 @@ class EmbeddedText:
 
 
 class VectorCache:
-    """Derived vectors, addressed by content and model identity.
+    """Derived vectors, addressed by content and model identity, in memory.
 
-    Outside the evidence store, always: this writes under a directory the
-    caller names (the workflow's own state directory in the server), never into
-    a database that holds recorded evidence, and never into a sealed archive.
-    The key is the model fingerprint plus a digest of the exact text, so a
-    changed projection or a changed model cannot read a stale vector -- it
-    simply misses.
+    Outside the evidence store, always: this is process memory, never a
+    database that holds recorded evidence, and never a sealed archive. Losing
+    it on restart costs a re-embedding and nothing else. The key is the model
+    fingerprint plus a digest of the exact text, so a changed projection or a
+    changed model cannot read a stale vector -- it simply misses.
+
+    Bounded by `max_entries`, least recently used first out. Vectors are held
+    as float32, which is what the encoder produces, so a hit returns exactly
+    the floats a recomputation would; 384 of them is about 1.5 KB an entry.
+    Requests are served on threads, hence the lock.
     """
 
-    def __init__(self, root: str | os.PathLike[str]) -> None:
-        self.root = Path(root)
+    def __init__(self, max_entries: int = VECTOR_CACHE_MAX_ENTRIES) -> None:
+        self.max_entries = max_entries
+        self._entries: OrderedDict[tuple[str, str], tuple[array, int, bool, int]] = (
+            OrderedDict()
+        )
+        self._lock = threading.Lock()
 
-    def _path(self, fingerprint: str, text: str) -> Path:
-        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        return self.root / fingerprint / digest[:2] / f"{digest}.json"
+    @staticmethod
+    def _key(fingerprint: str, text: str) -> tuple[str, str]:
+        return fingerprint, hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     def get(self, fingerprint: str, text: str) -> Optional[EmbeddedText]:
-        path = self._path(fingerprint, text)
-        try:
-            payload = json.loads(path.read_text("utf-8"))
-        except (OSError, ValueError):
-            return None
-        vector = payload.get("vector")
-        if not isinstance(vector, list) or not vector:
-            return None
+        key = self._key(fingerprint, text)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                return None
+            self._entries.move_to_end(key)
+        vector, token_count, truncated, windows = entry
         return EmbeddedText(
-            vector=tuple(float(value) for value in vector),
-            token_count=int(payload.get("token_count") or 0),
-            truncated=bool(payload.get("truncated")),
-            windows=int(payload.get("windows") or 1),
+            vector=tuple(vector),
+            token_count=token_count,
+            truncated=truncated,
+            windows=windows,
         )
 
     def put(self, fingerprint: str, text: str, embedded: EmbeddedText) -> None:
-        path = self._path(fingerprint, text)
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            # Written beside and renamed: a half-written vector read by a
-            # concurrent request would be a silently wrong similarity.
-            temporary = path.with_suffix(".json.tmp")
-            temporary.write_text(
-                json.dumps(
-                    {
-                        "vector": list(embedded.vector),
-                        "token_count": embedded.token_count,
-                        "truncated": embedded.truncated,
-                        "windows": embedded.windows,
-                    }
-                ),
-                "utf-8",
-            )
-            temporary.replace(path)
-        except OSError:
-            # A cache that cannot be written is a slower report, not a failed
-            # one. The vectors are derived and reproducible by construction.
-            return
+        key = self._key(fingerprint, text)
+        entry = (
+            array("f", embedded.vector),
+            embedded.token_count,
+            embedded.truncated,
+            embedded.windows,
+        )
+        with self._lock:
+            self._entries[key] = entry
+            self._entries.move_to_end(key)
+            while len(self._entries) > self.max_entries:
+                self._entries.popitem(last=False)
 
 
 class LocalTextEmbedder:
