@@ -250,6 +250,36 @@ def test_record_navigator_dom(record_nav_server):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.fixture
+def crumb_climb_server(experiment_server):
+    """One turn deep enough to stand on a step: Planning, then Execution of two steps."""
+    server, default = experiment_server
+    key = 'crumb-turn'
+    row = _turn_row(key, None, None, None)
+    row.update(channel_id='chat', conversation_id=9, ordinal=1,
+               user_message='climb the crumbs', started_at='2026-09-08T01:00:00+00:00')
+    spans = [
+        ('crumb-plan', None, 'fw.planner.plan', 1, 1000, '{}'),
+        ('crumb-exec', None, 'fw.agent.execute', 2000, 9000, '{}'),
+        ('crumb-step-1', 'crumb-exec', 'fw.agent.step', 2100, 5000,
+         '{"tool_name": "first_tool", "observation": "first seen"}'),
+        ('crumb-step-2', 'crumb-exec', 'fw.agent.step', 5100, 8900,
+         '{"tool_name": "second_tool"}'),
+    ]
+    with default._connect() as conn:
+        assert default.upsert_turn_row(conn, row, [], default._store_redactor())
+        for span_id, parent, name, start, end, attrs in spans:
+            conn.execute(
+                'INSERT INTO spans(span_id,trace_id,parent_span_id,name,kind,start_ns,end_ns,status,attributes)'
+                ' VALUES(?,?,?,?,?,?,?,?,?)',
+                (span_id, key, parent, name, 'internal', start, end, 'ok', attrs))
+    yield server
+
+
+def test_breadcrumb_climbs_out_of_a_step_dom(crumb_climb_server):
+    _run_dom('chatbot_crumb_climb_dom.cjs', crumb_climb_server, 'crumb-turn')
+
+
 def _run_dom(script_name, server, *extra, timeout=40):
     dependency = os.environ.get('TEST_JSDOM_ROOT')
     if not dependency:

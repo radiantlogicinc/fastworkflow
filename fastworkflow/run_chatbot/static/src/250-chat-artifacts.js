@@ -158,10 +158,13 @@ function tmOffloadedArtifactNode(key, value, source) {
   return box;
 }
 
-function tmArtifactsIn(commandOutputs) {
-  /* [{key, value, source}] for every artifact this turn actually returned. */
+function tmArtifactsIn(commandOutputs, callIds) {
+  /* [{key, value, source}] for every artifact this turn actually returned.
+     With `callIds`, only the outputs whose command_call_id is in it; the
+     source ordinal stays the output's place in the whole turn. */
   var found = [];
   (commandOutputs || []).forEach(function (co, index) {
+    if (callIds && !(co && co.command_call_id && callIds[co.command_call_id] === true)) { return; }
     var resp = (co && co.command_response) || {};
     var artifacts = resp.artifacts || {};
     Object.keys(artifacts).forEach(function (key) {
@@ -176,12 +179,31 @@ function tmArtifactsIn(commandOutputs) {
 }
 
 function tmRenderArtifacts(bubbleMsg, commandOutputs, note) {
+  var viewer = tmArtifactViewer(tmArtifactsIn(commandOutputs), note, {
+    owner: bubbleMsg,
+    label: "Artifacts of this answer",
+    anchor: function () { return bubbleMsg.querySelector(".bubble") || bubbleMsg; },
+    frame: function () { return document.getElementById("chatLog"); }
+  });
+  if (!viewer) { return null; }
+  tmAppendBeforeMeta(bubbleMsg, viewer.linkRow);
+  tmAppendBeforeMeta(bubbleMsg, viewer.panel);
+  return viewer.panel;
+}
+
+function tmArtifactViewer(items, note, place) {
   /* The answer stays the thing on screen. Its artifacts sit behind one link
      under it, and open in a panel beside it that shows one at a time. Every
      card is still built (and fetched, within the lazy-load rules) up front, so
-     stepping through them never waits on the network. */
-  var items = tmArtifactsIn(commandOutputs);
+     stepping through them never waits on the network.
+
+     `place` says where that is: `owner` is the element the link and panel are
+     put in (one open panel per owner), `anchor()` the element the panel sits
+     beside, and `frame()` the scroll box it must stay inside. With
+     `placement: "below"` the panel hangs under the anchor instead, starting
+     at its left edge and stopping short of the record navigator. */
   if (!items.length) { return null; }
+  var owner = place.owner;
   tmArtifactPanelSeq += 1;
   var panelId = "artifactPanel" + tmArtifactPanelSeq;
 
@@ -197,7 +219,7 @@ function tmRenderArtifacts(bubbleMsg, commandOutputs, note) {
   wrap.id = panelId;
   wrap.hidden = true;
   wrap.setAttribute("role", "dialog");
-  wrap.setAttribute("aria-label", "Artifacts of this answer");
+  wrap.setAttribute("aria-label", place.label);
   var head = el("div", "aPanelHead");
   head.appendChild(el("div", "aTitle", "Artifacts"));
   var position = el("span", "aPosition");
@@ -234,6 +256,7 @@ function tmRenderArtifacts(bubbleMsg, commandOutputs, note) {
   var cards = items.map(function (item) {
     var ref = tmArtifactRef(item.value);
     if (ref) {
+      /* offloaded: fetch from the artifact endpoint */
       return tmOffloadedArtifactNode(item.key, item.value, item.source);
     }
     var env = captureEnvelope(item.value);
@@ -260,11 +283,11 @@ function tmRenderArtifacts(bubbleMsg, commandOutputs, note) {
   show(0);
 
   link.addEventListener("click", function () {
-    if (wrap.hidden) { tmOpenArtifactPanel(bubbleMsg, wrap, link); }
-    else { tmCloseArtifactPanel(bubbleMsg); }
+    if (wrap.hidden) { tmOpenArtifactPanel(owner, wrap, link, place); }
+    else { tmCloseArtifactPanel(owner); }
   });
   close.addEventListener("click", function () {
-    tmCloseArtifactPanel(bubbleMsg);
+    tmCloseArtifactPanel(owner);
     link.focus();
   });
   wrap.addEventListener("keydown", function (event) {
@@ -274,7 +297,7 @@ function tmRenderArtifacts(bubbleMsg, commandOutputs, note) {
     else if (event.key === "ArrowUp" || event.key === "PageUp") { to = current - 1; }
     else if (event.key === "ArrowDown" || event.key === "PageDown") { to = current + 1; }
     else if (event.key === "Escape") {
-      tmCloseArtifactPanel(bubbleMsg);
+      tmCloseArtifactPanel(owner);
       link.focus();
       event.preventDefault();
       return;
@@ -284,9 +307,7 @@ function tmRenderArtifacts(bubbleMsg, commandOutputs, note) {
     event.preventDefault();
   });
 
-  tmAppendBeforeMeta(bubbleMsg, linkRow);
-  tmAppendBeforeMeta(bubbleMsg, wrap);
-  return wrap;
+  return {link: link, linkRow: linkRow, panel: wrap};
 }
 
 var tmArtifactPanelSeq = 0;
@@ -306,10 +327,13 @@ function tmPlaceArtifactPanel() {
      when that room is too narrow to read an artifact in, and its top follows
      the answer while the answer is on screen. */
   if (!tmOpenArtifacts) { return; }
+  if (tmOpenArtifacts.place.placement === "below") {
+    tmPlaceArtifactPanelBelow(tmOpenArtifacts.panel, tmOpenArtifacts.place);
+    return;
+  }
   var panel = tmOpenArtifacts.panel;
-  var log = document.getElementById("chatLog").getBoundingClientRect();
-  var answer = (tmOpenArtifacts.msg.querySelector(".bubble")
-    || tmOpenArtifacts.msg).getBoundingClientRect();
+  var log = tmOpenArtifacts.place.frame().getBoundingClientRect();
+  var answer = tmOpenArtifacts.place.anchor().getBoundingClientRect();
   var gap = 12;
   var room = log.right - answer.right - gap * 2;
   var width = Math.min(640, Math.max(room, Math.min(480, log.width - gap * 2)));
@@ -321,9 +345,57 @@ function tmPlaceArtifactPanel() {
   panel.style.maxHeight = Math.max(200, log.bottom - gap - top) + "px";
 }
 
-function tmOpenArtifactPanel(bubbleMsg, panel, link) {
+var TM_RECORD_NAV_TABS = ["recordNav", "turnFindNav"];
+
+function tmRecordNavLeft() {
+  /* The left edge of whichever window-edge navigator tabs are showing, so a
+     panel's own arrows never sit against the record navigator's arrows. */
+  var left = Infinity;
+  TM_RECORD_NAV_TABS.forEach(function (id) {
+    var tab = document.getElementById(id);
+    if (!tab) { return; }
+    var box = tab.getBoundingClientRect();
+    if (box.width > 0 && box.height > 0) { left = Math.min(left, box.left); }
+  });
+  return left;
+}
+
+function tmPlaceArtifactPanelBelow(panel, place) {
+  /* Under the link and flush with its left edge, kept inside the frame and a
+     clear gap short of the record navigator. When the room under the link is
+     short and there is more above it, the panel opens upward instead. */
+  var frame = place.frame().getBoundingClientRect();
+  var anchor = place.anchor().getBoundingClientRect();
+  var gap = 12, railGap = 24, offset = 6;
+  var edge = Math.min(frame.right - gap, tmRecordNavLeft() - railGap);
+  var minLeft = frame.left + gap;
+  var left = Math.max(minLeft, anchor.left);
+  var width = Math.min(640, edge - left);
+  if (width < 360) {
+    width = Math.max(240, Math.min(640, edge - minLeft));
+    left = Math.max(minLeft, edge - width);
+  }
+  var floor = frame.bottom - gap, ceiling = frame.top + gap;
+  var below = floor - (anchor.bottom + offset);
+  var above = (anchor.top - offset) - ceiling;
+  panel.style.left = left + "px";
+  panel.style.width = width + "px";
+  if (below >= 260 || below >= above) {
+    var top = Math.max(ceiling, Math.min(anchor.bottom + offset, floor - 200));
+    panel.style.top = top + "px";
+    panel.style.bottom = "";
+    panel.style.maxHeight = Math.max(200, floor - top) + "px";
+  } else {
+    var bottomEdge = Math.min(floor, Math.max(ceiling + 200, anchor.top - offset));
+    panel.style.top = "auto";
+    panel.style.bottom = (window.innerHeight - bottomEdge) + "px";
+    panel.style.maxHeight = Math.max(200, bottomEdge - ceiling) + "px";
+  }
+}
+
+function tmOpenArtifactPanel(bubbleMsg, panel, link, place) {
   if (tmOpenArtifacts) { tmCloseArtifactPanel(tmOpenArtifacts.msg); }
-  tmOpenArtifacts = {msg: bubbleMsg, panel: panel, link: link};
+  tmOpenArtifacts = {msg: bubbleMsg, panel: panel, link: link, place: place};
   panel.hidden = false;
   link.setAttribute("aria-expanded", "true");
   tmPlaceArtifactPanel();
@@ -339,7 +411,16 @@ function tmCloseArtifactPanel(bubbleMsg) {
   tmOpenArtifacts = null;
 }
 
+function tmCloseArtifactPanelIn(container) {
+  /* A panel whose owner is about to be cleared away must not stay the open
+     one: the next placement would measure detached nodes. */
+  if (tmOpenArtifacts && container.contains(tmOpenArtifacts.msg)) {
+    tmCloseArtifactPanel(tmOpenArtifacts.msg);
+  }
+}
+
 document.getElementById("chatLog").addEventListener("scroll", tmPlaceArtifactPanel);
+document.getElementById("detail").addEventListener("scroll", tmPlaceArtifactPanel);
 window.addEventListener("resize", tmPlaceArtifactPanel);
 
 function tmAppendBeforeMeta(bubbleMsg, node) {

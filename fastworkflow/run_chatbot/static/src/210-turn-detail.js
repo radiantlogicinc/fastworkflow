@@ -257,6 +257,9 @@ function makeNode(kind, title, opts) {
     title: title,
     crumb: opts.crumb || title,
     detail: opts.detail || "",
+    /* Which PHASE_* a phase node stands for. Titles are display text and
+       carry ordinals and "(resumed)", so code that needs the stage asks here. */
+    phase: opts.phase || "",
     category: opts.category || "cat-other",
     status: opts.status || "",
     span: opts.span || null,
@@ -530,6 +533,7 @@ function buildRecordedExecutionNode(span, kids, byId, ordinalLabel) {
   return makeNode("phase", label, {
     crumb: label,
     detail: stepCount + (stepCount === 1 ? " step" : " steps"),
+    phase: PHASE_EXECUTION,
     category: "cat-tool",
     status: span.status,
     span: span,
@@ -688,6 +692,7 @@ function buildExecutionNode(spans, kids, byId, ordinalLabel) {
   return makeNode("phase", "Execution" + (ordinalLabel || ""), {
     crumb: "Execution" + (ordinalLabel || ""),
     detail: stepCount + (stepCount === 1 ? " step" : " steps"),
+    phase: PHASE_EXECUTION,
     category: "cat-tool",
     children: children,
     extent: spanExtent(spans),
@@ -733,6 +738,7 @@ function buildPlanningNode(spans, kids, byId, ordinalLabel) {
     crumb: label,
     detail: attrs.replan_trigger && attrs.replan_trigger !== "None"
       ? "triggered by " + attrs.replan_trigger : "",
+    phase: PHASE_PLANNING,
     category: "cat-planner",
     children: children,
     extent: spanExtent(spans),
@@ -766,6 +772,7 @@ function buildOtherNode(spans, kids, byId) {
   if (only) { return only; }
   return makeNode("phase", "Post-turn work", {
     crumb: "Post-turn",
+    phase: PHASE_OTHER,
     category: "cat-other",
     children: children,
     extent: spanExtent(spans),

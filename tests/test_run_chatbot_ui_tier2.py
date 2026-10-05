@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
 import threading
 import urllib.error
 import urllib.request
@@ -976,6 +978,11 @@ class TestPage:
         assert b'"Execution ledger"' in page
         assert b"renderExecutionLedger(ledgerCard, state.turn, openSpanInTree)" in page
         assert b"renderExecutionLedger(ledgerCard, turn, null)" in page
+        # The turn-wide record lives on the Execution stage, found by its
+        # phase key rather than its title, with the ledger folded behind a link.
+        assert b"function turnRecordHome()" in page
+        assert b'child.kind === "phase" && child.phase === PHASE_EXECUTION' in page
+        assert b'el("details", "card ledgerDisclosure")' in page
         assert b'"no span recorded"' in page
         assert b"the record lists only dispatches since the last resume" in page
         assert b"function openSpanInTree(spanId)" in page
@@ -1027,6 +1034,29 @@ class TestPage:
         status, body = _get(server, "/")
         assert status == 200
         assert b"renderExecutionLedger" in body
+
+
+def test_execution_stage_layout_dom(server):
+    """TURN_A runs an agent loop, so its record moves to the Execution stage;
+    TURN_B dispatches commands directly and keeps it on the turn page."""
+    dependency = os.environ.get("TEST_JSDOM_ROOT")
+    if not dependency:
+        pytest.skip("Set TEST_JSDOM_ROOT to run DOM integration with jsdom")
+    script = Path(__file__).with_name("chatbot_execution_stage_layout_dom.cjs")
+    result = subprocess.run(
+        [
+            "node",
+            str(script),
+            dependency,
+            f"http://127.0.0.1:{server.port}/?token={server.token}",
+            TURN_A,
+            TURN_B,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 if __name__ == "__main__":

@@ -114,6 +114,7 @@ function el(tag, cls, text) {
 }
 function clear(node) {
   if (node.id === "detail") { detailAttentionPending = true; node.scrollTop = 0; node.setAttribute("aria-busy", "true"); }
+  tmCloseArtifactPanelIn(node);
   while (node.firstChild) { node.removeChild(node.firstChild); }
 }
 function makeRowActivatable(row, onActivate) {

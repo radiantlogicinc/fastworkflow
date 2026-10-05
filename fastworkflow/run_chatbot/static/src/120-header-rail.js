@@ -463,6 +463,9 @@ function attachTraceHierarchy() {
       children: trace.children.map(function (child) { return wrap(child, path); })};
   }
   turnNode.children = state.path[0].children.map(function (child) { return wrap(child, [state.path[0]]); });
+  /* The key index was walked before these components existed, and the
+     crumbs resolve their targets through it. */
+  hierarchyIndex = null;
 }
 
 function syncTraceHierarchy() {

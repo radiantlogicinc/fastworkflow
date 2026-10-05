@@ -331,6 +331,19 @@ function renderLevel() {
   info.appendChild(head);
   node.render(info);
   d.appendChild(info);
+  if (node.kind === "step") { renderStepArtifacts(d, node); }
+
+  var recordHome = node === turnRecordHome();
+  /* Record home only (see turnRecordHome): the whole recorded turn, expanded,
+     per the design — other levels are about their own slice and should not
+     repeat it. */
+  if (recordHome && state.turn.diagnosis) {
+    var diagCard = el("div", "card");
+    diagCard.appendChild(el("h2", null, "What was recorded"));
+    renderTurnDiagnosis(diagCard, state.turn, openSpanInTree);
+    d.appendChild(diagCard);
+  }
+  renderFeedback(d, node);
 
   if (node.children.length) {
     var wf = el("div", "card");
@@ -338,33 +351,18 @@ function renderLevel() {
     renderWaterfall(wf, node);
     d.appendChild(wf);
   }
-  renderFeedback(d, node);
 
-  if (node.kind === "turn") {
-    /* Turn level only: the whole recorded turn, expanded, per the design —
-       lower levels are about their own slice and should not repeat it. */
-    if (state.turn.diagnosis) {
-      var diagCard = el("div", "card");
-      diagCard.appendChild(el("h2", null, "What was recorded"));
-      renderTurnDiagnosis(diagCard, state.turn, openSpanInTree);
-      d.appendChild(diagCard);
-    }
-
-    var ledgerCard = el("div", "card");
-    ledgerCard.appendChild(el("h2", null, "Execution ledger"));
+  if (recordHome) {
+    var ledgerCard = ledgerDisclosure();
     renderExecutionLedger(ledgerCard, state.turn, openSpanInTree);
     d.appendChild(ledgerCard);
+  }
 
+  if (node.kind === "turn") {
     var arts = el("div", "card");
     arts.appendChild(el("h2", null, "Artifacts"));
     renderArtifacts(arts, state.turn);
     d.appendChild(arts);
-
-    var raw = el("div", "card");
-    raw.appendChild(el("h2", null, "Raw turn record (record_json)"));
-    raw.appendChild(el("pre", "json",
-      pretty(state.turn.record === null ? "(unparseable record_json)" : state.turn.record)));
-    d.appendChild(raw);
   }
 }
 
@@ -385,6 +383,23 @@ function levelNoun(node) {
   return "span";
 }
 
+/* The page that carries the turn-wide record (what was recorded, the
+   execution ledger): the first Execution stage, since that is where the
+   dispatches it lists ran. A turn without one -- planning only, a failed
+   turn, a direct command -- keeps them on the turn page. */
+function turnRecordHome() {
+  var root = state.path[0];
+  return root.children.filter(function (child) {
+    return child.kind === "phase" && child.phase === PHASE_EXECUTION;
+  })[0] || root;
+}
+
+function ledgerDisclosure() {
+  var box = el("details", "card ledgerDisclosure");
+  box.appendChild(el("summary", null, "Execution ledger"));
+  return box;
+}
+
 function renderDetail(turn, spans) {
   state.turn = turn;
   state.path = [buildTurnTree(turn, spans)];
@@ -403,8 +418,7 @@ function renderDetail(turn, spans) {
     d.appendChild(note);
     /* The record's own ledger still stands without spans: rows without a
        span say so. */
-    var ledgerCard = el("div", "card");
-    ledgerCard.appendChild(el("h2", null, "Execution ledger"));
+    var ledgerCard = ledgerDisclosure();
     renderExecutionLedger(ledgerCard, turn, null);
     d.appendChild(ledgerCard);
     return;
@@ -626,59 +640,62 @@ function artifactNode(key, value, meta) {
   return box;
 }
 
-function renderArtifacts(container, turn) {
+function turnArtifacts(turn, callIds) {
   var record = turn.record || {};
-  var outputs = (record.turn_output || {}).command_outputs || [];
-  var found = 0;
-  outputs.forEach(function (out) {
-    var resp = out.command_response || {};
-    var artifacts = resp.artifacts || {};
-    Object.keys(artifacts).forEach(function (key) {
-      found += 1;
-      var value = artifacts[key];
-      if (value && typeof value === "object" && value.__fw_artifact_ref__) {
-        /* offloaded: fetch from the artifact endpoint */
-        var box = el("div", "artifact");
-        var head = el("div", "aHead");
-        head.appendChild(el("span", "aKey", key));
-        head.appendChild(el("span", "aMeta",
-          "offloaded · " + (value.content_type || "?") + " · " + (value.size || "?") + " bytes"));
-        box.appendChild(head);
-        var placeholder = el("div", "aMeta", "loading…");
-        box.appendChild(placeholder);
-        container.appendChild(box);
-        apiRaw("/api/artifact/" + encodeURIComponent(value.__fw_artifact_ref__))
-          .then(function (r) {
-            if (!r.ok) { throw new Error("HTTP " + r.status); }
-            var ctype = (r.headers.get("Content-Type") || "").toLowerCase();
-            return r.text().then(function (text) { return { ctype: ctype, text: text }; });
-          })
-          .then(function (got) {
-            box.removeChild(placeholder);
-            var htmlish = got.ctype.indexOf("text/html") === 0 ||
-                          got.ctype.indexOf("image/svg") === 0 ||
-                          got.ctype.indexOf("application/xhtml") === 0 ||
-                          looksHtml(got.text);
-            if (htmlish) {
-              box.appendChild(sandboxedFrame(got.text));
-              var src = el("details");
-              src.appendChild(el("summary", null, "View source (as text)"));
-              src.appendChild(el("pre", "json", got.text));
-              box.appendChild(src);
-            } else {
-              box.appendChild(el("pre", "json", pretty(got.text)));
-            }
-          })
-          .catch(function (e) {
-            placeholder.textContent = "failed to load artifact: " + e.message;
-          });
-      } else {
-        container.appendChild(artifactNode(key, value, "inline"));
-      }
-    });
+  return tmArtifactsIn((record.turn_output || {}).command_outputs || [], callIds);
+}
+
+function renderArtifacts(container, turn, callIds) {
+  /* The chat's link and side panel, owned by this card and kept inside the
+     detail pane. */
+  var viewer = tmArtifactViewer(turnArtifacts(turn, callIds), null, {
+    owner: container,
+    label: callIds ? "Artifacts of this step" : "Artifacts of this turn",
+    placement: "below",
+    anchor: function () { return viewer.link; },
+    frame: function () { return document.getElementById("detail"); }
   });
-  if (!found) {
+  if (!viewer) {
     container.appendChild(el("div", "empty", "No artifacts on this turn."));
+    return;
   }
+  container.appendChild(viewer.linkRow);
+  container.appendChild(viewer.panel);
+}
+
+var STEP_DISPATCH_SPANS = { "fw.agent.tool_call": true, "fw.command.execute": true };
+function stepCallIds(node, turn) {
+  /* The dispatches this step made, by the command_call_id its tool-call and
+     execute spans carry, plus any execution_records ref of the turn record
+     whose span_id is one of this step's spans. Both are the id the command's
+     CommandOutput carries; nothing is matched by name, order or time. */
+  var ids = {}, spanIds = {};
+  (function walk(n) {
+    if (n.span) {
+      spanIds[n.span.span_id] = true;
+      var callId = (n.span.attributes || {}).command_call_id;
+      if (STEP_DISPATCH_SPANS[n.span.name] === true && typeof callId === "string" && callId) {
+        ids[callId] = true;
+      }
+    }
+    n.children.forEach(walk);
+  })(node);
+  ((turn.record || {}).execution_records || []).forEach(function (ref) {
+    if (ref && typeof ref.command_call_id === "string" && ref.command_call_id
+        && ref.span_id && spanIds[ref.span_id] === true) {
+      ids[ref.command_call_id] = true;
+    }
+  });
+  return ids;
+}
+
+function renderStepArtifacts(parent, node) {
+  /* Only a step whose own dispatches returned artifacts gets the card. */
+  var callIds = stepCallIds(node, state.turn);
+  if (!turnArtifacts(state.turn, callIds).length) { return; }
+  var card = el("div", "card");
+  card.appendChild(el("h2", null, "Artifacts"));
+  renderArtifacts(card, state.turn, callIds);
+  parent.appendChild(card);
 }
 

@@ -198,6 +198,20 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   assert.equal(marked.length, 1, 'the dispatch that carried the trouble is the marked row');
   assert.ok(marked[0].textContent.includes('ambiguous intent'),
     'the marker rides on the ledger row: ' + marked[0].textContent);
+  // A direct-command turn has no Execution stage, so the turn page keeps the
+  // record: summary above Feedback, the ledger folded below the waterfall.
+  const order = [...d.getElementById('detail').children].map(node =>
+    node.matches('.feedbackCard') ? 'Feedback'
+      : node.matches('details.ledgerDisclosure') ? 'ledger'
+      : (node.querySelector(':scope > h2') || {}).textContent);
+  const at = label => order.findIndex(text => text && text.startsWith(label));
+  assert.ok(at('What was recorded') >= 0, order.join(' | '));
+  assert.ok(at('What was recorded') < at('Feedback'), order.join(' | '));
+  assert.ok(at('Feedback') < at('Inside this turn'), order.join(' | '));
+  assert.ok(at('Inside this turn') < at('ledger'), order.join(' | '));
+  assert.ok(at('ledger') < at('Artifacts'), order.join(' | '));
+  assert.equal(d.querySelector('#detail details.ledgerDisclosure').open, false,
+    'the ledger starts folded');
 
   // Every marker links the spans it was computed from; clicking one moves the
   // trace viewer to that span rather than merely scrolling.

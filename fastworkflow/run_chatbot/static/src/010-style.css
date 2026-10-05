@@ -555,56 +555,57 @@ button.newConv:hover { filter: brightness(1.1); }
   flex: 0 0 auto; order: 2; display: flex; align-items: baseline;
   margin: 4px 0 0 12px; line-height: 16px;
 }
-.chatMsg .artifactsLink {
+.artifactsLink {
   appearance: none; background: none; border: none; box-shadow: none; min-height: 0; padding: 0;
   color: var(--accent-ink); cursor: pointer; text-decoration: underline;
   font-family: inherit; font-size: 11px; font-weight: 400; font-style: normal;
   line-height: 16px; letter-spacing: normal;
 }
-.chatMsg .artifactsLink::after { content: " ▸"; font: inherit; text-decoration: none; }
-.chatMsg .artifactsLink[aria-expanded="true"]::after { content: " ◂"; }
-.chatMsg .artifactsLink:hover:not(:disabled) { background: none; border-color: transparent; }
-/* Placed by tmPlaceArtifactPanel; fixed so the chat log cannot clip it. */
-.chatMsg .artifacts {
+.artifactsLink::after { content: " ▸"; font: inherit; text-decoration: none; }
+.artifactsLink[aria-expanded="true"]::after { content: " ◂"; }
+.artifactsLink:hover:not(:disabled) { background: none; border-color: transparent; }
+/* Placed by tmPlaceArtifactPanel; fixed so the chat log, or the turn detail
+   pane, cannot clip it. */
+.artifacts {
   position: fixed; z-index: 45; display: flex; flex-direction: column;
   padding: 12px 14px; border: 1px solid var(--border); border-radius: 14px;
   color: var(--text); background: var(--panel); box-shadow: 0 24px 80px #0004;
 }
-.chatMsg .artifacts[hidden] { display: none; }
-.chatMsg .artifacts .aPanelHead { display: flex; align-items: baseline; gap: 10px; }
-.chatMsg .artifacts .aTitle { color: var(--muted); font-size: 11px;
+.artifacts[hidden] { display: none; }
+.artifacts .aPanelHead { display: flex; align-items: baseline; gap: 10px; }
+.artifacts .aTitle { color: var(--muted); font-size: 11px;
   text-transform: uppercase; letter-spacing: .05em; }
-.chatMsg .artifacts .aPosition { color: var(--muted); font-size: 11px; }
-.chatMsg .artifacts .aClose {
+.artifacts .aPosition { color: var(--muted); font-size: 11px; }
+.artifacts .aClose {
   margin-left: auto; background: transparent; border: 1px solid transparent;
   box-shadow: none; min-height: 0; padding: 0 8px; font-size: 18px; line-height: 1.3;
   color: var(--muted);
 }
-.chatMsg .artifacts .aClose:hover:not(:disabled) { color: var(--text); border-color: var(--border); }
-.chatMsg .artifacts .aNote { margin-top: 2px; }
-.chatMsg .artifacts .aPanelBody { display: flex; gap: 10px; min-height: 0; margin-top: 8px; flex: 1; }
-.chatMsg .artifacts .aStage { flex: 1; min-width: 0; overflow: auto; }
-.chatMsg .artifacts .artifact { margin-bottom: 0; }
-.chatMsg .artifacts .artifact[hidden] { display: none; }
-.chatMsg .artifacts .aNav {
+.artifacts .aClose:hover:not(:disabled) { color: var(--text); border-color: var(--border); }
+.artifacts .aNote { margin-top: 2px; }
+.artifacts .aPanelBody { display: flex; gap: 10px; min-height: 0; margin-top: 8px; flex: 1; }
+.artifacts .aStage { flex: 1; min-width: 0; overflow: auto; }
+.artifacts .artifact { margin-bottom: 0; }
+.artifacts .artifact[hidden] { display: none; }
+.artifacts .aNav {
   display: flex; flex-direction: column; gap: 2px; align-self: flex-start;
   padding: 6px 3px; background: var(--warn-bg);
   border: 1px solid var(--warn-border); border-radius: 11px;
 }
-.chatMsg .artifacts .aNav button {
+.artifacts .aNav button {
   display: grid; place-items: center; width: 32px; min-height: 30px; padding: 0;
   border-radius: 7px; color: var(--text); background: transparent;
   border: 1px solid transparent; box-shadow: none;
 }
-.chatMsg .artifacts .aNav button svg {
+.artifacts .aNav button svg {
   display: block; width: 20px; height: 20px; fill: none; stroke: currentColor;
   stroke-width: 2.8; stroke-linecap: round; stroke-linejoin: round;
 }
-.chatMsg .artifacts .aNav button:hover:not(:disabled) { background: var(--panel); border-color: var(--warn-border); }
-.chatMsg .artifacts .aNav button:disabled { opacity: .3; }
-.chatMsg .artifacts .artifact img { max-width: 100%; border-radius: 6px;
+.artifacts .aNav button:hover:not(:disabled) { background: var(--panel); border-color: var(--warn-border); }
+.artifacts .aNav button:disabled { opacity: .3; }
+.artifacts .artifact img { max-width: 100%; border-radius: 6px;
   border: 1px solid var(--border); margin-top: 6px; }
-.chatMsg .artifacts .aActions { display: flex; gap: 8px; flex-wrap: wrap;
+.artifacts .aActions { display: flex; gap: 8px; flex-wrap: wrap;
   margin-top: 6px; font-size: 11px; }
 #composer { display: flex; gap: 10px; padding: 12px 18px; align-items: flex-end;
   border-top: 1px solid var(--border); background: var(--panel); }
@@ -871,7 +872,7 @@ pre.json { border-radius: 10px; padding: 16px; font-size: 12px; line-height: 1.6
 .consistencyStat strong { display: block; font-size: 12px; }
 .consistencyStat .figures { font-variant-numeric: tabular-nums; margin-top: 3px; }
 .consistencyPairs { margin-top: 8px; }
-.consistencyPairs > summary { cursor: pointer; color: var(--accent); font-size: 12px; }
+.consistencyPairs > summary, .ledgerDisclosure > summary { cursor: pointer; color: var(--accent); font-size: 12px; }
 #detail button.consistencyPair { display: block; width: 100%; text-align: left; border: 1px solid var(--border); border-radius: 9px; margin: 6px 0; padding: 9px 11px; font-variant-numeric: tabular-nums; }
 #detail button.consistencyPair.pairFocused { border-color: var(--accent); background: var(--accent-soft); }
 /* A refusal, an unreadable half, or a decision that lost a race: all three are
