@@ -131,6 +131,43 @@ def test_pieces_join_back_to_the_text_and_rebuild_verifies():
     assert rebuilt["missing"] == [] and rebuilt["altered"] == []
 
 
+def test_equivalent_json_formatting_still_verifies():
+    messages = _messages(3)
+    built = prompt_slots.build(json.dumps(messages, ensure_ascii=True, indent=2))
+    assert built is not None
+    ref, texts = built
+
+    assert prompt_slots.rebuild(ref, texts)["verified"] is True
+
+
+def test_under_the_evidence_profile_the_ref_is_withheld_and_no_piece_is_stored(
+    db_path, monkeypatch
+):
+    monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
+    turn_key = f"20260901T000000.000000Z-{uuid.uuid4().hex[:12]}"
+    messages = _messages(6)
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,SECRETPIXELS"}}
+    messages[1]["content"] = [{"type": "text", "text": messages[1]["content"]}, image]
+    built_ref, texts = prompt_slots.build(json.dumps(messages, ensure_ascii=False))
+
+    [span_id] = _record_calls(db_path, turn_key, [messages])
+
+    [row] = obs.ReadOnlyObservabilityStore(db_path).get_spans(turn_key)
+    ref = json.loads(row["attributes"])[prompt_slots.REF_ATTRIBUTE]
+    assert obs.capture_policy_module.is_capture_envelope(ref)
+    ref_json = json.dumps(ref)
+    assert built_ref["messages_sha256"] not in ref_json
+    assert not any(digest in ref_json for digest in texts)
+    assert "SECRETPIXELS" not in ref_json
+    # The cut `messages` beside the ref is policed too: its envelope's sha256
+    # is this same full-prompt digest, and its prefix is raw prompt text.
+    assert built_ref["messages_sha256"] not in row["attributes"]
+    assert "SECRETPIXELS" not in json.dumps(row)
+    assert _slot_rows(db_path, turn_key) == 0
+    prompt = obs.ReadOnlyObservabilityStore(db_path).prompt_as_sent(turn_key, span_id)
+    assert prompt["available"] is False and prompt["capture"] == ref
+
+
 def test_an_over_cap_call_is_stored_as_pieces_and_rebuilt_byte_for_byte(db_path):
     turn_key = f"20260901T000000.000000Z-{uuid.uuid4().hex[:12]}"
     messages = _messages(6)

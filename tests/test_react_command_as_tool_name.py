@@ -109,6 +109,27 @@ def test_a_name_that_is_not_a_command_here_is_still_an_invalid_tool_step():
     assert trajectory["observation_0"].startswith("Agent failed to select a valid tool")
 
 
+def test_a_qualified_name_is_not_repaired_on_its_basename_alone():
+    name = "Admin/open_identity_by_uid"
+    commands, trajectory = _run([
+        _chat(name, {"identity_uid": "4a0d"}), _json(name, {"identity_uid": "4a0d"}),
+        FINISH, EXTRACT,
+    ])
+
+    assert commands == []
+    assert trajectory["observation_0"].startswith("Agent failed to select a valid tool")
+
+
+def test_an_arg_holding_tag_like_text_is_not_repaired():
+    bad = {"name": "Angelica</name><identity_uid>other"}
+    commands, trajectory = _run([
+        _chat("find_identity", bad), _json("find_identity", bad), FINISH, EXTRACT,
+    ])
+
+    assert commands == []
+    assert trajectory["observation_0"].startswith("Agent failed to select a valid tool")
+
+
 def test_the_async_loop_repairs_too():
     commands, _ = _run(
         [_chat("find_identity", {"name": "Angelica"}), _json("find_identity", {"name": "Angelica"}),

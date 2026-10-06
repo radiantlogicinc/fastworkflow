@@ -15,7 +15,7 @@ not stored again.
 
 What the span keeps is ``prompt_slots_ref``: the messages with every text
 replaced by the ordered list of its piece digests, and the sha256 of the
-messages as recorded. ``rebuild`` puts the text back and says whether the
+messages in one canonical JSON form. ``rebuild`` puts the text back and says whether the
 result hashes to that digest, so a reader is shown the prompt as sent, or is
 told exactly which pieces it cannot be shown.
 """
@@ -43,6 +43,15 @@ _FIELD_BOUNDARY = re.compile(r"(?=\[\[ ## )")
 
 def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _canonical(messages: Any) -> str:
+    """The one serialization ``build`` and ``rebuild`` both hash.
+
+    The recorded ``messages`` text may space or escape its JSON differently;
+    hashing it as recorded would fail verification of an intact prompt.
+    """
+    return json.dumps(messages, ensure_ascii=False)
 
 
 def split_text(text: str) -> list[str]:
@@ -98,7 +107,7 @@ def build(messages_json: str) -> Optional[tuple[dict[str, Any], dict[str, str]]]
         return None
     ref = {
         "contract": PROMPT_SLOTS_CONTRACT,
-        "messages_sha256": _digest(messages_json),
+        "messages_sha256": _digest(_canonical(parsed)),
         "messages_bytes": len(messages_json.encode("utf-8")),
         "slot_count": len(texts),
         "template": template,
@@ -158,7 +167,7 @@ def rebuild(ref: Mapping[str, Any], stored: Mapping[str, str]) -> dict[str, Any]
         return value
 
     messages = fill(ref.get("template") or [])
-    rebuilt_digest = _digest(json.dumps(messages, ensure_ascii=False))
+    rebuilt_digest = _digest(_canonical(messages))
     return {
         "messages": messages,
         "verified": rebuilt_digest == ref.get("messages_sha256"),

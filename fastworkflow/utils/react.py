@@ -883,6 +883,8 @@ def _fmt_exc(err: BaseException, *, limit: int = 5) -> str:
 _FIELD_MARKER = re.compile(r"\[\[ ## (\w+) ## \]\]")
 _COMMAND_TOKEN = re.compile(r"[A-Za-z_][\w/]*")
 _COMMAND_TOOL = "execute_workflow_query"
+_ARG_KEY = re.compile(r"[A-Za-z_]\w*")
+_TAG_LIKE = re.compile(r"</?[^<>]+>")
 
 
 def _lm_responses(err: BaseException):
@@ -917,8 +919,9 @@ def _command_named_as_tool(
 
     Small models write ``next_tool_name: open_directory`` instead of calling
     ``execute_workflow_query`` with that command. When the rejected name is a
-    command listed for the current context and its args are a JSON object,
-    return the equivalent ``execute_workflow_query`` step; otherwise None.
+    command listed for the current context and its args are a JSON object
+    whose values hold no tag-like text, return the equivalent
+    ``execute_workflow_query`` step; otherwise None.
     """
     if _COMMAND_TOOL not in tools or not isinstance(available_commands, str):
         return None
@@ -930,8 +933,7 @@ def _command_named_as_tool(
         name = name.strip()
         if name in tools or not _COMMAND_TOKEN.fullmatch(name):
             continue
-        short = re.escape(name.split("/")[-1])
-        if not re.search(rf"^- {short}\s*$", available_commands, re.MULTILINE):
+        if not re.search(rf"^- {re.escape(name)}\s*$", available_commands, re.MULTILINE):
             continue
         args = fields.get("next_tool_args", {})
         if isinstance(args, str):
@@ -941,11 +943,19 @@ def _command_named_as_tool(
                 continue
         if not isinstance(args, dict):
             continue
+        values = {
+            key: value if isinstance(value, str) else json.dumps(value)
+            for key, value in args.items()
+        }
+        # The workflow reads parameters back with tag regexes and no unescaping,
+        # so a value holding tag-like text would arrive cut or altered.
+        if not all(
+            isinstance(key, str) and _ARG_KEY.fullmatch(key) and not _TAG_LIKE.search(value)
+            for key, value in values.items()
+        ):
+            continue
         command = " ".join(
-            [name] + [
-                f"<{key}>{value if isinstance(value, str) else json.dumps(value)}</{key}>"
-                for key, value in args.items()
-            ]
+            [name] + [f"<{key}>{value}</{key}>" for key, value in values.items()]
         )
         return {
             "next_thought": str(fields.get("next_thought", "")),

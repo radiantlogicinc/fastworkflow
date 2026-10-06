@@ -627,16 +627,30 @@ POLICY_PATH_CONVERSATION_SUMMARY = "conversation.summary"
 POLICY_PATH_TRAIN_METRICS = "train_run.metrics_json"
 POLICY_PATH_PASS_ANSWER = "span.pass.answer"
 POLICY_PATH_PASS_PLAN = "span.pass.plan"
+POLICY_PATH_LLM_MESSAGES = "span.llm.messages"
+POLICY_PATH_LLM_PROMPT = "span.llm.prompt"
+POLICY_PATH_LLM_OUTPUT = "span.llm.output"
+POLICY_PATH_LLM_REASONING = "span.llm.reasoning"
+POLICY_PATH_LLM_MODULE_INPUT = "span.llm.module_input"
+POLICY_PATH_LLM_MODULE_OUTPUT = "span.llm.module_output"
+POLICY_PATH_LLM_MODULE_EXCEPTION = "span.llm.module_exception"
+POLICY_PATH_LLM_EXCEPTION = "span.llm.exception"
+POLICY_PATH_LLM_PROVIDER_RESPONSE = "span.llm.provider_response"
+POLICY_PATH_LLM_TRAJECTORY_MANIFEST = "span.llm.trajectory_manifest"
 
 # The span name is restated rather than imported: this module is the sink and
 # does not import the runtime's `tracing`. `tests/test_distillation_pass_capture`
 # asserts the two spellings agree, because a drift here does not fail — it
-# silently stops policing the fields.
+# silently stops policing the fields. `tests/test_llm_call_capture` does the
+# same for `_SPAN_LLM_CALL`.
 _SPAN_DISTILLATION_PASS = "fw.distillation.pass"
+_SPAN_LLM_CALL = "fw.llm.call"
 
 # The ONLY span attributes this store classifies. Span attributes are otherwise
 # credential-scrubbed wholesale (`upsert_span_rows`) and carry no per-key
 # policy, which is a general gap and NOT repaired here.
+# (fix-sblf) Narrowed since: `fw.llm.call`'s content attributes are now
+# classified too (below). Every other span name is still scrub-only.
 #
 # These two are different in kind from everything else in an attribute bag:
 # `answer` is the text a pass showed the user and `plan` is the next-step
@@ -648,10 +662,34 @@ _SPAN_DISTILLATION_PASS = "fw.distillation.pass"
 # bypass. `user-text` is therefore the classification, and under `evidence` the
 # profile default withholds both with a badge (§12.0 delta 3) rather than
 # dropping them silently.
+#
+# `fw.llm.call` (fix-sblf) records what a model was sent and what came back:
+# the prompt quotes command responses, user text and the plan verbatim, and
+# the output, reasoning, module I/O, exception reprs and provider response
+# quote them back. So they are `opaque-payload`, like a prompt piece
+# (`POLICY_PATH_PROMPT_SLOT`). `trajectory_manifest` carries no text, but its
+# rows digest each raw observation unkeyed and unscrubbed -- the confirmation
+# oracle `_protected_text` refuses to write -- so it is withheld with the rest.
+# The bookkeeping attributes (`usage`, `cost`, `call_kwargs`, `cache_hit`,
+# `model`, `module`, `module_chain`, `history_uuid`, ...) are NOT listed:
+# cost and usage roll-ups, wrapper folding and the `call_kwargs.max_tokens`
+# cut-at-limit test read them by name, and none of them is prompt content.
 _POLICED_SPAN_ATTRIBUTES: dict[str, dict[str, tuple[str, str]]] = {
     _SPAN_DISTILLATION_PASS: {
         "answer": (POLICY_PATH_PASS_ANSWER, "user-text"),
         "plan": (POLICY_PATH_PASS_PLAN, "user-text"),
+    },
+    _SPAN_LLM_CALL: {
+        "messages": (POLICY_PATH_LLM_MESSAGES, "opaque-payload"),
+        "prompt": (POLICY_PATH_LLM_PROMPT, "opaque-payload"),
+        "output": (POLICY_PATH_LLM_OUTPUT, "opaque-payload"),
+        "reasoning": (POLICY_PATH_LLM_REASONING, "opaque-payload"),
+        "module_input": (POLICY_PATH_LLM_MODULE_INPUT, "opaque-payload"),
+        "module_output": (POLICY_PATH_LLM_MODULE_OUTPUT, "opaque-payload"),
+        "module_exception": (POLICY_PATH_LLM_MODULE_EXCEPTION, "opaque-payload"),
+        "exception": (POLICY_PATH_LLM_EXCEPTION, "opaque-payload"),
+        "provider_response": (POLICY_PATH_LLM_PROVIDER_RESPONSE, "opaque-payload"),
+        "trajectory_manifest": (POLICY_PATH_LLM_TRAJECTORY_MANIFEST, "opaque-payload"),
     },
 }
 # (ido-zlm) The sixth surface: the RAW command response that
@@ -715,7 +753,7 @@ def _policed_span_attributes(
     """A span's attribute bag with its classified fields policed.
 
     Returns the bag unchanged for every span that declares none, which is every
-    span but one — so this costs a dict lookup on the hot path and changes
+    span but two — so this costs a dict lookup on the hot path and changes
     nothing else.
 
     Scrub first, policy second, for the reasons `_protected_text` gives: the
@@ -724,6 +762,11 @@ def _policed_span_attributes(
     MAPPING, because this value is nested inside the attributes JSON rather
     than bound to a TEXT column; serializing it here would give a reader a
     string that happens to parse.
+
+    A structured value (a mapping or list that is neither a cap envelope nor a
+    capture envelope) is policed as its JSON text, but kept as it came unless
+    the policy acts: the bag is scrubbed as JSON afterwards anyway, and the
+    debug profile must not turn a mapping into a string.
     """
     declared = _POLICED_SPAN_ATTRIBUTES.get(span_name)
     if not declared or not isinstance(attributes, Mapping):
@@ -731,23 +774,70 @@ def _policed_span_attributes(
     policed = dict(attributes)
     for key, (field_path, classification) in declared.items():
         value = policed.get(key)
-        if isinstance(value, str) and value:
-            policed[key] = policy.apply(
-                field_path, redactor.redact(value), classification=classification
-            )
+        if isinstance(value, str):
+            if value:
+                policed[key] = policy.apply(
+                    field_path, redactor.redact(value), classification=classification
+                )
             continue
         capped = _capped_prefix(value)
-        if capped is None:
+        if capped is not None:
+            policed[key] = _police_capped(
+                value,
+                capped,
+                redactor=redactor,
+                policy=policy,
+                field_path=field_path,
+                classification=classification,
+            )
             continue
-        policed[key] = _police_capped(
-            value,
-            capped,
-            redactor=redactor,
-            policy=policy,
-            field_path=field_path,
+        if value is None or capture_policy_module.is_capture_envelope(value):
+            continue
+        captured = policy.apply(
+            field_path,
+            redactor.redact(json.dumps(value, ensure_ascii=False, default=str)),
             classification=classification,
         )
+        if capture_policy_module.is_capture_envelope(captured):
+            policed[key] = captured
     return policed
+
+
+def _policed_prompt_slots_ref(
+    attributes: Any,
+    slot_texts: Optional[Mapping[str, str]],
+    *,
+    redactor: Redactor,
+    policy: "capture_policy_module.CapturePolicy",
+) -> tuple[Any, bool]:
+    """A span's attribute bag with its ``prompt_slots_ref`` policed, and whether
+    its prompt pieces may be stored.
+
+    The ref is not text, but it is derived from the raw prompt: its piece
+    digests and ``messages_sha256`` confirm a guessed prompt, and its template
+    keeps every non-text message field (inline image data) verbatim. So it is
+    policed under the same path as the pieces. When the policy acts, the ref
+    is replaced by the policy's envelope and no piece is stored -- with the
+    ref gone nothing could put them back together.
+
+    The envelope is computed over the scrubbed prompt, not the ref, so its
+    digest describes what was persisted (see `_protected_text`).
+    """
+    if not isinstance(attributes, Mapping):
+        return attributes, True
+    ref = attributes.get(prompt_slots.REF_ATTRIBUTE)
+    if not isinstance(ref, Mapping):
+        return attributes, True
+    if policy.apply(POLICY_PATH_PROMPT_SLOT, ref, classification="opaque-payload") is ref:
+        return attributes, True
+    scrubbed = {digest: redactor.redact(text) for digest, text in (slot_texts or {}).items()}
+    messages = prompt_slots.rebuild(ref, scrubbed)["messages"]
+    withheld = policy.apply(
+        POLICY_PATH_PROMPT_SLOT,
+        json.dumps(messages, ensure_ascii=False),
+        classification="opaque-payload",
+    )
+    return {**attributes, prompt_slots.REF_ATTRIBUTE: withheld}, False
 
 
 def _capped_prefix(value: Any) -> Optional[str]:
@@ -760,11 +850,17 @@ def _capped_prefix(value: Any) -> Optional[str]:
     string, nothing to police" is how a long answer walked past the evidence
     profile while a short one was withheld — the longer the secret, the less
     protected it was.
+
+    An envelope whose prefix an enricher already emptied (`replaced_by`, e.g.
+    a `messages` the trajectory manifest stands in for) yields "", not None:
+    its `sha256` still digests the raw original, so it is policed all the same.
     """
     if not isinstance(value, Mapping) or value.get("truncated") is not True:
         return None
     prefix = value.get("value")
-    return prefix if isinstance(prefix, str) and prefix else None
+    if prefix is None or prefix == "":
+        return ""
+    return prefix if isinstance(prefix, str) else None
 
 
 def _police_capped(
@@ -799,11 +895,14 @@ def _police_capped(
         field_path, redactor.redact(prefix), classification=classification
     )
     if capture_policy_module.is_capture_envelope(captured):
-        return {
+        withheld = {
             **captured,
             "truncated_before_capture": True,
             "original_length": envelope.get("original_length"),
         }
+        if envelope.get("replaced_by") is not None:
+            withheld["replaced_by"] = envelope.get("replaced_by")
+        return withheld
     # The debug profile, whose contract is that nothing changes: the cap
     # envelope is returned as it came, carrying the scrubbed prefix.
     return {**envelope, "value": captured}
@@ -2415,12 +2514,18 @@ class ObservabilityStore:
                 conn, claim, "span"
             ):
                 continue
+            span_attributes, keep_prompt_slots = _policed_prompt_slots_ref(
+                span.attributes,
+                span.prompt_slots,
+                redactor=redactor,
+                policy=policy,
+            )
             attributes = redactor.redact(
                 json.dumps(
                     _sanitize_json_value(
                         _policed_span_attributes(
                             span.name,
-                            span.attributes,
+                            span_attributes,
                             redactor=redactor,
                             policy=policy,
                         )
@@ -2492,7 +2597,7 @@ class ObservabilityStore:
                     span.server_incarnation,
                 ),
             )
-            if span.prompt_slots:
+            if span.prompt_slots and keep_prompt_slots:
                 self._insert_prompt_slots(conn, span, channel_id, redactor, policy)
 
     @staticmethod
@@ -3482,6 +3587,12 @@ class ObservabilityStore:
             except (TypeError, ValueError):
                 attributes = {}
             ref = attributes.get(prompt_slots.REF_ATTRIBUTE) if isinstance(attributes, dict) else None
+            if capture_policy_module.is_capture_envelope(ref):
+                return {
+                    "available": False,
+                    "reason": "the capture policy withheld this prompt",
+                    "capture": ref,
+                }
             if not isinstance(ref, dict):
                 return {"available": False, "reason": "this call recorded no prompt pieces"}
             digests = prompt_slots.slot_digests(ref)

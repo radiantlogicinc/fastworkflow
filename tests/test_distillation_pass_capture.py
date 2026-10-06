@@ -1243,7 +1243,7 @@ def test_a_declared_bounded_text_policy_cuts_the_pass_fields_too(tmp_path):
     # And a span nobody declared fields for is returned as it came.
     bag = {"answer": answer}
     assert obs._policed_span_attributes(
-        tracing.SPAN_LLM_CALL, bag, redactor=obs.Redactor(), policy=policy
+        tracing.SPAN_AGENT_STEP, bag, redactor=obs.Redactor(), policy=policy
     ) is bag
 
 
