@@ -114,7 +114,7 @@ class CommandExecutor(CommandExecutorInterface):
         # own O alias BEFORE the command can move the context. This is runtime
         # presentation, not capture, so it is not gated on a span: a run with
         # tracing off must print the same observation.
-        cls._remember_execute_context(chat_session)
+        clause_before = cls._remember_execute_context(chat_session)
 
         # Bound before the try so the error path can still file this dispatch's
         # inner hops when call_scope itself is what raised.
@@ -194,6 +194,8 @@ class CommandExecutor(CommandExecutorInterface):
         # still be read back through a public API.
         command_output.command_call_id = call_id
 
+        cls._remember_context_change(chat_session, clause_before)
+
         context_after = None
         consequence = None
         if span is not None:
@@ -240,7 +242,7 @@ class CommandExecutor(CommandExecutorInterface):
     @classmethod
     def _remember_execute_context(
         cls, chat_session: 'fastworkflow.ChatSession'
-    ) -> None:
+    ) -> Optional[str]:
         """File the context-at-execution for this step's alias line.
 
         The context is taken here, before dispatch, and the rule this fixes is
@@ -252,6 +254,8 @@ class CommandExecutor(CommandExecutorInterface):
         Silent and best-effort from end to end: with no agent step in flight
         there is no ``O`` namespace to file under, and a failure to describe a
         context must never fail the command that ran in it.
+
+        Returns the clause it filed, or None when it filed nothing.
         """
         try:
             from fastworkflow.context_identity import context_clause_for
@@ -263,10 +267,38 @@ class CommandExecutor(CommandExecutorInterface):
 
             alias = current_execute_alias()
             if not alias:
+                return None
+            clause = context_clause_for(cls._active_workflow(chat_session))
+            record_context_clause(current_scope(), alias, clause)
+            return clause
+        except Exception:  # noqa: BLE001 - presentation must never fail a turn
+            return None
+
+    @classmethod
+    def _remember_context_change(
+        cls, chat_session: 'fastworkflow.ChatSession', clause_before: Optional[str]
+    ) -> None:
+        """File that this step's command moved the context, for its alias line.
+
+        Only ever sets the flag: a later dispatch under the same alias (the
+        abort after a parameter-extraction error) must not clear a move the
+        step's own command made. Best-effort like ``_remember_execute_context``.
+        """
+        if clause_before is None:
+            return
+        try:
+            from fastworkflow.context_identity import context_clause_for
+            from fastworkflow.observation_offloading.state import (
+                current_execute_alias,
+                current_scope,
+                record_context_change,
+            )
+
+            alias = current_execute_alias()
+            if not alias:
                 return
-            record_context_clause(
-                current_scope(), alias,
-                context_clause_for(cls._active_workflow(chat_session)))
+            if context_clause_for(cls._active_workflow(chat_session)) != clause_before:
+                record_context_change(current_scope(), alias)
         except Exception:  # noqa: BLE001 - presentation must never fail a turn
             pass
 

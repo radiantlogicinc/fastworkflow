@@ -109,5 +109,32 @@ class DispatchRecordsANonEmptyClause(unittest.TestCase):
             self.assertIs(state.durable_archive(None), self.agent.observation_archive)
 
 
+class DispatchRecordsAContextChange(unittest.TestCase):
+    """The change flag is set by comparing the clause before and after dispatch."""
+
+    def setUp(self):
+        self.host = FakeHost(FakeAgent())
+        self.workflow = FakeWorkflow()
+        original = CommandExecutor._active_workflow
+        CommandExecutor._active_workflow = staticmethod(lambda cs: self.workflow)
+        self.addCleanup(setattr, CommandExecutor, "_active_workflow", original)
+        state.reset_observation_state()
+        self.addCleanup(state.reset_observation_state)
+
+    def _dispatch(self, context_after):
+        session = FakeChatSession()
+        with tracing.host_scope(self.host):
+            before = CommandExecutor._remember_execute_context(session)
+            self.workflow.current_command_context_name = context_after
+            CommandExecutor._remember_context_change(session, before)
+            return state.context_changed_of(current_scope(), current_execute_alias())
+
+    def test_a_command_that_moves_the_context_is_flagged(self):
+        self.assertTrue(self._dispatch("DirectoryExplorer"))
+
+    def test_a_command_that_stays_put_is_not_flagged(self):
+        self.assertFalse(self._dispatch("Account"))
+
+
 if __name__ == "__main__":
     unittest.main()

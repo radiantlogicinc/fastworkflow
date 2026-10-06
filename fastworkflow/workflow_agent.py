@@ -294,6 +294,9 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     from fastworkflow.command_executor import CommandExecutor, _annotation
     started = datetime.now(timezone.utc)
     try:
+        # A command rejected below never reaches invoke_command, which is where
+        # the context it ran in is otherwise filed for its alias line.
+        CommandExecutor._remember_execute_context(chat_session_obj)
         resolved_command = _explicit_agent_command(command, chat_session_obj.get_active_workflow())
         command_output = CommandExecutor.invoke_command(chat_session_obj, resolved_command)
     except BaseException as e:
