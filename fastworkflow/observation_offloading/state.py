@@ -45,6 +45,10 @@ _search_answers: dict[str, int] = {}
 #: ``CommandExecutor.invoke_command`` BEFORE the command runs and read when
 #: the alias line is printed. Turn-scoped like everything else here.
 _context_clauses: dict[str, str] = {}
+#: ``handle_key(scope, alias)``s whose command moved the context, written by
+#: ``CommandExecutor.invoke_command`` AFTER the command runs. Process memory
+#: only: a label rehydrated in another process prints without the change suffix.
+_context_changes: set[str] = set()
 #: ``handle_key``s the archive was asked about and had no subject for, oldest
 #: first, so a caller that reads every handle of a turn (``related_handles``)
 #: pays one archive read per unrecorded alias rather than one per call. Kept
@@ -539,6 +543,18 @@ def record_context_clause(
     _write_subject(scope, alias, text, selected_archive)
 
 
+def record_context_change(scope: RuntimeHandleScope, alias: str) -> None:
+    """Remember that the command of step *alias* moved the context."""
+    with _lock:
+        _context_changes.add(handle_key(scope, alias))
+
+
+def context_changed_of(scope: RuntimeHandleScope, alias: str) -> bool:
+    """Whether the command of step *alias* moved the context."""
+    with _lock:
+        return handle_key(scope, alias) in _context_changes
+
+
 def _write_subject(
     scope: RuntimeHandleScope, alias: str, clause: str, selected_archive: Any
 ) -> None:
@@ -633,6 +649,7 @@ def forget_context_clause(
     with _lock:
         _context_clauses.pop(handle_key(scope, alias), None)
         _unrecorded_clauses.pop(handle_key(scope, alias), None)
+        _context_changes.discard(handle_key(scope, alias))
     store = durable_archive(selected_archive)
     if store is None:
         return
@@ -677,6 +694,8 @@ def release_scope(scope: "RuntimeHandleScope | str") -> None:
         for registry in (_handles, _archived, _context_clauses, _unrecorded_clauses):
             for key in [key for key in registry if key.startswith(prefix)]:
                 del registry[key]
+        _context_changes.difference_update(
+            [key for key in _context_changes if key.startswith(prefix)])
         _search_answers.pop(scope_id, None)
         _routes.pop(scope_id, None)
         release_live_raw(scope_id)
@@ -710,6 +729,7 @@ def reset_observation_state() -> None:
         _archived.clear()
         _search_answers.clear()
         _context_clauses.clear()
+        _context_changes.clear()
         _unrecorded_clauses.clear()
         _events.clear()
         _event_write_failures.clear()

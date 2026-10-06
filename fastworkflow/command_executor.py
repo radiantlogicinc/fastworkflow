@@ -115,6 +115,7 @@ class CommandExecutor(CommandExecutorInterface):
         # presentation, not capture, so it is not gated on a span: a run with
         # tracing off must print the same observation.
         cls._remember_execute_context(chat_session)
+        context_object_before = cls._current_context_object(chat_session)
 
         # Bound before the try so the error path can still file this dispatch's
         # inner hops when call_scope itself is what raised.
@@ -173,6 +174,9 @@ class CommandExecutor(CommandExecutorInterface):
                     # bare. Recording is best-effort, unwinding is not.
                     pass
             raise
+        finally:
+            # A command that moved the context and then raised still moved it.
+            cls._remember_context_change(chat_session, context_object_before)
 
         # Attribute prep stays inside the never-raise boundary and runs only
         # when a span was actually opened: a user-authored parameters model
@@ -269,6 +273,39 @@ class CommandExecutor(CommandExecutorInterface):
                 context_clause_for(cls._active_workflow(chat_session)))
         except Exception:  # noqa: BLE001 - presentation must never fail a turn
             pass
+
+    @classmethod
+    def _remember_context_change(
+        cls, chat_session: 'fastworkflow.ChatSession', context_object_before: object
+    ) -> None:
+        """File that this step's command moved the context, for its alias line.
+
+        A move is what ``Workflow.current_command_context`` itself counts as
+        one: a different context object, whatever its printed clause. Only ever
+        sets the flag, so a later dispatch under the same alias (the abort after
+        a parameter-extraction error) cannot clear a move the step's command
+        made. Best-effort like ``_remember_execute_context``.
+        """
+        try:
+            from fastworkflow.observation_offloading.state import (
+                current_execute_alias,
+                current_scope,
+                record_context_change,
+            )
+
+            alias = current_execute_alias()
+            if alias and cls._current_context_object(chat_session) is not context_object_before:
+                record_context_change(current_scope(), alias)
+        except Exception:  # noqa: BLE001 - presentation must never fail a turn
+            pass
+
+    @classmethod
+    def _current_context_object(cls, chat_session: 'fastworkflow.ChatSession') -> object:
+        """The active workflow's current context object, or None. Never raises."""
+        try:
+            return getattr(cls._active_workflow(chat_session), "current_command_context", None)
+        except Exception:  # noqa: BLE001 - presentation must never fail a turn
+            return None
 
     @staticmethod
     def _active_workflow(chat_session: 'fastworkflow.ChatSession'):
