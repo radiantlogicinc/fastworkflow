@@ -462,8 +462,11 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # a reader counting tool results would otherwise count that note as one.
     # v3: the same marker, renamed `finish_check_note`: the note now comes from
     # the finish-time execution check (fix-4dsr), which replaced the roster nudge.
+    # v4: `repaired_tool_name` (fix-8q7a) is the workflow command the model named
+    # as its tool; `tool_name`/`tool_args` are the execute_workflow_query call the
+    # step ran instead.
     SPAN_AGENT_STEP: SpanContract(
-        version=3,
+        version=4,
         attributes=frozenset(
             {
                 "step_index",
@@ -476,6 +479,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "tool_error",
                 "error_type",
                 "finish_check_note",
+                "repaired_tool_name",
             }
         ),
     ),
@@ -738,6 +742,17 @@ class Span:
     attempt: Optional[int] = None
     claim_epoch: Optional[int] = None
     server_incarnation: Optional[str] = None
+    #: ``sha256 -> text`` of the prompt pieces an over-cap ``messages`` was
+    #: split into (``observability.prompt_slots``). Carried beside the
+    #: attributes, never inside them, so a sink that persists the attribute
+    #: bag does not persist the full prompt text with it.
+    prompt_slots: Optional[dict[str, str]] = None
+
+
+#: The attribute the prompt-slot enricher hands its piece texts over in.
+#: ``_emit`` moves it out of the attributes onto ``Span.prompt_slots`` before
+#: any sink sees the span.
+ATTR_PROMPT_SLOT_TEXTS = "_fw_prompt_slot_texts"
 
 
 # ----------------------------------------------------------------------
@@ -882,6 +897,9 @@ def _emit(sink: TraceSink, span: Span) -> None:
     contract = SPAN_CONTRACTS.get(span.name)
     if contract is not None:
         span.attributes[ATTR_SPAN_CONTRACT_VERSION] = contract.version
+    slot_texts = span.attributes.pop(ATTR_PROMPT_SLOT_TEXTS, None)
+    if isinstance(slot_texts, dict) and slot_texts:
+        span.prompt_slots = slot_texts
     try:
         sink.emit_span(span)
     except Exception as exc:  # a broken sink must never fail a turn

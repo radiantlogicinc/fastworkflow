@@ -377,6 +377,7 @@ function renderSpanLevel(container, span, role, fold) {
     appendAttrSection(container, "module output (parsed)", a.module_output);
     appendAttrSection(container, "reasoning", a.reasoning);
     appendAttrSection(container, "LLM input (messages)", a.messages);
+    appendPromptAsSent(container, span);
     appendAttrSection(container, "LLM input (prompt)", a.prompt);
     appendAttrSection(container, "LLM output (raw)", a.output);
     appendAttrSection(container, "provider response", a.provider_response);
@@ -416,6 +417,71 @@ function renderSpanLevel(container, span, role, fold) {
     rawDetails.appendChild(el("pre", "json", pretty(a)));
   }
   container.appendChild(rawDetails);
+}
+
+/* The prompt an over-cap call was sent, rebuilt by the server from the pieces
+   it stored (`prompt_slots_ref`). `messages` above holds only the cut envelope
+   for such a call. Fetched on expand: a rebuilt agent prompt is tens of KB.
+   Not offered in a blinded review, whose trace is served by the review routes
+   and must not be widened by a second read of the same store. */
+function appendPromptAsSent(container, span) {
+  var ref = (span.attributes || {}).prompt_slots_ref;
+  if (!ref || typeof ref !== "object" || review.progress) { return; }
+  var route = span.store_id
+    ? "/api/workspace/prompt/" + encodeURIComponent(span.store_id) + "/"
+      + encodeURIComponent(span.logical_turn_key || span.trace_id) + "/"
+      + encodeURIComponent(span.span_id)
+    : "/api/prompt/" + encodeURIComponent(span.trace_id) + "/"
+      + encodeURIComponent(span.span_id);
+  var det = el("details", "promptAsSent");
+  det.appendChild(el("summary", null, "LLM input as sent ("
+    + formatByteSize(ref.messages_bytes || 0) + ", " + (ref.slot_count || 0)
+    + " pieces — expand to load)"));
+  det.addEventListener("toggle", function () {
+    if (!det.open || det.dataset.loaded) { return; }
+    det.dataset.loaded = "1";
+    var body = el("div");
+    body.appendChild(el("div", "promptStatus", "loading…"));
+    det.appendChild(body);
+    api(route).then(function (result) {
+      clear(body);
+      renderPromptAsSent(body, result.prompt || {});
+    }).catch(function (e) {
+      clear(body);
+      body.appendChild(el("div", "empty", "Failed to load the prompt: " + e.message));
+    });
+  });
+  container.appendChild(det);
+}
+
+function renderPromptAsSent(body, prompt) {
+  if (!prompt.available) {
+    body.appendChild(el("div", "promptStatus", prompt.reason || "no prompt pieces recorded"));
+    return;
+  }
+  var missing = (prompt.missing || []).length;
+  var altered = (prompt.altered || []).length;
+  var status;
+  if (prompt.verified) {
+    status = "verified — byte for byte the messages this call recorded (sha256 matches)";
+  } else {
+    var reasons = [
+      missing ? missing + " piece(s) not stored" : "",
+      altered ? altered + " piece(s) redacted or withheld by the capture policy" : ""
+    ].filter(Boolean);
+    status = "not verified — " + (reasons.length ? reasons.join(", ")
+      : "the rebuilt messages do not match the recorded digest");
+  }
+  body.appendChild(el("div", prompt.verified ? "promptStatus" : "promptStatus warn", status));
+  (prompt.messages || []).forEach(function (message) {
+    var block = el("div", "msgBlock");
+    var role = (message && message.role) || "message";
+    block.appendChild(el("span", "lbl", role));
+    var content = message && message.content;
+    block.appendChild(el("pre", "json",
+      typeof content === "string" ? content : pretty(content)));
+    body.appendChild(block);
+  });
 }
 
 function spanNode(span, kids, byId) {

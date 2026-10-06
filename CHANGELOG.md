@@ -5,6 +5,43 @@ Releases before 3.4.0 were announced in their merge-commit subjects
 with `git tag` and `git log --first-parent main`. This file starts at 3.4.0; it
 does not backfill them.
 
+## 3.5.1 — agent observation and tool-selection fixes, exact prompts in the debug UI
+
+### Added
+
+- **The exact prompt of an over-cap LLM call** (`fix-ra63`): an `fw.llm.call`
+  whose `messages` exceed the 16 KB attribute cap is split at its DSPy field
+  markers and each distinct piece is stored once per turn in a new
+  `prompt_slots` table (additive; no schema version bump). The span carries a
+  `prompt_slots_ref`, `ObservabilityStore.prompt_as_sent` rebuilds the messages
+  and checks them against the recorded digest, and the debug UI shows them
+  under "LLM input as sent" (`/api/prompt/…`, `/api/workspace/prompt/…`).
+  Pieces are scrubbed by the capture policy and removed by prune,
+  forget-channel, clear-conversations and restart-attempt.
+
+### Changed
+
+- **The observation line says where a command ran and whether it moved the
+  context** (#86): `Observation O3 (execute_workflow_query ran in Directory)`,
+  with `; and resulted in a context change` when it did. The root context
+  prints as `global`, and a command rejected before dispatch still gets its
+  clause.
+- **dspy is required at `>=3.3.0,<3.4`** (`fix-5sm7`, `fix-cbjx`): 3.3.0 added
+  the JSON-retry hook that keeps the available commands in the agent's retry
+  prompt, and 3.4.0's lazy `openai` import breaks `import dspy; import litellm`.
+- **`fw.agent.step` contract v4**: adds `repaired_tool_name`.
+
+### Fixed
+
+- **A workflow command named as the agent's tool runs** (`fix-8q7a`): when the
+  model writes `next_tool_name: open_directory` and that command is listed for
+  the current context, the step runs as the `execute_workflow_query` call it
+  meant instead of becoming an invalid-tool step (three of which end a turn).
+- **A moved or reinstalled fastworkflow no longer breaks every turn**
+  (`fix-u2zw`): a persisted `command_directory.json` whose recorded module
+  paths no longer exist is rebuilt instead of failing with "Could not import
+  module from path".
+
 ## 3.5.0 — observability debug UI hardening and winner-selection fixes
 
 The adversarial review of the `run_chatbot` observability UI (`fix-hzux`) is

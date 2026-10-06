@@ -796,6 +796,17 @@ class ObservabilityWorkspace:
             spans = store.get_spans(logical_turn_key)
         return self._scope_spans(store_id, logical_turn_key, spans)
 
+    def prompt(
+        self, store_id: str, logical_turn_key: str, span_id: str
+    ) -> Optional[dict[str, Any]]:
+        """`ObservabilityStore.prompt_as_sent` for one span of one store's turn."""
+        if not store_id:
+            raise UnknownWorkspaceStore(
+                "store_id is required; trace ids are never searched across stores"
+            )
+        with self.registry.open(store_id) as store:
+            return store.prompt_as_sent(logical_turn_key, span_id)
+
     def traces(
         self, store_id: str, logical_turn_keys: Iterable[str]
     ) -> dict[str, list[dict[str, Any]]]:

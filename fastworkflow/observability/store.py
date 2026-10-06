@@ -54,6 +54,7 @@ from pydantic import BaseModel, ConfigDict
 import fastworkflow
 from fastworkflow.observability import capture_policy as capture_policy_module
 from fastworkflow.observability import control
+from fastworkflow.observability import prompt_slots
 from fastworkflow.observability.feedback import human_feedback_row
 from fastworkflow import agent_runtime, runtime_manifest, state_paths, tracing
 from fastworkflow.utils.logging import logger
@@ -325,6 +326,10 @@ FEATURE_OFFLOAD_EVIDENCE_V1 = "offload_evidence_v1"
 # archived, offloaded, searched and rehydrated, keyed by turn like the evidence
 # and erased and aged with it.
 FEATURE_OFFLOAD_EVENTS_V1 = "offload_events_v1"
+# The prompt-slot table (`prompt_slots`): the pieces an over-cap fw.llm.call
+# prompt was split into (`observability.prompt_slots`), keyed by turn and
+# digest, and aged and erased with the turn like `artifacts`.
+FEATURE_PROMPT_SLOTS_V1 = "prompt_slots_v1"
 FEEDBACK_PROVENANCES = frozenset({"human", "coding_agent", "distillation_agent"})
 FEEDBACK_COMMENT_MAX_CHARS = 100_000
 
@@ -655,6 +660,10 @@ _POLICED_SPAN_ATTRIBUTES: dict[str, dict[str, tuple[str, str]]] = {
 # protections entirely -- a credential in a command response was stored
 # verbatim where the same text inside a span attribute was scrubbed.
 POLICY_PATH_OFFLOAD_OBSERVATION = "offload.observation.text"
+# The seventh: one piece of the prompt an LLM call was sent. A prompt quotes
+# command responses, user text and the plan verbatim, so a piece is classified
+# like an offloaded observation -- `opaque-payload`.
+POLICY_PATH_PROMPT_SLOT = "prompt.slot.text"
 
 
 def _protected_text(
@@ -1630,6 +1639,25 @@ _SCHEMA_STATEMENTS = [
         recorded_at TEXT NOT NULL)""",
     "CREATE INDEX IF NOT EXISTS idx_offload_events_turn ON offload_events(turn_key, event_id)",
     "CREATE INDEX IF NOT EXISTS idx_offload_events_channel ON offload_events(channel_id)",
+    # Prompt slots (FEATURE_PROMPT_SLOTS_V1), additive like the offload tables:
+    # a store created before it gains it on its next open, and an older build
+    # ignores it. One row per distinct piece of the prompts one turn's LLM
+    # calls were sent; `fw.llm.call` spans name their pieces by `sha256` in
+    # `prompt_slots_ref`. `text_utf8` is the piece as stored (scrubbed, then
+    # policed), so it hashes to `sha256` only when nothing was altered.
+    # `experiment_id` is carried so retention exempts bound experiments with
+    # the same predicate it applies to `artifacts`.
+    """CREATE TABLE IF NOT EXISTS prompt_slots (
+        turn_key TEXT NOT NULL,
+        sha256 TEXT NOT NULL,
+        channel_id TEXT,
+        text_utf8 BLOB NOT NULL,
+        raw_utf8_bytes INTEGER NOT NULL,
+        altered INTEGER NOT NULL,
+        recorded_at TEXT NOT NULL,
+        experiment_id TEXT,
+        PRIMARY KEY (turn_key, sha256))""",
+    "CREATE INDEX IF NOT EXISTS idx_prompt_slots_channel ON prompt_slots(channel_id)",
 ]
 
 # The offload tables above, named once for the erasure and retention paths,
@@ -1662,6 +1690,13 @@ def _present_offload_tables(conn: sqlite3.Connection) -> tuple[str, ...]:
     return tuple(table for table in _OFFLOAD_EVIDENCE_TABLES if table in found)
 
 
+def _has_prompt_slots(conn: sqlite3.Connection) -> bool:
+    """Whether this DB has the `prompt_slots` table (see `_present_offload_tables`)."""
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='prompt_slots'"
+    ).fetchone() is not None
+
+
 # What an experiment seal copies (single live DB design §3), in order: each
 # table with the predicate that picks its rows. Rows kept by turn select
 # against the copy's own `turns`, so they follow it, and go through the
@@ -1679,7 +1714,9 @@ _EXPERIMENT_SEAL_ROWS: tuple[tuple[str, str], ...] = (
     ("spans", f"trace_id IN ({_SEAL_KEPT_TURNS})"),
     *(
         (table, f"turn_key IN ({_SEAL_KEPT_TURNS})")
-        for table in ("artifacts", "human_feedback", *_OFFLOAD_EVIDENCE_TABLES)
+        for table in (
+            "artifacts", "human_feedback", *_OFFLOAD_EVIDENCE_TABLES, "prompt_slots",
+        )
     ),
     # Writer health describes the live DB's writers, not this experiment.
     ("diagnostics", "key NOT GLOB 'writer_health*'"),
@@ -1882,6 +1919,7 @@ class ObservabilityStore:
                     FEATURE_EXPERIMENT_SEALING_V1,
                     FEATURE_OFFLOAD_EVIDENCE_V1,
                     FEATURE_OFFLOAD_EVENTS_V1,
+                    FEATURE_PROMPT_SLOTS_V1,
                 ],
             )
             conn.execute(
@@ -2452,6 +2490,53 @@ class ObservabilityStore:
                     span.attempt,
                     span.claim_epoch,
                     span.server_incarnation,
+                ),
+            )
+            if span.prompt_slots:
+                self._insert_prompt_slots(conn, span, channel_id, redactor, policy)
+
+    @staticmethod
+    def _insert_prompt_slots(
+        conn: sqlite3.Connection,
+        span: tracing.Span,
+        channel_id: Optional[str],
+        redactor: Redactor,
+        policy: "capture_policy_module.CapturePolicy",
+    ) -> None:
+        """Store the span's prompt pieces once per turn, scrubbed then policed.
+
+        A piece already stored for the turn is skipped before it is policed:
+        the same system prompt and trajectory fields recur on every step.
+        """
+        recorded_at = _utcnow_iso()
+        for digest, text in span.prompt_slots.items():
+            if conn.execute(
+                "SELECT 1 FROM prompt_slots WHERE turn_key=? AND sha256=?",
+                (span.trace_id, digest),
+            ).fetchone() is not None:
+                continue
+            stored = _protected_text(
+                text,
+                redactor=redactor,
+                policy=policy,
+                field_path=POLICY_PATH_PROMPT_SLOT,
+                classification="opaque-payload",
+            )
+            stored = stored if isinstance(stored, str) else str(stored or "")
+            conn.execute(
+                """INSERT OR IGNORE INTO prompt_slots
+                   (turn_key, sha256, channel_id, text_utf8, raw_utf8_bytes,
+                    altered, recorded_at, experiment_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    span.trace_id,
+                    digest,
+                    channel_id,
+                    stored.encode("utf-8"),
+                    len(text.encode("utf-8")),
+                    int(stored != text),
+                    recorded_at,
+                    span.experiment_id,
                 ),
             )
 
@@ -3375,6 +3460,46 @@ class ObservabilityStore:
                 "SELECT * FROM artifacts WHERE artifact_id=?", (artifact_id,)
             ).fetchone()
             return dict(row) if row is not None else None
+
+    def prompt_as_sent(self, trace_id: str, span_id: str) -> Optional[dict[str, Any]]:
+        """The prompt one ``fw.llm.call`` span was sent, rebuilt from its pieces.
+
+        None when the turn has no such span. Otherwise ``available`` says
+        whether the span recorded its prompt as pieces at all (a prompt under
+        the attribute cap is in ``messages`` whole; a turn recorded before
+        this table existed has neither), and the rest is
+        ``prompt_slots.rebuild``'s answer.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT attributes FROM spans WHERE span_id=? AND trace_id=?",
+                (span_id, trace_id),
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                attributes = json.loads(row["attributes"])
+            except (TypeError, ValueError):
+                attributes = {}
+            ref = attributes.get(prompt_slots.REF_ATTRIBUTE) if isinstance(attributes, dict) else None
+            if not isinstance(ref, dict):
+                return {"available": False, "reason": "this call recorded no prompt pieces"}
+            digests = prompt_slots.slot_digests(ref)
+            stored: dict[str, str] = {}
+            if _has_prompt_slots(conn):
+                for chunk in _chunked(digests):
+                    marks = ",".join("?" for _ in chunk)
+                    for slot in conn.execute(
+                        f"SELECT sha256, text_utf8 FROM prompt_slots "
+                        f"WHERE turn_key=? AND sha256 IN ({marks})",
+                        (trace_id, *chunk),
+                    ).fetchall():
+                        value = slot["text_utf8"]
+                        stored[str(slot["sha256"])] = (
+                            bytes(value).decode("utf-8", errors="replace")
+                            if isinstance(value, (bytes, memoryview)) else str(value)
+                        )
+        return {"available": True, **prompt_slots.rebuild(ref, stored)}
 
     def list_train_runs(self, limit: int = 50) -> list[dict[str, Any]]:
         with self._connect() as conn:
@@ -4810,11 +4935,17 @@ class ObservabilityStore:
                 ).fetchall()
             ]
             if turn_keys:
+                has_prompt_slots = _has_prompt_slots(conn)
                 for chunk in _chunked(turn_keys):
                     marks = ", ".join("?" for _ in chunk)
                     conn.execute(
                         f"DELETE FROM artifacts WHERE turn_key IN ({marks})", chunk
                     )
+                    if has_prompt_slots:
+                        conn.execute(
+                            f"DELETE FROM prompt_slots WHERE turn_key IN ({marks})",
+                            chunk,
+                        )
                     conn.execute(
                         f"DELETE FROM spans WHERE trace_id IN ({marks})", chunk
                     )
@@ -5834,7 +5965,7 @@ class ObservabilityStore:
         # `observation_offloading.archive`), so the horizon compares as text.
         horizon_evidence = horizon_moment.strftime("%Y-%m-%dT%H:%M:%SZ")
         deleted = {
-            "spans": 0, "artifacts": 0,
+            "spans": 0, "artifacts": 0, "prompt_slots": 0,
             **{table: 0 for table in _OFFLOAD_EVIDENCE_TABLES},
         }
         erased_scopes: set[str] = set()
@@ -5848,6 +5979,7 @@ class ObservabilityStore:
             # As in `forget_channel`: retention deletes evidence text, and a
             # deleted cell must not survive in a page that still holds others.
             conn.execute("PRAGMA secure_delete=ON")
+            has_prompt_slots = _has_prompt_slots(conn)
             for _ in range(_PRUNE_MAX_BATCHES):
                 conn.execute("BEGIN IMMEDIATE")
                 spans_cur = conn.execute(
@@ -5864,6 +5996,15 @@ class ObservabilityStore:
                     (horizon_key, _PRUNE_BATCH_ROWS),
                 )
                 deleted["artifacts"] += artifacts_cur.rowcount
+                slots_deleted = 0
+                if has_prompt_slots:
+                    slots_deleted = conn.execute(
+                        "DELETE FROM prompt_slots WHERE rowid IN "
+                        "(SELECT rowid FROM prompt_slots WHERE turn_key < ? "
+                        f"AND {unbound} LIMIT ?)",
+                        (horizon_key, _PRUNE_BATCH_ROWS),
+                    ).rowcount
+                    deleted["prompt_slots"] += slots_deleted
                 # Offload evidence is aged by its TURN, like artifacts, so a
                 # turn's observations go whole. A turn's age is its earliest
                 # evidence write rather than its key, because a turn with no
@@ -5880,6 +6021,7 @@ class ObservabilityStore:
                 if (
                     spans_cur.rowcount < _PRUNE_BATCH_ROWS
                     and artifacts_cur.rowcount < _PRUNE_BATCH_ROWS
+                    and slots_deleted < _PRUNE_BATCH_ROWS
                     and len(aged_turns) < _OFFLOAD_PRUNE_BATCH_TURNS
                 ):
                     break
@@ -5899,6 +6041,10 @@ class ObservabilityStore:
                     for key in keys:
                         conn.execute("DELETE FROM spans WHERE trace_id=?", (key,))
                         conn.execute("DELETE FROM artifacts WHERE turn_key=?", (key,))
+                        if has_prompt_slots:
+                            deleted["prompt_slots"] += conn.execute(
+                                "DELETE FROM prompt_slots WHERE turn_key=?", (key,)
+                            ).rowcount
                         conn.execute("DELETE FROM turns WHERE turn_key=?", (key,))
                     self._delete_offload_turns_in_txn(
                         conn, keys, deleted, erased_scopes
@@ -5930,8 +6076,26 @@ class ObservabilityStore:
                 self._delete_offload_turns_in_txn(
                     conn, oldest_turns, deleted, erased_scopes
                 )
+                # A prompt's pieces are evicted a whole turn at a time, oldest
+                # turn first, beside the spans that referenced them.
+                slot_turns: list[str] = []
+                if has_prompt_slots:
+                    slot_turns = [
+                        str(row[0])
+                        for row in conn.execute(
+                            "SELECT DISTINCT turn_key FROM prompt_slots "
+                            f"WHERE {unbound} ORDER BY turn_key LIMIT ?",
+                            (_OFFLOAD_PRUNE_BATCH_TURNS,),
+                        ).fetchall()
+                    ]
+                    for chunk in _chunked(slot_turns):
+                        marks = ",".join("?" for _ in chunk)
+                        deleted["prompt_slots"] += conn.execute(
+                            f"DELETE FROM prompt_slots WHERE turn_key IN ({marks})",
+                            chunk,
+                        ).rowcount
                 conn.commit()
-                if cur.rowcount == 0 and not oldest_turns:
+                if cur.rowcount == 0 and not oldest_turns and not slot_turns:
                     only_bound_left = True
                     break
                 # Fetched to completion: each step of this pragma frees one page.
@@ -5987,6 +6151,11 @@ class ObservabilityStore:
             held.append(
                 "SELECT SUM(length(text_utf8)) FROM offload_evidence "
                 f"WHERE turn_key IN ({bound_turns})"
+            )
+        if _has_prompt_slots(conn):
+            held.append(
+                "SELECT SUM(length(text_utf8)) FROM prompt_slots "
+                f"WHERE experiment_id IN ({bound})"
             )
         return int(conn.execute(
             "SELECT " + " + ".join(f"COALESCE(({sql}), 0)" for sql in held)
@@ -6152,6 +6321,12 @@ class ObservabilityStore:
                 "(SELECT turn_key FROM turns WHERE channel_id=?)",
                 (channel_id, channel_id),
             ).rowcount
+            if _has_prompt_slots(conn):
+                deleted["prompt_slots"] = conn.execute(
+                    "DELETE FROM prompt_slots WHERE channel_id=? OR turn_key IN "
+                    "(SELECT turn_key FROM turns WHERE channel_id=?)",
+                    (channel_id, channel_id),
+                ).rowcount
             for table in _present_offload_tables(conn):
                 erased_scopes.update(
                     str(row[0])
@@ -6234,8 +6409,9 @@ class ObservabilityStore:
                         f"SELECT DISTINCT scope_id FROM {table}"
                     ).fetchall()
                 )
+            slot_tables = ("prompt_slots",) if _has_prompt_slots(conn) else ()
             for table in (
-                "spans", "artifacts", *offload_tables,
+                "spans", "artifacts", *offload_tables, *slot_tables,
                 "turns", "conversations",
             ):
                 deleted[table] = conn.execute(f"DELETE FROM {table}").rowcount
@@ -6446,6 +6622,7 @@ class SQLiteTraceSink:
                 attempt=span.attempt,
                 claim_epoch=span.claim_epoch,
                 server_incarnation=span.server_incarnation,
+                prompt_slots=span.prompt_slots,
             )
             self._span_queue.put_nowait(("span", snapshot))
         except queue.Full:

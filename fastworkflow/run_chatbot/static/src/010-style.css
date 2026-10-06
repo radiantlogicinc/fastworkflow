@@ -375,6 +375,13 @@ table.ledger td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospa
   flex-wrap: wrap; margin-top: 8px; white-space: normal; }
 .msgBlock .reuseAction button { font-size: 11px; padding: 3px 10px; }
 .msgBlock .reuseAction .muted { color: var(--muted); font-size: 11px; }
+.promptStatus { color: var(--muted); font-size: 12px; margin: 6px 0; }
+.promptAsSent { margin: 8px 0; }
+.promptAsSent > summary { display: inline-block; color: var(--accent); background: var(--accent-soft);
+  border: 1px solid var(--accent); border-radius: 6px; padding: 3px 9px;
+  font-size: 13px; font-weight: 700; }
+.promptAsSent > summary:hover { color: var(--on-accent); background: var(--accent); }
+.promptStatus.warn { color: var(--fail); }
 .expInvalid { border-left: 4px solid var(--fail); background: var(--fail-soft);
   padding: 8px 10px; border-radius: 6px; margin-top: 8px; }
 .expReadonly { color: var(--muted); font-size: 11px; margin-top: 4px; }

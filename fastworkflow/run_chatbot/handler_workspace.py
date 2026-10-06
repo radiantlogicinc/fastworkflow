@@ -214,6 +214,24 @@ class _WorkspaceRoutes:
                     )
                     self._send_json({"attempts": rows})
                 return
+            prompt_prefix = "/api/workspace/prompt/"
+            if path.startswith(prompt_prefix):
+                encoded_store, _, rest = path[len(prompt_prefix) :].partition("/")
+                encoded_key, _, encoded_span = rest.rpartition("/")
+                if not encoded_store or not encoded_key or not encoded_span:
+                    self._error(
+                        400,
+                        "prompt reads require store_id, logical_turn_key and span_id",
+                    )
+                    return
+                prompt = workspace.prompt(
+                    unquote(encoded_store), unquote(encoded_key), unquote(encoded_span)
+                )
+                if prompt is None:
+                    self._error(404, "span not found in the named store's turn")
+                    return
+                self._send_json({"prompt": prompt})
+                return
             for noun in ("turn", "trace", "spans"):
                 prefix = f"/api/workspace/{noun}/"
                 if not path.startswith(prefix):

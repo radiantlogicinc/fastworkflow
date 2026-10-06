@@ -1624,6 +1624,7 @@ class _ChatbotRequestHandler(
         elif self.chatbot.workspace is not None and (
             path.startswith("/api/turn/")
             or path.startswith("/api/spans/")
+            or path.startswith("/api/prompt/")
             or path.startswith("/api/experiment/")
         ):
             self._error(
@@ -1723,6 +1724,18 @@ class _ChatbotRequestHandler(
                 except (ValueError, TypeError, KeyError):
                     pass
             self._send_json({"spans": spans})
+        elif path.startswith("/api/prompt/"):
+            # /api/prompt/<turn_key>/<span_id>: span ids are hex, so the last
+            # separator is the one between the two.
+            turn_key, _, span_id = path[len("/api/prompt/") :].rpartition("/")
+            if not turn_key or not span_id:
+                self._error(400, "prompt reads require a turn key and a span id")
+                return
+            prompt = store.prompt_as_sent(unquote(turn_key), unquote(span_id))
+            if prompt is None:
+                self._error(404, "span not found in this turn")
+                return
+            self._send_json({"prompt": prompt})
         elif path == "/api/experiments" or path.startswith("/api/experiment/"):
             self._handle_experiments(store, path, q)
         elif path.startswith("/api/artifact/"):
