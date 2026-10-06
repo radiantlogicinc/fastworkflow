@@ -16,8 +16,18 @@ LABEL_RE = re.compile(
 #: can never contain a parenthesis or a newline (``context_clause`` removes
 #: both), so the closing ``)`` is unambiguous and a line printed before the
 #: clause existed still matches.
+#: The clause reads " ran in <clause>" and may be followed by
+#: ``CONTEXT_CHANGE_SUFFIX``; the earlier ", in <clause>" form is still matched.
+#: A printed clause never contains a semicolon either, so it cannot end in
+#: something the suffix would be mistaken for.
 ALIAS_LINE_RE = re.compile(
-    r"^Observation (O[1-9]\d*) \(execute_workflow_query(?:, in ([^()\n]*))?\)\n")
+    r"^Observation (O[1-9]\d*) \(execute_workflow_query"
+    r"(?:(?:, in| ran in) ([^()\n]*?))?(; and resulted in a context change)?\)\n")
+#: What the handle line names the root context as. The root's clause is empty.
+ROOT_CONTEXT_LABEL = "global"
+#: Appended to the handle line when the command moved the context. The new
+#: context is not named here: the command's own response already says it.
+CONTEXT_CHANGE_SUFFIX = "; and resulted in a context change"
 #: Longest instance identity printed. A uid plus a display name, not a payload.
 MAX_INSTANCE_LABEL_CHARS = 80
 #: Longest context name printed, for the same reason.
@@ -50,8 +60,9 @@ def is_search_answer_key(key: str) -> bool:
 
 
 def _clipped(value: str, limit: int) -> str:
-    """*value* with no parenthesis, no newline, collapsed spaces, capped."""
-    cleaned = " ".join(str(value or "").replace("(", " ").replace(")", " ").split())
+    """*value* with no parenthesis, semicolon or newline, collapsed spaces, capped."""
+    cleaned = " ".join(
+        str(value or "").replace("(", " ").replace(")", " ").replace(";", " ").split())
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[: max(0, limit - 3)].rstrip() + "..."
@@ -73,7 +84,7 @@ def context_clause(context_name: str, instance_label: str = "") -> str:
     return f"{name} {label}" if label else name
 
 
-def alias_line(alias: str, context: str = "") -> str:
+def alias_line(alias: str, context: str | None = None, *, context_changed: bool = False) -> str:
     """The canonical handle line printed above an inline execute observation.
 
     This is the only identifier the agent is ever asked to pass to
@@ -82,11 +93,19 @@ def alias_line(alias: str, context: str = "") -> str:
 
     ``context`` is the clause from ``context_clause`` -- the context the command
     RAN IN and, where the workflow declares one, that context's instance
-    identity. It is empty at the root context, and the line is then
-    byte-for-byte the bare alias line.
+    identity. It is empty at the root context, which is printed as
+    ``ROOT_CONTEXT_LABEL``. ``None`` means no clause was recorded, and the line
+    is then byte-for-byte the bare alias line.
+
+    ``context_changed`` says the command moved the context, so the agent does
+    not read the context it ran in as the one it is now in.
     """
+    if context is None:
+        return f"Observation {alias} (execute_workflow_query)\n"
     clause = _clipped(context, MAX_CONTEXT_NAME_CHARS + MAX_INSTANCE_LABEL_CHARS + 1)
-    suffix = f", in {clause}" if clause else ""
+    suffix = f" ran in {clause or ROOT_CONTEXT_LABEL}"
+    if context_changed:
+        suffix += CONTEXT_CHANGE_SUFFIX
     return f"Observation {alias} (execute_workflow_query{suffix})\n"
 
 
@@ -157,14 +176,15 @@ def quote_marker_lines(text: str) -> str:
                      for line in text.split("\n"))
 
 
-def annotated_observation(alias: str, context: str = "", text: str = "") -> str:
+def annotated_observation(alias: str, context: str | None = None, text: str = "",
+                          *, context_changed: bool = False) -> str:
     """The observation as the agent sees it: our handle line, then the response.
 
     The one place the two are joined, so the compaction hook that prints the
     line on a completed step and the rehydration that re-prints it over an
     archived response escape a shape-colliding response identically.
     """
-    return alias_line(alias, context) + escape_response(text)
+    return alias_line(alias, context, context_changed=context_changed) + escape_response(text)
 
 
 def printed_alias(text: str) -> str | None:
@@ -183,7 +203,8 @@ def printed_context(text: str) -> str | None:
     match = ALIAS_LINE_RE.match(text)
     if match is None:
         return None
-    return match.group(2) or None
+    clause = match.group(2)
+    return None if clause == ROOT_CONTEXT_LABEL else (clause or None)
 
 
 #: Which line of ours named an observation's alias. An alias is evidence only

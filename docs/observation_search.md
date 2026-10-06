@@ -91,7 +91,7 @@ observation-by-observation.
 Every `execute_workflow_query` observation is printed with its canonical handle
 on the first line, inline results included:
 
-> Observation O42 (execute_workflow_query)
+> Observation O42 (execute_workflow_query ran in global)
 > 477 holder(s).
 > ...
 
@@ -108,7 +108,7 @@ handle: there is nothing to search inside them.
 When the command ran inside a non-root command context, the line also names that
 context and, where the workflow declares one, that context's instance identity:
 
-> Observation O22 (execute_workflow_query, in Account e8a0c3a1-… Alan Cooper)
+> Observation O22 (execute_workflow_query ran in Account e8a0c3a1-… Alan Cooper)
 > permission_uid  label
 > 85cde168  Active Directory_Cloud Administrator
 > ...
@@ -130,6 +130,20 @@ already moved. So `open_account_by_uid` reads as the `DirectoryExplorer` command
 it is, and the `list_permissions` that follows it is the one that belongs to the
 account. An observation is evidence about the context it was produced in.
 
+**A command that moved the context says so.** Read alone, "ran in X" is easily
+taken for "now in X". So when the context after the command differs from the one
+it ran in, the line ends with `; and resulted in a context change`; the
+command's own response says where it moved to:
+
+> Observation O5 (execute_workflow_query ran in Identity 4a0d… Angelica Schneider; and resulted in a context change)
+> Context is now 'DirectoryExplorer'
+
+A move is a different context object after dispatch than before, whether the
+command returned or raised (`CommandExecutor._remember_context_change`); the
+response is never read. The flag is held in process memory only. A resumed turn
+keeps the lines it already printed; only a label rehydrated for the final answer
+in another process prints without the suffix.
+
 **The instance identity is declared, never derived.** fastWorkflow has no notion
 of a context instance's identity — the current context is an arbitrary
 application object — so `fastworkflow/context_identity.py` reads a declaration
@@ -139,12 +153,12 @@ or an `instance_label_attr = "uid"` naming an attribute to read. A context that
 declares neither prints its NAME alone, and an object that carries no identity
 yields no identity: nothing is invented to fill the gap, for the reason
 `tracing.context_handle` gives for refusing to mint an `instance_key` — a guess
-that looks concrete is worse than an honest absence. The root context prints no
-clause at all, so a root-context line is byte-for-byte the plain handle line
-shown earlier.
+that looks concrete is worse than an honest absence. The root context has an empty
+clause and is printed as `ran in global`; a step with no recorded clause prints
+the bare `Observation O{n} (execute_workflow_query)` line.
 
 `context_clause` is the one place the clause is made printable. It removes
-parentheses and newlines and caps the name at 60 and the label at 80 characters,
+parentheses, semicolons and newlines and caps the name at 60 and the label at 80 characters,
 which is what lets `ALIAS_LINE_RE` treat the closing `)` as unambiguous and match
 lines printed before the clause existed. Each printed line emits a `context_line`
 event carrying the alias, the clause, whether an instance was named and the bytes

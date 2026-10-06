@@ -162,7 +162,7 @@ class RehydratesEachKind(unittest.TestCase):
     def test_the_alias_and_context_lines_are_preserved(self) -> None:
         copy, _ = self.rehydrate()
         self.assertTrue(copy["observation_0"].startswith(
-            "Observation O1 (execute_workflow_query, in Identity 28c5aeb5 Alan Cooper)\n"))
+            "Observation O1 (execute_workflow_query ran in Identity 28c5aeb5 Alan Cooper)\n"))
         self.assertEqual(printed_context(copy["observation_0"]),
                          "Identity 28c5aeb5 Alan Cooper")
 

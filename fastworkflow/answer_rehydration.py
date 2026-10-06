@@ -52,6 +52,7 @@ from fastworkflow.observation_offloading.labels import (
     printed_alias,
 )
 from fastworkflow.observation_offloading.state import (
+    context_changed_of,
     context_clause_of,
     default_scope,
     stored_handles,
@@ -267,8 +268,9 @@ def rehydrated_label(
         # The archive that holds the text also holds the subject recorded
         # for it (ido-dhw), so a label rehydrated in a process that never
         # ran the turn prints the same clause the agent first saw.
-        context_clause_of(scope, alias, selected_archive=archive) or "",
+        context_clause_of(scope, alias, selected_archive=archive),
         text,
+        context_changed=context_changed_of(scope, alias),
     )
 
 
