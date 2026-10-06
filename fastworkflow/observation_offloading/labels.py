@@ -18,6 +18,8 @@ LABEL_RE = re.compile(
 #: clause existed still matches.
 #: The clause reads " ran in <clause>" and may be followed by
 #: ``CONTEXT_CHANGE_SUFFIX``; the earlier ", in <clause>" form is still matched.
+#: A printed clause never contains a semicolon either, so it cannot end in
+#: something the suffix would be mistaken for.
 ALIAS_LINE_RE = re.compile(
     r"^Observation (O[1-9]\d*) \(execute_workflow_query"
     r"(?:(?:, in| ran in) ([^()\n]*?))?(; and resulted in a context change)?\)\n")
@@ -58,8 +60,9 @@ def is_search_answer_key(key: str) -> bool:
 
 
 def _clipped(value: str, limit: int) -> str:
-    """*value* with no parenthesis, no newline, collapsed spaces, capped."""
-    cleaned = " ".join(str(value or "").replace("(", " ").replace(")", " ").split())
+    """*value* with no parenthesis, semicolon or newline, collapsed spaces, capped."""
+    cleaned = " ".join(
+        str(value or "").replace("(", " ").replace(")", " ").replace(";", " ").split())
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[: max(0, limit - 3)].rstrip() + "..."

@@ -138,10 +138,11 @@ command's own response says where it moved to:
 > Observation O5 (execute_workflow_query ran in Identity 4a0d… Angelica Schneider; and resulted in a context change)
 > Context is now 'DirectoryExplorer'
 
-The move is detected by comparing the clause before and after dispatch
-(`CommandExecutor._remember_context_change`), never by reading the response, and
-is held in process memory only: a label rehydrated in another process prints
-without the suffix.
+A move is a different context object after dispatch than before, whether the
+command returned or raised (`CommandExecutor._remember_context_change`); the
+response is never read. The flag is held in process memory only. A resumed turn
+keeps the lines it already printed; only a label rehydrated for the final answer
+in another process prints without the suffix.
 
 **The instance identity is declared, never derived.** fastWorkflow has no notion
 of a context instance's identity — the current context is an arbitrary
@@ -157,7 +158,7 @@ clause and is printed as `ran in global`; a step with no recorded clause prints
 the bare `Observation O{n} (execute_workflow_query)` line.
 
 `context_clause` is the one place the clause is made printable. It removes
-parentheses and newlines and caps the name at 60 and the label at 80 characters,
+parentheses, semicolons and newlines and caps the name at 60 and the label at 80 characters,
 which is what lets `ALIAS_LINE_RE` treat the closing `)` as unambiguous and match
 lines printed before the clause existed. Each printed line emits a `context_line`
 event carrying the alias, the clause, whether an instance was named and the bytes

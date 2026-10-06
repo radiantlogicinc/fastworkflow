@@ -152,6 +152,11 @@ class ContextClauseFormat(unittest.TestCase):
         self.assertNotIn("(", clause)
         self.assertNotIn(")", clause)
         self.assertNotIn("\n", clause)
+
+    def test_a_label_ending_like_the_change_suffix_is_read_back_whole(self) -> None:
+        clause = context_clause("Account", "28c5; and resulted in a context change")
+        self.assertNotIn(";", clause)
+        self.assertEqual(printed_context(alias_line("O3", clause)), clause)
         line = alias_line("O3", clause)
         self.assertEqual(printed_alias(line), "O3")
         self.assertEqual(printed_context(line), clause)
