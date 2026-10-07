@@ -423,9 +423,8 @@ function tmRenderTurn(bubbleMsg, out) {
   });
   tmRenderArtifacts(bubbleMsg, out.command_outputs);
   var meta = el("div", "meta");
-  var statusTxt = out.status +
-    (out.status === "awaiting_user" ? " (awaiting your reply)"
-      : (out.success ? " · ok" : " · FAILED"));
+  var statusTxt = turnOutcome(out.status, out.failure_reason).text +
+    (turnHadCommandFailure(out) ? " · a command reported failure" : "");
   meta.appendChild(el("span", null, statusTxt));
   if (out.turn_key) {
     var link = el("button", "traceLink", "view trace");

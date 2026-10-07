@@ -19,7 +19,7 @@ function commandOutcomeWord(value) {
 
 function commandGroupName(group) {
   return group.unknown_command
-    ? "(no command name recorded)" : policedText(group.command_name);
+    ? "(no command name recorded)" : group.command_name;
 }
 
 /* Recorded dispatch timing [fix-9eg.3.1.4].
@@ -602,24 +602,8 @@ function renderPairComposer(container, cmp, ctx, row, labelFor) {
   var history = el("div");
   card.appendChild(history);
   container.appendChild(card);
-  /* Which side the comment is anchored to decides where it is filed, so the
-     scope is worked out once, here, from the same authorized source the reads
-     use — not from whichever database the page is pointed at. */
   var primary = anchors.left || anchors.right;
   var paired = (anchors.left && anchors.right) ? anchors.right : null;
-  var primarySide = pairSide(cmp, anchors.left ? "left" : "right");
-  var scope = pairWriteScope(primarySide, primary);
-  if (scope.refusal) {
-    save.disabled = true;
-    note.textContent = scope.refusal;
-    return;
-  }
-  if (scope.annotated) {
-    /* Sealed evidence is never appended to, and that is not a reason to refuse
-       the comment: it is filed beside the archive and read back with it. */
-    note.textContent = "The evidence is read-only, so this comment is recorded "
-      + "alongside it without changing it.";
-  }
   save.addEventListener("click", function () {
     if (!area.value.trim()) {
       note.textContent = "Enter a comment before saving.";
@@ -628,7 +612,7 @@ function renderPairComposer(container, cmp, ctx, row, labelFor) {
     save.disabled = true;
     note.textContent = "saving…";
     var path = "/post_feedback?turn_key="
-      + encodeURIComponent(primary.turn_key) + scope.query;
+      + encodeURIComponent(primary.turn_key);
     var body = {
       /* The anchor the API returned, verbatim: the whole reference plus the
          turn the comment is anchored to. Narrowing it here would give the
@@ -655,9 +639,7 @@ function renderPairComposer(container, cmp, ctx, row, labelFor) {
     apiPost(path, body).then(function (data) {
       area.value = "";
       save.disabled = false;
-      note.textContent = data.annotated
-        ? "Saved alongside the read-only evidence"
-        : "Saved";
+      note.textContent = "Saved";
       clear(history);
       (data.feedback || []).forEach(function (recorded) {
         if (recorded.pair_key && recorded.pair_key !== cmp.review_pair_key) {
@@ -853,10 +835,10 @@ function renderSideCallCosts(cmp, which, label, ctx) {
      heading a side whose evidence could not be read with "0 recorded LLM
      calls" would state the one fact this list exists to avoid stating. */
   var unreadable = ((projection && projection.unavailable) || []).length;
-  var withheld = unreadable || found.turnsWithoutDetail;
+  var unlisted = unreadable || found.turnsWithoutDetail;
   box.appendChild(el("summary", null,
     label + ": attempt " + attempt + " — "
-    + ((!found.calls.length && withheld)
+    + ((!found.calls.length && unlisted)
         ? "no recorded LLM call can be listed, and that is missing evidence"
         : found.calls.length
           + (found.calls.length === 1
@@ -1002,35 +984,9 @@ function pairTurnAnchors(cmp) {
     var ref = projection && projection.ref;
     if (!ref || !(ref.turn_keys || []).length) { return null; }
     return { ref: ref, turn_key: ref.turn_keys[0], target_kind: "turn",
-             span_ids: [], anchorable: true, store_id: ref.store_id,
-             manifest_store_id: projection.manifest_store_id || null };
+             span_ids: [], anchorable: true, store_id: ref.store_id };
   }
   return { left: anchor(cmp.left), right: anchor(cmp.right) };
-}
-
-/* WHERE a pair comment is recorded — the authorized source of the side the
-   comment is anchored to, decided by the same rule the reads use.
-
-   A sealed archive is named by the MANIFEST's store id, which is how every
-   workspace route addresses it, and not by the evidence identity the
-   references inside the body carry: the server resolves the paired side
-   through that separately, and handing it the identity as a scope is refused.
-   Live evidence is the workflow's own database, which needs no scope.
-
-   A sealed side whose store the manifest does not name is refused here rather
-   than posted somewhere adjacent and plausible. */
-function pairWriteScope(side, anchor) {
-  if (session && session.workspace_mode) {
-    var storeId = side.manifestStoreId
-      || (anchor && anchor.manifest_store_id) || null;
-    if (!storeId) {
-      return { refusal: "This archive's manifest does not name the store this "
-        + "side was recorded in, so a comment has nowhere to be filed." };
-    }
-    return { query: "&store_id=" + encodeURIComponent(storeId),
-             annotated: true };
-  }
-  return { query: "" };
 }
 
 function describePairSides(cmp, anchors) {
@@ -1077,10 +1033,8 @@ function showBenchmarks() {
   var nav = benchNavToken(), d = document.getElementById("detail"); clear(d);
   writePageLink({page: "benchmarks"});
   var actions = pageHeader(d, "BENCHMARK LIBRARY", "Build confidence in every change", "Define repeatable tasks, compare experiments, and turn observations into better workflows.");
-  if (!(session && session.workspace_mode)) {
-    var create = el("button", "primary", "New benchmark");
-    create.addEventListener("click", function () { editBenchmark(null); }); actions.appendChild(create);
-  }
+  var create = el("button", "primary", "New benchmark");
+  create.addEventListener("click", function () { editBenchmark(null); }); actions.appendChild(create);
   var list = el("div", "recordGrid"); d.appendChild(list);
   api("/api/benchmarks").then(function (data) {
     if (benchNavStale(nav)) { return; }
@@ -1214,26 +1168,22 @@ function showBenchmark(benchmarkId, selectedVersion) {
         versions.forEach(function (v) { var opt = el("option", null, v); opt.value = v; select.appendChild(opt); }); select.value = version;
         select.addEventListener("change", function () { showBenchmark(benchmarkId, select.value); }); actions.appendChild(select);
       }
-      if (!(session && session.workspace_mode)) {
-        var edit = el("button", null, "Edit benchmark"); edit.disabled = version !== versions[versions.length - 1];
-        edit.title = edit.disabled ? "Select the latest version to edit" : "Save changes as a new version";
-        edit.addEventListener("click", function () { editBenchmark(manifest); }); actions.appendChild(edit);
-      }
+      var edit = el("button", null, "Edit benchmark"); edit.disabled = version !== versions[versions.length - 1];
+      edit.title = edit.disabled ? "Select the latest version to edit" : "Save changes as a new version";
+      edit.addEventListener("click", function () { editBenchmark(manifest); }); actions.appendChild(edit);
       var strip = el("div", "summaryStrip");
       [[manifest.tasks.length, "Tasks in this version"], [version, "Selected version"], [versions.length, "Published versions"]].forEach(function (item) {
         var stat = el("div"); stat.appendChild(el("strong", null, item[0])); stat.appendChild(el("span", null, item[1])); strip.appendChild(stat);
       }); d.appendChild(strip);
       var experimentsHead = sectionHeader(d, "Experiments"), experimentList = el("div", "recordGrid"), msg = el("p", "err fieldError"); msg.setAttribute("role", "alert");
-      if (!(session && session.workspace_mode)) {
-        var create = el("button", "primary", "New experiment");
-        create.addEventListener("click", function () {
-          apiPost("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/experiments", {version: version}).then(function (result) {
-            if (!benchNavStale(nav)) {
-              refreshConvs().then(function () { if (!benchNavStale(nav)) { showBenchmarkExperiment(result.experiment.experiment_id); } });
-            }
-          }).catch(function (e) { msg.textContent = e.message; });
-        }); experimentsHead.appendChild(create);
-      }
+      var create = el("button", "primary", "New experiment");
+      create.addEventListener("click", function () {
+        apiPost("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/experiments", {version: version}).then(function (result) {
+          if (!benchNavStale(nav)) {
+            refreshConvs().then(function () { if (!benchNavStale(nav)) { showBenchmarkExperiment(result.experiment.experiment_id); } });
+          }
+        }).catch(function (e) { msg.textContent = e.message; });
+      }); experimentsHead.appendChild(create);
       d.appendChild(msg);
       var winnerHost = el("div");
       d.appendChild(winnerHost);
@@ -1247,7 +1197,7 @@ function showBenchmark(benchmarkId, selectedVersion) {
         var experiments = archivedExperimentsShown[benchmarkId]
           ? result.experiments
           : result.experiments.filter(function (row) { return !row.archived; });
-        /* An unreadable evidence store is a workspace-wide condition, so the
+        /* An unreadable evidence store is a workflow-wide condition, so the
            sidebar's warning band (/api/navigation) is the one place that says
            so; repeating it over the cards told the reader nothing new. */
         if (!experiments.length) {
@@ -1284,20 +1234,16 @@ function showBenchmark(benchmarkId, selectedVersion) {
         api("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/analysis").then(function (value) {
           if (benchNavStale(nav)) { return; }
           var area = benchmarkText(analysis, "Analysis", analysisText(value.analysis), true);
-          area.readOnly = !!(session && session.workspace_mode);
-          if (!area.readOnly) {
-            var save = el("button", null, "Save analysis"), note = el("p", "err fieldError");
-            save.addEventListener("click", function () {
-              apiPut("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/analysis", {analysis: area.value})
-                .then(function () { note.textContent = ""; }).catch(function (e) { note.textContent = e.message; });
-            }); analysis.appendChild(save); analysis.appendChild(note);
-          }
+          var save = el("button", null, "Save analysis"), note = el("p", "err fieldError");
+          save.addEventListener("click", function () {
+            apiPut("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/analysis", {analysis: area.value})
+              .then(function () { note.textContent = ""; }).catch(function (e) { note.textContent = e.message; });
+          }); analysis.appendChild(save); analysis.appendChild(note);
         }).catch(function (e) { analysis.dataset.loaded = ""; analysis.appendChild(el("p", "err", e.message)); });
       });
     });
   }).catch(function (e) { if (!benchNavStale(nav)) { clear(d); d.appendChild(el("p", "err fieldError", e.message)); } });
 }
-function showBenchmarkVersion(benchmarkId, version) { showBenchmark(benchmarkId, version); }
 function openBenchmarkExecution(id) {
   var path = findExperimentPath(id);
   if (path) { activateHierarchy(path, true); }
@@ -1313,7 +1259,6 @@ function openBenchmarkExecution(id) {
    node for -- an evidence store it could not open, or a run recorded since the
    last refresh. */
 function openBenchmarkRecord(row) {
-  if (row.workspace) { showWorkspaceExperiment(row); return; }
   var path = findExperimentPath(row.experiment_id);
   if (path) { activateHierarchy(path, true); }
   else if (row.registered) { showBenchmarkExperiment(row.experiment_id); }
@@ -1361,7 +1306,7 @@ function showBenchmarkExperiment(id) {
     /* Editable only until a runner claims the registration: after that the
        description the run declared belongs to its evidence store, which this
        page cannot write. */
-    if (row.store || (session && session.workspace_mode)) {
+    if (row.store) {
       description.readOnly = true;
       note.appendChild(el("p", "sub", "This experiment has been handed to a runner; its description is part of the recorded run."));
     } else {
@@ -1394,7 +1339,7 @@ function showBenchmarkExperiment(id) {
   }).catch(function (e) { if (!benchNavStale(nav)) { clear(d); d.appendChild(el("p", "err fieldError", e.message)); } });
 }
 function openBenchmarkSetup() {
-  if (!session || (!session.workflow_path && !session.workspace_mode)) {
+  if (!session || !session.workflow_path) {
     setTopMode("picker"); loadPicker();
     document.getElementById("pickerStatus").textContent = "Choose a workflow, then open Benchmark setup."; return;
   }

@@ -638,7 +638,7 @@ def test_the_aggregate_number_moves_only_on_purpose():
     itself, so a bump -- or an accidental revert -- passes them all. Pinning the
     literal makes a change to the aggregate a deliberate edit to this test, next
     to the history comment in `tracing.py` that says what moved."""
-    assert tracing.SPAN_CONTRACT_VERSION == 9
+    assert tracing.SPAN_CONTRACT_VERSION == 10
 
 
 def test_a_provenance_record_written_before_the_map_still_validates():
@@ -647,8 +647,6 @@ def test_a_provenance_record_written_before_the_map_still_validates():
     record and every caller that predates it."""
     legacy = {
         "enabled": True,
-        "capture_profile": "debug",
-        "capture_policy_version": "1",
         "span_contract_version": 2,
         "db_schema_version": obs.SCHEMA_VERSION,
     }

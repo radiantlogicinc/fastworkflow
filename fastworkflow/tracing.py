@@ -19,12 +19,12 @@ This module is stdlib-only by design: it is imported by core runtime
 modules and must never pull torch/dspy/transformers.
 
 For the decision-signal capture slice (arch §12.0 deltas 1/2/4) this module also
-imports ``capture_policy`` and ``decision_signals``, which are architecture §22
-leaf modules — standard library, Pydantic, and ``runtime_manifest`` only. The
-invariant the paragraph above protects is unchanged: nothing on this import path
-reaches torch, dspy or transformers. They are imported here rather than at each
-emission site because ``command_executor`` and ``workflow_execution_context``
-both stamp the same handles, and ``workflow_execution_context`` cannot import
+imports ``decision_signals``, an architecture §22 leaf module — standard
+library, Pydantic, and ``runtime_manifest`` only. The invariant the paragraph
+above protects is unchanged: nothing on this import path reaches torch, dspy or
+transformers. It is imported here rather than at each emission site because
+``command_executor`` and ``workflow_execution_context`` both stamp the same
+consequence assessment, and ``workflow_execution_context`` cannot import
 ``command_executor`` at module scope (it defers that import to ``__init__`` to
 break a cycle).
 """
@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterator, Optional, Protocol, runtime_checkable
 
 from fastworkflow import runtime_manifest
-from fastworkflow.observability import capture_policy, decision_signals, enrichment
+from fastworkflow.observability import decision_signals, enrichment
 
 logger = logging.getLogger(__name__)
 
@@ -102,9 +102,13 @@ def host_scope(host: Any) -> Iterator[None]:
 ATTR_COMMAND_CALL_ID = "command_call_id"
 ATTR_PARENT_CALL_ID = "parent_call_id"
 ATTR_CHILD_CALLS = "child_calls"
+ATTR_CONSEQUENCE = "consequence"
+# The active command context's TYPE name (a context class name such as
+# "Identity") before and after the command ran; None when no workflow or context
+# could be read. A type, not an instance: two equal values do not prove the
+# command stayed on the same object.
 ATTR_CONTEXT_BEFORE = "context_before"
 ATTR_CONTEXT_AFTER = "context_after"
-ATTR_CONSEQUENCE = "consequence"
 
 # The emitter's own attribute-contract version, stamped on every span by `_emit`
 # (arch §12.0 delta 5). It is an ATTRIBUTE rather than a `Span` field because
@@ -237,7 +241,11 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # nothing saying which activity was whose, so a run recorded before this and a
 # run recorded after it are not comparable on that question: the older one is
 # "no pass identity recorded", not "one pass".
-SPAN_CONTRACT_VERSION = 9
+#
+# v10: fw.command.execute v4 and fw.agent.tool_call v2 -- `context_before` /
+# `context_after` change from a context-handle mapping to the plain context type
+# name string.
+SPAN_CONTRACT_VERSION = 10
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -397,8 +405,10 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # v3: the four auto-navigation keys (v2, ido-8ps.9) are gone with the
     # two-step dispatch that wrote them. Every execute step is now a step the
     # agent typed, so there is no composed-step shape to tell apart.
+    # v4: `context_before` / `context_after` change from a context-handle
+    # mapping to the plain context type name string.
     SPAN_COMMAND_EXECUTE: SpanContract(
-        version=3,
+        version=4,
         attributes=frozenset(
             {
                 "raw_command",
@@ -424,8 +434,10 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # same thing (an agent asked the workflow to run one command) and a reader
     # joining them would have had to learn which of three dialects each span was
     # written in.
+    # v2: `context_before` / `context_after` change from a context-handle
+    # mapping to the plain context type name string.
     SPAN_AGENT_TOOL_CALL: SpanContract(
-        version=1,
+        version=2,
         attributes=frozenset(
             {
                 "raw_command",
@@ -462,8 +474,11 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # a reader counting tool results would otherwise count that note as one.
     # v3: the same marker, renamed `finish_check_note`: the note now comes from
     # the finish-time execution check (fix-4dsr), which replaced the roster nudge.
+    # v4: `repaired_tool_name` (fix-8q7a) is the workflow command the model named
+    # as its tool; `tool_name`/`tool_args` are the execute_workflow_query call the
+    # step ran instead.
     SPAN_AGENT_STEP: SpanContract(
-        version=3,
+        version=4,
         attributes=frozenset(
             {
                 "step_index",
@@ -476,6 +491,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "tool_error",
                 "error_type",
                 "finish_check_note",
+                "repaired_tool_name",
             }
         ),
     ),
@@ -488,7 +504,7 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # `plan_source` says which planner produced it ("structured", "text",
     # "text_fallback" after a failed or empty structured call, "none" for no
     # plan) and `subjects` holds the structured plan's subject names, redacted
-    # by the capture policy.
+    # when recorded.
     # Structured planning is disabled (2026-09-28): new spans carry only
     # `plan_source` "text" or "none" and `subjects` []; older records may still
     # hold "structured" / "text_fallback".
@@ -738,6 +754,17 @@ class Span:
     attempt: Optional[int] = None
     claim_epoch: Optional[int] = None
     server_incarnation: Optional[str] = None
+    #: ``sha256 -> text`` of the prompt pieces an over-cap ``messages`` was
+    #: split into (``observability.prompt_slots``). Carried beside the
+    #: attributes, never inside them, so a sink that persists the attribute
+    #: bag does not persist the full prompt text with it.
+    prompt_slots: Optional[dict[str, str]] = None
+
+
+#: The attribute the prompt-slot enricher hands its piece texts over in.
+#: ``_emit`` moves it out of the attributes onto ``Span.prompt_slots`` before
+#: any sink sees the span.
+ATTR_PROMPT_SLOT_TEXTS = "_fw_prompt_slot_texts"
 
 
 # ----------------------------------------------------------------------
@@ -882,6 +909,9 @@ def _emit(sink: TraceSink, span: Span) -> None:
     contract = SPAN_CONTRACTS.get(span.name)
     if contract is not None:
         span.attributes[ATTR_SPAN_CONTRACT_VERSION] = contract.version
+    slot_texts = span.attributes.pop(ATTR_PROMPT_SLOT_TEXTS, None)
+    if isinstance(slot_texts, dict) and slot_texts:
+        span.prompt_slots = slot_texts
     try:
         sink.emit_span(span)
     except Exception as exc:  # a broken sink must never fail a turn
@@ -1002,71 +1032,13 @@ def end_span(
 
 
 # ----------------------------------------------------------------------
-# Capture projection (arch §12.0 deltas 2 and 4; §6.6.1, §6.7; FW-REQ-002)
+# Capture projection (arch §12.0 deltas 2 and 4; §6.6.1)
 # ----------------------------------------------------------------------
 #
-# Both helpers below are pure projections onto span attributes. Nothing in
+# The helpers below are pure projections onto span attributes. Nothing in
 # fastWorkflow reads what they return: that is EXP-003's no-control-flow-read
 # exit criterion and architecture §17.3's stop condition, and it is asserted
 # both structurally and behaviorally by tests/test_no_capture_control_flow.py.
-
-# Names the thing that produced a handle, so a handle projected by a real
-# workflow projector later is distinguishable from one projected by this
-# fallback. §6.7's projector registry does not exist yet: `ContextDeclaration.
-# handle_projector` is where a workflow names one, and nothing resolves it.
-CONTEXT_PROJECTOR_ID = "fastworkflow.context_type"
-CONTEXT_PROJECTOR_VERSION = "1"
-
-# §6.7 has a host-injected `SecurityContext` create the handle. fastWorkflow has
-# no such thing, so claiming a tenant or principal here would be inventing a
-# scope no code enforces. FW-NFR-010 tenant scoping is the outstanding delta
-# arch §12.4 already names.
-UNSCOPED_SECURITY_SCOPE = "unscoped"
-
-
-def context_handle(workflow: Any) -> Optional[dict[str, Any]]:
-    """Project a workflow's active command context into a §6.7 handle.
-
-    Returns the handle as a plain JSON-able dict, or None when there is no
-    workflow to read (never raises: a capture failure must not fail a turn).
-
-    **The handle is type-only, deliberately.** `project_context_handle` needs an
-    `instance_key` to produce a concrete, HMAC-fingerprinted handle, and
-    fastWorkflow has no framework-level notion of a context instance's identity.
-    The current context is an arbitrary application object
-    (`Workflow.current_command_context`) whose only framework-visible identity is
-    its class name; `current_command_context_displayname` is a display string
-    that a workflow may or may not derive from the instance, and on the test
-    workflows it is just the class name again. `id()` is not an identity either —
-    it is a memory address, reused after collection and meaningless across
-    processes, so two records could agree on it while describing different
-    objects.
-    §6.7 provides for exactly this: `instance_key=None` yields a handle with
-    `concrete=False`, which is documented feature-off legacy behavior and cannot
-    contribute to G2A/G2B. Inventing an instance key would be worse than the
-    honest degradation, because it would look concrete.
-
-    `display_label` stays None: §6.7 admits it only under an explicit allowlist,
-    and no allowlist mechanism exists.
-    """
-    try:
-        if workflow is None:
-            return None
-        context_type = getattr(workflow, "current_command_context_name", None)
-        if not context_type:
-            return None
-        handle = capture_policy.project_context_handle(
-            context_type=context_type,
-            instance_key=None,
-            security_scope_ref=UNSCOPED_SECURITY_SCOPE,
-            projector_id=CONTEXT_PROJECTOR_ID,
-            projector_version=CONTEXT_PROJECTOR_VERSION,
-        )
-        return handle.model_dump(mode="json")
-    except Exception as exc:
-        logger.warning(f"context_handle projection failed: {exc!r}")
-        return None
-
 
 def consequence_assessment(
     workflow_folderpath: Optional[str], command_name: Optional[str]
@@ -1104,12 +1076,34 @@ def consequence_assessment(
         return None
 
 
+def context_type(workflow: Any) -> Optional[str]:
+    """The name of *workflow*'s active command context, or None. Never raises:
+    a capture failure must not fail a turn."""
+    try:
+        name = getattr(workflow, "current_command_context_name", None) if workflow else None
+        return str(name) if name else None
+    except Exception as exc:
+        logger.warning(f"context type read failed: {exc!r}")
+        return None
+
+
+def context_before(span: Optional[Span], workflow: Any) -> Optional[str]:
+    """The active context type before a command runs, or None.
+
+    Gated on a span having actually opened, matching the attribute-prep rule at
+    every emission site: with observability off this must cost nothing.
+    """
+    if span is None:
+        return None
+    return context_type(workflow)
+
+
 def active_workflow(host: Any) -> Any:
     """The workflow whose command context a dispatch on *host* acts on, or None.
 
     Duck-typed and never raising, like the rest of this seam: it is called only to
     build capture attributes, and a host that cannot answer must degrade to an
-    absent handle rather than fail the command. The fallback to ``app_workflow``
+    absent assessment rather than fail the command. The fallback to ``app_workflow``
     matters for a bare WorkflowExecutionContext, whose ``get_active_workflow``
     reads a ContextVar stack that is empty outside a dispatch.
     """
@@ -1121,26 +1115,15 @@ def active_workflow(host: Any) -> Any:
     return workflow if workflow is not None else _resolve(host, "app_workflow")
 
 
-def context_before(span: Optional[Span], workflow: Any) -> Optional[dict[str, Any]]:
-    """The active context handle before a command runs, or None.
-
-    Gated on a span having actually opened, matching the attribute-prep rule at
-    every emission site: with observability off this must cost nothing.
-    """
-    if span is None:
-        return None
-    return context_handle(workflow)
-
-
 def capture_attributes(
     span: Optional[Span],
     command_output: Any,
-    handle_before: Optional[dict[str, Any]],
+    context_type_before: Optional[str],
     workflow: Any,
     *,
     command_name: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Call-id, context-before/after and consequence for one executed command.
+    """Call-id, context type before/after and consequence for one executed command.
 
     §12.1.1 requires the dispatch paths to capture the same things, so the
     projection lives here once. All three ``fw.agent.tool_call`` emitters call it
@@ -1160,8 +1143,8 @@ def capture_attributes(
         return {}
     return {
         ATTR_COMMAND_CALL_ID: getattr(command_output, "command_call_id", None),
-        ATTR_CONTEXT_BEFORE: handle_before,
-        ATTR_CONTEXT_AFTER: context_handle(workflow),
+        ATTR_CONTEXT_BEFORE: context_type_before,
+        ATTR_CONTEXT_AFTER: context_type(workflow),
         ATTR_CONSEQUENCE: consequence_assessment(
             getattr(workflow, "folderpath", None),
             command_name or getattr(command_output, "command_name", None) or None,

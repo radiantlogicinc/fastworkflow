@@ -33,10 +33,8 @@ from fastworkflow.runtime_manifest import (
     merge_and_gate,
     register_runtime_metadata,
 )
-from fastworkflow.observability import capture_policy
-from fastworkflow.observability import store as observability_store
 from fastworkflow.observation_offloading import finish_check, jev_client
-from fastworkflow.observation_offloading.archive import RuntimeHandleArchive, RuntimeHandleScope
+from fastworkflow.observation_offloading.archive import REDACTION_ENV, RuntimeHandleArchive, RuntimeHandleScope
 from fastworkflow.observation_offloading.continuation import StructuredContinuationReAct
 from fastworkflow.observation_offloading.finish_check import (
     CALL_TIMEOUT_SECONDS,
@@ -172,7 +170,7 @@ class LedgerFromTheTurn(unittest.TestCase):
         self.assertEqual(accounts["outcome"], "empty")
         self.assertEqual(accounts["context"], f"Identity {UID} Alan Cooper")
 
-    def test_what_is_sent_passes_the_capture_policy(self):
+    def test_what_is_sent_is_credential_scrubbed(self):
         secret = "Authorization: Bearer sk-abcdefghijklmnopqrstuvwxyz123456"
         self.agent.current_trajectory["observation_1"] = f"Entered. {secret}"
         rows = build_ledger(self.agent, ["Alan Cooper"])
@@ -930,33 +928,16 @@ def test_a_credential_named_as_a_subject_never_reaches_the_wire(live):
     assert GITHUB_TOKEN not in json.dumps(_last_event(), default=str)
 
 
-def _badge(text="rows"):
-    return json.dumps(capture_policy.evidence_policy().apply(
-        observability_store.POLICY_PATH_OFFLOAD_OBSERVATION, text, classification="opaque-payload"))
-
-
-def test_a_value_withheld_at_call_time_skips_the_check_without_a_call(live, warnings_logged, monkeypatch):
+def test_redaction_off_at_call_time_skips_the_check_without_a_call(live, warnings_logged, monkeypatch):
     checker = checker_from_env()
     assert checker is not None
-    monkeypatch.delitem(fastworkflow._env_vars, observability_store.CAPTURE_PROFILE_VAR, raising=False)
-    monkeypatch.setenv(observability_store.CAPTURE_PROFILE_VAR, "evidence")
+    monkeypatch.setenv(REDACTION_ENV, "off")
     assert checker.note(_agent(), {"user_query": "Audit Alan Cooper"}, iterations_left=10) == ""
     event = _last_event()
     assert (event["reason"], event["fired"], event["requests"]) == (finish_check.POLICY_WITHHELD, False, 0)
     assert "error_stage" not in event
     result = checker.check(_plan(), "Audit Alan Cooper", [], command_effect=_read_only)
     assert result.withheld and result.error is None and result.requests == 0
-    assert live.requests == []
-    assert warnings_logged == []
-
-
-def test_a_badge_in_the_ledger_skips_the_check_without_a_call(live, warnings_logged):
-    """An observation read back as its stored badge (an archive written under evidence)."""
-    trajectory = {"tool_name_0": "execute_workflow_query", "tool_args_0": {"command": "list_accounts"},
-                  "observation_0": _badge("12 accounts"),
-                  "tool_name_1": "finish", "tool_args_1": {}, "observation_1": "Completed."}
-    assert checker_from_env().note(_agent(trajectory), {"user_query": "q"}, iterations_left=10) == ""
-    assert _last_event()["reason"] == finish_check.POLICY_WITHHELD
     assert live.requests == []
     assert warnings_logged == []
 

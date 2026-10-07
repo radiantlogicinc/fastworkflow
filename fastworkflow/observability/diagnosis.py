@@ -60,8 +60,7 @@ comment recorded against a diagnosed step is recorded against the same evidence
 the comparison slice would anchor it to.
 
 **Scope is the caller's, never resolved here.** Every entry point takes an
-already-opened store (or workspace-opened store) and the `store_id` it was
-registered under. Nothing in this module opens a path, searches a second store,
+already-opened store and the `store_id` it was registered under. Nothing in this module opens a path, searches a second store,
 or widens an experiment/task/attempt scope it was handed.
 """
 
@@ -137,10 +136,10 @@ MARKER_ORDER: tuple[str, ...] = (
 )
 
 # Navigation states. `unknown` is a first-class answer: an execute span that
-# recorded no context handle (the exception path does not) cannot say whether
-# the context moved, and saying "unchanged" there would be an invention.
+# recorded no context type (the exception path does not) cannot say whether the
+# context moved, and neither can two equal types -- a context type names a
+# class, not an instance -- so saying "unchanged" there would be an invention.
 NAV_CHANGED = "changed"
-NAV_UNCHANGED = "unchanged"
 NAV_UNKNOWN = "unknown"
 
 # Phase-event kinds: the nested decisions a dispatch made.
@@ -265,13 +264,6 @@ def _digest(value: Any) -> Optional[str]:
     except (TypeError, ValueError):
         return None
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
-
-
-def _context_type(handle: Any) -> Optional[str]:
-    """The context type a §6.7 handle names, or None when none was recorded."""
-    if not isinstance(handle, Mapping):
-        return None
-    return _text_or_none(handle.get("context_type"))
 
 
 # The markers that count as recorded trouble for the loop heuristic. An
@@ -636,22 +628,14 @@ class ExecutionDiagnosis:
 
 
 def _dispatch_navigation(attributes: Mapping[str, Any]) -> dict[str, Any]:
-    """Where a dispatch started and ended, from its recorded context handles.
+    """Where a dispatch started and ended, from its recorded context types.
 
-    **A matching `context_type` does not prove the context did not move.** A
-    §6.7 handle is type-only whenever `instance_fingerprint` is None, which in
-    this build is ALWAYS -- `tracing.context_handle` passes `instance_key=None`
-    because fastWorkflow has no framework-level context-instance identity. Two
-    type-only handles reading `Project` and `Project` are equally consistent
-    with "the same project throughout" and "moved from one project to another",
-    so this reports `unknown` with `basis: type_only_handles` rather than
-    claiming `unchanged`. Two CONCRETE handles can settle it, and are compared
-    on their fingerprints -- but only when their `hmac_key_version` agrees,
-    since fingerprints minted under different keys are not comparable and
-    "different digest" would not mean "different instance".
-
-    A DIFFERENT `context_type` is provable either way, so that remains the
-    primary evidence for navigation and is unaffected by any of the above.
+    **A matching context type does not prove the context did not move.** The
+    recorded value is the active context's class name, so `Project` and
+    `Project` are equally consistent with "the same project throughout" and
+    "moved from one project to another"; that reports `unknown` with
+    `basis: same_context_type` rather than claiming `unchanged`. A DIFFERENT
+    type is provable, and is the primary evidence for navigation.
 
     `recorded_flags` are navigation keys a producer stamped explicitly
     (`auto_navigated` and friends appear on two spans in the pilot corpus; no
@@ -664,10 +648,8 @@ def _dispatch_navigation(attributes: Mapping[str, Any]) -> dict[str, Any]:
     `basis` names which evidence decided, so a reader can weigh a `changed` that
     came from a type difference against one that came from a producer's flag.
     """
-    before_handle = attributes.get(tracing.ATTR_CONTEXT_BEFORE)
-    after_handle = attributes.get(tracing.ATTR_CONTEXT_AFTER)
-    before = _context_type(before_handle)
-    after = _context_type(after_handle)
+    before = _text_or_none(attributes.get(tracing.ATTR_CONTEXT_BEFORE))
+    after = _text_or_none(attributes.get(tracing.ATTR_CONTEXT_AFTER))
     flags = {
         key: attributes[key]
         for key in (
@@ -678,21 +660,14 @@ def _dispatch_navigation(attributes: Mapping[str, Any]) -> dict[str, Any]:
         )
         if key in attributes
     }
-
     if before is not None and after is not None and before != after:
         state, basis = NAV_CHANGED, "context_type_change"
     elif flags.get("auto_navigated") is True:
         state, basis = NAV_CHANGED, "recorded_flag"
     elif before is None or after is None:
-        state, basis = NAV_UNKNOWN, "no_handles"
+        state, basis = NAV_UNKNOWN, "no_context_recorded"
     else:
-        fingerprints = _comparable_fingerprints(before_handle, after_handle)
-        if fingerprints is None:
-            state, basis = NAV_UNKNOWN, "type_only_handles"
-        elif fingerprints[0] != fingerprints[1]:
-            state, basis = NAV_CHANGED, "instance_fingerprint_change"
-        else:
-            state, basis = NAV_UNCHANGED, "instance_fingerprint_match"
+        state, basis = NAV_UNKNOWN, "same_context_type"
     return {
         "state": state,
         "basis": basis,
@@ -700,52 +675,6 @@ def _dispatch_navigation(attributes: Mapping[str, Any]) -> dict[str, Any]:
         "to": after,
         "recorded_flags": flags,
     }
-
-
-# What must be recorded, non-empty and EQUAL on both handles before their
-# instance fingerprints mean the same thing. A digest is only an identity
-# relative to the key that minted it and the projector that defined what was
-# hashed, so two digests are comparable only when all of these agree:
-#
-# - `hmac_key_version`: different keys give different digests for one instance.
-# - `projector_id` / `projector_version`: a different projector may hash a
-#   different instance key, so equal digests would be a coincidence and
-#   different ones would not mean the instance moved.
-# - `security_scope_ref`: §6.7 scopes a handle; the same instance under two
-#   scopes is not being asserted to be the same thing.
-#
-# Missing any of them is not a mismatch to report -- it is a handle this build
-# cannot reason about, which is `type_only_handles`.
-FINGERPRINT_COMPATIBILITY_KEYS: tuple[str, ...] = (
-    "hmac_key_version",
-    "projector_id",
-    "projector_version",
-    "security_scope_ref",
-)
-
-
-def _comparable_fingerprints(
-    before: Any, after: Any
-) -> Optional[tuple[str, str]]:
-    """Both handles' instance fingerprints, when comparing them is meaningful.
-
-    None when either handle is type-only, when either lacks the metadata that
-    gives a digest its meaning, or when that metadata disagrees between the two
-    -- in any of those cases a digest comparison would manufacture navigation
-    that never happened, or assert an identity nobody recorded.
-    """
-    if not isinstance(before, Mapping) or not isinstance(after, Mapping):
-        return None
-    first = _text_or_none(before.get("instance_fingerprint"))
-    second = _text_or_none(after.get("instance_fingerprint"))
-    if first is None or second is None:
-        return None
-    for key in FINGERPRINT_COMPATIBILITY_KEYS:
-        left = _text_or_none(before.get(key))
-        right = _text_or_none(after.get(key))
-        if left is None or right is None or left != right:
-            return None
-    return first, second
 
 
 def _dispatch_markers(
@@ -1051,7 +980,7 @@ def turn_markers(
     dispatches: list[dict[str, Any]] = []
     navigation_changed: list[dict[str, Any]] = []
     nav_unknown = 0
-    nav_type_only = 0
+    nav_same_type = 0
     unrecognized: set[str] = set()
     open_spans = 0
     dispatch_spans = 0
@@ -1092,11 +1021,10 @@ def turn_markers(
                     "to": navigation["to"],
                 }
             )
-        elif navigation["state"] == NAV_UNKNOWN:
-            if navigation["basis"] == "no_handles":
-                nav_unknown += 1
-            else:
-                nav_type_only += 1
+        elif navigation["basis"] == "no_context_recorded":
+            nav_unknown += 1
+        else:
+            nav_same_type += 1
         dispatches.append(
             {
                 "span_id": span_id,
@@ -1177,14 +1105,13 @@ def turn_markers(
         "intent_spans": intent_spans,
         "parameter_extraction_spans": param_spans,
         "dispatches_without_success": success_unknown,
-        "dispatches_without_context_handles": nav_unknown,
-        # Handles recorded, same type, no comparable instance identity: this
-        # build cannot prove the context stayed put. Reported separately from
-        # `dispatches_without_context_handles` because it is a property of the
-        # type-only projector (every handle this build writes), not a per-turn
-        # capture gap, and rolling the two together would put a
+        "dispatches_without_context_type": nav_unknown,
+        # Both types recorded and equal: this build cannot prove the context
+        # stayed put. Reported separately from `dispatches_without_context_type`
+        # because it is a property of what a context type can say, not a
+        # per-turn capture gap, and rolling the two together would put a
         # `partial_evidence` chip on essentially every turn.
-        "dispatches_with_type_only_handles": nav_type_only,
+        "dispatches_with_same_context_type": nav_same_type,
         "extractions_without_retry_flag": retry_unknown,
         "extractions_without_retry_round": round_unknown,
         "open_or_unended_spans": open_spans,
@@ -1243,7 +1170,7 @@ def turn_markers(
         navigation={
             "changed": len(navigation_changed),
             "unknown": nav_unknown,
-            "type_only": nav_type_only,
+            "same_type": nav_same_type,
             "transitions": navigation_changed[:MAX_MARKER_ANCHORS],
         },
         coverage=coverage,
@@ -1529,9 +1456,8 @@ def diagnose_execution(
 class TurnSearchSource(Protocol):
     """What a complete scan needs from a store, and nothing more.
 
-    Satisfied by `ObservabilityStore`, `ReadOnlyObservabilityStore` and the
-    store a workspace hands out of `ObservabilityWorkspace.open(store_id)`, so
-    the same scan serves the live debug view and a sealed archive without a
+    Satisfied by `ObservabilityStore` and `ReadOnlyObservabilityStore`, so the
+    same scan serves the live debug view and a sealed archive without a
     second code path. `get_turn` is only called when the caller asked for
     record-basis markers.
     """
@@ -2213,7 +2139,7 @@ def _stable_store_identity(
     """A filesystem-stable cache namespace, or None when caching must be skipped.
 
     `id(source)` is never used: per-request readers recycle object ids, and
-    workspace archive stores are byte-copies that share turn keys with their
+    sealed archive stores are byte-copies that share turn keys with their
     live originals.
     """
     db_path = getattr(source, "db_path", None)
@@ -2325,8 +2251,7 @@ def _read_record(source: TurnSearchSource, turn_key: str) -> Any:
     row = source.get_turn(turn_key)
     raw = (row or {}).get("record_json")
     if not isinstance(raw, str):
-        # A workspace reader hands back an already-decoded `record` instead.
-        return (row or {}).get("record")
+        return None
     try:
         return json.loads(raw)
     except (ValueError, TypeError):

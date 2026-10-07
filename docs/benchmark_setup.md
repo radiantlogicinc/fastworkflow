@@ -57,8 +57,7 @@ Benchmark versions remain in `<workflow>/benchmarks/<id>/vN.json`. Experiment
 registrations are rows of the workflow's live evidence DB
 (`experiment_registrations`); creating the first one creates that DB if nobody
 has chatted yet. Once a controller declares execution the registration is
-bound, and deletion is a tombstone row state. Multiple sealed stores continue
-to use the existing workspace viewer.
+bound, and deletion is a tombstone row state.
 
 The existing `ExperimentHarness(...)`, unregistered controller experiments and
 ordinary chat conversations continue to work without benchmark setup.
@@ -89,9 +88,8 @@ component with no recorded spans directs feedback to the turn instead.
 Comments live in the same `observability.sqlite3`, in `human_feedback`, separate
 from agent-memory `feedback`. They reference the turn and recorded span IDs,
 travel with database snapshots, and are removed when their turn is deleted.
-They do not change turn records, spans, scores, or agent memory. Workspace snapshots
-show previously captured comments read-only; add new comments in the working
-experiment database. Formal blinded assignments retain their separate review UI.
+They do not change turn records, spans, scores, or agent memory. Add new comments
+in the working experiment database; a sealed archive is never written.
 
 Benchmark and experiment analysis editors start blank and accept arbitrary text,
 including Markdown or pasted JSON, without requiring JSON syntax. Existing
@@ -133,7 +131,7 @@ An experiment that has not been handed to a runner offers **Delete empty experim
 its overview. Confirm the deletion to return to its benchmark; the benchmark version and
 tasks remain unchanged. Once a runner binds an evidence store, deletion is refused even if
 that store is temporarily unavailable. Deletion and runner binding are serialized, and a
-retired identity cannot be reused by a delayed runner. Workspace snapshots remain read-only.
+retired identity cannot be reused by a delayed runner. Sealed archives remain read-only.
 The authenticated API is `DELETE /api/benchmark-experiments/<id>`.
 
 Actions report success or failure in dismissible notifications. They disappear automatically

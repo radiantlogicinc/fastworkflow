@@ -20,6 +20,7 @@ from fastworkflow.observation_offloading.continuation import (
     StructuredContinuationReAct,
 )
 from fastworkflow.observation_offloading.manifest import install_span_policy
+from fastworkflow.observability.prompt_slots import install_prompt_slot_enrichment
 from fastworkflow.observation_offloading.search import (
     search_memory,
     search_observation_max_bytes,
@@ -340,6 +341,7 @@ def build_tool_agent(
     a mode it can be put into.
     """
     install_span_policy()
+    install_prompt_slot_enrichment()
     # The scope is re-resolved by the agent at every forward(), so the turn_key
     # it carries is the turn actually running. This one is only the fallback
     # for a step that fires before the first forward() bound a scope.

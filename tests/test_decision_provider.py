@@ -24,8 +24,8 @@ from types import SimpleNamespace
 import pytest
 
 import fastworkflow
-from fastworkflow.observability import store as observability_store
 from fastworkflow.observation_offloading import decision, finish_check, jev_client, search_router
+from fastworkflow.observation_offloading.archive import REDACTION_ENV
 from fastworkflow.observation_offloading.decision import (
     Answers,
     OneOf,
@@ -129,7 +129,7 @@ def _same_bytes(actual, expected):
 
 
 FLAGS = (finish_check.CHECK_ENV, search_router.ROUTER_ENV, jev_client.KEY_ENV,
-         finish_check.MODEL_ENV, search_router.ROUTER_MODEL_ENV, observability_store.CAPTURE_PROFILE_VAR)
+         finish_check.MODEL_ENV, search_router.ROUTER_MODEL_ENV, REDACTION_ENV)
 IN_PROCESS = "in-house"
 
 
@@ -419,13 +419,13 @@ def test_a_broken_factory_leaves_the_feature_off_with_one_warning(monkeypatch, w
     assert "TypeError" in warnings_logged[-1]
 
 
-def test_the_capture_policy_gate_applies_to_a_registered_provider(monkeypatch, warnings_logged):
+def test_the_redaction_gate_applies_to_a_registered_provider(monkeypatch, warnings_logged):
     built = []
     register_decision_provider(IN_PROCESS, lambda: built.append(1) or InProcessProvider())
     monkeypatch.setenv(finish_check.CHECK_ENV, IN_PROCESS)
-    monkeypatch.setenv(observability_store.CAPTURE_PROFILE_VAR, "evidence")
+    monkeypatch.setenv(REDACTION_ENV, "off")
     assert checker_from_env() is None and built == []
-    assert len(warnings_logged) == 1 and "withholds command output" in warnings_logged[0]
+    assert len(warnings_logged) == 1 and f"{REDACTION_ENV}=off" in warnings_logged[0]
 
 
 def test_a_registered_provider_refusing_the_state_gets_the_halves():

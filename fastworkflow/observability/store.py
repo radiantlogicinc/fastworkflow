@@ -52,10 +52,10 @@ from typing import Any, Iterable, Iterator, Mapping, Optional
 from pydantic import BaseModel, ConfigDict
 
 import fastworkflow
-from fastworkflow.observability import capture_policy as capture_policy_module
 from fastworkflow.observability import control
+from fastworkflow.observability import prompt_slots
 from fastworkflow.observability.feedback import human_feedback_row
-from fastworkflow import agent_runtime, runtime_manifest, state_paths, tracing
+from fastworkflow import agent_runtime, state_paths, tracing
 from fastworkflow.utils.logging import logger
 
 # v2 (fix-42b): experiments.benchmark_id / benchmark_version /
@@ -78,20 +78,11 @@ from fastworkflow.utils.logging import logger
 # v7 (fix-9eg.16/.19.1): the agent-memory `feedback` table is gone, and review
 # notes carry their category, subcategory, stable identity and frozen evidence
 # anchors as columns.
+# v8 (fix-0gh0): the capture policy is gone: experiments and offload_evidence
+# lose capture_profile / capture_policy_version. The workspace viewer is gone
+# too, and with it the `sealed_turn_comments` control table.
 # Fresh schema only, with no migration of previously recorded evidence.
-SCHEMA_VERSION = 7
-
-# Which capture profile this deployment records under (arch §12.0 delta 3).
-# Defaults to `debug`, which is byte-for-byte today's behavior: EXP-003 is a
-# Phase 0 instrumentation slice, so installing the policy must change nothing
-# until a deployment asks it to.
-CAPTURE_PROFILE_VAR = "FW_OBS_CAPTURE_PROFILE"
-_DEFAULT_CAPTURE_PROFILE = "debug"
-
-# Profiles are immutable and cheap to share, and capture runs on every command of
-# every turn, so they are built once per name rather than per turn (FW-NFR-005
-# overhead is an EXP-003 stop condition).
-_CAPTURE_POLICY_CACHE: dict[str, "capture_policy_module.CapturePolicy"] = {}
+SCHEMA_VERSION = 8
 
 TERMINAL_TURN_STATUSES = frozenset({"completed", "failed", "cancelled", "abandoned"})
 
@@ -270,7 +261,7 @@ def merge_writer_health(
     merged = dict(stored)
     merged.pop("updated_at", None)
     # The newcomer's word on everything it is authoritative about — the
-    # incarnation stamp, the gauges, the profile — then the floor re-imposed.
+    # incarnation stamp, the gauges — then the floor re-imposed.
     merged.update(incoming)
     for name in _HEALTH_MONOTONE_COUNTERS:
         merged[name] = max(
@@ -325,6 +316,10 @@ FEATURE_OFFLOAD_EVIDENCE_V1 = "offload_evidence_v1"
 # archived, offloaded, searched and rehydrated, keyed by turn like the evidence
 # and erased and aged with it.
 FEATURE_OFFLOAD_EVENTS_V1 = "offload_events_v1"
+# The prompt-slot table (`prompt_slots`): the pieces an over-cap fw.llm.call
+# prompt was split into (`observability.prompt_slots`), keyed by turn and
+# digest, and aged and erased with the turn like `artifacts`.
+FEATURE_PROMPT_SLOTS_V1 = "prompt_slots_v1"
 FEEDBACK_PROVENANCES = frozenset({"human", "coding_agent", "distillation_agent"})
 FEEDBACK_COMMENT_MAX_CHARS = 100_000
 
@@ -338,14 +333,11 @@ FEEDBACK_COMMENT_MAX_CHARS = 100_000
 # `category`/`subcategory` of None and are shown as unclassified, text
 # untouched.
 
-# Single source: the policy engine's own version (fix-49m.3 wiring).
-CAPTURE_POLICY_VERSION = capture_policy_module.CAPTURE_POLICY_VERSION
-CAPTURE_REGIME_DIAGNOSTIC = "observability_capture_regime"
 STORE_IDENTITY_DIAGNOSTIC = "observability_store_identity"
 
 
 def pruning_suppressed() -> bool:
-    """Whether retention pruning is currently withheld."""
+    """Whether retention pruning is currently suppressed."""
     if _env(SUPPRESS_PRUNE_VAR, "0") not in ("0", "false", "False", "no", "off"):
         return True
     with _prune_suppression_lock:
@@ -361,7 +353,6 @@ def pruning_suppressed() -> bool:
 # The per-attribute cap is the constant tracing.MAX_ATTR_BYTES, not a setting,
 # so it has no entry here.
 _OBS_CONFIG_VARS: tuple[tuple[str, str], ...] = (
-    (CAPTURE_PROFILE_VAR, _DEFAULT_CAPTURE_PROFILE),
     ("FW_OBS_RETENTION_DAYS", str(_DEFAULT_RETENTION_DAYS)),
     ("FW_OBS_DB_MAX_BYTES", str(_DEFAULT_DB_MAX_BYTES)),
     ("FW_OBS_INLINE_ARTIFACT_BYTES", str(_DEFAULT_INLINE_ARTIFACT_BYTES)),
@@ -393,22 +384,6 @@ def suppress_pruning():
     finally:
         with _prune_suppression_lock:
             _prune_suppression_depth -= 1
-
-
-def resolve_capture_policy() -> "capture_policy_module.CapturePolicy":
-    """The policy this process captures under.
-
-    Raises `CaptureProfileError` on an unrecognized profile name rather than
-    falling back — see `capture_policy.policy_for_profile`. The sink resolves this
-    in its constructor so a misconfigured deployment fails at startup instead of
-    discovering months later that it recorded tenant data verbatim.
-    """
-    name = _env(CAPTURE_PROFILE_VAR, _DEFAULT_CAPTURE_PROFILE)
-    policy = _CAPTURE_POLICY_CACHE.get(name)
-    if policy is None:
-        policy = capture_policy_module.policy_for_profile(name)
-        _CAPTURE_POLICY_CACHE[name] = policy
-    return policy
 
 
 class WriterHealthDelta(BaseModel):
@@ -571,268 +546,30 @@ def health_delta(
     )
 
 
-# Turn columns the capture policy deliberately does NOT touch.
-#
-# These two are not evidence, they are operational state: `get_memory_window` and
-# `_USABLE_TURN_FILTER` read exactly `conversation_summary` and
-# `conversation_traces` to rebuild the agent's conversation memory, and the filter
-# requires the summary to be non-NULL. Withholding them would not reduce what a
-# bundle exposes — it would make the agent forget, which is a behavior change and
-# therefore outside a Phase 0 slice.
-#
-# PII in conversation memory is a real gap; it is fix-cj4's. It needs a redaction
-# that leaves memory usable, which is a different problem from withholding
-# evidence, and solving it by omission here would silently degrade every
-# evidence-profile run's agent.
-_POLICY_EXEMPT_TURN_COLUMNS = frozenset({"conversation_summary", "conversation_traces"})
-
-# Turn columns that are pure evidence — nothing operational reads them — paired
-# with what they actually contain. `failure_reason` is `opaque-payload` rather
-# than text because it can embed a provider error body (the [R20] scenario), so
-# nobody can say what is in it.
-_POLICED_TURN_COLUMNS: tuple[tuple[str, str], ...] = (
-    ("user_message", "user-text"),
-    ("refined_user_message", "user-text"),
-    ("answer", "user-text"),
-    ("failure_reason", "opaque-payload"),
-)
-
 # ----------------------------------------------------------------------
 # The write paths that do NOT ride the TurnResult pipeline (fix-ajv.9)
 # ----------------------------------------------------------------------
 #
-# `serialize_turn_result` is where the capture policy meets a turn, and
-# `upsert_turn_row` is where the credential scrub meets one. Five persisted
-# surfaces reach SQLite without passing through either: conversation labels,
-# review notes, train-run metrics, writer diagnostics, and the SCALAR columns beside
-# a span's (already scrubbed) `attributes` JSON. FW-REQ-002 clause 3 requires
-# every captured field to have a declared policy, so each of the five is decided
-# here rather than by omission — including the three that are deliberately
-# scrub-only, whose reasons are recorded at their write sites.
-#
-# Policy paths are named constants because a deployment re-admitting one of these
-# under the evidence profile has to spell the path exactly (see
-# `CapturePolicy.policy_for`), and a path that only exists as a literal inside a
-# method is a path nobody can find in order to spell it.
-POLICY_PATH_SPAN_NAME = "span.name"
-POLICY_PATH_SPAN_COMMAND_NAME = "span.command_name"
-POLICY_PATH_SPAN_CONTEXT = "span.context"
-POLICY_PATH_CONVERSATION_TOPIC = "conversation.topic"
-POLICY_PATH_CONVERSATION_SUMMARY = "conversation.summary"
-POLICY_PATH_TRAIN_METRICS = "train_run.metrics_json"
-POLICY_PATH_PASS_ANSWER = "span.pass.answer"
-POLICY_PATH_PASS_PLAN = "span.pass.plan"
-
-# The span name is restated rather than imported: this module is the sink and
-# does not import the runtime's `tracing`. `tests/test_distillation_pass_capture`
-# asserts the two spellings agree, because a drift here does not fail — it
-# silently stops policing the fields.
-_SPAN_DISTILLATION_PASS = "fw.distillation.pass"
-
-# The ONLY span attributes this store classifies. Span attributes are otherwise
-# credential-scrubbed wholesale (`upsert_span_rows`) and carry no per-key
-# policy, which is a general gap and NOT repaired here.
-#
-# These two are different in kind from everything else in an attribute bag:
-# `answer` is the text a pass showed the user and `plan` is the next-step
-# sequence it generated, both free text, and both already withheld under the
-# evidence profile everywhere else they are persisted — `turns.answer` through
-# `_POLICED_TURN_COLUMNS`, `span.context` through `_protected_text`. Recording
-# them here unclassified would make `fw.distillation.pass` the one route by
-# which user text reaches an evidence bundle, which is the definition of a
-# bypass. `user-text` is therefore the classification, and under `evidence` the
-# profile default withholds both with a badge (§12.0 delta 3) rather than
-# dropping them silently.
-_POLICED_SPAN_ATTRIBUTES: dict[str, dict[str, tuple[str, str]]] = {
-    _SPAN_DISTILLATION_PASS: {
-        "answer": (POLICY_PATH_PASS_ANSWER, "user-text"),
-        "plan": (POLICY_PATH_PASS_PLAN, "user-text"),
-    },
-}
-# (ido-zlm) The sixth surface: the RAW command response that
-# `observation_offloading.archive` persists into `offload_evidence`. It does not
-# ride the TurnResult pipeline, so without this path it escaped both
-# protections entirely -- a credential in a command response was stored
-# verbatim where the same text inside a span attribute was scrubbed.
-POLICY_PATH_OFFLOAD_OBSERVATION = "offload.observation.text"
-
-
-def _protected_text(
-    value: Any,
-    *,
-    redactor: Redactor,
-    policy: "capture_policy_module.CapturePolicy",
-    field_path: str,
-    classification: str,
-) -> Any:
-    """Credential-scrub a persisted string, then apply the capture policy to it.
-
-    **Scrub first, policy second**, which is the opposite order from
-    `_POLICED_TURN_COLUMNS` (there the policy runs in `serialize_turn_result` and
-    the scrub runs later, in `upsert_turn_row`). Two reasons it has to be this way
-    on these paths:
-
-    * A conversation label can arrive by either of two routes —
-      `SQLiteTraceSink._apply_label`, which scrubs before calling
-      `apply_label_txn`, or `ObservabilityStore.record_conversation_label`, which
-      does not. Scrubbing first makes both produce `policy(scrub(text))`, because
-      the scrub is idempotent. Policing first would give the same label two
-      different digests depending on which route wrote it, and a digest that
-      depends on plumbing is not a digest anyone can compare.
-    * The badge left behind carries a digest of what it replaced. Digesting the
-      unscrubbed text would make the badge a confirmation oracle for a guessed
-      credential, which is a strange thing for a redaction record to be.
-
-    Returns TEXT, always: an envelope is serialized here because every caller
-    binds the result to a TEXT column and sqlite3 cannot bind a mapping. Same
-    reasoning as `_policed_column`, which does it for the turn row.
-    """
-    if not value:
-        return value
-    scrubbed = redactor.redact(value)
-    captured = policy.apply(field_path, scrubbed, classification=classification)
-    if capture_policy_module.is_capture_envelope(captured):
-        return json.dumps(captured, ensure_ascii=False)
-    return captured
-
-
-def _policed_span_attributes(
-    span_name: Any,
-    attributes: Any,
-    *,
-    redactor: Redactor,
-    policy: "capture_policy_module.CapturePolicy",
-) -> Any:
-    """A span's attribute bag with its classified fields policed.
-
-    Returns the bag unchanged for every span that declares none, which is every
-    span but one — so this costs a dict lookup on the hot path and changes
-    nothing else.
-
-    Scrub first, policy second, for the reasons `_protected_text` gives: the
-    digest in the badge must describe what was persisted, not the credential a
-    guesser is testing. Unlike `_protected_text` the envelope is left as a
-    MAPPING, because this value is nested inside the attributes JSON rather
-    than bound to a TEXT column; serializing it here would give a reader a
-    string that happens to parse.
-    """
-    declared = _POLICED_SPAN_ATTRIBUTES.get(span_name)
-    if not declared or not isinstance(attributes, Mapping):
-        return attributes
-    policed = dict(attributes)
-    for key, (field_path, classification) in declared.items():
-        value = policed.get(key)
-        if isinstance(value, str) and value:
-            policed[key] = policy.apply(
-                field_path, redactor.redact(value), classification=classification
-            )
-            continue
-        capped = _capped_prefix(value)
-        if capped is None:
-            continue
-        policed[key] = _police_capped(
-            value,
-            capped,
-            redactor=redactor,
-            policy=policy,
-            field_path=field_path,
-            classification=classification,
-        )
-    return policed
-
-
-def _capped_prefix(value: Any) -> Optional[str]:
-    """The surviving text of a `tracing.cap_attr_value` envelope, if that is what
-    this is.
-
-    An over-limit attribute never reaches the sink as a string: the emitter has
-    already replaced it with `{truncated, original_length, sha256, value}`,
-    where `value` is a RAW prefix of the text. Treating that mapping as "not a
-    string, nothing to police" is how a long answer walked past the evidence
-    profile while a short one was withheld — the longer the secret, the less
-    protected it was.
-    """
-    if not isinstance(value, Mapping) or value.get("truncated") is not True:
-        return None
-    prefix = value.get("value")
-    return prefix if isinstance(prefix, str) and prefix else None
-
-
-def _police_capped(
-    envelope: Mapping[str, Any],
-    prefix: str,
-    *,
-    redactor: Redactor,
-    policy: "capture_policy_module.CapturePolicy",
-    field_path: str,
-    classification: str,
-) -> Any:
-    """Apply the policy to text the emitter had already cut.
-
-    The policy sees the prefix, because the prefix is all that survived — there
-    is nothing else here to withhold, and pretending otherwise would put a
-    digest of text this process never held into the record.
-
-    When the policy acts, the cap envelope does NOT survive beside the result:
-
-    * its `value` is the raw prefix, which is the thing being withheld;
-    * its `sha256` digests the ORIGINAL, unscrubbed text. Keeping that next to a
-      withheld value turns the record into a confirmation oracle for a guessed
-      secret, which is the same reason `_protected_text` scrubs before it
-      digests.
-
-    What is kept is `original_length` and a `truncated_before_capture` flag, so
-    the badge stays truthful in the other direction too: the policy's own
-    `original_bytes` and `digest` describe the PREFIX, and without these two a
-    reader would take them for measurements of the whole value.
-    """
-    captured = policy.apply(
-        field_path, redactor.redact(prefix), classification=classification
-    )
-    if capture_policy_module.is_capture_envelope(captured):
-        return {
-            **captured,
-            "truncated_before_capture": True,
-            "original_length": envelope.get("original_length"),
-        }
-    # The debug profile, whose contract is that nothing changes: the cap
-    # envelope is returned as it came, carrying the scrubbed prefix.
-    return {**envelope, "value": captured}
+# `upsert_turn_row` is where the credential scrub meets a turn. Five persisted
+# surfaces reach SQLite without passing through it: conversation labels,
+# review notes, train-run metrics, writer diagnostics, and the SCALAR columns
+# beside a span's (already scrubbed) `attributes` JSON. Each is scrubbed at its
+# own write site.
 
 
 def protect_offload_observation(text: str) -> str:
-    """Scrub-then-police one raw command response bound for `offload_evidence`.
+    """Credential-scrub one raw command response bound for `offload_evidence`.
 
     The evidence row is written by `observation_offloading.archive`, not by the
-    TurnResult pipeline, so it cannot ride that pipeline's protections. What it
-    can do -- and what this function exists for -- is call the SAME two
-    protections in the SAME order as every other policed surface, instead of
-    growing a second redactor that drifts from this one.
-    `observation_offloading.archive.persist` passes the response text through
-    here at write time and stores whatever comes back.
-
-    `opaque-payload`, for the reason `failure_reason` carries that
-    classification: a command response is whatever a workflow's command chose to
-    return, so nobody can say what is inside it. Under the `debug` profile --
-    the default, and what every evaluation run to date was captured under --
-    that classification has no effect and this is the credential scrub alone,
-    which is exactly the protection a span attribute already had. Under
-    `evidence` it withholds the response behind a badge; a deployment that wants
-    default-deny spans and full-fidelity observations spells
-    `POLICY_PATH_OFFLOAD_OBSERVATION` in a `CaptureFieldPolicy`, which is what
-    these path constants exist for.
-
-    Returns TEXT, always, like `_protected_text`: the evidence row stores UTF-8 bytes,
-    and a withheld response is stored as its serialized badge -- size, digest and
-    class -- never as silence.
+    TurnResult pipeline, so it cannot ride that pipeline's scrub (ido-zlm:
+    without this a credential in a command response was stored verbatim where
+    the same text inside a span attribute was scrubbed). What it can do -- and
+    what this function exists for -- is call the SAME scrub as every other
+    persisted surface, instead of growing a second redactor that drifts from
+    this one. `observation_offloading.archive.persist` passes the response text
+    through here at write time and stores whatever comes back.
     """
-    return _protected_text(
-        text,
-        redactor=Redactor(),
-        policy=resolve_capture_policy(),
-        field_path=POLICY_PATH_OFFLOAD_OBSERVATION,
-        classification="opaque-payload",
-    )
+    return Redactor().redact(text)
 
 
 class IncompatibleObservabilityDB(RuntimeError):
@@ -923,19 +660,6 @@ class SourceChangedDuringArchive(RuntimeError):
 
 class WriterStillOpen(RuntimeError):
     """A seal was attempted while this process still owned a live writer."""
-
-
-class CaptureRegimeChanged(ValueError):
-    """An experiment was re-created under a different capture profile/policy."""
-
-    def __init__(self, experiment_id: str, stored: str, incoming: str) -> None:
-        self.experiment_id = experiment_id
-        super().__init__(
-            f"experiment {experiment_id!r} was captured under {stored} and is "
-            f"now being written under {incoming}. The two halves would not be "
-            "measuring the same columns; record the second half as its own "
-            "experiment."
-        )
 
 
 class PartialBenchmarkPin(ValueError):
@@ -1062,7 +786,7 @@ def _decode_attempt_row(row: Any) -> dict[str, Any]:
 
     `runtime_snapshot_json` is exposed decoded under
     `runtime_snapshot` -- a dict, or None when the binding server recorded no
-    snapshot -- so the chatbot UI and the workspace render it without parsing.
+    snapshot -- so the chatbot UI renders it without parsing.
     The raw column is dropped from the projection rather than duplicated: one
     key, one shape. An unreadable value is reported as None with the raw text
     kept under `runtime_snapshot_json`, so a corrupt stamp is visible rather
@@ -1102,173 +826,13 @@ def _sanitize_json_value(value: Any) -> Any:
     }
 
 
-def _capture_classify_for_turn(turn_result: Any) -> Optional[Any]:
-    """Resolve ``RuntimeMetadata.capture_classification`` for one turn, if any.
-
-    The workflow folderpath is carried on ``TurnResult.metadata`` because the
-    sink has no other durable link to the manifest registered at startup.
-    Unregistered or absent metadata yields None, which is the evidence
-    profile's default-deny input.
-    """
-    metadata = getattr(turn_result, "metadata", None) or {}
-    if not isinstance(metadata, dict):
-        return None
-    folderpath = metadata.get("workflow_folderpath")
-    if not folderpath:
-        return None
-    runtime = runtime_manifest.get_runtime_metadata(folderpath)
-    if runtime is None:
-        return None
-    return runtime.capture_classification
-
-
-def _policy_classification(
-    classify: Optional[Any], command_name: str, field_name: str
-) -> Optional[str]:
-    """The workflow's declared classification for one parameter, or None.
-
-    None is the default-deny input, so a resolver that raises must be treated as
-    "unclassified" rather than allowed to lose the whole turn record: under the
-    evidence profile that omits the field, which is the conservative direction.
-    """
-    if classify is None:
-        return None
-    try:
-        return classify(command_name, field_name)
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.debug(f"capture classification resolver failed: {exc!r}")
-        return None
-
-
-def _apply_capture_policy(
-    record: dict[str, Any],
-    policy: "capture_policy_module.CapturePolicy",
-    classify: Optional[Any] = None,
-) -> None:
-    """Apply the field policy to one dumped TurnResult, in place.
-
-    Runs on the `model_dump()` copy, never on the live accumulator objects, so
-    what the caller and the user see is untouched — the policy governs what is
-    *persisted*, which is the whole reason it is applied here rather than at the
-    sink's string boundary.
-
-    Ordering matters: this runs BEFORE the artifact-offload pass. A withheld
-    artifact collapses to a small envelope and is therefore never offloaded, so
-    its bytes never reach the `artifacts` table. Applying the policy afterwards
-    would redact the record while leaving the raw value in `inline_value`.
-    """
-    for command_output in record.get("turn_output", {}).get("command_outputs", []):
-        command_name = command_output.get("command_name") or "unknown"
-        # A FAILED command's response and artifacts are diagnostic content —
-        # an exception repr, a message, a traceback — not the command's normal
-        # output, so they must not inherit the policy written for its happy
-        # path. `CapturePolicy.apply` returns a value WHOLE when a declared
-        # policy is not gated for this sink, so a perfectly reasonable
-        # `command.X.response` rule (X's normal response is benign, keep it)
-        # would also release X's failure text once fix-ajv.16 started naming
-        # failed commands. A separate segment makes releasing error text
-        # something a deployment has to say, rather than something it inherits.
-        # fix-ajv.18.
-        #
-        # ask_user is excluded deliberately [A7]: `success=False` on an
-        # ask_user entry means the question is still unanswered, not that
-        # anything failed, and its response is the user's ANSWER — ordinary
-        # user text that belongs on the ordinary path.
-        #
-        # Read via the structural marker with the name as fallback, mirroring
-        # `CommandOutput.is_ask_user` — this walks the model_dump()ed dict, so
-        # it cannot call the property. `ask_user_entry` absent means a record
-        # written before that field existed (fix-ajv.17); True/False are
-        # authoritative, and False is what a failed command NAMED `ask_user`
-        # carries, which is the whole point of not testing the name here.
-        response_dict = command_output.get("command_response") or {}
-        marker = command_output.get("ask_user_entry")
-        is_ask_user = marker if marker is not None else command_name == "ask_user"
-        is_failure = response_dict.get("success") is False and not is_ask_user
-        # PARAMETERS DELIBERATELY STAY ON THE ORDINARY PATH, and this asymmetry
-        # is the point rather than an oversight. A failure's parameters are the
-        # SAME values the success path carries, so a rule written to gate them
-        # must keep applying; moving them under `.error.` would stop that rule
-        # matching and fall through to the profile default — which under
-        # `debug` returns the value whole. Separating them would un-gate the
-        # one field group the success policy is right about.
-        outcome_prefix = (
-            f"command.{command_name}.error" if is_failure else f"command.{command_name}"
-        )
-        parameters = command_output.get("command_parameters")
-        if isinstance(parameters, dict):
-            for field_name in list(parameters):
-                parameters[field_name] = policy.apply(
-                    f"command.{command_name}.parameters.{field_name}",
-                    parameters[field_name],
-                    classification=_policy_classification(
-                        classify, command_name, field_name
-                    ),
-                )
-        elif parameters is not None:
-            # The ask_user role inversion [A10]: for an `ask_user` entry
-            # `command_parameters` is the agent's *question* as a str, not a
-            # parameter mapping — and the response below is the user's *answer*.
-            command_output["command_parameters"] = policy.apply(
-                f"command.{command_name}.parameters",
-                parameters,
-                classification="user-text",
-            )
-
-        response = command_output.get("command_response") or {}
-        if response.get("response"):
-            response["response"] = policy.apply(
-                f"{outcome_prefix}.response",
-                response["response"],
-                classification="user-text",
-            )
-        artifacts = response.get("artifacts")
-        if not isinstance(artifacts, dict):
-            continue
-        for key in list(artifacts):
-            value = artifacts[key]
-            # An artifact ref envelope is a pointer, not content: the value has
-            # already been moved out, and digesting a pointer loses the join
-            # without protecting anything.
-            if isinstance(value, dict) and "__fw_artifact_ref__" in value:
-                continue
-            artifacts[key] = policy.apply(
-                f"{outcome_prefix}.artifacts.{key}",
-                value,
-                classification=_policy_classification(classify, command_name, key),
-            )
-
-
-def _policed_column(
-    policy: "capture_policy_module.CapturePolicy",
-    column: str,
-    classification: str,
-    value: Any,
-) -> Any:
-    """A turn text column after policy, still bindable as TEXT.
-
-    An envelope is serialized rather than returned as a dict: these are TEXT
-    columns and sqlite3 cannot bind a mapping, and `conversation_summary`'s
-    non-NULL contract shows how much the read side depends on their shape.
-    """
-    if not value:
-        return value
-    captured = policy.apply(f"turn.{column}", value, classification=classification)
-    if capture_policy_module.is_capture_envelope(captured):
-        return json.dumps(captured, ensure_ascii=False)
-    return captured
-
-
 def serialize_turn_result(
     turn_result: Any,
-    *,
-    policy: "Optional[capture_policy_module.CapturePolicy]" = None,
-    classify: Optional[Any] = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Project a TurnResult into (turn_row, artifact_rows) at emission time.
 
     - ``record_json`` holds the full internal TurnResult (post-envelope,
-      post-capture-policy, pre-credential-redaction — the sink redacts the
+      pre-credential-redaction — the sink redacts the
       serialized text).
     - Any artifact value over ``FW_OBS_INLINE_ARTIFACT_BYTES`` is replaced in
       place by a ref envelope; the artifacts table is the only value holder.
@@ -1276,19 +840,10 @@ def serialize_turn_result(
 
     Runs in the caller thread so the row snapshots the turn as emitted (the
     accumulator's CommandOutput objects mutate on resume).
-
-    The capture policy (arch §6.6) runs here rather than at the sink's string
-    boundary because it is per-field and `Redactor` operates on already-serialized
-    JSON: by the time the text exists, the field structure the policy classifies
-    is gone. The two compose — the policy decides what is captured, the redactor
-    still scrubs credential shapes out of whatever survives. `policy=None`
-    resolves `FW_OBS_CAPTURE_PROFILE`, which defaults to the verbatim `debug`
-    profile, so this is a no-op unless a deployment opts in.
     """
     turn_output = turn_result.turn_output
     inline_limit = _env_int("FW_OBS_INLINE_ARTIFACT_BYTES", _DEFAULT_INLINE_ARTIFACT_BYTES)
     capture_tracebacks = _env("FW_OBS_CAPTURE_TRACEBACKS", "0") == "1"
-    policy = policy or resolve_capture_policy()
 
     try:
         record = turn_result.model_dump(mode="python")
@@ -1298,8 +853,6 @@ def serialize_turn_result(
     # computed_field `success` is included by model_dump; make sure it is
     # present even on the fallback path.
     record.setdefault("turn_output", {}).setdefault("success", turn_output.success)
-
-    _apply_capture_policy(record, policy, classify)
 
     turn_key = turn_output.turn_key
     channel_id = turn_result.channel_id or ""
@@ -1395,10 +948,6 @@ def serialize_turn_result(
         "record_version": 1,
         "record_json": json.dumps(record, ensure_ascii=False),
     }
-    for column, classification in _POLICED_TURN_COLUMNS:
-        turn_row[column] = _policed_column(
-            policy, column, classification, turn_row[column]
-        )
     return turn_row, artifact_rows
 
 
@@ -1501,8 +1050,6 @@ _SCHEMA_STATEMENTS = [
         benchmark_version TEXT,
         benchmark_digest_sha256 TEXT,
         workflow_name TEXT,
-        capture_profile TEXT NOT NULL,
-        capture_policy_version TEXT NOT NULL,
         created_at TEXT NOT NULL,
         completed_at TEXT)""",
     """CREATE TABLE IF NOT EXISTS experiment_attempts (
@@ -1590,8 +1137,6 @@ _SCHEMA_STATEMENTS = [
         step_index INTEGER NOT NULL,
         text_utf8 BLOB NOT NULL,
         text_sha256 TEXT NOT NULL,
-        capture_policy_version TEXT NOT NULL,
-        capture_profile TEXT NOT NULL,
         redaction TEXT NOT NULL,
         redacted INTEGER NOT NULL,
         raw_utf8_bytes INTEGER NOT NULL,
@@ -1630,6 +1175,26 @@ _SCHEMA_STATEMENTS = [
         recorded_at TEXT NOT NULL)""",
     "CREATE INDEX IF NOT EXISTS idx_offload_events_turn ON offload_events(turn_key, event_id)",
     "CREATE INDEX IF NOT EXISTS idx_offload_events_channel ON offload_events(channel_id)",
+    # Prompt slots (FEATURE_PROMPT_SLOTS_V1), additive like the offload tables:
+    # a store created before it gains it on its next open, and an older build
+    # ignores it. One row per distinct piece of the prompts one turn's LLM
+    # calls were sent; `fw.llm.call` spans name their pieces by `sha256` in
+    # `prompt_slots_ref`. `text_utf8` is the piece as stored (credential-
+    # scrubbed), so it hashes to `sha256` only when the scrub altered nothing;
+    # `altered` records whether it did.
+    # `experiment_id` is carried so retention exempts bound experiments with
+    # the same predicate it applies to `artifacts`.
+    """CREATE TABLE IF NOT EXISTS prompt_slots (
+        turn_key TEXT NOT NULL,
+        sha256 TEXT NOT NULL,
+        channel_id TEXT,
+        text_utf8 BLOB NOT NULL,
+        raw_utf8_bytes INTEGER NOT NULL,
+        altered INTEGER NOT NULL,
+        recorded_at TEXT NOT NULL,
+        experiment_id TEXT,
+        PRIMARY KEY (turn_key, sha256))""",
+    "CREATE INDEX IF NOT EXISTS idx_prompt_slots_channel ON prompt_slots(channel_id)",
 ]
 
 # The offload tables above, named once for the erasure and retention paths,
@@ -1662,6 +1227,13 @@ def _present_offload_tables(conn: sqlite3.Connection) -> tuple[str, ...]:
     return tuple(table for table in _OFFLOAD_EVIDENCE_TABLES if table in found)
 
 
+def _has_prompt_slots(conn: sqlite3.Connection) -> bool:
+    """Whether this DB has the `prompt_slots` table (see `_present_offload_tables`)."""
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='prompt_slots'"
+    ).fetchone() is not None
+
+
 # What an experiment seal copies (single live DB design §3), in order: each
 # table with the predicate that picks its rows. Rows kept by turn select
 # against the copy's own `turns`, so they follow it, and go through the
@@ -1679,7 +1251,9 @@ _EXPERIMENT_SEAL_ROWS: tuple[tuple[str, str], ...] = (
     ("spans", f"trace_id IN ({_SEAL_KEPT_TURNS})"),
     *(
         (table, f"turn_key IN ({_SEAL_KEPT_TURNS})")
-        for table in ("artifacts", "human_feedback", *_OFFLOAD_EVIDENCE_TABLES)
+        for table in (
+            "artifacts", "human_feedback", *_OFFLOAD_EVIDENCE_TABLES, "prompt_slots",
+        )
     ),
     # Writer health describes the live DB's writers, not this experiment.
     ("diagnostics", "key NOT GLOB 'writer_health*'"),
@@ -1778,19 +1352,6 @@ class ObservabilityStore:
             self._redactor = redactor
         return redactor
 
-    def _store_capture_policy(self) -> "capture_policy_module.CapturePolicy":
-        """This store's capture profile, resolved once.
-
-        Resolved here as well as on the sink because the sync label path
-        (`record_conversation_label`) reaches SQLite without a sink in sight,
-        so it would otherwise write under no profile at all.
-        """
-        policy = getattr(self, "_capture_policy", None)
-        if policy is None:
-            policy = resolve_capture_policy()
-            self._capture_policy = policy
-        return policy
-
     # -- connections ----------------------------------------------------
 
     def _open_connection(self, timeout: float = 30.0) -> sqlite3.Connection:
@@ -1882,6 +1443,7 @@ class ObservabilityStore:
                     FEATURE_EXPERIMENT_SEALING_V1,
                     FEATURE_OFFLOAD_EVIDENCE_V1,
                     FEATURE_OFFLOAD_EVENTS_V1,
+                    FEATURE_PROMPT_SLOTS_V1,
                 ],
             )
             conn.execute(
@@ -1891,24 +1453,6 @@ class ObservabilityStore:
                 (
                     STORE_IDENTITY_DIAGNOSTIC,
                     str(uuid.uuid4()),
-                    _utcnow_iso(),
-                ),
-            )
-            conn.execute(
-                """INSERT INTO diagnostics (key, value, updated_at)
-                   VALUES (?, ?, ?)
-                   ON CONFLICT(key) DO UPDATE SET
-                     value=excluded.value, updated_at=excluded.updated_at""",
-                (
-                    CAPTURE_REGIME_DIAGNOSTIC,
-                    json.dumps(
-                        {
-                            "capture_profile": _env(
-                                CAPTURE_PROFILE_VAR, "debug"
-                            ),
-                            "capture_policy_version": CAPTURE_POLICY_VERSION,
-                        }
-                    ),
                     _utcnow_iso(),
                 ),
             )
@@ -2069,24 +1613,6 @@ class ObservabilityStore:
         except sqlite3.Error:
             return False
 
-    def capture_regime(self) -> Optional[tuple[str, str]]:
-        """Return the regime installed by the process that owns this store."""
-        try:
-            with self._connect() as conn:
-                row = conn.execute(
-                    "SELECT value FROM diagnostics WHERE key=?",
-                    (CAPTURE_REGIME_DIAGNOSTIC,),
-                ).fetchone()
-            if row is None:
-                return None
-            value = json.loads(row["value"])
-            return (
-                str(value["capture_profile"]),
-                str(value["capture_policy_version"]),
-            )
-        except (KeyError, TypeError, ValueError, sqlite3.Error):
-            return None
-
     def store_identity(self) -> Optional[str]:
         """Return the durable identity minted when this store was installed."""
         try:
@@ -2242,45 +1768,16 @@ class ObservabilityStore:
                 # Blank stays the "no title yet" sentinel — never stored as a
                 # title (legacy blank-topic policy).
                 topic = None
-        # fix-ajv.9 item 5, the one live gap: BOTH layers, applied here because
-        # this is the single label-write enforcement point and the production
-        # route to it — run_fastapi_mcp/utils.ensure_topic_and_summary calling
-        # `record_conversation_label` — is the SYNC one, which never touches
-        # `SQLiteTraceSink._apply_label` and so never met the credential scrub
-        # either. Protecting the enforcement point rather than the two callers is
-        # what makes it impossible to add a third route that skips this.
-        #
-        # `user-text` and not `controlled-vocabulary`: a topic and a summary are
-        # LLM output generated FROM a real user's conversation, so their content
-        # is whatever the conversation was about — an order number, a name, an
-        # address. Under `evidence` they become badges; the UI degrades to
-        # "a 34-byte user-text title was here", which is §12.0 delta 3's
-        # requirement and is why this is not simply an omission.
-        #
-        # AFTER uniquification, not before. `_unique_topic_in_txn` compares
-        # casefolded titles and appends " 1", " 2" on collision: policing first
-        # would append that suffix outside the envelope's closing brace and leave
-        # a column holding text that no longer parses as JSON. The cost is that
-        # collision suffixing stops distinguishing anything under `evidence`,
-        # where two identical titles digest identically — acceptable, because
-        # uniquification exists so a human can pick a conversation out of a list
-        # by its title, and under `evidence` every title in that list is a badge.
+        # fix-ajv.9 item 5, the one live gap: the credential scrub, applied here
+        # because this is the single label-write enforcement point and the
+        # production route to it — run_fastapi_mcp/utils.ensure_topic_and_summary
+        # calling `record_conversation_label` — is the SYNC one, which never
+        # touches `SQLiteTraceSink._apply_label` and so never met the scrub.
+        # Protecting the enforcement point rather than the two callers is what
+        # makes it impossible to add a third route that skips this.
         redactor = self._store_redactor()
-        policy = self._store_capture_policy()
-        topic = _protected_text(
-            topic,
-            redactor=redactor,
-            policy=policy,
-            field_path=POLICY_PATH_CONVERSATION_TOPIC,
-            classification="user-text",
-        )
-        summary = _protected_text(
-            summary,
-            redactor=redactor,
-            policy=policy,
-            field_path=POLICY_PATH_CONVERSATION_SUMMARY,
-            classification="user-text",
-        )
+        topic = redactor.redact(topic)
+        summary = redactor.redact(summary)
         now = _utcnow_iso()
         conn.execute(
             """INSERT INTO conversations
@@ -2345,26 +1842,7 @@ class ObservabilityStore:
         # `context` is `workflow.current_command_context_displayname`, which calls
         # a workflow-supplied `get_displayname(instance)` hook — the bundled
         # simple_workflow_template returns the work item's absolute path from it.
-        # So it is not a type name, it is a label about a specific instance:
-        # `user-text`, and withheld under `evidence`.
-        #
-        # `name` and `command_name` are closed vocabularies — the span taxonomy in
-        # tracing.py and the workflow's own command set — so they are declared
-        # rather than withheld, which is what FW-REQ-002 clause 3 asks for. The
-        # `controlled-vocabulary` default bounds them at 256 bytes and passes
-        # anything shorter through untouched, so this is inert for every real
-        # command name while still refusing to let an unbounded value in.
-        #
-        # `channel_id` is SCRUB-ONLY, and deliberately so. It is an identifier, so
-        # the evidence default would digest it, and a digest still joins — but
-        # `forget_channel` erases a channel with `DELETE FROM spans WHERE
-        # channel_id=?`, so digesting this column would silently narrow
-        # first-class erasure [R21] to whatever the `trace_id IN (...)` fallback
-        # happens to still cover. Reducing exposure by weakening erasure is not a
-        # trade this slice gets to make; a joinable pseudonym applied to
-        # turns/artifacts/spans at once, with `forget_channel` taught to match it,
-        # is the real fix and is follow-up work.
-        policy = self._store_capture_policy()
+        # So it is not a type name, it is a label about a specific instance.
         for span in spans:
             claim = {
                 "experiment_id": span.experiment_id,
@@ -2379,38 +1857,13 @@ class ObservabilityStore:
                 continue
             attributes = redactor.redact(
                 json.dumps(
-                    _sanitize_json_value(
-                        _policed_span_attributes(
-                            span.name,
-                            span.attributes,
-                            redactor=redactor,
-                            policy=policy,
-                        )
-                    ),
+                    _sanitize_json_value(span.attributes),
                     ensure_ascii=False,
                 )
             )
-            span_name = _protected_text(
-                span.name,
-                redactor=redactor,
-                policy=policy,
-                field_path=POLICY_PATH_SPAN_NAME,
-                classification="controlled-vocabulary",
-            )
-            command_name = _protected_text(
-                span.command_name,
-                redactor=redactor,
-                policy=policy,
-                field_path=POLICY_PATH_SPAN_COMMAND_NAME,
-                classification="controlled-vocabulary",
-            )
-            context = _protected_text(
-                span.context,
-                redactor=redactor,
-                policy=policy,
-                field_path=POLICY_PATH_SPAN_CONTEXT,
-                classification="user-text",
-            )
+            span_name = redactor.redact(span.name)
+            command_name = redactor.redact(span.command_name)
+            context = redactor.redact(span.context)
             # `Redactor.redact` returns a falsy input unchanged, so a None
             # channel_id stays None rather than becoming "".
             channel_id = redactor.redact(span.channel_id)
@@ -2454,6 +1907,45 @@ class ObservabilityStore:
                     span.server_incarnation,
                 ),
             )
+            if span.prompt_slots:
+                self._insert_prompt_slots(conn, span, channel_id, redactor)
+
+    @staticmethod
+    def _insert_prompt_slots(
+        conn: sqlite3.Connection,
+        span: tracing.Span,
+        channel_id: Optional[str],
+        redactor: Redactor,
+    ) -> None:
+        """Store the span's prompt pieces once per turn, credential-scrubbed.
+
+        A piece already stored for the turn is skipped before it is scrubbed:
+        the same system prompt and trajectory fields recur on every step.
+        """
+        recorded_at = _utcnow_iso()
+        for digest, text in span.prompt_slots.items():
+            if conn.execute(
+                "SELECT 1 FROM prompt_slots WHERE turn_key=? AND sha256=?",
+                (span.trace_id, digest),
+            ).fetchone() is not None:
+                continue
+            stored = redactor.redact(text)
+            conn.execute(
+                """INSERT OR IGNORE INTO prompt_slots
+                   (turn_key, sha256, channel_id, text_utf8, raw_utf8_bytes,
+                    altered, recorded_at, experiment_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    span.trace_id,
+                    digest,
+                    channel_id,
+                    stored.encode("utf-8"),
+                    len(text.encode("utf-8")),
+                    int(stored != text),
+                    recorded_at,
+                    span.experiment_id,
+                ),
+            )
 
     def upsert_turn_row(
         self,
@@ -2483,11 +1975,7 @@ class ObservabilityStore:
             return False
         # failure_reason is included because it can embed exception/provider
         # text (e.g. a LiteLLM AuthenticationError body) — the [R20] scenario.
-        # task_id is SCRUB-ONLY and not policed (`[XR6]`/`[XR7]`): policing it
-        # would withhold nothing (the plaintext rides into record_json above,
-        # which `_apply_capture_policy` never walks) while breaking every
-        # equality lookup the experiment read layer is built on. It must be
-        # scrubbed on BOTH label routes -- here and in mint_conversation_id --
+        # task_id is scrubbed (`[XR6]`/`[XR7]`), and it must be scrubbed on BOTH label routes -- here and in mint_conversation_id --
         # and in the container tables, or the copies stop being joinable.
         #
         # `experiment_id` is deliberately NOT in this list. It is a machine-minted
@@ -2867,25 +2355,11 @@ class ObservabilityStore:
     ) -> None:
         """Persist one training run's metrics at publication time (Phase 6).
 
-        BOTH protection layers apply, classified `opaque-payload`.
-
-        Not `controlled-vocabulary`, which is what a dict of thresholds and
-        F1 scores looks like from the outside. `collect_train_metrics` assembles this
-        by reading whatever JSON is sitting in `___command_info`, and one of those
-        files carries free text: `heldout_evaluation.EscalationScore.failures`
-        records the verbatim `utterance` of every case that failed, and
-        `metrics_persistence` copies the whole `escalation` block through. Those
-        utterances are synthetic today, but "nobody can enumerate what is in
-        here" is the definition of `opaque-payload`, and default-deny exists for
-        precisely the field whose contents grow when someone edits a file
-        elsewhere.
-
-        An evidence deployment that has reviewed its metrics and wants them in the
-        bundle re-admits them by name — a `CaptureFieldPolicy` on
-        `POLICY_PATH_TRAIN_METRICS` with `redact_before_trace=False`. The other
-        four columns of the row (run_id, fingerprint, timestamps) are unpoliced,
-        so a bundle always knows a training run happened and which sources it was
-        built from, even when the metrics themselves are a badge.
+        Credential-scrubbed. `collect_train_metrics` assembles this by reading
+        whatever JSON is sitting in `___command_info`, and one of those files
+        carries free text: `heldout_evaluation.EscalationScore.failures` records
+        the verbatim `utterance` of every case that failed, and
+        `metrics_persistence` copies the whole `escalation` block through.
         """
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -2903,34 +2377,20 @@ class ObservabilityStore:
                     workflow_fingerprint,
                     started_at,
                     completed_at,
-                    _protected_text(
-                        json.dumps(_sanitize_json_value(metrics), ensure_ascii=False),
-                        redactor=self._store_redactor(),
-                        policy=self._store_capture_policy(),
-                        field_path=POLICY_PATH_TRAIN_METRICS,
-                        classification="opaque-payload",
+                    self._store_redactor().redact(
+                        json.dumps(_sanitize_json_value(metrics), ensure_ascii=False)
                     ),
                 ),
             )
             conn.commit()
 
     def set_diagnostic(self, conn: sqlite3.Connection, key: str, value: dict[str, Any]) -> None:
-        """Upsert one diagnostics row. Credential-scrubbed, NOT policy-withheld.
+        """Upsert one diagnostics row. Credential-scrubbed.
 
         The scrub earns its place here more than anywhere else:
         `writer_health.last_error` is `repr(exc)`, and the scenario that
         motivated the redactor in the first place is a LiteLLM
         `AuthenticationError` whose body echoes the key.
-
-        WHY NO CAPTURE POLICY: this table is not a record of the workload, it is
-        the record of whether the record can be trusted. `health_delta` and
-        `evidence_run` read `writer_health` to decide whether a run may be
-        reported as evidence at all, and `WriterHealthDelta.problems()` names the
-        affected turn keys so a partly-damaged run can be salvaged instead of
-        discarded. Withholding it under the `evidence` profile would blind the
-        evidence gate — under the one profile that exists to make the gate
-        meaningful — and would digest the very turn keys an operator needs in
-        order to go and look at those turns.
         """
         conn.execute(
             """INSERT INTO diagnostics (key, value, updated_at) VALUES (?, ?, ?)
@@ -3376,6 +2836,46 @@ class ObservabilityStore:
             ).fetchone()
             return dict(row) if row is not None else None
 
+    def prompt_as_sent(self, trace_id: str, span_id: str) -> Optional[dict[str, Any]]:
+        """The prompt one ``fw.llm.call`` span was sent, rebuilt from its pieces.
+
+        None when the turn has no such span. Otherwise ``available`` says
+        whether the span recorded its prompt as pieces at all (a prompt under
+        the attribute cap is in ``messages`` whole; a turn recorded before
+        this table existed has neither), and the rest is
+        ``prompt_slots.rebuild``'s answer.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT attributes FROM spans WHERE span_id=? AND trace_id=?",
+                (span_id, trace_id),
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                attributes = json.loads(row["attributes"])
+            except (TypeError, ValueError):
+                attributes = {}
+            ref = attributes.get(prompt_slots.REF_ATTRIBUTE) if isinstance(attributes, dict) else None
+            if not isinstance(ref, dict):
+                return {"available": False, "reason": "this call recorded no prompt pieces"}
+            digests = prompt_slots.slot_digests(ref)
+            stored: dict[str, str] = {}
+            if _has_prompt_slots(conn):
+                for chunk in _chunked(digests):
+                    marks = ",".join("?" for _ in chunk)
+                    for slot in conn.execute(
+                        f"SELECT sha256, text_utf8 FROM prompt_slots "
+                        f"WHERE turn_key=? AND sha256 IN ({marks})",
+                        (trace_id, *chunk),
+                    ).fetchall():
+                        value = slot["text_utf8"]
+                        stored[str(slot["sha256"])] = (
+                            bytes(value).decode("utf-8", errors="replace")
+                            if isinstance(value, (bytes, memoryview)) else str(value)
+                        )
+        return {"available": True, **prompt_slots.rebuild(ref, stored)}
+
     def list_train_runs(self, limit: int = 50) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -3429,28 +2929,13 @@ class ObservabilityStore:
 
     # -- the experiment container (`fix-bn1`, experiment_container_design.md) --
     #
-    # CAPTURE POLICY, decided here rather than by omission (`[XR6]`): every text
-    # column of `experiments`, `experiment_attempts` and
-    # `experiment_evidence_runs` is SCRUB-ONLY -- `redactor.redact(value)` with
-    # no `policy.apply` call, the `spans.channel_id` code shape.
-    #
-    # The precedent is `set_diagnostic` plus `_POLICY_EXEMPT_TURN_COLUMNS`, not
-    # `spans.channel_id`'s erasure argument. These rows are not evidence ABOUT a
-    # tenant; they are the record of whether the evidence may be used at all --
-    # an `EvidenceRun`'s valid/problems, an attempt's outcome, an experiment's
-    # declaration. Withholding them reduces nothing a tenant would care about and
-    # makes the bundle uninterpretable under exactly the profile an
-    # evidence-grade run uses, since `opaque-payload` and `user-text` both map to
-    # `omit` there. The claim that makes this safe is a DATAFLOW claim and is
-    # tested: no code path exists by which workflow, model or user content
-    # reaches these tables, except `task_id`, which the caller supplies from its
-    # own task-set file. The residual risk -- an operator pasting a credential
-    # into `notes`, an exception repr inside `record_json.problems` -- is exactly
-    # what the scrub catches, which is why this is scrub-only and not untouched.
-    #
-    # No `POLICY_PATH_EXPERIMENT_*` constants are declared: a constant never
-    # passed to `policy.apply` is inert, and the one genuinely scrub-only column
-    # in this file, `spans.channel_id`, deliberately has none either.
+    # Every text column of `experiments`, `experiment_attempts` and
+    # `experiment_evidence_runs` is credential-scrubbed (`[XR6]`). These rows
+    # are the record of whether the evidence may be used at all -- an
+    # `EvidenceRun`'s valid/problems, an attempt's outcome, an experiment's
+    # declaration. The residual risk -- an operator pasting a credential into
+    # `notes`, an exception repr inside `record_json.problems` -- is exactly
+    # what the scrub catches.
 
     _EXPERIMENT_STATUSES = frozenset(
         {
@@ -3533,8 +3018,6 @@ class ObservabilityStore:
         arm: Optional[str] = None,
         baseline_experiment_id: Optional[str] = None,
         workflow_name: Optional[str] = None,
-        capture_profile: Optional[str] = None,
-        capture_policy_version: Optional[str] = None,
         benchmark_id: Optional[str] = None,
         benchmark_version: Optional[str] = None,
         benchmark_digest_sha256: Optional[str] = None,
@@ -3595,33 +3078,14 @@ class ObservabilityStore:
             benchmark_id = self._scrub(benchmark_id)
             benchmark_version = self._scrub(benchmark_version)
             benchmark_digest_sha256 = self._scrub(benchmark_digest_sha256)
-        capture_profile = capture_profile or _env("FW_OBS_CAPTURE_PROFILE", "debug")
-        capture_policy_version = capture_policy_version or CAPTURE_POLICY_VERSION
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            # A re-create (the resume path) under a DIFFERENT capture regime is
-            # refused rather than silently keeping the first one. The stored
-            # profile is what `compare_experiments` gates on, so a run whose
-            # second half was captured under another policy would compare as if
-            # both halves matched -- and the column would say so.
             existing = conn.execute(
-                """SELECT capture_profile, capture_policy_version, status,
-                          benchmark_id, benchmark_version,
+                """SELECT status, benchmark_id, benchmark_version,
                           benchmark_digest_sha256
                      FROM experiments WHERE experiment_id=?""",
                 (experiment_id,),
             ).fetchone()
-            if existing is not None and (
-                existing["capture_profile"] != capture_profile
-                or existing["capture_policy_version"] != capture_policy_version
-            ):
-                conn.rollback()
-                raise CaptureRegimeChanged(
-                    experiment_id,
-                    f"{existing['capture_profile']}/"
-                    f"{existing['capture_policy_version']}",
-                    f"{capture_profile}/{capture_policy_version}",
-                )
             if existing is not None and benchmark_id is not None:
                 stored_pin = (
                     existing["benchmark_id"],
@@ -3643,11 +3107,10 @@ class ObservabilityStore:
                     baseline_experiment_id, status, invalid_reason,
                     invalid_detail, declared_tasks, declared_attempts,
                     required_evidence_segments, benchmark_id, benchmark_version,
-                    benchmark_digest_sha256, workflow_name, capture_profile,
-                    capture_policy_version,
+                    benchmark_digest_sha256, workflow_name,
                     created_at, completed_at)
                    VALUES (?, ?, NULL, ?, ?, 'running', NULL, NULL,
-                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                           ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                    ON CONFLICT(experiment_id) DO UPDATE SET
                      description=excluded.description,
                      arm=excluded.arm,
@@ -3690,8 +3153,6 @@ class ObservabilityStore:
                     benchmark_version,
                     benchmark_digest_sha256,
                     self._scrub(workflow_name),
-                    capture_profile,
-                    capture_policy_version,
                     _utcnow_iso(),
                 ),
             )
@@ -4231,9 +3692,9 @@ class ObservabilityStore:
         """Record one `evidence_run()` segment (`[XR1]`).
 
         One row per segment rather than an appended JSON array, because
-        appending to a column is a read-modify-write and `[XR20]` forbids that
-        on any column a capture policy might act on. Here each segment is an
-        independent INSERT and `valid` is a queryable column.
+        appending to a column is a read-modify-write and `[XR20]` forbids that.
+        Here each segment is an independent INSERT and `valid` is a queryable
+        column.
 
         `record` is the WHOLE `EvidenceRun.as_record()`, not its `observability`
         sub-dict: the sub-dict alone carries neither the run id, nor `valid`,
@@ -4297,7 +3758,7 @@ class ObservabilityStore:
         what the archived copy says forever, and the archived copy is the one a
         reader opens. Stamping `complete` afterwards — as the seal used to —
         left every sealed archive reporting `capture_complete` about an
-        experiment its own manifest presented as sealed.
+        experiment presented as sealed.
 
         `evidence_sealed_at` is stamped here too, which is what makes the two
         halves of a seal distinguishable afterwards without a new column: a row
@@ -4357,9 +3818,8 @@ class ObservabilityStore:
         The archive is created first. This write intentionally happens only
         afterwards, so the helper can prove that snapshotting did not modify
         the source DB or its committed WAL — and because a file cannot contain
-        its own digest, which is why the digest lives on the source row and in
-        the manifest while the STATUS lives in the archive too
-        (`begin_workspace_seal`).
+        its own digest, which is why the digest lives on the source row while
+        the STATUS lives in the archive too (`begin_workspace_seal`).
 
         The same transaction records the archive in `sealed_archives`, the
         only writer of that table, which is how `SelectionControlStore.store_for`
@@ -4810,11 +4270,17 @@ class ObservabilityStore:
                 ).fetchall()
             ]
             if turn_keys:
+                has_prompt_slots = _has_prompt_slots(conn)
                 for chunk in _chunked(turn_keys):
                     marks = ", ".join("?" for _ in chunk)
                     conn.execute(
                         f"DELETE FROM artifacts WHERE turn_key IN ({marks})", chunk
                     )
+                    if has_prompt_slots:
+                        conn.execute(
+                            f"DELETE FROM prompt_slots WHERE turn_key IN ({marks})",
+                            chunk,
+                        )
                     conn.execute(
                         f"DELETE FROM spans WHERE trace_id IN ({marks})", chunk
                     )
@@ -5155,7 +4621,7 @@ class ObservabilityStore:
         query = (
             "SELECT e.experiment_id, e.description, e.status, e.arm, "
             "e.baseline_experiment_id, e.declared_tasks, e.declared_attempts, "
-            "e.invalid_reason, e.workflow_name, e.capture_profile, "
+            "e.invalid_reason, e.workflow_name, "
             "e.benchmark_id, e.benchmark_version, e.benchmark_digest_sha256, "
             "e.archived, e.created_at, e.completed_at, "
             "(SELECT COUNT(*) FROM experiment_attempts a "
@@ -5324,10 +4790,10 @@ class ObservabilityStore:
         query layer that emits a p-value is a query layer that will be quoted as
         if it had run the protocol.
 
-        Refuses unless both are complete, both declare the same shape, their
-        task-id SETS are equal, and they were captured under the same profile.
-        Cardinality is not comparability: two 15x3 runs over disjoint task sets
-        would otherwise report "0 regressions" while sharing no task.
+        Refuses unless both are complete, both declare the same shape, and their
+        task-id SETS are equal. Cardinality is not comparability: two 15x3 runs
+        over disjoint task sets would otherwise report "0 regressions" while
+        sharing no task.
         """
         treatment = self.get_experiment(experiment_id)
         baseline = self.get_experiment(baseline_experiment_id)
@@ -5350,17 +4816,6 @@ class ObservabilityStore:
                 f"{treatment['declared_tasks']}x{treatment['declared_attempts']} "
                 f"vs baseline {baseline['declared_tasks']}x"
                 f"{baseline['declared_attempts']}"
-            )
-        if treatment["capture_profile"] != baseline["capture_profile"] or (
-            treatment["capture_policy_version"] != baseline["capture_policy_version"]
-        ):
-            problems.append(
-                f"capture regimes differ: treatment "
-                f"{treatment['capture_profile']}/"
-                f"{treatment['capture_policy_version']} vs baseline "
-                f"{baseline['capture_profile']}/"
-                f"{baseline['capture_policy_version']}; the two arms are not "
-                "measuring the same columns"
             )
         treatment_pin = self._experiment_benchmark_pin(treatment)
         baseline_pin = self._experiment_benchmark_pin(baseline)
@@ -5834,7 +5289,7 @@ class ObservabilityStore:
         # `observation_offloading.archive`), so the horizon compares as text.
         horizon_evidence = horizon_moment.strftime("%Y-%m-%dT%H:%M:%SZ")
         deleted = {
-            "spans": 0, "artifacts": 0,
+            "spans": 0, "artifacts": 0, "prompt_slots": 0,
             **{table: 0 for table in _OFFLOAD_EVIDENCE_TABLES},
         }
         erased_scopes: set[str] = set()
@@ -5848,6 +5303,7 @@ class ObservabilityStore:
             # As in `forget_channel`: retention deletes evidence text, and a
             # deleted cell must not survive in a page that still holds others.
             conn.execute("PRAGMA secure_delete=ON")
+            has_prompt_slots = _has_prompt_slots(conn)
             for _ in range(_PRUNE_MAX_BATCHES):
                 conn.execute("BEGIN IMMEDIATE")
                 spans_cur = conn.execute(
@@ -5864,6 +5320,15 @@ class ObservabilityStore:
                     (horizon_key, _PRUNE_BATCH_ROWS),
                 )
                 deleted["artifacts"] += artifacts_cur.rowcount
+                slots_deleted = 0
+                if has_prompt_slots:
+                    slots_deleted = conn.execute(
+                        "DELETE FROM prompt_slots WHERE rowid IN "
+                        "(SELECT rowid FROM prompt_slots WHERE turn_key < ? "
+                        f"AND {unbound} LIMIT ?)",
+                        (horizon_key, _PRUNE_BATCH_ROWS),
+                    ).rowcount
+                    deleted["prompt_slots"] += slots_deleted
                 # Offload evidence is aged by its TURN, like artifacts, so a
                 # turn's observations go whole. A turn's age is its earliest
                 # evidence write rather than its key, because a turn with no
@@ -5880,6 +5345,7 @@ class ObservabilityStore:
                 if (
                     spans_cur.rowcount < _PRUNE_BATCH_ROWS
                     and artifacts_cur.rowcount < _PRUNE_BATCH_ROWS
+                    and slots_deleted < _PRUNE_BATCH_ROWS
                     and len(aged_turns) < _OFFLOAD_PRUNE_BATCH_TURNS
                 ):
                     break
@@ -5899,6 +5365,10 @@ class ObservabilityStore:
                     for key in keys:
                         conn.execute("DELETE FROM spans WHERE trace_id=?", (key,))
                         conn.execute("DELETE FROM artifacts WHERE turn_key=?", (key,))
+                        if has_prompt_slots:
+                            deleted["prompt_slots"] += conn.execute(
+                                "DELETE FROM prompt_slots WHERE turn_key=?", (key,)
+                            ).rowcount
                         conn.execute("DELETE FROM turns WHERE turn_key=?", (key,))
                     self._delete_offload_turns_in_txn(
                         conn, keys, deleted, erased_scopes
@@ -5930,8 +5400,26 @@ class ObservabilityStore:
                 self._delete_offload_turns_in_txn(
                     conn, oldest_turns, deleted, erased_scopes
                 )
+                # A prompt's pieces are evicted a whole turn at a time, oldest
+                # turn first, beside the spans that referenced them.
+                slot_turns: list[str] = []
+                if has_prompt_slots:
+                    slot_turns = [
+                        str(row[0])
+                        for row in conn.execute(
+                            "SELECT DISTINCT turn_key FROM prompt_slots "
+                            f"WHERE {unbound} ORDER BY turn_key LIMIT ?",
+                            (_OFFLOAD_PRUNE_BATCH_TURNS,),
+                        ).fetchall()
+                    ]
+                    for chunk in _chunked(slot_turns):
+                        marks = ",".join("?" for _ in chunk)
+                        deleted["prompt_slots"] += conn.execute(
+                            f"DELETE FROM prompt_slots WHERE turn_key IN ({marks})",
+                            chunk,
+                        ).rowcount
                 conn.commit()
-                if cur.rowcount == 0 and not oldest_turns:
+                if cur.rowcount == 0 and not oldest_turns and not slot_turns:
                     only_bound_left = True
                     break
                 # Fetched to completion: each step of this pragma frees one page.
@@ -5987,6 +5475,11 @@ class ObservabilityStore:
             held.append(
                 "SELECT SUM(length(text_utf8)) FROM offload_evidence "
                 f"WHERE turn_key IN ({bound_turns})"
+            )
+        if _has_prompt_slots(conn):
+            held.append(
+                "SELECT SUM(length(text_utf8)) FROM prompt_slots "
+                f"WHERE experiment_id IN ({bound})"
             )
         return int(conn.execute(
             "SELECT " + " + ".join(f"COALESCE(({sql}), 0)" for sql in held)
@@ -6062,10 +5555,8 @@ class ObservabilityStore:
         capture record beside ``event_text``, the event as it was stored --
         the JSON the runtime recorded, with redaction applied when
         ``redaction`` is ``on`` -- and ``event``, that text parsed, or ``None``
-        when it does not parse as a JSON object. Under a capture profile that
-        withholds the event, ``event`` is the withholding badge rather than the
-        recorded dictionary. A DB that predates the table reads as having no
-        events.
+        when it does not parse as a JSON object. A DB that predates the table
+        reads as having no events.
         """
         clauses: list[str] = []
         params: list[Any] = []
@@ -6152,6 +5643,12 @@ class ObservabilityStore:
                 "(SELECT turn_key FROM turns WHERE channel_id=?)",
                 (channel_id, channel_id),
             ).rowcount
+            if _has_prompt_slots(conn):
+                deleted["prompt_slots"] = conn.execute(
+                    "DELETE FROM prompt_slots WHERE channel_id=? OR turn_key IN "
+                    "(SELECT turn_key FROM turns WHERE channel_id=?)",
+                    (channel_id, channel_id),
+                ).rowcount
             for table in _present_offload_tables(conn):
                 erased_scopes.update(
                     str(row[0])
@@ -6234,8 +5731,9 @@ class ObservabilityStore:
                         f"SELECT DISTINCT scope_id FROM {table}"
                     ).fetchall()
                 )
+            slot_tables = ("prompt_slots",) if _has_prompt_slots(conn) else ()
             for table in (
-                "spans", "artifacts", *offload_tables,
+                "spans", "artifacts", *offload_tables, *slot_tables,
                 "turns", "conversations",
             ):
                 deleted[table] = conn.execute(f"DELETE FROM {table}").rowcount
@@ -6303,7 +5801,7 @@ def open_live_store(db_path: str, *, write: bool = False) -> Optional[Observabil
 
     A read gets the read-only store, or None when the file is absent — every
     control read then answers empty. A write gets a `migrate=False` store, so a
-    click never rewrites the capture-regime diagnostic, and an absent file
+    click never rewrites the schema diagnostics, and an absent file
     refuses with `control.ControlUnavailable` (design §2.1).
     """
     if not os.path.isfile(db_path):
@@ -6338,10 +5836,6 @@ class SQLiteTraceSink:
         except OSError:
             self._db_ino = None
         self._redactor = Redactor()
-        # Resolved once, here, so an unrecognized FW_OBS_CAPTURE_PROFILE fails
-        # when the sink is built rather than on every turn — and so a deployment
-        # that asked for `evidence` cannot end up running verbatim.
-        self._capture_policy = resolve_capture_policy()
         self._record_queue: queue.Queue = queue.Queue(maxsize=_RECORD_QUEUE_MAX)
         self._span_queue: queue.Queue = queue.Queue(
             maxsize=_env_int("FW_OBS_QUEUE_MAX", _DEFAULT_QUEUE_MAX)
@@ -6446,6 +5940,7 @@ class SQLiteTraceSink:
                 attempt=span.attempt,
                 claim_epoch=span.claim_epoch,
                 server_incarnation=span.server_incarnation,
+                prompt_slots=span.prompt_slots,
             )
             self._span_queue.put_nowait(("span", snapshot))
         except queue.Full:
@@ -6472,11 +5967,7 @@ class SQLiteTraceSink:
         if self._closed:
             return False
         try:
-            turn_row, artifact_rows = serialize_turn_result(
-                record,
-                policy=self._capture_policy,
-                classify=_capture_classify_for_turn(record),
-            )
+            turn_row, artifact_rows = serialize_turn_result(record)
         except Exception as exc:
             self._count("write_errors", error=f"serialize: {exc!r}")
             return False

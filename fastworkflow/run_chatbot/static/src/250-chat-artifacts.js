@@ -259,14 +259,6 @@ function tmArtifactViewer(items, note, place) {
       /* offloaded: fetch from the artifact endpoint */
       return tmOffloadedArtifactNode(item.key, item.value, item.source);
     }
-    var env = captureEnvelope(item.value);
-    if (env) {
-      /* Withheld by the capture policy: say so where the content would be,
-         so a digest never reads as the artifact it stands in for. */
-      var box = tmArtifactCard(item.key, "withheld · " + item.source);
-      appendPoliced(box, item.value);
-      return box;
-    }
     return artifactNode(item.key, item.value, "inline · " + item.source);
   });
   cards.forEach(function (card) { stage.appendChild(card); });

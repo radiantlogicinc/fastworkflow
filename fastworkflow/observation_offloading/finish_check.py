@@ -30,13 +30,13 @@ OFF unless a deployment turns it on: ``FW_FINISH_CHECK=jev`` AND a
 the check sends the request, the plan and a summary of every step (command,
 context, the first bytes of its output) to a third party. All of it -- the
 subjects' names and kinds, the ``refers_to`` identifiers and ``names_in_output``
-included -- passes the archive's capture policy (``jev_client.egress``) first.
+included -- passes the archive's credential scrub (``jev_client.egress``) first.
 
 The questions go through the vendor-neutral ``decision.DecisionProvider``
 interface; Jev is its built-in implementation (``jev_client.JevProvider``).
 ``FW_FINISH_CHECK`` may instead name a provider registered from code
 (``decision.register_decision_provider``) -- never a module path. The same
-capture-policy gate and per-value filter apply to it. ``FLAG_MIN``,
+redaction gate and per-value filter apply to it. ``FLAG_MIN``,
 ``ASK_MIN``, the questions' wording and the precision and recall above were
 calibrated with Jev: with any other provider they are unmeasured (one warning
 per process).
@@ -52,11 +52,11 @@ off: it is local work plus archive reads that each wait at most
 ending the check (reason "error", stage "ledger"); its calls also draw on the turn's shared vendor
 budget (``jev_client.TurnBudget``), whose running total lands on the event as
 ``vendor_ms``. A set ``FW_FINISH_CHECK`` that cannot take effect (an
-unrecognised value, no SDK, no key, a rejected ``FW_JEV_BASE_URL``, a capture
-profile that withholds command output, ``FW_OFFLOAD_EVIDENCE_REDACTION=off``)
+unrecognised value, no SDK, no key, a rejected ``FW_JEV_BASE_URL``,
+``FW_OFFLOAD_EVIDENCE_REDACTION=off``)
 logs one warning per cause; see ``jev_client``. A failure is warned about at
 most once per five minutes per (error type, HTTP status), counting the ones not
-logged. A value the capture policy withholds at call time sends nothing: the
+logged. A value ``jev_client.egress`` refuses at call time sends nothing: the
 check is skipped with reason "policy_withheld", unwarned.
 
 Every finish of an agent with a check attached records one ``finish_check``
@@ -227,7 +227,7 @@ _SENTENCE_END_RE = re.compile(r"[.!?\n]")
 SCORES_MAX = 200
 #: The agent's tool for asking the user; its steps are counted as ``user_replies``.
 ASK_USER_TOOL_NAME = "ask_user"
-#: The event reason when the capture policy withheld a value the check would send.
+#: The event reason when ``jev_client.egress`` refused a value the check would send.
 POLICY_WITHHELD = "policy_withheld"
 #: The event reason when the plan named more than ``SUBJECTS_MAX`` subjects: fired
 #: and ``flagged_steps`` say what the step-level check found.
@@ -257,7 +257,7 @@ CommandEffect = Callable[[str], str]
 
 
 class PolicyWithheld(Exception):
-    """The capture policy withheld a value the check would send: nothing is sent."""
+    """``jev_client.egress`` refused a value the check would send: nothing is sent."""
 
 
 def _redacted(text: str) -> str:
@@ -395,7 +395,7 @@ def build_ledger(agent: Any, subject_names: list[str]) -> list[dict[str, Any]]:
 
     Every value in a row passes ``jev_client.egress``, the ``refers_to`` keys
     and the ``names_in_output`` names included; *subject_names* are matched
-    raw, locally. Raises ``PolicyWithheld`` when the policy withholds a value.
+    raw, locally. Raises ``PolicyWithheld`` when ``egress`` refuses a value.
     """
     trajectory = getattr(agent, "current_trajectory", None) or {}
     scope = getattr(agent, "continuation_scope", None)
@@ -681,7 +681,7 @@ class CheckResult:
     #: ``decision.describe`` of the error, and where it happened.
     failure: Optional[dict[str, Any]] = None
     error_stage: Optional[str] = None
-    #: The capture policy withheld a value the check would send; nothing was sent.
+    #: ``jev_client.egress`` refused a value the check would send; nothing was sent.
     withheld: bool = False
 
 

@@ -2,8 +2,7 @@
 
 `fix-9eg.3.1.1`. The route has filtered by experiment/task/attempt since the
 attempt opener was written against it; what was missing was the finder sending
-those filters, saying which scope it is answering about, and keeping the scope
-attached to the source it was chosen in.
+those filters and saying which scope it is answering about.
 
 Integration throughout, per the repo's testing rules: a real
 `ObservabilityStore` seeded through its own write methods, attempts written
@@ -322,7 +321,6 @@ def test_the_page_ships_the_scope_control_and_its_entry_points():
         b'id="turnFindScope"',
         b"function turnFindScopeTo(scope)",
         b"function turnFindRenderScope()",
-        b"function turnFindEntrySupported()",
         b"function turnFindEntryButton(container, scope, label, help)",
         b'"Find problems in this experiment"',
         b'"Find problems in this task"',

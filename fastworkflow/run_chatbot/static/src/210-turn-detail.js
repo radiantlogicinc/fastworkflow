@@ -4,6 +4,7 @@
    rendered, so a focus request can never be applied to another run's trace.
    Every existing caller opens the turn and passes neither. `level` is the
    position a page link names inside the turn, focused the same way. */
+var turnLoadAbort = null;
 function selectTurn(turnKey, spanId, note, level) {
   var nav = expNavToken();   // this view now owns #detail
   writePageLink({turn: turnKey});
@@ -30,14 +31,48 @@ function selectTurn(turnKey, spanId, note, level) {
   });
 }
 
+var FAILURE_REASON_TEXT = { max_iters_exhausted: "ran out of agent iterations" };
+
+/* A turn's outcome is its STATUS: whether the agent ran to the end. Whether
+   every command succeeded is a separate fact (`turnHadCommandFailure`), so a
+   command that failed and was recovered from does not read as a failed turn. */
+function turnOutcome(status, failureReason) {
+  if (status === "completed") { return { text: "completed", cls: "ok" }; }
+  if (status === "awaiting_user") { return { text: "awaiting your reply", cls: "progress" }; }
+  var why = failureReason
+    ? (FAILURE_REASON_TEXT[failureReason] || failureReason) : status;
+  return { text: "incomplete — " + why, cls: "fail" };
+}
+
+/* While a turn awaits the user, its pending ask_user counts as not yet
+   successful, so `success` is false without any command having failed. */
+function turnHadCommandFailure(turn) {
+  return turn.status !== "awaiting_user" && !turn.success;
+}
+
+var OUTCOME_HINTS = {
+  ok: "The turn's status: the agent ran to the end and gave its answer.",
+  progress: "The turn's status: the agent asked you a question, and your next " +
+    "message resumes this turn.",
+  fail: "The turn's status: the agent stopped before finishing (for example, it " +
+    "hit its step limit)."
+};
+var COMMAND_FAILURE_HINT = "At least one command the agent ran returned a " +
+  "failure, even if the agent recovered from it. Whether the turn itself " +
+  "finished is the status beside this.";
+
 function statusBadge(turn) {
-  if (review.progress && review.progress.assignment.blinded) {
-    return el("span", "badge", "blinded review trace");
+  var outcome = turnOutcome(turn.status, turn.failure_reason);
+  var badges = el("span", "statusBadges");
+  var status = el("span", "badge " + outcome.cls, outcome.text);
+  status.title = OUTCOME_HINTS[outcome.cls];
+  badges.appendChild(status);
+  if (turnHadCommandFailure(turn)) {
+    var failed = el("span", "badge unknown", "a command reported failure");
+    failed.title = COMMAND_FAILURE_HINT;
+    badges.appendChild(failed);
   }
-  if (turn.status === "awaiting_user") { return el("span", "badge progress", "awaiting_user — in progress"); }
-  if (turn.status === "completed" && turn.success) { return el("span", "badge ok", "completed · success"); }
-  return el("span", "badge " + (turn.success ? "ok" : "fail"),
-    turn.status + (turn.success ? " · success" : " · failure"));
+  return badges;
 }
 
 /* ======================================================================
@@ -291,14 +326,14 @@ function spanTitle(span, role) {
     case "fw.agent.execute": return "Execution";
     case "fw.agent.step": return "Step";
     case "fw.agent.tool_call":
-      return "Agent tool call" + (span.command_name ? " · " + policedText(span.command_name) : "");
+      return "Agent tool call" + (span.command_name ? " · " + span.command_name : "");
     case "fw.command.execute":
-      return "Assistant" + (span.command_name ? " · " + policedText(span.command_name) : "");
+      return "Assistant" + (span.command_name ? " · " + span.command_name : "");
     case "fw.nlu.intent": return "Intent detection";
     case "fw.nlu.param_extraction": return "Parameter extraction";
     case "fw.ask_user": return "Ask user";
     case "fw.llm.call": return "LLM call" + (role ? " · " + role : "");
-    default: return policedText(span.name);
+    default: return span.name;
   }
 }
 
@@ -321,12 +356,12 @@ function renderSpanLevel(container, span, role, fold) {
     kv.appendChild(el("dt", null, k));
     kv.appendChild(el("dd", null, v));
   }
-  row("span", policedText(span.name) + (role ? " · " + role : ""));
+  row("span", span.name + (role ? " · " + role : ""));
   row("span_id", span.span_id);
   row("kind", span.kind);
   row("status", span.status);
-  if (span.command_name) { row("command", policedText(span.command_name)); }
-  if (span.context) { row("context", policedText(span.context)); }
+  if (span.command_name) { row("command", span.command_name); }
+  if (span.context) { row("context", span.context); }
   if (span.end_ns) { row("duration", fmtNs(span.end_ns - span.start_ns)); }
   if (llmCallCutAtLimit(span)) {
     var cutAt = parsedAttr((span.attributes || {}).call_kwargs).max_tokens;
@@ -377,6 +412,7 @@ function renderSpanLevel(container, span, role, fold) {
     appendAttrSection(container, "module output (parsed)", a.module_output);
     appendAttrSection(container, "reasoning", a.reasoning);
     appendAttrSection(container, "LLM input (messages)", a.messages);
+    appendPromptAsSent(container, span);
     appendAttrSection(container, "LLM input (prompt)", a.prompt);
     appendAttrSection(container, "LLM output (raw)", a.output);
     appendAttrSection(container, "provider response", a.provider_response);
@@ -416,6 +452,106 @@ function renderSpanLevel(container, span, role, fold) {
     rawDetails.appendChild(el("pre", "json", pretty(a)));
   }
   container.appendChild(rawDetails);
+}
+
+/* The messages a call recorded whole, or null. They arrive as the list itself
+   or as its JSON text; a cut envelope is neither. */
+function inlinePromptMessages(messages) {
+  if (typeof messages === "string") {
+    try { messages = JSON.parse(messages); } catch (e) { return null; }
+  }
+  if (!Array.isArray(messages) || !messages.length) { return null; }
+  var wellFormed = messages.every(function (m) {
+    return m && typeof m === "object" && typeof m.role === "string";
+  });
+  return wellFormed ? messages : null;
+}
+
+/* The prompt a call was sent. An over-cap call is rebuilt by the server from
+   the pieces it stored (`prompt_slots_ref`), because `messages` above holds
+   only the cut envelope for such a call; that is fetched on expand, since a
+   rebuilt agent prompt is tens of KB. A call under the cap recorded its
+   messages whole, so they are rendered from the span itself. */
+function appendPromptAsSent(container, span) {
+  var a = span.attributes || {};
+  var ref = a.prompt_slots_ref;
+  if (!ref || typeof ref !== "object") {
+    var messages = inlinePromptMessages(a.messages);
+    if (!messages) { return; }
+    var inline = el("details", "promptAsSent");
+    inline.appendChild(el("summary", null, "LLM input as sent ("
+      + formatByteSize(estimateSerializedSize(messages)) + ")"));
+    inline.addEventListener("toggle", function () {
+      if (!inline.open || inline.dataset.loaded) { return; }
+      inline.dataset.loaded = "1";
+      var body = el("div");
+      body.appendChild(el("div", "promptStatus",
+        "recorded whole — the messages this call stored, as sent"));
+      renderPromptMessages(body, messages);
+      inline.appendChild(body);
+    });
+    container.appendChild(inline);
+    return;
+  }
+  var route = "/api/prompt/" + encodeURIComponent(span.trace_id) + "/"
+    + encodeURIComponent(span.span_id);
+  var det = el("details", "promptAsSent");
+  det.appendChild(el("summary", null, "LLM input as sent ("
+    + formatByteSize(ref.messages_bytes || 0) + ")"));
+  det.addEventListener("toggle", function () {
+    if (!det.open || det.dataset.loaded) { return; }
+    det.dataset.loaded = "1";
+    var body = el("div");
+    body.appendChild(el("div", "promptStatus", "loading…"));
+    det.appendChild(body);
+    api(route).then(function (result) {
+      clear(body);
+      renderPromptAsSent(body, result.prompt || {});
+    }).catch(function (e) {
+      clear(body);
+      body.appendChild(el("div", "empty", "Failed to load the prompt: " + e.message));
+    });
+  });
+  container.appendChild(det);
+}
+
+function renderPromptAsSent(body, prompt) {
+  if (!prompt.available) {
+    body.appendChild(el("div", "promptStatus", prompt.reason || "no prompt pieces recorded"));
+    return;
+  }
+  var missing = (prompt.missing || []).length;
+  var altered = (prompt.altered || []).length;
+  var status;
+  if (prompt.verified) {
+    status = "verified — byte for byte the messages this call recorded (sha256 matches)";
+  } else {
+    var reasons = [
+      missing ? missing + " piece(s) not stored" : "",
+      altered ? altered + " piece(s) had credentials redacted" : ""
+    ].filter(Boolean);
+    status = "not verified — " + (reasons.length ? reasons.join(", ")
+      : "the rebuilt messages do not match the recorded digest");
+  }
+  body.appendChild(el("div", prompt.verified ? "promptStatus" : "promptStatus warn", status));
+  renderPromptMessages(body, prompt.messages || []);
+}
+
+/* One panel around every message: together they are the single input the LLM
+   received, not separate inputs. */
+function renderPromptMessages(body, messages) {
+  var panel = el("div", "promptInput");
+  panel.appendChild(el("div", "promptInputLabel", "LLM input"));
+  messages.forEach(function (message) {
+    var block = el("div", "msgBlock");
+    var role = (message && message.role) || "message";
+    block.appendChild(el("span", "lbl", role));
+    var content = message && message.content;
+    block.appendChild(el("pre", "json",
+      typeof content === "string" ? content : pretty(content)));
+    panel.appendChild(block);
+  });
+  body.appendChild(panel);
 }
 
 function spanNode(span, kids, byId) {
@@ -841,7 +977,7 @@ function buildTurnTree(turn, spans) {
     ? spanExtent([rootSpan])
     : mergeExtents(children.map(function (c) { return c.extent; }));
 
-  return makeNode("turn", policedText(turn.user_message) || "(no message)", {
+  return makeNode("turn", turn.user_message || "(no message)", {
     crumb: (turn.ordinal ? "Turn " + turn.ordinal : "Turn"),
     category: "cat-turn",
     status: turn.status,
@@ -874,18 +1010,18 @@ function renderTurnLevel(container, turn) {
     row("wall time", fmtMs(Date.parse(turn.completed_at) - Date.parse(turn.started_at)));
   }
   if (turn.suspended_ms) { row("suspended (human wait)", fmtMs(turn.suspended_ms)); }
-  row("failure_reason", policedText(turn.failure_reason));
+  row("failure_reason", turn.failure_reason);
   row("LLM cost", fmtCostAmount(turn.llm_cost));
 
   var um = el("div", "msgBlock");
   um.appendChild(el("span", "lbl", "user message"));
-  appendPoliced(um, turn.user_message || "");
+  um.appendChild(document.createTextNode(turn.user_message || ""));
   appendReuseAction(um, turn);
   container.appendChild(um);
   if (turn.answer) {
     var ans = el("div", "msgBlock");
     ans.appendChild(el("span", "lbl", "answer"));
-    appendPoliced(ans, turn.answer);
+    ans.appendChild(document.createTextNode(turn.answer));
     container.appendChild(ans);
   }
   var metadata = el("details", "turnMetadata"); metadata.appendChild(el("summary", null, "Turn details & timing"));
@@ -896,14 +1032,8 @@ function appendReuseAction(block, turn) {
   /* Hands the recorded message to the live composer [fix-9eg.7.4]. It reads
      the record and writes a text box: no request goes out, the recorded turn
      is untouched, and nothing runs until the person presses Send. */
-  var actions = el("div", "reuseAction");
-  if (captureEnvelope(turn.user_message)) {
-    actions.appendChild(el("span", "muted",
-      "The recorded message is not available in full, so there is nothing to reuse."));
-    block.appendChild(actions);
-    return;
-  }
   if (!turn.user_message) { return; }
+  var actions = el("div", "reuseAction");
   var button = el("button", null, "Reuse this message in chat");
   button.title = "Copies the text into the live chat composer. Nothing is sent "
     + "until you press Send, and the recorded turn is unchanged.";

@@ -35,8 +35,7 @@ root/child split is published beside the count so the composition is visible
 rather than assumed.
 
 WHAT IS NEVER GUESSED. Absent text is `absent`, never an empty string that
-would make two silent runs look identical. A value the capture policy withheld
-is `withheld` and a bounded one is `truncated`, both distinct from absent. A
+would make two silent runs look identical. A
 turn the store cannot produce makes the run's evidence INCOMPLETE and its step
 count `partial`, which keeps it out of the distribution while leaving it on
 screen. A run with no recorded turns has an UNKNOWN step count, not zero. One
@@ -78,7 +77,6 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from fastworkflow.observability import comparison as comparison_module
-from fastworkflow.observability.capture_policy import CAPTURE_ENVELOPE_MARKER
 
 # Versions that gate a numeric delta between two experiments. Bump the metric
 # version when a number's MEANING changes and the projection version when the
@@ -132,13 +130,11 @@ DEFAULT_MAX_PAIRS = 300
 # About 3 MB of MiniLM vectors; a full view of DEFAULT_MAX_RUNS runs needs ~60.
 VECTOR_CACHE_MAX_ENTRIES = 2048
 
-# Text states. `absent` is "the evidence records none", which is not `withheld`
-# ("the capture policy removed it") and not `unreadable` ("the turn could not
-# be read"). Collapsing the three would make three different investigations
-# look like one.
+# Text states. `absent` is "the evidence records none", which is not
+# `unreadable` ("the turn could not be read"). Collapsing the two would make
+# two different investigations look like one.
 TEXT_PRESENT = "present"
 TEXT_ABSENT = "absent"
-TEXT_WITHHELD = "withheld"
 TEXT_UNREADABLE = "unreadable"
 
 # Count states. `partial` is a real count over an incomplete read; it is shown
@@ -263,8 +259,8 @@ def _clean_text(value: Any) -> Optional[str]:
 def _span_attributes(span: Mapping[str, Any]) -> dict[str, Any]:
     """A span's attributes, decoded or not, as the reader handed them over.
 
-    The workspace reader decodes the JSON column and `ObservabilityStore`
-    returns the raw text; both are legitimate and `server.py` and
+    A reader may decode the JSON column while `ObservabilityStore` returns
+    the raw text; both are legitimate and `server.py` and
     `comparison.py` each accept both for the same reason. Six lines here beats
     reaching into either module's private helper.
     """
@@ -278,19 +274,6 @@ def _span_attributes(span: Mapping[str, Any]) -> dict[str, Any]:
             return {}
         return decoded if isinstance(decoded, dict) else {}
     return {}
-
-
-def _capture_envelope(value: Any) -> Optional[Mapping[str, Any]]:
-    """The capture policy's envelope, if this value is one.
-
-    A withheld or bounded value arrives as a dict carrying
-    `CAPTURE_ENVELOPE_MARKER`, not as text. Treating it as absent would report
-    "this run recorded no plan" about a run that recorded one and had it
-    removed, which sends a reader looking in the wrong place.
-    """
-    if isinstance(value, Mapping) and value.get(CAPTURE_ENVELOPE_MARKER):
-        return value
-    return None
 
 
 @dataclass(frozen=True)
@@ -324,7 +307,7 @@ class PlanSegment:
 class ProjectedText:
     """One side of one similarity metric, as text plus why it is what it is.
 
-    `state` is the honest four-way answer; `text` is set only when the state is
+    `state` is the honest three-way answer; `text` is set only when the state is
     `present`. Two runs that both recorded nothing are two `absent` values and
     form no pair -- not two equal empty strings with a cosine of 1.
     """
@@ -334,10 +317,8 @@ class ProjectedText:
     text: Optional[str] = None
     reason: Optional[str] = None
     segments: tuple[PlanSegment, ...] = ()
-    withheld_segments: int = 0
-    truncated_source: bool = False
     # Something this text is made of was named by the reference and could not
-    # be read: a pruned turn, a withheld plan emission. The surviving text is
+    # be read: a pruned turn. The surviving text is
     # still worth comparing, but it is NOT the whole of what the run recorded,
     # and every similarity computed from it is partial coverage.
     evidence_incomplete: bool = False
@@ -350,9 +331,7 @@ class ProjectedText:
     @property
     def partial_source(self) -> bool:
         """The text is present but is less than the run recorded."""
-        return bool(
-            self.truncated_source or self.withheld_segments or self.evidence_incomplete
-        )
+        return self.evidence_incomplete
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -362,12 +341,6 @@ class ProjectedText:
             "chars": len(self.text or ""),
             "segments": [segment.as_dict() for segment in self.segments],
             "segment_count": len(self.segments),
-            "withheld_segments": self.withheld_segments,
-            # The capture policy bounded the SOURCE value. Distinct from the
-            # embedding-window truncation reported per vector below: one is
-            # evidence that was never stored whole, the other is a limit of the
-            # model, and a reader chasing a low similarity needs to know which.
-            "source_bounded": self.truncated_source,
             "evidence_incomplete": self.evidence_incomplete,
             "incomplete_reason": self.incomplete_reason,
             "partial_source": self.partial_source,
@@ -392,12 +365,8 @@ def canonical_plan_text(segments: Sequence[PlanSegment]) -> str:
 
 def _plan_segments(
     turn_index: int, turn_key: str, spans: Sequence[Mapping[str, Any]]
-) -> tuple[list[PlanSegment], int, bool]:
-    """Plan emissions of one turn, in recorded order.
-
-    Returns the segments, how many were withheld by the capture policy, and
-    whether any surviving one was stored bounded.
-    """
+) -> list[PlanSegment]:
+    """Plan emissions of one turn, in recorded order."""
     ordered = sorted(
         (span for span in spans if span.get("name") in PLAN_SPAN_NAMES),
         key=lambda span: (
@@ -406,20 +375,9 @@ def _plan_segments(
         ),
     )
     segments: list[PlanSegment] = []
-    withheld = 0
-    bounded = False
     for span in ordered:
         attributes = _span_attributes(span)
-        raw = attributes.get("plan")
-        envelope = _capture_envelope(raw)
-        if envelope is not None:
-            prefix = _clean_text(envelope.get("prefix"))
-            if prefix is None:
-                withheld += 1
-                continue
-            bounded = True
-            raw = prefix
-        text = _clean_text(raw)
+        text = _clean_text(attributes.get("plan"))
         if text is None:
             # An emitted plan with no text is a real recorded state (the
             # planner returned nothing), and it carries no content to compare.
@@ -434,7 +392,7 @@ def _plan_segments(
                 text=text,
             )
         )
-    return segments, withheld, bounded
+    return segments
 
 
 # ----------------------------------------------------------------------
@@ -540,8 +498,8 @@ def collect_run_evidence(
 ) -> RunEvidence:
     """Project one attempt row into the evidence the metrics read.
 
-    `row` is an attempt row as `best_run.task_run_summary` (live) or
-    `selection_api._workspace_attempts` (sealed) produces it, so this module
+    `row` is an attempt row as `best_run.task_run_summary` produces it, so
+    this module
     never resolves a store, a turn key or a reference of its own.
 
     A row with no reference is not an error: an attempt that finished with
@@ -591,15 +549,10 @@ def collect_run_evidence(
 
     readable = {turn.turn_key for turn in projection.turns}
     segments: list[PlanSegment] = []
-    withheld = 0
-    bounded = False
     for turn in projection.turns:
-        found, missing, was_bounded = _plan_segments(
+        segments.extend(_plan_segments(
             turn.turn_index, turn.turn_key, reader.trace(ref.store_id, turn.turn_key)
-        )
-        segments.extend(found)
-        withheld += missing
-        bounded = bounded or was_bounded
+        ))
 
     # Turns the reference NAMES but the store could not return. Their plan
     # emissions are not absent, they are unread: the surviving plan is a
@@ -621,11 +574,6 @@ def collect_run_evidence(
             "the recorded order of this run's turns is not derivable from the "
             "evidence, so this plan sequence is shown in the reference's order"
         )
-    if withheld:
-        plan_gaps.append(
-            f"{withheld} recorded plan emission(s) were removed by the capture "
-            "policy"
-        )
 
     if segments:
         plan = ProjectedText(
@@ -633,20 +581,8 @@ def collect_run_evidence(
             state=TEXT_PRESENT,
             text=canonical_plan_text(segments),
             segments=tuple(segments),
-            withheld_segments=withheld,
-            truncated_source=bounded,
             evidence_incomplete=bool(plan_gaps),
             incomplete_reason="; ".join(plan_gaps) or None,
-        )
-    elif withheld:
-        plan = ProjectedText(
-            kind="plan",
-            state=TEXT_WITHHELD,
-            reason=(
-                f"{withheld} recorded plan emission(s) were removed by the "
-                "capture policy, so this run's plan text cannot be compared"
-            ),
-            withheld_segments=withheld,
         )
     else:
         plan = _absent(
@@ -734,13 +670,6 @@ def _final_answer(
             TEXT_UNREADABLE,
         )
     last = projection.turns[-1]
-    envelope = _capture_envelope(last.answer)
-    if envelope is not None:
-        return ProjectedText(
-            kind="final_answer",
-            state=TEXT_WITHHELD,
-            reason="the capture policy removed this turn's answer",
-        )
     text = _clean_text(last.answer)
     if text is None:
         return _absent(
@@ -1096,13 +1025,11 @@ def _similarity(
     left_vector = session.vector(left.text or "")
     right_vector = session.vector(right.text or "")
     truncated = left_vector.truncated or right_vector.truncated
-    bounded = left.truncated_source or right.truncated_source
-    # A surviving plan whose sibling emission was withheld, or whose run has a
-    # turn nobody can read, is a partial source even though its own text is
-    # whole. Reporting that cosine as full coverage is exactly the claim this
-    # module must not make.
+    # A surviving plan whose run has a turn nobody can read is a partial source
+    # even though its own text is whole. Reporting that cosine as full coverage
+    # is exactly the claim this module must not make.
     incomplete = left.partial_source or right.partial_source
-    partial = truncated or bounded or incomplete
+    partial = truncated or incomplete
     return {
         "state": METRIC_COMPUTED,
         "cosine": cosine(left_vector.vector, right_vector.vector),
@@ -1111,14 +1038,13 @@ def _similarity(
         # gets quoted as the similarity of the whole output.
         "coverage_note": (
             "at least one side is less than the whole of what its run "
-            "recorded (some of it was withheld, bounded, unreadable or past "
-            "the embedding bound), so this is not a similarity of the full "
+            "recorded (some of it was unreadable or past the embedding "
+            "bound), so this is not a similarity of the full "
             "recorded text"
             if partial
             else None
         ),
         "truncated_for_model": truncated,
-        "source_bounded": bounded,
         "source_incomplete": incomplete,
         "left_tokens": left_vector.token_count,
         "right_tokens": right_vector.token_count,
@@ -1688,7 +1614,6 @@ __all__ = [
     "TEXT_PRESENT",
     "TEXT_PROJECTION_VERSION",
     "TEXT_UNREADABLE",
-    "TEXT_WITHHELD",
     "ConsistencyError",
     "EmbeddedText",
     "EmbeddingUnavailable",

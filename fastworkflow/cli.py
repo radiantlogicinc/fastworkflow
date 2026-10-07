@@ -331,13 +331,6 @@ def add_run_chatbot_parser(subparsers):
              "chat tab then needs a signed token pasted into its Advanced "
              "connection panel)",
     )
-    parser_run_chatbot.add_argument(
-        "--workspace-manifest",
-        metavar="PATH",
-        default=None,
-        help="Open a read-only observability workspace manifest instead of "
-             "the workflow picker and live chatbot.",
-    )
     def _run_chatbot_main_wrapper(args):
         # Lazy import: the chatbot server is stdlib-only [R23] but pulls in the
         # fastworkflow package for state paths / the store. Env-file

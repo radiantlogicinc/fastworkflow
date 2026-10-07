@@ -223,7 +223,7 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
     'the trace viewer to move to the linked span');
 
   // ---------------------------------------------------------------
-  // Same-type context handles: unknown, never "unchanged".
+  // Same context type before and after: unknown, never "unchanged".
   // ---------------------------------------------------------------
   box.value = keys.same_type;
   box.dispatchEvent(new w.Event('input', {bubbles: true}));
@@ -232,10 +232,22 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   rows()[0].click();
   await until(() => detail().includes('Execution ledger'), 'that turn to open');
   assert.ok(detail().includes('context unknown'), detail().slice(0, 800));
-  assert.ok(detail().includes('handles name a type but no instance'),
+  assert.ok(detail().includes('same context type before and after'),
     'the reason is shown, not just the verdict');
   assert.ok(!detail().includes('context unchanged'),
-    'two handles of one type must never be reported as unchanged');
+    'two equal context types must never be reported as unchanged');
+
+  // A recorded type change reads as a move, with both ends and the reason.
+  box.value = keys.nav;
+  box.dispatchEvent(new w.Event('input', {bubbles: true}));
+  find();
+  await until(() => rows().length === 1, 'the navigating turn');
+  rows()[0].click();
+  await until(() => detail().includes('Execution ledger'), 'that turn to open');
+  assert.ok(detail().includes('context changed (Workspace \u2192 Project)'),
+    detail().slice(0, 800));
+  assert.ok(detail().includes('the recorded context types differ'),
+    'the basis is shown, not just the verdict');
 
   // ---------------------------------------------------------------
   // Repetition is reported as repetition, with the policy that would have

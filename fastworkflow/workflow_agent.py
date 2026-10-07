@@ -283,8 +283,8 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     # methods: the same record written three ways is three things to drift.
     # Resolving the workflow is gated on a span having opened, so with
     # observability off this seam costs a `start_span` that already declined. One
-    # workflow reference serves both handles, matching the sibling sites — the
-    # handle is re-projected after execution, so a context the command MOVED is
+    # workflow reference serves both context reads, matching the sibling sites —
+    # the type is re-read after execution, so a context the command MOVED is
     # still recorded as a transition.
     workflow = tracing.active_workflow(chat_session_obj) if span is not None else None
     context_before = tracing.context_before(span, workflow)
@@ -341,21 +341,6 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
             # pre-empt routing, or when invoke_command was replaced wholesale
             # (tests/test_turn_result_capture.py does), hence the annotation
             # defaults rather than a declared attribute. fix-ajv.16 FW-2.
-            #
-            # CAPTURE-POLICY CONSEQUENCE, handled in _apply_capture_policy.
-            # Naming the command moves this record's policy field paths from
-            # command.unknown.* to command.<name>.*, and that ran the UNSAFE
-            # way round: capture_policy short-circuits and returns a value
-            # WHOLE when a declared policy is not gated for the sink, so a rule
-            # written about a command's benign NORMAL response would also
-            # release the failure text below — an exception repr, an error
-            # message, a 4KB traceback. Fixed in fix-ajv.18 by deriving a
-            # failed command's response/artifacts paths under
-            # command.<name>.error.* instead, so releasing error text is
-            # something a deployment declares rather than inherits. Parameters
-            # stay on the ordinary path deliberately; see the comment there.
-            # A blanket command.unknown.* rule no longer matches these
-            # failures either — that is the same fix, seen from the other side.
             failure_output = fastworkflow.CommandOutput(
                 command_name=_annotation(e, "_fw_command_name") or "",
                 workflow_name=_annotation(e, "_fw_workflow_name") or "",
@@ -729,7 +714,7 @@ def _text_turn_plan(plan_text: str, workflow_path: str) -> TurnPlan | None:
 
 # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
 # def _redacted_subject_names(turn_plan: TurnPlan | None) -> list[str]:
-#     """The plan's subject names as the capture policy would store them."""
+#     """The plan's subject names as the credential scrub would store them."""
 #     if turn_plan is None:
 #         return []
 #     try:

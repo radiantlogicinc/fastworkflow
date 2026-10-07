@@ -27,8 +27,8 @@ unique across channels or recordings. Follow the selected experiment's bound sto
 all results are in the currently selected workflow's default database.
 
 Use [debug-workflow-conversations](../debug-workflow-conversations/SKILL.md) for trace reads and
-stage-specific diagnosis. Before interpreting a missing call, inspect writer health and capture
-policy: redacted, withheld, truncated, dropped and absent evidence are different conditions.
+stage-specific diagnosis. Before interpreting a missing call, inspect writer health and
+redaction: redacted, truncated, dropped and absent evidence are different conditions.
 Do not rerun a workflow merely to obtain an answer already present in its recording.
 
 ## Use human feedback precisely
@@ -62,12 +62,9 @@ Keep three mechanisms distinct:
 |---|---|
 | `human_feedback` | Developer/operator annotations attached to recorded evidence; no automatic retraining, prompt injection or score change |
 | The agent-memory `feedback` table | Removed with its `dspy.History` injection (fix-9eg.16). Recorded comments are never replayed into a prompt |
-| Independent human review assignments | Rubric-based ratings with their own review flow; comments and simulated-operator replies are not substitutes |
 
-Snapshots are read-only evidence, which is not the same as read-only feedback. A comment on a
-sealed archive is recorded in the `sealed_turn_comments` table of its workflow's live database,
-keyed by the archive's sha256; the archive's bytes do not change and the reads return the merge.
-Never modify a sealed archive to insert feedback.
+Comments are recorded in the workflow's live database. Never modify a sealed archive to insert
+feedback.
 
 ## Diagnose and choose the smallest useful change
 
@@ -118,7 +115,7 @@ the changed feature before spending on measured execution.
 
 ## Compare and record what changed
 
-Check evidence validity, capture profile/policy and the attempt's recorded runtime configuration
+Check evidence validity and the attempt's recorded runtime configuration
 before reading score differences. An invalid experiment carries no defensible score. Missing
 runtime snapshots limit claims about configuration; today's readiness response does not prove
 what ran yesterday. Respect comparison refusals instead of bypassing them to produce a ranking.

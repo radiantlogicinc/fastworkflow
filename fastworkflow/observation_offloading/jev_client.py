@@ -14,14 +14,14 @@ described and warned about.
 
 An unset flag, or one set to an explicit off value (``off``, ``0``, ``false``,
 ``no``, ``none``), is silent. A set flag that cannot take effect -- an unrecognised
-value, the SDK not installed, no key, an endpoint that may not be used, a
-capture profile that withholds command output, or
+value, the SDK not installed, no key, an endpoint that may not be used, or
 ``FW_OFFLOAD_EVIDENCE_REDACTION=off`` -- logs one warning per process per cause
-and the feature stays off. A registered provider passes the same capture-policy
+and the feature stays off. A registered provider passes the same redaction
 gate; one whose factory fails, or returns no ``DecisionProvider``, warns once
 and the feature stays off. Selecting one warns once per flag that the feature's
 thresholds were calibrated with Jev. Every value sent passes ``egress`` first: the
-capture policy's stored form, or None -- send nothing -- when that is a badge. The raw key is
+credential-scrubbed form the archive would store, or None -- send nothing --
+when redaction is off. The raw key is
 never stored or logged: caches are keyed by a short SHA-256 fingerprint, so a
 rotated key builds a new client.
 
@@ -75,8 +75,6 @@ except ImportError:  # optional dependency: without it no Jev-backed feature act
     Choice = Noul = RetryPolicy = TypeSafeAPIError = TypeSafeClient = None
 
 from fastworkflow import context_budget
-from fastworkflow.observability import capture_policy
-from fastworkflow.observability import store as observability_store
 from fastworkflow.observation_offloading import decision
 from fastworkflow.observation_offloading.archive import (
     REDACTION_ENV,
@@ -147,7 +145,7 @@ if TypeSafeClient is not None:
 
 
 def redacted(text: str) -> str:
-    """*text* as the archive's capture policy would store it; what may be sent."""
+    """*text* as the archive would store it; what may be sent."""
     stored, _record = capture_record_for(text)
     return stored
 
@@ -155,35 +153,18 @@ def redacted(text: str) -> str:
 def egress(text: str) -> Optional[str]:
     """*text* as it may leave the process, or None when it may not leave at all.
 
-    None when the capture policy withheld it (the stored form is, or carries, a
-    capture badge) or when redaction is off: a badge is not the value, and a
-    question asked about one is answered about nothing.
+    None when redaction is off: unscrubbed text never leaves the process.
     """
     stored, record = capture_record_for(text)
     if record.get("redaction") == REDACTION_OFF:
-        return None
-    if capture_policy.CAPTURE_ENVELOPE_MARKER in stored:
         return None
     return stored
 
 
 def withholding_cause() -> Optional[str]:
-    """Why what the Jev features send would be withheld or left unredacted, or None when it would not.
-
-    Asks the capture policy directly what it does to an opaque-payload value on
-    the offload-observation field (what every sent value is classified as), so
-    a declared field policy that keeps observations whole is honoured.
-    """
+    """Why what the Jev features send would be left unredacted, or None when it would not."""
     if not redaction_enabled():
         return f"{REDACTION_ENV}={REDACTION_OFF}, so nothing sent would be redacted"
-    try:
-        policy = observability_store.resolve_capture_policy()
-    except capture_policy.CaptureProfileError:
-        return f"{observability_store.CAPTURE_PROFILE_VAR} names an unknown capture profile"
-    probe = policy.apply(observability_store.POLICY_PATH_OFFLOAD_OBSERVATION, "probe",
-                         classification="opaque-payload")
-    if capture_policy.is_capture_envelope(probe):
-        return f"the capture profile {policy.profile!r} withholds command output"
     return None
 
 
@@ -255,11 +236,11 @@ def flag_value(flag_env: str) -> str:
     return (context_budget.env_value(flag_env) or "").strip().lower()
 
 
-def _policy_allows(flag_env: str, value: str, feature: str) -> bool:
-    """False, with one warning per cause, when the capture policy would withhold what *feature* sends."""
+def _redaction_allows(flag_env: str, value: str, feature: str) -> bool:
+    """False, with one warning per cause, when what *feature* sends would be left unredacted."""
     cause = withholding_cause()
     if cause is not None:
-        _warn_once((flag_env, "policy", cause),
+        _warn_once((flag_env, "redaction", cause),
                    "%s=%s but %s; %s stays off", flag_env, value, cause, feature)
         return False
     return True
@@ -269,9 +250,8 @@ def requested_key(flag_env: str, feature: str) -> Optional[str]:
     """The API key when *flag_env* asks for Jev and the feature can activate, else None.
 
     The flag is read before the SDK is looked for, so a set flag without the
-    SDK warns rather than staying silently off. Last, the capture policy is
-    asked (``withholding_cause``): a profile that withholds command output, or
-    redaction switched off, keeps the feature off with one warning per cause.
+    SDK warns rather than staying silently off. Last, ``withholding_cause`` is
+    asked: redaction switched off keeps the feature off with one warning.
     The endpoint is checked separately (``base_url``), after this has returned
     a key. A value naming a registered provider returns None without a warning:
     the caller asks ``decision.registration`` first.
@@ -297,7 +277,7 @@ def requested_key(flag_env: str, feature: str) -> Optional[str]:
                    "%s=%s but %s is not set; %s stays off (set %s)",
                    flag_env, JEV, KEY_ENV, feature, KEY_ENV)
         return None
-    if not _policy_allows(flag_env, JEV, feature):
+    if not _redaction_allows(flag_env, JEV, feature):
         return None
     return key
 
@@ -305,12 +285,12 @@ def requested_key(flag_env: str, feature: str) -> Optional[str]:
 def registered_provider(flag_env: str, entry: decision.Registration, feature: str) -> Optional[Any]:
     """The provider *entry* registers, for *feature* selected by *flag_env*; None when it cannot activate.
 
-    The capture-policy gate applies as it does to Jev. A factory that raises, or
+    The redaction gate applies as it does to Jev. A factory that raises, or
     returns something that is not a ``decision.DecisionProvider``, warns once
     per registration and the feature stays off. The first activation per flag
     and name warns that the feature was calibrated with Jev.
     """
-    if not _policy_allows(flag_env, entry.name, feature):
+    if not _redaction_allows(flag_env, entry.name, feature):
         return None
     try:
         provider = decision.build_provider(entry)

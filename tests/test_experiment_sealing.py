@@ -17,7 +17,6 @@ from fastworkflow.experiment.runner import ExperimentController, experiment_stor
 
 @pytest.fixture
 def installed_db(tmp_path, monkeypatch):
-    monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
     folder = str(tmp_path / "workflow")
     path = state_paths.observability_db(folder)
     store = obs.ObservabilityStore(path)
@@ -126,7 +125,6 @@ def test_capture_complete_needs_archive_digest_before_reportable(
 def test_drain_blocks_certification_until_owned_writer_stops(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
     workflow = tmp_path / "workflow"
     workflow.mkdir()
@@ -269,8 +267,7 @@ def test_the_sealed_archive_reports_the_experiment_complete(installed_db, tmp_pa
     assert archived_digest is None
     assert archived_sealed_at is not None
 
-    # The digest lives in the manifest (this return value is what the caller
-    # writes into workspace.json) and on the source row.
+    # The digest is returned to the caller and stamped on the source row.
     assert archive["sha256"] == _sha256(archive_path)
     assert archive["experiment_status"] == "complete"
     source = controller.store.get_experiment("exp-1")
@@ -383,7 +380,6 @@ def test_a_live_writer_blocks_the_seal_before_the_status_is_stamped(
     """A writer in this process may still hold the experiment's records, so the
     seal refuses it, and before the promotion: a knowable refusal must not
     leave an unfinished seal behind."""
-    monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
     workflow = tmp_path / "workflow"
     workflow.mkdir()

@@ -151,9 +151,8 @@ off the same context callback class that already declares `get_parent` and
 `enter_command`: a classmethod `instance_label(command_context_object) -> str`,
 or an `instance_label_attr = "uid"` naming an attribute to read. A context that
 declares neither prints its NAME alone, and an object that carries no identity
-yields no identity: nothing is invented to fill the gap, for the reason
-`tracing.context_handle` gives for refusing to mint an `instance_key` — a guess
-that looks concrete is worse than an honest absence. The root context has an empty
+yields no identity: nothing is invented to fill the gap, because a guess that
+looks concrete is worse than an honest absence. The root context has an empty
 clause and is printed as `ran in global`; a step with no recorded clause prints
 the bare `Observation O{n} (execute_workflow_query)` line.
 
@@ -656,7 +655,7 @@ router (`observation_offloading/search_router.py`). It is off unless
 `FW_SEARCH_ROUTER=jev` and `JEV_API_KEY` are both set, because it sends the
 question, the agent's reasoning and the observation's first four lines to
 TypeSafe. **Data egress:** that text leaves the deployment with only the
-capture policy's credential patterns scrubbed by default; names, identifiers
+credential scrub's patterns removed; names, identifiers
 and other personal data in it are sent as they are. It makes one attempt with a
 2-second timeout and fails open to the search model (hard wall clock and at
 most 3 calls per turn since 2026-09-27; below). `FW_SEARCH_ROUTER_MODEL`
@@ -680,8 +679,8 @@ wall-clock cutoff, a turn routes at most `ROUTER_CALLS_PER_TURN` (3) searches,
 and once those are used, or the turn's vendor time is spent, `route` returns
 the error `router_budget` with no call, no span and no warning, and the search
 model answers (`listing_skip_reason` `router_budget`). What it sends passes
-`jev_client.egress`: when the capture policy would withhold any of the three
-values at call time, nothing is sent and the router returns the error
+`jev_client.egress`: when redaction is off for any of the three values at
+call time, nothing is sent and the router returns the error
 `policy_withheld` (`error_stage` `redaction`, unwarned; its span, when traced,
 has status error and `error_type` `policy_withheld`).
 
@@ -744,7 +743,7 @@ never ambiguous (fix-wheb):
 | `router_enabled` | whether a router was attached to this agent |
 | `listing_parsed` | whether the observation parsed as a complete listing |
 | `listing_shape` | `aligned`, `markdown` or `tabbed`, or `None` |
-| `listing_skip_reason` | why rows were not served: `router_disabled`, `no_listing`, `router_error`, `router_budget` (the turn's routing calls or vendor time were used up), `policy_withheld` (since 2026-09-28: the capture policy withheld a value the router would send), `not_all_rows`, `below_threshold`, `rows_do_not_fit` (not one whole row fits the answer bound beside the text above the rows), `short_observation`, `missing_handle`; `None` when they were |
+| `listing_skip_reason` | why rows were not served: `router_disabled`, `no_listing`, `router_error`, `router_budget` (the turn's routing calls or vendor time were used up), `policy_withheld` (since 2026-09-28: a value the router would send could not be sent redacted), `not_all_rows`, `below_threshold`, `rows_do_not_fit` (not one whole row fits the answer bound beside the text above the rows), `short_observation`, `missing_handle`; `None` when they were |
 | `for_report` | the router's verdict on whether the rows were wanted only for the final answer; recorded, it does not change the path |
 
 The router's error values are the error's class name (`CallTimedOut`,
@@ -782,7 +781,7 @@ the turn's full trajectory -- one row per step with its command, the context it
 ran in and the context it left, identifiers resolved to the labels retrieved
 listings gave them, the subjects found in its full output (from the archive),
 its outcome and the first 200 bytes of its output -- all passed through the
-capture policy before sending. Steps it judges unexecuted are listed in one note
+credential scrub before sending. Steps it judges unexecuted are listed in one note
 that replaces the finish observation; the agent may act on it or finish anyway.
 One note per turn, never with fewer than two iterations left in the current
 segment, never for optional or user-gated steps. The count the note states
@@ -900,8 +899,8 @@ block. Served rows still come only from a complete listing.
 Off unless `FW_FINISH_CHECK=jev` and `JEV_API_KEY` are both set;
 `FW_FINISH_CHECK_MODEL` pins the model (default `jev-1.13.0`). **Data egress:**
 the plan, the request and the ledger (commands, contexts, subject names, the
-head of each output) are sent to TypeSafe with only the capture policy's
-credential patterns scrubbed by default. A set `FW_FINISH_CHECK` that cannot
+head of each output) are sent to TypeSafe with only the credential scrub's
+patterns removed. A set `FW_FINISH_CHECK` that cannot
 take effect -- a value other than `jev`, `typesafe-sdk` not installed, or no
 `JEV_API_KEY` -- logs one warning per cause and the check stays off; an unset
 flag is silent. The checker is built once per model and key, so a rotated key
@@ -1003,8 +1002,8 @@ subjects, with the subject kind and `p_unmet`, never step or subject text
 `fw.finish_check` span, closed even when the check raises. With the check off
 no event is recorded. Install with the `jev` extra.
 
-Since 2026-09-27 the reasons also include `policy_withheld` (the capture policy
-withheld a value the check would send, at ledger build or at call time:
+Since 2026-09-27 the reasons also include `policy_withheld` (a value the check
+would send could not be sent redacted, at ledger build or at call time:
 nothing is sent, `requests` is 0, no warning, no `error_*` fields; spelled with
 an underscore, unlike the others), `subjects capped` (above) and `ledger
 incomplete` (above). `subjects capped` replaces `every step executed` /
@@ -1046,17 +1045,12 @@ it runs except the SDK log filter.
 **Activation.** A set flag that cannot take effect logs one warning per cause
 per process and the feature stays off. The causes are now: a value that is
 neither `jev` nor a registered provider's name; `typesafe-sdk` not installed;
-no `JEV_API_KEY`; a rejected `FW_JEV_BASE_URL` (fix-2so9); a capture profile
-that withholds command output -- one whose policy returns a badge for an
-opaque-payload value on the offload-observation path, such as `evidence` --
-or a `FW_OBS_CAPTURE_PROFILE` naming an unknown profile; and
-`FW_OFFLOAD_EVIDENCE_REDACTION=off` (fix-7tz5). A declared field policy that
-keeps observations whole is still allowed. The capture-policy causes read
-"`<FLAG>=jev but <cause>; <feature> stays off`" and are checked last, so an SDK
+no `JEV_API_KEY`; a rejected `FW_JEV_BASE_URL` (fix-2so9); and
+`FW_OFFLOAD_EVIDENCE_REDACTION=off` (fix-7tz5). The redaction cause reads
+"`<FLAG>=jev but <cause>; <feature> stays off`" and is checked last, so an SDK
 or key problem is reported first. Every value sent then passes
-`jev_client.egress`, which returns nothing to send when the stored form is or
-carries a capture badge, or when redaction is off: the per-value backstop
-behind `policy_withheld`.
+`jev_client.egress`, which returns nothing to send when redaction is off: the
+per-value backstop behind `policy_withheld`.
 
 **Endpoint** (fix-2so9). Both features send their key and payloads to
 `FW_JEV_BASE_URL`, default `https://api.typesafe.ai` (the SDK's own default),
@@ -1159,7 +1153,7 @@ channel, exactly like a chatbot conversation's.
 
 **Redaction happens when the evidence is written.** With
 `FW_OFFLOAD_EVIDENCE_REDACTION=on` — the default — a command response is stored
-as the trace sink's credential scrub and capture policy leave it: it redacts, it
+as the trace sink's credential scrub leaves it: it redacts, it
 does not truncate. Event text is protected the same way, because events carry
 search questions, reasoning and answers. `off` stores responses and events
 verbatim, and each row says which mode produced it. That is the developer

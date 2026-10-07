@@ -17,8 +17,8 @@ not depend on a model. If the embedding stack ever changes, these still pin what
 the numbers MEAN.
 
 **Honesty about absence.** The tests that matter most here are the ones where
-there is nothing to compare: absent plan text, a withheld value, a bounded one,
-an attempt with no recorded turns, one recorded run. Every one of them has a
+there is nothing to compare: absent plan text, an attempt with no recorded
+turns, one recorded run. Every one of them has a
 tempting wrong answer -- 1.0, 0, or "consistent" -- and each is checked to
 produce an explicit unknown instead.
 
@@ -36,7 +36,6 @@ import sqlite3
 import subprocess
 import threading
 from array import array
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -46,9 +45,7 @@ from fastworkflow.benchmark import setup
 from fastworkflow.experiment.runner import ExperimentController
 from fastworkflow.observability import best_run as best_run_module
 from fastworkflow.observability import comparison, consistency
-from fastworkflow.observability import feedback as fb
 from fastworkflow.observability import store as obs
-from fastworkflow.observability.capture_policy import CapturedValue
 from fastworkflow.run_chatbot import selection_api
 from fastworkflow.run_chatbot import server as run_chatbot_server
 from tests.test_chatbot_benchmarks import _request
@@ -753,49 +750,6 @@ class TestRunEvidence:
         assert run.evidence_complete is False
         assert any("turn-that-was-pruned" in item for item in run.unavailable)
 
-    def test_a_withheld_plan_is_withheld_and_a_bounded_one_is_labelled(
-        self, repeats, tmp_path
-    ):
-        """The capture policy's own envelopes, not a stand-in for them.
-
-        A removed plan must not read as "this run planned nothing", and a
-        bounded one must not be presented as the whole plan.
-        """
-        store = obs.ObservabilityStore(str(tmp_path / "envelopes.sqlite3"))
-        removed = CapturedValue(
-            classification="user-text", disposition="omit",
-            original_bytes=120, digest="sha256:deadbeef",
-            reason="omitted by evidence profile default",
-        ).to_envelope()
-        bounded = CapturedValue(
-            classification="controlled-vocabulary", disposition="bounded-text",
-            original_bytes=900, digest="sha256:cafe",
-            reason="bounded by evidence profile default", prefix=PLAN_OPEN,
-        ).to_envelope()
-
-        for turn_key, value in (("withheld-turn", removed), ("bounded-turn", bounded)):
-            row = _evidence_turn_row(
-                turn_key,
-                record=_record(turn_key, refs=[], outputs=[]),
-                answer=ANSWER_DONE,
-            )
-            span = _plan_span(f"{turn_key}-plan", turn_key, text="", start_ns=T0)
-            span.attributes["plan"] = value
-            _write(store, row, [span])
-
-        reader = comparison.StoreExecutionReader("envelopes", store)
-
-        withheld = consistency.collect_run_evidence(
-            _row_for("withheld-turn"), reader
-        )
-        assert withheld.plan.state == consistency.TEXT_WITHHELD
-        assert withheld.plan.withheld_segments == 1
-        assert "capture policy" in withheld.plan.reason
-
-        partial = consistency.collect_run_evidence(_row_for("bounded-turn"), reader)
-        assert partial.plan.state == consistency.TEXT_PRESENT
-        assert partial.plan.truncated_source is True
-
     def test_a_missing_last_turn_makes_the_final_answer_unknown(self, repeats):
         """The run's ENDING is what is missing, so nothing stands in for it.
 
@@ -863,43 +817,11 @@ class TestRunEvidence:
             metric["coverage_note"]
         )
 
-    def test_a_withheld_sibling_emission_makes_the_surviving_plan_partial(
-        self, tmp_path
-    ):
-        """One plan removed by the capture policy, one kept, in one turn."""
-        store = obs.ObservabilityStore(str(tmp_path / "mixed.sqlite3"))
-        removed = CapturedValue(
-            classification="user-text", disposition="omit",
-            original_bytes=120, digest="sha256:deadbeef",
-            reason="omitted by evidence profile default",
-        ).to_envelope()
-        row = _evidence_turn_row(
-            "mixed-turn",
-            record=_record("mixed-turn", refs=[], outputs=[]),
-            answer=ANSWER_DONE,
-        )
-        kept = _plan_span("mixed-a", "mixed-turn", text=PLAN_OPEN, start_ns=T0)
-        gone = _plan_span("mixed-b", "mixed-turn", text="", start_ns=T0 + 1)
-        gone.attributes["plan"] = removed
-        _write(store, row, [kept, gone])
-
-        reader = comparison.StoreExecutionReader("mixed", store)
-        run = consistency.collect_run_evidence(
-            _row_for("mixed-turn", "mixed"), reader
-        )
-
-        assert run.plan.state == consistency.TEXT_PRESENT
-        assert run.plan.withheld_segments == 1
-        assert run.plan.partial_source is True, (
-            "half a plan sequence compared as if it were the whole one"
-        )
-
-
 class TestRecordedOrder:
     """Which turn ended a run is read off the evidence, or it is unknown.
 
-    A reference's turn vector is an identity and not a chronology -- an
-    archived one names its turns newest-first (`fix-6v3n`) -- so the order the
+    A reference's turn vector is an identity and not a chronology -- nothing
+    promises it lists its turns in the order they ran (`fix-6v3n`) -- so the order the
     content is read in comes from what the turns themselves recorded. The
     authority is narrow on purpose: `ordinal` is dense from 1 WITHIN a
     conversation, and conversation ids are minted per channel, so ordinals from
@@ -1089,19 +1011,6 @@ def _choose_best(repeats, experiment_id, attempt, reason=None):
         expected_selection_id=summary["expected_selection_id"],
         provenance="human", reason=reason, **HUMAN,
     )
-
-
-def _row_for(turn_key, store_id="envelopes"):
-    """An attempt row naming one seeded turn, in the shape the routes emit."""
-    return {
-        "attempt": 1,
-        "comparable": True,
-        "execution_ref": {
-            "store_id": store_id,
-            "turn_keys": [turn_key],
-            "label": "attempt 1",
-        },
-    }
 
 
 # ----------------------------------------------------------------------
@@ -1419,279 +1328,6 @@ class TestAcrossExperiments:
         assert block["metric_identity_matches"] is False
         for delta in block["deltas"].values():
             assert delta["state"] == consistency.METRIC_UNKNOWN
-
-
-# ----------------------------------------------------------------------
-# The same metrics out of sealed evidence
-# ----------------------------------------------------------------------
-
-
-SEALED_EXPERIMENT = "sealed-candidate"
-
-
-def _sealed(repeats, tmp_path):
-    """The candidate experiment's evidence, archived and reopened read-only.
-
-    The manifest gives it a LOGICAL id of its own, which is how a workspace
-    addresses an experiment; the reference the route builds still carries the
-    local id the evidence itself records. Exercising that split is the point
-    of reading the archive through the real routing rather than the module.
-    """
-    from fastworkflow.observability.workspace import load_observability_workspace
-
-    from tests.test_observability_workspace import _manifest, _store_decl
-
-    archived = obs.ObservabilityStore(repeats["db"], migrate=False).archive_to(
-        str(tmp_path / "sealed-candidate.sqlite3")
-    )
-    manifest = _manifest(
-        tmp_path,
-        [_store_decl(archived, "sealed")],
-        experiments=[
-            {
-                "experiment_id": SEALED_EXPERIMENT,
-                "label": "the candidate, sealed",
-                "segments": [
-                    {
-                        "segment_id": "only",
-                        "store_id": "sealed",
-                        "local_experiment_id": repeats["candidate_id"],
-                    }
-                ],
-            }
-        ],
-    )
-    return load_observability_workspace(manifest), archived
-
-
-class TestSealedWorkspace:
-    """A coding agent reading an archive and a person reading the live page
-    must be quoting the same figures. An archive that answered differently --
-    or not at all -- would make every consistency number a statement about
-    which copy of the evidence somebody happened to open."""
-
-    def _read(self, workspace, experiment_id, task_id, **params):
-        return selection_api.handle_workspace_get(
-            workspace,
-            f"/api/experiments/{experiment_id}/tasks/{task_id}/consistency",
-            {key: [str(value)] for key, value in params.items()},
-        )
-
-    def test_sealed_evidence_gives_the_figures_the_live_route_gives(
-        self, repeats, tmp_path
-    ):
-        live = _consistency(repeats, repeats["candidate_id"])[1]
-        workspace, _archive = _sealed(repeats, tmp_path)
-
-        status, sealed = self._read(
-            workspace, SEALED_EXPERIMENT, repeats["task_id"]
-        )
-
-        assert status == 200
-        assert sealed["sealed"] is True
-        assert sealed["summary"]["step_counts"] == live["summary"]["step_counts"]
-        # Same identity, so the two are comparable rather than merely equal.
-        assert sealed["metric_identity"] == live["metric_identity"]
-        for metric in ("planning_similarity", "final_answer_similarity"):
-            assert (
-                sealed["summary"][metric]["pairs_computed"]
-                == live["summary"][metric]["pairs_computed"]
-            )
-            assert (
-                sealed["summary"][metric]["pairs_considered"]
-                == live["summary"][metric]["pairs_considered"]
-            )
-
-    def test_an_archived_run_reads_in_the_order_it_ran(self, repeats, tmp_path):
-        """The archive's answer, plan and steps are the live ones (fix-6v3n).
-
-        `ObservabilityWorkspace.attempts` builds `turn_refs` from `list_turns`,
-        which documents itself as newest-first, so an archived attempt's
-        reference NAMES turn 2 before turn 1. Content read off that vector ran
-        backwards: the run's final answer was the answer it opened with, a
-        replan in turn 2 was labelled turn 1, and the aligned steps were
-        aligned end-first.
-
-        `project_execution` now orders content by the recorded chronology
-        (`ordinal` within a conversation), so both copies of one run answer
-        identically no matter which order their references were filed in.
-        """
-        live = _consistency(repeats, repeats["candidate_id"])[1]
-        workspace, _archive = _sealed(repeats, tmp_path)
-        sealed = self._read(
-            workspace, SEALED_EXPERIMENT, repeats["task_id"]
-        )[1]
-
-        for attempt in (1, 2, 3):
-            here, there = _by_attempt(live, attempt), _by_attempt(sealed, attempt)
-            assert there["answer"] == here["answer"], (
-                f"attempt {attempt}: the archive's final answer is not the "
-                "live one"
-            )
-            assert there["plan"] == here["plan"], (
-                f"attempt {attempt}: the archive's plan sequence differs"
-            )
-            assert there["step_detail"] == here["step_detail"]
-            assert there["evidence"]["turn_order"] == (
-                comparison.TURN_ORDER_CHRONOLOGICAL
-            )
-            assert here["evidence"]["turn_order"] == (
-                comparison.TURN_ORDER_CHRONOLOGICAL
-            )
-
-    def test_the_archived_steps_run_in_the_order_the_archive_recorded(
-        self, repeats, tmp_path
-    ):
-        """Through the shared comparison route, which is what a reader opens.
-
-        The consistency figures above are counts, and a count survives being
-        read backwards. The step SEQUENCE does not, so it is asserted where it
-        shows: the archive's own alignment, against the live one.
-        """
-        workspace, _archive = _sealed(repeats, tmp_path)
-
-        def _steps(payload):
-            return [
-                (step["turn_index"], step["command_name"])
-                for step in payload["left"]["steps"]
-            ]
-
-        status, sealed = selection_api.handle_workspace_get(
-            workspace,
-            f"/api/experiments/{SEALED_EXPERIMENT}"
-            f"/tasks/{repeats['task_id']}/comparison",
-            {"left_attempt": ["1"], "right_attempt": ["3"], "view": ["steps"]},
-        )
-        live = _get_live_comparison(repeats, left=1, right=3)
-
-        assert status == 200
-        assert _steps(sealed) == _steps(live)
-        assert [turn["turn_key"] for turn in sealed["left"]["turns"]] == [
-            turn["turn_key"] for turn in live["left"]["turns"]
-        ]
-        assert sealed["left"]["answers"][-1]["answer"] == (
-            live["left"]["answers"][-1]["answer"]
-        )
-
-    def test_correcting_the_order_did_not_re_key_one_recorded_comment(
-        self, repeats, tmp_path
-    ):
-        """Content moved; identity did not, which is the whole constraint.
-
-        A comparison comment is anchored by `ref_id` and filed under a
-        `review_pair_key` derived from the two references AS THEY WERE FILED.
-        Sorting the reference vectors would have re-keyed every comment ever
-        written against an archived pair. So the vectors are untouched and only
-        the projected content is ordered: a reference and its reverse still
-        have DIFFERENT identities, and now project the SAME run.
-        """
-        workspace, _archive = _sealed(repeats, tmp_path)
-        sealed = self._read(
-            workspace, SEALED_EXPERIMENT, repeats["task_id"]
-        )[1]
-        reader = selection_api._reader(_open_control(repeats))
-        row = _by_attempt(_consistency(repeats, repeats["candidate_id"])[1], 1)
-        ref = comparison.ExecutionRef.from_mapping(row["execution_ref"])
-        assert len(ref.turn_keys) > 1, "needs a multi-turn run to have an order"
-        backwards = replace(ref, turn_keys=tuple(reversed(ref.turn_keys)))
-
-        forward = comparison.project_execution(ref, reader)
-        reverse = comparison.project_execution(backwards, reader)
-
-        # Same run, either way it was named.
-        assert [turn.turn_key for turn in forward.turns] == [
-            turn.turn_key for turn in reverse.turns
-        ]
-        assert forward.answers()[-1] == reverse.answers()[-1]
-        # Different identity, because that is what was filed and what old
-        # comments are anchored by.
-        assert ref.ref_id() != backwards.ref_id()
-        assert forward.ref.turn_keys == ref.turn_keys
-        assert reverse.ref.turn_keys == backwards.turn_keys
-
-        # And the archive's pair keys are still the archive's: an anchor built
-        # from its alignment rows resolves to the key its own pair row carries.
-        # Attempts 1 and 2 ran the same commands, so their alignment has rows
-        # with BOTH sides filled -- which is what a paired comment is written
-        # on.
-        status, compared = selection_api.handle_workspace_get(
-            workspace,
-            f"/api/experiments/{SEALED_EXPERIMENT}"
-            f"/tasks/{repeats['task_id']}/comparison",
-            {"left_attempt": ["1"], "right_attempt": ["2"], "view": ["steps"]},
-        )
-        assert status == 200
-        anchored = [
-            fb.FeedbackAnchors(
-                primary=fb.FeedbackTarget.from_mapping(
-                    dict(pair["anchors"]["left"], target_label="left")
-                ),
-                paired=fb.FeedbackTarget.from_mapping(
-                    dict(pair["anchors"]["right"], target_label="right")
-                ),
-            ).pair_key
-            for pair in compared["alignment"]["rows"]
-            if pair["anchors"]["left"] and pair["anchors"]["right"]
-        ]
-        assert anchored, "a two-sided row is what a paired comment is written on"
-        assert set(anchored) == {_pair(sealed, 1, 2)["review_pair_key"]}
-
-    def test_an_archive_records_no_best_run_and_says_so(self, repeats, tmp_path):
-        workspace, _archive = _sealed(repeats, tmp_path)
-
-        sealed = self._read(
-            workspace, SEALED_EXPERIMENT, repeats["task_id"]
-        )[1]
-
-        assert sealed["reference"]["usable"] is False
-        assert "selection control" in sealed["reference"]["reason"]
-        assert sealed["reference_rows"] == []
-        # The pair table is still there: the comparison is evidence, not a
-        # decision, and it is what a reader came for.
-        assert len(sealed["pairs"]) == 3
-
-    def test_reading_an_archive_writes_nothing_beside_it(self, repeats, tmp_path):
-        """Byte-for-byte, which a sealed file can be held to."""
-        workspace, archive = _sealed(repeats, tmp_path)
-        path = Path(archive["path"])
-        before = (path.stat().st_size, path.stat().st_mtime_ns, path.read_bytes())
-        beside = sorted(path.parent.iterdir())
-
-        assert self._read(
-            workspace, SEALED_EXPERIMENT, repeats["task_id"]
-        )[0] == 200
-
-        after = (path.stat().st_size, path.stat().st_mtime_ns, path.read_bytes())
-        assert before == after
-        assert sorted(path.parent.iterdir()) == beside, (
-            "a read of sealed evidence created a derived cache beside it"
-        )
-
-    def test_an_archived_pair_is_the_pair_the_archive_compares(
-        self, repeats, tmp_path
-    ):
-        """The row's key is the key the comparison it links to was filed under.
-
-        Checked against the ARCHIVE's own `/comparison`, which is where the
-        row deep-links; the live route's keys are a separate question, and
-        today a separate answer, because of the turn-order defect above.
-        """
-        workspace, _archive = _sealed(repeats, tmp_path)
-        sealed = self._read(
-            workspace, SEALED_EXPERIMENT, repeats["task_id"]
-        )[1]
-
-        status, comparison_payload = selection_api.handle_workspace_get(
-            workspace,
-            f"/api/experiments/{SEALED_EXPERIMENT}"
-            f"/tasks/{repeats['task_id']}/comparison",
-            {"left_attempt": ["1"], "right_attempt": ["3"]},
-        )
-
-        assert status == 200
-        assert _pair(sealed, 1, 3)["review_pair_key"] == (
-            comparison_payload["review_pair_key"]
-        )
 
 
 # ----------------------------------------------------------------------

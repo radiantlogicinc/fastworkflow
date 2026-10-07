@@ -4,8 +4,8 @@
 until now read them back. This module is that reader, and it is a PROJECTION
 only: it opens no artifact directory, runs no training, downloads nothing and
 never writes. Everything it reports comes from rows already in the store, which
-is what lets it run against a sealed post-mortem snapshot and against a
-workspace's read-only stores on equal terms.
+is what lets it run against a sealed post-mortem snapshot and against the
+live store on equal terms.
 
 Three rules shape the whole file.
 
@@ -18,13 +18,9 @@ renames, averages or re-scales them into one. A viewer that saw "score: 0.93"
 would reasonably read it as "93% of tasks passed", which the number does not
 say about anything.
 
-**Absence is reported, never filled in.** A run whose metrics were withheld by
-the capture policy, or whose JSON will not parse, is a different state from a
-run that recorded nothing and from a run with no training evidence at all;
-`metrics_status` separates them. `record_train_run` classifies the metrics blob
-as `opaque-payload`, so an evidence-profile deployment legitimately stores a
-policy envelope there instead of the numbers, and a reader that rendered that
-envelope as data would be reporting a badge as a measurement.
+**Absence is reported, never filled in.** A run whose metrics JSON will not
+parse is a different state from a run that recorded nothing and from a run with
+no training evidence at all; `metrics_status` separates them.
 
 **A runtime link needs a recorded identity on both sides.** The only link this
 module will draw is an exact match between the train run's recorded
@@ -45,20 +41,16 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
-from fastworkflow.observability.capture_policy import is_capture_envelope
-
 # How many experiments one runtime-link lookup will walk. A link is a
 # convenience on a detail page, not a search: an unbounded scan of every
 # experiment and every attempt of a large store would make opening one training
 # run cost the whole experiment history.
 RUNTIME_LINK_EXPERIMENT_SCAN = 100
 
-# `metrics_status` vocabulary. Four states, because collapsing any two of them
-# loses the difference between "we know there was nothing" and "we are not
-# allowed to tell you" -- which is exactly what a reader of a redacted evidence
-# bundle needs to see.
+# `metrics_status` vocabulary. Three states, because collapsing any two of them
+# loses the difference between "we know there was nothing" and "we could not
+# read what was there".
 METRICS_RECORDED = "recorded"
-METRICS_WITHHELD = "withheld"
 METRICS_UNREADABLE = "unreadable"
 METRICS_ABSENT = "absent"
 
@@ -93,8 +85,6 @@ def decode_metrics(raw: Any) -> tuple[str, dict[str, Any]]:
         decoded = json.loads(raw)
     except (TypeError, ValueError):
         return METRICS_UNREADABLE, {}
-    if is_capture_envelope(decoded):
-        return METRICS_WITHHELD, {}
     if not isinstance(decoded, dict):
         return METRICS_UNREADABLE, {}
     return METRICS_RECORDED, decoded
@@ -158,8 +148,8 @@ def training_run_summary(row: dict[str, Any]) -> dict[str, Any]:
 
     Cheap by construction: the whole metrics blob is already in the row, so
     this costs a JSON parse and no further reads. The columns outside
-    `metrics_json` (run_id, fingerprint, timestamps) are unpoliced by
-    `record_train_run`, which is why a withheld run still lists.
+    `metrics_json` (run_id, fingerprint, timestamps) are stored beside it,
+    which is why a run whose metrics are unreadable still lists.
     """
     status, metrics = decode_metrics(row.get("metrics_json"))
     version_id = _text(metrics.get("version_id"))
@@ -326,7 +316,6 @@ __all__ = [
     "METRICS_ABSENT",
     "METRICS_RECORDED",
     "METRICS_UNREADABLE",
-    "METRICS_WITHHELD",
     "RUNTIME_LINK_EXPERIMENT_SCAN",
     "decode_metrics",
     "list_training_runs",

@@ -2092,8 +2092,8 @@ class WorkflowExecutionContext:
     # _process_message and _process_action both open fw.agent.tool_call and both
     # owe §12.1.1's shared capture, so the projection lives here once rather than
     # being written twice and drifting. Everything below is additive recording:
-    # no fastWorkflow control flow reads a context handle or a consequence class,
-    # which arch §17.3 requires.
+    # no fastWorkflow control flow reads a recorded context type or a
+    # consequence class, which arch §17.3 requires.
     #
     # "Here" is in fact `tracing`, because workflow_agent.py
     # opens the same span from a third site and owes the same record. These two
@@ -2103,8 +2103,8 @@ class WorkflowExecutionContext:
 
     def _context_before(
         self, span, workflow: Optional[fastworkflow.Workflow] = None
-    ) -> Optional[dict]:
-        """The active context handle before a command runs, or None.
+    ) -> Optional[str]:
+        """The active context type before a command runs, or None.
 
         Gated on a span having actually opened, matching the existing
         attribute-prep rule at this seam: with observability off this must cost
@@ -2116,11 +2116,11 @@ class WorkflowExecutionContext:
         self,
         span,
         command_output: fastworkflow.CommandOutput,
-        context_before: Optional[dict],
+        context_before: Optional[str],
         workflow: Optional[fastworkflow.Workflow] = None,
         command_name: Optional[str] = None,
     ) -> dict:
-        """Call-id, context-before/after and consequence for one command.
+        """Call-id, context type before/after and consequence for one command.
 
         The call id is read off the CommandOutput rather than minted here: the
         dispatcher that ran the command already stamped it, and minting a second

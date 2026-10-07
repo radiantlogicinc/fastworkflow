@@ -5,12 +5,9 @@ and skip unless TEST_JSDOM_ROOT is set (run them through tests.browser_validatio
 """
 import json
 
-from fastworkflow.observability import store as obs
 from fastworkflow.run_chatbot import server as run_chatbot_server
-from tests.test_chatbot_benchmarks import _request, experiment_server, workflow_dir
+from tests.test_chatbot_benchmarks import _request, _turn_row, experiment_server, workflow_dir
 from tests.test_chatbot_hierarchy import _run_dom, hierarchy_server
-from tests.test_observability_workspace import _manifest, _store_decl, _turn_row
-from tests.test_review_integration import _request as _review_request, _serve
 
 
 def _seed_turn(store, key, message, spans, *, channel='chat', cid=9):
@@ -68,26 +65,3 @@ def test_page_links_round_trip_dom(hierarchy_server):
     task_id = data['tasks'][0]['task_id']
     _run_dom('chatbot_page_link_dom.cjs', server, eid, spec['benchmark_id'], task_id,
              timeout=120)
-
-
-def test_workspace_page_links_and_review_fragment_dom(tmp_path, monkeypatch):
-    monkeypatch.setenv('FASTWORKFLOW_STATE_ROOT', str(tmp_path / 'state'))
-    live = obs.ObservabilityStore(str(tmp_path / 'live.sqlite3'))
-    _seed_turn(live, 'review-turn', 'a reviewed turn', _recorded_spans('rv'))
-    archive = obs.ObservabilityStore(str(tmp_path / 'live.sqlite3'), migrate=False).archive_to(
-        str(tmp_path / 'sealed.sqlite3'))
-    manifest = _manifest(tmp_path, [_store_decl(archive, 'sealed')])
-    with _serve(manifest) as server:
-        status, created = _review_request(server, 'POST', '/api/review/assignments', {
-            'id': 'page-link-review',
-            'rater_slots': ['rater-a', 'rater-b'],
-            'adjudicator_slots': ['adjudicator-a'],
-            'blinded': True,
-            'rows': [{'id': 'row-1', 'turn_ref': {
-                'store_id': 'sealed', 'logical_turn_key': 'review-turn'}}],
-            'questions': [{'id': 'verdict', 'prompt': 'Verdict',
-                           'type': 'single-select', 'vocabulary': ['alpha', 'beta']}],
-        })
-        assert status == 201, created
-        _run_dom('chatbot_page_link_review_dom.cjs', server,
-                 created['rater_capabilities']['rater-a'], timeout=80)

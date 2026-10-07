@@ -908,9 +908,32 @@ def test_absent_effect_contract_reads_as_unknown_never_read_only():
     assert metadata.effect_kind("App/never_heard_of_it") == "unknown"
 
 
-def test_invalid_capture_classification_is_rejected():
-    with pytest.raises(ValidationError):
-        CommandDeclaration(capture={"uid": "secret-sauce"})
+def test_a_capture_declaration_is_an_unknown_field():
+    with pytest.raises(ValidationError, match="capture"):
+        CommandDeclaration(capture={"uid": "identifier"})
+
+
+def test_a_handle_projector_declaration_is_an_unknown_field():
+    with pytest.raises(ValidationError, match="handle_projector"):
+        ContextDeclaration(occupiable=True, handle_projector="todo/v1")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"schema_version": 1, "manifest_version": "1.0.0", "commands": '
+        '{"App/get": {"capture": {"uid": "identifier"}}}}',
+        '{"schema_version": 1, "manifest_version": "1.0.0", "contexts": '
+        '{"App": {"occupiable": true, "handle_projector": "app/v1"}}}',
+    ],
+    ids=["command-capture", "context-handle-projector"],
+)
+def test_a_manifest_on_disk_with_a_removed_field_fails_conformance(tmp_path, body):
+    (tmp_path / "workflow_runtime.json").write_text(body, encoding="utf-8")
+    with pytest.raises(ManifestConformanceError):
+        load_manifest(str(tmp_path))
+    with pytest.raises(ManifestConformanceError):
+        check_startup_conformance(str(tmp_path), env={})
 
 
 def test_manifest_absent_from_disk_loads_as_none(tmp_path):
@@ -928,7 +951,6 @@ def test_manifest_on_disk_round_trips(tmp_path):
                     kind="descend", target_context="Permission", remains_active=True
                 ),
                 effect=EffectContract(kind="read_only"),
-                capture={"permission_uid": "identifier"},
             )
         },
     )
@@ -1135,7 +1157,6 @@ def test_workflow_may_supply_a_declaration_the_core_manifest_omits():
             commands={
                 "core/quiet": CommandDeclaration(
                     navigation_effect=NavigationEffect(kind="ascend"),
-                    capture={"uid": "identifier"},
                 )
             }
         ),
@@ -1143,21 +1164,6 @@ def test_workflow_may_supply_a_declaration_the_core_manifest_omits():
         core_manifest=core,
     )
     assert metadata.navigation_effect("core/quiet").kind == "ascend"
-    assert metadata.capture_classification("core/quiet", "uid") == "identifier"
-
-
-def test_workflow_cannot_reclassify_a_core_capture_field():
-    core = RuntimeManifest(
-        schema_version=1,
-        manifest_version="1.0.0",
-        commands={"core/lookup": CommandDeclaration(capture={"uid": "identifier"})},
-    )
-    with pytest.raises(ManifestConformanceError, match="reclassifies 'uid'"):
-        merge_and_gate(
-            _manifest(commands={"core/lookup": CommandDeclaration(capture={"uid": "user-text"})}),
-            deployment_features={},
-            core_manifest=core,
-        )
 
 
 def test_every_problem_is_reported_at_once():

@@ -654,6 +654,29 @@ def compute_commands_source_fingerprint(workflow_folderpath: str) -> str:
     return hashlib.sha256(repr(sorted(entries)).encode("utf-8")).hexdigest()
 
 
+def _recorded_modules_exist(directory: "CommandDirectory") -> bool:
+    """Whether every absolute module path the snapshot recorded is still on disk.
+
+    The fingerprint does not cover fastworkflow's own core commands, whose
+    absolute paths the snapshot also records, so a moved or reinstalled
+    fastworkflow leaves a snapshot that fingerprints clean but points at files
+    that are gone. Not folded into the fingerprint because checkpoint namespaces
+    are keyed on it too.
+    """
+    paths = [
+        path
+        for metadata in directory.map_command_2_metadata.values()
+        for path in (
+            metadata.parameter_extraction_signature_module_path,
+            metadata.response_generation_module_path,
+        )
+    ]
+    paths.extend(
+        metadata.context_module_path for metadata in directory.map_context_2_metadata.values()
+    )
+    return all(os.path.isfile(path) for path in paths if path and os.path.isabs(path))
+
+
 @lru_cache(maxsize=32)
 def get_cached_command_directory(workflow_folderpath: str) -> CommandDirectory:
     """Return a cached CommandDirectory, rebuilding only when sources change.
@@ -678,7 +701,7 @@ def get_cached_command_directory(workflow_folderpath: str) -> CommandDirectory:
     if cache_file.exists():
         with contextlib.suppress(Exception):
             cached = CommandDirectory.model_validate_json(cache_file.read_text())
-            if cached.source_fingerprint == current_fingerprint:
+            if cached.source_fingerprint == current_fingerprint and _recorded_modules_exist(cached):
                 return cached
 
     # (Re)build and persist (save() re-stamps the fingerprint)

@@ -1,11 +1,9 @@
 """Feedback uses real stores and HTTP, without model or backend calls."""
-import hashlib
 import http.server
 import json
 import os
 import re
 import shutil
-import sqlite3
 import subprocess
 import threading
 import time
@@ -15,15 +13,10 @@ from pathlib import Path
 
 import pytest
 
-from fastworkflow import state_paths
 from fastworkflow.run_chatbot import server as run_chatbot_server
 from fastworkflow.observability import feedback as fb
-from fastworkflow.observability import control
 from fastworkflow.observability import store as obs
-from tests.test_chatbot_benchmarks import _request
-from tests.test_observability_workspace import (
-    _manifest, _seed_archive, _store_decl, _turn_row,
-)
+from tests.test_chatbot_benchmarks import _request, _turn_row
 
 # Fixtures by plugin, not by import: see tests/test_task_feedback.py.
 pytest_plugins = ("tests.test_chatbot_benchmarks",)
@@ -289,212 +282,6 @@ def test_the_taxonomy_route_serves_the_same_vocabulary_as_the_module(experiment_
     assert status == 200 and data == fb.taxonomy_payload()
 
 
-def test_workspace_feedback_with_no_live_db_is_refused_and_writes_nothing(
-    workspace_server,
-):
-    """A comment on sealed evidence belongs in its workflow's live DB (§2.5).
-
-    This manifest names no workflow, so there is no live DB on this machine
-    to hold it: the write is refused with a message saying so, rather than
-    being appended to the archive or to a new file beside it. The read still
-    answers, from the archive alone.
-    """
-    server, _workflow, _before = workspace_server
-    stores = server.workspace.stores()
-    sid = stores[0]['store_id']
-    descriptor = server.workspace.registry.descriptor(sid)
-    before = hashlib.sha256(descriptor.path.read_bytes()).hexdigest()
-    beside = sorted(path.name for path in descriptor.path.parent.iterdir())
-    read = '/api/feedback-notes?turn_key=turn&store_id=' + sid
-    status, data = _request(server, read)
-    assert status == 200
-    assert data == {"feedback": [], "read_only": True, "annotated": True}
-    status, refused = _request(
-        server, '/post_feedback?turn_key=turn&store_id=' + sid, 'POST', payload(),
-    )
-    assert status == 409, refused
-    assert "live database" in refused['error']
-    assert hashlib.sha256(descriptor.path.read_bytes()).hexdigest() == before
-    assert sorted(path.name for path in descriptor.path.parent.iterdir()) == beside
-    assert _request(server, read)[1]['feedback'] == []
-
-
-@pytest.fixture
-def two_sealed_stores(tmp_path):
-    """Two REAL sealed archives, one logical experiment across both.
-
-    The shape .19.1 names directly: a comparison whose two executions live in
-    their own authorized stores. Nothing here is a stand-in — each archive is
-    produced by `ObservabilityStore.archive_to` and declared in a manifest
-    that names its digest and its evidence identity, and the workflow whose
-    live DB holds the comments made about them.
-    """
-    workflow = tmp_path / "archived_workflow"
-    workflow.mkdir()
-    obs.ObservabilityStore(state_paths.observability_db(str(workflow)))
-    left = _seed_archive(
-        tmp_path, "left", experiment_id="left-local",
-        task_id="task-left", turn_key="turn-left",
-    )
-    right = _seed_archive(
-        tmp_path, "right", experiment_id="right-local",
-        task_id="task-right", turn_key="turn-right",
-    )
-    manifest = _manifest(
-        tmp_path,
-        [_store_decl(left, "left"), _store_decl(right, "right")],
-        experiments=[{
-            "experiment_id": "logical",
-            "label": "logical",
-            "segments": [
-                {"segment_id": "a", "store_id": "left",
-                 "local_experiment_id": "left-local"},
-                {"segment_id": "b", "store_id": "right",
-                 "local_experiment_id": "right-local"},
-            ],
-        }],
-        workflow_folderpath=str(workflow),
-    )
-    server = run_chatbot_server.ChatbotServer(
-        port=0, workspace_manifest_path=str(manifest)
-    )
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    digests = {
-        side["path"]: hashlib.sha256(Path(side["path"]).read_bytes()).hexdigest()
-        for side in (left, right)
-    }
-    yield server, left, right, digests
-    server.shutdown()
-    thread.join(timeout=5)
-
-
-def _sealed_comments(server):
-    live = state_paths.observability_db(server.workspace.workflow_folderpath)
-    return control.rows(
-        obs.ReadOnlyObservabilityStore(live), "SELECT * FROM sealed_turn_comments"
-    )
-
-
-def _paired_note(right, *, store_id=None, turn_key="turn-right"):
-    return {
-        "target_kind": "turn", "span_ids": [], "target_label": "Turn",
-        "provenance": "human", "category": "conclusions",
-        "subcategory": "what_went_right",
-        "comment": "the left archive recovered where the right one gave up",
-        "paired": {
-            "store_id": store_id or right["store_identity"],
-            "turn_keys": [turn_key],
-            "experiment_id": "right-local", "task_id": "task-right",
-            "attempt": 1, "target_kind": "turn", "span_ids": [],
-            "target_label": "Turn",
-        },
-    }
-
-
-def test_a_comparison_across_two_sealed_archives_is_recordable(two_sealed_stores):
-    """P1 .19.1: paired executions in their OWN authorized stores.
-
-    The comment names a turn in the left archive and a turn in the right one.
-    It is recorded in mutable annotation storage beside the left archive,
-    both archives' bytes are untouched, and the comment appears ONCE in each
-    of the two tasks' Feedback views with its full pair reference intact.
-    Before this, a workspace refused the write outright, which left the one
-    kind of comment a two-store comparison exists to produce unrecordable.
-    """
-    server, left, right, digests = two_sealed_stores
-    write = "/post_feedback?turn_key=turn-left&store_id=left"
-    status, written = _request(server, write, "POST", _paired_note(right))
-    assert status == 201, written
-    row = written["feedback"][0]
-    assert row["pair_key"]
-    assert row["paired"]["ref"]["turn_keys"] == ["turn-right"]
-    assert row["paired"]["ref"]["store_id"] == right["store_identity"]
-    assert row["anchors"]["primary"]["ref"]["turn_keys"] == ["turn-left"]
-
-    # Once in each task's view, and the same row both times.
-    def task_view(task_id):
-        status, data = _request(
-            server,
-            "/api/workspace/task-feedback?experiment=logical&task=" + task_id,
-        )
-        assert status == 200, data
-        return data
-
-    from_left = task_view("task-left")
-    from_right = task_view("task-right")
-    assert from_left["total"] == from_right["total"] == 1
-    assert (
-        from_left["feedback"][0]["feedback_uid"]
-        == from_right["feedback"][0]["feedback_uid"]
-        == row["feedback_uid"]
-    )
-    # The pair identity survives the round trip through the read, so a client
-    # can link BOTH sides from either task's view.
-    shown = from_right["feedback"][0]
-    assert shown["pair_key"] == row["pair_key"]
-    assert shown["anchors"]["primary"]["ref"]["turn_keys"] == ["turn-left"]
-    assert shown["paired"]["ref"]["turn_keys"] == ["turn-right"]
-
-    # Neither sealed archive moved a byte, and neither grew a journal.
-    assert digests == {
-        side["path"]: hashlib.sha256(Path(side["path"]).read_bytes()).hexdigest()
-        for side in (left, right)
-    }
-    assert not any(
-        Path(f"{side['path']}{suffix}").exists()
-        for side in (left, right)
-        for suffix in ("-wal", "-shm")
-    )
-    # The note is in the live DB, keyed by the left archive, not inside it.
-    assert [row["archive_sha256"] for row in _sealed_comments(server)] == [
-        left["sha256"]
-    ]
-    with sqlite3.connect(f"file:{left['path']}?mode=ro", uri=True) as evidence:
-        assert evidence.execute(
-            "SELECT COUNT(*) FROM human_feedback"
-        ).fetchone()[0] == 0
-
-
-def test_a_paired_reference_to_an_undeclared_store_is_still_refused(
-    two_sealed_stores,
-):
-    """Authorization is the manifest declaration, not the request.
-
-    Widening the workspace to resolve a paired reference must not widen it to
-    ANY store id a client cares to name: the identity has to be one the
-    manifest declares, or the write is refused and nothing is recorded.
-    """
-    server, left, right, digests = two_sealed_stores
-    write = "/post_feedback?turn_key=turn-left&store_id=left"
-    status, error = _request(
-        server, write, "POST",
-        _paired_note(right, store_id="sha256:" + "0" * 64),
-    )
-    assert status == 409, error
-    assert "no workspace store declares evidence identity" in error["error"]
-    assert digests == {
-        side["path"]: hashlib.sha256(Path(side["path"]).read_bytes()).hexdigest()
-        for side in (left, right)
-    }
-    status, data = _request(
-        server, "/api/workspace/task-feedback?experiment=logical&task=task-left"
-    )
-    assert status == 200 and data["total"] == 0
-
-
-def test_a_paired_reference_to_a_turn_the_other_archive_lacks_is_refused(
-    two_sealed_stores,
-):
-    """The declared store is opened and actually checked, not just named."""
-    server, left, right, _digests = two_sealed_stores
-    status, error = _request(
-        server, "/post_feedback?turn_key=turn-left&store_id=left", "POST",
-        _paired_note(right, turn_key="no-such-turn"),
-    )
-    assert status == 400, error
-
-
 class _DelayingProxy(http.server.BaseHTTPRequestHandler):
     """A real HTTP hop in front of the real server, slow on one path.
 
@@ -514,7 +301,7 @@ class _DelayingProxy(http.server.BaseHTTPRequestHandler):
     # `attachTraceHierarchy` cannot align it into the rail) at the moment the
     # navigation response lands. That is the window, and these two numbers are
     # the only reason a test can be inside it every time.
-    delays = {"/api/workspace/trace/": 1.5, "/api/navigation": 0.4}
+    delays = {"/api/spans/": 1.5, "/api/navigation": 0.4}
     protocol_version = "HTTP/1.1"
 
     def log_message(self, *args):  # noqa: D102 - quiet under pytest
@@ -560,9 +347,10 @@ class _DelayingProxy(http.server.BaseHTTPRequestHandler):
 
 
 @pytest.fixture
-def slow_navigation_proxy(two_sealed_stores):
-    """The two-store workspace, reached through the delaying hop."""
-    server, left, right, digests = two_sealed_stores
+def slow_navigation_proxy(experiment_server):
+    """The live server with recorded turns, reached through the delaying hop."""
+    server, store = experiment_server
+    seed(store)
     handler = type(
         "_BoundDelayingProxy",
         (_DelayingProxy,),
@@ -571,7 +359,7 @@ def slow_navigation_proxy(two_sealed_stores):
     proxy = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=proxy.serve_forever, daemon=True)
     thread.start()
-    yield f"http://127.0.0.1:{proxy.server_port}/?token={server.token}", digests
+    yield f"http://127.0.0.1:{proxy.server_port}/?token={server.token}"
     proxy.shutdown()
     proxy.server_close()
     thread.join(timeout=5)
@@ -580,14 +368,11 @@ def slow_navigation_proxy(two_sealed_stores):
 def test_a_selected_turn_survives_the_navigation_refresh(slow_navigation_proxy):
     """A background navigation read must not repaint over an open trace.
 
-    Found as an intermittent failure of the composer test below and diagnosed
-    as a product race, not a test artifact: `refreshConvs` repainted the
-    "No conversations yet" placeholder whenever the rail had no path to the
-    open record, and `attachTraceHierarchy` can only supply that path once the
-    turn's trace has FINISHED loading. Anything selected and still loading was
-    fair game — and in workspace mode, where the rail may have no path to a
-    scoped turn at all, every periodic refresh could do it, not just the
-    first.
+    Diagnosed as a product race, not a test artifact: `refreshConvs`
+    repainted the "No conversations yet" placeholder whenever the rail had no
+    path to the open record, and `attachTraceHierarchy` can only supply that
+    path once the turn's trace has FINISHED loading. Anything selected and
+    still loading was fair game.
 
     Deterministic because `/api/navigation` is delayed by a real HTTP hop, so
     the refresh reliably lands inside the window rather than sometimes.
@@ -597,51 +382,13 @@ def test_a_selected_turn_survives_the_navigation_refresh(slow_navigation_proxy):
         pytest.skip("Set TEST_JSDOM_ROOT to run DOM integration with jsdom")
     if not shutil.which("node"):
         pytest.skip("Node is needed to execute UI integration tests")
-    url, digests = slow_navigation_proxy
+    url = slow_navigation_proxy
     script = Path(__file__).with_name("chatbot_nav_refresh_race_dom.cjs")
     result = subprocess.run(
-        ["node", str(script), dependency, url, "left", "turn-left"],
+        ["node", str(script), dependency, url, "turn-a"],
         capture_output=True, text=True, timeout=180,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert digests == {
-        path: hashlib.sha256(Path(path).read_bytes()).hexdigest()
-        for path in digests
-    }
-
-
-def test_the_composer_works_on_sealed_evidence_in_a_real_dom(two_sealed_stores):
-    """Clicked, on the branch HTTP tests cannot see.
-
-    `renderFeedback` decides whether to show the composer at all from the
-    `read_only`/`annotated` pair the server sends back. Every server-side
-    assertion in this file passes against a page that hides the box, which
-    would leave a person looking at a sealed archive with nothing to type
-    into — the exact human/agent parity .19.1 asks for. So this drives the
-    real page: type, classify, save, and find the comment in the task view,
-    with the archive's bytes checked here afterwards.
-    """
-    dependency = os.environ.get("TEST_JSDOM_ROOT")
-    if not dependency:
-        pytest.skip("Set TEST_JSDOM_ROOT to run DOM integration with jsdom")
-    if not shutil.which("node"):
-        pytest.skip("Node is needed to execute UI integration tests")
-    server, left, right, digests = two_sealed_stores
-    script = Path(__file__).with_name("chatbot_annotated_feedback_dom.cjs")
-    result = subprocess.run(
-        ["node", str(script), dependency,
-         f"http://127.0.0.1:{server.port}/?token={server.token}",
-         "left", "turn-left", "logical", "task-left"],
-        capture_output=True, text=True, timeout=180,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert digests == {
-        side["path"]: hashlib.sha256(Path(side["path"]).read_bytes()).hexdigest()
-        for side in (left, right)
-    }
-    assert {row["archive_sha256"] for row in _sealed_comments(server)} == {
-        left["sha256"]
-    }, "the comment went to the live DB, keyed by the archive"
 
 
 def test_experiment_analysis_route_is_gone(experiment_server):

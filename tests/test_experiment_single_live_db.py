@@ -276,7 +276,6 @@ def test_an_ad_hoc_run_under_an_overridden_root_warns_once(tmp_path, caplog):
 @pytest.fixture
 def live(tmp_path, monkeypatch):
     """Two finished experiments and an ad-hoc turn in one live DB."""
-    monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
     folder = str(tmp_path / "workflow")
     db_path = state_paths.observability_db(folder)
     store = obs.ObservabilityStore(db_path)

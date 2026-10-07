@@ -46,10 +46,9 @@ from tests.test_trace_diagnosis import (
 )
 
 # Bound by assignment rather than imported by name: pytest registers a fixture
-# under the name it is bound to either way, but a test taking `workspace_server`
+# under the name it is bound to either way, but a test taking `workflow_dir`
 # as a parameter would be flagged as redefining an import (F811).
 workflow_dir = benchmark_fixtures.workflow_dir
-workspace_server = benchmark_fixtures.workspace_server
 
 # Above the page's own scan bound, so the first request cannot reach the end of
 # the store and the client must continue to answer at all.
@@ -107,8 +106,8 @@ def _seed(store: obs.ObservabilityStore) -> None:
         ],
     )
 
-    # Two handles of the SAME type. Every handle this build writes is
-    # type-only, so this proves nothing either way and must read as unknown.
+    # Two equal context TYPES. A type names a class, not an instance, so this
+    # proves nothing either way and must read as unknown.
     _write(
         store,
         _turn_row(SAME_TYPE, record=_record(SAME_TYPE, refs=[("c1", 1, f"{SAME_TYPE}-ex")],
@@ -492,19 +491,19 @@ def test_navigation_reports_where_it_went(diagnosis_server):
     assert navigation["from"] == "Workspace" and navigation["to"] == "Project"
 
 
-def test_two_handles_of_one_type_do_not_prove_the_context_stayed_put(
+def test_two_equal_context_types_do_not_prove_the_context_stayed_put(
     diagnosis_server,
 ):
     """The limitation the UI must not paper over.
 
-    `tracing.context_handle` records `instance_key=None`, so every handle is
-    type-only. Equal types are consistent with having navigated between two
+    The span records the context's type name, not the instance. Equal types are
+    consistent with having navigated between two
     instances of that type, and the honest answer is that nobody recorded it.
     """
     server, _store = diagnosis_server
     navigation = _detail(server, SAME_TYPE)["diagnosis"]["steps"][0]["navigation"]
     assert navigation["state"] == diag.NAV_UNKNOWN
-    assert navigation["basis"] == "type_only_handles"
+    assert navigation["basis"] == "same_context_type"
     assert "context_navigation" not in _detail(server, SAME_TYPE)["diagnosis"]["markers"]
 
 
@@ -557,64 +556,6 @@ def test_the_search_and_the_opened_turn_agree(diagnosis_server):
 # ----------------------------------------------------------------------
 # Scope: a search never widens past the store the caller opened
 # ----------------------------------------------------------------------
-
-
-def test_a_workspace_search_must_name_its_store(workspace_server):
-    server, _workflow, _before = workspace_server
-    status, data = _request(server, "/api/workspace/turns")
-    assert status == 400
-    assert "store_id" in data["error"]
-
-
-def test_a_workspace_search_refuses_a_store_the_manifest_does_not_name(
-    workspace_server,
-):
-    server, _workflow, _before = workspace_server
-    status, data = _request(server, "/api/workspace/turns?store_id=somewhere-else")
-    assert status == 404, data
-    assert "somewhere-else" in data["error"]
-
-
-def test_a_workspace_search_answers_within_the_named_store(workspace_server):
-    server, _workflow, _before = workspace_server
-    status, stores = _request(server, "/api/workspace/stores")
-    assert status == 200
-    store_id = stores["stores"][0]["store_id"]
-    data = _turns_workspace(server, store_id, "limit=5")
-    assert data["store_id"] == store_id
-    assert data["total_matched"] >= 1
-    assert all("diagnosis" in row for row in data["turns"])
-
-
-def test_the_unscoped_search_is_refused_and_names_the_scoped_one(workspace_server):
-    server, _workflow, _before = workspace_server
-    status, data = _request(server, "/api/turns")
-    assert status == 400
-    assert "/api/workspace/turns" in data["error"], (
-        "a refusal that does not say what to do instead is a dead end"
-    )
-
-
-def _turns_workspace(server, store_id: str, query: str) -> dict:
-    status, data = _request(
-        server, f"/api/workspace/turns?store_id={store_id}&" + query
-    )
-    assert status == 200, data
-    return data
-
-
-def test_a_workspace_read_does_not_modify_the_archive(workspace_server, tmp_path):
-    """A sealed archive is evidence; searching it must not touch its bytes."""
-    server, _workflow, _before = workspace_server
-    status, stores = _request(server, "/api/workspace/stores")
-    store_id = stores["stores"][0]["store_id"]
-    # The manifest names its stores relatively; resolving against the manifest
-    # is the workspace's own rule and is not a path the test invents.
-    path = Path(server.workspace.manifest_path).parent / stores["stores"][0]["path"]
-    before = (path.stat().st_size, path.stat().st_mtime_ns, path.read_bytes())
-    _turns_workspace(server, store_id, "markers_any=step_error&limit=5")
-    after = (path.stat().st_size, path.stat().st_mtime_ns, path.read_bytes())
-    assert before == after
 
 
 # ----------------------------------------------------------------------

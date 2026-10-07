@@ -1,15 +1,7 @@
 /* WHERE the compare view reads each side of a pair from, driven in a real DOM.
  *
  * The reviewer-required half of fix-9eg.17.4: every deep link and every inline
- * artifact preview must be scoped to the database that RECORDED that side, and
- * the two ways of getting it wrong are both invisible in a one-store fixture.
- *
- * Mode `workspace`: two sealed archives whose attempts share the logical turn
- * key `shared-turn` and both record an artifact under `roster.txt` with
- * DIFFERENT values. A preview that read "the turn" without naming the store, or
- * named the wrong store, would show one side's value in both panes and nobody
- * would notice. Sealed routes also refuse an unscoped read outright, so a link
- * built the live way fails closed instead of quietly.
+ * artifact preview must be scoped to the database that RECORDED that side.
  *
  * Mode `adhoc`: a live experiment recorded in the workflow's default store with
  * no authoring registration -- typed at a prompt rather than declared. Its two
@@ -155,21 +147,9 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
     .find(node => node.textContent === 'Open the turn that recorded it');
   assert.ok(open, 'the artifact still links to the turn that recorded it');
   open.click();
-  if (plan.mode === 'workspace') {
-    /* Addressed by store id, which is the only thing that separates two
-       archives holding the same logical turn key. */
-    await until(() => w.state.storeId === plan.right_store,
-      'the right side\'s own archive to be selected, not the left\'s');
-    await until(() => w.state.turn, 'the scoped turn to load');
-    assert.equal(w.state.turnKey, plan.turn_key);
-    assert.ok(w.state.turn.answer.includes(plan.right_answer),
-      'and it is the RIGHT archive\'s turn under that shared key: '
-      + w.state.turn.answer);
-  } else {
-    await until(() => w.state.turn, 'the turn to load with no scope invented');
-    assert.ok(w.state.turn.answer.includes(plan.right_answer),
-      'and the right side\'s turn is what opened: ' + w.state.turn.answer);
-  }
+  await until(() => w.state.turn, 'the turn to load with no scope invented');
+  assert.ok(w.state.turn.answer.includes(plan.right_answer),
+    'and the right side\'s turn is what opened: ' + w.state.turn.answer);
 
   /* ================================================================
    * A step drilldown follows the same rule
@@ -186,107 +166,14 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
         .map(n => n.textContent).join(' | '));
   trace.click();
   await until(() => w.state.turn, 'the step\'s turn');
-  if (plan.mode === 'workspace') {
-    assert.ok(w.state.storeId, 'a sealed step opened through its store id');
-  }
-
-  /* ================================================================
-   * A comment on a pair of SEALED archives, saved and read back
-   * ================================================================
-   * Read-only evidence is not a reason to refuse the note: the comment is
-   * filed beside the archive and read back with it. The two things that can go
-   * wrong here are invisible in a one-store fixture and both are refused by the
-   * server, so a green result means the page named the right source: a workspace
-   * write is scoped by the MANIFEST's store id, while the references inside it
-   * name their archives by evidence identity. Swap them and the write is 409. */
-  if (plan.comment) {
-    await openCompare();
-    await pickBothSides();
-    const composerOf = label => [...d.querySelectorAll('#detail .feedbackCard')]
-      .find(card => card.textContent.includes('Comment on ' + label)
-        && card.querySelector('[data-compare-comment-box]'));
-    const tabOf = (card, value) =>
-      card.querySelector('button[data-value="' + value + '"]');
-
-    async function writeComment(label, text) {
-      const card = await until(() => composerOf(label), 'the composer for ' + label);
-      const save = [...card.querySelectorAll('button')]
-        .find(node => node.textContent === 'Save this comment');
-      assert.ok(save, 'the composer for ' + label + ' offers a save');
-      assert.equal(save.disabled, false,
-        'sealed evidence does not disable the composer for ' + label + ': '
-        + card.textContent.slice(0, 500));
-      /* Ordinary vocabulary, chosen the same way a turn comment chooses it. */
-      tabOf(card, plan.comment.category).click();
-      await until(() => tabOf(card, plan.comment.subcategory),
-        'the subcategories of ' + plan.comment.category);
-      tabOf(card, plan.comment.subcategory).click();
-      const box = card.querySelector('[data-compare-comment-box]');
-      box.value = text;
-      save.click();
-      const note = await until(
-        () => [...card.querySelectorAll('.sub')]
-          .find(node => /^Saved|does not|nowhere|refus|unknown|no workspace/.test(
-            node.textContent)),
-        'the save of ' + label + ' to report itself');
-      assert.match(note.textContent, /^Saved/,
-        'the comment on ' + label + ' was recorded: ' + note.textContent);
-      assert.ok(note.textContent.includes('alongside the read-only evidence'),
-        'and it says where, because the archive itself did not change: '
-        + note.textContent);
-    }
-
-    await writeComment('the whole pair', plan.comment.text);
-
-    /* The selected side's step, through the same authorized source. */
-    await changeUntil('View', 'steps',
-      () => d.querySelectorAll('#detail .compareRow').length > 0,
-      'the aligned steps');
-    const rowToggle = await until(() => [...d.querySelectorAll('#detail .compareRow')]
-      .map(row => [...row.querySelectorAll('button')]
-        .find(node => /^Comment/.test(node.textContent)))
-      .find(Boolean), 'a step offering a comment');
-    rowToggle.click();
-    const stepLabel = await until(() => {
-      const card = [...d.querySelectorAll('#detail .feedbackCard')]
-        .find(node => node.querySelector('[data-compare-comment-box]')
-          && !node.textContent.includes('Comment on the whole pair'));
-      const heading = card && card.querySelector('h2');
-      return heading && heading.textContent.replace(/^Comment on /, '');
-    }, 'the step composer');
-    await writeComment(stepLabel, plan.comment.step_text);
-
-    /* And they are ordinary comments: the task's Feedback view is where they
-       show up, with no second read layer and no pair-only view. */
-    d.querySelector('#detail button[data-task-view="feedback"]').click();
-    await until(() => detail().includes(plan.comment.text),
-      'the pair comment under the task\'s Feedback view');
-    const rows = [...d.querySelectorAll('#detail .listItem')]
-      .filter(node => node.textContent.includes(plan.comment.text));
-    assert.equal(rows.length, 1,
-      'the comment is listed exactly once, not once per archive: '
-      + rows.map(node => node.textContent.slice(0, 160)).join(' ||| '));
-    assert.ok(rows[0].textContent.includes(plan.comment.category_label),
-      'carrying the category it was written under: '
-      + rows[0].textContent.slice(0, 300));
-    assert.ok(rows[0].textContent.includes('Compared with'),
-      'and naming the other side of the pair it was written about: '
-      + rows[0].textContent.slice(0, 300));
-    assert.ok(detail().includes(plan.comment.step_text),
-      'the step comment is listed under the same view');
-  }
 
   /* ================================================================
    * The selected pair does not survive a change of source
    * ================================================================ */
-  if (plan.comment) {
-    await openCompare();
-    await pickBothSides();
-  }
   assert.ok(w.taskCompare.key, 'a pair is selected for this task');
   /* The hook the source switcher calls. The same experiment and task ids recur
-     across archives, so keeping attempt 2 selected would show a number from the
-     old database under the new one's label. */
+     across workflows' databases, so keeping attempt 2 selected would show a
+     number from the old database under the new one's label. */
   w.onSourceSwitch();
   assert.equal(w.taskCompare.key, null, 'the pair identity is dropped');
   assert.equal(w.taskCompare.right, null, 'along with the attempt it named');

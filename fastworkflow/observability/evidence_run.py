@@ -26,11 +26,10 @@ normal operation exactly as it was:
    `ObservabilityStore.archive_to` for why copying a WAL-mode database silently
    loses the end of the run.
 
-4. **Provenance.** The `FW_OBS_*` values in effect, the capture profile and its
-   policy version, the span-contract version, and the DB schema version. Trace
-   evidence without these is uninterpretable rather than merely undocumented: the
-   same workflow under the `evidence` and `debug` profiles produces records that
-   differ in what they contain, not in what happened.
+4. **Provenance.** The `FW_OBS_*` values in effect, the span-contract version,
+   and the DB schema version. Trace evidence without these is uninterpretable
+   rather than merely undocumented: two runs whose span-contract versions differ
+   cannot be compared attribute by attribute.
 
 **What this module cannot promise.** It asserts that the *store* did not drop what
 it was given. It cannot assert that everything which happened was emitted — an
@@ -50,7 +49,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastworkflow import state_paths, tracing
-from fastworkflow.observability import capture_policy, store as observability_store
+from fastworkflow.observability import store as observability_store
 from fastworkflow.observability.provenance import ObservabilityProvenance
 from fastworkflow.utils.logging import logger
 
@@ -78,20 +77,18 @@ def capture_observability_provenance(
     dspy_history_enabled: Optional[bool] = None,
     evidence_grade: Optional[bool] = None,
 ) -> ObservabilityProvenance:
-    """Snapshot the capture regime in effect (§12.4).
+    """Snapshot the observability configuration in effect (§12.4).
 
     Lives here rather than in `provenance` because it reads `observability_store`
     and `tracing`, neither of which is a §22 leaf.
     """
     config = observability_store.observability_config()
     return ObservabilityProvenance(
-        # Recording has no switch, so the regime is always "on". The field
+        # Recording has no switch, so this is always "on". The field
         # stays because every provenance record already written carries it;
         # whether a writer actually opened the store is checked separately,
         # from writer health.
         enabled=True,
-        capture_profile=config[observability_store.CAPTURE_PROFILE_VAR],
-        capture_policy_version=capture_policy.CAPTURE_POLICY_VERSION,
         span_contract_version=tracing.SPAN_CONTRACT_VERSION,
         span_contract_versions=tracing.span_contract_versions(),
         db_schema_version=observability_store.SCHEMA_VERSION,
@@ -239,7 +236,6 @@ def evidence_run(
     run_id: Optional[str] = None,
     archive_dir: Optional[str] = None,
     dspy_history_enabled: Optional[bool] = None,
-    require_evidence_profile: bool = False,
     raise_on_invalid: bool = False,
     health_settle_s: float = 5.0,
     experiment_id: Optional[str] = None,
@@ -290,11 +286,6 @@ def evidence_run(
     starts, because `SQLiteTraceSink.__init__` prunes opportunistically. See
     fix-ajv.14 and `run_fastapi_mcp`'s startup report of the value in effect.
 
-    `require_evidence_profile` additionally demands
-    `FW_OBS_CAPTURE_PROFILE=evidence`. Off by default because the profile governs
-    exposure, not completeness — a `debug`-profile run loses no evidence, it just
-    keeps more than a tenant deployment should.
-
     Archiving and verification run even when the body raises, because a run that
     crashed is exactly when its evidence is most worth keeping.
     """
@@ -343,11 +334,6 @@ def evidence_run(
             "sink and the database has no persisted writer-health row, so no "
             "writer has opened this store and no drop could have been detected "
             "by this run"
-        )
-    if require_evidence_profile and provenance.capture_profile != "evidence":
-        run.extra_problems.append(
-            f"capture profile is '{provenance.capture_profile}', not 'evidence'; "
-            "unclassified fields were captured rather than withheld"
         )
     if dspy_history_enabled is False:
         run.extra_problems.append(

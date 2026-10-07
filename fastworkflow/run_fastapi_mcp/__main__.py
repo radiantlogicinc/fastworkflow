@@ -353,14 +353,13 @@ def _log_memory_bounds() -> None:
         from fastworkflow.observability import store as _obs
 
         logger.info(
-            "observability capture regime: "
-            f"profile={_obs.observability_config()[_obs.CAPTURE_PROFILE_VAR]}, "
+            "observability: "
             f"pruning_suppressed={_obs.pruning_suppressed()} "
             f"({_obs.SUPPRESS_PRUNE_VAR}="
             f"{_obs.observability_config()[_obs.SUPPRESS_PRUNE_VAR]!r})"
         )
     except Exception as exc:  # never let a log line stop the server
-        logger.warning(f"could not report observability capture regime: {exc!r}")
+        logger.warning(f"could not report observability configuration: {exc!r}")
 
     logger.info(
         "memory bounds active: "
@@ -603,6 +602,7 @@ async def lifespan(_app: FastAPI):
             if runtime:
                 runtime.execution_context.close()
 
+    reaper: asyncio.Task | None = None
     try:
         initialize_fastworkflow_on_startup()
         # Log startup info AFTER init() so log level from env file is respected
@@ -625,9 +625,10 @@ async def lifespan(_app: FastAPI):
         yield
     finally:
         logger.info("FastWorkflow FastAPI service shutting down...")
-        reaper.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await reaper
+        if reaper is not None:
+            reaper.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await reaper
         still_busy = await wait_for_active_turns_to_complete(
             max_wait_seconds=SHUTDOWN_DRAIN_SECONDS
         )
@@ -893,8 +894,8 @@ async def readiness_probe(
     bytes, in-memory conversation turns and bytes). They are off by default
     because computing them walks live objects, and probes are frequent.
 
-    Pass ``?observability=true`` for the capture regime in effect in THIS
-    process, including whether retention pruning is suppressed. An evidence
+    Pass ``?observability=true`` for the observability configuration in effect
+    in THIS process, including whether retention pruning is suppressed. An evidence
     harness drives this server from another process, where
     ``suppress_pruning()`` — an in-process counter — cannot reach; the only
     switch that crosses the boundary is ``FW_OBS_SUPPRESS_PRUNE``, and it has
@@ -906,7 +907,7 @@ async def readiness_probe(
     Pass ``?runtime=true`` for the credential-free snapshot of the effective
     runtime in this process (fix-qe2): the feature vector and manifest
     fingerprint registered at startup, the trained model version, the served
-    command count, the capture regime and the pid. This is what an experiment
+    command count, whether pruning is suppressed and the pid. This is what an experiment
     driver asserts against before admitting a paid request, and what the
     server stamps on an attempt when it binds (`runtime_snapshot_json`). An
     invalid runtime configuration makes the pod not ready.

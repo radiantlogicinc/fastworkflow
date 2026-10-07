@@ -40,7 +40,6 @@ def _sample_spec(
 
 @pytest.fixture
 def store(tmp_path, monkeypatch) -> obs.ObservabilityStore:
-    monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
     path = str(tmp_path / "observability.sqlite3")
     return obs.ObservabilityStore(path)
 
@@ -132,7 +131,6 @@ class TestExperimentNotes:
         assert "notes" not in score
 
     def test_read_only_store_refuses_notes_update(self, tmp_path, monkeypatch):
-        monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
         db_path = str(tmp_path / "observability.sqlite3")
         live = obs.ObservabilityStore(db_path)
         live.create_experiment(

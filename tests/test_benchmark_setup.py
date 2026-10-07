@@ -13,7 +13,7 @@ from fastworkflow.observability import store as obs
 from fastworkflow.benchmark.catalog import list_versions, load_version, write_version
 from fastworkflow.experiment.runner import ExperimentController, ExperimentHarness
 from tests.test_experiment_setup import setup_server  # noqa: F401
-from tests.test_chatbot_benchmarks import _request, workspace_server  # noqa: F401
+from tests.test_chatbot_benchmarks import _request
 from tests.test_experiment_container import _turn_row, _write_turn
 
 
@@ -264,22 +264,6 @@ def test_registration_survives_incompatible_default_evidence(setup_server, tmp_p
     assert len(result["experiments"]) == 1 and result["warning"]
 
 
-def test_workspace_cannot_author_benchmarks_or_experiments(workspace_server):
-    server = workspace_server[0]
-    assert (
-        _request(server, "/api/benchmark-setup", "POST", {"title": "x", "tasks": [{}]})[
-            0
-        ]
-        == 403
-    )
-    assert (
-        _request(
-            server, "/api/benchmarks/smoke/experiments", "POST", {"version": "v1"}
-        )[0]
-        == 403
-    )
-
-
 def test_harness_factory_preserves_registered_identity(tmp_path, monkeypatch):
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
     folder = tmp_path / "workflow"
@@ -435,10 +419,8 @@ def test_http_creation_accepts_the_authors_description(setup_server):
     assert _request(server, path, "POST", {"version": "v1", "description": 7})[0] == 400
 
 
-def test_delete_workspace_and_unrelated_routes_refused(workspace_server):
-    server, _folder, _before = workspace_server
-    assert _request(server, "/api/benchmark-experiments/empty", "DELETE")[0] == 403
-    assert _request(server, "/api/benchmark-experiments/empty", "PATCH", {"description": "x"})[0] == 403
+def test_delete_on_an_unrelated_route_is_refused(setup_server):
+    server, _folder = setup_server
     assert _request(server, "/api/turn/turn", "DELETE")[0] == 405
 
 

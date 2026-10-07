@@ -239,12 +239,8 @@ function selectedRunsMember(data, attempt) {
   return found;
 }
 
-/* One member's source, resolved from its OWN reference.
-
-   An archive has two names and they are not interchangeable: the reference
-   carries the evidence identity, and every workspace route is addressed by
-   the manifest's name. Both travel on the member, and `pairReadScope` picks
-   the one its route needs. */
+/* One member's source, resolved from its OWN reference, which `pairReadScope`
+   reads. */
 function selectedRunsSide(data, attempt, experimentId) {
   var member = selectedRunsMember(data, attempt);
   return {
@@ -252,7 +248,6 @@ function selectedRunsSide(data, attempt, experimentId) {
     run: member || {},
     projection: {},
     storeId: (member && member.store_id) || null,
-    manifestStoreId: (member && member.manifest_store_id) || null,
     experimentId: experimentId
   };
 }

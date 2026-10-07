@@ -12,11 +12,10 @@ same transactions that erase the turn record.
 Redaction happens at WRITE time. ``FW_OFFLOAD_EVIDENCE_REDACTION`` is the one
 toggle: ``on`` (the default, and what an unconfigured deployment gets) stores
 what ``observability.store.protect_offload_observation`` makes of the response
--- the trace sink's own credential scrub and capture policy, called rather than
-reimplemented -- and ``off`` stores the response verbatim. Every row records
-which of the two produced it, the capture-policy version and profile in force,
-whether the stored bytes differ from what the command returned, and how many
-bytes it returned.
+-- the trace sink's own credential scrub, called rather than reimplemented --
+and ``off`` stores the response verbatim. Every row records which of the two
+produced it, whether the stored bytes differ from what the command returned,
+and how many bytes it returned.
 
 Redacting at the write would change what an agent reads back mid-turn, so the
 RAW text of every row whose stored bytes differ is also kept in this process's
@@ -64,7 +63,7 @@ ALIAS_COLLISION_MESSAGE = (
 # ---------------------------------------------------------------------------
 
 REDACTION_ENV = "FW_OFFLOAD_EVIDENCE_REDACTION"
-#: Route stored response bytes through the credential and capture pipeline.
+#: Route stored response bytes through the credential scrub.
 #: The default, and what an unconfigured deployment gets.
 REDACTION_ON = "on"
 #: Store exactly what the command returned. For development and optimisation,
@@ -80,10 +79,6 @@ _REDACTION_ALIASES = {
     "off": REDACTION_OFF, "0": REDACTION_OFF, "false": REDACTION_OFF,
     "no": REDACTION_OFF, "disabled": REDACTION_OFF,
 }
-
-#: Recorded per row when no capture policy was consulted, so ``debug`` (a real
-#: profile that happens to be inert) and "not asked" never read the same.
-PROFILE_NOT_CONSULTED = ""
 
 _warned_redaction: set[str] = set()
 
@@ -121,12 +116,11 @@ def capture_record_for(text: str, *, mode: Optional[str] = None) -> tuple[str, d
     """The bytes to store for *text*, and the record that describes their fidelity.
 
     The record is what makes an archive auditable about itself. It carries the
-    capture-policy CONTRACT version in force at the write, the profile that was
-    consulted (empty when redaction was off and none was), the toggle state, and
-    -- the part a reader actually needs -- whether the stored bytes DIFFER from
-    what the command returned. Version plus toggle says which rules applied;
-    ``redacted`` says whether they had anything to act on, which is how a reader
-    tells a row that was redacted from a row that never contained a secret.
+    toggle state and -- the part a reader actually needs -- whether the stored
+    bytes DIFFER from what the command returned. The toggle says whether the
+    scrub ran; ``redacted`` says whether it had anything to act on, which is how
+    a reader tells a row that was redacted from a row that never contained a
+    secret.
 
     A failure inside the pipeline stores nothing rather than storing the raw
     text: evidence capture is an optimisation and the write path already knows
@@ -135,19 +129,13 @@ def capture_record_for(text: str, *, mode: Optional[str] = None) -> tuple[str, d
     """
     active = redaction_mode(mode)
     record: dict[str, Any] = {
-        "capture_policy_version": str(observability_store.CAPTURE_POLICY_VERSION),
-        "capture_profile": PROFILE_NOT_CONSULTED,
         "redaction": active,
         "redacted": False,
         "raw_utf8_bytes": len(text.encode("utf-8")),
     }
     if active == REDACTION_OFF:
         return text, record
-    policy = observability_store.resolve_capture_policy()
-    record["capture_profile"] = str(policy.profile)
-    record["capture_policy_version"] = str(policy.policy_version)
     stored = observability_store.protect_offload_observation(text)
-    stored = text if stored is None else str(stored)
     record["redacted"] = stored != text
     return stored, record
 
@@ -312,9 +300,8 @@ class RuntimeHandleArchive:
                 INSERT INTO offload_evidence (
                     turn_key, channel_id, scope_id, alias, offload_order,
                     command_name, step_index, text_utf8, text_sha256,
-                    capture_policy_version, capture_profile, redaction,
-                    redacted, raw_utf8_bytes, persisted_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    redaction, redacted, raw_utf8_bytes, persisted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(turn_key, alias) DO NOTHING
                 """,
                 (
@@ -327,8 +314,6 @@ class RuntimeHandleArchive:
                     step_index,
                     stored_payload,
                     stored_sha256,
-                    capture["capture_policy_version"],
-                    capture["capture_profile"],
                     capture["redaction"],
                     1 if capture["redacted"] else 0,
                     int(capture["raw_utf8_bytes"]),
@@ -579,8 +564,7 @@ class RuntimeHandleArchive:
         with closing(self._connect()) as conn:
             row = conn.execute(
                 """
-                SELECT capture_policy_version, capture_profile, redaction,
-                       redacted, raw_utf8_bytes, persisted_at
+                SELECT redaction, redacted, raw_utf8_bytes, persisted_at
                 FROM offload_evidence
                 WHERE turn_key = ? AND channel_id = ? AND alias = ?
                 """,
@@ -589,8 +573,6 @@ class RuntimeHandleArchive:
         if row is None:
             return None
         return {
-            "capture_policy_version": str(row["capture_policy_version"]),
-            "capture_profile": str(row["capture_profile"]),
             "redaction": str(row["redaction"]),
             "redacted": bool(row["redacted"]),
             "raw_utf8_bytes": int(row["raw_utf8_bytes"]),

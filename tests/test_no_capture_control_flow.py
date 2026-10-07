@@ -1,8 +1,7 @@
 """EXP-003's exit criterion: nothing branches on a captured value.
 
 Architecture §17.3 makes this a stop condition rather than a style preference. A
-confidence, a consequence class, or a context handle that is captured and then
-quietly consulted converts an instrumentation slice into an unmeasured behavior
+confidence or a consequence class that is captured and then quietly consulted converts an instrumentation slice into an unmeasured behavior
 change — and FW-REQ-021 clause 4 forbids any threshold at all until calibration
 has been measured against realized correctness, which does not exist until G2A.
 The failure mode is invisible in a diff review: one `if` in one emitter, in a file
@@ -32,7 +31,6 @@ import pytest
 
 import fastworkflow
 from fastworkflow import tracing
-from fastworkflow.observability.capture_policy import HMAC_KEY_VAR
 from fastworkflow.runtime_manifest import (
     CommandDeclaration,
     EffectContract,
@@ -48,10 +46,10 @@ from tests.todo_list_workflow.application.todo_manager import TodoListManager
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # The runtime files this slice added capture to. Deliberately not
-# `observability/capture_policy.py` or `observability/decision_signals.py`: those legitimately validate their
-# own fields (a `ConsequenceAssessment` that could grade below its floor is the
-# defect their validators exist to refuse), and tests/test_observability/decision_signals.py
-# already pins that neither exports anything to branch on.
+# `observability/decision_signals.py`: it legitimately validates its own fields
+# (a `ConsequenceAssessment` that could grade below its floor is the defect its
+# validators exist to refuse), and tests/test_observability/decision_signals.py
+# already pins that it exports nothing to branch on.
 SCANNED_FILES = (
     "fastworkflow/command_executor.py",
     "fastworkflow/tracing.py",
@@ -64,8 +62,6 @@ SCANNED_FILES = (
 CAPTURED_NAMES = frozenset(
     {
         # locals holding a projection
-        "context_before",
-        "context_after",
         "consequence",
         "child_calls",
         # fields of those projections
@@ -75,25 +71,17 @@ CAPTURED_NAMES = frozenset(
         "blast_radius",
         "decision_critical",
         "write_capable",
-        "instance_fingerprint",
-        "handle_id",
-        "concrete",
         # uncertainty, which fix-ajv.4 will emit into these same files
         "decision_uncertainty",
         "uncertainty",
         "calibrated",
         # the producers
-        "context_handle",
         "consequence_assessment",
         "assess_consequence",
-        "project_context_handle",
-        "ContextHandle",
         "ConsequenceAssessment",
         "DecisionUncertainty",
         "UncertaintySignal",
         # the span attribute keys, so `attributes[ATTR_CONSEQUENCE]` counts too
-        "ATTR_CONTEXT_BEFORE",
-        "ATTR_CONTEXT_AFTER",
         "ATTR_CONSEQUENCE",
         "ATTR_CHILD_CALLS",
     }
@@ -104,7 +92,7 @@ def _referenced_names(node: ast.AST) -> set[str]:
     """Every identifier a subtree mentions, as a name, attribute, or string key.
 
     String constants count because these values are dicts once projected, so
-    `handle["consequence_class"]` addresses the same thing `x.consequence_class`
+    `assessment["consequence_class"]` addresses the same thing `x.consequence_class`
     does and a check that saw only attributes would miss it.
     """
     names: set[str] = set()
@@ -245,22 +233,8 @@ def test_a_declared_effect_contract_changes_no_outcome(
     assert declared.status == undeclared.status
 
 
-def test_configuring_the_handle_hmac_key_changes_no_outcome(
-    initialized_fastworkflow, todo_workflow_path, tmp_path, monkeypatch
-):
-    """The key changes what a handle contains, and must change nothing else."""
-    monkeypatch.delenv(HMAC_KEY_VAR, raising=False)
-    without_key = _run_one_command(todo_workflow_path, tmp_path)
-
-    monkeypatch.setenv(HMAC_KEY_VAR, "deployment-secret")
-    with_key = _run_one_command(todo_workflow_path, tmp_path)
-
-    assert with_key.answer == without_key.answer
-    assert with_key.success == without_key.success
-
-
 def test_the_projection_helpers_return_data_not_decisions():
-    """Neither helper answers "should we proceed", at any argument.
+    """The helper never answers "should we proceed", at any argument.
 
     A helper that returned a bool would be the stop condition arriving disguised
     as a convenience, so the shape is pinned rather than left to review.
@@ -271,10 +245,3 @@ def test_the_projection_helpers_return_data_not_decisions():
     ):
         assert isinstance(value, dict)
         assert not isinstance(value, bool)
-
-    class _Workflow:
-        current_command_context_name = "TodoList"
-
-    handle = tracing.context_handle(_Workflow())
-    assert isinstance(handle, dict)
-    assert tracing.context_handle(None) is None

@@ -16,8 +16,6 @@ from fastworkflow.observability import comparison, diagnosis, turn_derivations
 from fastworkflow.run_chatbot import (
     http_common,
     provenance,
-    selection_api,
-    selection_workspace,
     server,
     turn_annotations,
     workflow_discovery,
@@ -29,13 +27,10 @@ TURN_ANNOTATION_REEXPORTS = (
     "TRAINING_RUN_MAX_LIMIT",
     "_wire_bool",
     "_wire_number",
-    "_workspace_segment_verdicts",
     "annotate_attempt_rows",
-    "annotate_projected_attempts",
     "annotate_turn_detail",
     "annotate_turn_diagnosis",
     "annotate_turn_rows",
-    "annotate_workspace_attempts",
     "cost_rollup",
     "count_llm_calls_cut_at_limit",
     "diagnostic_store_id",
@@ -51,7 +46,6 @@ TURN_ANNOTATION_REEXPORTS = (
 )
 
 PROVENANCE_REEXPORTS = (
-    "benchmark_pin_check",
     "experiment_provenance",
     "provenance_differences",
 )
@@ -109,22 +103,6 @@ DEFAULT_PROJECTION_FUNCTIONS = (
 )
 
 
-SELECTION_WORKSPACE_REEXPORTS = (
-    "_ManifestScopedReader",
-    "_WorkspaceNames",
-    "_refuse_ambiguous_attempts",
-    "_with_turn_refs",
-    "_workspace_archive",
-    "_workspace_attempts",
-    "_workspace_consistency",
-    "_workspace_get",
-    "_workspace_selected_rows",
-    "_workspace_selected_runs",
-    "_workspace_side",
-    "handle_workspace_get",
-)
-
-
 HTTP_COMMON_REEXPORTS = (
     "STORE_UNAVAILABLE",
     "run_clear_conversations",
@@ -147,10 +125,8 @@ PRE_SPLIT_HANDLER_METHODS = (
     "_host_origin_allowed",
     "_token_valid",
     "_gate",
-    "_review_capability",
     "do_GET",
     "_handle_get",
-    "_handle_trace_navigation",
     "_refuse_write",
     "_dispatch_write",
     "do_POST",
@@ -161,10 +137,7 @@ PRE_SPLIT_HANDLER_METHODS = (
     "_post_benchmark_record",
     "_post_selection",
     "_post_experiment_setup",
-    "_post_review_capture",
-    "_post_review_assignment",
     "_post_benchmark_version",
-    "_post_select_workspace",
     "_post_select_workflow",
     "_post_configure_env",
     "_post_train",
@@ -178,10 +151,7 @@ PRE_SPLIT_HANDLER_METHODS = (
     "_handle_api",
     "_training_limit",
     "_handle_training_history",
-    "_handle_review_assignment",
-    "_handle_review_evidence",
     "_search_turns_response",
-    "_handle_workspace",
     "_handle_setup",
     "_benchmark_workflow_path",
     "_handle_selection_api",
@@ -189,13 +159,10 @@ PRE_SPLIT_HANDLER_METHODS = (
     "_send_navigation",
     "_handle_feedback_notes",
     "_feedback_writer",
-    "_workspace_live",
-    "_sealed_evidence",
     "_append_feedback_note",
     "_record_feedback_note",
     "_feedback_source_for",
     "_pass_selector",
-    "_handle_workspace_task_feedback",
     "_handle_task_feedback",
     "_handle_benchmark_registration",
     "_handle_registration_patch",
@@ -213,8 +180,6 @@ PRE_SPLIT_HANDLER_METHODS = (
 
 # Mixin classes, in MRO order, each ahead of BaseHTTPRequestHandler.
 HANDLER_MIXIN_NAMES = (
-    "_ReviewRoutes",
-    "_WorkspaceRoutes",
     "_ExperimentRoutes",
     "_BenchmarkRoutes",
     "_FeedbackRoutes",
@@ -228,8 +193,6 @@ MIXIN_MODULES = (
     "handler_experiment.py",
     "handler_feedback.py",
     "handler_navigation.py",
-    "handler_review.py",
-    "handler_workspace.py",
 )
 
 
@@ -339,25 +302,3 @@ def test_mixin_modules_do_not_import_server():
             for module in modules:
                 assert module != "fastworkflow.run_chatbot.server", name
                 assert not module.endswith(".run_chatbot.server"), name
-
-
-def test_selection_api_reexports_are_the_moved_workspace_objects():
-    """Workspace archive GETs moved out of selection_api and stay the same objects."""
-    _assert_same(
-        SELECTION_WORKSPACE_REEXPORTS, selection_workspace, selection_api
-    )
-
-
-def test_selection_workspace_does_not_import_server():
-    """selection_workspace must not import server.py; that import would be a cycle."""
-    package = Path(selection_workspace.__file__).resolve().parent
-    tree = ast.parse((package / "selection_workspace.py").read_text())
-    for node in ast.walk(tree):
-        modules: list[str] = []
-        if isinstance(node, ast.Import):
-            modules = [alias.name for alias in node.names]
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            modules = [node.module]
-        for module in modules:
-            assert module != "fastworkflow.run_chatbot.server"
-            assert not module.endswith(".run_chatbot.server")

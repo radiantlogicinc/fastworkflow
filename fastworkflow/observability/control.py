@@ -1,9 +1,9 @@
 """Control tables: judgements kept in the workflow's live evidence DB (`fix-10vj`).
 
-A winner, a pair-review mark or a comment on a sealed turn is a judgement
-ABOUT evidence, not evidence. They live in tables of the live DB rather than in
-sidecar files beside it, under one feature marker, `control_v1`, so a DB either
-has every control table or none of them. Sealed copies never carry them
+A winner or a pair-review mark is a judgement ABOUT evidence, not evidence.
+They live in tables of the live DB rather than in sidecar files beside it,
+under one feature marker, `control_v1`, so a DB either has every control table
+or none of them. Sealed copies never carry them
 (`strip`), which is what keeps a sealed file's digest fixed while judgements
 about it keep being made.
 
@@ -21,12 +21,9 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Iterable, Iterator, Mapping, Optional
-
-from fastworkflow.observability import feedback as feedback_module
+from typing import Any, Iterable, Iterator, Optional
 
 FEATURE_CONTROL_V1 = "control_v1"
 
@@ -113,36 +110,6 @@ CONTROL_SCHEMA = [
         seq INTEGER NOT NULL, previous_state TEXT, state TEXT NOT NULL,
         note TEXT, created_at TEXT NOT NULL,
         UNIQUE (pair_key, reviewer, seq))""",
-    # Column for column the v7 `human_feedback` shape, plus the four fields a
-    # join to `turns` would have supplied. The archive is a different file and
-    # cannot be joined to, so the anchored turn's recorded scope is copied in
-    # at write time -- read off the turn row, never off a label.
-    """CREATE TABLE IF NOT EXISTS sealed_turn_comments (
-        feedback_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        feedback_uid TEXT NOT NULL UNIQUE,
-        archive_sha256 TEXT NOT NULL,
-        store_identity TEXT NOT NULL,
-        turn_key TEXT NOT NULL,
-        target_kind TEXT NOT NULL, span_ids_json TEXT NOT NULL,
-        target_label TEXT NOT NULL, comment TEXT NOT NULL,
-        provenance TEXT NOT NULL, category TEXT NOT NULL, subcategory TEXT NOT NULL,
-        anchors_json TEXT NOT NULL,
-        pair_experiment_id TEXT, pair_task_id TEXT,
-        turn_experiment_id TEXT, turn_task_id TEXT, attempt INTEGER, channel_id TEXT,
-        created_at TEXT NOT NULL)""",
-    """CREATE INDEX IF NOT EXISTS idx_sealed_comments_turn
-        ON sealed_turn_comments(archive_sha256, turn_key)""",
-    """CREATE INDEX IF NOT EXISTS idx_sealed_comments_task
-        ON sealed_turn_comments(turn_experiment_id, turn_task_id)""",
-    # Append-only, enforced by the database rather than by convention: a
-    # recorded comment is somebody's statement and editing one in place would
-    # leave no trace that it had said something else.
-    """CREATE TRIGGER IF NOT EXISTS sealed_turn_comments_no_update
-        BEFORE UPDATE ON sealed_turn_comments
-        BEGIN SELECT RAISE(ABORT, 'recorded feedback is append-only'); END""",
-    """CREATE TRIGGER IF NOT EXISTS sealed_turn_comments_no_delete
-        BEFORE DELETE ON sealed_turn_comments
-        BEGIN SELECT RAISE(ABORT, 'recorded feedback is append-only'); END""",
     """CREATE TABLE IF NOT EXISTS sealed_archives (
         experiment_id TEXT PRIMARY KEY,
         archive_sha256 TEXT NOT NULL UNIQUE,
@@ -164,15 +131,9 @@ CONTROL_SCHEMA = [
 CONTROL_TABLES = (
     "experiment_registrations", "comparison_groups", "comparison_group_members",
     "selection_pointers", "selection_decisions", "pair_reviews",
-    "pair_review_events", "sealed_turn_comments", "sealed_archives",
+    "pair_review_events", "sealed_archives",
     "training_process", "evidence_releases",
 )
-
-# Which table a merged comment came out of. Not provenance (who wrote it): it
-# is how a merged read gives two independent row-id sequences one total order.
-ORIGIN_EVIDENCE = "evidence"
-ORIGIN_ANNOTATION = "annotation"
-
 
 class ControlUnavailable(RuntimeError):
     """There is no live DB to record this judgement in. Nothing was created."""
@@ -264,150 +225,3 @@ def write_refusal_status(exc: sqlite3.OperationalError) -> Optional[int]:
     if "readonly" in message or "read-only" in message:
         return 409
     return None
-
-
-_SEALED_SELECT = (
-    "SELECT feedback_id, feedback_uid, turn_key, target_kind, span_ids_json, "
-    "target_label, comment, provenance, category, subcategory, anchors_json, "
-    "turn_experiment_id, turn_task_id, attempt, channel_id, created_at "
-    "FROM sealed_turn_comments WHERE archive_sha256=? "
-)
-
-
-class SealedEvidence:
-    """A sealed archive read as one store with its comments from the live DB.
-
-    Implements the small surface `feedback.record_feedback` and
-    `feedback.consolidate_task_feedback` use — identity, turn and span reads,
-    the two feedback lists, and the append — so neither has to know that a
-    comment about a sealed turn lives in `sealed_turn_comments`, keyed by the
-    archive's sha256 (§2.5). `live` is None when the archive's workflow has no
-    live DB here: reads then show the archive's own comments, writes refuse.
-    """
-
-    def __init__(self, archive: Any, live: Any, archive_sha256: str) -> None:
-        self.archive, self.live, self.archive_sha256 = archive, live, archive_sha256
-        self.db_path = archive.db_path
-
-    def store_identity(self) -> Optional[str]:
-        return self.archive.store_identity()
-
-    def get_turn(self, turn_key: str) -> Optional[dict[str, Any]]:
-        return self.archive.get_turn(turn_key)
-
-    def get_spans(self, turn_key: str) -> list[dict[str, Any]]:
-        return self.archive.get_spans(turn_key)
-
-    def _comments(self, where: str, params: Iterable[Any]) -> list[dict[str, Any]]:
-        found = rows(self.live, _SEALED_SELECT + where, (self.archive_sha256, *params))
-        return [
-            {**feedback_module.human_feedback_row(row), "origin": ORIGIN_ANNOTATION}
-            for row in found
-        ]
-
-    def list_human_feedback(self, turn_key: str) -> list[dict[str, Any]]:
-        return _merged(
-            self.archive.list_human_feedback(turn_key),
-            self._comments("AND turn_key=?", (turn_key,)),
-        )
-
-    def list_task_feedback(self, *, experiment_id: str, task_id: str) -> list[dict[str, Any]]:
-        return _merged(
-            self.archive.list_task_feedback(experiment_id=experiment_id, task_id=task_id),
-            self._comments(
-                "AND ((turn_experiment_id=? AND turn_task_id=?) "
-                "OR (pair_experiment_id=? AND pair_task_id=?))",
-                (experiment_id, task_id, experiment_id, task_id),
-            ),
-        )
-
-    def add_human_feedback(self, turn_key: str, *, target_kind: str,
-                           span_ids: list[str], target_label: str,
-                           provenance: str, comment: Optional[str] = None,
-                           category: Any = None, subcategory: Any = None,
-                           anchors: Any = None) -> dict[str, Any]:
-        """Same call as the evidence store's, landing in `sealed_turn_comments`.
-
-        Every check the evidence store makes is made here against the archive
-        — the turn is recorded, the spans belong to it, the anchor names the
-        turn — because a sealed file is no reason to record a comment about a
-        turn that is not in it.
-        """
-        if self.live is None:
-            raise ControlUnavailable(
-                "comments on sealed evidence are recorded in its workflow's live "
-                "database, and this archive's workflow has none on this machine"
-            )
-        if not isinstance(turn_key, str) or not turn_key:
-            raise ValueError("turn_key is required")
-        note = feedback_module.normalize_note(
-            target_kind=target_kind, span_ids=span_ids, target_label=target_label,
-            provenance=provenance, comment=comment, category=category,
-            subcategory=subcategory,
-        )
-        turn = self.archive.get_turn(turn_key)
-        if turn is None:
-            raise ValueError("turn not found")
-        recorded = {str(span["span_id"]) for span in self.archive.get_spans(turn_key)}
-        if not set(note["span_ids"]).issubset(recorded):
-            raise ValueError("feedback spans must belong to the selected turn")
-        if anchors is None:
-            anchors = self.archive._own_anchor(
-                turn_key, target_kind=note["target_kind"],
-                span_ids=note["span_ids"], target_label=note["target_label"],
-            )
-        if anchors.primary.turn_key != turn_key:
-            raise ValueError("the primary anchor must name the turn being annotated")
-        scrub, paired = self.archive._scrub, anchors.paired
-        feedback_uid = f"fb-{uuid.uuid4().hex}"
-        with write(self.live) as conn:
-            conn.execute(
-                "INSERT INTO sealed_turn_comments "
-                "(feedback_uid,archive_sha256,store_identity,turn_key,target_kind,"
-                "span_ids_json,target_label,comment,provenance,category,subcategory,"
-                "anchors_json,pair_experiment_id,pair_task_id,turn_experiment_id,"
-                "turn_task_id,attempt,channel_id,created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    feedback_uid, self.archive_sha256, self.store_identity() or "",
-                    turn_key, note["target_kind"], json.dumps(note["span_ids"]),
-                    scrub(note["target_label"]), scrub(note["comment"]),
-                    note["provenance"], note["category"], note["subcategory"],
-                    json.dumps(
-                        feedback_module.scrubbed_anchor_dict(anchors, scrub),
-                        ensure_ascii=False,
-                    ),
-                    paired.ref.experiment_id if paired else None,
-                    paired.ref.task_id if paired else None,
-                    turn.get("experiment_id"), turn.get("task_id"),
-                    turn.get("attempt"), turn.get("channel_id"), _now(),
-                ),
-            )
-        stored = self._comments("AND feedback_uid=?", (feedback_uid,))
-        return stored[0] if stored else {}
-
-
-def _merged(
-    evidence_rows: Iterable[Mapping[str, Any]],
-    annotation_rows: Iterable[Mapping[str, Any]],
-) -> list[dict[str, Any]]:
-    """Both tables in one chronology, de-duplicated by `feedback_uid`.
-
-    `origin` breaks a same-second tie before the row id does — the two id
-    sequences are independent and would otherwise interleave differently
-    depending on which table answered first.
-    """
-    merged: dict[str, dict[str, Any]] = {}
-    for row in evidence_rows:
-        merged.setdefault(str(row.get("feedback_uid") or id(row)),
-                          {**dict(row), "origin": row.get("origin") or ORIGIN_EVIDENCE})
-    for row in annotation_rows:
-        merged.setdefault(str(row.get("feedback_uid") or id(row)), dict(row))
-    return sorted(
-        merged.values(),
-        key=lambda row: (
-            str(row.get("created_at") or ""),
-            str(row.get("origin") or ""),
-            int(row.get("feedback_id") or 0),
-        ),
-    )

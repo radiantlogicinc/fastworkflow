@@ -92,7 +92,7 @@ bundle-writing code whose `as_record()` → column mapping can be copied.
 | `[XR16]` | Repeat-attempt determinism | Two contaminants, not one: the DSPy response cache **and** the shared utterance/clarification cache. Both blocking for `fix-bn1.4`. |
 | `[XR17]` | Binding | Through `bind_observability_identity`, validated there. `channel_id` semantics unchanged. |
 | `[XR18]` | One channel per attempt | `exp:<experiment_id>:<task_id>:<attempt>`, one WEC per attempt, unique `workflow_id_str`. |
-| `[XR19]` | Comparability | Equal task-id **sets**, equal declarations, equal capture profile. Cardinality is not comparability. |
+| `[XR19]` | Comparability | Equal task-id **sets**, equal declarations. Cardinality is not comparability. |
 | `[XR20]` | Read-modify-write | A policed column may never be read-modify-written. General ruling; it is why `[XR8]` reversed. |
 
 ---
@@ -279,8 +279,6 @@ CREATE TABLE IF NOT EXISTS experiments (
     declared_tasks         INTEGER NOT NULL,      -- the denominator [XR14]
     declared_attempts      INTEGER NOT NULL,      -- k                 [XR14]
     workflow_name          TEXT,
-    capture_profile        TEXT NOT NULL,         -- [XR19]: comparability
-    capture_policy_version TEXT NOT NULL,         -- [XR19]
     created_at             TEXT NOT NULL,
     completed_at           TEXT);
 
@@ -337,9 +335,8 @@ under the same three labels.
 
 Additions to the bead's DDL, each argued below rather than assumed:
 `experiment_attempts` (§8), `experiment_evidence_runs` (§6.4), `declared_*`
-(`[XR14]`), `invalid_reason`/`invalid_detail` (§6.3), `capture_profile` and
-`capture_policy_version` (`[XR19]`). `provenance_json` from the bead's sketch is
-**removed** — §6.4 says why.
+(`[XR14]`), `invalid_reason`/`invalid_detail` (§6.3). `provenance_json` from the
+bead's sketch is **removed** — §6.4 says why.
 
 ---
 
@@ -453,6 +450,12 @@ introduced.
 
 ## 6. Capture policy `[XR6]` `[XR7]` `[XR8]` `[XR20]`
 
+> **Superseded in 3.5.1.** fastWorkflow no longer has capture profiles or a
+> capture policy: every surface, the experiment surface included, gets the
+> credential scrub and nothing else, and experiments record no
+> `capture_profile`/`capture_policy_version`. This section is the phase-0
+> design record of the policy that existed then.
+
 `FW-REQ-002` clause 3 requires every captured field to have a **declared**
 policy. The module comment at `observability/store.py:276-290` is explicit that
 each non-`TurnResult` surface is "decided here rather than by omission —
@@ -523,8 +526,7 @@ codebase's convention, where all six shipped `POLICY_PATH_*` constants are passe
 to `policy.apply` at a real write site and the one genuinely scrub-only column,
 `spans.channel_id`, deliberately has none. The decision is recorded as a comment
 at each write site, matching `spans.channel_id` (`:1721-1730`). Re-admitting
-these fields to the policy is a code change, not a configuration change; §12
-item 2 records that.
+these fields to the policy is a code change, not a configuration change.
 
 **`[XR7]` is a reversal.** Revision 1 policed `turns.task_id` as `identifier`.
 Three independent findings killed it:
@@ -767,7 +769,7 @@ judgement that the task was accomplished".
 something weaker shipped: nothing refuses to score a workflow whose commands
 never set `success=False`. That check needs a per-workflow notion of "reports
 failure honestly" which this container does not have. The warning is visible;
-the refusal is not implemented. See §12 item 6.
+the refusal is not implemented. See §12 item 4.
 
 **Attempt lifecycle.** `start_attempt` writes the row before the first turn;
 `finish_attempt` stamps `finished_at` and the outcome. An attempt with
@@ -834,9 +836,7 @@ Refuses with a 409 unless **all** of:
 * their **DISTINCT `task_id` sets are equal** — the 409 body reports the
   symmetric difference. Revision 1 checked cardinality only, which admitted two
   15×3 runs over *disjoint* task sets and reported "0 regressions" for two runs
-  sharing no task;
-* their `capture_profile` and `capture_policy_version` match. Two arms captured
-  under different profiles are not measuring the same columns.
+  sharing no task.
 
 ### 8.4 One layer, three consumers
 
@@ -950,7 +950,7 @@ abandoned partial trajectory is evidence of nothing, `idx_conv_experiment_attemp
 is UNIQUE so a second conversation under the same labels is refused, and leaving
 the rows would pin every resumed attempt's derived diagnostic to 0 forever. The
 `restarts` counter makes a task that keeps crashing visible rather than silently
-retried. (§12 item 6 records the alternative that was not chosen.)
+retried. (§12 item 4 records the alternative that was not chosen.)
 
 **Other harness constraints**, verified and recorded so they are not
 rediscovered:
@@ -994,7 +994,7 @@ shipped (`[DR55]`). The experiment surface never uses that word:
 
 | Route | Returns |
 |---|---|
-| `GET /api/experiments` | list: `experiment_id`, `description`, `status`, `arm`, `baseline_experiment_id`, declared vs finished attempt counts, `invalid_reason`, `capture_profile`, `created_at`. **No score**: computing one per row would be a query per experiment, and `status` plus the two counts already say whether a score exists and whether it is reportable. `/score` serves the number for one experiment. |
+| `GET /api/experiments` | list: `experiment_id`, `description`, `status`, `arm`, `baseline_experiment_id`, declared vs finished attempt counts, `invalid_reason`, `created_at`. **No score**: computing one per row would be a query per experiment, and `status` plus the two counts already say whether a score exists and whether it is reportable. `/score` serves the number for one experiment. |
 | `GET /api/experiment/<id>` | detail: `hypothesis`, `notes`, `arm`, `baseline_experiment_id`, every evidence segment with its `valid`/`problems`, `invalid_reason`/`invalid_detail` |
 | `GET /api/experiment/<id>/tasks` | one row per `task_id` with its attempts' outcomes |
 | `GET /api/experiment/<id>/attempts?task=<task_id>` | one row per attempt: `outcome`, `outcome_source`, `reward`, `restarts`, `channel_id`, `conversation_id`, timestamps. **Not turn keys**: those come from `GET /api/turns?experiment=&task=&attempt=`, which is the shipped route the UI already drills through, rather than a second projection of the same rows. |
@@ -1095,41 +1095,31 @@ An **invalid experiment must be visually unmistakable**, and must show its
 | `[XR16]` | Two determinism contaminants — the DSPy response cache (process-wide flag; the per-attempt option has no seam) and the shared `___convo_info/cache.sqlite3` utterance cache (must be sharded per attempt). Both blocking for `fix-bn1.4`. |
 | `[XR17]` | Labels bind through `bind_observability_identity`, type- and value-validated there. `channel_id` semantics unchanged. |
 | `[XR18]` | One channel per attempt; one WEC per attempt; a unique `workflow_id_str` whatever drives it. |
-| `[XR19]` | Comparability requires equal task-id **sets**, equal declarations, and equal `capture_profile`/`capture_policy_version`. |
+| `[XR19]` | Comparability requires equal task-id **sets** and equal declarations. |
 | `[XR20]` | A policed column may never be read-modify-written. |
 
 ---
 
 ## 12. What this gate does not settle
 
-1. **There is no configuration surface for a `CaptureFieldPolicy`.**
-   `resolve_capture_policy()` (`:232-245`) passes no `field_policies`, so the six
-   shipped `POLICY_PATH_*` constants are unreachable by any deployment today.
-   `[XR6]` sidesteps it by declaring none, and records that re-admitting the
-   experiment surface to the policy is a code change. The gap is `fix-ajv`'s.
-2. **Top-level `TurnResult` fields are not withheld by the capture pipeline.**
-   `_apply_capture_policy` walks only `turn_output.command_outputs`, so
-   `user_message`, `answer` and now `task_id` appear in plaintext in
-   `record_json` regardless of what the column beside them says. `[XR7]` rests on
-   this being true; if `fix-ajv` closes it, `[XR7]` should be revisited.
-3. **What "passed" means for a real benchmark.** `[XR13]` gives the container a
+1. **What "passed" means for a real benchmark.** `[XR13]` gives the container a
    place to store a verdict and a name for who decided it; it does not supply a
    grader. tau2's reward function is `fix-bn1.4`'s consumer's problem.
-4. **Cross-process experiments.** `fastworkflow.init()`'s global env dict and
+2. **Cross-process experiments.** `fastworkflow.init()`'s global env dict and
    `[XR16]`'s process-wide cache flag together mean an arm that varies
    configuration needs its own process, and nothing here coordinates two
    processes writing one experiment. The schema permits it
    (`experiment_evidence_runs` is a list); no code does it.
-5. **Retention of a very large experiment.** `[XR15]` exempts the three tables,
+3. **Retention of a very large experiment.** `[XR15]` exempts the three tables,
    and turns are already exempt from the size cap (`[R16]`) — so the *denominator*
    is safe. What a long sweep can lose is its own early **spans**, i.e. trace
    detail, while its rows and score survive: the `[DR52]` pinning problem one
    level up, unsolved here.
-6. **A derived score is warned about, not refused.** §8.1 records that the
+4. **A derived score is warned about, not refused.** §8.1 records that the
    turn-derived fallback is meaningless for a workflow whose commands never
    report failure. The UI and the score payload both say so; nothing prevents
    it.
-7. **Restart destroys the abandoned trajectory.** `restart_attempt` deletes the
+5. **Restart destroys the abandoned trajectory.** `restart_attempt` deletes the
    crashed attempt's conversations and turns. The alternative — allocating a
    fresh `attempt` and marking the abandoned one — keeps the partial trajectory
    but makes `declared_attempts` arithmetic no longer exact and the UNIQUE index

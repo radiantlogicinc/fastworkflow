@@ -1,15 +1,5 @@
 /* -- navigation --------------------------------------------------------- */
 function renderCrumbs() {
-  if (review.progress) {
-    var reviewBar = el("nav", "crumbs");
-    state.path.forEach(function (node, index) {
-      if (index) { reviewBar.appendChild(el("span", "sep", "›")); }
-      var button = el("button", null, node.crumb);
-      button.addEventListener("click", function () { state.path = state.path.slice(0, index + 1); renderLevel(); });
-      reviewBar.appendChild(button);
-    });
-    return reviewBar;
-  }
   syncTraceHierarchy();
   var bar = el("nav", "crumbs");
   fillHierarchyCrumbs(bar);
@@ -148,8 +138,6 @@ function renderFeedbackHistoryRow(row) {
 }
 
 function renderFeedback(parent, node) {
-  // Formal blinded assignments retain their own capability-gated review UI.
-  if (review.progress) { return; }
   var ids = feedbackAnchor(node);
   var card = el("div", "card feedbackCard");
   /* Just the field name: the level this feedback is anchored to is named in
@@ -164,7 +152,6 @@ function renderFeedback(parent, node) {
   /* Distinct read and write surfaces (fix-9eg.16): listing notes is a GET on
      its own path, and /post_feedback only ever appends one. */
   var scope = "turn_key=" + encodeURIComponent(state.turn.turn_key);
-  if (session && session.workspace_mode) { scope += "&store_id=" + encodeURIComponent(state.storeId); }
   var readPath = "/api/feedback-notes?" + scope;
   var writePath = "/post_feedback?" + scope;
   var history = el("div"), note = el("p", "sub", "Loading feedback\u2026");
@@ -257,18 +244,8 @@ function renderFeedback(parent, node) {
     }).forEach(function (row) {
       history.appendChild(renderFeedbackHistoryRow(row));
     });
-    /* Read-only evidence is not read-only feedback. When the server answers
-       `annotated`, the comment is recorded in the workflow's live database,
-       keyed by the archive's digest (fix-9eg.19.1), and the evidence file is
-       not touched, so the composer stays open on a sealed store. */
-    var recordable = !data.read_only || !!data.annotated;
-    composer.hidden = save.hidden = head.hidden = !recordable;
-    save.disabled = !recordable;
-    note.textContent = !recordable
-      ? "Read-only snapshot. Add feedback in the working experiment database."
-      : (data.read_only
-        ? "This evidence is read-only. Your comment is recorded beside it and never changes it."
-        : "Each save adds a timestamped comment.");
+    save.disabled = false;
+    note.textContent = "Each save adds a timestamped comment.";
   }
   api(readPath).then(show).catch(function (e) { note.textContent = e.message; });
   save.addEventListener("click", function () {
@@ -410,7 +387,7 @@ function renderDetail(turn, spans) {
     clear(d);
     d.appendChild(renderCrumbs());
     var info = el("div", "card");
-    info.appendChild(el("h2", null, policedText(turn.user_message) || "(no message)"));
+    info.appendChild(el("h2", null, turn.user_message || "(no message)"));
     renderTurnLevel(info, turn);
     d.appendChild(info);
     renderFeedback(d, state.path[0]);

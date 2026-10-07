@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sqlite3
 from typing import Any, Optional
 from urllib.parse import unquote
@@ -25,7 +24,7 @@ from fastworkflow.run_chatbot.http_common import STORE_UNAVAILABLE
 
 class _BenchmarkRoutes:
     def _post_benchmark_record(self, path: str, body: Any, query: dict[str, list[str]]) -> None:
-        folder = self._benchmark_workflow_path(write=True)
+        folder = self._benchmark_workflow_path()
         if folder is None:
             return
         benchmark_setup_path = path == "/api/benchmark-setup"
@@ -66,7 +65,7 @@ class _BenchmarkRoutes:
         self._handle_benchmark_analysis_put(path, body)
 
     def _delete_benchmark_experiment(self, path: str, body: Any, query: dict[str, list[str]]) -> None:
-        folder = self._benchmark_workflow_path(write=True)
+        folder = self._benchmark_workflow_path()
         if folder is None:
             return
         prefix = "/api/benchmark-experiments/"
@@ -90,41 +89,8 @@ class _BenchmarkRoutes:
     def _patch_registration(self, path: str, body: Any, query: dict[str, list[str]]) -> None:
         self._handle_registration_patch(path, body)
 
-    def _benchmark_workflow_path(self, *, write: bool = False) -> Optional[str]:
-        """Workflow folder for versioned benchmark corpus files.
-
-        In workspace mode this is the folder the manifest named at seal time,
-        and it is served for READS only: the corpus a sealed run was pinned to
-        is part of reading that run's evidence, and refusing it left the pin as
-        a digest with nothing behind it. Writes stay refused exactly as before
-        — the folder is a live checkout that a read-only workspace must not
-        touch, and `write=True` returns None before the manifest is consulted.
-
-        A manifest with no folder keeps its 409, and so does one whose folder
-        is gone: nothing was found to read, and the reason is quoted.
-        """
-        if self.chatbot.workspace is not None:
-            if write:
-                self._error(
-                    403,
-                    "workspace mode is read-only; benchmark corpus files cannot be changed",
-                )
-                return None
-            declared = self.chatbot.workspace.workflow_folderpath
-            if not declared:
-                self._error(
-                    409,
-                    "benchmarks are available in live workflow mode only",
-                )
-                return None
-            if not os.path.isdir(declared):
-                self._error(
-                    409,
-                    "the workflow folder named by this workspace is not on "
-                    f"this machine: {declared}",
-                )
-                return None
-            return declared
+    def _benchmark_workflow_path(self) -> Optional[str]:
+        """Workflow folder for versioned benchmark corpus files."""
         workflow_path = (self.chatbot.workflow_path or "").strip()
         if not workflow_path:
             self._error(
@@ -166,12 +132,11 @@ class _BenchmarkRoutes:
         # so a read of a workflow nobody has decided in leaves it untouched.
         winner = None
         sole_member = False
-        if self.chatbot.workspace is None:
-            try:
-                winner = benchmark_setup.workflow_winner(folder, experiment_id)
-                sole_member = benchmark_setup.is_sole_group_member(folder, experiment_id)
-            except (OSError, sqlite3.Error, ValueError) as exc:
-                warning = warning or str(exc)
+        try:
+            winner = benchmark_setup.workflow_winner(folder, experiment_id)
+            sole_member = benchmark_setup.is_sole_group_member(folder, experiment_id)
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            warning = warning or str(exc)
         is_winner = bool(winner and winner.get("experiment_id") == experiment_id)
         self._send_json({"experiment": record, "benchmark": manifest,
                          "recorded": recorded, "warning": warning,
@@ -188,7 +153,6 @@ class _BenchmarkRoutes:
                          # move between this read and the DELETE, and that
                          # refusal stays where it is.
                          "can_delete": (record.get("store") is None
-                                        and self.chatbot.workspace is None
                                         and (not is_winner or sole_member))})
 
     def _handle_registration_patch(self, path: str, body: dict[str, Any]) -> None:
@@ -206,7 +170,7 @@ class _BenchmarkRoutes:
         if "description" not in body:
             self._error(400, 'nothing to patch: send {"description": "..."}')
             return
-        folder = self._benchmark_workflow_path(write=True)
+        folder = self._benchmark_workflow_path()
         if folder is None:
             return
         try:
@@ -234,69 +198,41 @@ class _BenchmarkRoutes:
         if folder is None:
             return
         rows, warning = [], None
-        if self.chatbot.workspace is not None:
-            workspace = self.chatbot.workspace
-            for logical in workspace.experiments():
-                matches = [workspace.experiment(segment["store_id"], segment["local_experiment_id"])
-                           for segment in workspace.segments(logical["experiment_id"])]
-                benchmark_rows = [
-                    row for row in matches
-                    if row and row.get("benchmark_id") == benchmark_id
-                ]
-                versions = sorted(
-                    {row["benchmark_version"] for row in benchmark_rows}
-                )
-                if versions:
-                    rows.append(
-                        dict(
-                            logical,
-                            benchmark_version=", ".join(versions),
-                            workspace=True,
-                            archived=all(
-                                bool(row.get("archived")) for row in benchmark_rows
-                            ),
-                            created_at=max(
-                                row.get("created_at") or "" for row in benchmark_rows
-                            ),
-                        )
-                    )
-        else:
-            try:
-                registrations = benchmark_setup.registered_experiments(folder, benchmark_id)
-                rows = [dict(row, registered=True, status="registered", archived=False)
-                        for row in registrations]
-                registered = {row["experiment_id"]: row for row in rows}
-                store = self.chatbot.open_store()
-                if store:
-                    offset = 0
-                    while True:
-                        batch = store.list_experiments(limit=200, offset=offset)
-                        for row in batch:
-                            if row.get("benchmark_id") == benchmark_id:
-                                known = registered.get(row["experiment_id"])
-                                if known is None:
-                                    rows.append(row)
-                                elif known.get("store"):
-                                    known["archived"] = row["archived"]
-                        if len(batch) < 200:
-                            break
-                        offset += len(batch)
-            except IncompatibleObservabilityDB as exc:
-                warning = STORE_UNAVAILABLE + str(exc)
+        try:
+            registrations = benchmark_setup.registered_experiments(folder, benchmark_id)
+            rows = [dict(row, registered=True, status="registered", archived=False)
+                    for row in registrations]
+            registered = {row["experiment_id"]: row for row in rows}
+            store = self.chatbot.open_store()
+            if store:
+                offset = 0
+                while True:
+                    batch = store.list_experiments(limit=200, offset=offset)
+                    for row in batch:
+                        if row.get("benchmark_id") == benchmark_id:
+                            known = registered.get(row["experiment_id"])
+                            if known is None:
+                                rows.append(row)
+                            elif known.get("store"):
+                                known["archived"] = row["archived"]
+                    if len(batch) < 200:
+                        break
+                    offset += len(batch)
+        except IncompatibleObservabilityDB as exc:
+            warning = STORE_UNAVAILABLE + str(exc)
         # One read for the whole list. The winner is a pointer on the contest,
         # not a property of any registration row, and the list is newest-first
         # so the experiment it names is often the oldest card on the page.
         winner_id = None
         winner_automatic = False
-        if self.chatbot.workspace is None:
-            try:
-                winner = benchmark_setup.benchmark_winner(folder, benchmark_id)
-            except (OSError, sqlite3.Error, ValueError) as exc:
-                warning = warning or str(exc)
-                winner = None
-            if winner and winner.get("experiment_id"):
-                winner_id = str(winner["experiment_id"])
-                winner_automatic = bool(winner.get("automatic"))
+        try:
+            winner = benchmark_setup.benchmark_winner(folder, benchmark_id)
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            warning = warning or str(exc)
+            winner = None
+        if winner and winner.get("experiment_id"):
+            winner_id = str(winner["experiment_id"])
+            winner_automatic = bool(winner.get("automatic"))
         for row in rows:
             row["is_winner"] = bool(
                 winner_id and row.get("experiment_id") == winner_id
@@ -312,7 +248,7 @@ class _BenchmarkRoutes:
 
     def _handle_benchmarks(self, path: str) -> None:
         """Read workflow-local benchmark catalogs from ``<workflow>/benchmarks/``."""
-        workflow_path = self._benchmark_workflow_path(write=False)
+        workflow_path = self._benchmark_workflow_path()
         if workflow_path is None:
             return
         if path == "/api/benchmarks":
@@ -374,7 +310,7 @@ class _BenchmarkRoutes:
 
     def _handle_benchmark_post(self, path: str, body: Any) -> None:
         """Create one immutable benchmark version file under the workflow folder."""
-        workflow_path = self._benchmark_workflow_path(write=True)
+        workflow_path = self._benchmark_workflow_path()
         if workflow_path is None:
             return
         if not isinstance(body, dict):
@@ -418,7 +354,7 @@ class _BenchmarkRoutes:
 
     def _handle_benchmark_analysis_put(self, path: str, body: dict[str, Any]) -> None:
         """``PUT /api/benchmarks/<id>/analysis`` — mutable sibling analysis file."""
-        workflow_path = self._benchmark_workflow_path(write=True)
+        workflow_path = self._benchmark_workflow_path()
         if workflow_path is None:
             return
         encoded_id = path[len("/api/benchmarks/") : -len("/analysis")].rstrip("/")

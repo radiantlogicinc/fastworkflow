@@ -19,7 +19,6 @@ from fastworkflow.experiment.runner import (
 
 @pytest.fixture
 def workflow(tmp_path, monkeypatch) -> str:
-    monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
     folder = str(tmp_path / "workflow")
     obs.ObservabilityStore(state_paths.observability_db(folder))
     return folder
@@ -78,18 +77,6 @@ def _start_and_terminalize(
         attempt,
         execution_status="completed",
     )
-
-
-def test_external_controller_refuses_capture_regime_mismatch(workflow, db_path):
-    with pytest.raises(obs.CaptureRegimeChanged):
-        ExperimentController(
-            workflow,
-            experiment_store_readiness(db_path)["store_id"],
-            migrate=False,
-            external=True,
-            capture_profile="debug",
-            capture_policy_version=obs.CAPTURE_POLICY_VERSION,
-        )
 
 
 def test_external_controller_has_no_sink_writer_or_pruning_side_effect(

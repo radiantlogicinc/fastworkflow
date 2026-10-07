@@ -650,14 +650,12 @@ def _proxy_credentials(url: Optional[str]) -> Optional[str]:
 
 
 class ObservabilityProvenance(BaseModel):
-    """Under what capture regime a run's trace evidence was recorded.
+    """Under what observability configuration a run's trace evidence was recorded.
 
     §12.4 requires an evidence run to record "observability configuration
     (`FW_OBS_*` values in effect) and the span-contract version", because trace
-    evidence read without them is uninterpretable: the same workflow under
-    `FW_OBS_CAPTURE_PROFILE=evidence` and under `debug` produces records that
-    differ in what they contain rather than in what happened, and two runs whose
-    span-contract versions differ cannot be compared attribute by attribute at all.
+    evidence read without them is uninterpretable: two runs whose span-contract
+    versions differ cannot be compared attribute by attribute at all.
 
     Values arrive as arguments rather than being read here, per the §22 leaf
     constraint — `observability_store` and `tracing` are not leaves, and this
@@ -673,8 +671,6 @@ class ObservabilityProvenance(BaseModel):
 
     schema_version: int = 1
     enabled: bool
-    capture_profile: str
-    capture_policy_version: str
     span_contract_version: int
     # Per-emitter attribute-contract versions (arch §12.0 delta 5). Additive and
     # defaulted: this model is frozen with `extra="forbid"`, so a required field
@@ -691,11 +687,6 @@ class ObservabilityProvenance(BaseModel):
     # Set only by an evidence-grade run; None means normal best-effort operation,
     # where drops are acceptable and nobody asserted otherwise.
     evidence_grade: Optional[bool] = None
-
-    @property
-    def default_deny(self) -> bool:
-        """Whether unclassified fields were withheld rather than captured."""
-        return self.capture_profile == "evidence"
 
     @property
     def evidence_interpretable(self) -> bool:
@@ -732,7 +723,7 @@ class RuntimeProvenance(BaseModel):
     workflow: WorkflowProvenance
     models: ModelProvenance
     # Additive and optional: a harness that consumes no trace evidence owes no
-    # capture regime, and requiring one would break every existing caller to
+    # observability configuration, and requiring one would break every existing caller to
     # record a fact that does not apply to it.
     observability: Optional[ObservabilityProvenance] = None
 

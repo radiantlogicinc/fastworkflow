@@ -151,50 +151,8 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   assert.ok(!rightPane().includes('Plan this pass generated'),
     'no plan is invented for it: ' + rightPane().slice(0, 400));
 
-  /* ================================================================
-   * A pass whose text the capture policy withheld says so
-   * ================================================================ */
-  await changeUntil('Left run', '3',
-    () => detail().includes('Left: attempt 3'), 'the evidence-profile attempt');
-  /* Waited on the ATTRIBUTION again, not on "withheld": under this profile the
-     turn's own answer is withheld too, so the unscoped pane already says
-     "withheld by policy" and the wait would return before the pass selection
-     repainted anything. */
-  await changeUntil('Left recorded pass', 'teacher',
-    () => leftPane().includes('recorded for this pass — teacher'),
-    'the withheld pass');
-  /* BOTH fields, named, so a badge for one cannot pass for both. */
-  assert.ok(leftPane().includes('this pass\'s answer — withheld by policy'),
-    'the withheld answer is badged: ' + leftPane().slice(0, 600));
-  assert.ok(leftPane().includes('this pass\'s plan — withheld by policy'),
-    'the withheld plan is badged: ' + leftPane().slice(0, 600));
-  assert.ok(leftPane().includes('user-text'),
-    'the badge carries the classification: ' + leftPane().slice(0, 600));
-  /* This attempt's text was capped by the emitter before the sink policed it,
-     so the size and digest in the badge are the prefix's and the badge says
-     so. Without this line a reader takes "32 bytes" for the whole answer. */
-  assert.ok(leftPane().includes('already truncated on recording'),
-    'the badge admits the measurements are partial: ' + leftPane().slice(0, 600));
-  /* And none of the withheld text reached the page by any route — the badge,
-     the answer body, the plan, or a payload rendered elsewhere on it. */
-  assert.ok(!d.body.textContent.includes('PRIVATE_SENTINEL_'),
-    'withheld pass text is nowhere on the page');
-  assert.ok(!leftPane().includes('(no answer recorded)'),
-    'a withheld answer is not reported as one nobody recorded: '
-    + leftPane().slice(0, 600));
-  /* And it is still a recorded pass: the attribution and the outcome survive
-     the withholding, because only the text was withheld. */
-  assert.ok(leftPane().includes('recorded for this pass — teacher'),
-    'still attributed: ' + leftPane().slice(0, 600));
-  assert.ok(leftPane().includes('completed'),
-    'the outcome is still recorded: ' + leftPane().slice(0, 600));
-
-  /* Back to the attempt with content, so the artifact checks below read the
-     pane they were written for. */
-  await changeUntil('Left run', '1',
-    () => detail().includes('Left: attempt 1'), 'the recorded attempt');
-  /* Changing the run resets the pass selector to the whole turn, so the pass
-     is chosen again here rather than assumed to have survived. */
+  /* Back to the teacher pass, so the artifact checks below read the pane they
+     were written for. */
   await changeUntil('Left recorded pass', 'teacher',
     () => leftPane().includes('recorded for this pass — teacher'),
     'the teacher pass again');

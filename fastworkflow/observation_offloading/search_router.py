@@ -11,11 +11,10 @@ OFF unless a deployment turns it on: ``FW_SEARCH_ROUTER=jev`` AND a
 ``JEV_API_KEY``. A key present for some other purpose does not enable it,
 because routing sends the agent's question, its reasoning and the first lines
 of the observation to a third party. What is sent is passed through the
-archive's capture policy first (``jev_client.egress``), and if that fails
-nothing is sent. Routing stays off (one warning) under a capture profile that
-withholds command output and when ``FW_OFFLOAD_EVIDENCE_REDACTION=off``; a
-value the policy withholds at call time sends nothing and returns the error
-``policy_withheld``.
+archive's credential scrub first (``jev_client.egress``), and if that fails
+nothing is sent. Routing stays off (one warning) when
+``FW_OFFLOAD_EVIDENCE_REDACTION=off``; a value ``egress`` refuses at call time
+sends nothing and returns the error ``policy_withheld``.
 
 Routing fails open: no SDK, no key, a timeout or any error means ``route``
 returns an error record and the search model answers exactly as before. One
@@ -44,7 +43,7 @@ The questions go through the vendor-neutral ``decision.DecisionProvider``
 interface; Jev is its built-in implementation (``jev_client.JevProvider``).
 ``FW_SEARCH_ROUTER`` may instead name a provider registered from code
 (``decision.register_decision_provider``) -- never a module path -- under the
-same capture-policy gate and per-value filter. ``ROUTE_ALL_ROWS_MIN``, the
+same redaction gate and per-value filter. ``ROUTE_ALL_ROWS_MIN``, the
 wording and the precision and recall above were measured with Jev: with any
 other provider they are unmeasured (one warning per process).
 
@@ -75,7 +74,7 @@ ROUTER_HEAD_LINES = 4
 ROUTER_TIMEOUT_SECONDS = 2.0
 EXAMPLES_FILE = "search_router_examples.json"
 ALL_ROWS = "all_rows"
-#: ``route``'s error when the capture policy withheld a value it would have sent.
+#: ``route``'s error when ``jev_client.egress`` refused a value it would have sent.
 POLICY_WITHHELD = "policy_withheld"
 #: ``route``'s error once the turn's routing calls or vendor time are used up.
 ROUTER_BUDGET = "router_budget"
@@ -176,7 +175,7 @@ class SearchRouter:
             budget = self._budget_source()
         started = time.monotonic()
         state, refused = self._state(question, reasoning, text, started)
-        # A route that sends nothing (withheld by the capture policy, or failed
+        # A route that sends nothing (refused by ``egress``, or failed
         # redaction) does not use up one of the turn's routing calls.
         if refused is None and budget is not None and not budget.take_router_call():
             return self._with_in_flight(
