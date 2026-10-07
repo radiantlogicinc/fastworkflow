@@ -14,8 +14,7 @@ from fastworkflow.observability import store as obs
 from fastworkflow.experiment.runner import ExperimentController
 from fastworkflow.run_chatbot.navigation import build_navigation
 from fastworkflow.run_chatbot import server as run_chatbot_server
-from tests.test_chatbot_benchmarks import _request, experiment_server, workflow_dir, workspace_server
-from tests.test_observability_workspace import _turn_row
+from tests.test_chatbot_benchmarks import _request, _turn_row, experiment_server, workflow_dir
 
 
 def add_turn(store, key, eid=None, day='2026-09-08', channel='chat', cid=1):
@@ -73,20 +72,19 @@ def test_hierarchy_separates_benchmarks_experiments_and_dates(hierarchy_server):
     recorded = next(n for n in benchmark['children'] if n['experiment_id'] == eid)
     assert recorded['recorded']
     turn = next(n for n in walk(recorded) if n['kind'] == 'turn')
-    assert turn['turn_key'] == 'experiment-turn' and turn['source'] is None
+    assert turn['turn_key'] == 'experiment-turn'
     adhoc = next(n for n in root['children'] if n['kind'] == 'adhoc')
     assert [n['label'] for n in adhoc['children']] == ['2026-09-08', '2026-09-07']
     assert {n['turn_key'] for n in walk(adhoc) if n['kind'] == 'turn'} == {'plain today', 'plain yesterday'}
     assert any(n['turn_key'] == 'outside benchmark' for n in walk(root) if n['kind'] == 'turn')
 
 
-def test_more_than_one_page_and_colliding_conversation_ids(tmp_path):
-    a = obs.ObservabilityStore(str(tmp_path / 'a.sqlite3'))
-    b = obs.ObservabilityStore(str(tmp_path / 'b.sqlite3'))
+def test_more_than_one_page_of_turns(tmp_path):
+    store = obs.ObservabilityStore(str(tmp_path / 'a.sqlite3'))
     for i in range(503):
-        add_turn(a, f'a-{i}')
-    add_turn(b, 'b')
-    root = build_navigation([], [], [{'store': a, 'source': {'store_id': 'a'}}, {'store': b, 'source': {'store_id': 'b'}}])
+        add_turn(store, f'a-{i}')
+    add_turn(store, 'b', channel='other')
+    root = build_navigation([], [], store)
     assert len([n for n in walk(root) if n['kind'] == 'turn']) == 504
     assert len([n for n in walk(root) if n['kind'] == 'conversation']) == 2
 
@@ -101,7 +99,6 @@ def test_navigation_orders_benchmark_experiments_newest_first():
     root = build_navigation(
         [{'benchmark_id': 'bench'}],
         rows,
-        [],
     )
     benchmark = root['children'][0]
     assert [node['experiment_id'] for node in benchmark['children']] == [
@@ -147,14 +144,6 @@ def test_navigation_payload_is_slim_and_supports_etag(hierarchy_server):
     assert (headers304.get('ETag') or headers304.get('etag')) == etag
 
 
-def test_navigation_workspace_is_scoped(workspace_server):
-    server, _workflow, _before = workspace_server
-    status, data = _request(server, '/api/navigation')
-    assert status == 200
-    turns = [n for n in walk(data['root']) if n['kind'] == 'turn']
-    assert turns and all(n['source'].get('store_id') for n in turns)
-
-
 def test_page_separates_navigation_into_tabs():
     page = run_chatbot_server.load_index_html()
     assert b'id="navConversations"' in page
@@ -165,7 +154,6 @@ def test_page_separates_navigation_into_tabs():
     assert b"Distillations are coming soon" not in page
     assert b'setNavigationTab("distillations")' not in page
     assert b"Benchmarks &amp; conversations" not in page
-    assert b">WORKSPACE<" not in page
 
 
 def test_incompatible_default_does_not_hide_registered_experiment(hierarchy_server, tmp_path):
@@ -303,8 +291,8 @@ def test_polling_visibility_dom(hierarchy_server):
 
 
 def test_keyboard_rail_dom(hierarchy_server):
-    server, _spec, _eid, _default, _store = hierarchy_server
-    _run_dom('chatbot_keyboard_rail_dom.cjs', server, timeout=90)
+    server, _spec, eid, _default, _store = hierarchy_server
+    _run_dom('chatbot_keyboard_rail_dom.cjs', server, eid, timeout=90)
 
 
 def test_unreachable_and_clear_rotation_dom(hierarchy_server):

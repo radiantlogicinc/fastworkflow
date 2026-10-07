@@ -1,7 +1,7 @@
 """Switching evidence sources without relaunching the page (fix-9eg.7.2).
 
-The switching itself was already delivered — /api/select_workflow,
-/api/select_workspace, the picker, store-scoped workspace reads. What was
+The switching itself was already delivered — /api/select_workflow and the
+picker. What was
 missing is the boundary between sources: the page carried the previous
 source's selected turn, experiment scoping, rendered detail and live chat
 binding straight into the next one, so a workflow switch could leave the
@@ -26,9 +26,7 @@ import pytest
 
 from fastworkflow import state_paths
 from fastworkflow.observability import store as obs
-from fastworkflow.observability.workspace import WORKSPACE_SCHEMA
 from fastworkflow.run_chatbot import server as run_chatbot_server
-from tests.test_observability_workspace import _seed_archive, _store_decl
 
 # One key, two stores: the collision is the point.
 SHARED_TURN = "20260901T090000-shared"
@@ -106,7 +104,7 @@ def _seed_workflow(
 
 @pytest.fixture
 def two_sources(tmp_path, monkeypatch):
-    """Two live workflows and two sealed workspaces over one workflow."""
+    """Two live workflows that share a turn key."""
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
     # Source A's artifact is offloaded, so showing it costs a real HTTP read
     # from A's store — which is what must not happen once B is open.
@@ -141,41 +139,10 @@ def two_sources(tmp_path, monkeypatch):
         tmp_path, "source_b", record_artifacts={"note": "artifact of source_b"}
     )
 
-    archive_root = tmp_path / "archives"
-    archive_root.mkdir()
-    archive = _seed_archive(
-        archive_root,
-        "sealed",
-        experiment_id="exp-sealed",
-        task_id="task-sealed",
-        turn_key=SHARED_TURN,
-    )
-
-    manifests = []
-    for index in (1, 2):
-        manifest = archive_root / f"workspace-{index}.json"
-        manifest.write_text(
-            json.dumps(
-                {
-                    "schema": WORKSPACE_SCHEMA,
-                    "workspace_id": f"workspace-{index}",
-                    "label": f"Sealed workspace {index}",
-                    # Same workflow, different workspace: still two sources.
-                    "workflow_folderpath": source_a,
-                    "stores": [_store_decl(archive, f"store-{index}")],
-                    "experiments": [],
-                    "projected_attempts": [],
-                }
-            ),
-            encoding="utf-8",
-        )
-        manifests.append(str(manifest))
-
     return {
         "a": source_a,
         "b": source_b,
         "db_a": state_paths.observability_db(source_a),
-        "manifests": manifests,
     }
 
 
@@ -197,20 +164,6 @@ def live_server(two_sources):
     thread.join(timeout=5)
 
 
-@pytest.fixture
-def second_workspace_server(two_sources):
-    """A second sealed workspace over the SAME workflow.
-
-    Once a chatbot is in workspace mode its control plane is read-only, so a
-    workspace-to-workspace switch cannot be driven through one server. This
-    one exists to hand the page a genuine second-workspace session payload.
-    """
-    server, thread = _serve(workspace_manifest_path=two_sources["manifests"][1])
-    yield server
-    server.shutdown()
-    thread.join(timeout=5)
-
-
 def test_the_two_sources_really_collide(two_sources):
     """The fixture's premise: one turn key, two different records."""
     in_a = obs.ObservabilityStore(two_sources["db_a"]).get_turn(SHARED_TURN)
@@ -221,10 +174,8 @@ def test_the_two_sources_really_collide(two_sources):
     assert in_a["answer"] != in_b["answer"]
 
 
-def test_switching_sources_in_a_real_dom(
-    two_sources, live_server, second_workspace_server
-):
-    """Workflow → workflow → workspace, in a browser, over real servers.
+def test_switching_sources_in_a_real_dom(two_sources, live_server):
+    """Workflow → workflow, in a browser, over real servers.
 
     Asserts the boundary in both directions: everything scoped to the source
     being left is gone (selected turn, rendered detail, chat transcript and
@@ -240,12 +191,9 @@ def test_switching_sources_in_a_real_dom(
             "node", str(script), jsdom_root,
             f"http://127.0.0.1:{live_server.port}/?token={live_server.token}",
             two_sources["b"],
-            two_sources["manifests"][0],
             SHARED_TURN,
             ARTIFACT_A,
             ARTIFACT_PAYLOAD_A,
-            f"http://127.0.0.1:{second_workspace_server.port}"
-            f"/api/session?token={second_workspace_server.token}",
         ],
         capture_output=True, text=True, timeout=180,
     )

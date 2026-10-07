@@ -44,21 +44,13 @@ env_files = chat_fixtures.env_files
 app_module = chat_fixtures.app_module
 
 MULTILINE_TURN = "20260825T130000-reuse1"
-WITHHELD_TURN = "20260825T130500-reuse2"
+OTHER_TURN = "20260825T130500-reuse2"
 MULTILINE_MESSAGE = (
     "first line of the recorded message\n"
     "second line, indented:\n"
     "    - a bullet the person typed\n"
 )
-WITHHELD_MESSAGE = json.dumps(
-    {
-        "__fw_capture__": True,
-        "reason": "user_message withheld by the strict profile",
-        "classification": "pii",
-        "original_bytes": 61,
-        "digest": "sha256:0f0f",
-    }
-)
+OTHER_MESSAGE = "a different recorded message"
 
 
 def _turn_row(turn_key: str, user_message: str) -> dict:
@@ -99,7 +91,7 @@ def recorded_workflow_path(tmp_path, monkeypatch) -> str:
 
 @pytest.fixture
 def recorded_store(recorded_workflow_path) -> str:
-    """A store holding one reusable message and one the policy withheld."""
+    """A store holding two reusable messages."""
     db_path = state_paths.observability_db(recorded_workflow_path)
     store = obs.ObservabilityStore(db_path)
     redactor = obs.Redactor()
@@ -111,7 +103,7 @@ def recorded_store(recorded_workflow_path) -> str:
         conn.execute("BEGIN IMMEDIATE")
         for turn_key, message in (
             (MULTILINE_TURN, MULTILINE_MESSAGE),
-            (WITHHELD_TURN, WITHHELD_MESSAGE),
+            (OTHER_TURN, OTHER_MESSAGE),
         ):
             assert store.upsert_turn_row(
                 conn, _turn_row(turn_key, message), [], redactor
@@ -146,8 +138,8 @@ def test_reusing_a_recorded_message_in_a_real_dom(recorded_server):
 
     Asserts the negative space as well as the feature: no request leaves the
     page when evidence is opened or copied, the record is unchanged
-    afterwards, a withheld message offers nothing to reuse, and a turn is
-    submitted only when Send is pressed.
+    afterwards, another turn offers its own message, and a turn is submitted
+    only when Send is pressed.
     """
     jsdom_root = os.environ.get("TEST_JSDOM_ROOT")
     if not jsdom_root:
@@ -157,7 +149,7 @@ def test_reusing_a_recorded_message_in_a_real_dom(recorded_server):
         [
             "node", str(script), jsdom_root,
             f"http://127.0.0.1:{recorded_server.port}/?token={recorded_server.token}",
-            MULTILINE_TURN, WITHHELD_TURN, MULTILINE_MESSAGE,
+            MULTILINE_TURN, OTHER_TURN, MULTILINE_MESSAGE,
         ],
         capture_output=True, text=True, timeout=120,
     )

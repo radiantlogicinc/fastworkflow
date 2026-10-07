@@ -736,7 +736,7 @@ LISTING_SKIP_NO_LISTING = "no_listing"
 LISTING_SKIP_ROUTER_ERROR = "router_error"
 #: The turn's routing calls or vendor time were used up, so the router was not asked.
 LISTING_SKIP_ROUTER_BUDGET = ROUTER_BUDGET
-#: The capture policy withheld a value the router would send, so nothing was sent.
+#: ``jev_client.egress`` refused a value the router would send, so nothing was sent.
 LISTING_SKIP_POLICY_WITHHELD = POLICY_WITHHELD
 LISTING_SKIP_NOT_ALL_ROWS = "not_all_rows"
 LISTING_SKIP_BELOW_THRESHOLD = "below_threshold"

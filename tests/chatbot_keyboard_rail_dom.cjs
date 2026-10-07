@@ -1,7 +1,7 @@
-/* Rail tabs, a picker row, and an experiment row, driven from the keyboard. */
+/* Rail tabs, a picker row, and an experiment's task row, driven from the keyboard. */
 const assert = require('node:assert/strict');
 const {JSDOM, VirtualConsole} = require(process.argv[2] + '/node_modules/jsdom');
-const url = process.argv[3];
+const url = process.argv[3], experimentId = process.argv[4];
 const errors = [];
 const console = new VirtualConsole();
 console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.message); });
@@ -64,14 +64,14 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   key(bench, 'ArrowRight');
   assert.equal(conv.getAttribute('aria-selected'), 'true', 'ArrowRight wraps to the first tab');
 
-  w.showExperiments();
-  await until(() => d.querySelector('#detail .listItem'), 'experiment rows');
-  const expRow = d.querySelector('#detail .listItem');
-  assert.equal(expRow.getAttribute('role'), 'button');
-  assert.equal(expRow.tabIndex, 0);
-  const space = key(expRow, ' ');
+  w.showExperiment(experimentId);
+  await until(() => d.querySelector('#detail .listItem'), 'task rows');
+  const taskRow = d.querySelector('#detail .listItem');
+  assert.equal(taskRow.getAttribute('role'), 'button');
+  assert.equal(taskRow.tabIndex, 0);
+  const space = key(taskRow, ' ');
   assert.equal(space.defaultPrevented, true);
-  await until(() => d.getElementById('detail').textContent.includes('RECORDED EXPERIMENT'), 'experiment page');
+  await until(() => w.state.experimentTask, 'task page');
 
   w.setTopMode('picker');
   w.loadPicker();
@@ -99,6 +99,10 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
      keyboard failure. */
   await until(() => !d.getElementById('pickerStatus').textContent.startsWith('Starting '),
     'workflow selection settled');
+  /* The selected workflow's session repaints the rail; that read must land
+     before the window closes too. */
+  await until(() => !d.getElementById('convList').textContent.includes('Loading navigation'),
+    'rail refreshed for the selected workflow');
 
   assert.deepEqual(errors, []);
   w.close();

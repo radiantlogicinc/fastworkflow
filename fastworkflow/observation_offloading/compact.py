@@ -26,6 +26,7 @@ from fastworkflow.observation_offloading.labels import (
 from fastworkflow.observation_offloading.state import (
     archive,
     archived_digest,
+    context_changed_of,
     context_clause_of,
     default_scope,
     evict_hot_handles,
@@ -223,9 +224,10 @@ def annotate_execute_observations(
                 }
             )
         clause = context_clause_of(
-            selected_scope, alias, selected_archive=selected_archive) or ""
-        line = alias_line(alias, clause)
-        trajectory[key] = annotated_observation(alias, clause, text)
+            selected_scope, alias, selected_archive=selected_archive)
+        changed = context_changed_of(selected_scope, alias)
+        line = alias_line(alias, clause, context_changed=changed)
+        trajectory[key] = annotated_observation(alias, clause, text, context_changed=changed)
         record_event(
             {
                 "kind": "context_line",
@@ -242,7 +244,7 @@ def annotate_execute_observations(
                     len(line.encode("utf-8")) - len(alias_line(alias).encode("utf-8"))),
             }
         )
-        annotated.append({"alias": alias, "step_index": step_index, "context": clause})
+        annotated.append({"alias": alias, "step_index": step_index, "context": clause or ""})
     return annotated
 
 

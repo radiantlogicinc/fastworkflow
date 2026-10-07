@@ -7,29 +7,18 @@
    The fragment and not the whole URL is the link. The port and the token in
    front of it change with every launch, so only the part after # still means
    something after a restart, and the token is not something to paste into
-   an issue. Pasting a fragment after any live chatbot URL opens its page.
-
-   A formal review owns its fragment. Its row link is already written by the
-   review pane, and a blinded review must not gain the identity of the
-   experiment or the run it hides, so nothing here writes while one is open. */
+   an issue. Pasting a fragment after any live chatbot URL opens its page. */
 var initialPageLink = location.hash.replace(/^#/, "");
 var debugPageLink = "";
 
-function reviewOwnsFragment() {
-  return !!(review.progress || (session && session.workspace_mode
-    && review.assignmentId && review.capability));
-}
-
 function replaceFragment(text) {
-  if (reviewOwnsFragment()) { return; }
   var url = location.pathname + location.search + (text ? "#" + text : "");
   if (url !== location.pathname + location.search + location.hash) {
     history.replaceState(history.state, "", url);
   }
 }
 
-/* Ids in this app are full of colons (experiment channels, workspace turn
-   keys), and a fragment may carry `:` `/` `@` `,` as they are; escaping them
+/* Ids in this app are full of colons (experiment channels, turn keys), and a fragment may carry `:` `/` `@` `,` as they are; escaping them
    as URLSearchParams does only makes the link unreadable. `&`, `=`, `+`, `#`
    and `%` stay escaped, so URLSearchParams still reads the text back. */
 function pageLinkText(params) {
@@ -46,7 +35,6 @@ function pageLinkText(params) {
    that names nothing in particular (a search, an emptied source) is still
    debug mode, which is what its link opens. */
 function writePageLink(params) {
-  if (reviewOwnsFragment()) { return; }
   debugPageLink = pageLinkText(params) || "debug";
   /* A view can repaint while the Chat tab is showing (the rail's background
      refresh, for one); the address bar names the tab on screen, and debug's
@@ -60,7 +48,7 @@ function writePageLink(params) {
    A rail key is JSON, and a conversation's nests its parent's key inside it,
    so as a fragment it escapes into a wall of %22%5C. The records people link
    to are named the way the recording names them instead: a conversation by
-   its store, channel and conversation id, a date by the date. Any other
+   its channel and conversation id, a date by the date. Any other
    record, or a name that would not single out this one node, keeps the key,
    which always does. */
 function railNodeLink(node) {
@@ -68,8 +56,7 @@ function railNodeLink(node) {
   if (node.kind === "date") { params = {date: node.info.date}; }
   else if (node.kind === "adhoc") { params = {page: "adhoc"}; }
   else if (node.kind === "conversation") {
-    params = {store: node.source && node.source.store_id,
-              channel: node.info.channel_id, conversation: node.info.conversation_id};
+    params = {channel: node.info.channel_id, conversation: node.info.conversation_id};
   }
   if (params) {
     var named = railNodesNamed(new URLSearchParams(pageLinkText(params)));
@@ -88,7 +75,7 @@ function railNodesNamed(params) {
   var match;
   if (params.has("conversation") || params.has("channel")) {
     match = function (n) {
-      return n.kind === "conversation" && same(n.source && n.source.store_id, "store")
+      return n.kind === "conversation"
         && same(n.info.channel_id, "channel") && same(n.info.conversation_id, "conversation");
     };
   } else if (params.has("date")) {
@@ -114,8 +101,7 @@ function railNodesNamed(params) {
    when it shows one, or else its position under the turn (an execution
    phase or a step inferred from an older recording, which has no span). */
 function traceLevelLink() {
-  var params = session && session.workspace_mode
-    ? {store: state.storeId, turn: state.turnKey} : {turn: state.turnKey};
+  var params = {turn: state.turnKey};
   var node = state.path[state.path.length - 1];
   if (state.path.length < 2 || !node) { return params; }
   var spanPath = node.span ? findSpanPath(state.path[0], node.span.span_id) : null;
@@ -133,7 +119,7 @@ function traceLevelLink() {
   return params;
 }
 
-/* Called from inside `selectTurn`/`selectWorkspaceTurn`'s stale-guarded
+/* Called from inside `selectTurn`'s stale-guarded
    completion, for the same reason `focusLoadedSpan` is. A position the trace
    does not have says so on screen rather than quietly opening the turn. */
 function focusLoadedLevel(level) {
@@ -189,8 +175,6 @@ function openRailPageLink(params) {
   } else if (named) {
     if (named.length === 1) { activateHierarchy(named[0], true); }
     else { pageLinkMissing("This link names a record this source's navigation does not hold."); }
-  } else if (experiment && session && session.workspace_mode) {
-    showWorkspaceExperiment({experiment_id: experiment});
   } else if (experiment && task) {
     var view = params.get("view");
     taskView = TASK_VIEWS.some(function (v) { return v.key === view; }) ? view : "runs";
@@ -215,15 +199,6 @@ function openPageLink(text) {
   if (text === "debug") { setTopMode("debug"); return true; }
   var params = new URLSearchParams(text);
   var turn = params.get("turn");
-  if (session && session.workspace_mode && turn && params.get("store")) {
-    setTopMode("debug");
-    selectWorkspaceTurn(params.get("store"), turn, params.get("span"), null, params.get("level"));
-    return true;
-  }
-  if (session && session.workspace_mode && turn) {
-    pageLinkMissing("Unscoped turn links are refused in workspace mode; include store and turn.");
-    return true;
-  }
   if (turn) {
     setTopMode("debug");
     selectTurnWithRetry(turn, 3, params.get("span"), params.get("level"));
@@ -240,7 +215,7 @@ function openPageLink(text) {
 }
 
 window.addEventListener("hashchange", function () {
-  if (!session || reviewOwnsFragment()) { return; }
+  if (!session) { return; }
   openPageLink(location.hash.replace(/^#/, ""));
 });
 

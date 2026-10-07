@@ -1,9 +1,5 @@
 /* -- boot --------------------------------------------------------------- */
 function refreshAll() {
-  if (session && session.workspace_mode) {
-    loadWorkspaceChrome();
-    return;
-  }
   refreshMeta();
   refreshHealth();
   refreshConvs();
@@ -81,12 +77,6 @@ var activeSourceIdentity = null;
 
 function sourceIdentity(sess) {
   if (!sess) { return "none"; }
-  if (sess.workspace_mode) {
-    /* A workspace is identified by the manifest, not by the workflow it was
-       collected from: two workspaces over one workflow are two sources. */
-    var workspace = sess.workspace || {};
-    return "workspace:" + (workspace.manifest_path || workspace.workspace_id || "");
-  }
   return "workflow:" + (sess.db_path || sess.workflow_path || "");
 }
 
@@ -95,7 +85,6 @@ function resetSourceScopedState() {
      both view-load tokens move, so a response that arrives after the switch
      finds itself stale and paints nothing. */
   expNavToken();
-  workspaceNav++;
 
   /* The turn finder owns #detail while it is active and walks the store over
      several round trips, so it has to be stood down explicitly: its sequence
@@ -111,8 +100,6 @@ function resetSourceScopedState() {
      LEFT. The one being opened can hold those same labels over other runs,
      so it goes with the rest of the search rather than being re-applied. */
   turnFind.scope = null;
-  turnFind.source = null;
-  turnFind.sourceMoved = false;
   var findText = document.getElementById("turnFindText");
   if (findText) { findText.value = ""; }
   turnFindRenderMarkers();
@@ -120,7 +107,6 @@ function resetSourceScopedState() {
   turnFindRender();
 
   state.channel = "";
-  state.storeId = null;
   state.turnKey = null;
   state.turn = null;
   state.path = [];
@@ -128,7 +114,6 @@ function resetSourceScopedState() {
   state.experimentTask = null;
   state.benchmarkId = null;
   state.benchmarkVersion = null;
-  workspaceStores = {};
   hierarchyRoot = null;
   hierarchyScope = null;
   hierarchyPath = [];
@@ -171,20 +156,6 @@ function applySession() {
   } else {
     activeSourceIdentity = identity;
   }
-  if (session && session.workspace_mode) {
-    setPill("ok", "sealed/read-only");
-    document.getElementById("modeTest").style.display = "none";
-    document.getElementById("modeDebug").style.display = "none";
-    document.getElementById("switchWfBtn").style.display = "none";
-    document.getElementById("clearConvsBtn").style.display = "none";
-    document.getElementById("advPanel").style.display = "none";
-    document.getElementById("advToggle").style.display = "none";
-    setTopMode("debug");
-    loadReviewAssignment();
-    return;
-  }
-  document.getElementById("advPanel").style.display = "";
-  document.getElementById("advToggle").style.display = "";
   if (!session || !session.workflow_path) {
     setPill("", "no workflow");
     setTopMode("picker");
@@ -237,11 +208,7 @@ api("/api/session").then(function (data) {
   /* deep links override the default landing view. The fragment is the one
      the page was opened with: applySession has already written the landing
      mode over the address bar. */
-  if (session.workspace_mode && review.assignmentId && review.capability) {
-    /* loadReviewAssignment owns row and trace resume for review links. */
-  } else {
-    openPageLink(initialPageLink);
-  }
+  openPageLink(initialPageLink);
 }).catch(function () {
   /* No control plane (very old server?) — behave like the plain viewer. */
   setPill("", "viewer");

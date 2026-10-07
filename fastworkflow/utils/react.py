@@ -1,5 +1,7 @@
 import asyncio
+import json
 import logging
+import re
 import time
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
@@ -348,6 +350,7 @@ class fastWorkflowReAct(Module):
                 tracing.SPAN_AGENT_STEP,
                 attributes={"step_index": idx},
             )
+            repaired_tool_name = None
             try:
                 pred = self._call_with_potential_trajectory_truncation(
                     self.react, trajectory, **input_args
@@ -355,36 +358,43 @@ class fastWorkflowReAct(Module):
                 if pred is None:
                     raise ValueError("Tool returned is None")
             except ValueError as err:
-                invalid_tool_obs = (
-                    f"Agent failed to select a valid tool: {_fmt_exc(err)}"
+                repaired = _command_named_as_tool(
+                    err, self.tools, input_args.get("available_commands")
                 )
-                trajectory[f"observation_{idx}"] = invalid_tool_obs
-                self.current_trajectory[f"observation_{idx}"] = invalid_tool_obs
-                idx += 1
-                recovery_thought = (
-                    "To execute a command, I should use one of the available tools"
-                )
-                recovery_obs = (
-                    "Use the appropriate tool with proper arguments (correctly formatted)"
-                )
-                trajectory[f"thought_{idx}"] = recovery_thought
-                trajectory[f"observation_{idx}"] = recovery_obs
-                self.current_trajectory[f"thought_{idx}"] = recovery_thought
-                self.current_trajectory[f"observation_{idx}"] = recovery_obs
-                idx += 1
-                exception_count += 1
-                tracing.end_span(
-                    host,
-                    step_span,
-                    status=tracing.STATUS_ERROR,
-                    attributes={
-                        "observation": invalid_tool_obs,
-                        "recovered": exception_count <= 2,
-                    },
-                )
-                if exception_count > 2:
-                    break
-                continue
+                if repaired is not None:
+                    repaired_tool_name = repaired.pop("repaired_tool_name")
+                    pred = dspy.Prediction(**repaired)
+                else:
+                    invalid_tool_obs = (
+                        f"Agent failed to select a valid tool: {_fmt_exc(err)}"
+                    )
+                    trajectory[f"observation_{idx}"] = invalid_tool_obs
+                    self.current_trajectory[f"observation_{idx}"] = invalid_tool_obs
+                    idx += 1
+                    recovery_thought = (
+                        "To execute a command, I should use one of the available tools"
+                    )
+                    recovery_obs = (
+                        "Use the appropriate tool with proper arguments (correctly formatted)"
+                    )
+                    trajectory[f"thought_{idx}"] = recovery_thought
+                    trajectory[f"observation_{idx}"] = recovery_obs
+                    self.current_trajectory[f"thought_{idx}"] = recovery_thought
+                    self.current_trajectory[f"observation_{idx}"] = recovery_obs
+                    idx += 1
+                    exception_count += 1
+                    tracing.end_span(
+                        host,
+                        step_span,
+                        status=tracing.STATUS_ERROR,
+                        attributes={
+                            "observation": invalid_tool_obs,
+                            "recovered": exception_count <= 2,
+                        },
+                    )
+                    if exception_count > 2:
+                        break
+                    continue
             except BaseException as err:
                 # Anything else from the reasoning call — AdapterParseError,
                 # provider errors, control signals. The caller's retry loop
@@ -409,6 +419,8 @@ class fastWorkflowReAct(Module):
                 "tool_name": pred.next_tool_name,
                 "tool_args": pred.next_tool_args,
             }
+            if repaired_tool_name is not None:
+                step_attributes["repaired_tool_name"] = repaired_tool_name
 
             # Mirror the full step into current_trajectory (consumed by the planner
             # for replanning and by distillation as the agent trajectory). Keep the
@@ -555,8 +567,14 @@ class fastWorkflowReAct(Module):
             try:
                 pred = await self._async_call_with_potential_trajectory_truncation(self.react, trajectory, **input_args)
             except ValueError as err:
-                logger.warning(f"Ending the trajectory: Agent failed to select a valid tool: {_fmt_exc(err)}")
-                break
+                repaired = _command_named_as_tool(
+                    err, self.tools, input_args.get("available_commands")
+                )
+                if repaired is None:
+                    logger.warning(f"Ending the trajectory: Agent failed to select a valid tool: {_fmt_exc(err)}")
+                    break
+                repaired.pop("repaired_tool_name")
+                pred = dspy.Prediction(**repaired)
 
             trajectory[f"thought_{idx}"] = pred.next_thought
             trajectory[f"tool_name_{idx}"] = pred.next_tool_name
@@ -860,6 +878,92 @@ def _fmt_exc(err: BaseException, *, limit: int = 5) -> str:
     import traceback
 
     return "\n" + "".join(traceback.format_exception(type(err), err, err.__traceback__, limit=limit)).strip()
+
+
+_FIELD_MARKER = re.compile(r"\[\[ ## (\w+) ## \]\]")
+_COMMAND_TOKEN = re.compile(r"[A-Za-z_][\w/]*")
+_COMMAND_TOOL = "execute_workflow_query"
+_ARG_KEY = re.compile(r"[A-Za-z_]\w*")
+_TAG_LIKE = re.compile(r"</?[^<>]+>")
+
+
+def _lm_responses(err: BaseException):
+    """Raw LM replies carried by the adapter parse errors chained under *err*."""
+    seen: set[int] = set()
+    current: BaseException | None = err
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        response = getattr(current, "lm_response", None)
+        if isinstance(response, str):
+            yield response
+        current = current.__cause__ or current.__context__
+
+
+def _reply_fields(response: str) -> dict[str, Any]:
+    """The output fields of a chat-format or JSON-format reply, unvalidated."""
+    text = response.strip()
+    if text.startswith("```"):
+        text = text.strip("`").removeprefix("json").strip()
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        parts = _FIELD_MARKER.split(text)
+        return {parts[i]: parts[i + 1].strip() for i in range(1, len(parts) - 1, 2)}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _command_named_as_tool(
+    err: BaseException, tools: dict[str, Any], available_commands: Any
+) -> dict[str, Any] | None:
+    """The step the agent meant when it named a workflow command as its tool.
+
+    Small models write ``next_tool_name: open_directory`` instead of calling
+    ``execute_workflow_query`` with that command. When the rejected name is a
+    command listed for the current context and its args are a JSON object
+    whose values hold no tag-like text, return the equivalent
+    ``execute_workflow_query`` step; otherwise None.
+    """
+    if _COMMAND_TOOL not in tools or not isinstance(available_commands, str):
+        return None
+    for response in _lm_responses(err):
+        fields = _reply_fields(response)
+        name = fields.get("next_tool_name")
+        if not isinstance(name, str):
+            continue
+        name = name.strip()
+        if name in tools or not _COMMAND_TOKEN.fullmatch(name):
+            continue
+        if not re.search(rf"^- {re.escape(name)}\s*$", available_commands, re.MULTILINE):
+            continue
+        args = fields.get("next_tool_args", {})
+        if isinstance(args, str):
+            try:
+                args = json.loads(args or "{}")
+            except ValueError:
+                continue
+        if not isinstance(args, dict):
+            continue
+        values = {
+            key: value if isinstance(value, str) else json.dumps(value)
+            for key, value in args.items()
+        }
+        # The workflow reads parameters back with tag regexes and no unescaping,
+        # so a value holding tag-like text would arrive cut or altered.
+        if not all(
+            isinstance(key, str) and _ARG_KEY.fullmatch(key) and not _TAG_LIKE.search(value)
+            for key, value in values.items()
+        ):
+            continue
+        command = " ".join(
+            [name] + [f"<{key}>{value}</{key}>" for key, value in values.items()]
+        )
+        return {
+            "next_thought": str(fields.get("next_thought", "")),
+            "next_tool_name": _COMMAND_TOOL,
+            "next_tool_args": {"command": command},
+            "repaired_tool_name": name,
+        }
+    return None
 
 
 """

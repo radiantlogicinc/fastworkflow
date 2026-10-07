@@ -21,11 +21,7 @@ function renderWinnerPanel(container, experimentId, reload) {
   selectionRead(selectionPath(experimentId, "/winner")).then(function (data) {
     clear(body);
     if (data.unavailable) {
-      selectionNote(body,
-        data.sealed
-          ? "Sealed evidence records no winner."
-          : "This experiment is not in this workflow's contest.",
-        data.error);
+      selectionNote(body, "This experiment is not in this workflow's contest.", data.error);
       return;
     }
     var winner = data.winner;
@@ -98,7 +94,6 @@ function renderWinnerPanel(container, experimentId, reload) {
    recorded before contests were kept in the live database) offers promotion
    alone, recorded against "nobody", which makes this experiment its first. */
 function renderWinnerDecision(body, experimentId, data, reload) {
-  if (session && session.workspace_mode) { return; }
   var box = el("div");
   box.appendChild(el("h2", null, "Decide"));
   if (!data.expected_selection_id) {
@@ -179,7 +174,6 @@ function renderWinnerHistory(body, experimentId) {
    target, rubric, hypothesis or review gate is required to ask for n attempts
    — the repeat count is the declared attempt count and nothing else. */
 function renderRepeatSetup(container, row, nav) {
-  if (session && session.workspace_mode) { return; }
   var card = el("div", "card");
   sectionHeader(card, "Run this setup again");
   card.appendChild(el("div", "sub",
@@ -249,9 +243,9 @@ function resetTaskCompare(experimentId, taskId) {
 /* Called by the source switcher when the page changes which evidence database
    it is reading (see `resetSourceScopedState`).
 
-   The identity above is experiment-and-task, and both recur across archives: a
-   workspace and a live store can hold "todo-list-v1" / "add an item" and mean
-   different runs. Keeping the selected pair across a source change would show
+   The identity above is experiment-and-task, and both recur across workflows:
+   two live stores can hold "todo-list-v1" / "add an item" and mean different
+   runs. Keeping the selected pair across a source change would show
    attempt numbers from the old database under the new one's label, which is the
    one way this view can lie. Dropping the key makes the next visit re-derive
    the pair from the new source's own runs list. */
@@ -593,9 +587,7 @@ function renderTaskCompare(container, experimentId, taskId, nav) {
     if (runs.unavailable) {
       clear(body);
       selectionNote(body,
-        runs.sealed
-          ? "Sealed evidence can be compared, but not from this route."
-          : "This task's runs cannot be listed, so there is nothing to compare.",
+        "This task's runs cannot be listed, so there is nothing to compare.",
         runs.error);
       return;
     }
@@ -886,38 +878,12 @@ function renderPassControls(container, cmp, ctx) {
    recorded nothing reads as shared, which is what it is. */
 
 function appendRecordedEnvelope(block, turn) {
-  /* BOTH recorded fields, and both ways a value can be less than whole.
-
-     `answer` and `plan` are the two the sink classifies as user-text, so
-     either can come back withheld under the evidence profile or cut by a
-     declared bounded-text policy; either can also be capped by the tracing
-     attribute limit before the policy ever sees it. Showing a prefix with no
-     badge presents part of an answer as the whole of one, and showing nothing
-     for a withheld value is indistinguishable from a pass that said nothing. */
+  /* BOTH recorded fields: either can be capped by the tracing attribute limit.
+     Showing a prefix with no badge presents part of an answer as the whole of
+     one. */
   var content = turn.pass_content || {};
   [["answer", "answer"], ["plan", "plan"]].forEach(function (field) {
     var recorded = content[field[0]];
-    var env = captureEnvelope(recorded);
-    if (env) {
-      /* The page's own wording for a policed value, quoted from the envelope:
-         "cut by policy: ..." when a prefix survived, "withheld by policy: ..."
-         when none did.
-
-         `truncated_before_capture` means the emitter had already cut the value
-         when the policy saw it, so the size and digest in that wording are the
-         PREFIX's. Said here, because a badge reading "29 bytes" about a 4 KiB
-         answer is worse than no badge. */
-      block.appendChild(el("div", "chipMarker unknown",
-        "this pass's " + field[1] + " — " + envelopeText(env)
-        + (env.truncated_before_capture
-            ? "; already truncated on recording, so that size and digest are of "
-              + "the kept prefix only"
-              + (env.original_length === undefined || env.original_length === null
-                  ? ""
-                  : " of " + fmtCount(env.original_length) + " bytes")
-            : "")));
-      return;
-    }
     if (recorded && typeof recorded === "object" && recorded.truncated) {
       /* BYTES: `tracing.cap_attr_value` encodes to UTF-8 and measures the
          encoding, so calling these characters overstates the value by however
@@ -932,25 +898,15 @@ function appendRecordedEnvelope(block, turn) {
 }
 
 function appendPassPlan(block, turn) {
-  var recordedPlan = (turn.pass_content || {}).plan;
-  var planEnvelope = captureEnvelope(recordedPlan);
-  if (!turn.plan && !planEnvelope) { return; }
+  if (!turn.plan) { return; }
   var box = el("details", "artifactPreview");
   box.appendChild(el("summary", null, "Plan this pass generated"));
-  if (planEnvelope) {
-    /* Withheld or cut by the capture policy. The envelope IS the content here:
-       parsing a policy prefix as a plan would render half a JSON document as
-       though it were the sequence the pass produced. */
-    appendPoliced(box, recordedPlan);
-    block.appendChild(box);
-    return;
-  }
   var steps = null;
   try { steps = JSON.parse(turn.plan); } catch (err) { steps = null; }
   if (!Array.isArray(steps)) {
     /* Recorded text that is not the shape this reader expects is shown
        verbatim rather than guessed at or dropped. */
-    appendPoliced(box, turn.plan);
+    box.appendChild(document.createTextNode(turn.plan));
   } else if (!steps.length) {
     box.appendChild(el("div", "sub", "This pass recorded no planning step."));
   } else {
@@ -959,7 +915,8 @@ function appendPassPlan(block, turn) {
       box.appendChild(el("div", "sub",
         "planning step " + ((step && step.step_number) === undefined
           ? "(unnumbered)" : step.step_number)));
-      appendPoliced(box, Array.isArray(lines) ? lines.join("\n") : String(lines));
+      box.appendChild(document.createTextNode(
+        Array.isArray(lines) ? lines.join("\n") : String(lines)));
     });
   }
   block.appendChild(box);
@@ -973,7 +930,7 @@ function appendSharedTurnAnswer(block, turn, answer) {
   box.appendChild(el("summary", null,
     "The turn recorded a different answer"
     + (turn.turn_status ? " (" + turn.turn_status + ")" : "")));
-  appendPoliced(box, turn.turn_answer);
+  box.appendChild(document.createTextNode(turn.turn_answer));
   block.appendChild(box);
 }
 
@@ -1006,19 +963,10 @@ function renderAnswerPane(which, projection, run, ctx) {
     block.appendChild(meta);
     var turn = turnsByIndex[answer.turn_index] || {};
     /* Verbatim, through textContent. The recorded answer is the author's and is
-       never re-wrapped, summarised or parsed on its way to the screen.
-
-       A policed pass answer is rendered from the ENVELOPE rather than from the
-       projected text: the projection quotes the surviving prefix and answers
-       null for a withheld value, and "(no answer recorded)" is a claim about
-       the pass that a withheld value does not support. */
-    var recordedAnswer = (turn.pass_content || {}).answer;
-    if (answer.attribution === "pass" && captureEnvelope(recordedAnswer)) {
-      appendPoliced(block, recordedAnswer);
-    } else {
-      appendPoliced(block, answer.answer === null || answer.answer === undefined
-        ? "(no answer recorded)" : answer.answer);
-    }
+       never re-wrapped, summarised or parsed on its way to the screen. */
+    block.appendChild(document.createTextNode(
+      answer.answer === null || answer.answer === undefined
+        ? "(no answer recorded)" : answer.answer));
     if (answer.attribution === "pass") {
       /* Recorded AS this pass's own (`fix-txxy`). Every non-turn attribution
          used to be labelled "shared", which denied exactly the divergence a
@@ -1060,8 +1008,8 @@ function renderAnswerPane(which, projection, run, ctx) {
 
    Loading is explicitly scoped to the side's own database and explicitly
    bounded: a large value is named and left unloaded until somebody asks for it,
-   and a value that is gone says whether it was pruned, withheld or simply not
-   readable rather than rendering as empty. */
+   and a value that is gone says whether it was pruned or simply not readable
+   rather than rendering as empty. */
 var ARTIFACT_PREVIEW_MAX_BYTES = 262144;
 
 function renderArtifactPane(which, projection, run, ctx) {
@@ -1123,12 +1071,9 @@ function renderArtifactPane(which, projection, run, ctx) {
 
 /* One artifact's value, from the side's own store.
 
-   Read through `pairReadScope`, the same rule the deep links use: a sealed
-   archive is read by store id through the workspace turn route, and a side in
-   the current database needs no scope named. An inline value is lifted out of the
-   turn record, so BOTH modes can show it; only offloaded bytes need the live
-   artifact endpoint, and a sealed archive exposes no route for them, which is
-   said rather than shown as empty. */
+   Read through `pairReadScope`, the same rule the deep links use: a side in
+   the current database needs no scope named. An inline value is lifted out of
+   the turn record; offloaded bytes are served by the artifact endpoint. */
 function loadArtifactPreview(host, artifact, side, ctx, forced) {
   clear(host);
   var size = artifact.size_bytes;
@@ -1152,7 +1097,7 @@ function loadArtifactPreview(host, artifact, side, ctx, forced) {
   }
   host.appendChild(el("div", "aMeta", "loading…"));
   /* Offloaded bytes: only the live artifact endpoint serves them. */
-  if (artifact.artifact_id && scope.kind !== "workspace") {
+  if (artifact.artifact_id) {
     apiRaw("/api/artifact/" + encodeURIComponent(artifact.artifact_id))
       .then(function (r) {
         if (r.status === 404) {
@@ -1179,13 +1124,7 @@ function loadArtifactPreview(host, artifact, side, ctx, forced) {
       });
     return;
   }
-  var read = scope.kind === "workspace"
-    ? api("/api/workspace/turn/" + encodeURIComponent(scope.storeId)
-          + "/" + encodeURIComponent(artifact.turn_key))
-        .then(function (data) { return data; },
-              function (e) { return { unavailable: true, error: e.message }; })
-    : selectionRead("/api/turn/" + encodeURIComponent(artifact.turn_key));
-  read.then(function (data) {
+  selectionRead("/api/turn/" + encodeURIComponent(artifact.turn_key)).then(function (data) {
       clear(host);
       if (data.unavailable) {
         host.appendChild(el("div", "aMeta",
@@ -1195,12 +1134,9 @@ function loadArtifactPreview(host, artifact, side, ctx, forced) {
       }
       var value = inlineArtifactValue(data.turn, artifact);
       if (value === undefined) {
-        host.appendChild(el("div", "aMeta", artifact.artifact_id
-          ? "This value was offloaded out of the turn record, and a sealed "
-            + "archive publishes no route that serves offloaded bytes. It is "
-            + "recorded; it is not readable from this page."
-          : "The turn was read, but it no longer records a value under this "
-            + "key — the capture policy withheld it, or it was not retained."));
+        host.appendChild(el("div", "aMeta",
+          "The turn was read, but it no longer records a value under this "
+          + "key — it was not retained."));
         return;
       }
       host.appendChild(artifactNode(artifact.key, value, "inline"));
@@ -1233,15 +1169,7 @@ function inlineArtifactValue(turn, artifact) {
 
    `store_id` comes from the projection's own reference, so "which database is
    this side in" is a recorded fact and not a guess from the experiment id or
-   from whichever source the page is currently pointed at.
-
-   Sealed evidence has TWO names for one archive and they are not
-   interchangeable: `storeId` is the identity the database reports about itself,
-   which is what a reference carries and what a cross-archive write is resolved
-   through, while `manifestStoreId` is the name the manifest gave it, which is
-   what every workspace route is addressed by. Both are read from the field that
-   carries them; neither is derived from the other. Live evidence has one name
-   and both come out the same. */
+   from whichever source the page is currently pointed at. */
 function pairSide(cmp, which) {
   var projection = which === "left" ? cmp.left : cmp.right;
   var run = which === "left" ? cmp.left_run : cmp.right_run;
@@ -1249,8 +1177,6 @@ function pairSide(cmp, which) {
   return {
     which: which, run: run || {}, projection: projection || {},
     storeId: ref.store_id || null,
-    manifestStoreId: (projection && projection.manifest_store_id)
-      || (run && run.manifest_store_id) || null,
     experimentId: ref.experiment_id || (run && run.experiment_id) || null
   };
 }
@@ -1259,27 +1185,14 @@ function pairSide(cmp, which) {
    every inline preview, from the recorded reference rather than from the
    experiment id or from whichever source the page happens to be pointed at.
 
-   Three answers, and the difference between them is the whole point:
+   Two answers, and the difference between them is the whole point:
 
-   - `workspace`: a sealed archive addresses evidence by store id, and its
-     routes refuse an unscoped read. Two archives in one manifest can hold the
-     same logical turn key, so the store travels with the read.
    - `current`: the side is in the database this page is already reading, so no
      change of scope.
    - `unaddressable`: the reference names no way in, including a side recorded
      in another live database, which this build does not read. Said out loud,
      because a silent no-op reads as a broken link. */
 function pairReadScope(ctx, side) {
-  if (session && session.workspace_mode) {
-    /* Addressed by the MANIFEST's name for the archive, which is the only one
-       these routes answer to — not by the evidence identity the reference
-       carries, which is what the write side resolves. */
-    var storeId = side.manifestStoreId || side.storeId;
-    if (storeId) { return { kind: "workspace", storeId: storeId }; }
-    return { kind: "unaddressable",
-             why: "This side records no store id, and a sealed archive is only "
-                  + "readable through one." };
-  }
   if (!side.storeId || !ctx.storeId || side.storeId === ctx.storeId) {
     return { kind: "current" };
   }
@@ -1293,10 +1206,6 @@ function openPairTurn(ctx, side, turnKey, note, spanId) {
   var scope = pairReadScope(ctx, side);
   if (scope.kind === "unaddressable") {
     if (note) { note.textContent = scope.why; }
-    return;
-  }
-  if (scope.kind === "workspace") {
-    selectWorkspaceTurn(scope.storeId, turnKey, spanId, note);
     return;
   }
   selectTurn(turnKey, spanId, note);
@@ -1330,64 +1239,60 @@ function renderPairReview(container, cmp, ctx) {
   card.appendChild(state);
   card.appendChild(counted);
   container.appendChild(card);
-  if (cmp.sealed || (session && session.workspace_mode)) {
-    state.textContent = "A sealed archive records no review progress of its own.";
-  } else {
-    var query = "?reviewer=" + encodeURIComponent(SELECTION_ACTOR.actor);
-    if (cmp.left_run && cmp.left_run.attempt !== undefined
-        && cmp.left_run.attempt !== null) {
-      query += "&left_attempt=" + cmp.left_run.attempt;
-    }
-    if (cmp.right_run && cmp.right_run.experiment_id
-        && cmp.right_run.experiment_id !== ctx.experimentId) {
-      query += "&right_experiment="
-        + encodeURIComponent(cmp.right_run.experiment_id);
-    }
-    selectionRead(taskSelectionPath(ctx.experimentId, ctx.taskId,
-                                    "/review-pairs" + query))
-      .then(function (data) {
-        if (data.unavailable) { state.textContent = data.error; return; }
-        var mine = (data.pairs || []).filter(function (row) {
-          return row.pair_key === cmp.review_pair_key;
-        })[0];
-        var reviewed = mine && mine.state && mine.state.state === "reviewed";
-        clear(state);
-        state.appendChild(el("span", reviewed ? "pill ok" : "pill",
-                             reviewed ? "you marked this reviewed"
-                                      : "you have not marked this reviewed"));
-        state.appendChild(el("span", null,
-          "  " + (data.progress ? data.progress.reviewed : 0) + " of "
-          + (data.progress ? data.progress.pairs : 0)
-          + " pairs of this task marked reviewed by you."));
-        var mark = el("button", null,
-          reviewed ? "Un-mark this pair" : "Mark this pair reviewed");
-        mark.type = "button";
-        mark.addEventListener("click", function () {
-          mark.disabled = true;
-          selectionWrite(
-            taskSelectionPath(ctx.experimentId, ctx.taskId, "/review-pairs"),
-            "POST",
-            {
-              reviewer: SELECTION_ACTOR.actor, reviewer_kind: "human",
-              state: reviewed ? "not_reviewed" : "reviewed",
-              left_attempt: cmp.left_run ? cmp.left_run.attempt : undefined,
-              right_attempt: cmp.right_run ? cmp.right_run.attempt : undefined,
-              right_experiment:
-                (cmp.right_run && cmp.right_run.experiment_id
-                 !== ctx.experimentId)
-                  ? cmp.right_run.experiment_id : undefined,
-              left_pass: taskCompare.leftPass || undefined,
-              right_pass: taskCompare.rightPass || undefined
-            }
-          ).then(function (result) {
-            mark.disabled = false;
-            if (result.ok) { showNotice("Review progress recorded"); ctx.reload(); }
-            else { renderSelectionRefusal(card, result, ctx.reload); }
-          });
-        });
-        state.appendChild(mark);
-      }).catch(function (e) { state.textContent = e.message; });
+  var query = "?reviewer=" + encodeURIComponent(SELECTION_ACTOR.actor);
+  if (cmp.left_run && cmp.left_run.attempt !== undefined
+      && cmp.left_run.attempt !== null) {
+    query += "&left_attempt=" + cmp.left_run.attempt;
   }
+  if (cmp.right_run && cmp.right_run.experiment_id
+      && cmp.right_run.experiment_id !== ctx.experimentId) {
+    query += "&right_experiment="
+      + encodeURIComponent(cmp.right_run.experiment_id);
+  }
+  selectionRead(taskSelectionPath(ctx.experimentId, ctx.taskId,
+                                  "/review-pairs" + query))
+    .then(function (data) {
+      if (data.unavailable) { state.textContent = data.error; return; }
+      var mine = (data.pairs || []).filter(function (row) {
+        return row.pair_key === cmp.review_pair_key;
+      })[0];
+      var reviewed = mine && mine.state && mine.state.state === "reviewed";
+      clear(state);
+      state.appendChild(el("span", reviewed ? "pill ok" : "pill",
+                           reviewed ? "you marked this reviewed"
+                                    : "you have not marked this reviewed"));
+      state.appendChild(el("span", null,
+        "  " + (data.progress ? data.progress.reviewed : 0) + " of "
+        + (data.progress ? data.progress.pairs : 0)
+        + " pairs of this task marked reviewed by you."));
+      var mark = el("button", null,
+        reviewed ? "Un-mark this pair" : "Mark this pair reviewed");
+      mark.type = "button";
+      mark.addEventListener("click", function () {
+        mark.disabled = true;
+        selectionWrite(
+          taskSelectionPath(ctx.experimentId, ctx.taskId, "/review-pairs"),
+          "POST",
+          {
+            reviewer: SELECTION_ACTOR.actor, reviewer_kind: "human",
+            state: reviewed ? "not_reviewed" : "reviewed",
+            left_attempt: cmp.left_run ? cmp.left_run.attempt : undefined,
+            right_attempt: cmp.right_run ? cmp.right_run.attempt : undefined,
+            right_experiment:
+              (cmp.right_run && cmp.right_run.experiment_id
+               !== ctx.experimentId)
+                ? cmp.right_run.experiment_id : undefined,
+            left_pass: taskCompare.leftPass || undefined,
+            right_pass: taskCompare.rightPass || undefined
+          }
+        ).then(function (result) {
+          mark.disabled = false;
+          if (result.ok) { showNotice("Review progress recorded"); ctx.reload(); }
+          else { renderSelectionRefusal(card, result, ctx.reload); }
+        });
+      });
+      state.appendChild(mark);
+    }).catch(function (e) { state.textContent = e.message; });
   countPairComments(counted, cmp, ctx);
   renderPairComposer(card, cmp, ctx, null, "the whole pair");
 }
@@ -1397,9 +1302,7 @@ function renderPairReview(container, cmp, ctx) {
    and reported as "at least" when the page is full rather than as a total the
    count does not support. */
 function countPairComments(node, cmp, ctx) {
-  var path = ((session && session.workspace_mode)
-      ? "/api/workspace/task-feedback?experiment="
-      : "/api/task-feedback?experiment=")
+  var path = "/api/task-feedback?experiment="
     + encodeURIComponent(ctx.experimentId)
     + "&task=" + encodeURIComponent(ctx.taskId) + "&limit=200";
   api(path).then(function (data) {

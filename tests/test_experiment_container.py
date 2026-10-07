@@ -233,18 +233,19 @@ class TestAdditiveSchema:
         assert {"experiment_id", "task_id", "attempt"} <= conv_cols
         assert {"idx_turns_experiment", "idx_conv_experiment_attempt"} <= indexes
 
-    def test_schema_version_is_seven_for_create_time_only_columns(self, db_path):
+    def test_schema_version_is_eight_for_create_time_only_columns(self, db_path):
         """fix-42b added create-time-only experiment columns and bumped v1->v2;
         fix-qe2 added experiment_attempts.runtime_snapshot_json and bumped
         v2->v3; fix-aw5 added feedback in v4; fix-46l.2 added feedback
         provenance in v5; fix-w6w added experiment archival in v6; fix-9eg.16
         dropped the agent-memory `feedback` table and gave `human_feedback`
-        its taxonomy, identity and anchor columns in v7. All are create-time
-        columns with no migration path."""
+        its taxonomy, identity and anchor columns in v7; fix-0gh0 dropped the
+        capture-policy columns from experiments and offload_evidence in v8. All
+        are create-time shapes with no migration path."""
         obs.ObservabilityStore(db_path)
         conn = sqlite3.connect(db_path)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 7
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
             attempt_cols = {
                 r[1] for r in conn.execute("PRAGMA table_info(experiment_attempts)")
             }
@@ -253,9 +254,10 @@ class TestAdditiveSchema:
             }
         finally:
             conn.close()
-        assert obs.SCHEMA_VERSION == 7
+        assert obs.SCHEMA_VERSION == 8
         assert "runtime_snapshot_json" in attempt_cols
         assert "archived" in experiment_cols
+        assert not {"capture_profile", "capture_policy_version"} & experiment_cols
 
     def test_a_pre_v7_db_is_refused_instead_of_migrated(self, db_path):
         """No legacy support: a populated v1 store is never migrated. The writer
@@ -545,26 +547,6 @@ class TestInvalidIsTerminal:
         store.finish_attempt("exp-1", "t0", 1, outcome="pass", outcome_source="g")
         assert store.complete_experiment("exp-1") == "invalid"
 
-    def test_recreating_under_a_different_capture_regime_is_refused(self, store):
-        """The stored profile is what `compare_experiments` gates on, so a run
-        whose second half was captured under another policy must not compare as
-        if both halves matched."""
-        store.create_experiment(
-            "exp-1", "L", declared_tasks=1, declared_attempts=1,
-            capture_profile="debug", capture_policy_version="1",
-        )
-        with pytest.raises(obs.CaptureRegimeChanged):
-            store.create_experiment(
-                "exp-1", "L", declared_tasks=1, declared_attempts=1,
-                capture_profile="evidence", capture_policy_version="1",
-            )
-        # the same regime is a normal resume and is allowed
-        store.create_experiment(
-            "exp-1", "L2", declared_tasks=1, declared_attempts=1,
-            capture_profile="debug", capture_policy_version="1",
-        )
-        assert store.get_experiment("exp-1")["description"] == "L2"
-
     def test_a_write_to_a_missing_experiment_raises(self, store):
         with pytest.raises(obs.ExperimentNotFound):
             store.update_experiment_notes("exp-nope", "x")
@@ -801,22 +783,6 @@ class TestComparison:
         assert result["comparable"] is False
         assert any("declared shapes differ" in p for p in result["problems"])
 
-    def test_a_differing_capture_regime_is_refused(self, store):
-        """`[XR19]`: two arms captured under different profiles are not
-        measuring the same columns."""
-        self._complete(store, "exp-base")
-        self._complete(store, "exp-treat")
-        with store._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
-                "UPDATE experiments SET capture_profile='evidence' "
-                "WHERE experiment_id='exp-treat'"
-            )
-            conn.commit()
-        result = store.compare_experiments("exp-treat", "exp-base")
-        assert result["comparable"] is False
-        assert any("capture regimes differ" in p for p in result["problems"])
-
     def test_a_real_comparison_reports_both_flip_directions(self, store):
         self._complete(store, "exp-base", failures={("t0", 1)})
         self._complete(store, "exp-treat", failures={("t1", 2)})
@@ -965,11 +931,11 @@ class TestOrdinaryTurnIsUnaffected:
 
 
 # ----------------------------------------------------------------------
-# `[XR6]` / `[XR7]`: the capture-policy decision, and the dataflow claim
+# `[XR6]` / `[XR7]`: the scrub-only decision, and the dataflow claim
 # ----------------------------------------------------------------------
 
 
-class TestCapturePolicy:
+class TestCredentialScrub:
     _SECRET = "sk-live-0123456789abcdefghijklmnopqrstuv"
 
     def test_experiment_prose_is_credential_scrubbed(self, store):
@@ -1004,8 +970,7 @@ class TestCapturePolicy:
 
         `turns.task_id` is scrubbed by `upsert_turn_row`'s text loop and
         `conversations.task_id` by `mint_conversation_id`. If only one scrubbed,
-        the two copies would stop being joinable — which is exactly the failure
-        `_protected_text`'s docstring exists to prevent one layer down.
+        the two copies would stop being joinable.
         """
         dirty = f"task-{self._SECRET}"
         store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1)
@@ -1096,15 +1061,6 @@ class TestCapturePolicy:
             )
             assert not (params & forbidden), f"{name} accepts {params & forbidden}"
 
-    def test_no_policy_path_constants_were_declared_for_this_surface(self):
-        """`[XR6]`: a constant never passed to `policy.apply` is inert.
-
-        `spans.channel_id`, the one genuinely scrub-only column already in the
-        file, deliberately has no constant either. Declaring one here would
-        promise a deployment an override that does not exist.
-        """
-        names = [n for n in dir(obs) if n.startswith("POLICY_PATH_")]
-        assert not [n for n in names if "EXPERIMENT" in n]
 
 
 # ----------------------------------------------------------------------
@@ -2080,12 +2036,10 @@ class TestSpaSurface:
     def test_the_experiment_browser_ships_and_obeys_the_page_rules(self):
         page = run_chatbot_server.load_index_html()
         assert b'id="navBenchmarks"' in page
-        assert b"showExperiments" in page
         assert b"showExperimentTask" in page
         assert b"openExperimentAttempt" in page
         # The routes it calls, not just the functions it defines: a page that
         # defined every function and called the wrong path would pass otherwise.
-        assert b"/api/experiments?limit=" in page
         assert b'"/api/experiment/"' in page
         assert b'"/attempts?task="' in page
         assert b'"/compare"' in page
@@ -2146,7 +2100,6 @@ class TestRuntimeSnapshotStamp:
             "configuration_valid": True,
             "effective_features": {"decision_signals_v1": "shadow"},
             "workflow_fingerprint": "sha256:abc",
-            "capture_profile": "debug",
             "pid": 4242,
         }
 

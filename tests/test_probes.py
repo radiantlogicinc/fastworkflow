@@ -313,9 +313,9 @@ class TestObservabilityRegimeIsAssertable:
 
         assert body["pruning_suppressed"] is False
 
-    def test_the_capture_profile_rides_along(self, app_module):
-        """Two runs under different profiles are not comparable attribute by
-        attribute, so the bundle has to cite the profile the SERVER used."""
+    def test_the_observability_config_rides_along(self, app_module):
+        """The bundle has to cite the observability configuration the SERVER
+        used, not the harness's own."""
         from fastworkflow.observability import store as obs
 
         client = TestClient(app_module.app)
@@ -323,7 +323,7 @@ class TestObservabilityRegimeIsAssertable:
 
         body = client.get("/probes/readyz?observability=true").json()["observability"]
 
-        assert obs.CAPTURE_PROFILE_VAR in body["config"]
+        assert obs.SUPPRESS_PRUNE_VAR in body["config"]
         assert "enabled" in body
 
 

@@ -95,18 +95,6 @@ _EFFECT_SEVERITY: dict[str, int] = {"read_only": 0, "unknown": 1, "write": 2}
 
 NavigationKind = Literal["none", "descend", "ascend", "reset", "temporary"]
 
-# What a parameter *is*. The workflow's to say; what to do about it (omit,
-# digest, bounded-text, opaque-ref — arch §6.6) is deployment capture policy and
-# is deliberately not declarable here, so that a workflow cannot override a
-# deployment's evidence profile.
-DataClassification = Literal[
-    "identifier",
-    "opaque-payload",
-    "controlled-vocabulary",
-    "user-text",
-]
-
-
 class ManifestConformanceError(Exception):
     """A manifest, or a deployment's gating of one, failed startup conformance.
 
@@ -695,21 +683,16 @@ class EffectContract(_Strict):
 
 
 class ContextDeclaration(_Strict):
-    """What a context is: occupiable, and how its handle is projected."""
+    """What a context is: whether it is occupiable."""
 
     occupiable: bool
-    # A projector name is a promise that a registered projector exists. None
-    # means type-only context evidence, which is all P0 has until the
-    # ContextHandle work lands.
-    handle_projector: Optional[str] = None
 
 
 class CommandDeclaration(_Strict):
-    """What a command does to context, to the world, and with its parameters."""
+    """What a command does to context and to the world."""
 
     navigation_effect: Optional[NavigationEffect] = None
     effect: Optional[EffectContract] = None
-    capture: Optional[dict[str, DataClassification]] = None
 
     def effect_kind(self) -> EffectKind:
         """``unknown`` when no contract is declared — never ``read_only`` (§7.3)."""
@@ -845,15 +828,6 @@ def _context_merge_problems(name: str, core: ContextDeclaration, workflow: Conte
             "core manifest declares it non-occupiable; core declarations may be "
             "made stricter, never weaker (arch §7.3)"
         )
-    if (
-        core.handle_projector is not None
-        and workflow.handle_projector is not None
-        and workflow.handle_projector != core.handle_projector
-    ):
-        problems.append(
-            f"workflow manifest overrides the handle projector for core context "
-            f"'{name}' ('{core.handle_projector}' -> '{workflow.handle_projector}')"
-        )
     return problems
 
 
@@ -886,15 +860,6 @@ def _command_merge_problems(name: str, core: CommandDeclaration, workflow: Comma
             f"'{workflow.navigation_effect.kind}'); core transitions are facts "
             "about framework code and are not overridable"
         )
-
-    if workflow.capture is not None and core.capture is not None:
-        for field_name, classification in workflow.capture.items():
-            core_classification = core.capture.get(field_name)
-            if core_classification is not None and core_classification != classification:
-                problems.append(
-                    f"workflow manifest reclassifies '{field_name}' of core command "
-                    f"'{name}' ('{core_classification}' -> '{classification}')"
-                )
     return problems
 
 
@@ -951,12 +916,6 @@ class RuntimeMetadata:
         """
         declaration = self.commands.get(command_name)
         return declaration.navigation_effect if declaration else None
-
-    def capture_classification(self, command_name: str, field_name: str) -> Optional[DataClassification]:
-        declaration = self.commands.get(command_name)
-        if declaration is None or declaration.capture is None:
-            return None
-        return declaration.capture.get(field_name)
 
     def feature_mode(self, feature_id: str) -> FeatureMode:
         """The effective mode after dual gating. Unknown ids are ``off``.
@@ -1135,7 +1094,6 @@ def merge_and_gate(
                 # deployment that catches the error and continues.
                 contexts[name] = ContextDeclaration(
                     occupiable=core.occupiable and declaration.occupiable,
-                    handle_projector=core.handle_projector or declaration.handle_projector,
                 )
             else:
                 contexts[name] = declaration
@@ -1170,17 +1128,12 @@ def _stricter_command(core: CommandDeclaration, workflow: CommandDeclaration) ->
         if _EFFECT_SEVERITY[workflow.effect.kind] > core_severity:
             effect = workflow.effect
 
-    capture = dict(core.capture or {})
-    for field_name, classification in (workflow.capture or {}).items():
-        capture.setdefault(field_name, classification)
-
     return CommandDeclaration(
         # Core wins where it spoke; where it did not, the workflow is adding a
         # declaration rather than overriding one, and dropping it would lose
         # information the merge was given.
         navigation_effect=core.navigation_effect or workflow.navigation_effect,
         effect=effect,
-        capture=capture or None,
     )
 
 
@@ -1228,7 +1181,7 @@ def check_startup_conformance(
 # points — ``fastworkflow/run/__main__.py`` and
 # ``fastworkflow/run_fastapi_mcp/__main__.py`` — discarded it. The declarations
 # were therefore validated at startup and then thrown away: nothing at runtime
-# could reach ``effect_kind()`` or ``capture_classification()``, so a workflow
+# could reach ``effect_kind()``, so a workflow
 # that declared its effect contracts got the same ``unknown`` as one that
 # declared nothing. This table is the smallest thing that keeps them reachable;
 # it is modelled on ``observability_store._sinks``, process-wide and keyed by

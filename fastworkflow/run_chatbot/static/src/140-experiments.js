@@ -42,8 +42,8 @@ function hierarchyCrumb(path) {
 
 /* An experiment's crumbs start where the rail does: Benchmarks, then the
    branch the experiment sits under, each landing where its rail row would.
-   The rail can hold no node for it (a workspace, an evidence store it could
-   not open, a run recorded since the last refresh), so the benchmark the
+   The rail can hold no node for it (an evidence store it could not open, a
+   run recorded since the last refresh), so the benchmark the
    experiment record names stands in, remembered for the task page, which
    renders before any experiment record is read. */
 var experimentBenchmarks = {};
@@ -68,74 +68,6 @@ function expStatusPill(status) {
   pill.appendChild(el("span", "dot"));
   pill.appendChild(el("span", null, status));
   return pill;
-}
-
-function showExperiments() {
-  var nav = expNavToken();
-  state.experimentId = null;
-  state.experimentTask = null;
-  var d = document.getElementById("detail");
-  clear(d);
-  d.appendChild(el("div", "empty", "loading experiments…"));
-  /* limit=201 so 201 rows means "there are more than 200", which is said out
-     loud rather than silently truncating the list. */
-  api("/api/experiments?limit=201").then(function (data) {
-    if (expNavStale(nav)) { return; }
-    clear(d);
-    var card = el("div", "card");
-    expCrumbs(card, [{ label: "Experiments" }]);
-    card.appendChild(el("h2", null, "Experiments"));
-    card.appendChild(el("div", "sub",
-      "A labelled set of tasks, each run one or more times, scored as one " +
-      "object. An experiment is not a channel: attempts run on their own " +
-      "channels so they stay independent."));
-    var allRows = data.experiments || [];
-    var hiddenArchived = allRows.filter(function (row) {
-      return row.archived && !archivedExperimentsShown[row.benchmark_id];
-    }).length;
-    var rows = allRows.filter(function (row) {
-      return !row.archived || archivedExperimentsShown[row.benchmark_id];
-    });
-    var truncated = rows.length > 200;
-    if (truncated) { rows = rows.slice(0, 200); }
-    if (!rows.length) {
-      card.appendChild(el("div", "empty", hiddenArchived
-        ? "archived experiments are hidden; show them from their benchmark in the left rail"
-        : "no experiments recorded"));
-      d.appendChild(card);
-      return;
-    }
-    if (truncated) {
-      card.appendChild(el("div", "sub",
-        "Showing the 200 most recent experiments; there are more. "
-        + "Add ?offset=200 to /api/experiments to see the next page."));
-    }
-    rows.forEach(function (row) {
-      var item = el("div", "listItem" + (row.archived ? " archived" : ""));
-      var title = el("div", "title");
-      title.appendChild(el("span", null, "Experiment · " + row.experiment_id.slice(-8) + "  "));
-      title.appendChild(expStatusPill(row.status));
-      if (row.archived) { title.appendChild(el("span", "pill", "Archived")); }
-      if (row.arm) { title.appendChild(el("span", null, "  [" + row.arm + "]")); }
-      item.appendChild(title);
-      if (row.description) { item.appendChild(el("div", "sub", row.description)); }
-      var declared = row.declared_tasks + "×" + row.declared_attempts;
-      var sub = declared + " declared, " + row.attempts_finished + " finished"
-        + (row.invalid_reason ? "  — " + row.invalid_reason : "")
-        + (row.benchmark_id
-            ? "  · " + row.benchmark_id + "@" + (row.benchmark_version || "?")
-            : "")
-        + "  · " + (row.created_at || "");
-      item.appendChild(el("div", "sub", sub));
-      makeRowActivatable(item, function () { showExperiment(row.experiment_id); });
-      card.appendChild(item);
-    });
-    d.appendChild(card);
-  }).catch(function (e) {
-    if (expNavStale(nav)) { return; }
-    clear(d);
-    d.appendChild(el("div", "empty", "No experiments available: " + e.message));
-  });
 }
 
 function showExperiment(experimentId) {
@@ -169,7 +101,7 @@ function showExperiment(experimentId) {
         : "Review outcomes, follow the evidence, and capture what you learn.");
     var intro = actions.parentNode.querySelector(".intro");
     intro.insertBefore(el("div", "recordId", "ID: " + experimentId), intro.querySelector("p"));
-    if (exp.benchmark_id && !(session && session.workspace_mode)) {
+    if (exp.benchmark_id) {
       var archive = el("button", "ghost", exp.archived ? "Unarchive experiment" : "Archive experiment");
       archive.title = exp.archived
         ? "Return this experiment to benchmark lists"
@@ -192,12 +124,6 @@ function showExperiment(experimentId) {
     turnFindEntryButton(actions, { experiment: experimentId },
       "Find problems in this experiment",
       "Search the turns this source recorded for this experiment.");
-    if (!turnFindEntrySupported()) {
-      card.appendChild(el("div", "sub",
-        "The turn finder searches one store at a time. This experiment is "
-        + "read through a workspace whose evidence spans several stores, so "
-        + "no scoped search is offered here."));
-    }
 
     /* An invalid experiment first, and loudly. A run whose turns were dropped
        or erased has an unreconstructable denominator; showing its label beside
@@ -530,14 +456,7 @@ function renderTaskFeedback(container, experimentId, taskId) {
   container.appendChild(card);
 
   function load() {
-    /* A workspace reads through its manifest: the store-aware route scopes
-       the task to the segments the manifest declares for the experiment, so
-       a comparison comment recorded beside one archive shows in the other
-       archive's task view too. The live route takes no store_id at all. */
-    var base = (session && session.workspace_mode)
-      ? "/api/workspace/task-feedback?experiment="
-      : "/api/task-feedback?experiment=";
-    var path = base + encodeURIComponent(experimentId)
+    var path = "/api/task-feedback?experiment=" + encodeURIComponent(experimentId)
       + "&task=" + encodeURIComponent(taskId)
       + "&limit=" + TASK_FEEDBACK_PAGE
       + "&offset=" + (taskFeedbackFilters.offset || 0);
@@ -700,7 +619,7 @@ function taskSelectionPath(experimentId, taskId, suffix) {
 
 /* A GET whose refusal IS the answer.
 
-   403 sealed, 404 not recorded and 409 (no control yet, this experiment joined
+   404 not recorded and 409 (no control yet, this experiment joined
    no contest, the evidence is unreadable) are all states the page has to
    render as themselves. Throwing would replace an explanation with "Could not
    load", and a workflow whose experiments predate the selection control would
@@ -710,9 +629,9 @@ function selectionRead(path) {
     .then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (data) {
         if (r.ok) { return data; }
-        if (r.status === 403 || r.status === 404 || r.status === 409) {
+        if (r.status === 404 || r.status === 409) {
           return {
-            unavailable: true, status: r.status, sealed: !!data.sealed,
+            unavailable: true, status: r.status,
             error: data.error || ("API " + path + " -> " + r.status)
           };
         }
@@ -862,19 +781,9 @@ function renderTaskRuns(container, experimentId, taskId, label, crumbs, nav) {
    the second with a refusal, and then this list is exactly what it was before
    plus a line saying decisions are not available here. */
 function renderTaskRunList(card, experimentId, taskId, label, evidence, runs, nav) {
-  var decisions = !runs.unavailable && runs.decisions_available !== false;
+  var decisions = !runs.unavailable;
   if (runs.unavailable) {
-    selectionNote(card,
-      runs.sealed
-        ? "This is sealed evidence, so it records no decisions."
-        : "No best run can be recorded for this task yet.",
-      runs.error);
-  } else if (!decisions) {
-    selectionNote(card,
-      "This archive carries the evidence, not the decisions.",
-      "Best run and Reference are the live workflow's judgements. An archive "
-      + "does not hold them, so none is shown rather than an empty badge that "
-      + "would read as 'nobody has chosen yet'.");
+    selectionNote(card, "No best run can be recorded for this task yet.", runs.error);
   }
   var byAttempt = {};
   evidence.forEach(function (row) { byAttempt[row.attempt] = row; });
@@ -894,7 +803,7 @@ function renderTaskRunList(card, experimentId, taskId, label, evidence, runs, na
      whose attempt row cannot be read right now is still a recorded choice, and
      reporting it as "nobody has chosen" would erase somebody's decision. */
   var pinned = runs.best_run || null;
-  if (!runs.unavailable && decisions) {
+  if (decisions) {
     var head = el("div", "sub");
     head.textContent = pinned
       ? ("Best run: attempt " + pinned.attempt + ". " + bestRunProvenance(pinned))
@@ -952,7 +861,7 @@ function renderTaskRunList(card, experimentId, taskId, label, evidence, runs, na
     card, experimentId, taskId, label, runs, nav
   );
   selectionChanged();
-  if (!runs.unavailable && decisions) {
+  if (decisions) {
     renderBestRunHistory(card, experimentId, taskId, nav);
   }
 

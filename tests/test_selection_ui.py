@@ -28,10 +28,8 @@ of the same thing.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
-import shutil
 import subprocess
 import threading
 import urllib.parse
@@ -739,7 +737,7 @@ def test_a_comment_pairing_two_experiments_in_the_live_db_is_recorded(
 
 
 # ----------------------------------------------------------------------
-# Sealed evidence: readable, and never credited with a decision
+# A workflow recorded before the selection control existed
 # ----------------------------------------------------------------------
 
 
@@ -811,23 +809,19 @@ def test_one_rule_decides_where_every_side_of_a_pair_is_read_from(server, world)
     """Links and inline previews resolve the source the same way, once.
 
     The two sides of a pair are routinely in two databases, and getting this
-    wrong is silent: a link built from the experiment id alone opens the wrong
-    archive in a workspace whose two stores share a logical turn key, and
-    scoping a live read that needs no scoping breaks an ad-hoc experiment with
-    no authoring registration to resolve. Both failures are invisible in a
-    one-store fixture, so the structural claim is asserted here and the
-    behaviour over two real stores is asserted in the DOM tests below.
+    wrong is silent: scoping a live read that needs no scoping breaks an ad-hoc
+    experiment with no authoring registration to resolve. The structural claim
+    is asserted here and the behaviour is asserted in the DOM test below.
     """
     page = run_chatbot_server.load_index_html().decode("utf-8")
 
     assert "function pairReadScope(ctx, side)" in page
     rule = page[page.index("function pairReadScope("):
                 page.index("function openPairTurn(")]
-    # A sealed side is addressed by the MANIFEST's name for its archive, which
-    # is the only one the workspace routes answer to -- never by the evidence
-    # identity the reference carries, which is what the write side resolves.
-    assert 'return { kind: "workspace", storeId: storeId };' in rule
-    assert "var storeId = side.manifestStoreId || side.storeId;" in rule
+    # A side recorded in another database is refused rather than read from
+    # the one the page is pointed at.
+    assert 'return { kind: "current" };' in rule
+    assert 'kind: "unaddressable"' in rule
     assert "side.storeId === ctx.storeId" in rule
 
     # Both consumers defer to it rather than each deciding for themselves.
@@ -910,10 +904,8 @@ def test_the_setup_registration_read_carries_what_the_panel_prints(server, world
 # ----------------------------------------------------------------------
 #
 # The `world` fixture above has both sides in databases registered against the
-# workflow, which is the easy case and hides the two ways the source can be got
-# wrong. These two fixtures are the hard cases, and they are opposites: a sealed
-# workspace where the store id is the ONLY thing separating two sides, and a
-# live ad-hoc run where naming a source at all is what breaks it.
+# workflow, which is the easy case. The fixture below is the hard one: a live
+# ad-hoc run where naming a source at all is what breaks it.
 
 
 def _seed_artifact_turn(store, turn_key, *, experiment_id, task_id, attempt,
@@ -943,80 +935,6 @@ def _seed_artifact_turn(store, turn_key, *, experiment_id, task_id, attempt,
     row["conversation_id"] = conversation
     row["ordinal"] = 1
     _write(store, row, spans)
-
-
-@pytest.fixture
-def colliding_workspace(tmp_path, monkeypatch):
-    """Two sealed archives whose attempts share a logical turn key.
-
-    Both record `shared-turn` and both record an artifact under `roster.txt`
-    with a different value, which is the shape that makes an unscoped read
-    indistinguishable from a correct one. Real archives: written with the
-    ordinary store API and sealed with `archive_to`, then stitched into one
-    logical experiment by a real manifest. The manifest names the workflow
-    they came from, whose live DB is where comments on them are recorded.
-    """
-    from tests.test_observability_workspace import _manifest, _store_decl
-
-    monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
-    folder = tmp_path / "archived_workflow"
-    folder.mkdir()
-    live_db = state_paths.observability_db(str(folder))
-    obs.ObservabilityStore(live_db)
-    declarations, values = [], {}
-    for store_id, attempt, answer, value in (
-        ("alpha", 1, "left answer", "LEFT-ONLY-VALUE"),
-        ("beta", 2, "right answer", "RIGHT-ONLY-VALUE"),
-    ):
-        live = str(tmp_path / f"live-{store_id}.sqlite3")
-        store = obs.ObservabilityStore(live)
-        store.create_experiment("local", "archived run", declared_tasks=1,
-                                declared_attempts=1)
-        channel = f"ch-{store_id}"
-        store.start_attempt("local", "task", attempt, channel)
-        conversation = store.mint_conversation_id(
-            channel, experiment_id="local", task_id="task", attempt=attempt
-        )
-        _seed_artifact_turn(
-            store, "shared-turn", experiment_id="local", task_id="task",
-            attempt=attempt, conversation=conversation,
-            commands=["add_item", "list_items"] if attempt == 1 else ["add_item"],
-            answer=answer, artifacts={"roster.txt": value},
-        )
-        store.finish_attempt("local", "task", attempt, outcome="pass",
-                             outcome_source="test")
-        archive = obs.ObservabilityStore(live, migrate=False).archive_to(
-            str(tmp_path / f"sealed-{store_id}.sqlite3")
-        )
-        declarations.append(_store_decl(archive, store_id))
-        values[store_id] = {
-            "answer": answer, "value": value, "attempt": attempt,
-            # Two names for one archive, both recorded here so a test can say
-            # which one it expects rather than matching either.
-            "identity": archive["store_identity"],
-            "path": str(tmp_path / f"sealed-{store_id}.sqlite3"),
-            "sha256": archive["sha256"],
-        }
-
-    manifest = _manifest(
-        tmp_path, declarations,
-        experiments=[{
-            "experiment_id": "logical",
-            "segments": [
-                {"store_id": "alpha", "local_experiment_id": "local"},
-                {"store_id": "beta", "local_experiment_id": "local"},
-            ],
-        }],
-        workflow_folderpath=str(folder),
-    )
-    srv = run_chatbot_server.ChatbotServer(port=0,
-                                           workspace_manifest_path=str(manifest))
-    thread = threading.Thread(target=srv.serve_forever, daemon=True)
-    thread.start()
-    yield {"server": srv, "sides": values, "turn_key": "shared-turn",
-           "root": tmp_path, "live_db": live_db}
-    srv.shutdown()
-    thread.join(timeout=5)
 
 
 @pytest.fixture
@@ -1083,56 +1001,6 @@ class TestWhereEachSideIsRead:
     the fixtures really are the awkward shapes they claim to be.
     """
 
-    def test_two_archives_can_hold_the_same_turn_key_and_different_values(
-        self, colliding_workspace
-    ):
-        srv = colliding_workspace["server"]
-        status, payload = _request(
-            srv,
-            "/api/experiments/logical/tasks/task/comparison"
-            "?left_attempt=1&right_attempt=2&view=answers",
-        )
-
-        assert status == 200
-        # A reference names its store the way a reference names a store
-        # everywhere in this system: by the identity the database reports about
-        # itself. The manifest's own name for the same archive -- which is what
-        # every /api/workspace route is addressed by -- travels beside it, under
-        # its own key, so a client can never reach for the wrong one of the two.
-        sides = colliding_workspace["sides"]
-        assert payload["left"]["ref"]["store_id"] == sides["alpha"]["identity"]
-        assert payload["right"]["ref"]["store_id"] == sides["beta"]["identity"]
-        assert payload["left"]["manifest_store_id"] == "alpha"
-        assert payload["right"]["manifest_store_id"] == "beta"
-        assert payload["left_run"]["manifest_store_id"] == "alpha"
-        assert payload["right_run"]["manifest_store_id"] == "beta"
-        # The collision, stated: the turn key alone does not identify evidence.
-        assert payload["left"]["ref"]["turn_keys"] == ["shared-turn"]
-        assert payload["right"]["ref"]["turn_keys"] == ["shared-turn"]
-        assert [row["key"] for row in payload["left"]["artifacts"]] == ["roster.txt"]
-        assert [row["key"] for row in payload["right"]["artifacts"]] == ["roster.txt"]
-        assert all(row["inline"] for row in payload["left"]["artifacts"])
-
-        # And the two stores answer differently for the same key, which is what
-        # makes a mis-scoped preview a wrong answer rather than a missing one.
-        for store_id, expected in sides.items():
-            status, turn = _request(srv, f"/api/workspace/turn/{store_id}/shared-turn")
-            assert status == 200
-            recorded = [
-                output["command_response"]["artifacts"]
-                for output in turn["turn"]["record"]["turn_output"]["command_outputs"]
-            ]
-            assert {"roster.txt": expected["value"]} in recorded
-
-    def test_a_sealed_archive_refuses_the_unscoped_read_a_live_page_would_make(
-        self, colliding_workspace
-    ):
-        """So a link that forgot the store fails closed, not quietly wrong."""
-        srv = colliding_workspace["server"]
-
-        status, payload = _request(srv, "/api/turn/shared-turn")
-        assert status == 400 and "store-aware" in payload["error"]
-
     def test_an_unregistered_run_is_readable(self, adhoc_world):
         """The ad-hoc case: no registration, and nothing it needs one for."""
         srv = adhoc_world["server"]
@@ -1158,335 +1026,6 @@ class TestWhereEachSideIsRead:
         assert _request(srv, "/api/turn/adhoc-a1")[0] == 200
 
 
-class TestCommentingOnASealedPair:
-    """A comment about two archives, written where neither can be written to.
-
-    The two names an archive has are not interchangeable and the write route
-    refuses the wrong one, so these tests pin which field carries which -- the
-    mistake they exist to catch reads as "the page suddenly cannot save".
-    """
-
-    @staticmethod
-    def _anchors(srv):
-        status, payload = _request(
-            srv,
-            "/api/experiments/logical/tasks/task/comparison"
-            "?left_attempt=1&right_attempt=2&view=steps",
-        )
-        assert status == 200 and payload["sealed"] is True
-        row = next(
-            row for row in payload["alignment"]["rows"]
-            if row["anchors"].get("left") and row["anchors"].get("right")
-        )
-        return payload, row["anchors"]
-
-    @staticmethod
-    def _body(**overrides):
-        body = {
-            "target_kind": "step", "span_ids": [], "target_label": "step add_item",
-            "provenance": "human", "category": "conclusions",
-            "subcategory": "what_went_right", "comment": "the left archive won",
-        }
-        body.update(overrides)
-        return body
-
-    def test_the_anchors_the_comparison_returned_can_be_posted_verbatim(
-        self, colliding_workspace
-    ):
-        """The contract the composer relies on, stated without a browser.
-
-        Posting the row as it came back is the ONLY shape that keeps the stored
-        pair identity equal to the comparison's own: rebuilding either reference
-        to carry a different store name changes its `ref_id`, and the comment
-        would be filed against a pair nothing on screen matches.
-        """
-        srv = colliding_workspace["server"]
-        payload, anchors = self._anchors(srv)
-
-        status, recorded = _request(
-            srv,
-            "/post_feedback?turn_key=" + anchors["left"]["turn_key"]
-            + "&store_id=" + anchors["left"]["manifest_store_id"],
-            "POST",
-            self._body(
-                span_ids=anchors["left"]["span_ids"], ref=anchors["left"]["ref"],
-                paired=dict(anchors["right"], target_label="step add_item (other)"),
-            ),
-        )
-
-        assert status == 201, recorded
-        assert recorded["read_only"] is True and recorded["annotated"] is True
-        stored = recorded["feedback"][-1]
-        assert stored["pair_key"] == payload["review_pair_key"]
-        assert stored["pair_key"] == anchors["left"]["ref"]["ref_id"] \
-            + "|" + anchors["right"]["ref"]["ref_id"]
-        # The paired side keeps the WHOLE reference it was written against,
-        # including the other archive's identity.
-        assert stored["anchors"]["paired"]["ref"]["store_id"] == \
-            colliding_workspace["sides"]["beta"]["identity"]
-
-    def test_the_manifest_name_and_the_evidence_identity_are_not_swappable(
-        self, colliding_workspace
-    ):
-        """Both ways round, so neither can be "fixed" by exchanging them.
-
-        This is the failure the page hit before the reference carried the
-        identity: the anchors named archives the way the manifest does, and the
-        paired side could not be resolved at all.
-        """
-        srv = colliding_workspace["server"]
-        _payload, anchors = self._anchors(srv)
-        identity = colliding_workspace["sides"]["alpha"]["identity"]
-
-        # The write scope is the manifest's name. The identity is not a store id.
-        status, refusal = _request(
-            srv,
-            "/post_feedback?turn_key=" + anchors["left"]["turn_key"]
-            + "&store_id=" + identity,
-            "POST",
-            self._body(span_ids=anchors["left"]["span_ids"],
-                       ref=anchors["left"]["ref"]),
-        )
-        assert status == 409 and identity in refusal["error"]
-
-        # A reference names the identity. The manifest's name is not one.
-        status, refusal = _request(
-            srv,
-            "/post_feedback?turn_key=" + anchors["left"]["turn_key"]
-            + "&store_id=alpha",
-            "POST",
-            self._body(
-                span_ids=anchors["left"]["span_ids"], ref=anchors["left"]["ref"],
-                paired=dict(
-                    anchors["right"], target_label="step add_item (other)",
-                    ref=dict(anchors["right"]["ref"], store_id="beta"),
-                ),
-            ),
-        )
-        assert status == 409 and "beta" in refusal["error"]
-
-
-class TestAnArchiveNamedTwice:
-    """One evidence identity declared by two manifest stores.
-
-    Real, not hypothetical: two snapshots of the same database are the same
-    evidence under two names, and a manifest can declare both. The translation
-    between a manifest's name and the identity a reference carries has no answer
-    then, and the failure it invites is the invisible kind -- one archive's turns
-    projected under the other archive's reference. `store_id_for_identity`
-    already refuses it on the write side; this is the read side refusing it too,
-    rather than picking whichever declaration it saw last.
-    """
-
-    def test_naming_an_archive_re_hashes_only_what_is_read(
-        self, tmp_path, colliding_workspace, monkeypatch
-    ):
-        """Translating two names is metadata work, not integrity work.
-
-        The manifest's declaration already says which identity each store has,
-        so mapping one name onto the other needs no file. `workspace.stores()`
-        would answer the same question by re-digesting EVERY archive the manifest
-        names, on every request, including archives the request never touches.
-        The archives actually read are digested anyway when they are leased,
-        which is where that cost belongs.
-
-        So the manifest here declares a third archive that no segment of the
-        experiment being compared names. Counting digests is the only way to see
-        the difference: an eager mapping produces exactly the same payload.
-        """
-        from fastworkflow.observability import workspace as workspace_module
-        from tests.test_observability_workspace import _manifest
-
-        sides = colliding_workspace["sides"]
-        room = tmp_path / "one-spare"
-        room.mkdir()
-        declarations = []
-        for store_id, source, identity in (
-            ("alpha", sides["alpha"]["path"], sides["alpha"]["identity"]),
-            ("beta", sides["beta"]["path"], sides["beta"]["identity"]),
-            # Declared, and named by nothing the comparison below reads. Its
-            # identity is left undeclared, which is the one shape that has to
-            # keep working without it: an older manifest.
-            ("spare", sides["alpha"]["path"], None),
-        ):
-            local = room / f"sealed-{store_id}.sqlite3"
-            shutil.copyfile(source, local)
-            declaration = {
-                "store_id": store_id, "path": local.name, "mode": "sealed",
-                "sha256": hashlib.sha256(local.read_bytes()).hexdigest(),
-            }
-            if identity is not None:
-                declaration["store_identity"] = identity
-            declarations.append(declaration)
-        manifest = _manifest(
-            room, declarations,
-            experiments=[{
-                "experiment_id": "logical",
-                "segments": [
-                    {"store_id": "alpha", "local_experiment_id": "local"},
-                    {"store_id": "beta", "local_experiment_id": "local"},
-                ],
-            }],
-        )
-        srv = run_chatbot_server.ChatbotServer(
-            port=0, workspace_manifest_path=str(manifest)
-        )
-        thread = threading.Thread(target=srv.serve_forever, daemon=True)
-        thread.start()
-        try:
-            # Counted from here, so the one-off verification every archive gets
-            # when the manifest is LOADED is not what is being measured.
-            digested = []
-            real = workspace_module._sha256
-            monkeypatch.setattr(
-                workspace_module, "_sha256",
-                lambda path: (digested.append(Path(path).name), real(path))[1],
-            )
-
-            status, payload = _request(
-                srv,
-                "/api/experiments/logical/tasks/task/comparison"
-                "?left_attempt=1&right_attempt=2&view=steps",
-            )
-
-            assert status == 200, payload
-            # Both sides carry both names, which is what the mapping was for...
-            assert payload["left"]["manifest_store_id"] == "alpha"
-            assert payload["right"]["manifest_store_id"] == "beta"
-            assert payload["left"]["ref"]["store_id"] == sides["alpha"]["identity"]
-            # ...and the archive nobody asked about was never opened again.
-            assert set(digested) == {
-                "sealed-alpha.sqlite3", "sealed-beta.sqlite3"
-            }, digested
-        finally:
-            srv.shutdown()
-            thread.join(timeout=5)
-
-    def test_the_ambiguity_is_refused_rather_than_resolved(
-        self, tmp_path, colliding_workspace
-    ):
-        from tests.test_observability_workspace import _manifest
-
-        alpha = colliding_workspace["sides"]["alpha"]
-        beta = colliding_workspace["sides"]["beta"]
-        # Its own directory, so the fixture's manifest and archives are left
-        # exactly as that fixture wrote them.
-        room = tmp_path / "named-twice"
-        room.mkdir()
-        declarations = []
-        for store_id, source, identity in (
-            ("alpha", alpha["path"], alpha["identity"]),
-            # A second name for the SAME evidence: byte-for-byte the same
-            # archive, so it reports the same identity about itself.
-            ("twin", alpha["path"], alpha["identity"]),
-            ("beta", beta["path"], beta["identity"]),
-        ):
-            # A manifest names its stores by a path relative to itself, so each
-            # is copied in. The fixture's own archives are only read.
-            local = room / f"sealed-{store_id}.sqlite3"
-            shutil.copyfile(source, local)
-            declarations.append({
-                "store_id": store_id, "path": local.name, "mode": "sealed",
-                "sha256": hashlib.sha256(local.read_bytes()).hexdigest(),
-                "store_identity": identity,
-            })
-        manifest = _manifest(
-            room, declarations,
-            experiments=[{
-                "experiment_id": "logical",
-                "segments": [
-                    {"store_id": "alpha", "local_experiment_id": "local"},
-                    {"store_id": "twin", "local_experiment_id": "local"},
-                ],
-            }],
-        )
-        srv = run_chatbot_server.ChatbotServer(
-            port=0, workspace_manifest_path=str(manifest)
-        )
-        thread = threading.Thread(target=srv.serve_forever, daemon=True)
-        thread.start()
-        try:
-            status, payload = _request(
-                srv, "/api/experiments/logical/tasks/task/runs"
-            )
-
-            assert status == 409, payload
-            assert alpha["identity"] in payload["error"]
-            # Both names said out loud, because the fix is to the manifest.
-            assert "alpha" in payload["error"] and "twin" in payload["error"]
-            assert payload["ambiguous_identity"] == alpha["identity"]
-
-            # And the refusal is the same one the write side gives, so neither
-            # half of the product quietly picks a store the other refused.
-            with pytest.raises(Exception) as refused:
-                srv.workspace.registry.store_id_for_identity(alpha["identity"])
-            assert "more than one" in str(refused.value)
-        finally:
-            srv.shutdown()
-            thread.join(timeout=5)
-
-
-def _archive_bytes(colliding_workspace):
-    """sha256 of every file beside the two archives, keyed by name.
-
-    Named by directory listing rather than by the two paths, so a `-wal` or
-    `-shm` that should not exist shows up as a new key instead of going unseen.
-    """
-    return {
-        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in sorted(Path(colliding_workspace["root"]).glob("sealed-*"))
-    }
-
-
-def test_a_comment_about_two_sealed_archives_is_saved_in_the_live_db(
-    colliding_workspace
-):
-    """The whole affordance, in a real DOM, over two read-only archives.
-
-    Sealed evidence is not a reason to refuse the comment -- it is a reason to
-    keep it somewhere else -- so the composer stays open, the note is filed in
-    the workflow's live DB, and the task's Feedback view lists it exactly ONCE even though the
-    logical experiment is stitched from two stores. The archives themselves are
-    hashed before and after: if either changed by a byte, or grew a `-wal`, the
-    comment was appended to frozen evidence and the pass is worthless.
-    """
-    before = _archive_bytes(colliding_workspace)
-    assert [name for name in before if name.endswith(".sqlite3")] == [
-        "sealed-alpha.sqlite3", "sealed-beta.sqlite3"
-    ]
-    sides = colliding_workspace["sides"]
-
-    _run_scope_dom(colliding_workspace["server"], {
-        "mode": "workspace",
-        "experiment": "logical",
-        "task": "task",
-        "turn_key": colliding_workspace["turn_key"],
-        "values": [sides["alpha"]["value"], sides["beta"]["value"]],
-        "right_store": "beta",
-        "right_answer": sides["beta"]["answer"],
-        "comment": {
-            "category": "conclusions",
-            "category_label": "Conclusions",
-            "subcategory": "what_went_right",
-            "text": "the left archive kept the roster in order",
-            "step_text": "and this step is where it did it",
-        },
-    })
-
-    after = _archive_bytes(colliding_workspace)
-    unchanged = {name: digest for name, digest in after.items()
-                 if name in before}
-    assert unchanged == before, "the sealed archives were written to"
-    # Nothing appeared beside them; the comment is in the live DB, keyed by
-    # the archive it is about.
-    appeared = sorted(set(after) - set(before))
-    assert appeared == [], appeared
-    assert {row["archive_sha256"] for row in control.rows(
-        obs.ReadOnlyObservabilityStore(colliding_workspace["live_db"]),
-        "SELECT archive_sha256 FROM sealed_turn_comments",
-    )} == {colliding_workspace["sides"]["alpha"]["sha256"]}
-
-
 def _run_scope_dom(server, plan):
     dependency = os.environ.get("TEST_JSDOM_ROOT")
     if not dependency:
@@ -1498,26 +1037,6 @@ def _run_scope_dom(server, plan):
         capture_output=True, text=True, timeout=180,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-
-
-def test_a_sealed_pair_previews_each_side_in_its_own_archive(colliding_workspace):
-    """Two archives, one turn key, two values -- and two correct panes.
-
-    The inline preview and the deep link both go through `pairReadScope`, so
-    this is the test that would fail if either of them read "the turn" without
-    naming the store it belongs to: the panes would agree, and agreeing is the
-    bug.
-    """
-    sides = colliding_workspace["sides"]
-    _run_scope_dom(colliding_workspace["server"], {
-        "mode": "workspace",
-        "experiment": "logical",
-        "task": "task",
-        "turn_key": colliding_workspace["turn_key"],
-        "values": [sides["alpha"]["value"], sides["beta"]["value"]],
-        "right_store": "beta",
-        "right_answer": sides["beta"]["answer"],
-    })
 
 
 def test_an_unregistered_live_run_previews_without_inventing_a_source(adhoc_world):

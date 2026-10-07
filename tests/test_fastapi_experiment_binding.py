@@ -67,7 +67,6 @@ def binding_harness(tmp_path, monkeypatch):
         pytest.skip(f"hello_world workflow not found at {workflow_path}")
 
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
-    monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
     sys.argv = ["pytest", "--workflow_path", workflow_path]
     import fastworkflow.run_fastapi_mcp.__main__ as main
 
@@ -81,8 +80,6 @@ def binding_harness(tmp_path, monkeypatch):
             store_readiness["store_id"],
             migrate=False,
             external=True,
-            capture_profile=store_readiness["capture_profile"],
-            capture_policy_version=store_readiness["capture_policy_version"],
         )
         controller.create_experiment(
             "exp-http",
@@ -101,8 +98,6 @@ def test_readiness_reports_exact_experiment_store(binding_harness):
     assert readiness == {
         "store_id": binding_harness.controller.store_identity,
         "resolved_path": os.path.realpath(binding_harness.controller.db_path),
-        "capture_profile": "evidence",
-        "capture_policy_version": obs.CAPTURE_POLICY_VERSION,
         "writer_incarnation": obs.writer_incarnation_id(
             obs.sink_for_db_path(binding_harness.controller.db_path)
             .health_snapshot()
@@ -385,7 +380,6 @@ def test_the_runtime_probe_reports_a_valid_credential_free_snapshot(
     assert runtime["configuration_valid"] is True
     assert runtime["runtime_metadata_registered"] is True
     assert runtime["pid"] == os.getpid()
-    assert runtime["capture_profile"] == "evidence"
     assert runtime["command_surface_count"] > 0
     assert isinstance(runtime["effective_features"], dict)
     # The snapshot itself carries no path, no store location, no env value.

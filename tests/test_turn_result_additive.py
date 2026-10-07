@@ -7,13 +7,11 @@ before anything writes to it — its shape, and its blast radius.
 
 **Shape.** Both element models are thin correlation records rather than copies
 of architecture §6.6's `ExecutionRecord` field list, and the constraint that
-makes that the right answer is testable: `observability_store.
-_apply_capture_policy` walks exactly `record["turn_output"]["command_outputs"]`,
-so a new top-level list on `TurnResult` reaches `record_json` with no policy
-applied to it at all. Under the evidence profile it would be the one place
-default-deny does not reach. Every field is therefore an opaque id, a closed
-vocabulary, or a count — asserted structurally below, not left to review, since
-the failure it prevents produces a clean-looking record and no error.
+makes that the right answer is testable: a new top-level list on `TurnResult`
+reaches `record_json` as it stands. Every field is therefore an opaque id, a
+closed vocabulary, or a count — asserted structurally below, not left to
+review, since the failure it prevents produces a clean-looking record and no
+error.
 
 **Blast radius.** EXP-003 is a Phase 0 slice: adding a field must not change a
 turn, a public projection, or an already-written record. The compatibility
@@ -42,7 +40,6 @@ from pydantic import ValidationError
 import fastworkflow
 from fastworkflow import TurnResult, TurnStatus, mint_turn_key
 from fastworkflow.observability import store as obs
-from fastworkflow.observability.capture_policy import evidence_policy
 from fastworkflow.turn import (
     TURN_CAPTURE_CONTRACT_VERSION,
     ExecutionRecordRef,
@@ -353,31 +350,8 @@ def test_an_empty_pair_still_appears_in_a_stored_record(
 
 
 # ----------------------------------------------------------------------
-# Why the records are thin: no policy reaches them
+# Why the records are thin: they are retained whole
 # ----------------------------------------------------------------------
-
-
-def test_the_capture_policy_does_not_reach_these_fields():
-    """The measured constraint the contract is designed around.
-
-    `_apply_capture_policy` walks `turn_output.command_outputs` and nothing
-    else, so values here are persisted verbatim even under the default-deny
-    evidence profile. That is not a defect to fix in this slice — policing a
-    list of framework-minted ids would digest away the joins it exists to
-    carry — but it is why every field below is an id, an enum or a count, and
-    why the structural test that follows is not optional.
-    """
-    turn_row, _artifacts = obs.serialize_turn_result(
-        _turn_result(execution_records=(_execution_record(),)),
-        policy=evidence_policy(),
-    )
-    record = json.loads(turn_row["record_json"])
-
-    # The command output beside it IS policed, which is what makes this a
-    # statement about reach rather than about the profile being off.
-    policed = record["turn_output"]["command_outputs"][0]["command_response"]
-    assert isinstance(policed["response"], dict), "the evidence profile did not run"
-    assert record["execution_records"][0]["command_call_id"] == "c0ffee"
 
 
 def _is_id_or_vocabulary_or_count(annotation) -> bool:
@@ -412,7 +386,7 @@ def test_every_field_is_an_identifier_a_vocabulary_or_a_count(model):
         annotation = field.annotation
         assert _is_id_or_vocabulary_or_count(annotation), (
             f"{model.__name__}.{name} is annotated {annotation!r}, which can "
-            "hold content no capture policy reaches"
+            "hold free text"
         )
         if _admits_free_str(annotation):
             assert name.endswith("_id"), (

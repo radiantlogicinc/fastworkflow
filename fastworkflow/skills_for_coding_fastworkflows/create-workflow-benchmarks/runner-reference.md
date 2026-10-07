@@ -130,6 +130,5 @@ programmatic UI requests. URL-encode IDs. These are `run_chatbot` APIs, not `/in
 | Read/write experiment notes | `GET /api/experiment/<experiment_id>` / `PATCH /api/experiment/<experiment_id>` with `{"notes": "..."}` |
 
 Execution reads/writes go to the workflow's one live database, so a registered experiment's
-evidence is visible only once it is recorded there. For workspace reads use the appropriate
-`store_id`; workspace writes are refused. Do not confuse a registration with a recorded experiment:
+evidence is visible only once it is recorded there. Do not confuse a registration with a recorded experiment:
 a registration can exist before there are attempts or conversations to show.

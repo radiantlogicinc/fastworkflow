@@ -7,24 +7,11 @@ import sqlite3
 from typing import Any
 
 from fastworkflow.observability.store import IncompatibleObservabilityDB
-from fastworkflow.observability.workspace import WorkspaceError
 from fastworkflow.run_chatbot.http_common import run_clear_conversations
 from fastworkflow.run_chatbot.workflow_discovery import _looks_like_workflow
 
 
 class _ControlPlaneRoutes:
-    def _post_select_workspace(self, url_path: str, body: Any, query: dict[str, list[str]]) -> None:
-        path = str(body.get("path") or "").strip()
-        if not path or not os.path.isfile(path):
-            self._error(400, f"not a file: {path!r}")
-            return
-        try:
-            session = self.chatbot.activate_workspace(path)
-        except (OSError, ValueError, WorkspaceError) as exc:
-            self._error(400, str(exc))
-            return
-        self._send_json({"session": session})
-
     def _post_select_workflow(self, url_path: str, body: Any, query: dict[str, list[str]]) -> None:
         path = str(body.get("path") or "").strip()
         if not path or not os.path.isdir(path):

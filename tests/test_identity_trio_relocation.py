@@ -10,7 +10,7 @@ resolves, which is the only way that failure mode is visible.
 """
 import unittest
 
-from fastworkflow import tracing
+from fastworkflow import CommandOutput, CommandResponse, tracing
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.observation_offloading import state
 from fastworkflow.observation_offloading.state import (
@@ -107,6 +107,54 @@ class DispatchRecordsANonEmptyClause(unittest.TestCase):
         self.agent.observation_archive = object()
         with tracing.host_scope(self.host):
             self.assertIs(state.durable_archive(None), self.agent.observation_archive)
+
+
+class MovableWorkflow(FakeWorkflow):
+    """A workflow whose current context object a fake command can replace."""
+
+    current_command_context = None
+
+
+class DispatchRecordsAContextChange(unittest.TestCase):
+    """``invoke_command`` flags a step whose command replaced the context object."""
+
+    def setUp(self):
+        self.host = FakeHost(FakeAgent())
+        self.workflow = MovableWorkflow()
+        self.workflow.current_command_context = FakeContext()
+        self._patch("_active_workflow", staticmethod(lambda cs: self.workflow))
+        state.reset_observation_state()
+        self.addCleanup(state.reset_observation_state)
+
+    def _patch(self, name, value):
+        original = CommandExecutor.__dict__[name]
+        setattr(CommandExecutor, name, value)
+        self.addCleanup(setattr, CommandExecutor, name, original)
+
+    def _dispatch(self, command):
+        self._patch("_invoke_command_impl", staticmethod(lambda cs, raw: command()))
+        with tracing.host_scope(self.host):
+            try:
+                CommandExecutor.invoke_command(self.host, "any command")
+            except RuntimeError:
+                pass
+            return state.context_changed_of(current_scope(), current_execute_alias())
+
+    def _move(self, then_raise=False):
+        self.workflow.current_command_context = FakeContext()
+        if then_raise:
+            raise RuntimeError("failed after moving")
+        return CommandOutput(command_response=CommandResponse(response="moved"))
+
+    def test_a_command_that_moves_the_context_is_flagged(self):
+        self.assertTrue(self._dispatch(self._move))
+
+    def test_a_command_that_moves_and_then_raises_is_flagged(self):
+        self.assertTrue(self._dispatch(lambda: self._move(then_raise=True)))
+
+    def test_a_command_that_stays_put_is_not_flagged(self):
+        self.assertFalse(self._dispatch(
+            lambda: CommandOutput(command_response=CommandResponse(response="rows"))))
 
 
 if __name__ == "__main__":

@@ -17,30 +17,26 @@
      fingerprint does not move when only its trained artifacts do, and "the
      newest training run" is a guess, so neither is ever used: a run with no
      recorded version id reads as unavailable, not as unmatched. */
-var trainingHistory = {storeId: null, runs: [], runId: null, seq: 0};
+var trainingHistory = {runs: [], runId: null, seq: 0};
 
-/* Every read this section makes is scoped to ONE source and ONE store inside
-   it, and both can change while a read is in flight. Two independent guards,
-   because they fail differently:
+/* Every read this section makes is scoped to ONE source, and it can change
+   while a read is in flight. Two independent guards, because they fail
+   differently:
 
    * the SEQUENCE moves whenever a list or a detail starts, so a slower
      earlier read finds itself disowned. Without it, a list issued against the
      store the user just left could land last and overwrite `runs` -- after
      which a click resolved a run id belonging to the old store against the
-     new one, which in a workspace is a different training run under the same
-     id rather than an error.
+     new one.
    * the SOURCE is captured at the moment the read is issued and re-checked
      when it lands. It covers what a counter cannot: a switch away and back
      while one read is outstanding leaves the sequence looking current again.
 
-   This is the same rule `expNavToken` / `workspaceNav` / `turnFind.seq`
+   This is the same rule `expNavToken` / `turnFind.seq`
    already state for the panes they own; `resetSourceScopedState` reaches this
    one through `onSourceSwitch`. */
 function trainingSource() {
-  /* In a workspace the manifest is the source and the archives are stores, so
-     the store belongs in the identity: `run-000` names a different training
-     run in each archive. */
-  return sourceIdentity(session) + "|" + (trainingHistory.storeId || "");
+  return sourceIdentity(session);
 }
 
 function trainingToken() { return ++trainingHistory.seq; }
@@ -51,11 +47,9 @@ function trainingStale(token, source) {
 
 function trainingHistoryReset() {
   /* Called from the page's source boundary. In-flight reads are invalidated
-     rather than awaited, the remembered store goes with the source it named,
-     and the section is closed: what it is showing belongs to evidence that is
+     rather than awaited, and the section is closed: what it is showing belongs to evidence that is
      no longer selected. */
   trainingHistory.seq++;
-  trainingHistory.storeId = null;
   trainingHistory.runs = [];
   trainingHistory.runId = null;
   var dialog = document.getElementById("trainingDialog");
@@ -65,11 +59,9 @@ function trainingHistoryReset() {
   }
   clear(document.getElementById("trainingRunList"));
   clear(document.getElementById("trainingRunDetail"));
-  clear(document.getElementById("trainingStore"));
 }
 
 var TRAINING_METRICS_NOTE = {
-  withheld: "Metrics withheld by this deployment's capture policy. The run is on record; its numbers are not.",
   unreadable: "This run's recorded metrics could not be read back.",
   absent: "This run recorded no metrics."
 };
@@ -78,23 +70,6 @@ var TRAINING_HELDOUT_CAPTION =
   "Held-out intent-classification metrics, under the names the trainer recorded "
   + "them with, measured on its own generated evaluation set. They are not a "
   + "task-success rate and say nothing about whether a benchmark task passed.";
-
-function trainingListPath() {
-  if (session && session.workspace_mode) {
-    return "/api/workspace/training-runs?store_id="
-      + encodeURIComponent(trainingHistory.storeId || "");
-  }
-  return "/api/training-runs";
-}
-
-function trainingDetailPath(runId) {
-  if (session && session.workspace_mode) {
-    return "/api/workspace/training-run/"
-      + encodeURIComponent(trainingHistory.storeId || "")
-      + "/" + encodeURIComponent(runId);
-  }
-  return "/api/training-run/" + encodeURIComponent(runId);
-}
 
 function trainingRunTitle(run) {
   /* The published version id IS the trained set's identity, so it is the
@@ -106,7 +81,8 @@ function trainingRunTitle(run) {
 function trainingField(parent, label, value) {
   var row = el("div", "sub");
   row.appendChild(el("strong", null, label + ": "));
-  appendPoliced(row, value === null || value === undefined || value === "" ? "not recorded" : value);
+  row.appendChild(document.createTextNode(
+    value === null || value === undefined || value === "" ? "not recorded" : String(value)));
   parent.appendChild(row);
   return row;
 }
@@ -256,10 +232,9 @@ function selectTrainingRun(runId) {
   renderTrainingRunList();
   var token = trainingToken();
   var source = trainingSource();
-  /* The URL is built HERE, from the store this run was listed under, and not
-     again when the response lands: resolving it later would read the id
-     against whatever store is selected by then. */
-  var path = trainingDetailPath(runId);
+  /* The source is captured with the request, so a response that lands after
+     a switch is recognised by `trainingStale` and dropped. */
+  var path = "/api/training-run/" + encodeURIComponent(runId);
   var pane = document.getElementById("trainingRunDetail");
   clear(pane);
   pane.appendChild(el("div", "empty", "Loading training run…"));
@@ -303,7 +278,7 @@ function loadTrainingRuns() {
      than surviving until the next list happens to finish. */
   var token = trainingToken();
   var source = trainingSource();
-  var path = trainingListPath();
+  var path = "/api/training-runs";
   trainingHistory.runs = [];
   trainingHistory.runId = null;
   renderTrainingRun(null);
@@ -321,35 +296,9 @@ function loadTrainingRuns() {
   });
 }
 
-function loadTrainingStores() {
-  /* A workspace read names its store or it is refused: two archives may hold
-     the same run_id, and nothing makes it unique across the manifest. */
-  var picker = document.getElementById("trainingStore");
-  if (!(session && session.workspace_mode)) {
-    picker.style.display = "none";
-    return Promise.resolve();
-  }
-  picker.style.display = "";
-  var token = trainingHistory.seq;
-  var source = sourceIdentity(session);
-  return api("/api/workspace/stores").then(function (data) {
-    if (token !== trainingHistory.seq || source !== sourceIdentity(session)) { return; }
-    clear(picker);
-    (data.stores || []).forEach(function (store) {
-      var option = el("option", null, store.label || store.store_id);
-      option.value = store.store_id;
-      picker.appendChild(option);
-    });
-    if (!trainingHistory.storeId && (data.stores || []).length) {
-      trainingHistory.storeId = data.stores[0].store_id;
-    }
-    picker.value = trainingHistory.storeId || "";
-  });
-}
-
 function openTrainingHistory() {
   var dialog = document.getElementById("trainingDialog");
-  loadTrainingStores().then(loadTrainingRuns);
+  loadTrainingRuns();
   if (dialog.showModal) { dialog.showModal(); } else { dialog.setAttribute("open", ""); }
 }
 
@@ -358,11 +307,4 @@ document.getElementById("trainingClose").addEventListener("click", function () {
   var dialog = document.getElementById("trainingDialog");
   if (dialog.close) { dialog.close(); } else { dialog.removeAttribute("open"); }
 });
-document.getElementById("trainingStore").addEventListener("change", function (event) {
-  /* The store is part of the source, so setting it before the load is what
-     makes every read still in flight against the previous one stale. */
-  trainingHistory.storeId = event.target.value;
-  loadTrainingRuns();
-});
-
 

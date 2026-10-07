@@ -17,8 +17,8 @@ What the tests are for, in order of how much they matter:
 2. Held-out metrics keep the names and the dataset they were measured on.
    `in_distribution_f1` is an intent-classification measurement over synthetic
    utterances; nothing may present it as a task-success rate.
-3. Absence is reported as absence, with its kind: withheld by the capture
-   policy, unreadable, or simply not recorded.
+3. Absence is reported as absence, with its kind: unreadable, or simply not
+   recorded.
 """
 
 from __future__ import annotations
@@ -37,7 +37,6 @@ from fastworkflow.observability import store as obs
 from fastworkflow.observability import training_history as th
 from fastworkflow.run_chatbot import server as run_chatbot_server
 from tests.test_chatbot_benchmarks import _request
-from tests.test_observability_workspace import _manifest, _store_decl
 
 # The published version id the trainer writes into the manifest and the binding
 # server stamps onto an attempt. The same string on both sides is the ONLY
@@ -151,7 +150,6 @@ def _snapshot(version_id, *, legacy=False):
         "workflow_fingerprint": FINGERPRINT,
         "workflow_model_version": version_id,
         "workflow_model_legacy_layout": legacy,
-        "capture_profile": "debug",
         "effective_features": {"decision_signals_v1": "shadow"},
         "pid": 4242,
     }
@@ -392,20 +390,16 @@ class TestRuntimeLink:
 
 
 # ----------------------------------------------------------------------
-# Absent, withheld and unreadable metrics
+# Absent and unreadable metrics
 # ----------------------------------------------------------------------
 
 
 class TestMissingMetricsAreExplicit:
-    def test_an_evidence_profile_withholds_the_numbers_and_keeps_the_run(
-        self, db_path, monkeypatch
-    ):
-        """The default-deny profile stores a badge in `metrics_json`.
-
-        The run still lists, because the other four columns are unpoliced --
-        and the badge is reported as `withheld`, never rendered as data.
+    def test_unreadable_metrics_keep_the_run(self, db_path):
+        """The run still lists, because the other four columns are stored
+        beside `metrics_json` -- and the blob is reported as `unreadable`,
+        never rendered as data.
         """
-        monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
         store = obs.ObservabilityStore(db_path)
         store.record_train_run(
             run_id=RUN_A,
@@ -414,10 +408,17 @@ class TestMissingMetricsAreExplicit:
             completed_at="2026-09-01T10:15:00+00:00",
             metrics=_metrics(VERSION_A),
         )
+        with store._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "UPDATE train_runs SET metrics_json='{not json' WHERE run_id=?",
+                (RUN_A,),
+            )
+            conn.commit()
 
         run = th.list_training_runs(store)[0]
 
-        assert run["metrics_status"] == th.METRICS_WITHHELD
+        assert run["metrics_status"] == th.METRICS_UNREADABLE
         assert run["run_id"] == RUN_A
         assert run["workflow_fingerprint"] == FINGERPRINT
         assert run["completed_at"] == "2026-09-01T10:15:00+00:00"
@@ -679,170 +680,6 @@ def test_training_history_dom(training_server):
 
 
 # ----------------------------------------------------------------------
-# Workspace mode: an explicit source, and ids that collide across stores
-# ----------------------------------------------------------------------
-
-
-def _training_archive(root: Path, name: str, version_id: str, seed: int) -> dict:
-    """A sealed archive holding ONE training run, under a colliding run_id."""
-    source = root / f"{name}-live.sqlite3"
-    store = obs.ObservabilityStore(str(source))
-    store.record_train_run(
-        run_id=RUN_A,
-        workflow_fingerprint=FINGERPRINT,
-        started_at="2026-09-01T10:00:00+00:00",
-        completed_at="2026-09-01T10:15:00+00:00",
-        metrics=_metrics(version_id, seed=seed),
-    )
-    return obs.ObservabilityStore(str(source), migrate=False).archive_to(
-        str(root / f"{name}.sqlite3")
-    )
-
-
-@pytest.fixture
-def workspace_training_server(tmp_path, monkeypatch):
-    monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
-    left = _training_archive(tmp_path, "left", VERSION_A, seed=1)
-    right = _training_archive(tmp_path, "right", VERSION_B, seed=2)
-    manifest = _manifest(
-        tmp_path, [_store_decl(left, "left"), _store_decl(right, "right")]
-    )
-    server = run_chatbot_server.ChatbotServer(
-        port=0, workspace_manifest_path=str(manifest)
-    )
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield server, tmp_path
-    server.shutdown()
-    thread.join(timeout=5)
-
-
-class TestWorkspaceTrainingHistory:
-    def test_an_unscoped_read_is_refused_and_names_the_scoped_route(
-        self, workspace_training_server
-    ):
-        server, _root = workspace_training_server
-
-        status, data = _request(server, "/api/training-runs")
-
-        assert status == 400
-        assert "/api/workspace/training-runs?store_id=" in data["error"]
-        assert _request(server, f"/api/training-run/{RUN_A}")[0] == 400
-
-    def test_a_store_id_is_required(self, workspace_training_server):
-        server, _root = workspace_training_server
-
-        status, data = _request(server, "/api/workspace/training-runs")
-
-        assert status == 400
-        assert "never listed across stores" in data["error"]
-
-    def test_colliding_run_ids_resolve_to_the_named_store(
-        self, workspace_training_server
-    ):
-        """One run_id, two stores, two different training runs.
-
-        This is why the workspace routes take the store explicitly instead of
-        searching: the ids are each store's own and nothing makes them unique
-        across a workspace.
-        """
-        server, _root = workspace_training_server
-
-        left = _request(server, f"/api/workspace/training-run/left/{RUN_A}")[1]
-        right = _request(server, f"/api/workspace/training-run/right/{RUN_A}")[1]
-
-        assert left["training_run"]["version_id"] == VERSION_A
-        assert right["training_run"]["version_id"] == VERSION_B
-        assert left["training_run"]["seed"] == 1
-        assert right["training_run"]["seed"] == 2
-        assert left["training_run"]["store_id"] == "left"
-        assert right["training_run"]["store_id"] == "right"
-
-    def test_an_old_run_in_a_sealed_archive_is_readable_too(self, tmp_path, monkeypatch):
-        """The same primary-key rule on the read-only path.
-
-        A sealed archive is exactly where an old training run lives, so a
-        detail read that depended on the newest-first window would fail worst
-        on the stores this feature exists to inspect.
-        """
-        monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
-        source = tmp_path / "long-live.sqlite3"
-        store = obs.ObservabilityStore(str(source))
-        for index in range(60):
-            store.record_train_run(
-                run_id=f"run-{index:03d}",
-                workflow_fingerprint=FINGERPRINT,
-                started_at=f"2026-07-{index % 28 + 1:02d}T00:00:00+00:00",
-                completed_at=f"2026-07-{index % 28 + 1:02d}T01:00:00+00:00",
-                metrics=_metrics(f"version-{index:03d}", seed=index),
-            )
-        archive = obs.ObservabilityStore(str(source), migrate=False).archive_to(
-            str(tmp_path / "long.sqlite3")
-        )
-        manifest = _manifest(tmp_path, [_store_decl(archive, "long")])
-        server = run_chatbot_server.ChatbotServer(
-            port=0, workspace_manifest_path=str(manifest)
-        )
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            listed = _request(
-                server, "/api/workspace/training-runs?store_id=long&limit=10"
-            )[1]["training_runs"]
-            status, data = _request(
-                server, "/api/workspace/training-run/long/run-000"
-            )
-        finally:
-            server.shutdown()
-            thread.join(timeout=5)
-
-        assert len(listed) == 10
-        assert "run-000" not in {run["run_id"] for run in listed}
-        assert status == 200, data
-        assert data["training_run"]["version_id"] == "version-000"
-        assert data["training_run"]["store_id"] == "long"
-
-    def test_the_scoped_list_names_its_store(self, workspace_training_server):
-        server, _root = workspace_training_server
-
-        status, data = _request(server, "/api/workspace/training-runs?store_id=left")
-
-        assert status == 200
-        assert data["store_id"] == "left"
-        assert [run["run_id"] for run in data["training_runs"]] == [RUN_A]
-
-    def test_an_unknown_store_is_refused_rather_than_resolved(
-        self, workspace_training_server
-    ):
-        server, _root = workspace_training_server
-
-        status, data = _request(
-            server, "/api/workspace/training-runs?store_id=nowhere"
-        )
-
-        # The registry refuses a store the manifest never named; it does not
-        # fall back to a path, so no read can escape the declared set.
-        assert status == 404
-        assert "nowhere" in json.dumps(data)
-        assert (
-            _request(server, f"/api/workspace/training-run/nowhere/{RUN_A}")[0] == 404
-        )
-
-    def test_reading_a_sealed_archive_does_not_touch_its_bytes(
-        self, workspace_training_server
-    ):
-        """[R12]: a viewer opened on a snapshot must not migrate or write it."""
-        server, root = workspace_training_server
-        archive = root / "left.sqlite3"
-        before = (archive.stat().st_mtime_ns, archive.read_bytes())
-
-        assert _request(server, f"/api/workspace/training-run/left/{RUN_A}")[0] == 200
-
-        assert (archive.stat().st_mtime_ns, archive.read_bytes()) == before
-        assert not (root / "left.sqlite3-wal").exists()
-
-
-# ----------------------------------------------------------------------
 # The source boundary: one source, one store, and reads that outlive both
 # ----------------------------------------------------------------------
 
@@ -850,11 +687,11 @@ class TestWorkspaceTrainingHistory:
 class TestTheSectionIsScopedToItsSource:
     """The page's guards against a response from the store the reader left.
 
-    A stale response here is not a cosmetic flicker. Two archives in one
-    workspace may hold the same `run_id`, so a list that lands after the
-    reader has switched leaves rows naming runs that exist in the other
-    archive -- and a click then resolves that id against the current store,
-    which answers with a different training run under the same name. Both
+    A stale response here is not a cosmetic flicker. Two workflows' stores
+    may hold the same `run_id`, so a list that lands after the reader has
+    switched leaves rows naming runs that exist in the other store -- and a
+    click then resolves that id against the current store, which answers
+    with a different training run under the same name. Both
     halves have to be guarded: the token, which moves when any read starts,
     and the source, which is captured with the request and re-checked when it
     lands.
@@ -865,9 +702,9 @@ class TestTheSectionIsScopedToItsSource:
         page = run_chatbot_server.load_index_html().decode("utf-8")
         return page.split(f"function {name}(", 1)[1].split("\nfunction ", 1)[0]
 
-    def test_the_store_is_part_of_the_identity_a_read_is_checked_against(self):
+    def test_the_source_is_the_identity_a_read_is_checked_against(self):
         body = self._body("trainingSource")
-        assert "sourceIdentity(session)" in body and "trainingHistory.storeId" in body
+        assert "sourceIdentity(session)" in body
 
     def test_starting_a_list_disowns_a_detail_already_in_flight(self):
         """Otherwise a detail from the previous store survives until the next
@@ -878,12 +715,6 @@ class TestTheSectionIsScopedToItsSource:
         assert body.index("trainingToken()") < body.index("api(path)")
         assert "trainingStale(token, source)" in body
 
-    def test_a_detail_url_is_built_when_the_click_happens(self):
-        """Building it when the response lands would resolve the id against
-        whichever store is selected by then."""
-        body = self._body("selectTrainingRun")
-        assert body.index("trainingDetailPath(runId)") < body.index("api(path)")
-        assert "trainingStale(token, source)" in body
 
     def test_the_page_source_boundary_stands_the_section_down(self):
         """`resetSourceScopedState` reaches this section through
@@ -894,35 +725,6 @@ class TestTheSectionIsScopedToItsSource:
         assert "trainingHistoryReset()" in hook
         reset = self._body("trainingHistoryReset")
         assert "trainingHistory.seq++" in reset
-        assert "trainingHistory.storeId = null" in reset
-
-
-def test_training_source_switch_dom(workspace_training_server):
-    """Real server, real DOM, colliding run ids across two sealed archives."""
-    dependency = os.environ.get("TEST_JSDOM_ROOT")
-    if not dependency:
-        pytest.skip("Set TEST_JSDOM_ROOT to run DOM integration with jsdom")
-    server, _root = workspace_training_server
-    script = Path(__file__).with_name("chatbot_training_source_switch_dom.cjs")
-    result = subprocess.run(
-        [
-            "node",
-            str(script),
-            dependency,
-            f"http://127.0.0.1:{server.port}/?token={server.token}",
-            json.dumps(
-                {
-                    "version_a": VERSION_A,
-                    "version_b": VERSION_B,
-                    "run_id": RUN_A,
-                }
-            ),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
 
 
 # ----------------------------------------------------------------------

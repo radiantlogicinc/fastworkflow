@@ -1,7 +1,7 @@
 # observability.sqlite3 — the read contract
 
 Reference for `debug-workflow-conversations` (see SKILL.md for the triage
-method). The current source uses `SCHEMA_VERSION = 4` in `observability/store.py`.
+method). The current source uses `SCHEMA_VERSION = 8` in `observability/store.py`.
 Readers check compatibility; older evidence is not migrated by this version. Preserve it and
 use its writer's framework version. Inspect `PRAGMA user_version` read-only when diagnosing a
 mismatch, rather than forcing a version number or adding columns.
@@ -68,7 +68,7 @@ Around the agent's task-planner calls. Attributes: `model`, the plan text
 `text` (the plain-text planner, the default with the check off),
 `text_fallback` (the structured call failed to parse or returned no steps, so
 the plain-text planner ran), or `none` (no plan) — and `subjects`, the
-structured plan's subject names redacted by the capture policy (`[]` for a
+structured plan's subject names, credential-scrubbed (`[]` for a
 text plan and for continuation replans). With `plan_source: structured` the
 plan text is a numbered list whose steps may carry `(optional)` /
 `(needs the user)` flags. Spans written before v2 lack both keys.
@@ -194,7 +194,7 @@ The full internal `TurnResult`, post-redaction:
 | `list_human_feedback(turn_key)` | All component and turn notes, oldest first; decoded `span_ids`, `category`/`subcategory`, decoded `anchors` |
 | `list_task_feedback(experiment_id=, task_id=)` | Every note about one task, across attempts and turns, plus notes whose frozen pair anchor names it |
 | `get_experiment(experiment_id)` / `experiment_attempt_rows(experiment_id, task_id=)` | Pin/configuration and attempt records; attempt `runtime_snapshot` is decoded or null |
-| `store_identity()` / `capture_regime()` | Evidence source and capture profile/policy identity |
+| `store_identity()` | Evidence source identity |
 | `writer_health(incarnation_id=None)` | A writer's drop/error counters — read this before trusting span completeness. Each writer process has its own row; with no id, every row folded together |
 | `db_size_bytes()` | File + WAL size |
 
@@ -247,8 +247,8 @@ WHERE name='fw.turn' AND trace_id=:turn_key AND end_ns IS NOT NULL;
 
 ## Trust notes
 
-- Capture profile/policy can withhold inputs, outputs or attributes. Inspect `capture_regime()`
-  and recorded envelopes; missing or withheld text is not proof the runtime lacked that data.
+- The credential scrub, size limits and offload can replace or shorten inputs, outputs or
+  attributes; missing or shortened text is not proof the runtime lacked that data.
 - `call_kwargs` is flat: the completion cap is `call_kwargs.max_tokens`. Some mapping attributes
   can be JSON strings; decode them before reading fields. Compare usage, output and request limits
   together; a cap match alone is not a task-failure verdict.
@@ -297,17 +297,11 @@ pairs with the watermark text the composer shows. Reads are separate routes:
 turns and components (optional `category`, `subcategory`, `provenance`, `target_kind`,
 `component`, `attempt`, `limit`, `offset`; no filter is applied by default).
 
-Preserve the UI's authentication and source selection: reads go to the workflow's one live
-database, or add `store_id=<id>` for workspace reads.
+Preserve the UI's authentication: reads and writes go to the workflow's one live database.
 
-A POST on a sealed workspace store is accepted without writing the archive: the note goes to the
-`sealed_turn_comments` table of the archive's workflow's live database, keyed by the archive's
-sha256, so the archive file is byte-identical afterwards; the response carries
-`"annotated": true` and the reads return the merge. It is refused (409) when that workflow has
-no live database on this machine, and so is a POST on a live database file this process cannot
-write. Otherwise the server uses the narrow `ObservabilityStore.open_for_annotation` path; that
-is not a reason to open a writer during analysis.
+A POST on a live database file this process cannot write is refused (409). Otherwise the server
+uses the narrow `ObservabilityStore.open_for_annotation` path; that is not a reason to open a
+writer during analysis.
 
 The agent-memory `feedback` table and the `/api/feedback` read routes it backed were removed with
-their `dspy.History` injection (fix-9eg.16); those paths now 404. Formal human review assignments
-have separate rubric/capability controls and are not these comments.
+their `dspy.History` injection (fix-9eg.16); those paths now 404.

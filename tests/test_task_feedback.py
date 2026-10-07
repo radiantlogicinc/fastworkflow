@@ -23,12 +23,10 @@ from pathlib import Path
 import pytest
 
 from fastworkflow.observability import feedback as fb
-from fastworkflow.observability import control
 from fastworkflow.observability import store as obs
 from fastworkflow.observability.comparison import ExecutionRef, review_pair_key
 from fastworkflow.run_chatbot import server as run_chatbot_server
-from tests.test_chatbot_benchmarks import _request
-from tests.test_observability_workspace import _turn_row
+from tests.test_chatbot_benchmarks import _request, _turn_row
 
 # The server fixtures come from that module as a plugin rather than as
 # imported names: importing a fixture makes it look unused at its import and
@@ -659,47 +657,6 @@ def test_a_row_whose_pair_anchor_is_unreadable_is_not_hidden_by_an_attempt(
     assert _task_feedback(server, task="task-1", attempt=2)["total"] == 0
 
 
-def test_a_logical_experiment_matches_the_attempt_under_each_local_id(
-    experiment_server,
-):
-    """The workspace case: one logical experiment, two local ids, one row.
-
-    A comparison note written across two segments of one logical experiment is
-    a single row whose two sides name DIFFERENT local experiment ids. Both
-    sides have to be recognized as the task the reader asked about, or the
-    attempt filter would match neither and the note would vanish from a view
-    that shows it perfectly well unfiltered.
-    """
-    server, store = experiment_server
-    first = _seed_task(store, experiment_id="seg-a", task_id="task", attempts=(1,))
-    second = _seed_task(store, experiment_id="seg-b", task_id="task", attempts=(2,))
-    note = "the second segment's run repeated the first segment's mistake"
-    _post(
-        server,
-        first[0],
-        comment=note,
-        paired=_paired(
-            store.store_identity(), [second[0]],
-            experiment_id="seg-b", task_id="task", attempt=2,
-        ),
-    )
-    identity = store.store_identity()
-
-    def page(**params):
-        return fb.consolidate_task_feedback(
-            {identity: store},
-            experiment_id="logical",
-            task_id="task",
-            local_experiment_ids=["seg-a", "seg-b"],
-            **params,
-        )
-
-    assert page().total == 1, "one row, however many local ids name it"
-    assert page(attempt=1).total == 1, "the segment the note was written on"
-    assert page(attempt=2).total == 1, "the segment the note is about"
-    assert page(attempt=3).total == 0
-
-
 def test_the_attempt_filter_still_answers_for_rows_with_no_pair(
     experiment_server,
 ):
@@ -718,7 +675,7 @@ def test_the_attempt_filter_still_answers_for_rows_with_no_pair(
 
 
 # ---------------------------------------------------------------------------
-# Read-only evidence: annotated beside, never written to
+# Read-only evidence: never written to
 # ---------------------------------------------------------------------------
 
 
@@ -739,8 +696,7 @@ def read_only_copy(tmp_path):
     """A current-schema store this build cannot write to.
 
     Its notes are recorded first; then the file is closed out of WAL and made
-    read-only. As a live DB that refuses a new comment; as a sealed archive's
-    bytes it is what `sealed_turn_comments` rows are keyed by.
+    read-only, so as a live DB it refuses a new comment.
     """
     path = tmp_path / "read_only.sqlite3"
     store = obs.ObservabilityStore(str(path))
@@ -861,32 +817,6 @@ def test_a_read_only_live_db_refuses_a_note_and_is_left_untouched(
     assert sorted(path.name for path in read_only_copy.parent.iterdir()) == directory
 
 
-def _sealed_note(evidence, live, *, comment="a note about sealed evidence"):
-    sha = hashlib.sha256(Path(evidence.db_path).read_bytes()).hexdigest()
-    return control.SealedEvidence(evidence, live, sha).add_human_feedback(
-        "recorded-t1", target_kind="turn", span_ids=[], target_label="Turn",
-        provenance="human", comment=comment,
-        category="observations_analysis", subcategory="observation",
-    ), sha
-
-
-def test_a_note_about_sealed_evidence_is_append_only_in_the_live_db(
-    read_only_copy, tmp_path
-):
-    """A comment is somebody's statement; editing one in place would leave no
-    trace that it had said something else."""
-    live = obs.ObservabilityStore(str(tmp_path / "live.sqlite3"))
-    _sealed_note(obs.ReadOnlyObservabilityStore(str(read_only_copy)), live)
-    connection = sqlite3.connect(live.db_path)
-    try:
-        with pytest.raises(sqlite3.IntegrityError):
-            connection.execute("UPDATE sealed_turn_comments SET comment='edited'")
-        with pytest.raises(sqlite3.IntegrityError):
-            connection.execute("DELETE FROM sealed_turn_comments")
-    finally:
-        connection.close()
-
-
 def test_a_paired_side_may_name_its_anchored_turn_unambiguously(
     experiment_server,
 ):
@@ -949,68 +879,11 @@ def test_reading_feedback_brings_nothing_into_existence(read_only_copy):
     directory = read_only_copy.parent
     before = sorted(path.name for path in directory.iterdir())
     evidence = obs.ReadOnlyObservabilityStore(str(read_only_copy))
-    sealed = control.SealedEvidence(evidence, None, "0" * 64)
-    assert sealed.list_human_feedback("recorded-t1")
+    assert evidence.list_human_feedback("recorded-t1")
     assert fb.consolidate_task_feedback(
-        {"recorded": sealed}, experiment_id="exp-recorded", task_id="task-recorded"
+        {"recorded": evidence}, experiment_id="exp-recorded", task_id="task-recorded"
     ).total == len(RECORDED_NOTES)
     assert sorted(path.name for path in directory.iterdir()) == before
-
-
-def test_a_sealed_note_reads_back_merged_without_writing(read_only_copy, tmp_path):
-    """The merged read opens the live DB read-only.
-
-    Checked by row digest rather than by inspection: a reader that stamps a
-    schema version, a journal or an identity into the file it is reading is
-    writing, whatever it calls itself.
-    """
-    evidence = obs.ReadOnlyObservabilityStore(str(read_only_copy))
-    live_path = str(tmp_path / "live.sqlite3")
-    _note, sha = _sealed_note(evidence, obs.ObservabilityStore(live_path))
-    before = _row_digest(live_path)
-    reader = control.SealedEvidence(
-        evidence, obs.ReadOnlyObservabilityStore(live_path), sha
-    )
-    rows = reader.list_human_feedback("recorded-t1")
-    assert [row["comment"] for row in rows][-1] == "a note about sealed evidence"
-    assert len(rows) == 1 + sum(
-        1 for index in range(len(RECORDED_NOTES)) if (index % 3) + 1 == 1
-    )
-    assert fb.consolidate_task_feedback(
-        {"sealed": reader}, experiment_id="exp-recorded", task_id="task-recorded"
-    ).total == len(RECORDED_NOTES) + 1
-    # Another archive's sha reads none of it.
-    assert len(control.SealedEvidence(
-        evidence, obs.ReadOnlyObservabilityStore(live_path), "f" * 64
-    ).list_human_feedback("recorded-t1")) == len(rows) - 1
-    assert _row_digest(live_path) == before
-    # And it refuses to become a writer behind the caller's back.
-    with pytest.raises(sqlite3.OperationalError):
-        reader.add_human_feedback(
-            "recorded-t1", target_kind="turn", span_ids=[], target_label="Turn",
-            provenance="human", comment="not through a read handle",
-            category="conclusions", subcategory="what_went_wrong",
-        )
-    assert _row_digest(live_path) == before
-
-
-def test_a_sealed_note_with_no_live_db_is_refused(read_only_copy):
-    evidence = obs.ReadOnlyObservabilityStore(str(read_only_copy))
-
-    with pytest.raises(control.ControlUnavailable, match="live database"):
-        _sealed_note(evidence, None)
-
-
-def _row_digest(path):
-    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    try:
-        return hashlib.sha256(json.dumps([
-            list(row) for row in connection.execute(
-                "SELECT * FROM sealed_turn_comments ORDER BY feedback_id"
-            )
-        ]).encode()).hexdigest()
-    finally:
-        connection.close()
 
 
 def test_the_http_reads_create_nothing(read_only_copy):

@@ -176,7 +176,7 @@ class UncertaintySignal(_Strict):
 
     Values are numeric or drawn from a closed vocabulary, per §6.6.1: signals
     carry no free text and no entity content, so that the whole record is safe to
-    retain under any capture profile.
+    retain.
     """
 
     signal_id: str

@@ -207,7 +207,6 @@ def test_a_source_this_process_is_recording_into_is_refused(
     """
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
     monkeypatch.setenv("FASTWORKFLOW_WORKFLOW_ID", "historical_archive_live")
-    monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
     workflow = tmp_path / "workflow"
     workflow.mkdir()
     sink = obs.get_observability_sink(str(workflow))

@@ -6,7 +6,7 @@ Moved verbatim from ``run_chatbot.server``. No handler state.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any, Optional
 
 from fastworkflow.observability.comparison import (
@@ -45,7 +45,6 @@ from fastworkflow.observability.turn_derivations import (
     merge_cost_rollups,
     turn_decision_signals,
 )
-from fastworkflow.observability.workspace import ObservabilityWorkspace
 
 # ----------------------------------------------------------------------
 # Derived fields for the SPA (fix-49m.6)
@@ -56,8 +55,8 @@ from fastworkflow.observability.workspace import ObservabilityWorkspace
 # and the verdict an experiment's evidence segments add up to. They are derived
 # in the read layer (the per-call cut-at-limit test in
 # `observability/turn_derivations.py`, the rest here), from ObservabilityStore
-# reads only [R12] -- never from a query of this module's own -- so the
-# workspace's archived stores render them through the very same functions.
+# reads only [R12] -- never from a query of this module's own -- so a sealed
+# experiment's archive renders them through the very same functions.
 # (The fourth, the attempt's runtime snapshot, IS a column:
 # `_decode_attempt_row` already exposes it.)
 
@@ -173,139 +172,13 @@ def annotate_attempt_rows(
         row["evidence"] = verdict
 
 
-def _workspace_segment_verdicts(
-    workspace: ObservabilityWorkspace, experiment_id: str
-) -> dict[str, dict[str, Any]]:
-    return {
-        segment["segment_id"]: evidence_verdict(
-            workspace.evidence_runs(
-                segment["store_id"], segment["local_experiment_id"]
-            )
-        )
-        for segment in workspace.segments(experiment_id)
-    }
-
-
-def _workspace_span_cache(
-    workspace: ObservabilityWorkspace, refs: Iterable[tuple[Any, Any]]
-) -> dict[tuple[str, str], list[dict[str, Any]]]:
-    """``{(store_id, logical_turn_key): spans}`` for many refs, one bulk read
-    per store instead of one `trace` call per ref.
-
-    Refs missing either half are dropped here rather than raising: the caller
-    already treats an unresolvable ref as "nothing to tally", and a store that
-    a manifest no longer names must not break the rest of the answer.
-    """
-    by_store: dict[str, list[str]] = {}
-    for store_id, key in refs:
-        if store_id and key:
-            by_store.setdefault(str(store_id), []).append(str(key))
-    cache: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for store_id, keys in by_store.items():
-        for key, spans in workspace.traces(store_id, keys).items():
-            cache[(store_id, key)] = spans
-    return cache
-
-
-def annotate_workspace_attempts(
-    workspace: ObservabilityWorkspace,
-    rows: list[dict[str, Any]],
-    verdict_by_segment: Mapping[str, dict[str, Any]],
-) -> None:
-    """The workspace twin of `annotate_attempt_rows`, over scoped trace reads.
-
-    Every ref on every row is read in one pass per store; the stamps
-    are the ones `trace` would have produced ref by ref."""
-    spans_by_ref = _workspace_span_cache(
-        workspace,
-        (
-            (ref.get("store_id"), ref.get("logical_turn_key"))
-            for row in rows
-            for ref in row.get("turn_refs") or []
-        ),
-    )
-    for row in rows:
-        total = 0
-        costs = []
-        for ref in row.get("turn_refs") or []:
-            ref.update(turn_span_stamps(
-                spans_by_ref.get((ref["store_id"], ref["logical_turn_key"])) or []
-            ))
-            total += ref["llm_calls_cut_at_limit"]
-            costs.append(ref["llm_cost"])
-        row["turn_count"] = len(row.get("turn_refs") or [])
-        row["llm_calls_cut_at_limit"] = total
-        row["llm_cost"] = merge_cost_rollups(costs)
-        row["evidence"] = verdict_by_segment.get(
-            row.get("segment_id"), evidence_verdict([])
-        )
-
-
-def annotate_projected_attempts(
-    workspace: ObservabilityWorkspace, rows: list[dict[str, Any]]
-) -> None:
-    """Projected history rows: tally the resolved turns once each, and badge
-    every resolved source with the verdict its own store persisted.
-
-    The spans behind those tallies are read in one pass per store up front;
-    a projection that resolves the same turn from several sources
-    then costs one lookup, not one query, per mention."""
-
-    def _resolved_turns(row: Mapping[str, Any]) -> Iterator[Any]:
-        yield from row.get("resolved_turns") or []
-        for source in row.get("resolved_sources") or []:
-            yield source.get("resolved_turn")
-
-    spans_by_ref = _workspace_span_cache(
-        workspace,
-        (
-            (turn.get("store_id"), turn.get("logical_turn_key"))
-            for row in rows
-            for turn in _resolved_turns(row)
-            if isinstance(turn, dict)
-        ),
-    )
-    for row in rows:
-        seen: set[tuple[str, str]] = set()
-        total = 0
-        costs: list[dict[str, Any]] = []
-
-        def tally(turn: Any) -> None:
-            nonlocal total
-            if not isinstance(turn, dict):
-                return
-            store_id = turn.get("store_id")
-            key = turn.get("logical_turn_key")
-            if not store_id or not key:
-                return
-            turn.update(turn_span_stamps(spans_by_ref.get((store_id, key)) or []))
-            if (store_id, key) not in seen:
-                seen.add((store_id, key))
-                total += turn["llm_calls_cut_at_limit"]
-                costs.append(turn["llm_cost"])
-
-        for turn in row.get("resolved_turns") or []:
-            tally(turn)
-        for source in row.get("resolved_sources") or []:
-            tally(source.get("resolved_turn"))
-            local_id = source.get(
-                "local_experiment_id", source.get("experiment_id")
-            )
-            if source.get("store_id") and local_id is not None:
-                source["evidence"] = evidence_verdict(
-                    workspace.evidence_runs(str(source["store_id"]), str(local_id))
-                )
-        row["llm_calls_cut_at_limit"] = total
-        row["llm_cost"] = merge_cost_rollups(costs)
-
-
 # ----------------------------------------------------------------------
 # Derived fields for the SPA, tier 2 (fix-aou)
 # ----------------------------------------------------------------------
 #
 # Four more things the debug UI shows that are not columns, derived here from
-# ObservabilityStore reads only [R12] so the workspace's archives render them
-# through the same functions:
+# ObservabilityStore reads only [R12] so sealed archives render them through
+# the same functions:
 #
 # (a) a turn's execution ledger -- every dispatch, joined on `command_call_id`
 #     between the turn record's `execution_records` refs and the trace's
@@ -340,8 +213,6 @@ TRAINING_RUN_MAX_LIMIT = 200
 
 # The experiment row's own provenance-bearing columns.
 _EXPERIMENT_PROVENANCE_COLUMNS = (
-    "capture_profile",
-    "capture_policy_version",
     "workflow_name",
     "benchmark_id",
     "benchmark_version",
@@ -355,8 +226,6 @@ _SNAPSHOT_PROVENANCE_KEYS = (
     "workflow_model_legacy_layout",
     "workflow_scope_rule_version",
     "command_surface_count",
-    "capture_profile",
-    "capture_policy_version",
 )
 
 
@@ -372,7 +241,7 @@ def turn_span_stamps(spans: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
 
 def annotate_turn_detail(turn: dict[str, Any], spans: Iterable[Mapping[str, Any]]) -> None:
     """The opened turn: its ledger, chips and cost, from the trace the route
-    already reads. Live and workspace routes both call this."""
+    already reads."""
     span_list = list(spans)
     turn["execution_ledger"] = execution_ledger(turn.get("record"), span_list)
     turn.update(turn_span_stamps(span_list))
@@ -388,9 +257,8 @@ def annotate_turn_diagnosis(
     """Stamp an opened turn with its diagnosis (`fix-9eg.18.2/.18.3`).
 
     Deliberately separate from `annotate_turn_detail` rather than folded into
-    it: the ledger, chips and cost are what every reader of a turn gets,
-    including the formal review projection, and widening that shape would
-    change a payload this slice does not own.
+    it: the ledger, chips and cost are what every reader of a turn gets, and
+    widening that shape would change a payload this slice does not own.
 
     The steps come from the ledger `annotate_turn_detail` already projected --
     `project_execution` runs that same `execution_ledger` -- so the markers
@@ -480,8 +348,8 @@ def _wire_markers(value: Optional[str], name: str) -> tuple[str, ...]:
 def turn_query_from_params(q: Any, *, default_limit: int = 100) -> TurnQuery:
     """Build one `TurnQuery` from the wire, or refuse with `InvalidTurnQuery`.
 
-    One function for every route that searches turns -- live, workspace, and an
-    agent read -- so a filter means the same thing wherever it is asked. The
+    One function for every route that searches turns -- the rail and an agent
+    read -- so a filter means the same thing wherever it is asked. The
     store-level names are the rail's existing ones (`channel`, `conversation`,
     `command`, ...), kept so an existing link keeps working; the diagnostic ones
     are new.

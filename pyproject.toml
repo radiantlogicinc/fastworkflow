@@ -9,7 +9,7 @@ repository = "https://github.com/radiantlogicinc/fastworkflow"
 
 [tool.poetry]
 name = "fastworkflow"
-version = "3.5.0"
+version = "3.5.1"
 description = "A framework for rapidly building large-scale, deterministic, interactive workflows with a fault-tolerant, conversational UX"
 authors = ["Dhar Rawal <drawal@radiantlogic.com>"]
 license = "Apache-2.0"
@@ -50,7 +50,7 @@ sentencepiece = "^0.2.0"
 mmh3 = "^5.1.0"
 python-levenshtein = "^0.27.1"
 colorama = "^0.4.6"
-dspy = "^3.0.1"
+dspy = ">=3.3.0,<3.4" # 3.3.0 added ChatAdapter._make_json_adapter_fallback, which keeps the commands prelude on the JSON retry; 3.4.0's lazy openai import breaks `import dspy; import litellm`
 # Default: CPU-only wheels from the PyTorch CPU index (portable, smaller).
 # CUDA is an explicit opt-in — Poetry cannot lock torch from two indexes, so:
 #   poetry install --with gpu && make install-gpu-torch

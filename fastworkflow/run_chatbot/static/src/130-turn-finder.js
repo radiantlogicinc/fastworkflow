@@ -28,7 +28,7 @@ var turnFind = {
   seq: 0, timer: null, rows: [], cursor: null, scanned: 0, matched: 0,
   complete: true, facets: null, markers: {}, text: "", running: false,
   stopped: false, active: false, error: null, basis: "", nav: 0,
-  scope: null, source: null, sourceMoved: false, abort: null
+  scope: null, abort: null
 };
 
 /* -- scoping the search to one experiment, task or attempt [fix-9eg.3.1.1]
@@ -37,29 +37,10 @@ var turnFind = {
    simply never sent them, so "what went wrong in this run" meant searching
    the whole store and reading past every other run to find out.
 
-   A scope belongs to the SOURCE it was chosen in. One experiment id can
-   exist in two stores and mean two different sets of runs, so a scope
-   carried across a source change would ask the new database for the old
-   one's labels and present whatever came back under the old one's heading.
-   The scope is stamped with the source it was chosen in and is dropped, with
-   the walk and its cursor, when that source moves.
-
    What a scoped result is: the turns RECORDED under that experiment, task
    or attempt. A marker on one of them says that turn recorded it; it does
    not attribute the trouble to the scope, and the counts stay the scan's
    own the way they are for an unscoped search. */
-function turnFindSourceKey() {
-  /* What `api()` will actually read: a workspace read is pinned to its
-     store by turnFindPath below, and everything else is this workflow's own
-     store. */
-  if (session && session.workspace_mode) { return "workspace:" + (state.storeId || ""); }
-  return "current";
-}
-
-function turnFindSourceMoved() {
-  return turnFind.source !== null && turnFind.source !== turnFindSourceKey();
-}
-
 function turnFindScopeText(scope) {
   var parts = [];
   if (scope.experiment) { parts.push("experiment " + scope.experiment); }
@@ -85,12 +66,6 @@ function turnFindSelected() {
 function turnFindPath(cursor) {
   var path = "/api/turns";
   var params = ["limit=" + TURN_FIND_PAGE, "scan_limit=" + TURN_FIND_SCAN];
-  if (session && session.workspace_mode) {
-    /* A workspace read is store-scoped or it is refused; the unscoped route
-       says so rather than searching across archives. */
-    path = "/api/workspace/turns";
-    params.push("store_id=" + encodeURIComponent(state.storeId || ""));
-  }
   if (turnFind.text) { params.push("text=" + encodeURIComponent(turnFind.text)); }
   var markers = turnFindSelected();
   /* Selected chips narrow together: a turn must carry every one of them. */
@@ -122,61 +97,21 @@ function turnFindReset() {
   turnFind.rows = []; turnFind.cursor = null; turnFind.scanned = 0;
   turnFind.matched = 0; turnFind.complete = true; turnFind.facets = null;
   turnFind.stopped = false; turnFind.error = null; turnFind.basis = "";
-  turnFind.sourceMoved = false;
   /* The scope survives: a marker chip, a new search word and every
      continuation are all asked WITHIN the scope the operator chose, and
      silently widening back to the store is how a scoped count becomes a
      store-wide one under a scoped heading. It is dropped by the Clear
-     control, by a source change, and by the source boundary. */
+     control and when another workflow is opened. */
   return turnFind.seq;
 }
 
-function turnFindDropScopedWalk() {
-  /* The source moved under an open walk. Its cursor, counts and scope all
-     describe the database being left, so the next segment would be asked of
-     a different one and would read as more of the same result. Nothing is
-     carried over and the page says why, rather than leaving an answer on
-     screen whose source is gone.
-
-     The finder also stands down rather than repainting itself empty: an empty
-     result list with a finished walk is rendered as "no turn in this store
-     matches", which would be this page answering a question it never asked
-     the source now open. */
-  var owned = turnFind.active;
-  turnFind.seq += 1;
-  if (turnFind.abort) { turnFind.abort.abort(); turnFind.abort = null; }
-  turnFind.rows = []; turnFind.cursor = null; turnFind.scanned = 0;
-  turnFind.matched = 0; turnFind.complete = true; turnFind.facets = null;
-  turnFind.stopped = false; turnFind.error = null; turnFind.basis = "";
-  turnFind.scope = null;
-  turnFind.running = false;
-  turnFind.active = false;
-  turnFind.sourceMoved = true;
-  turnFind.source = turnFindSourceKey();
-  turnFindRenderScope();
-  turnFindRenderMarkers();
-  turnFindRender();
-  if (owned) {
-    /* Only the pane the search itself was holding: a reader who had navigated
-       to a turn keeps what they were reading. */
-    var pane = document.getElementById("detail");
-    clear(pane);
-    pane.appendChild(el("div", "empty", turnFindStatusText()));
-  }
-}
-
 function turnFindRun(seq, cursor) {
-  /* Before the request, because a continuation issued against the source
-     now open is the wrong question asked of the wrong database. */
-  if (turnFindSourceMoved()) { turnFindDropScopedWalk(); return; }
   turnFind.running = true;
   turnFindRender();
   if (turnFind.abort) { turnFind.abort.abort(); }
   turnFind.abort = (typeof AbortController !== "undefined") ? new AbortController() : null;
   api(turnFindPath(cursor), { signal: turnFind.abort && turnFind.abort.signal }).then(function (page) {
     if (seq !== turnFind.seq) { return; }   /* a later search owns the view */
-    /* And after it: the switch can land while this one is in flight. */
-    if (turnFindSourceMoved()) { turnFindDropScopedWalk(); return; }
     turnFind.running = false;
     /* Every fetched row is kept. The cursor moves past these rows whether or
        not they are rendered, so a row dropped here could never be asked for
@@ -234,36 +169,16 @@ document.getElementById("recordNav")
   .addEventListener("click", turnFindRelease, true);
 
 function turnFindStart() {
-  /* A scope chosen in another source names runs this one may not have, or
-     may have under the same labels and different evidence; either way it is
-     not the scope the operator picked, so it goes rather than travels. */
-  if (turnFind.scope && turnFindSourceMoved()) { turnFind.scope = null; }
   /* The box is read here rather than on every keystroke: typing only edits
      the question, and whichever control asks it searches what the box says. */
   var box = document.getElementById("turnFindText");
   if (box) { turnFind.text = box.value.trim(); }
-  turnFind.source = turnFindSourceKey();
   turnFind.active = true;
   turnFindRenderScope();
   turnFindRun(turnFindReset(), null);
 }
 
-/* Entry from the run being read, on the source that is SELECTED.
-
-   Carrying a scope ACROSS a source change is a different thing and is not
-   offered: the guards above discard an open walk, its cursor and its scope the
-   moment the selected source moves, rather than asking the new database for
-   the old one's labels.
-
-   What is deferred is a WORKSPACE: its logical experiments span several sealed
-   stores and /api/workspace/turns takes one store_id per request, so scoping
-   one needs multi-store routing this slice does not build (fix-luut). */
-function turnFindEntrySupported() {
-  return !(session && session.workspace_mode);
-}
-
 function turnFindEntryButton(container, scope, label, help) {
-  if (!turnFindEntrySupported()) { return null; }
   var button = el("button", "ghost", label);
   button.type = "button";
   button.title = help;
@@ -281,7 +196,6 @@ function turnFindScopeTo(scope) {
     task: scope.task || null,
     attempt: (scope.attempt === undefined ? null : scope.attempt)
   };
-  turnFind.source = turnFindSourceKey();
   /* Whatever is in the box is what the box says the search is; entering a
      scope narrows that search rather than quietly replacing it. */
   var box = document.getElementById("turnFindText");
@@ -310,10 +224,6 @@ function turnFindRenderScope() {
 
 function turnFindStatusText() {
   if (turnFind.error) { return "Search failed: " + turnFind.error; }
-  if (turnFind.sourceMoved) {
-    return "The evidence source changed, so this search was discarded along "
-      + "with its scope. Search again to look in the source now open.";
-  }
   if (!turnFind.active) { return ""; }
   var scanned = turnFind.scanned + " turn" + (turnFind.scanned === 1 ? "" : "s") + " scanned";
   if (turnFind.running) {
@@ -411,7 +321,7 @@ function turnFindRender() {
     var item = el("div", "listItem");
     item.appendChild(el("div", "title",
       (row.ordinal ? "#" + row.ordinal + " " : "")
-      + (policedText(row.user_message) || "(no message)")));
+      + (row.user_message || "(no message)")));
     var sub = el("div", "sub", row.status + " \u00b7 " + fmtTs(row.started_at));
     item.appendChild(sub);
     var chips = el("div");

@@ -339,12 +339,12 @@ def test_pruning_is_suppressed_inside_the_block_and_restored_after(workflow_path
 
 def test_suppression_is_distinguishable_from_having_nothing_to_prune(workflow_path):
     """An all-zero result would look identical to a prune that ran and found
-    nothing, so a caller could not tell whether retention was withheld."""
+    nothing, so a caller could not tell whether retention was suppressed."""
     store = obs.ObservabilityStore(obs.state_paths.observability_db(workflow_path))
     ran = store.prune()
     with obs.suppress_pruning():
-        withheld = store.prune()
-    assert withheld == {"suppressed": 1}
+        suppressed = store.prune()
+    assert suppressed == {"suppressed": 1}
     assert "suppressed" not in ran
 
 
@@ -377,14 +377,15 @@ def test_suppression_propagates_to_a_child_process(tmp_path):
 # ----------------------------------------------------------------------
 
 
-def test_provenance_records_the_capture_regime(workflow_path):
+def test_provenance_records_the_observability_configuration(workflow_path):
     provenance = capture_observability_provenance(dspy_history_enabled=True)
     assert provenance.enabled is True
-    assert provenance.capture_profile == "debug"
     assert provenance.span_contract_version == tracing.SPAN_CONTRACT_VERSION
     assert provenance.db_schema_version == obs.SCHEMA_VERSION
-    assert provenance.capture_policy_version
     assert provenance.evidence_interpretable is True
+    dumped = provenance.model_dump()
+    assert "capture_profile" not in dumped
+    assert "capture_policy_version" not in dumped
 
 
 def test_provenance_records_defaults_nobody_set(workflow_path):
@@ -397,16 +398,8 @@ def test_provenance_records_defaults_nobody_set(workflow_path):
         "FW_OBS_DB_MAX_BYTES",
         "FW_OBS_INLINE_ARTIFACT_BYTES",
         "FW_OBS_QUEUE_MAX",
-        obs.CAPTURE_PROFILE_VAR,
     ):
         assert config.get(name), name
-
-
-def test_provenance_reflects_the_selected_profile(workflow_path, monkeypatch):
-    monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
-    provenance = capture_observability_provenance()
-    assert provenance.capture_profile == "evidence"
-    assert provenance.default_deny is True
 
 
 def test_unknown_dspy_history_is_not_interpretable(workflow_path):
@@ -452,18 +445,6 @@ def test_dspy_history_off_is_reported_as_a_problem(workflow_path):
         pass
     assert any("no token or cost evidence" in problem for problem in run.problems())
     assert run.valid is False
-
-
-def test_requiring_the_evidence_profile_is_opt_in(workflow_path):
-    with evidence_run(workflow_path, run_id="run-permissive") as permissive:
-        pass
-    assert all("capture profile" not in problem for problem in permissive.problems())
-
-    with evidence_run(
-        workflow_path, run_id="run-strict", require_evidence_profile=True
-    ) as strict:
-        pass
-    assert any("not 'evidence'" in problem for problem in strict.problems())
 
 
 def test_raise_on_invalid_raises_only_when_asked(workflow_path):

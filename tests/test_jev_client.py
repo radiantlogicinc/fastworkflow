@@ -16,8 +16,6 @@ from types import SimpleNamespace
 import pytest
 
 import fastworkflow
-from fastworkflow.observability import capture_policy
-from fastworkflow.observability import store as observability_store
 from fastworkflow.observation_offloading import archive, finish_check, jev_client, search_router
 from fastworkflow.observation_offloading.finish_check import CHECK_ENV, KEY_ENV, MODEL_ENV, checker_from_env
 from fastworkflow.observation_offloading.search_router import ROUTER_ENV, router_for_workflow
@@ -66,8 +64,7 @@ class _Collect(logging.Handler):
 @pytest.fixture
 def warnings_logged(monkeypatch):
     for name in (CHECK_ENV, ROUTER_ENV, KEY_ENV, MODEL_ENV, search_router.ROUTER_MODEL_ENV,
-                 jev_client.BASE_URL_ENV, jev_client.SDK_BASE_URL_ENV,
-                 observability_store.CAPTURE_PROFILE_VAR, archive.REDACTION_ENV):
+                 jev_client.BASE_URL_ENV, jev_client.SDK_BASE_URL_ENV, archive.REDACTION_ENV):
         monkeypatch.delenv(name, raising=False)
         monkeypatch.delitem(fastworkflow._env_vars, name, raising=False)
     jev_client._WARNED.clear()
@@ -302,7 +299,7 @@ def test_the_sdks_debug_records_never_carry_the_payload(jev_stub, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# The capture policy: the features stay off where it would withhold what they send
+# The redaction gate: the features stay off where what they send would be left unredacted
 # ---------------------------------------------------------------------------
 
 def _turn_both_on(monkeypatch):
@@ -312,14 +309,11 @@ def _turn_both_on(monkeypatch):
 
 
 @needs_sdk
-@pytest.mark.parametrize("env, value, cause", [
-    (observability_store.CAPTURE_PROFILE_VAR, "evidence", "withholds command output"),
-    (archive.REDACTION_ENV, "off", f"{archive.REDACTION_ENV}=off"),
-])
-def test_a_withholding_profile_or_redaction_off_keeps_both_features_off_with_one_warning_each(
-        warnings_logged, jev_stub, monkeypatch, env, value, cause):
+def test_redaction_off_keeps_both_features_off_with_one_warning_each(
+        warnings_logged, jev_stub, monkeypatch):
+    cause = f"{archive.REDACTION_ENV}=off"
     _turn_both_on(monkeypatch)
-    monkeypatch.setenv(env, value)
+    monkeypatch.setenv(archive.REDACTION_ENV, "off")
     for _ in range(2):
         checker = checker_from_env()
         assert checker is None
@@ -333,9 +327,8 @@ def test_a_withholding_profile_or_redaction_off_keeps_both_features_off_with_one
 
 
 @needs_sdk
-def test_the_debug_profile_with_redaction_on_lets_both_features_on(warnings_logged, jev_stub, monkeypatch):
+def test_redaction_on_lets_both_features_on(warnings_logged, jev_stub, monkeypatch):
     _turn_both_on(monkeypatch)
-    monkeypatch.setenv(observability_store.CAPTURE_PROFILE_VAR, "debug")
     monkeypatch.setenv(archive.REDACTION_ENV, "on")
     assert jev_client.withholding_cause() is None
     checker = checker_from_env()
@@ -344,41 +337,25 @@ def test_the_debug_profile_with_redaction_on_lets_both_features_on(warnings_logg
     assert warnings_logged == []
 
 
-def test_an_unknown_capture_profile_is_a_withholding_cause(monkeypatch):
-    monkeypatch.setenv(observability_store.CAPTURE_PROFILE_VAR, "evidnce")
-    assert observability_store.CAPTURE_PROFILE_VAR in jev_client.withholding_cause()
-
-
-def test_egress_scrubs_credentials_and_refuses_badges(monkeypatch):
-    monkeypatch.delenv(observability_store.CAPTURE_PROFILE_VAR, raising=False)
+def test_egress_scrubs_credentials_and_sends_nothing_with_redaction_off(monkeypatch):
     monkeypatch.delenv(archive.REDACTION_ENV, raising=False)
     token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
     assert jev_client.egress(f"Audit {token}") == "Audit [REDACTED]"
-    badge = json.dumps(capture_policy.evidence_policy().apply(
-        observability_store.POLICY_PATH_OFFLOAD_OBSERVATION, "rows", classification="opaque-payload"))
-    assert capture_policy.CAPTURE_ENVELOPE_MARKER in badge
-    assert jev_client.egress(badge) is None
-    assert jev_client.egress(f"Stored: {badge}") is None
-    monkeypatch.setenv(observability_store.CAPTURE_PROFILE_VAR, "evidence")
-    assert jev_client.egress("rows") is None
-    monkeypatch.setenv(observability_store.CAPTURE_PROFILE_VAR, "debug")
+    assert jev_client.egress("rows") == "rows"
     monkeypatch.setenv(archive.REDACTION_ENV, "off")
     assert jev_client.egress("rows") is None
 
 
 @needs_sdk
-def test_a_router_value_withheld_at_call_time_sends_nothing(warnings_logged, jev_stub, monkeypatch):
+def test_a_router_value_left_unredacted_at_call_time_sends_nothing(warnings_logged, jev_stub, monkeypatch):
     _turn_both_on(monkeypatch)
     router = router_for_workflow("wf")
     assert router is not None
-    badge = json.dumps(capture_policy.evidence_policy().apply(
-        observability_store.POLICY_PATH_OFFLOAD_OBSERVATION, "rows", classification="opaque-payload"))
-    route = router.route("list every row", "to report them", badge)
+    # Redaction switched off after the router was built: the backstop still holds.
+    monkeypatch.setenv(archive.REDACTION_ENV, "off")
+    route = router.route("list every row", "to report them", "1 row\nuid  label")
     assert (route["choice"], route["error"], route["error_stage"]) == (None, "policy_withheld", "redaction")
     assert not router.wants_all_rows(route)
-    # The profile changed after the router was built: the backstop still holds.
-    monkeypatch.setenv(observability_store.CAPTURE_PROFILE_VAR, "evidence")
-    assert router.route("list every row", "to report them", "1 row\nuid  label")["error"] == "policy_withheld"
     assert jev_stub.requests == []
     assert warnings_logged == []
 

@@ -1,7 +1,7 @@
 /* Switching evidence sources without relaunching the page (fix-9eg.7.2).
 
-   Driven through the real page against real chatbot servers over two seeded
-   workflows and two sealed workspaces. The two workflows share a turn key on
+   Driven through the real page against a real chatbot server over two seeded
+   workflows. The two workflows share a turn key on
    purpose: a detail pane that survived the switch would keep resolving, and
    would be showing the wrong source's evidence.
 
@@ -9,9 +9,8 @@
    is checked as a property of the traffic, not only of the pixels. */
 const assert = require('node:assert/strict');
 const {JSDOM, VirtualConsole} = require(process.argv[2] + '/node_modules/jsdom');
-const url = process.argv[3], workflowB = process.argv[4], manifest1 = process.argv[5];
-const sharedTurn = process.argv[6], artifactA = process.argv[7], payloadA = process.argv[8];
-const secondWorkspaceSessionUrl = process.argv[9];
+const url = process.argv[3], workflowB = process.argv[4];
+const sharedTurn = process.argv[5], artifactA = process.argv[6], payloadA = process.argv[7];
 const errors = [];
 const requested = [];
 const virtualConsole = new VirtualConsole();
@@ -63,7 +62,7 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
 
   /* A search in progress owns the detail pane and walks the store over
      several round trips, and a comparison pair is keyed by experiment+task,
-     which recur across archives. Both are source-scoped state. */
+     which recur across workflows. Both are source-scoped state. */
   d.getElementById('turnFindText').value = 'recorded';
   /* Submit rather than type: the debounce a keystroke schedules would start a
      second search behind this one and disown the first. */
@@ -107,7 +106,6 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
   assert.match(d.getElementById('chatLog').textContent, /Switched evidence source/);
   /* Nor of A's evidence: selection, detail, artifact payload. */
   assert.equal(w.state.turnKey, null);
-  assert.equal(w.state.storeId, null);
   assert.ok(!detail().includes('recorded in source_a'), detail().slice(0, 200));
   assert.ok(!d.body.textContent.includes(payloadA),
     "source A's artifact payload survived the switch");
@@ -121,7 +119,7 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
   assert.equal(d.getElementById('turnFindText').value, '');
   assert.ok(w.turnFind.seq > findSeq, 'in-flight search pages still owned the view');
   /* The comparison pair is keyed by experiment+task, which recur across
-     archives; selection_ui's onSourceSwitch() drops it at this boundary. */
+     workflows; selection_ui's onSourceSwitch() drops it at this boundary. */
   assert.equal(w.taskCompare.key, null,
     'the comparison pair survived the switch (is onSourceSwitch still defined?)');
   assert.equal(w.taskCompare.left, null);
@@ -148,41 +146,6 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
   await until(() => detail().includes('recorded in source_b'),
     'source B never rendered the shared turn');
   assert.ok(!detail().includes('recorded in source_a'));
-
-  /* ---- switch again, this time to a sealed workspace --------------------
-     The workspace holds the same workflow and can hold the same experiment
-     and task ids, so a retained pair would show the previous store's attempts
-     under this one's labels. */
-  w.taskCompare.key = 'todo-list-v1\u001fadd an item';
-  w.taskCompare.left = '3';
-  w.chooseWorkspace(manifest1);
-  await until(() => w.session.workspace_mode === true, 'the workspace never opened');
-  await new Promise(r => setTimeout(r, 200));
-  assert.ok(!detail().includes('recorded in source_b'),
-    "source B's turn survived into the workspace");
-  assert.equal(w.state.turnKey, null);
-  assert.equal(w.taskCompare.key, null,
-    'the comparison pair followed the same task id into another source');
-  assert.ok(composerLocked(), 'a read-only workspace left the composer live');
-  assert.equal(d.getElementById('modeTest').style.display, 'none');
-  const workspaceEpoch = w.tm.epoch;
-  const workspaceOne = w.session;
-
-  /* ---- a different workspace over the SAME workflow is a different source
-     A chatbot in workspace mode is read-only, so this payload comes from a
-     second server that opened the second manifest. It is a real session
-     payload; only its delivery is out of band. */
-  const second = await (await fetch(secondWorkspaceSessionUrl)).json();
-  assert.equal(second.session.workspace_mode, true);
-  assert.equal(second.session.workspace.workflow_folderpath,
-    workspaceOne.workspace.workflow_folderpath,
-    'the two workspaces were meant to share a workflow');
-  assert.notEqual(w.sourceIdentity(second.session), w.sourceIdentity(workspaceOne));
-  w.session = second.session;
-  w.applySession();
-  await new Promise(r => setTimeout(r, 150));
-  assert.notEqual(w.tm.epoch, workspaceEpoch,
-    'switching workspaces over one workflow was treated as the same source');
 
   await new Promise(r => setTimeout(r, 300));
   assert.deepEqual(errors, []);

@@ -13,7 +13,7 @@ from fastworkflow.experiment.setup import (
     setup_digest,
 )
 from fastworkflow.run_chatbot.server import ChatbotServer, load_index_html
-from tests.test_chatbot_benchmarks import _request, workspace_server  # noqa: F401
+from tests.test_chatbot_benchmarks import _request
 
 
 def spec():
@@ -224,27 +224,12 @@ def test_http_before_first_run_auth_revision_and_export(setup_server):
     assert _request(server, detail + "/unknown")[0] == 404
 
 
-def test_workspace_refuses_setup_authoring(workspace_server):
-    server = (
-        workspace_server[0] if isinstance(workspace_server, tuple) else workspace_server
-    )
-    assert (
-        _request(
-            server,
-            "/api/experiment-setups",
-            "POST",
-            {"spec": spec(), "expected_revision": 0},
-        )[0]
-        == 403
-    )
-
-
 def test_ui_has_pre_run_entry_and_safe_task_rendering():
     html = load_index_html().decode("utf-8")
     assert 'id="benchmarkSetupBtn"' in html
     ui = html[
         html.index("/* Benchmark setup:") : html.index(
-            "/* -- capability-gated formal review"
+            "/* -- training history [fix-9eg.2]"
         )
     ]
     assert "Task prompt (optional)" in ui and "Description (optional)" in ui
@@ -288,7 +273,7 @@ def test_setup_navigation_is_visible_outside_debug_view():
     assert 'id="benchmarkSetupBtn"' in header
     assert html.count('id="benchmarkSetupBtn"') == 1
     handler = html.split("function openBenchmarkSetup()")[1].split(
-        "/* -- capability-gated formal review"
+        "/* -- training history [fix-9eg.2]"
     )[0]
     assert 'setTopMode("debug")' in handler
     assert 'setTopMode("picker")' in handler

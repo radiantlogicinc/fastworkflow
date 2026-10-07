@@ -62,7 +62,6 @@ from fastworkflow.observability import control as control_module
 from fastworkflow.observability import pair_review as pair_review_module
 from fastworkflow.observability import selected_runs as selected_runs_module
 from fastworkflow.observability import selection
-from fastworkflow.observability import workspace as workspace_module
 from fastworkflow.observability.store import FEEDBACK_PROVENANCES
 
 EXPERIMENTS_PREFIX = "/api/experiments/"
@@ -374,13 +373,6 @@ POPULATION_BASELINE_PARAMS = frozenset(
 SELECTED_RUNS_PARAMS = frozenset({"attempt", "scope"})
 SELECTED_RUNS_VALIDATION_PARAMS = (
     frozenset({"attempt", "expect", "expect_member"}) | POPULATION_BASELINE_PARAMS
-)
-# One archive is one source. `segment_id` is not a wider scope: it is how a
-# workspace names WHICH archive an attempt number belongs to when two hold it.
-WORKSPACE_SELECTED_RUNS_PARAMS = frozenset({"attempt", "segment_id", "scope"})
-WORKSPACE_SELECTED_RUNS_VALIDATION_PARAMS = (
-    frozenset({"attempt", "segment_id", "expect", "expect_member"})
-    | POPULATION_BASELINE_PARAMS
 )
 
 
@@ -901,14 +893,8 @@ def _run_header(run: dict[str, Any]) -> dict[str, Any]:
 def _projection_payload(
     projection: comparison_module.ExecutionProjection,
     view: str,
-    manifest_store_id: Optional[str] = None,
 ) -> dict[str, Any]:
-    """One side's wire shape, trimmed to the view that was asked for.
-
-    `manifest_store_id` is set for sealed evidence only, where the manifest's
-    name for an archive and the identity the reference carries are two different
-    strings and a client needs to know which is which.
-    """
+    """One side's wire shape, trimmed to the view that was asked for."""
     data = projection.as_dict()
     data["step_count"] = len(projection.steps)
     data["unassigned_step_count"] = len(projection.unassigned_steps)
@@ -917,8 +903,6 @@ def _projection_payload(
     # the steps view does instead of a shorter one. Additive: a client that
     # does not know the key reads exactly what it read before.
     data["command_summary"] = command_summary_module.summarize_projection(projection)
-    if manifest_store_id:
-        data["manifest_store_id"] = manifest_store_id
     if view == VIEW_ANSWERS:
         data.pop("steps", None)
         data.pop("unassigned_steps", None)
@@ -1215,7 +1199,6 @@ def _alignment_row(
     pair: comparison_module.AlignedPair,
     left_ref: comparison_module.ExecutionRef,
     right_ref: comparison_module.ExecutionRef,
-    manifest_store_ids: Optional[Mapping[str, Optional[str]]] = None,
 ) -> dict[str, Any]:
     """One compare-view row, carrying everything a comment on it needs.
 
@@ -1236,13 +1219,6 @@ def _alignment_row(
         if not anchors.get(side):
             continue
         anchors[side]["ref"] = ref.as_dict()
-        # Sealed evidence only. The ref names its archive by identity, which is
-        # what a paired write resolves through; the manifest's own name for the
-        # same archive is what a READ route is addressed by, and a client needs
-        # both. Outside a workspace there is one name and this is absent.
-        manifest_store_id = (manifest_store_ids or {}).get(side)
-        if manifest_store_id:
-            anchors[side]["manifest_store_id"] = manifest_store_id
     return dict(
         pair.as_dict(),
         anchors=anchors,
@@ -1739,14 +1715,6 @@ def _guard(fn: Callable[[], tuple[int, dict[str, Any]]]) -> tuple[int, dict[str,
         return 404, {"error": str(exc.args[0] if exc.args else exc)}
     except (selection.SelectionControlError, control_module.ControlUnavailable) as exc:
         return 409, {"error": str(exc)}
-    except workspace_module.UnknownLogicalExperiment as exc:
-        return 404, {"error": f"unknown experiment: {exc.args[0] if exc.args else exc}"}
-    except workspace_module.UnknownWorkspaceStore as exc:
-        return 404, {"error": f"unknown store: {exc.args[0] if exc.args else exc}"}
-    except workspace_module.WorkspaceBusyError as exc:
-        return 503, {"error": str(exc)}
-    except workspace_module.WorkspaceError as exc:
-        return 409, {"error": str(exc)}
     except comparison_module.UnknownRecordedPass as exc:
         # The pass was resolved from spans and then failed to resolve against
         # some turn -- the evidence does not contain what was named.
@@ -1838,43 +1806,5 @@ __all__ = [
     "handle_delete",
     "handle_get",
     "handle_post",
-    "handle_workspace_get",
     "owns_write",
 ]
-
-# Names moved verbatim into selection_workspace. Re-exported lazily: that
-# module imports the helpers above, so a module-level import here would cycle.
-# This module does not call the moved names; callers still reach them here.
-_SELECTION_WORKSPACE_REEXPORTS = (
-    "_WorkspaceNames",
-    "_ManifestScopedReader",
-    "_workspace_attempts",
-    "_with_turn_refs",
-    "_workspace_consistency",
-    "_workspace_selected_rows",
-    "_workspace_archive",
-    "_workspace_selected_runs",
-    "_refuse_ambiguous_attempts",
-    "_workspace_side",
-    "_workspace_get",
-    "handle_workspace_get",
-)
-
-
-def __getattr__(name: str):
-    # PEP 562. The import stays inside this function because a top-level import
-    # of selection_workspace would cycle: that module imports helpers from here.
-    if name not in _SELECTION_WORKSPACE_REEXPORTS:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    import importlib
-
-    module = importlib.import_module(
-        "fastworkflow.run_chatbot.selection_workspace"
-    )
-    for export in _SELECTION_WORKSPACE_REEXPORTS:
-        globals()[export] = getattr(module, export)
-    return globals()[name]
-
-
-def __dir__() -> list[str]:
-    return sorted(set(globals()) | set(_SELECTION_WORKSPACE_REEXPORTS))

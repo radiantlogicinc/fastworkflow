@@ -1,4 +1,4 @@
-"""Workflow and workspace-manifest discovery for the chatbot picker.
+"""Workflow discovery for the chatbot picker.
 
 Moved verbatim from ``run_chatbot.server``. The candidate-directory walk
 cache lives only in this module.
@@ -8,11 +8,9 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import time
 from typing import Any, Optional
 
-from fastworkflow.observability.workspace import WORKSPACE_SCHEMA
 from fastworkflow.run_chatbot import launcher
 
 
@@ -244,117 +242,14 @@ def list_workflow_candidates() -> list[dict[str, Any]]:
     return candidates[:_MAX_WF_CANDIDATES]
 
 
-_MANIFEST_PROBE_BYTES = 4096
-_MANIFEST_SCHEMA_RE = re.compile(
-    r'"(?:schema|schema_version)"\s*:\s*"' + re.escape(WORKSPACE_SCHEMA) + r'"'
-)
-
-
-def _declares_workspace_schema(path: str) -> bool:
-    """Whether this file's head declares the v1 workspace manifest schema.
-
-    The picker used to offer every ``*.json`` in the browsed directory, so
-    from a project root it filled with score dumps and trajectory files that
-    cannot be opened. The cheap, honest discriminator is the one key
-    `ObservabilityWorkspace.load` itself insists on: ``schema`` (or the older
-    ``schema_version``) equal to :data:`WORKSPACE_SCHEMA`.
-
-    At most :data:`_MANIFEST_PROBE_BYTES` are read, so browsing a directory of
-    900 KB result files costs one short read each and never loads one into
-    memory. That prefix is parsed as JSON when it happens to be a whole small
-    document -- which checks the key really is at the *top* level -- and
-    otherwise scanned for the schema declaration, since a truncated prefix
-    cannot be parsed. A manifest whose schema key sits past the probe window
-    reads as "not a manifest": absence of evidence is "no", the same rule the
-    rest of this module's derivations use, and the developer can still type
-    the path.
-
-    Any read error (permissions, a directory racing in, undecodable bytes)
-    answers False rather than raising: the picker must render.
-    """
-    try:
-        with open(path, "rb") as handle:
-            head = handle.read(_MANIFEST_PROBE_BYTES)
-    except OSError:
-        return False
-    try:
-        text = head.decode("utf-8", errors="replace")
-    except Exception:  # pragma: no cover - decode with errors= cannot raise
-        return False
-    try:
-        value = json.loads(text)
-    except ValueError:
-        # Truncated at the probe window (or malformed): fall back to spotting
-        # the schema declaration textually.
-        return bool(_MANIFEST_SCHEMA_RE.search(text))
-    if not isinstance(value, dict):
-        return False
-    return value.get("schema", value.get("schema_version")) == WORKSPACE_SCHEMA
-
-
-def _local_workspace_manifests(base: str, name: str) -> list[dict[str, str]]:
-    """This directory's own ``*.json`` file as a manifest offer, or nothing.
-
-    Offered when it is named ``workspace.json`` -- the well-known name, offered
-    on its name alone so a manifest that fails validation is still reachable
-    and reports why -- or when its head declares the workspace schema, which
-    covers a manifest someone renamed. Everything else is omitted entirely:
-    not offered and not labelled, because a row the picker cannot open is
-    worse than no row.
-    """
-    if not name.lower().endswith(".json"):
-        return []
-    full = os.path.join(base, name)
-    if name.lower() != "workspace.json" and not _declares_workspace_schema(full):
-        return []
-    return [{"name": name, "label": name, "path": full}]
-
-
-def _nested_workspace_manifests(base: str, name: str) -> list[dict[str, str]]:
-    """``workspace.json`` one level under ``base/name``, labelled by that folder.
-
-    What an owner points the picker at is the collection folder
-    (``evaluation/collections/``); the manifest lives two levels down, at
-    ``<collection>/workspace/workspace.json`` or ``<collection>/workspace.json``.
-    Listing only the current directory made those invisible, so opening a
-    sealed collection meant knowing and typing the path.
-
-    Only the exact name ``workspace.json`` is looked for, never arbitrary
-    ``*.json`` one level down: a collection folder holds many unrelated JSON
-    files (scores, summaries, seal records), and offering those as manifests
-    would fill the picker with entries that cannot be opened. Nothing is read
-    — existence and the folder name are the whole probe.
-    """
-    found: list[dict[str, str]] = []
-    for relative in ("workspace.json", os.path.join("workspace", "workspace.json")):
-        candidate = os.path.join(base, name, relative)
-        if os.path.isfile(candidate):
-            found.append(
-                {
-                    "name": os.path.join(name, relative),
-                    "label": name,
-                    "path": os.path.abspath(candidate),
-                }
-            )
-    return found
-
-
 def browse_directories(dir_path: str) -> dict[str, Any]:
     """One level of the local filesystem for the workflow picker: directories
     only, never file contents; each entry flagged when it is a workflow.
-
-    Workspace manifests come from two places: this directory's own
-    ``workspace.json`` plus any other ``*.json`` here whose head declares the
-    workspace schema (`_local_workspace_manifests`), and the well-known
-    ``workspace.json`` one level down inside each subdirectory. Stray JSON is
-    omitted, never offered-and-broken.
     """
     base = os.path.abspath(dir_path or os.getcwd())
     if not os.path.isdir(base):
         return {"error": f"not a directory: {base}"}
     entries = []
-    workspace_manifests: list[dict[str, str]] = []
-    nested_manifests: list[dict[str, str]] = []
     try:
         names = sorted(os.listdir(base))
     except OSError as exc:
@@ -364,9 +259,7 @@ def browse_directories(dir_path: str) -> dict[str, Any]:
             continue
         full = os.path.join(base, name)
         if not os.path.isdir(full):
-            workspace_manifests.extend(_local_workspace_manifests(base, name))
             continue
-        nested_manifests.extend(_nested_workspace_manifests(base, name))
         is_workflow = _looks_like_workflow(full)
         entry = {
             "name": name,
@@ -384,8 +277,4 @@ def browse_directories(dir_path: str) -> dict[str, Any]:
         "dir": base,
         "parent": parent if parent != base else None,
         "entries": entries,
-        # This directory's own JSON first, then what was found one level down:
-        # the same 300 cap covers both, so a directory of many collections
-        # cannot make the answer unbounded.
-        "workspace_manifests": (workspace_manifests + nested_manifests)[:300],
     }

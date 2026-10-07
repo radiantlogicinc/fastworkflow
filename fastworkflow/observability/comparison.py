@@ -14,8 +14,8 @@ evidence store, and nothing here is a judgement. "Reference", "best" and
 difference, not an error.
 
 Reference vocabulary is borrowed, not invented. `store_id` + logical turn key
-is exactly what `workspace.py` already uses for a portable evidence address,
-and experiment/task/attempt are the `experiments` / `experiment_attempts`
+is the store's own identity plus the turn key it records, and
+experiment/task/attempt are the `experiments` / `experiment_attempts`
 columns. A reference that DECLARES an experiment, task or attempt is checked
 against the turn rows it names: a scope the evidence does not record is
 refused, because a forged or stale scope would otherwise ride along on real
@@ -215,9 +215,8 @@ def _digest(*parts: str) -> str:
 class ExecutionRef:
     """One scoped recorded execution: the unit both sides of a comparison name.
 
-    `store_id` + `turn_keys` is the mandatory part and is the same address
-    `workspace.py` uses (`logical_turn_key` within a named store). `turn_keys`
-    is a SEQUENCE, so a multi-turn attempt is one reference and stays navigable
+    `store_id` + `turn_keys` is the mandatory part (`logical_turn_key` within
+    a named store). `turn_keys` is a SEQUENCE, so a multi-turn attempt is one reference and stays navigable
     in full rather than collapsing to its final answer. Everything else narrows
     it:
 
@@ -298,11 +297,10 @@ class ExecutionRef:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "ExecutionRef":
-        """Parse the wire shape, tolerating the workspace's field names.
+        """Parse the wire shape, tolerating the readers' field names.
 
         `logical_turn_keys` / `logical_turn_key` are accepted because that is
-        what a workspace attempt row's `turn_refs` are called; they name the
-        same strings.
+        what a reader's turn rows call them; they name the same strings.
 
         `attempt` may arrive as the text an HTTP query carries, and only as the
         exact decimal form of an integer: `"2"` is attempt 2, while `"2.0"`,
@@ -467,7 +465,7 @@ class _SpanTree:
     def attributes(self, span: Mapping[str, Any]) -> dict[str, Any]:
         """Span attributes as a mapping, whether the reader decoded them.
 
-        `workspace.trace` decodes the JSON column; `ObservabilityStore.get_spans`
+        A reader may decode the JSON column; `ObservabilityStore.get_spans`
         hands back the raw text. Both are legitimate readers, so accept both
         rather than making the caller normalize.
         """
@@ -584,24 +582,6 @@ class StoreExecutionReader:
     def trace(self, store_id: str, turn_key: str) -> list[dict[str, Any]]:
         self._check(store_id)
         return [dict(span) for span in self._store.get_spans(turn_key)]
-
-
-class WorkspaceExecutionReader:
-    """Reader over a loaded `ObservabilityWorkspace`.
-
-    The workspace already enforces manifest-bound, per-store, read-only access
-    and already decodes the turn record and span attributes, so this is a
-    two-line adapter rather than a second access path.
-    """
-
-    def __init__(self, workspace: Any) -> None:
-        self._workspace = workspace
-
-    def turn(self, store_id: str, turn_key: str) -> Optional[dict[str, Any]]:
-        return self._workspace.turn(store_id, turn_key)
-
-    def trace(self, store_id: str, turn_key: str) -> list[dict[str, Any]]:
-        return list(self._workspace.trace(store_id, turn_key))
 
 
 # ----------------------------------------------------------------------
@@ -1058,7 +1038,7 @@ def _pass_id_for(
     """The pass a span belongs to, or None when the evidence does not say.
 
     A step with no recorded span can never be attributed: the span tree is the
-    only thing that says which pass ran it, so such a step is withheld from
+    only thing that says which pass ran it, so such a step is left out of
     every pass view (and counted in `unassigned_steps`) rather than assigned to
     the pass whose neighbours it sat between.
     """
@@ -1105,44 +1085,22 @@ def _spans_in_pass(
     return selected
 
 
-# The marker `capture_policy.CapturedValue.to_envelope` writes. Restated for the
-# same reason as `SPAN_DISTILLATION_PASS` above -- this module reads stored
-# evidence and stays off the runtime's import path -- and checked against the
-# producer by `tests/test_distillation_pass_capture`.
-CAPTURE_ENVELOPE_MARKER = "__fw_capture__"
-
-
 def _recorded_text(value: Any) -> Optional[str]:
     """A recorded string attribute, including one an envelope stands in for.
 
-    Three shapes arrive here and they mean three different things.
+    Two shapes arrive here and they mean two different things.
 
     A plain string is the value, whole.
 
     A tracing cap envelope (`{truncated, original_length, sha256, value}`,
     [R10]) means the emitter cut an over-limit attribute. The prefix in there is
     still recorded evidence, so it is quoted.
-
-    A capture-policy envelope (`{__fw_capture__: True, ...}`) means the SINK
-    acted on the field: `bounded-text` leaves a `prefix`, which is likewise
-    recorded evidence and is quoted; every other disposition leaves no text at
-    all, and this answers `None` for those.
-
-    `None` here is therefore ambiguous on its own -- withheld and never-recorded
-    look alike -- which is exactly why the envelope stays in
-    `TurnProjection.pass_content`. A reader that needs to tell "this pass said
-    nothing" from "this pass said something nobody may see" reads the envelope;
-    the chatbot page does (`captureEnvelope` / `policedText` in
-    run_chatbot/static/src/110-state-format.js), and badges the second.
     """
     if isinstance(value, str):
         return value
     if isinstance(value, Mapping) and value.get("truncated"):
         text = value.get("value")
         return text if isinstance(text, str) else None
-    if isinstance(value, Mapping) and value.get(CAPTURE_ENVELOPE_MARKER) is True:
-        prefix = value.get("prefix")
-        return prefix if isinstance(prefix, str) else None
     return None
 
 
@@ -1404,7 +1362,7 @@ def project_execution(
                     else turn_status
                 ),
                 # The turn row's success code describes the whole turn, so under
-                # a recorded pass it is withheld rather than re-labelled: no
+                # a recorded pass it is left out rather than re-labelled: no
                 # producer records a per-pass one, and absent is what that is.
                 success=None if pass_recorded else _bool_column(row.get("success")),
                 failure_reason=(
@@ -2391,7 +2349,7 @@ def _align_segment(
             continue
         # A key that occurs more than once on either side inside this segment
         # cannot distinguish which repetition is which. The pair still shows,
-        # labelled, rather than being withheld or silently asserted.
+        # labelled, rather than being hidden or silently asserted.
         left_counts: dict[str, int] = {}
         for index in remaining_left:
             key = left_keys[index]
@@ -2913,7 +2871,6 @@ __all__ = [
     "StoreExecutionReader",
     "TurnProjection",
     "UnknownRecordedPass",
-    "WorkspaceExecutionReader",
     "align_steps",
     "anchor_for_step",
     "anchor_for_turn",

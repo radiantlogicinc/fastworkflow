@@ -20,7 +20,39 @@ from fastworkflow.benchmark.catalog import (
     write_version,
 )
 from fastworkflow.run_chatbot import server as run_chatbot_server
-from tests.test_observability_workspace import _manifest, _seed_archive, _store_decl
+
+
+def _turn_row(turn_key: str, experiment_id: str, task_id: str, attempt: int) -> dict:
+    """One completed turn row, labelled with an experiment, task and attempt."""
+    return {
+        "turn_key": turn_key,
+        "channel_id": f"channel-{task_id}",
+        "conversation_id": None,
+        "ordinal": None,
+        "user_message": f"run {task_id}",
+        "refined_user_message": None,
+        "entry_workflow_name": "test-workflow",
+        "entry_context": "test",
+        "status": "completed",
+        "success": 1,
+        "failure_reason": None,
+        "answer": "done",
+        "conversation_summary": None,
+        "conversation_traces": None,
+        "started_at": "2026-09-04T00:00:00+00:00",
+        "completed_at": "2026-09-04T00:00:01+00:00",
+        "suspended_ms": 0,
+        "continuation_of": None,
+        "record_version": 1,
+        "experiment_id": experiment_id,
+        "task_id": task_id,
+        "attempt": attempt,
+        "claim_epoch": None,
+        "server_incarnation": None,
+        "record_json": json.dumps(
+            {"turn_output": {"turn_key": turn_key, "success": True}}
+        ),
+    }
 
 
 def _sample_spec(
@@ -109,37 +141,6 @@ def experiment_server(workflow_dir, tmp_path, monkeypatch):
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
     yield srv, store
-    srv.shutdown()
-    thread.join(timeout=5)
-
-
-@pytest.fixture
-def workspace_server(tmp_path, monkeypatch):
-    monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
-    workflow = tmp_path / "workflow"
-    workflow.mkdir()
-    (workflow / "_commands").mkdir()
-    write_version(workflow, _sample_spec())
-    before = json.loads(
-        (benchmarks_root(workflow) / "smoke" / "v1.json").read_text(encoding="utf-8")
-    )
-
-    archive = _seed_archive(
-        tmp_path,
-        "sealed",
-        experiment_id="local",
-        task_id="task",
-        turn_key="turn",
-    )
-    manifest = _manifest(tmp_path, [_store_decl(archive, "sealed")])
-
-    srv = run_chatbot_server.ChatbotServer(
-        port=0,
-        workspace_manifest_path=str(manifest),
-    )
-    thread = threading.Thread(target=srv.serve_forever, daemon=True)
-    thread.start()
-    yield srv, workflow, before
     srv.shutdown()
     thread.join(timeout=5)
 
@@ -252,29 +253,6 @@ class TestBenchmarkWriteApi:
         assert "immutable" in data["error"]
 
 
-class TestWorkspaceModeBenchmarkWrites:
-    def test_post_refused_in_workspace_mode(self, workspace_server):
-        server, workflow, before = workspace_server
-        status, data = _request(
-            server,
-            "/api/benchmarks/smoke/versions",
-            method="POST",
-            body=_sample_spec(version="v2"),
-        )
-        assert status == 403
-        assert "read-only" in data["error"]
-        after = json.loads(
-            (benchmarks_root(workflow) / "smoke" / "v1.json").read_text(encoding="utf-8")
-        )
-        assert after == before
-
-    def test_get_refused_in_workspace_mode(self, workspace_server):
-        server, _workflow, _before = workspace_server
-        status, data = _request(server, "/api/benchmarks")
-        assert status == 409
-        assert "live workflow mode" in data["error"]
-
-
 class TestBenchmarkAnalysisApi:
     def test_put_get_analysis_round_trip(self, live_server, workflow_dir):
         payload = {"findings": ["latency on case-01"], "nested": {"a": 1}}
@@ -319,22 +297,6 @@ class TestBenchmarkAnalysisApi:
         assert status == 200
         assert data["analysis"] is None
 
-    def test_put_analysis_refused_in_workspace_mode(self, workspace_server):
-        server, workflow, before = workspace_server
-        status, data = _request(
-            server,
-            "/api/benchmarks/smoke/analysis",
-            method="PUT",
-            body={"x": 1},
-        )
-        assert status == 403
-        assert "read-only" in data["error"]
-        assert not (benchmarks_root(workflow) / "smoke" / "analysis.json").exists()
-        after = json.loads(
-            (benchmarks_root(workflow) / "smoke" / "v1.json").read_text(encoding="utf-8")
-        )
-        assert after == before
-
     def test_non_object_analysis_refused(self, live_server):
         status, data = _request(
             live_server,
@@ -358,17 +320,6 @@ class TestExperimentNotesApi:
         assert status == 405
         assert "analysis_json" not in store.get_experiment("exp-1")
         assert store.get_experiment("exp-1")["notes"] == "original notes"
-
-    def test_put_analysis_refused_in_workspace_mode(self, workspace_server):
-        server, _workflow, _before = workspace_server
-        status, data = _request(
-            server,
-            "/api/experiment/local/analysis",
-            method="PUT",
-            body={"x": 1},
-        )
-        assert status == 405
-        assert "read-only" in data["error"]
 
     def test_patch_notes_does_not_accept_analysis(self, experiment_server):
         server, store = experiment_server
@@ -404,17 +355,6 @@ class TestExperimentNotesApi:
         assert status == 200
         assert data["experiment"]["archived"] is False
 
-    def test_patch_archive_refused_in_workspace_mode(self, workspace_server):
-        server, _workflow, _before = workspace_server
-        status, data = _request(
-            server,
-            "/api/experiment/local",
-            method="PATCH",
-            body={"archived": True},
-        )
-        assert status == 403
-        assert "read-only" in data["error"]
-
 
 class TestSpaSurface:
     def test_benchmark_browser_ships(self):
@@ -422,7 +362,6 @@ class TestSpaSurface:
         assert b'id="benchmarksBtn"' not in page
         assert b'id="hierarchyCrumbs"' not in page
         assert b"showBenchmarks" in page
-        assert b"showBenchmarkVersion" in page
         assert b"/api/benchmarks" in page
         assert b"/analysis" in page
         assert b"Save analysis" in page

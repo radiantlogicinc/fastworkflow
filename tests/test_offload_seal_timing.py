@@ -115,7 +115,7 @@ class EvidenceFixture(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self._restore_env: dict[str, str | None] = {}
-        for name in (REDACTION_ENV, "FW_OBS_CAPTURE_PROFILE"):
+        for name in (REDACTION_ENV,):
             self._restore_env[name] = os.environ.pop(name, None)
         self.addCleanup(self._restore_environment)
         archive_module._warned_redaction.clear()
@@ -249,8 +249,6 @@ class FidelityRecordTests(EvidenceFixture):
                          (REDACTION_OFF, False))
         self.assertEqual((clean["redaction"], clean["redacted"]),
                          (REDACTION_ON, False))
-        self.assertEqual(verbatim["capture_profile"], "")
-        self.assertEqual(redacted["capture_profile"], "debug")
         self.assertIsNone(archive.capture_record(scope, "O404"))
 
     def test_there_are_no_side_tables_for_seal_or_capture_state(self) -> None:
@@ -265,8 +263,8 @@ class FidelityRecordTests(EvidenceFixture):
                         "observation_context_entries", "observation_offload_handles"):
             with self.subTest(table=retired):
                 self.assertNotIn(retired, tables)
-        self.assertTrue({"capture_policy_version", "capture_profile", "redaction",
-                         "redacted", "raw_utf8_bytes"} <= columns)
+        self.assertTrue({"redaction", "redacted", "raw_utf8_bytes"} <= columns)
+        self.assertFalse({"capture_policy_version", "capture_profile"} & columns)
         self.assertFalse({"seal_state", "owner_id", "sealed_at"} & columns)
 
 
@@ -499,7 +497,7 @@ class LiveTurnFixture(unittest.TestCase):
         reset_runtime_state()
         self.temp = tempfile.TemporaryDirectory()
         self._restore_env: dict[str, str | None] = {}
-        for name in (REDACTION_ENV, "FW_OBS_CAPTURE_PROFILE"):
+        for name in (REDACTION_ENV,):
             self._restore_env[name] = os.environ.pop(name, None)
         os.environ["FASTWORKFLOW_STATE_ROOT"] = os.path.join(self.temp.name, "state")
         fastworkflow.init({"FASTWORKFLOW_STATE_ROOT":

@@ -31,7 +31,6 @@ from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
 @pytest.fixture
 def controller(tmp_path, monkeypatch):
-    monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
     folder = str(tmp_path / "workflow")
     store = obs.ObservabilityStore(state_paths.observability_db(folder))
     controller = ExperimentController(

@@ -9,7 +9,7 @@ var TOKEN = (document.querySelector('meta[name="fw-chatbot-token"]') || {}).cont
 
 /* Opening the page with ?token= set the session cookie, which authenticates
    reloads and pasted links from here on, so the token leaves the address
-   bar. Anything else in the query (a review link's parameters) stays. */
+   bar. Anything else in the query stays. */
 (function dropTokenFromAddress() {
   var query = new URLSearchParams(location.search);
   if (!query.has("token")) { return; }
@@ -87,25 +87,6 @@ function apiRaw(path) {
 }
 function apiPost(path, body) { return mutationRequest(path, "POST", body); }
 
-function reviewApi(path, method, body) {
-  return fetch(path, {
-    method: method || "GET",
-    headers: chatbotAuthHeaders({
-      "X-Review-Capability": review.capability,
-      "Content-Type": "application/json"
-    }),
-    body: method === "POST" ? JSON.stringify(body || {}) : undefined
-  }).then(function (r) {
-    return r.json().then(function (data) {
-      if (!r.ok) {
-        throw new Error(
-          data && data.error ? data.error : ("API " + path + " -> " + r.status));
-      }
-      return data;
-    });
-  });
-}
-
 function apiPatch(path, body, successMessage) {
   return mutationRequest(path, "PATCH", body, successMessage);
 }
@@ -156,11 +137,11 @@ themeSelect.addEventListener("change", function () {
   setTheme(themeSelect.value); try { localStorage.setItem("fw-theme", themeSelect.value); } catch (error) {}
 });
 document.addEventListener("click", function (event) {
-  var menu = document.getElementById("workspaceTools");
+  var menu = document.getElementById("toolsMenu");
   if (!menu.contains(event.target)) { menu.open = false; }
 });
 document.addEventListener("keydown", function (event) {
-  var menu = document.getElementById("workspaceTools");
+  var menu = document.getElementById("toolsMenu");
   if (event.key === "Escape" && menu.open) { menu.open = false; menu.querySelector("summary").focus(); }
 });
 
@@ -228,7 +209,6 @@ function actionSuccess(path, method) {
   if (path === "/api/benchmark-setup") { return "Benchmark version saved"; }
   if (/\/benchmarks\/.*\/experiments$/.test(path)) { return "Experiment created"; }
   if (path === "/api/select_workflow") { return "Workflow selected"; }
-  if (path === "/api/select_workspace") { return "Workspace opened"; }
   if (path === "/api/train") { return "Training requested"; }
   if (path === "/api/configure_env") { return "Environment files saved"; }
   if (path === "/api/clear_conversations") { return "Conversations cleared"; }

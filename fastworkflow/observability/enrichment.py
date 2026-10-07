@@ -73,6 +73,16 @@ def _register_once(key: str, enricher: AttributeEnricher) -> _RegistrationToken:
         return _register(key, enricher)
 
 
+def register_builtin(key: str, enricher: AttributeEnricher) -> _RegistrationToken:
+    """Register a built-in enricher once under *key*; repeat calls are no-ops."""
+    return _register_once(key, enricher)
+
+
+def unregister(token: _RegistrationToken) -> bool:
+    """Remove the registration *token* names; False when it is no longer current."""
+    return _remove(token)
+
+
 def _remove(token: _RegistrationToken) -> bool:
     """Remove only the registration represented by *token*."""
     with _lock:

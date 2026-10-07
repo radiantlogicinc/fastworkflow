@@ -21,8 +21,8 @@ a ``ProviderFailure`` carrying ``describe(error)``'s fields: error type, HTTP
 status, request id and machine-readable code -- never a message, which may echo
 what was sent.
 
-Everything a feature sends passes the archive's capture policy first, and the
-features' capture-policy gate applies to every provider today. ``third_party``
+Everything a feature sends passes the archive's credential scrub first, and the
+features' redaction gate applies to every provider today. ``third_party``
 says whether what is sent leaves the deployment, so that gate may later be
 relaxed for a self-hosted provider.
 

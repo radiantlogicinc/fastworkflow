@@ -1,7 +1,6 @@
 /* -- state ------------------------------------------------------------- */
 var state = {
   channel: "",              // "" = all channels
-  storeId: null,            // workspace reads always name one store
   turnKey: null,
   turn: null,               // the loaded turn record for the open drill-down
   path: [],                 // node path from the turn down to the open level
@@ -11,25 +10,6 @@ var state = {
   benchmarkVersion: null
 };
 var session = null;          // /api/session payload: workflow + server + identity
-var workspaceNav = 0;        // prevents a previous store fetch repainting a new one
-var initialHashParams = new URLSearchParams(location.hash.replace(/^#/, ""));
-var initialQueryParams = new URLSearchParams(location.search);
-var review = {
-  assignmentId: initialHashParams.get("review")
-    || initialHashParams.get("assignment")
-    || initialQueryParams.get("review")
-    || initialQueryParams.get("assignment")
-    || "",
-  capability: initialHashParams.get("review_capability")
-    || initialQueryParams.get("review_capability")
-    || "",
-  progress: null,
-  rowIndex: 0,
-  answers: {},
-  captured: {},
-  dirty: {},
-  pending: {}
-};
 
 /* -- formatting -------------------------------------------------------- */
 function fmtNs(ns) {
@@ -100,71 +80,7 @@ function pretty(objOrText) {
     try { value = JSON.parse(value); }
     catch (e) { return value; }
   }
-  /* Envelopes at any depth print as their marker, so a dumped record never
-     shows a digest where the value used to be. */
-  var root = captureEnvelope(value);
-  if (root) { return policedText(root); }
-  return JSON.stringify(value, function (key, item) {
-    var env = captureEnvelope(item);
-    return env ? policedText(env) : item;
-  }, 2);
-}
-
-/* -- capture-policy envelopes [fix-49m.6 (c)] --------------------------- */
-/* A value the capture policy acted on is persisted as an envelope: an object
-   carrying `__fw_capture__: true`, the reason, the size and a digest of what
-   was there (capture_policy.CapturedValue). The turn's TEXT columns, the span's
-   scalar columns and the conversation labels hold that envelope serialized as
-   JSON text; inside record_json it is a nested object. Both forms are
-   recognized here so that nowhere does the digest print as if it were data. */
-var CAPTURE_MARKER = "__fw_capture__";
-function captureEnvelope(value) {
-  var candidate = value;
-  if (typeof candidate === "string") {
-    if (candidate.charAt(0) !== "{" || candidate.indexOf(CAPTURE_MARKER) === -1) {
-      return null;
-    }
-    try { candidate = JSON.parse(candidate); } catch (e) { return null; }
-  }
-  if (candidate && typeof candidate === "object" && !Array.isArray(candidate)
-      && candidate[CAPTURE_MARKER] === true) {
-    return candidate;
-  }
-  return null;
-}
-function envelopeText(env) {
-  /* The reason is quoted from the envelope, never restated: it names the
-     profile default or the declared policy that withheld the value. */
-  var detail = [];
-  if (env.classification) { detail.push(env.classification); }
-  if (typeof env.original_bytes === "number") {
-    detail.push(fmtCount(env.original_bytes) + " bytes");
-  }
-  detail.push("digest " + (env.digest || "(none)"));
-  if (env.policy_version) { detail.push("policy " + env.policy_version); }
-  /* bounded-text kept a prefix: the value was cut, not withheld. */
-  var verb = typeof env.prefix === "string" ? "cut by policy: " : "withheld by policy: ";
-  return verb + (env.reason || "reason not recorded") + " (" + detail.join(", ") + ")";
-}
-function policedText(value) {
-  /* A string, for places that build a title or a line out of a stored value. */
-  var env = captureEnvelope(value);
-  if (!env) { return value; }
-  var marker = "[" + envelopeText(env) + "]";
-  return typeof env.prefix === "string" ? env.prefix + " … " + marker : marker;
-}
-function appendPoliced(parent, value) {
-  /* A node, for places that print a stored value verbatim: the marker is set
-     apart visually so a digest never reads as the text it stands in for. */
-  var env = captureEnvelope(value);
-  if (!env) {
-    parent.appendChild(document.createTextNode(value === null || value === undefined ? "" : String(value)));
-    return;
-  }
-  if (typeof env.prefix === "string") {
-    parent.appendChild(document.createTextNode(env.prefix + " … "));
-  }
-  parent.appendChild(el("span", "policed", envelopeText(env)));
+  return JSON.stringify(value, null, 2);
 }
 
 /* -- token-limit detection [fix-49m.6 (a)] ------------------------------ */
@@ -637,8 +553,8 @@ function renderExecutionLedger(container, turn, openSpan) {
     tr.appendChild(el("td", "mono",
       row.parent_call_id ? "↳ " + row.parent_call_id.slice(0, 8) : "—"));
     tr.appendChild(el("td", null,
-      row.command_name ? policedText(row.command_name) : "(not recorded)"));
-    tr.appendChild(el("td", null, row.context ? policedText(row.context) : "—"));
+      row.command_name ? row.command_name : "(not recorded)"));
+    tr.appendChild(el("td", null, row.context ? row.context : "—"));
     var statusText = row.status ? row.status : "no span recorded";
     if (row.status && row.success === false) { statusText += " · success false"; }
     tr.appendChild(el("td", null, statusText));
@@ -683,31 +599,23 @@ function renderExecutionLedger(container, turn, openSpan) {
   wrap.appendChild(table);
   container.appendChild(wrap);
 }
-/* Navigation is a three-state answer and is rendered as one. `unknown` is the
-   common case in current traces -- every context handle this build writes is
-   type-only, so two handles of the same type prove nothing about whether the
-   context moved -- and printing "unchanged" there would be a claim the
-   evidence does not support. The basis is shown so the reason is legible. */
+/* Navigation is a two-state answer and is rendered as one. `unknown` is the
+   common case when a command stays put -- the recorded value is a context
+   TYPE, so two equal types prove nothing about whether the context moved --
+   and printing "unchanged" there would be a claim the evidence does not
+   support. The basis is shown so the reason is legible. */
 var NAVIGATION_BASIS_NOTE = {
   context_type_change: "the recorded context types differ",
   recorded_flag: "the producer flagged the move",
-  instance_fingerprint_change: "same type, different recorded instance",
-  instance_fingerprint_match: "same type, same recorded instance",
-  type_only_handles: "handles name a type but no instance, so a move cannot be ruled out",
-  no_handles: "this dispatch recorded no context handles"
+  same_context_type: "same context type before and after, so a move between instances cannot be ruled out",
+  no_context_recorded: "this dispatch recorded no context type"
 };
 function navigationNote(navigation) {
   if (!navigation || !navigation.state) { return el("span"); }
   var note = el("div", "diagNote");
   var where = navigation.from || navigation.to
     ? " (" + (navigation.from || "?") + " \u2192 " + (navigation.to || "?") + ")" : "";
-  if (navigation.state === "changed") {
-    note.textContent = "context changed" + where;
-  } else if (navigation.state === "unchanged") {
-    note.textContent = "context unchanged" + where;
-  } else {
-    note.textContent = "context unknown" + where;
-  }
+  note.textContent = (navigation.state === "changed" ? "context changed" : "context unknown") + where;
   var why = NAVIGATION_BASIS_NOTE[navigation.basis];
   if (why) { note.textContent += " \u2014 " + why; }
   return note;
@@ -807,7 +715,7 @@ function openSpanInTree(spanId) {
 
 /* Focus one recorded span in the trace that has JUST been rendered.
 
-   Called from inside `selectTurn`/`selectWorkspaceTurn`'s own stale-guarded
+   Called from inside `selectTurn`'s own stale-guarded
    completion and never from a timer: a span id identifies a call only within the
    trace that recorded it, so a focus request left running after a later
    navigation could land on a same-named span of ANOTHER run. Waiting for the
@@ -840,102 +748,13 @@ function focusLoadedSpan(spanId, note) {
 }
 
 /* -- provenance and comparability [fix-aou (c)] --------------------------- */
-/* `provenance` is the server's experiment_provenance(): one field per row,
-   keys verbatim, each naming its source -- the experiment row, the
-   evidence-run records' observability provenance, or the attempts' runtime
-   snapshots -- with "not recorded" where nothing was, and every observed
-   value listed when segments or attempts disagree. `differences` is
-   provenance_differences(): what the two compared experiments do not agree
-   on, quoted, and never a reason to withhold the comparison. */
+/* `differences` is the server's provenance_differences(): what the two
+   compared experiments do not agree on, quoted, and never a reason to
+   withhold the comparison. */
 function provenanceValueText(value) {
   if (value === null || value === undefined) { return "null"; }
   return typeof value === "string" ? value : JSON.stringify(value);
 }
-var PROVENANCE_SOURCE_LABEL = {
-  experiment: "experiment row",
-  evidence_run: "evidence-run record (observability provenance)",
-  runtime_snapshot: "attempt runtime snapshots"
-};
-function renderProvenance(container, provenance, label) {
-  var det = el("details", "provenance");
-  var fields = provenance && provenance.fields ? provenance.fields : [];
-  var recorded = provenance ? provenance.recorded || 0 : 0;
-  var unrecorded = provenance ? provenance.unrecorded || 0 : 0;
-  det.appendChild(el("summary", null, (label || "provenance") + " · "
-    + recorded + " recorded"
-    + (unrecorded ? " · " + unrecorded + " not recorded" : "")
-    + (provenance && provenance.inconsistent
-      ? " · " + provenance.inconsistent + " inconsistent" : "")));
-  if (!fields.length) {
-    det.appendChild(el("div", "sub", "no provenance fields in this view"));
-  }
-  var bySource = {};
-  fields.forEach(function (field) {
-    (bySource[field.source] = bySource[field.source] || []).push(field);
-  });
-  Object.keys(bySource).forEach(function (source) {
-    det.appendChild(el("div", "sub", PROVENANCE_SOURCE_LABEL[source] || source));
-    var kv = el("dl", "kv");
-    bySource[source].forEach(function (field) {
-      kv.appendChild(el("dt", null, field.key));
-      var dd = el("dd");
-      if (!field.recorded) {
-        dd.className = "unrecorded";
-        dd.textContent = "not recorded";
-      } else if (field.consistent) {
-        dd.textContent = provenanceValueText(field.value);
-      } else {
-        dd.appendChild(el("div", null, "differs within this experiment:"));
-        (field.values || []).forEach(function (entry) {
-          dd.appendChild(el("div", null,
-            entry.where + ": " + provenanceValueText(entry.value)));
-        });
-      }
-      kv.appendChild(dd);
-    });
-    det.appendChild(kv);
-  });
-  det.addEventListener("click", function (evt) { evt.stopPropagation(); });
-  container.appendChild(det);
-}
-/* The benchmark pin, checked against the catalogue file the sealed workspace
-   names — never a bare digest, and never silence. A mismatch is quoted with
-   both digests: the reader decides whether the corpus moved on or the run was
-   pinned wrong, and neither reading survives the UI hiding one of them. */
-function renderBenchmarkPin(container, pin) {
-  if (!pin) { return; }
-  var status = pin.status || "catalogue_unavailable";
-  var headline = {
-    match: "Benchmark pin verified against the catalogue.",
-    mismatch: "Benchmark pin does NOT match the catalogue file.",
-    pin_incomplete: "Benchmark pin recorded no digest.",
-    catalogue_unavailable: "Benchmark catalogue unavailable — pin unchecked."
-  }[status] || ("Benchmark pin: " + status);
-  var box = el("div", status === "match" ? "provDiff" : "nonComparable");
-  box.appendChild(el("strong", null, headline));
-  var kv = el("dl", "kv");
-  function pair(k, v) {
-    kv.appendChild(el("dt", null, k));
-    kv.appendChild(el("dd", null,
-      v === null || v === undefined || v === "" ? "—" : String(v)));
-  }
-  pair("benchmark", pin.benchmark_id + "@" + pin.benchmark_version);
-  pair("pinned digest", pin.pinned_digest);
-  pair("catalogue digest", pin.catalogue_digest);
-  pair("workflow folder", pin.workflow_folderpath);
-  box.appendChild(kv);
-  if (pin.detail) { box.appendChild(el("div", "sub", pin.detail)); }
-  if (pin.catalogue_digest) {
-    var open = el("button", null, "Open catalogue version");
-    open.addEventListener("click", function (evt) {
-      evt.stopPropagation();
-      showBenchmarkVersion(pin.benchmark_id, pin.benchmark_version);
-    });
-    box.appendChild(open);
-  }
-  container.appendChild(box);
-}
-
 function renderProvenanceDifferences(container, differences) {
   var box = el("div", "provDiff");
   if (!differences) {
