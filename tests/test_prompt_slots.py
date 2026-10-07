@@ -12,10 +12,13 @@ Real store, real tracing, real sink, real chatbot server (no mocks).
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
 import threading
 import urllib.request
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -316,3 +319,18 @@ def test_the_chatbot_serves_the_rebuilt_prompt(tmp_path, monkeypatch):
     finally:
         srv.shutdown()
         thread.join(timeout=5)
+
+
+def test_every_llm_call_offers_the_prompt_as_sent(tmp_path):
+    """Whole messages render in place; an over-cap call's are fetched rebuilt."""
+    jsdom_root = os.environ.get("TEST_JSDOM_ROOT")
+    if not jsdom_root:
+        pytest.skip("Set TEST_JSDOM_ROOT to run DOM integration with jsdom")
+    page = tmp_path / "index.html"
+    page.write_bytes(run_chatbot_server.load_index_html())
+    script = Path(__file__).with_name("chatbot_prompt_as_sent_dom.cjs")
+    result = subprocess.run(
+        ["node", str(script), jsdom_root, str(page)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

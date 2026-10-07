@@ -258,6 +258,7 @@ main { flex: 1; display: flex; min-height: 0; }
 .badge.fail { color: var(--fail); border-color: var(--fail); background: var(--fail-soft); }
 .badge.progress { color: var(--bar-human); border-color: var(--bar-human); }
 .badge.unknown { color: var(--muted); border-color: var(--border); }
+.statusBadges { display: inline-flex; flex-wrap: wrap; gap: 6px; cursor: help; }
 /* fix-49m.6 (a): an fw.llm.call whose output stopped exactly at its cap */
 .chipLimit {
   display: inline-block; font-size: 10px; font-weight: 600; border-radius: 999px;
@@ -342,6 +343,11 @@ table.ledger td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospa
   border: 1px solid var(--accent); border-radius: 6px; padding: 3px 9px;
   font-size: 13px; font-weight: 700; }
 .promptAsSent > summary:hover { color: var(--on-accent); background: var(--accent); }
+.promptInput { border: 1px solid var(--accent); border-left-width: 4px; border-radius: 8px;
+  background: var(--accent-soft); padding: 8px 10px 10px; margin-top: 6px; }
+.promptInputLabel { color: var(--accent); font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .04em; }
+.promptInput > .msgBlock { margin-top: 8px; }
 .promptStatus.warn { color: var(--fail); }
 .expInvalid { border-left: 4px solid var(--fail); background: var(--fail-soft);
   padding: 8px 10px; border-radius: 6px; margin-top: 8px; }

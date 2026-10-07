@@ -31,11 +31,48 @@ function selectTurn(turnKey, spanId, note, level) {
   });
 }
 
+var FAILURE_REASON_TEXT = { max_iters_exhausted: "ran out of agent iterations" };
+
+/* A turn's outcome is its STATUS: whether the agent ran to the end. Whether
+   every command succeeded is a separate fact (`turnHadCommandFailure`), so a
+   command that failed and was recovered from does not read as a failed turn. */
+function turnOutcome(status, failureReason) {
+  if (status === "completed") { return { text: "completed", cls: "ok" }; }
+  if (status === "awaiting_user") { return { text: "awaiting your reply", cls: "progress" }; }
+  var why = failureReason
+    ? (FAILURE_REASON_TEXT[failureReason] || failureReason) : status;
+  return { text: "incomplete — " + why, cls: "fail" };
+}
+
+/* While a turn awaits the user, its pending ask_user counts as not yet
+   successful, so `success` is false without any command having failed. */
+function turnHadCommandFailure(turn) {
+  return turn.status !== "awaiting_user" && !turn.success;
+}
+
+var OUTCOME_HINTS = {
+  ok: "The turn's status: the agent ran to the end and gave its answer.",
+  progress: "The turn's status: the agent asked you a question, and your next " +
+    "message resumes this turn.",
+  fail: "The turn's status: the agent stopped before finishing (for example, it " +
+    "hit its step limit)."
+};
+var COMMAND_FAILURE_HINT = "At least one command the agent ran returned a " +
+  "failure, even if the agent recovered from it. Whether the turn itself " +
+  "finished is the status beside this.";
+
 function statusBadge(turn) {
-  if (turn.status === "awaiting_user") { return el("span", "badge progress", "awaiting_user — in progress"); }
-  if (turn.status === "completed" && turn.success) { return el("span", "badge ok", "completed · success"); }
-  return el("span", "badge " + (turn.success ? "ok" : "fail"),
-    turn.status + (turn.success ? " · success" : " · failure"));
+  var outcome = turnOutcome(turn.status, turn.failure_reason);
+  var badges = el("span", "statusBadges");
+  var status = el("span", "badge " + outcome.cls, outcome.text);
+  status.title = OUTCOME_HINTS[outcome.cls];
+  badges.appendChild(status);
+  if (turnHadCommandFailure(turn)) {
+    var failed = el("span", "badge unknown", "a command reported failure");
+    failed.title = COMMAND_FAILURE_HINT;
+    badges.appendChild(failed);
+  }
+  return badges;
 }
 
 /* ======================================================================
@@ -417,18 +454,50 @@ function renderSpanLevel(container, span, role, fold) {
   container.appendChild(rawDetails);
 }
 
-/* The prompt an over-cap call was sent, rebuilt by the server from the pieces
-   it stored (`prompt_slots_ref`). `messages` above holds only the cut envelope
-   for such a call. Fetched on expand: a rebuilt agent prompt is tens of KB. */
+/* The messages a call recorded whole, or null. They arrive as the list itself
+   or as its JSON text; a cut envelope is neither. */
+function inlinePromptMessages(messages) {
+  if (typeof messages === "string") {
+    try { messages = JSON.parse(messages); } catch (e) { return null; }
+  }
+  if (!Array.isArray(messages) || !messages.length) { return null; }
+  var wellFormed = messages.every(function (m) {
+    return m && typeof m === "object" && typeof m.role === "string";
+  });
+  return wellFormed ? messages : null;
+}
+
+/* The prompt a call was sent. An over-cap call is rebuilt by the server from
+   the pieces it stored (`prompt_slots_ref`), because `messages` above holds
+   only the cut envelope for such a call; that is fetched on expand, since a
+   rebuilt agent prompt is tens of KB. A call under the cap recorded its
+   messages whole, so they are rendered from the span itself. */
 function appendPromptAsSent(container, span) {
-  var ref = (span.attributes || {}).prompt_slots_ref;
-  if (!ref || typeof ref !== "object") { return; }
+  var a = span.attributes || {};
+  var ref = a.prompt_slots_ref;
+  if (!ref || typeof ref !== "object") {
+    var messages = inlinePromptMessages(a.messages);
+    if (!messages) { return; }
+    var inline = el("details", "promptAsSent");
+    inline.appendChild(el("summary", null, "LLM input as sent ("
+      + formatByteSize(estimateSerializedSize(messages)) + ")"));
+    inline.addEventListener("toggle", function () {
+      if (!inline.open || inline.dataset.loaded) { return; }
+      inline.dataset.loaded = "1";
+      var body = el("div");
+      body.appendChild(el("div", "promptStatus",
+        "recorded whole — the messages this call stored, as sent"));
+      renderPromptMessages(body, messages);
+      inline.appendChild(body);
+    });
+    container.appendChild(inline);
+    return;
+  }
   var route = "/api/prompt/" + encodeURIComponent(span.trace_id) + "/"
     + encodeURIComponent(span.span_id);
   var det = el("details", "promptAsSent");
   det.appendChild(el("summary", null, "LLM input as sent ("
-    + formatByteSize(ref.messages_bytes || 0) + ", " + (ref.slot_count || 0)
-    + " pieces — expand to load)"));
+    + formatByteSize(ref.messages_bytes || 0) + ")"));
   det.addEventListener("toggle", function () {
     if (!det.open || det.dataset.loaded) { return; }
     det.dataset.loaded = "1";
@@ -465,15 +534,24 @@ function renderPromptAsSent(body, prompt) {
       : "the rebuilt messages do not match the recorded digest");
   }
   body.appendChild(el("div", prompt.verified ? "promptStatus" : "promptStatus warn", status));
-  (prompt.messages || []).forEach(function (message) {
+  renderPromptMessages(body, prompt.messages || []);
+}
+
+/* One panel around every message: together they are the single input the LLM
+   received, not separate inputs. */
+function renderPromptMessages(body, messages) {
+  var panel = el("div", "promptInput");
+  panel.appendChild(el("div", "promptInputLabel", "LLM input"));
+  messages.forEach(function (message) {
     var block = el("div", "msgBlock");
     var role = (message && message.role) || "message";
     block.appendChild(el("span", "lbl", role));
     var content = message && message.content;
     block.appendChild(el("pre", "json",
       typeof content === "string" ? content : pretty(content)));
-    body.appendChild(block);
+    panel.appendChild(block);
   });
+  body.appendChild(panel);
 }
 
 function spanNode(span, kids, byId) {
