@@ -1,6 +1,5 @@
 /* -- top-level views: picker | chat (test) | debug ---------------------- */
 function setTopMode(mode) {
-  if (session && session.workspace_mode && mode !== "debug") { mode = "debug"; }
   document.getElementById("pickerMain").className = mode === "picker" ? "visible" : "";
   document.getElementById("debugMain").className = mode === "debug" ? "visible" : "";
   document.getElementById("testMain").className = mode === "test" ? "visible" : "";
@@ -8,12 +7,11 @@ function setTopMode(mode) {
   document.getElementById("modeTest").className = mode === "test" ? "active" : "";
   document.getElementById("refreshBtn").style.display = mode === "debug" ? "" : "none";
   document.getElementById("clearConvsBtn").style.display =
-    (mode === "debug" && session && session.workflow_path
-      && !session.workspace_mode) ? "" : "none";
+    (mode === "debug" && session && session.workflow_path) ? "" : "none";
   document.getElementById("newConvBtn").style.display =
     (mode === "test" && tm.connected) ? "" : "none";
   document.getElementById("copyLinkBtn").style.display =
-    (mode === "debug" && !reviewOwnsFragment()) ? "" : "none";
+    mode === "debug" ? "" : "none";
   replaceFragment(mode === "debug" ? (debugPageLink || "debug") : mode === "test" ? "test" : "");
   if (mode !== "debug") { setTurnFindOpen(false); }
   if (mode !== "picker") { stopPickerPolling(); }
@@ -67,17 +65,6 @@ function chooseWorkflow(path) {
     applySession();
   }).catch(function (e) {
     pickerStatus("Could not activate the workflow: " + e.message, "err");
-  });
-}
-
-function chooseWorkspace(path) {
-  pickerStatus("Opening read-only workspace " + path + " …");
-  apiPost("/api/select_workspace", { path: path }).then(function (data) {
-    session = data.session;
-    pickerStatus("");
-    applySession();
-  }).catch(function (e) {
-    pickerStatus("Could not open workspace: " + e.message, "err");
   });
 }
 
@@ -307,26 +294,6 @@ function browseTo(dir) {
     });
     if (!(data.entries || []).length) {
       list.appendChild(el("div", "empty", "No subfolders here."));
-    }
-    var manifests = document.getElementById("workspaceManifestList");
-    clear(manifests);
-    if ((data.workspace_manifests || []).length) {
-      manifests.appendChild(el("h3", null, "Workspace manifests"));
-      (data.workspace_manifests || []).forEach(function (manifest) {
-        var rowEl = el("div", "wfItem");
-        var grow = el("div", "grow");
-        /* The label is the collection folder for a manifest found one level
-           down ("exp029-trial-3.3-lifecycle-2026-09-06"), and the file name
-           for one sitting in this directory. The full path stays on the row
-           below it, so the label never hides which file will be opened. */
-        grow.appendChild(el("div", "name", manifest.label || manifest.name));
-        grow.appendChild(el("div", "path", manifest.path));
-        rowEl.appendChild(grow);
-        var use = el("button", "primary", "Open read-only");
-        use.addEventListener("click", function () { chooseWorkspace(manifest.path); });
-        rowEl.appendChild(use);
-        manifests.appendChild(rowEl);
-      });
     }
   }).catch(function (e) { pickerStatus("Browse failed: " + e.message, "err"); });
 }

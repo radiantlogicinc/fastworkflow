@@ -73,7 +73,7 @@ class EventFixture(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self._restore_env: dict[str, str | None] = {}
-        for name in (REDACTION_ENV, "FW_OBS_CAPTURE_PROFILE"):
+        for name in (REDACTION_ENV,):
             self._restore_env[name] = os.environ.pop(name, None)
         self.addCleanup(self._restore_environment)
         self.db_path = os.path.join(self.temp.name, "observability.sqlite3")

@@ -4,6 +4,7 @@
    rendered, so a focus request can never be applied to another run's trace.
    Every existing caller opens the turn and passes neither. `level` is the
    position a page link names inside the turn, focused the same way. */
+var turnLoadAbort = null;
 function selectTurn(turnKey, spanId, note, level) {
   var nav = expNavToken();   // this view now owns #detail
   writePageLink({turn: turnKey});
@@ -31,9 +32,6 @@ function selectTurn(turnKey, spanId, note, level) {
 }
 
 function statusBadge(turn) {
-  if (review.progress && review.progress.assignment.blinded) {
-    return el("span", "badge", "blinded review trace");
-  }
   if (turn.status === "awaiting_user") { return el("span", "badge progress", "awaiting_user — in progress"); }
   if (turn.status === "completed" && turn.success) { return el("span", "badge ok", "completed · success"); }
   return el("span", "badge " + (turn.success ? "ok" : "fail"),
@@ -291,14 +289,14 @@ function spanTitle(span, role) {
     case "fw.agent.execute": return "Execution";
     case "fw.agent.step": return "Step";
     case "fw.agent.tool_call":
-      return "Agent tool call" + (span.command_name ? " · " + policedText(span.command_name) : "");
+      return "Agent tool call" + (span.command_name ? " · " + span.command_name : "");
     case "fw.command.execute":
-      return "Assistant" + (span.command_name ? " · " + policedText(span.command_name) : "");
+      return "Assistant" + (span.command_name ? " · " + span.command_name : "");
     case "fw.nlu.intent": return "Intent detection";
     case "fw.nlu.param_extraction": return "Parameter extraction";
     case "fw.ask_user": return "Ask user";
     case "fw.llm.call": return "LLM call" + (role ? " · " + role : "");
-    default: return policedText(span.name);
+    default: return span.name;
   }
 }
 
@@ -321,12 +319,12 @@ function renderSpanLevel(container, span, role, fold) {
     kv.appendChild(el("dt", null, k));
     kv.appendChild(el("dd", null, v));
   }
-  row("span", policedText(span.name) + (role ? " · " + role : ""));
+  row("span", span.name + (role ? " · " + role : ""));
   row("span_id", span.span_id);
   row("kind", span.kind);
   row("status", span.status);
-  if (span.command_name) { row("command", policedText(span.command_name)); }
-  if (span.context) { row("context", policedText(span.context)); }
+  if (span.command_name) { row("command", span.command_name); }
+  if (span.context) { row("context", span.context); }
   if (span.end_ns) { row("duration", fmtNs(span.end_ns - span.start_ns)); }
   if (llmCallCutAtLimit(span)) {
     var cutAt = parsedAttr((span.attributes || {}).call_kwargs).max_tokens;
@@ -421,18 +419,12 @@ function renderSpanLevel(container, span, role, fold) {
 
 /* The prompt an over-cap call was sent, rebuilt by the server from the pieces
    it stored (`prompt_slots_ref`). `messages` above holds only the cut envelope
-   for such a call. Fetched on expand: a rebuilt agent prompt is tens of KB.
-   Not offered in a blinded review, whose trace is served by the review routes
-   and must not be widened by a second read of the same store. */
+   for such a call. Fetched on expand: a rebuilt agent prompt is tens of KB. */
 function appendPromptAsSent(container, span) {
   var ref = (span.attributes || {}).prompt_slots_ref;
-  if (!ref || typeof ref !== "object" || review.progress) { return; }
-  var route = span.store_id
-    ? "/api/workspace/prompt/" + encodeURIComponent(span.store_id) + "/"
-      + encodeURIComponent(span.logical_turn_key || span.trace_id) + "/"
-      + encodeURIComponent(span.span_id)
-    : "/api/prompt/" + encodeURIComponent(span.trace_id) + "/"
-      + encodeURIComponent(span.span_id);
+  if (!ref || typeof ref !== "object") { return; }
+  var route = "/api/prompt/" + encodeURIComponent(span.trace_id) + "/"
+    + encodeURIComponent(span.span_id);
   var det = el("details", "promptAsSent");
   det.appendChild(el("summary", null, "LLM input as sent ("
     + formatByteSize(ref.messages_bytes || 0) + ", " + (ref.slot_count || 0)
@@ -467,7 +459,7 @@ function renderPromptAsSent(body, prompt) {
   } else {
     var reasons = [
       missing ? missing + " piece(s) not stored" : "",
-      altered ? altered + " piece(s) redacted or withheld by the capture policy" : ""
+      altered ? altered + " piece(s) had credentials redacted" : ""
     ].filter(Boolean);
     status = "not verified — " + (reasons.length ? reasons.join(", ")
       : "the rebuilt messages do not match the recorded digest");
@@ -907,7 +899,7 @@ function buildTurnTree(turn, spans) {
     ? spanExtent([rootSpan])
     : mergeExtents(children.map(function (c) { return c.extent; }));
 
-  return makeNode("turn", policedText(turn.user_message) || "(no message)", {
+  return makeNode("turn", turn.user_message || "(no message)", {
     crumb: (turn.ordinal ? "Turn " + turn.ordinal : "Turn"),
     category: "cat-turn",
     status: turn.status,
@@ -940,18 +932,18 @@ function renderTurnLevel(container, turn) {
     row("wall time", fmtMs(Date.parse(turn.completed_at) - Date.parse(turn.started_at)));
   }
   if (turn.suspended_ms) { row("suspended (human wait)", fmtMs(turn.suspended_ms)); }
-  row("failure_reason", policedText(turn.failure_reason));
+  row("failure_reason", turn.failure_reason);
   row("LLM cost", fmtCostAmount(turn.llm_cost));
 
   var um = el("div", "msgBlock");
   um.appendChild(el("span", "lbl", "user message"));
-  appendPoliced(um, turn.user_message || "");
+  um.appendChild(document.createTextNode(turn.user_message || ""));
   appendReuseAction(um, turn);
   container.appendChild(um);
   if (turn.answer) {
     var ans = el("div", "msgBlock");
     ans.appendChild(el("span", "lbl", "answer"));
-    appendPoliced(ans, turn.answer);
+    ans.appendChild(document.createTextNode(turn.answer));
     container.appendChild(ans);
   }
   var metadata = el("details", "turnMetadata"); metadata.appendChild(el("summary", null, "Turn details & timing"));
@@ -962,14 +954,8 @@ function appendReuseAction(block, turn) {
   /* Hands the recorded message to the live composer [fix-9eg.7.4]. It reads
      the record and writes a text box: no request goes out, the recorded turn
      is untouched, and nothing runs until the person presses Send. */
-  var actions = el("div", "reuseAction");
-  if (captureEnvelope(turn.user_message)) {
-    actions.appendChild(el("span", "muted",
-      "The recorded message is not available in full, so there is nothing to reuse."));
-    block.appendChild(actions);
-    return;
-  }
   if (!turn.user_message) { return; }
+  var actions = el("div", "reuseAction");
   var button = el("button", null, "Reuse this message in chat");
   button.title = "Copies the text into the live chat composer. Nothing is sent "
     + "until you press Send, and the recorded turn is unchanged.";

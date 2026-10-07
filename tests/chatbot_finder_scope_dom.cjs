@@ -219,7 +219,6 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
   /* -- the source boundary takes the scope with it --------------------- */
   w.resetSourceScopedState();
   assert.equal(w.turnFind.scope, null, 'the source boundary left a scope behind');
-  assert.equal(w.turnFind.source, null);
   assert.equal(scopeBox().className, '');
   assert.equal(d.getElementById('turnFindText').value, '');
 

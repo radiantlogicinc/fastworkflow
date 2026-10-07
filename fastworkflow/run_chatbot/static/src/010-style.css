@@ -69,11 +69,6 @@ header h1 { font-size: 14px; margin: 0; letter-spacing: .01em; }
 header .meta { color: var(--muted); font-size: 12px; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
 header .spacer { flex: 1; }
-#workspaceChrome {
-  display: none; color: var(--muted); font-size: 11px; white-space: nowrap;
-  overflow: hidden; text-overflow: ellipsis; max-width: 52vw;
-}
-#workspaceChrome.visible { display: inline; }
 .pill {
   display: inline-flex; align-items: center; gap: 6px; font-size: 11px;
   border: 1px solid var(--border); border-radius: 999px; padding: 2px 10px;
@@ -159,7 +154,6 @@ main { flex: 1; display: flex; min-height: 0; }
   overflow-wrap: anywhere; }
 #browseList { max-height: 330px; overflow-y: auto; border: 1px solid var(--border);
   border-radius: 7px; }
-#workspaceManifestList { margin-top: 10px; }
 .dirRow { display: flex; align-items: center; gap: 8px; padding: 6px 10px;
   border-bottom: 1px solid var(--border); cursor: pointer; }
 .dirRow:last-child { border-bottom: none; }
@@ -227,35 +221,6 @@ main { flex: 1; display: flex; min-height: 0; }
 
 .empty { color: var(--muted); padding: 16px; font-size: 12px; text-align: center; }
 #detail { flex: 1; overflow-y: auto; padding: 16px 20px; min-width: 0; }
-#reviewPane {
-  display: none; width: min(420px, 42vw); min-width: 320px;
-  border-left: 1px solid var(--border); background: var(--panel);
-  overflow-y: auto; padding: 16px;
-}
-#reviewPane.visible { display: block; }
-#debugMain.reviewActive #rail { display: none; }
-.reviewHead {
-  position: sticky; top: -16px; z-index: 3; background: var(--panel);
-  margin: -16px -16px 14px; padding: 13px 16px;
-  border-bottom: 1px solid var(--border);
-}
-.reviewHead h2 { font-size: 14px; margin: 0 0 4px; }
-.reviewNav { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
-.reviewNav .sub { flex: 1; text-align: center; }
-.reviewQuestion {
-  border: 1px solid var(--border); border-radius: 8px; padding: 11px;
-  margin-bottom: 12px; background: var(--bg);
-}
-.reviewQuestion fieldset { border: 0; padding: 0; margin: 8px 0 0; }
-.reviewQuestion label { display: block; margin: 5px 0; }
-.reviewQuestion textarea {
-  width: 100%; min-height: 92px; resize: vertical; font: inherit;
-  color: var(--text); background: var(--panel); border: 1px solid var(--border);
-  border-radius: 6px; padding: 7px 8px; margin-top: 8px;
-}
-.reviewSave { min-height: 18px; color: var(--muted); font-size: 11px; }
-.reviewSave.err { color: var(--fail); }
-.reviewSave.ok { color: var(--ok); }
 .card {
   background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
   box-shadow: var(--shadow); padding: 13px 15px; margin-bottom: 14px;
@@ -300,9 +265,6 @@ main { flex: 1; display: flex; min-height: 0; }
   border: 1px solid var(--bar-human); background: var(--warn-bg);
   vertical-align: 1px; white-space: nowrap;
 }
-/* fix-49m.6 (c): a value the capture policy withheld, set apart so its digest
-   never passes for the data it replaced */
-.policed { color: var(--muted); font-style: italic; }
 /* fix-49m.6 (b)/(d): verdict reasons and the collapsed server configuration
    live inside the attempt row, not in a panel of their own */
 .evidenceProblems div { margin-top: 2px; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -360,10 +322,9 @@ table.ledger th { color: var(--muted); font-weight: 600; }
 table.ledger tr.child td:first-child { padding-left: 18px; }
 table.ledger tr.openable { cursor: pointer; }
 table.ledger td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-/* fix-aou (c): provenance folds on the experiment page; differences quoted */
-.provenance, .provDiff { margin-top: 6px; }
-.provenance .kv, .provDiff .kv { grid-template-columns: 260px 1fr; font-size: 12px; }
-.provenance dd.unrecorded { color: var(--muted); font-style: italic; }
+/* fix-aou (c): provenance differences quoted */
+.provDiff { margin-top: 6px; }
+.provDiff .kv { grid-template-columns: 260px 1fr; font-size: 12px; }
 .kv { display: grid; grid-template-columns: 130px 1fr; gap: 3px 12px; margin-top: 8px; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; overflow-wrap: anywhere; }
@@ -384,7 +345,6 @@ table.ledger td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospa
 .promptStatus.warn { color: var(--fail); }
 .expInvalid { border-left: 4px solid var(--fail); background: var(--fail-soft);
   padding: 8px 10px; border-radius: 6px; margin-top: 8px; }
-.expReadonly { color: var(--muted); font-size: 11px; margin-top: 4px; }
 .expNotes { width: 100%; min-height: 60px; font: inherit; font-size: 12px;
   padding: 6px; border: 1px solid var(--border); border-radius: 6px;
   background: var(--panel); color: inherit; box-sizing: border-box; }
@@ -984,10 +944,9 @@ pre.json { border-radius: 10px; padding: 16px; font-size: 12px; line-height: 1.6
   .feedbackComposer > .feedbackTabs { flex-direction: row; flex-wrap: wrap; max-width: none; }
   .levelHead { display: block; }
   .levelDur { display: inline-block; margin: 10px 0 0; }
-  .kv, .provenance .kv, .provDiff .kv, .serverConfig .kv { grid-template-columns: 1fr; }
+  .kv, .provDiff .kv, .serverConfig .kv { grid-template-columns: 1fr; }
   .comparePanes, .compareRow { grid-template-columns: 1fr; }
   .selectionBar select { max-width: none; }
-  #reviewPane { width: 100%; min-width: 0; border-left: none; }
   .summaryStrip { gap: 24px; }
   #noticeStack { top: calc(var(--notice-top, 60px) + 8px); }
   #pickerCard { padding: 24px 18px; }
@@ -1078,10 +1037,10 @@ pre.json { border-radius: 10px; padding: 16px; font-size: 12px; line-height: 1.6
   color: var(--text); background: var(--panel); box-shadow: 0 24px 80px #0004;
 }
 #turnFindDialog::backdrop { background: transparent; }
-#debugMain.visible:not(.reviewActive) #detail {
+#debugMain.visible #detail {
   padding-right: calc(var(--detail-pad) + var(--record-nav-gutter));
 }
-#debugMain.visible:not(.reviewActive) #detail .crumbs {
+#debugMain.visible #detail .crumbs {
   margin-right: calc(-1 * (var(--detail-pad) + var(--record-nav-gutter)));
   padding-right: calc(var(--detail-pad) + var(--record-nav-gutter));
 }

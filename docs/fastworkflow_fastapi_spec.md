@@ -287,9 +287,7 @@ there is no top-level field to map. MCP clients read the outcome from the
   "comment": "Answered without the third item the request asked for."
 }
 ```
-  with the anchor in the query string (`?turn_key=<turn_key>`), optionally
-  scoped by `&store_id=` (workspace) or `&benchmark_experiment=` (registered
-  experiment).
+  with the anchor in the query string (`?turn_key=<turn_key>`).
 - Rules:
   - `category` and `subcategory` are enums and must pair:
     `observations_analysis` → `observation` | `analysis`;
@@ -307,13 +305,11 @@ there is no top-level field to map. MCP clients read the outcome from the
   - Validate the anchor against the evidence (the turn is recorded, the spans
     belong to it) and append. Nothing is overwritten: a second comment is a
     second row.
-  - Evidence that cannot be appended to — a sealed archive, or a store written
-    by an older schema — still accepts the comment: it is recorded in annotation
-    storage beside the evidence, and the evidence file is not modified. Reads
-    merge the two, so a client cannot tell which file answered.
-- Response: `201` with `{ "feedback": [...], "read_only": bool, "annotated": bool }`.
+  - Comments are recorded in the workflow's live evidence database. A database
+    file this process cannot write refuses the comment rather than diverting it.
+- Response: `201` with `{ "feedback": [...] }`.
 - Errors: 404 turn not found; 400 invalid category/subcategory pair, unknown
-  anchor or malformed body; 409 unreadable or foreign annotation storage.
+  anchor or malformed body; 409 unreadable or unwritable evidence database.
 
 8a) Reading feedback — separate GETs, never a POST
 - `GET /api/feedback-notes?turn_key=…` — the comments on one turn.
@@ -322,8 +318,6 @@ there is no top-level field to map. MCP clients read the outcome from the
   anchored on the other side of a pair. Optional `category`, `subcategory`,
   `provenance`, `target_kind`, `component`, `attempt`, `limit`, `offset`; no
   filter is applied by default.
-- `GET /api/workspace/task-feedback?experiment=…&task=…` — the same read scoped
-  by a workspace manifest's segments.
 - `GET /api/feedback-taxonomy` — the categories and subcategories above.
 - Comments recorded before the taxonomy existed read back with no category and
   are shown as unclassified; their text is never rewritten.

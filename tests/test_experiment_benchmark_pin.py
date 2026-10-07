@@ -20,7 +20,6 @@ from fastworkflow.experiment.runner import (
 
 @pytest.fixture
 def workflow(tmp_path, monkeypatch) -> str:
-    monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
     folder = str(tmp_path / "workflow")
     obs.ObservabilityStore(state_paths.observability_db(folder))
     return folder

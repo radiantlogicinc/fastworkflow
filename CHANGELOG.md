@@ -15,12 +15,22 @@ does not backfill them.
   `prompt_slots` table (additive; no schema version bump). The span carries a
   `prompt_slots_ref`, `ObservabilityStore.prompt_as_sent` rebuilds the messages
   and checks them against the recorded digest, and the debug UI shows them
-  under "LLM input as sent" (`/api/prompt/…`, `/api/workspace/prompt/…`).
-  Pieces are scrubbed by the capture policy and removed by prune,
+  under "LLM input as sent" (`/api/prompt/…`).
+  Pieces are credential-scrubbed and removed by prune,
   forget-channel, clear-conversations and restart-attempt.
 
 ### Changed
 
+- **Capture profiles and context handles are gone**: `FW_OBS_CAPTURE_PROFILE`
+  and the manifest `capture` field are removed (a manifest that still declares
+  `capture` or `handle_projector` fails validation); recorded values get the
+  credential scrub only. Span contract 10 (`fw.command.execute` v4,
+  `fw.agent.tool_call` v2) records `context_before` / `context_after` as the
+  plain context type name instead of a handle mapping. **Observability schema v8**: `experiments` and
+  `offload_evidence` lose `capture_profile` / `capture_policy_version`, and the
+  `sealed_turn_comments` control table is dropped (see Removed); a v7
+  store is refused on open like every older one (a one-off
+  `migrate_obs_v7_to_v8.py` at the repo root converts existing stores).
 - **The observation line says where a command ran and whether it moved the
   context** (#86): `Observation O3 (execute_workflow_query ran in Directory)`,
   with `; and resulted in a context change` when it did. The root context
@@ -29,6 +39,19 @@ does not backfill them.
 - **dspy is required at `>=3.3.0,<3.4`** (`fix-5sm7`, `fix-cbjx`): 3.3.0 added
   the JSON-retry hook that keeps the available commands in the agent's retry
   prompt, and 3.4.0's lazy `openai` import breaks `import dspy; import litellm`.
+
+### Removed
+
+- **The workspace viewer and the blinded review sidecar** (`fix-0gh0`):
+  `run_chatbot --workspace-manifest`, the picker's workspace-manifest list,
+  `/api/workspace/*`, `/api/select_workspace`, `/api/review/*`, `/trace`,
+  `fastworkflow/review/` and `observability/workspace.py` are gone, as are the
+  navigation nodes' `source` field and the feedback response's `read_only` /
+  `annotated` flags. Comments always go to the workflow's live database, so
+  the `sealed_turn_comments` table that only workspace mode wrote is dropped.
+  Experiment sealing is unchanged: `seal_workspace_evidence` still writes
+  `sealed_archives`, and `selection.store_for` still reads a sealed member's
+  archive.
 - **`fw.agent.step` contract v4**: adds `repaired_tool_name`.
 
 ### Fixed

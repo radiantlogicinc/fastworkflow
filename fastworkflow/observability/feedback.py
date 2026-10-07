@@ -239,13 +239,10 @@ def normalize_note(
     category: Any,
     subcategory: Any,
 ) -> dict[str, Any]:
-    """Check and normalize one note's own fields, wherever it will be stored.
+    """Check and normalize one note's own fields before it is stored.
 
-    The evidence store and `sealed_turn_comments` record the same row and must
-    refuse the same things, so the rules live here once rather than in two
-    writers that would drift the first time one of them was relaxed. Evidence
-    questions — does the turn exist, do the spans belong to it — are NOT asked
-    here: only the caller holding the evidence can answer those.
+    Evidence questions — does the turn exist, do the spans belong to it — are
+    NOT asked here: only the caller holding the evidence can answer those.
     """
     from fastworkflow.observability.store import (
         FEEDBACK_COMMENT_MAX_CHARS,
@@ -771,22 +768,17 @@ class TaskFeedbackPage:
         }
 
 
-def _sort_key(row: Mapping[str, Any]) -> tuple[str, str, str, int]:
+def _sort_key(row: Mapping[str, Any]) -> tuple[str, str, int]:
     """Deterministic chronology that never depends on which store answered.
 
-    Timestamp first, then the store id, then which file within that store the
-    row came out of, then the row id: two comments written in the same second
-    in two databases still have exactly one order, and paging over it cannot
-    show or skip a row because the merge happened to run differently. `origin`
-    is in the key because comments on a sealed archive's turns are kept in the
-    live DB's `sealed_turn_comments` (`control.SealedEvidence`), whose row ids
-    run independently of the archive's, so the row id alone does not break
-    every tie.
+    Timestamp first, then the store id, then the row id: two comments written
+    in the same second in two databases still have exactly one order, and
+    paging over it cannot show or skip a row because the merge happened to run
+    differently.
     """
     return (
         str(row.get("created_at") or ""),
         str(row.get("store_id") or ""),
-        str(row.get("origin") or ""),
         int(row.get("feedback_id") or 0),
     )
 
@@ -819,7 +811,7 @@ def _side_scope(side: Any) -> Optional[tuple[Any, Any, Any]]:
 def task_attempts(
     row: Mapping[str, Any],
     *,
-    experiment_ids: Sequence[str],
+    experiment_id: str,
     task_id: str,
 ) -> Optional[frozenset[int]]:
     """Which attempts OF THE QUERIED TASK one stored comment is about.
@@ -842,13 +834,8 @@ def task_attempts(
       it: a note anchored to the task as a whole is not evidence about one run,
       and hiding it from every attempt view would lose it entirely.
     - `None` means "no attempt is named", the same permissive answer.
-
-    `experiment_ids` is every id the task may be recorded under: a workspace
-    manifest gives an experiment a LOGICAL id while each segment keeps its own
-    local one, and a row written under the local id is the same task the reader
-    asked about (see `consolidate_task_feedback`).
     """
-    wanted = {str(value) for value in experiment_ids if value}
+    wanted = str(experiment_id)
     task = str(task_id)
     sides: list[tuple[Any, Any, Any]] = [
         (row.get("turn_experiment_id"), row.get("turn_task_id"), row.get("attempt"))
@@ -868,10 +855,10 @@ def task_attempts(
 
     matched = False
     attempts: set[int] = set()
-    for experiment_id, side_task, attempt in sides:
-        if experiment_id is None or side_task is None:
+    for side_experiment, side_task, attempt in sides:
+        if side_experiment is None or side_task is None:
             continue
-        if str(side_task) != task or str(experiment_id) not in wanted:
+        if str(side_task) != task or str(side_experiment) != wanted:
             continue
         matched = True
         if attempt is None:
@@ -893,13 +880,13 @@ def task_attempts(
 def _attempt_matches(
     row: Mapping[str, Any],
     *,
-    experiment_ids: Sequence[str],
+    experiment_id: str,
     task_id: str,
     attempt: Optional[int],
 ) -> bool:
     if attempt is None:
         return True
-    named = task_attempts(row, experiment_ids=experiment_ids, task_id=task_id)
+    named = task_attempts(row, experiment_id=experiment_id, task_id=task_id)
     return named is None or int(attempt) in named
 
 
@@ -916,7 +903,6 @@ def consolidate_task_feedback(
     attempt: Optional[int] = None,
     limit: int = 100,
     offset: int = 0,
-    local_experiment_ids: Optional[Sequence[str]] = None,
 ) -> TaskFeedbackPage:
     """Every authorized comment on one task, across attempts, turns and stores.
 
@@ -928,17 +914,6 @@ def consolidate_task_feedback(
     evidence may be split across the live store and one or more registered or
     archived ones, and this follows the stores it was given rather than
     assuming a default database.
-
-    `local_experiment_ids` is for the one case where the caller's experiment
-    id is not the one the evidence was written under: a workspace manifest
-    gives an experiment a LOGICAL id while each segment keeps its own local
-    one. Every store is asked about every local id rather than only its own,
-    because a comparison comment is ONE row, stored beside one of the two
-    archives, whose pair anchor names the OTHER segment's local id — asking
-    each store only about itself would hide the cross-store pair from both
-    task views. Rows deduplicate on `feedback_uid`, so the extra queries
-    cannot double-count. The page reports the logical id the reader asked
-    about.
     """
     if not isinstance(experiment_id, str) or not experiment_id:
         raise FeedbackError("experiment_id is required")
@@ -958,19 +933,13 @@ def consolidate_task_feedback(
         raise FeedbackError("limit and offset must not be negative")
 
     merged: dict[str, dict[str, Any]] = {}
-    scoped = list(local_experiment_ids) if local_experiment_ids else [experiment_id]
-    # Every id this task's evidence may be recorded under, for the attempt
-    # match: the logical id the reader asked about plus each segment's local
-    # one, because either may be the id a row's anchor names.
-    known_experiment_ids = tuple(dict.fromkeys([experiment_id, *scoped]))
     for store_id, store in sorted(stores.items()):
-        for local_id in scoped:
-            for row in store.list_task_feedback(
-                experiment_id=local_id, task_id=task_id
-            ):
-                row = dict(row)
-                row["store_id"] = store_id
-                merged.setdefault(dedupe_key(row), row)
+        for row in store.list_task_feedback(
+            experiment_id=experiment_id, task_id=task_id
+        ):
+            row = dict(row)
+            row["store_id"] = store_id
+            merged.setdefault(dedupe_key(row), row)
 
     rows = sorted(merged.values(), key=_sort_key)
     filtered = [
@@ -985,7 +954,7 @@ def consolidate_task_feedback(
         # annotated turn's: see `task_attempts`.
         and _attempt_matches(
             row,
-            experiment_ids=known_experiment_ids,
+            experiment_id=experiment_id,
             task_id=task_id,
             attempt=attempt,
         )

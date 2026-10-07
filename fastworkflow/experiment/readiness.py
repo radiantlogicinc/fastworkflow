@@ -13,8 +13,7 @@ that changes what a server does per turn:
 * the trained model version, because `___command_info/` is under no hashed
   root, so a retrain changes the system under measurement while every
   source fingerprint stays byte-identical;
-* the observability regime in effect in THIS process -- capture profile,
-  policy version, whether retention pruning is suppressed;
+* whether retention pruning is suppressed in THIS process;
 * the served command count and the process id.
 
 Omitted, with the reason, so a reader of the ido snapshot knows why the
@@ -29,8 +28,8 @@ fields are missing rather than assuming the port forgot them:
   `FW_PLAN_WALL_TIME_LIMIT_SECONDS` or `FW_TURN_DEADLINE_SECONDS`. A snapshot
   that reported them would describe a setting with no effect.
 
-**Credential-free.** The only environment names consulted are the three
-FW_OBS_* switches named below, every one a profile name or a flag. No path,
+**Credential-free.** The only environment name consulted is the FW_OBS_*
+switch named below, a flag. No path,
 no key, no token, no env-file value reaches the snapshot; the fingerprint is
 a content hash and the model version is a generated id.
 """
@@ -41,11 +40,6 @@ import os
 from typing import Any, Optional
 
 from fastworkflow.observability import store as observability_store
-from fastworkflow.observability.capture_policy import (
-    CAPTURE_POLICY_VERSION,
-    CaptureProfileError,
-    policy_for_profile,
-)
 from fastworkflow.runtime_manifest import RuntimeMetadata, get_runtime_metadata
 
 
@@ -94,32 +88,6 @@ def workflow_model_legacy_layout(workflow_path: str) -> Optional[bool]:
         return None
 
 
-def capture_regime() -> dict[str, Any]:
-    """The capture profile and policy version this process records under.
-
-    Resolved the way the sink resolves it (`FW_OBS_CAPTURE_PROFILE`, process
-    env first, then the workflow env file, then the default) and validated
-    through `capture_policy.policy_for_profile`, which refuses an unknown name
-    rather than falling back. A profile the sink would refuse to start under
-    is reported as invalid here rather than raising, so the probe can say
-    "not ready" with the reason instead of failing to answer.
-    """
-    name = observability_store._env(
-        observability_store.CAPTURE_PROFILE_VAR,
-        observability_store._DEFAULT_CAPTURE_PROFILE,
-    )
-    try:
-        policy_for_profile(name)
-        valid = True
-    except CaptureProfileError:
-        valid = False
-    return {
-        "capture_profile": name,
-        "capture_profile_valid": valid,
-        "capture_policy_version": CAPTURE_POLICY_VERSION,
-    }
-
-
 def runtime_readiness_snapshot(
     workflow_path: str,
     *,
@@ -138,7 +106,6 @@ def runtime_readiness_snapshot(
         get_runtime_metadata(workflow_path) if metadata is None else metadata
     )
     registered = effective_metadata is not None
-    regime = capture_regime()
 
     snapshot: dict[str, Any] = {
         "runtime_metadata_registered": registered,
@@ -172,23 +139,16 @@ def runtime_readiness_snapshot(
         "pruning_suppressed": observability_store.pruning_suppressed(),
         "pid": os.getpid(),
     }
-    snapshot.update(regime)
-    snapshot["configuration_valid"] = bool(
-        registered and regime["capture_profile_valid"]
-    )
+    snapshot["configuration_valid"] = registered
     return snapshot
 
 
 def snapshot_env_names() -> tuple[str, ...]:
     """Every environment name the snapshot consults. Pinned by test."""
-    return (
-        observability_store.CAPTURE_PROFILE_VAR,
-        observability_store.SUPPRESS_PRUNE_VAR,
-    )
+    return (observability_store.SUPPRESS_PRUNE_VAR,)
 
 
 __all__ = [
-    "capture_regime",
     "runtime_readiness_snapshot",
     "snapshot_env_names",
     "workflow_model_legacy_layout",

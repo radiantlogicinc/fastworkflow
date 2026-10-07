@@ -101,11 +101,11 @@ class CommandExecutor(CommandExecutorInterface):
             },
         )
 
-        # Context BEFORE execution (arch §12.0 delta 2, FW-REQ-002). Gated on a
-        # span having actually opened, for the same reason the attribute prep
-        # below is: with tracing off this work must not run at all.
+        # Context type BEFORE execution (arch §12.0 delta 2). Gated on a span
+        # having actually opened, for the same reason the attribute prep below
+        # is: with tracing off this work must not run at all.
         context_before = (
-            tracing.context_handle(cls._active_workflow(chat_session))
+            tracing.context_type(cls._active_workflow(chat_session))
             if span is not None
             else None
         )
@@ -202,7 +202,7 @@ class CommandExecutor(CommandExecutorInterface):
         consequence = None
         if span is not None:
             workflow = cls._active_workflow(chat_session)
-            context_after = tracing.context_handle(workflow)
+            context_after = tracing.context_type(workflow)
             consequence = tracing.consequence_assessment(
                 getattr(workflow, "folderpath", None),
                 command_output.command_name or None,
@@ -313,7 +313,7 @@ class CommandExecutor(CommandExecutorInterface):
 
         Duck-typed and never raising, like the rest of the tracing seam: this is
         called only to build capture attributes, and a host that cannot answer
-        must degrade to an absent handle rather than fail the command.
+        must degrade to an absent context type rather than fail the command.
         """
         try:
             return chat_session.get_active_workflow()

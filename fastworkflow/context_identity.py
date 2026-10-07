@@ -24,9 +24,7 @@ that already declares ``get_parent``, ``get_displayname`` and ``enter_command``:
 A context that declares neither prints its NAME alone. Nothing here derives an
 identifier from anything else: ``id()`` is a memory address, ``get_displayname``
 is a display string a workflow may or may not derive from the instance, and a
-guessed identifier that looks concrete is worse than an honest absence -- the
-same reasoning ``tracing.context_handle`` gives for refusing to mint an
-``instance_key``.
+guessed identifier that looks concrete is worse than an honest absence.
 """
 from __future__ import annotations
 

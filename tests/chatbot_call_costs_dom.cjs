@@ -394,7 +394,7 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
    * ================================================================ */
   /* Both payloads are the genuine output of `project_execution` over the same
      temp store, for a reference that names a turn the store does not hold --
-     the sealed-archive and pruned-turn case. Rendered through the shipped
+     the pruned-turn case. Rendered through the shipped
      helper, so what is asserted is what the pane says, not what a reducer
      returns. The two absences sit in ONE pane here on purpose: a reader must
      be able to tell "we cannot see what this run spent" from "this run spent

@@ -3,8 +3,7 @@
 Integration throughout, per `.cursor/rules/testing_rules.mdc`: real
 `ObservabilityStore` databases on disk, attempts written through the real
 `ExperimentController`, real span rows and real turn records, the real control
-tables of the live DB, the real HTTP server over a real socket and a real sealed
-archive. No mocks: the whole question here is whether pooled figures agree
+tables of the live DB and the real HTTP server over a real socket. No mocks: the whole question here is whether pooled figures agree
 with the evidence they claim to be about, and a fake store would not test it.
 
 What these tests defend, in order of how badly each would mislead:
@@ -51,7 +50,6 @@ from tests.test_execution_comparison import (
     _write,
 )
 from tests.test_execution_comparison import _turn_row as _evidence_turn_row
-from tests.test_selection_api import _sealed_server
 from tests.test_usage_and_cache_rollups import _llm_call
 
 # `world` and `server` are the two-experiment, two-database workflow the
@@ -599,7 +597,7 @@ class TestSources:
         ]
         with pytest.raises(sr.SelectionIncoherent) as caught:
             sr.aggregate_selected_runs(
-                experiment_id="e", task_id="t", source_id=None, store_id=None,
+                experiment_id="e", task_id="t", store_id=None,
                 requested=[1, 2], duplicate_requests=0, recorded_attempts=[1, 2],
                 candidate_rows=rows, reader=_RefusingReader(),
             )
@@ -618,7 +616,7 @@ class TestSources:
         ]
         with pytest.raises(sr.SelectionIncoherent) as caught:
             sr.aggregate_selected_runs(
-                experiment_id="e", task_id="t", source_id=None, store_id=None,
+                experiment_id="e", task_id="t", store_id=None,
                 requested=[1, 2], duplicate_requests=0, recorded_attempts=[1, 2],
                 candidate_rows=rows, reader=_RefusingReader(),
             )
@@ -713,12 +711,12 @@ class TestDigest:
         elsewhere = self._aggregate(
             runs_world, resolved, reader, rows, task_id="another-task"
         )
-        other_source = self._aggregate(
-            runs_world, resolved, reader, rows, source_id="another-source"
+        other_store = self._aggregate(
+            runs_world, resolved, reader, rows, store_id="another-store"
         )
         assert here["members"][0]["dispatches"] == 0
         assert len({here["evidence_digest"], elsewhere["evidence_digest"],
-                    other_source["evidence_digest"]}) == 3
+                    other_store["evidence_digest"]}) == 3
 
 
 class TestPartialEvidence:
@@ -957,7 +955,7 @@ class TestValidation:
 
 
 # ----------------------------------------------------------------------
-# Over a real socket, and over a sealed archive
+# Over a real socket
 # ----------------------------------------------------------------------
 
 
@@ -1075,66 +1073,3 @@ def test_a_drilldown_refuses_evidence_that_no_longer_supports_the_totals(
         ),
     )
 
-
-class TestSealedArchive:
-    """A sealed archive carries EVIDENCE, and summarizing the evidence of runs
-    a reader names is a read of it. It is answered, not refused with the
-    decisions wording, which is about winners and best runs."""
-
-    def test_an_archive_summarizes_the_runs_a_reader_names(
-        self, tmp_path, monkeypatch
-    ):
-        srv, thread = _sealed_server(tmp_path, monkeypatch)
-        try:
-            status, payload = _request(
-                srv,
-                "/api/experiments/logical/tasks/task/selected-runs"
-                "?attempt=1&attempt=2",
-            )
-            assert status == 200, payload
-            assert payload["sealed"] is True
-            assert [member["attempt"] for member in payload["members"]] == [1, 2]
-            assert payload["command_summary"]["totals"]["dispatches"] == 3
-            status, refused = _request(
-                srv,
-                "/api/experiments/logical/tasks/task/selected-runs"
-                "?attempt=1&left_pass=teacher",
-            )
-            assert status == 400
-            assert refused["refused"] == "unsupported_parameter"
-        finally:
-            srv.shutdown()
-            thread.join(timeout=5)
-
-    def test_members_keep_both_of_an_archives_names(self, tmp_path, monkeypatch):
-        """The reference names the archive by evidence identity; every
-        workspace turn and span route is addressed by the manifest's own
-        name. A drill-down that used the wrong one would not open."""
-        srv, thread = _sealed_server(tmp_path, monkeypatch)
-        try:
-            payload = _request(
-                srv,
-                "/api/experiments/logical/tasks/task/selected-runs?attempt=1",
-            )[1]
-            member = payload["members"][0]
-            assert member["manifest_store_id"] == "sealed"
-            assert member["store_id"] != "sealed"
-            assert member["execution_ref"]["store_id"] == member["store_id"]
-            contributors = [
-                contributor
-                for group in payload["command_summary"]["groups"]
-                for contributor in group["contributors"]
-            ]
-            assert {c["store_id"] for c in contributors} == {member["store_id"]}
-            # Validation answers under the same scope, so its digest is the
-            # one the summary published.
-            status, validation = _request(
-                srv,
-                "/api/experiments/logical/tasks/task/selected-runs/validation"
-                "?attempt=1&expect=" + payload["evidence_digest"],
-            )
-            assert status == 200
-            assert validation["stale"] is False
-        finally:
-            srv.shutdown()
-            thread.join(timeout=5)

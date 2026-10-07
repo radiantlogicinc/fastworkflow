@@ -3,7 +3,7 @@
 The ido source tests pinned planner arms, packing and catalogue fields; none
 of those exist here and none are ported. What is pinned instead is the
 3.3-shaped snapshot: manifest identity and feature vector, the trained model
-version, the observability regime, the served command count, the pid -- and,
+version, whether pruning is suppressed, the served command count, the pid -- and,
 above all, that nothing resembling a credential can reach it.
 """
 
@@ -22,7 +22,6 @@ from fastworkflow.runtime_manifest import (
     register_runtime_metadata,
 )
 from fastworkflow.experiment.readiness import (
-    capture_regime,
     runtime_readiness_snapshot,
     snapshot_env_names,
     workflow_model_legacy_layout,
@@ -41,9 +40,6 @@ KEPT_FIELDS = {
     "workflow_model_legacy_layout",
     "observability_enabled",
     "pruning_suppressed",
-    "capture_profile",
-    "capture_profile_valid",
-    "capture_policy_version",
     "pid",
     "configuration_valid",
 }
@@ -158,19 +154,15 @@ def test_an_unregistered_runtime_is_described_but_not_valid(tmp_path):
 
 
 # ----------------------------------------------------------------------
-# Observability regime
+# Observability configuration
 # ----------------------------------------------------------------------
 
 
-def test_the_regime_is_read_the_way_the_sink_reads_it(tmp_path, monkeypatch):
-    monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
+def test_pruning_suppression_is_read_the_way_the_sink_reads_it(tmp_path, monkeypatch):
     monkeypatch.setenv(obs.SUPPRESS_PRUNE_VAR, "1")
 
     snapshot = runtime_readiness_snapshot(str(tmp_path), metadata=_metadata())
 
-    assert snapshot["capture_profile"] == "evidence"
-    assert snapshot["capture_profile_valid"] is True
-    assert snapshot["capture_policy_version"] == obs.CAPTURE_POLICY_VERSION
     assert snapshot["pruning_suppressed"] is True
     assert snapshot["configuration_valid"] is True
 
@@ -184,25 +176,6 @@ def test_in_process_pruning_suppression_is_visible(tmp_path, monkeypatch):
         assert runtime_readiness_snapshot(str(tmp_path), metadata=_metadata())[
             "pruning_suppressed"
         ] is True
-
-
-def test_an_unknown_capture_profile_is_reported_invalid_not_raised(
-    tmp_path, monkeypatch
-):
-    """The sink refuses to start under a profile it does not know. The probe
-    must say so with the reason rather than fail to answer."""
-    monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidnce")
-
-    regime = capture_regime()
-    snapshot = runtime_readiness_snapshot(str(tmp_path), metadata=_metadata())
-
-    assert regime == {
-        "capture_profile": "evidnce",
-        "capture_profile_valid": False,
-        "capture_policy_version": obs.CAPTURE_POLICY_VERSION,
-    }
-    assert snapshot["capture_profile_valid"] is False
-    assert snapshot["configuration_valid"] is False
 
 
 # ----------------------------------------------------------------------
@@ -273,7 +246,7 @@ def test_the_snapshot_carries_no_value_from_any_secret_looking_env_var(
     sentinels = {
         "FW_LLM_API_KEY": "sk-plant-key-1",
         "OPENAI_API_KEY": "sk-plant-key-2",
-        "FW_CAPTURE_HMAC_KEY": "plant-hmac-key",
+        "SOME_SERVICE_HMAC_KEY": "plant-hmac-key",
         "SOME_SECRET": "plant-secret",
         "AUTH_TOKEN": "plant-token",
         "JWT_TOKEN_SECRET": "plant-jwt",
@@ -314,13 +287,10 @@ def test_the_snapshot_carries_no_value_from_any_secret_looking_env_var(
 
 
 def test_the_env_names_the_snapshot_consults_are_pinned():
-    """Two profile/pruning names and nothing else. A new env read must be
-    added here deliberately, with its credential-freeness argued. The
-    retired recording switch is not among them: recording is always on."""
-    assert snapshot_env_names() == (
-        obs.CAPTURE_PROFILE_VAR,
-        obs.SUPPRESS_PRUNE_VAR,
-    )
+    """The pruning name and nothing else. A new env read must be added here
+    deliberately, with its credential-freeness argued. The retired recording
+    switch is not among them: recording is always on."""
+    assert snapshot_env_names() == (obs.SUPPRESS_PRUNE_VAR,)
     assert all(
         not any(word in name for word in ("KEY", "SECRET", "TOKEN", "PASSWORD"))
         for name in snapshot_env_names()

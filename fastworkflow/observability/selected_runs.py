@@ -237,18 +237,13 @@ def population_scope_id(
     *,
     experiment_id: str,
     task_id: str,
-    source_id: Optional[str] = None,
     store_id: Optional[str],
-    segment_id: Optional[str] = None,
-    segments: Optional[Sequence[str]] = None,
-    sealed: bool = False,
     selection_rule: str = SELECTION_ALL_FINISHED,
 ) -> str:
     """The identity a population baseline is bound to.
 
-    Resolved from AUTHORITATIVE metadata -- the source the control authorized,
-    the store it resolves to, the archive segments in play -- and never from a
-    member, so a population with no finished runs at all is bound exactly as
+    Resolved from AUTHORITATIVE metadata -- the store the control's source
+    resolves to -- and never from a member, so a population with no finished runs at all is bound exactly as
     tightly as a full one.
     """
     return _digest(
@@ -257,11 +252,7 @@ def population_scope_id(
             "basis": POPULATION_BASIS,
             "experiment_id": experiment_id,
             "task_id": task_id,
-            "source_id": source_id,
             "store_id": store_id,
-            "segment_id": segment_id,
-            "segments": None if segments is None else sorted(str(s) for s in segments),
-            "sealed": bool(sealed),
             "selection_rule": selection_rule,
         },
     )
@@ -300,14 +291,10 @@ def build_task_population(
     selection_rule: str,
     experiment_id: str,
     task_id: str,
-    source_id: Optional[str] = None,
     store_id: Optional[str],
     recorded_attempts: Sequence[int],
     finished_attempts: Sequence[int],
     unfinished_attempts: Sequence[int],
-    segment_id: Optional[str] = None,
-    segments: Optional[Sequence[str]] = None,
-    sealed: bool = False,
     planned: Optional[int] = None,
     planned_source: Optional[str] = None,
 ) -> dict[str, Any]:
@@ -324,11 +311,7 @@ def build_task_population(
     scope_id = population_scope_id(
         experiment_id=experiment_id,
         task_id=task_id,
-        source_id=source_id,
         store_id=store_id,
-        segment_id=segment_id,
-        segments=segments,
-        sealed=sealed,
         selection_rule=selection_rule,
     )
     listed = unfinished[:MAX_LISTED_UNFINISHED]
@@ -341,8 +324,6 @@ def build_task_population(
             finished_attempts=finished,
         ),
         "digest_basis": POPULATION_BASIS,
-        "segment_id": segment_id,
-        "sealed": bool(sealed),
         "recorded": len(recorded),
         "finished": len(finished),
         "unfinished": len(unfinished),
@@ -436,8 +417,8 @@ def population_drift(
     supplied_scope = str(baseline.get("population_scope") or "")
     if supplied_scope != scope_id:
         raise PopulationScopeMismatch(
-            "this population baseline was taken under a different source, "
-            "experiment, task, archive segment or selection rule, so it says "
+            "this population baseline was taken under a different store, "
+            "experiment, task or selection rule, so it says "
             "nothing about the population this request resolved; attempt "
             "numbers alone are not a scope",
             reason="foreign_population_baseline",
@@ -646,14 +627,7 @@ class SelectedRun:
             "evidence_label": row.get("evidence_label"),
             "is_best": bool(row.get("is_best")),
             "is_reference": bool(row.get("is_reference")),
-            "segment_id": row.get("segment_id"),
             "store_id": None if self.ref is None else self.ref.store_id,
-            # An archive has TWO names and they are not interchangeable: the
-            # reference carries the evidence identity, and every workspace
-            # turn/span route is addressed by the manifest's own name for the
-            # same archive. A drill-down that used the identity would not
-            # open. Absent outside a workspace, where there is one name.
-            "manifest_store_id": row.get("manifest_store_id"),
             "ref_id": None if self.ref is None else self.ref.ref_id(),
             "execution_ref": None if self.ref is None else self.ref.as_dict(),
             # The exact contribution, so a reader can check the pooled figures
@@ -1063,7 +1037,6 @@ def _build(
     *,
     experiment_id: str,
     task_id: str,
-    source_id: Optional[str] = None,
     store_id: Optional[str],
     requested: Sequence[int],
     duplicate_requests: int,
@@ -1071,7 +1044,6 @@ def _build(
     excluded: Sequence[Mapping[str, Any]],
     unfinished: Sequence[int],
     not_recorded: Sequence[int],
-    sealed: bool,
     selection_rule: str = SELECTION_EXPLICIT,
     task_population: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
@@ -1117,9 +1089,7 @@ def _build(
     payload: dict[str, Any] = {
         "experiment_id": experiment_id,
         "task_id": task_id,
-        "source_id": source_id,
         "store_id": store_id,
-        "sealed": bool(sealed),
         "scope": {
             "kind": METRIC_SCOPE,
             # How this member set was arrived at: a list a caller sent, or the
@@ -1158,9 +1128,7 @@ def _build(
             "scope": {
                 "experiment_id": experiment_id,
                 "task_id": task_id,
-                "source_id": source_id,
                 "store_id": store_id,
-                "sealed": bool(sealed),
                 "requested_attempts": list(requested),
             },
             "members": [
@@ -1194,22 +1162,20 @@ def aggregate_selected_runs(
     *,
     experiment_id: str,
     task_id: str,
-    source_id: Optional[str] = None,
     store_id: Optional[str],
     requested: Sequence[int],
     duplicate_requests: int,
     recorded_attempts: Sequence[int],
     candidate_rows: Sequence[Mapping[str, Any]],
     reader: Any,
-    sealed: bool = False,
     selection_rule: str = SELECTION_EXPLICIT,
     task_population: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """One summary over exactly the runs a caller named.
 
     `candidate_rows` are the attempt rows of this task as the CALLER's own
-    resolver produced them -- the live control's authorized source, or one
-    sealed archive. This function resolves no source of its own and looks for
+    resolver produced them -- the live control's authorized source. This
+    function resolves no source of its own and looks for
     no run: it is handed the population and the reader, which is what keeps
     the source boundary in the route that can enforce it.
     """
@@ -1222,7 +1188,6 @@ def aggregate_selected_runs(
     return _build(
         experiment_id=experiment_id,
         task_id=task_id,
-        source_id=source_id,
         store_id=store_id,
         requested=requested,
         duplicate_requests=duplicate_requests,
@@ -1230,7 +1195,6 @@ def aggregate_selected_runs(
         excluded=excluded,
         unfinished=unfinished,
         not_recorded=not_recorded,
-        sealed=sealed,
         selection_rule=selection_rule,
         task_population=task_population,
     )
@@ -1270,7 +1234,6 @@ def validate_selection(
     *,
     experiment_id: str,
     task_id: str,
-    source_id: Optional[str] = None,
     store_id: Optional[str],
     requested: Sequence[int],
     recorded_attempts: Sequence[int],
@@ -1278,7 +1241,6 @@ def validate_selection(
     reader: Any,
     expect: Optional[str] = None,
     expect_members: Optional[Mapping[int, str]] = None,
-    sealed: bool = False,
     task_population: Optional[Mapping[str, Any]] = None,
     population_baseline: Optional[Mapping[str, Any]] = None,
     finished_attempts: Sequence[int] = (),
@@ -1347,7 +1309,6 @@ def validate_selection(
     digest = _build(
         experiment_id=experiment_id,
         task_id=task_id,
-        source_id=source_id,
         store_id=store_id,
         requested=requested,
         duplicate_requests=0,
@@ -1355,7 +1316,6 @@ def validate_selection(
         excluded=excluded,
         unfinished=unfinished,
         not_recorded=not_recorded,
-        sealed=sealed,
     )["evidence_digest"]
     # A matching RESULT digest is a statement about every member, because
     # each member's digest is inside it. A differing one says something
@@ -1413,7 +1373,6 @@ def validate_selection(
     return {
         "experiment_id": experiment_id,
         "task_id": task_id,
-        "source_id": source_id,
         "store_id": store_id,
         "attempts": list(requested),
         "expect": expect,

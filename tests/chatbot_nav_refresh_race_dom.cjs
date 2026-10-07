@@ -1,18 +1,16 @@
 /* A selected turn survives the navigation refresh that lands on top of it.
  *
  * The product race, driven deterministically: `/api/navigation` is delayed in
- * transit so its response is GUARANTEED to arrive after a scoped turn has
+ * transit so its response is GUARANTEED to arrive after a turn has
  * been selected and while that turn's own trace is still loading. That window
  * is the bug — `attachTraceHierarchy` can only align a turn whose trace has
  * already arrived, so a refresh landing inside it used to find no path in the
  * rail and repaint "No conversations yet" over the trace.
  *
- * Both refreshes are exercised: the one startup fires, and a later one, which
- * in workspace mode is the dangerous case because the rail may have no path
- * to a scoped turn at all. */
+ * Both refreshes are exercised: the one startup fires, and a later one. */
 const assert = require('node:assert/strict');
 const {JSDOM, VirtualConsole} = require(process.argv[2] + '/node_modules/jsdom');
-const url = process.argv[3], storeId = process.argv[4], turnKey = process.argv[5];
+const url = process.argv[3], turnKey = process.argv[4];
 const errors = [];
 const console = new VirtualConsole();
 console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.message); });
@@ -35,13 +33,13 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
   const detailText = () => d.getElementById('detail').textContent;
 
   d.getElementById('modeDebug').click();
-  await until(() => w.session && w.session.workspace_mode, 'the session');
+  await until(() => w.session, 'the session');
 
   /* Deliberately NOT waiting for startup to finish. The navigation read is
      still in flight and its response is held back by the proxy, so selecting
      a turn now puts the selection squarely inside the window the refresh
      used to overwrite. */
-  w.selectWorkspaceTurn(storeId, turnKey);
+  w.selectTurn(turnKey);
   assert.equal(w.state.turnKey, turnKey, 'the turn is selected synchronously');
 
   /* The trace arrives and stays. Without the guard the delayed navigation
@@ -55,8 +53,7 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
     'the refresh cleared the selection out from under the open trace');
 
   /* Now the periodic case: a refresh fired long after the turn is fully
-     loaded and rendered. In workspace mode the rail may hold no path to a
-     scoped turn, so this is not a one-time startup problem. */
+     loaded and rendered, so this is not a one-time startup problem. */
   await w.refreshConvs();
   await new Promise(r => setTimeout(r, 100));
   assert.equal(w.state.turnKey, turnKey,
@@ -69,8 +66,8 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
 
   /* And the empty state is still reachable the way it is meant to be: by a
      navigation gesture, not by a background read. The Conversations tab has
-     nothing selected in a sealed workspace, so switching to it is exactly
-     the case the placeholder exists for. */
+     nothing selected, so switching to it is exactly the case the
+     placeholder exists for. */
   w.setNavigationTab('conversations');
   await until(() => detailText().includes('No conversations yet'),
     'the tab empty state');

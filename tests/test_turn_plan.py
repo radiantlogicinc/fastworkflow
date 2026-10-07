@@ -97,7 +97,7 @@ def test_a_text_plan_the_parser_cannot_read_is_no_plan_not_a_failed_turn():
 
 
 @pytest.mark.skip(reason="structured planning disabled 2026-09-28 (owner decision)")
-def test_planner_span_subjects_pass_the_capture_policy():
+def test_planner_span_subjects_are_credential_scrubbed():
     secret = "Authorization: Bearer sk-abcdefghijklmnopqrstuvwxyz123456"
     plan = TurnPlan(steps=[PlanStep(text="Find them")],
                     subjects=[PlanSubject(name="Alan Cooper", kind="person"),

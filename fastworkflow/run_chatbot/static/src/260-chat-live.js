@@ -56,7 +56,7 @@ function tmActivityPanel(bubbleMsg) {
       }
       if (body !== null && body !== undefined && body !== "") {
         var text = el("div", "actText");
-        appendPoliced(text, body);
+        text.appendChild(document.createTextNode(String(body)));
         row.appendChild(text);
       }
       list.appendChild(row);
@@ -452,11 +452,6 @@ function tmClearReuse() {
 }
 
 function tmReuseRecordedMessage(text, source) {
-  if (session && session.workspace_mode) {
-    showNotice("This is a read-only workspace", "error",
-      "There is no live chat session here to send a message through.");
-    return;
-  }
   setTopMode("test");
   var input = document.getElementById("chatInput");
   input.value = text;                       /* verbatim, line breaks and all */
@@ -535,17 +530,15 @@ function tmSortTurnsChronologically(turns) {
 }
 
 function tmRenderStoredTurn(turn, autoloadArtifacts) {
-  /* Stored turns come back through the policed columns, so a withheld
-     message or answer paints as its marker rather than as a hash. */
   if (turn.user_message) {
-    tmBubble("user", policedText(turn.user_message));
+    tmBubble("user", turn.user_message);
   }
   var agent = tmBubble("agent", "…");
   tmRenderTurn(agent, {
     turn_key: turn.turn_key,
     status: turn.status,
     success: !!turn.success,
-    answer: policedText(turn.answer),
+    answer: turn.answer,
     command_outputs: []
   });
   tmAttachStoredArtifacts(agent, turn.turn_key, autoloadArtifacts);

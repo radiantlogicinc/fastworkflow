@@ -245,16 +245,12 @@ class TurnOutput(BaseModel):
 # give each of them two homes that can disagree, which is the outcome that note
 # exists to prevent.
 #
-# **The capture policy does not reach here.** ``observability_store.
-# _apply_capture_policy`` walks exactly ``record["turn_output"]
-# ["command_outputs"]`` — parameters, response text, artifacts. A new top-level
-# list on ``TurnResult`` is dumped straight into ``record_json`` unpoliced, so
-# under the evidence profile it would be the one place default-deny does not
-# apply. Every field below is therefore a framework-minted opaque id, a closed
-# vocabulary defined in this module, or a count: no free text, no entity
-# content, nothing a user or a workflow author supplies. That is the rule
-# §6.6.1 already imposes on uncertainty signals, for the same reason — a record
-# no profile will filter has to be safe to retain under every profile.
+# **Nothing here is free text.** A top-level list on ``TurnResult`` is dumped
+# straight into ``record_json`` as it stands. Every field below is therefore a
+# framework-minted opaque id, a closed vocabulary defined in this module, or a
+# count: no free text, no entity content, nothing a user or a workflow author
+# supplies. That is the rule §6.6.1 already imposes on uncertainty signals, for
+# the same reason — a record retained whole has to be safe to retain.
 #
 # **Spans are best-effort; turn records are the evidence.**
 # ``observability_store.WriterHealthDelta`` states the asymmetry: a dropped span
@@ -373,7 +369,7 @@ class RoutingEvent(_CapturedRecord):
     point at: the tier and the outcome ARE the event. ``span_id`` reaches the
     ``fw.nlu.intent`` span that carries the utterance, the context name, the
     confidences and the candidate names — every one of which is either entity
-    content or workflow-author text, all of which the span's own policy governs,
+    content or workflow-author text, all of which the span already records,
     and none of which this record may therefore repeat.
 
     One event per attempt, not per turn. The CME wildcard command walks up the

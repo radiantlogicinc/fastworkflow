@@ -109,7 +109,6 @@ class RedactionFixture(unittest.TestCase):
         self._restore_env: dict[str, str | None] = {}
         for name in (
             REDACTION_ENV,
-            "FW_OBS_CAPTURE_PROFILE",
             API_KEY_VAR,
         ):
             self._restore_env[name] = os.environ.pop(name, None)
@@ -248,17 +247,15 @@ class StoredBytesTests(RedactionFixture):
                 self.assertEqual(stored["text_sha256"], digest)
 
 
-class CapturePolicyRecordTests(RedactionFixture):
+class CaptureRecordTests(RedactionFixture):
     """An archive that can be asked about its own fidelity."""
 
-    def test_the_policy_version_is_recorded_with_redaction_on(self) -> None:
+    def test_the_record_is_kept_with_redaction_on(self) -> None:
         self.plant_env_secret()
         archive, _ = self.persist(response_with_credential())
         record = archive.capture_record(chatbot_scope(), "O1")
-        self.assertEqual(
-            record["capture_policy_version"], obs.CAPTURE_POLICY_VERSION
-        )
-        self.assertEqual(record["capture_profile"], "debug")
+        self.assertNotIn("capture_policy_version", record)
+        self.assertNotIn("capture_profile", record)
         self.assertEqual(record["redaction"], REDACTION_ON)
         self.assertTrue(record["redacted"])
         self.assertEqual(
@@ -266,21 +263,15 @@ class CapturePolicyRecordTests(RedactionFixture):
             len(response_with_credential().encode("utf-8")),
         )
 
-    def test_the_policy_version_is_recorded_with_redaction_off(self) -> None:
+    def test_the_record_is_kept_with_redaction_off(self) -> None:
         os.environ[REDACTION_ENV] = REDACTION_OFF
         archive, _ = self.persist(response_with_credential())
         record = archive.capture_record(chatbot_scope(), "O1")
-        self.assertEqual(
-            record["capture_policy_version"], obs.CAPTURE_POLICY_VERSION
-        )
         self.assertEqual(record["redaction"], REDACTION_OFF)
         self.assertFalse(record["redacted"])
-        # No policy was consulted, and that is not the same as the `debug`
-        # profile having been consulted and done nothing.
-        self.assertEqual(record["capture_profile"], "")
 
     def test_a_redacted_row_is_distinguishable_from_one_with_no_secret(self) -> None:
-        """The requirement the version alone does not meet."""
+        """The requirement the redaction mode alone does not meet."""
         archive, _ = self.persist(response_with_credential(), alias="O1",
                                   release=False)
         archive.persist(
@@ -294,9 +285,6 @@ class CapturePolicyRecordTests(RedactionFixture):
         leaky = archive.capture_record(chatbot_scope(), "O1")
         clean = archive.capture_record(chatbot_scope(), "O2")
         self.assertEqual(leaky["redaction"], clean["redaction"], REDACTION_ON)
-        self.assertEqual(
-            leaky["capture_policy_version"], clean["capture_policy_version"]
-        )
         self.assertTrue(leaky["redacted"])
         self.assertFalse(clean["redacted"])
 
@@ -312,11 +300,10 @@ class CapturePolicyRecordTests(RedactionFixture):
             tables = {row[0] for row in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
             record = conn.execute(
-                "SELECT capture_policy_version, capture_profile, redaction, "
-                "redacted, raw_utf8_bytes FROM offload_evidence"
+                "SELECT redaction, redacted, raw_utf8_bytes FROM offload_evidence"
             ).fetchone()
         self.assertNotIn("observation_capture_policy", tables)
-        self.assertEqual(record[2], REDACTION_ON)
+        self.assertEqual(record[0], REDACTION_ON)
         self.assertFalse(hasattr(archive_module, "UNKNOWN_CAPTURE_RECORD"))
         # An alias nothing was stored for has no record, and says so.
         self.assertIsNone(

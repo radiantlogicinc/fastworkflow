@@ -7,7 +7,7 @@
    evidence would show up here. */
 const assert = require('node:assert/strict');
 const {JSDOM, VirtualConsole} = require(process.argv[2] + '/node_modules/jsdom');
-const url = process.argv[3], multilineTurn = process.argv[4], withheldTurn = process.argv[5];
+const url = process.argv[3], multilineTurn = process.argv[4], otherTurn = process.argv[5];
 const multiline = process.argv[6];
 const errors = [];
 const requested = [];
@@ -73,18 +73,16 @@ virtualConsole.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push
   await new Promise(r => setTimeout(r, 150));
   assert.deepEqual(requested.slice(editedFrom), [], 'editing the copy sent something');
 
-  /* ---- a withheld message has nothing to reuse -------------------------- */
-  w.selectTurn(withheldTurn);
-  await until(() => d.querySelector('#detail .msgBlock')
-      && d.querySelector('#detail .msgBlock').textContent.includes('withheld by policy'),
-    'the withheld turn never rendered its message block');
-  assert.equal(reuseButton(), undefined,
-    'a message the capture policy withheld was offered for reuse');
-  assert.match(d.querySelector('#detail .reuseAction').textContent,
-    /not available in full/);
-  /* Reopening the reusable turn restores the action. */
+  /* ---- another recorded turn offers its own message --------------------- */
+  w.selectTurn(otherTurn);
+  await until(() => reuseButton() && d.querySelector('#detail .msgBlock')
+      && !d.querySelector('#detail .msgBlock').textContent.includes('second line'),
+    'the other recorded turn never offered its message');
+  /* Reopening the first turn restores its message and its action. */
   w.selectTurn(multilineTurn);
-  await until(() => reuseButton(), 'the reusable turn lost its action');
+  await until(() => reuseButton()
+      && d.querySelector('#detail .msgBlock').textContent.includes('second line'),
+    'the reusable turn lost its action');
 
   /* ---- only an explicit send sends -------------------------------------
      The composer is pointed at this server, which is not a workflow server:

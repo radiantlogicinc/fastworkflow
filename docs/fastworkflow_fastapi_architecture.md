@@ -90,10 +90,10 @@ Based on: [fastworkflow_fastapi_spec.md](mdc:docs/fastworkflow_fastapi_spec.md)
     (`observations_analysis` → `observation` | `analysis`; `conclusions` →
     `what_went_right` | `what_went_wrong`; `recommendations` → `what_to_do` |
     `what_not_to_do`) and the anchor against the evidence it names.
-  - Append-only. Evidence that cannot be written to is annotated beside itself
-    rather than modified.
+  - Append-only, in the workflow's live evidence database. A database this
+    process cannot write refuses the comment rather than diverting it.
   - Reads are separate GETs: `/api/feedback-notes`, `/api/task-feedback`,
-    `/api/workspace/task-feedback`, `/api/feedback-taxonomy`.
+    `/api/feedback-taxonomy`.
 
 - **POST `/admin/dump_all_conversations`**
   - Iterate all channels and conversations in Rdict; write a JSONL file to the provided folder and return the file path.

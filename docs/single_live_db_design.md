@@ -12,9 +12,10 @@
 ## 0. Goal
 
 Each workflow has exactly one live evidence DB:
-`<state_root>/workflows/<workflow_id>/observability.sqlite3` (schema v7). It
+`<state_root>/workflows/<workflow_id>/observability.sqlite3` (schema v8 since
+`fix-0gh0` dropped the capture-policy columns; v7 when this design was approved). It
 holds evidence, and it also holds every judgement made about that evidence:
-registrations, contests, winners, pair-review marks and comments on sealed turns.
+registrations, contests, winners and pair-review marks.
 A few things stay outside it:
 
 - authored benchmark files;
@@ -27,6 +28,15 @@ Non-goals:
 - `ReviewSidecar` (blinded review, `fastworkflow/review/sidecar.py`) is out of scope.
 - Workspace-viewer reading of sealed archives is kept.
 - No `SCHEMA_VERSION` bump.
+
+> **Update (`fix-0gh0`):** the first two non-goals no longer hold. The blinded
+> review sidecar (`fastworkflow/review/`) and the workspace viewer
+> (`--workspace-manifest`, `/api/workspace/*`, `observability/workspace.py`)
+> were removed outright, and with the viewer went `sealed_turn_comments`
+> (§2.5). Experiment sealing is kept: `runner.seal_workspace_evidence`,
+> `store.record_workspace_archive`, `sealed_archives`,
+> `experiments.workspace_archive_sha256`, `ReadOnlyObservabilityStore` and
+> `selection.store_for`, which reads a member's sealed archive in live mode.
 
 Principles applied to every decision below:
 
@@ -41,7 +51,7 @@ Principles applied to every decision below:
 
 | Path | Written by | Purpose |
 |---|---|---|
-| `observability.sqlite3` (+ `-wal`, `-shm`) | every recorder; control writers | evidence (v7 tables) + control tables (§2) |
+| `observability.sqlite3` (+ `-wal`, `-shm`) | every recorder; control writers | evidence (v8 tables) + control tables (§2) |
 | `server.log`, `server.log.1` | `run_chatbot` launcher | stdio of the spawned FastAPI server, rotated |
 | `chatbot_train.log` | `run_chatbot` launcher | stdio of the detached `fastworkflow train` child |
 | `session_state/` | `run_fastapi_mcp` | suspended `awaiting_user` trajectories, keyed by channel |
@@ -209,41 +219,14 @@ CREATE TABLE IF NOT EXISTS pair_review_events (
 
 - **Pair keys stay stable across sealing.** `ExecutionRef.store_id` is always the live store's identity, and sealed copies carry that same identity.
 
-### 2.5 Comments on sealed-archive turns
+### 2.5 Comments on sealed-archive turns (removed)
 
-```sql
-CREATE TABLE IF NOT EXISTS sealed_turn_comments (
-    feedback_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    feedback_uid TEXT NOT NULL UNIQUE,
-    archive_sha256 TEXT NOT NULL,
-    store_identity TEXT NOT NULL,
-    turn_key TEXT NOT NULL,
-    target_kind TEXT NOT NULL, span_ids_json TEXT NOT NULL,
-    target_label TEXT NOT NULL, comment TEXT NOT NULL,
-    provenance TEXT NOT NULL, category TEXT NOT NULL, subcategory TEXT NOT NULL,
-    anchors_json TEXT NOT NULL,
-    pair_experiment_id TEXT, pair_task_id TEXT,
-    turn_experiment_id TEXT, turn_task_id TEXT, attempt INTEGER, channel_id TEXT,
-    created_at TEXT NOT NULL);
-CREATE INDEX IF NOT EXISTS idx_sealed_comments_turn
-    ON sealed_turn_comments(archive_sha256, turn_key);
-CREATE INDEX IF NOT EXISTS idx_sealed_comments_task
-    ON sealed_turn_comments(turn_experiment_id, turn_task_id);
-CREATE TRIGGER IF NOT EXISTS sealed_turn_comments_no_update
-    BEFORE UPDATE ON sealed_turn_comments
-    BEGIN SELECT RAISE(ABORT, 'recorded feedback is append-only'); END;
-CREATE TRIGGER IF NOT EXISTS sealed_turn_comments_no_delete
-    BEFORE DELETE ON sealed_turn_comments
-    BEGIN SELECT RAISE(ABORT, 'recorded feedback is append-only'); END;
-```
-
-- **Routing rule: the store a turn was READ from decides where a comment on it goes.**
-  - A live turn's comment goes to `human_feedback`, which is unchanged (decision 7).
-  - A turn read from a sealed archive gets its comment in `sealed_turn_comments`, keyed to that archive.
-  - No mode flag and no v6 branch are involved.
-- **Bound to the archive by `archive_sha256`.** `store_identity` alone cannot be the key, because the live DB and every seal share it.
-- **The merge reader replaces `AnnotatedEvidence`.** It returns the archive's `human_feedback` rows unioned with this table's rows for (`archive_sha256`, `turn_key`), de-duplicated by `feedback_uid`, in about 30 lines.
-- **Append-only triggers are kept.** This is parity with the deleted sidecar.
+Removed with the workspace viewer (`fix-0gh0`). The viewer was the only way to
+read a turn from a sealed archive, so it was the only writer of the
+`sealed_turn_comments` table this section specified. A comment on any turn the
+chatbot reads goes to the live DB's `human_feedback` (decision 7), including a
+turn of a sealed member, whose rows stay in the live DB until its evidence is
+released.
 
 ### 2.6 Known sealed archives
 
@@ -309,7 +292,7 @@ Rationale:
 
 **Rule 1 — sealed copies contain no control table, ever.** Every table in `control.CONTROL_TABLES` is absent from the copy. The copy's `schema_features` row is rewritten without `control_v1`.
 
-**Rule 2 — the digest is the sha256 of the sealed file's bytes.** It is fixed once, at seal time. Rule 1 means judgements live only in the live DB, so no later decision, mark or comment can change a sealed file or its digest. Comments on sealed turns go to `sealed_turn_comments` in the live DB (§2.5). Live-turn `human_feedback` written after the seal stays in the live DB.
+**Rule 2 — the digest is the sha256 of the sealed file's bytes.** It is fixed once, at seal time. Rule 1 means judgements live only in the live DB, so no later decision, mark or comment can change a sealed file or its digest. Comments on any turn go to `human_feedback` in the live DB (§2.5). Live-turn `human_feedback` written after the seal stays in the live DB.
 
 **Two paths, one function:** `archive_to(destination, *, experiment_id=None, quiesce_live_writer=True)`.
 
@@ -358,7 +341,7 @@ Deleted with them:
 
 `store_id` stays in payloads, valued as the live identity.
 
-The workspace viewer is not a contest. It reads only sealed archives named in its manifest, verified by sha256. Manifest stores with `mode: "live"` are refused (decision 6).
+The workspace viewer that read sealed archives through a manifest was removed (`fix-0gh0`).
 
 ## 5. Concurrency: many processes writing one WAL DB
 
@@ -485,7 +468,7 @@ Net line estimates are for production code; tests are given in parentheses.
   - delete the modes, the evidence sources, bootstrap, adoption, `control_meta`, its own `_connect` / `_ensure_schema`, the module-level `control_mode_of`, `initialize_winner_for`, `selection_control_for`, `open_shared_control`, `SHARED_CONTROL_FILENAME`, `control_db_path_for`, `shared_control_db_path_for`, and the source exceptions;
   - `store_for(experiment_id)` replaces `store_for_source` (§2.6).
 - **`pair_review.py` (721 lines → about 250):** the same treatment. Delete `SHARED_PAIR_REVIEW_FILENAME`, `pair_review_db_path_for`, `shared_pair_review_db_path_for` and `_require_authorized`. The roughly 150 duplicated lines of `fix-90i7` go with them.
-- **Delete `feedback_sidecar.py`** (579 lines). The sealed-comment writer and merge reader live in `control.py`, and `handler_feedback` routes by the read store (§2.5).
+- **Delete `feedback_sidecar.py`** (579 lines). The sealed-comment writer and merge reader live in `control.py`, and `handler_feedback` routes by the read store (§2.5). Both were later removed with the workspace viewer (`fix-0gh0`).
 - **`benchmark/setup.py`:** delete `open_workflow_control`, `ensure_selection_bootstrap`, `bind_runner_evidence`, `authorize_evidence_store`, `_admit_default_store`, `_seed_registrations`, `_authorize_recorded_store`, `_declare_unreadable` and `workflow_control_db_path`.
 - **`selection_api.py`:** `_open_control` → `SelectionControlStore(live store)`. Its 409 "no selection control sidecar at …" becomes an empty contest. `_AuthorizedReader` and `_authorized_sources` are deleted. `_pair_review` uses the live DB.
 - **Other callers:** `best_run.py` and `selected_runs.py` drop `source_id` resolution. `runner.py` drops `selection_control_db_path`. `static/src/160-comparison.js` gets new message text.
@@ -543,7 +526,7 @@ Net line estimates are for production code; tests are given in parentheses.
 
 - **`.6` gains per-incarnation writer health (§5).** Without it, a shared DB invalidates evidence runs whenever the interactive server is up.
 - **`.6` gains the experiment-scoped seal (§3).** A whole-store seal of a shared, multi-hundred-MB, concurrently written DB is neither cheap nor possible under the old byte-stability check.
-- **`.9` also refuses workspace manifest stores in `mode: "live"`**, and `archive.py` stops accepting pre-v7 stores.
+- **`.9` also refuses workspace manifest stores in `mode: "live"`**, and `archive.py` stops accepting pre-v7 stores. (The manifest refusal is moot since `fix-0gh0` removed the workspace viewer.)
 - **`.3` lands the DDL for all control tables**, including those `.4`, `.8` and `.2` use, because one feature marker must name one table set.
 - **`.4` drops `benchmarks/.setup.lock` too.** It is runtime state in the project folder, and SQLite transactions plus `vN.json`'s exclusive create make it unnecessary.
 - **`.8`: `analysis.json` stays** (authored, §1.2). The epic's "benchmarks/ contains only vN.json" acceptance should read "only authored files: `vN.json` and `analysis.json`".
@@ -551,11 +534,11 @@ Net line estimates are for production code; tests are given in parentheses.
 ## 11. Owner resolutions (2026-10-04)
 
 1. **Experiment seals contain only that experiment's rows** (§3).
-2. **Workspace-mode comments are refused** with a clear message when the archive's workflow has no live DB on this machine.
+2. **Workspace-mode comments are refused** with a clear message when the archive's workflow has no live DB on this machine. (Superseded: `fix-0gh0` removed workspace mode.)
 3. **The consistency cache is an in-memory LRU**, not a table (§2.9).
 4. **Evidence release is API-only for now** (`release_experiment_evidence`), plus a diagnostics counter of bound bytes; no UI button yet.
 5. **Complete-but-never-sealed experiments are never auto-released.**
-6. **Workspace manifest stores with `mode: "live"` are refused.**
+6. **Workspace manifest stores with `mode: "live"` are refused.** (Superseded: `fix-0gh0` removed workspace manifests.)
 7. **Per-incarnation writer health is in scope for `.6`** (§5).
 8. **Pre-existing experiments are enrolled only by an explicit decide, keep or promote request** that names them, in the same transaction (§2.3). Nothing enrols them automatically.
 9. **`chatbot_train.log` stays a separate file** (§1.1).

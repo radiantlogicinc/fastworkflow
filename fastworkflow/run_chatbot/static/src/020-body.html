@@ -14,13 +14,12 @@
   </nav>
   <span class="pill" id="statusPill"><span class="dot"></span><span id="statusPillText">starting…</span></span>
   <span class="meta" id="metaLine"></span>
-  <span id="workspaceChrome"></span>
   <span class="spacer"></span>
   <div class="headerActions">
     <button id="copyLinkBtn" style="display:none" title="Copy the address of the page on screen (the part after #). Paste it after any chatbot URL to open the same page.">Copy link</button>
     <button id="benchmarkSetupBtn" class="primary">Benchmark setup</button>
     <button id="switchWfBtn" style="display:none">Switch workflow</button>
-    <details class="headerTools" id="workspaceTools">
+    <details class="headerTools" id="toolsMenu">
       <summary>Tools</summary>
       <div class="toolMenu">
         <button id="refreshBtn" style="display:none">Refresh</button>
@@ -47,7 +46,6 @@
         <h3>Browse folders</h3>
         <div id="browsePath"></div>
         <div id="browseList"></div>
-        <div id="workspaceManifestList"></div>
       </div>
     </div>
     <div id="envSetup">
@@ -81,7 +79,6 @@
     <div id="convList"></div>
   </div>
   <div id="detail" role="region" aria-label="Selected record"><div class="emptyState"><strong>Explore a conversation</strong><p>Select a conversation on the left to revisit its turns and inspect what happened.</p></div></div>
-  <aside id="reviewPane" aria-label="Review questions"></aside>
 </main>
 <nav id="recordNav" aria-label="Move through records">
   <button id="recordNavUp" type="button" aria-label="Up to the parent record" disabled><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 11l7-7 7 7M12 4v16"></path></svg></button>
@@ -153,7 +150,6 @@
 <dialog id="trainingDialog" aria-labelledby="trainingTitle">
   <header>
     <h2 id="trainingTitle">Training history</h2>
-    <select id="trainingStore" aria-label="Evidence store" style="display:none"></select>
     <span class="spacer"></span>
     <button id="trainingClose" type="button">Close</button>
   </header>

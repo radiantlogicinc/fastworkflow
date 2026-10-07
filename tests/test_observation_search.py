@@ -18,12 +18,12 @@ import pytest
 from pydantic import BaseModel, Field
 
 import fastworkflow
-from fastworkflow.observability import capture_policy
-from fastworkflow.observability import store as observability_store
 from fastworkflow.observation_offloading import jev_client, search_router
 from fastworkflow.observation_offloading import search as search_module
 from fastworkflow.observation_offloading.agent import current_search_reasoning
 from fastworkflow.observation_offloading.archive import (
+    REDACTION_ENV,
+    REDACTION_OFF,
     PersistenceError,
     RuntimeHandleArchive,
     RuntimeHandleScope,
@@ -992,7 +992,7 @@ class ShortObservationsAndServedRows(unittest.TestCase):
         self.assertEqual(route['error'], 'TimeoutError')
         self.assertFalse(router.wants_all_rows(route))
 
-    def test_what_the_router_is_sent_passes_the_capture_policy(self):
+    def test_what_the_router_is_sent_is_credential_scrubbed(self):
         client = self._DecisionClient()
         secret = 'Authorization: Bearer sk-abcdefghijklmnopqrstuvwxyz123456'
         SearchRouter(client, questions={}).route('Who holds it?', f'I saw {secret}',
@@ -1250,15 +1250,13 @@ class ShortObservationsAndServedRows(unittest.TestCase):
         self.assertTrue(event['listing_parsed'])
         self.assertEqual(client.sent, [])
 
-    def test_a_withheld_route_is_its_own_skip_reason_and_uses_no_routing_call(self):
+    def test_an_unredacted_route_is_its_own_skip_reason_and_uses_no_routing_call(self):
         self.persist('O3', 'show_holders', self.LISTING + 'x' * SHORT_OBSERVATION_BYTES)
         client = self._DecisionClient()
         budget = jev_client.TurnBudget(router_calls=1)
         router = SearchRouter(client, questions={}).within_budget(lambda: budget)
-        badge = json.dumps(capture_policy.evidence_policy().apply(
-            observability_store.POLICY_PATH_OFFLOAD_OBSERVATION, 'rows',
-            classification='opaque-payload'))
-        _, event = self.search(f'Who are the holders? {badge}', 'O3', router=router)
+        with patch.dict(os.environ, {REDACTION_ENV: REDACTION_OFF}):
+            _, event = self.search('Who are the holders?', 'O3', router=router)
         self.assertEqual(event['router']['error'], 'policy_withheld')
         self.assertEqual(event['listing_skip_reason'], 'policy_withheld')
         self.assertEqual((client.sent, budget.router_calls), ([], 0))

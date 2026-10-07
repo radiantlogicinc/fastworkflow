@@ -10,7 +10,7 @@ description: >-
 # Debugging workflows from conversation logs
 
 Use recorded turns and their span trees to identify the first wrong decision and its
-consequences. Capture depends on the runtime profile, redaction, limits and writer health;
+consequences. Capture depends on redaction, limits and writer health;
 not every run contains every input or response.
 
 ## 1. Locate the conversation and its evidence store
@@ -31,12 +31,12 @@ db_path = state_paths.observability_db("<workflow_folder>")
 
 For registered experiments, resolve the registration's `store` via
 `benchmark_setup.load_experiment(workflow_folderpath, experiment_id)`. A null store means
-execution has not bound the registration yet. Workspace evidence may span multiple stores;
-retain `store_id` with every turn/span reference. Conversation IDs are local to channels/stores.
+execution has not bound the registration yet. Retain `store_id` with every turn/span reference.
+Conversation IDs are local to channels/stores.
 
-A missing default database does not prove the workflow never ran: check the selected state root,
-experiment registration and workspace sources first. If reproduction is needed, prepare it under
-the project's execution permissions. The supported picker command is `fastworkflow run_chatbot`;
+A missing default database does not prove the workflow never ran: check the selected state root
+and experiment registration first. If reproduction is needed, prepare it under the project's
+execution permissions. The supported picker command is `fastworkflow run_chatbot`;
 selecting a workflow can start a server, so it is not merely an offline file viewer.
 
 ## 2. Read it — read-only, always

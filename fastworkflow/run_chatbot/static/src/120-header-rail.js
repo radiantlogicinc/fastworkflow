@@ -50,7 +50,6 @@ document.getElementById("healthDismiss").addEventListener("click", function () {
 
 /* -- meta -------------------------------------------------------------- */
 function refreshMeta() {
-  if (session && session.workspace_mode) { return; }
   api("/api/meta").then(function (m) {
     var size = m.db_size_bytes;
     var sizeTxt = size > 1048576 ? (size / 1048576).toFixed(1) + " MB" : Math.round(size / 1024) + " KB";
@@ -234,7 +233,7 @@ function hierarchyLabel(node) {
   if (node.kind === "experiment" && node.experiment_id) {
     return "Experiment · " + node.experiment_id.slice(-8);
   }
-  return policedText(node.label);
+  return node.label;
 }
 
 function visibleHierarchyChildren(node) {
@@ -273,7 +272,7 @@ function fillHierarchyCrumbs(container) {
   (hierarchyPath.length ? hierarchyPath : (hierarchyRoot ? [hierarchyRoot] : [])).forEach(function (node, index) {
     if (index) { container.appendChild(el("span", "sep", "›")); }
     var button = el("button", null, navSnippet(hierarchyLabel(node)));
-    button.title = policedText(node.label);
+    button.title = node.label;
     button.addEventListener("click", function () {
       var path = findHierarchyByKey(node.key);
       if (path) { activateHierarchy(path, true); }
@@ -304,7 +303,7 @@ function renderHierarchy() {
     var summary = el("summary");
     var childNodes = visibleHierarchyChildren(node);
     var navLabel = navSnippet(hierarchyLabel(node));
-    summary.title = policedText(node.label) || hierarchyLabel(node);
+    summary.title = node.label || hierarchyLabel(node);
     var labelNode = el("span", "navLabel", navLabel);
     if (node.kind === "experiment" && node.experiment_id) {
       row.dataset.experimentId = node.experiment_id;
@@ -336,7 +335,7 @@ function renderHierarchy() {
       var count = el("span", "navCount", childNodes.length); count.setAttribute("aria-hidden", "true"); summary.appendChild(count);
     }
     if (selected === node.key) { summary.setAttribute("aria-current", "page"); }
-    if (node.kind === "turn") { summary.title = policedText(node.label); }
+    if (node.kind === "turn") { summary.title = node.label; }
     summary.addEventListener("click", function (event) {
       event.preventDefault();
       activateHierarchy(path, !hierarchyExpanded[node.key]);
@@ -379,7 +378,7 @@ function showHierarchyInfo(node) {
      over the heading above it instead. Same placement as renderLevel. */
   var crumbs = el("nav", "crumbs"); fillHierarchyCrumbs(crumbs); d.appendChild(crumbs);
   var card = el("div", "card");
-  card.appendChild(el("h2", null, policedText(node.label)));
+  card.appendChild(el("h2", null, node.label));
   if (node.kind === "adhoc" || node.kind === "date") {
     card.appendChild(el("p", "sub", "Conversations recorded outside experiments, grouped by UTC date."));
   }
@@ -416,20 +415,18 @@ function activateHierarchy(path, expanded) {
   var node = path[path.length - 1];
   path.slice(0, -1).forEach(function (n) { hierarchyExpanded[n.key] = true; });
   hierarchyExpanded[node.key] = expanded;
-  if (node.source && node.source.store_id) { state.storeId = node.source.store_id; }
   renderHierarchy();
   if (node.kind === "component") {
     expNavToken();
     state.path = node.tracePath;
     renderLevel();
   } else if (node.kind === "turn") {
-    if (node.source && node.source.store_id) { selectWorkspaceTurn(node.source.store_id, node.turn_key); }
-    else { selectTurn(node.turn_key); }
+    selectTurn(node.turn_key);
   } else {
     state.turnKey = null; state.turn = null; state.path = [];
     if (node.kind === "root") { showBenchmarks(); }
     else if (node.kind === "benchmark" && node.benchmark_id) { showBenchmark(node.benchmark_id); }
-    else if (node.kind === "experiment" && !(node.source && node.source.store_id)) {
+    else if (node.kind === "experiment") {
       if (node.recorded) { showExperiment(node.experiment_id); }
       else if (node.registered) { showBenchmarkExperiment(node.experiment_id); }
       else { showHierarchyInfo(node); }
@@ -439,9 +436,7 @@ function activateHierarchy(path, expanded) {
 
 function alignHierarchyTurn(turnKey) {
   var path = findHierarchy(function (n) {
-    if (n.kind !== "turn" || n.turn_key !== turnKey) { return false; }
-    if (session && session.workspace_mode) { return n.source && n.source.store_id === state.storeId; }
-    return true;
+    return n.kind === "turn" && n.turn_key === turnKey;
   });
   if (path) {
     navigationTab = hierarchyTab(path);
@@ -454,14 +449,14 @@ function alignHierarchyTurn(turnKey) {
 }
 
 function attachTraceHierarchy() {
-  if (!state.turn || !state.path.length || review.progress) { return; }
+  if (!state.turn || !state.path.length) { return; }
   alignHierarchyTurn(state.turn.turn_key);
   var turnNode = hierarchyPath[hierarchyPath.length - 1];
   if (!turnNode || turnNode.kind !== "turn") { return; }
   function wrap(trace, tracePath) {
     var path = tracePath.concat([trace]);
     return {key: turnNode.key + "/" + trace.id, kind: "component", label: trace.title,
-      source: turnNode.source, tracePath: path,
+      tracePath: path,
       children: trace.children.map(function (child) { return wrap(child, path); })};
   }
   turnNode.children = state.path[0].children.map(function (child) { return wrap(child, [state.path[0]]); });
@@ -471,7 +466,7 @@ function attachTraceHierarchy() {
 }
 
 function syncTraceHierarchy() {
-  if (review.progress || !state.turn || !state.path.length) { return; }
+  if (!state.turn || !state.path.length) { return; }
   var trace = state.path[state.path.length - 1];
   if (state.path.length === 1) { alignHierarchyTurn(state.turn.turn_key); }
   else {
@@ -515,7 +510,7 @@ var RECORD_NAV_MOVES = [
 ];
 
 function recordNavTarget(move) {
-  if (!hierarchyRoot || review.progress) { return null; }
+  if (!hierarchyRoot) { return null; }
   if (!hierarchyPath.length) {
     /* Nothing is selected, so the only move that means anything is into the
        first row of the tab the rail is showing. */
@@ -579,11 +574,7 @@ window.addEventListener("resize", function () {
 
 function renderRecordNavigator() {
   var main = document.getElementById("debugMain");
-  /* A formal review walks its own assigned rows through the review pane, and
-     that order is the point of the assignment; the hierarchy arrows would
-     wander out of it. */
-  var usable = !!hierarchyRoot && !review.progress
-    && main.classList.contains("visible") && !main.classList.contains("reviewActive");
+  var usable = !!hierarchyRoot && main.classList.contains("visible");
   document.getElementById("recordNav").className = usable ? "visible" : "";
   if (usable) { placeRecordNavigator(); }
   RECORD_NAV_MOVES.forEach(function (move) {
@@ -612,7 +603,7 @@ function refreshConvs(reportFailure) {
   var refresh = ++conversationRefresh;
   var force = reportFailure === true;
   var workflow = session && session.workflow_path;
-  var scope = JSON.stringify([workflow, session && session.workspace]);
+  var scope = JSON.stringify([workflow]);
   if (scope !== hierarchyScope) {
     hierarchyScope = scope; hierarchyRoot = null; hierarchyPath = []; hierarchyExpanded = {};
     hierarchyIndex = null; navigationETag = null;
@@ -633,7 +624,7 @@ function refreshConvs(reportFailure) {
     allow304: !force,
     captureETag: true
   }).then(function (result) {
-    if (refresh !== conversationRefresh || scope !== JSON.stringify([session && session.workflow_path, session && session.workspace])) { return; }
+    if (refresh !== conversationRefresh || scope !== JSON.stringify([session && session.workflow_path])) { return; }
     if (result && result.notModified) {
       /* Unchanged body: keep the rail as painted; do not rebuild. */
       return;
@@ -654,9 +645,7 @@ function refreshConvs(reportFailure) {
        has finished loading (`state.turn`), but a turn is selected the moment
        somebody clicks it or opens a deep link — so a navigation read landing
        inside that window used to find `hierarchyPath` empty and repaint "No
-       conversations yet" over a trace that was still arriving. In workspace
-       mode the rail may have no path to a scoped turn at all, which made
-       every periodic refresh do it, not just the first.
+       conversations yet" over a trace that was still arriving.
 
        This is the same rule the finder guard above states: a background
        refresh does not get to take the pane. A navigation GESTURE still

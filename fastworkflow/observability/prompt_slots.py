@@ -137,11 +137,10 @@ def slot_digests(ref: Mapping[str, Any]) -> list[str]:
 def rebuild(ref: Mapping[str, Any], stored: Mapping[str, str]) -> dict[str, Any]:
     """The messages *ref* describes, from the stored piece texts.
 
-    ``stored`` maps a digest to the text kept for it. A piece kept under a
-    capture policy that redacted or withheld it holds text that no longer
-    hashes to its digest; it is shown as kept and listed in ``altered``. A
-    piece with no row at all is shown as a placeholder and listed in
-    ``missing``. ``verified`` is True only when the rebuilt messages hash to
+    ``stored`` maps a digest to the text kept for it. A piece the credential
+    scrub altered holds text that no longer hashes to its digest; it is shown
+    as kept and listed in ``altered``. A piece with no row at all is shown as a
+    placeholder and listed in ``missing``. ``verified`` is True only when the rebuilt messages hash to
     the recorded digest, i.e. this is byte for byte what the model was sent.
     """
     missing: list[str] = []

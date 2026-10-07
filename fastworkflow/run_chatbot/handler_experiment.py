@@ -91,13 +91,6 @@ class _ExperimentRoutes:
         self._send_json({"training_run": detail})
 
     def _handle_setup(self, path, *, body=None, write=False):
-        # Setup reviews are live workflow authoring records, never sealed evidence.
-        if self.chatbot.workspace is not None:
-            self._error(
-                403,
-                "Select a live workflow to review experiment setups; sealed workspaces are read-only",
-            )
-            return
         workflow_path = self.chatbot.workflow_path
         if not workflow_path:
             self._error(409, "Select a workflow before reviewing experiment setups")
@@ -154,34 +147,8 @@ class _ExperimentRoutes:
 
         Judgements are live-workflow only. The winner of a contest and the best
         run of a task live in the WORKFLOW's live DB control tables, not in the
-        evidence; a sealed workspace carries the evidence and not those tables,
-        so answering those from workspace mode would report the live machine's
-        decisions as if they were the archive's.
-
-        Reading the EVIDENCE is different, and in workspace mode the archive is
-        the only thing there is to read: attempts, one attempt's projection and
-        a comparison of two are answered from the manifest's own read-only
-        stores. `selection_api.handle_workspace_get` refuses the judgement
-        routes itself, and nothing on that path can write.
+        evidence.
         """
-        if self.chatbot.workspace is not None:
-            if method != "GET":
-                self._error(
-                    403,
-                    "a sealed workspace records no decisions; select a live "
-                    "workflow to choose a winner, a best run or to mark a pair "
-                    "reviewed",
-                )
-                return
-            archived = selection_api.handle_workspace_get(
-                self.chatbot.workspace, path, query or {}
-            )
-            if archived is None:
-                self._error(404, "not found")
-                return
-            status, payload = archived
-            self._send_json(payload, status=status)
-            return
         workflow_path = (self.chatbot.workflow_path or "").strip()
         if not workflow_path:
             self._error(409, "select a workflow before using experiment selections")

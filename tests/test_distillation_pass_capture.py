@@ -46,7 +46,6 @@ from fastworkflow.benchmark import setup
 from fastworkflow.command_executor import CommandExecutor
 from fastworkflow.distillation import DistillationSession, PlanningStep
 from fastworkflow.experiment.runner import ExperimentController
-from fastworkflow.observability import capture_policy
 from fastworkflow.observability import comparison as comparison_module
 from fastworkflow.observability import store as obs
 from fastworkflow.observability.comparison import (
@@ -90,8 +89,6 @@ DISPATCHES = {
 
 TEACHER_ANSWER = "you have 0 lists; I saved them anyway"
 STUDENT_ANSWER = "you have 0 lists"
-# Recognisable anywhere: a byte of it on a page or in a database is a leak.
-WITHHELD_SENTINEL = "PRIVATE_SENTINEL_"
 
 
 # ----------------------------------------------------------------------
@@ -467,7 +464,7 @@ def test_each_pass_projects_its_own_dispatches(
         {step.command_call_id for step in teacher.steps}
         & {step.command_call_id for step in student.steps}
     )
-    # The other pass's dispatches are withheld from this view and counted, not
+    # The other pass's dispatches are left out of this view and counted, not
     # dropped.
     assert any(
         step.command_call_id in {s.command_call_id for s in student.steps}
@@ -941,106 +938,8 @@ def test_a_recorded_pass_answer_is_scrubbed_like_a_turn_answer(
 
 
 # ----------------------------------------------------------------------
-# The capture policy, on the two fields that carry text
+# The two fields that carry text
 # ----------------------------------------------------------------------
-
-
-def test_the_store_polices_exactly_the_pass_fields_the_producer_writes():
-    """The sink restates the span name and the field names; a drift is silent.
-
-    `store.py` is the sink and does not import `tracing`, so the classification
-    table names the span and its two text fields as literals. If either
-    spelling drifts from the producer's, nothing raises — the fields simply
-    stop being policed, and the only symptom is user text appearing in an
-    evidence bundle months later.
-    """
-    assert obs._SPAN_DISTILLATION_PASS == tracing.SPAN_DISTILLATION_PASS
-    policed = obs._POLICED_SPAN_ATTRIBUTES[tracing.SPAN_DISTILLATION_PASS]
-    assert set(policed) == {"answer", "plan"}
-    contract = tracing.SPAN_CONTRACTS[tracing.SPAN_DISTILLATION_PASS]
-    assert set(policed) <= set(contract.attributes)
-    # Both are free text the pass produced, and both are classified as such:
-    # `user-text` is what withholds them under the evidence profile.
-    assert {classification for _path, classification in policed.values()} == {
-        "user-text"
-    }
-    # And the reader agrees about the marker it has to recognise.
-    assert (
-        comparison_module.CAPTURE_ENVELOPE_MARKER
-        == capture_policy.CAPTURE_ENVELOPE_MARKER
-    )
-
-
-def test_a_restrictive_capture_profile_withholds_the_pass_answer_and_plan(
-    initialized_fastworkflow, todo_workflow_path, tmp_path, db_path, monkeypatch
-):
-    """The fields must not be a way round the policy that withholds this text.
-
-    A pass answer is the text the agent showed the user and a pass plan is the
-    sequence it generated: the same class of content as `turns.answer` and
-    `span.context`, both of which the evidence profile withholds. Recording
-    them as ordinary span attributes would have made `fw.distillation.pass` the
-    one route by which that text reaches an evidence bundle verbatim.
-
-    Withheld is not silent: each field leaves a badge carrying its
-    classification, size and digest, so a reader sees that a value was here.
-    """
-    monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
-    secret_answer = "the customer is Jane Roe of 14 Elm Row"
-    turn_key = _run_distillation_turn(
-        monkeypatch,
-        todo_workflow_path,
-        tmp_path,
-        db_path,
-        scripts=[
-            _PassScript(
-                commands=["list_todo_lists"],
-                plan=[f"tell {secret_answer}"],
-                answer=secret_answer,
-                cost=0.10,
-            ),
-            STUDENT_SCRIPT,
-        ],
-    )
-
-    spans = _reader(db_path).trace("store-1", turn_key)
-    recorded = json.loads(
-        next(
-            span
-            for span in spans
-            if span["name"] == tracing.SPAN_DISTILLATION_PASS
-            and json.loads(span["attributes"])[tracing.ATTR_PASS]
-            == tracing.PASS_TEACHER
-        )["attributes"]
-    )
-    for field in ("answer", "plan"):
-        envelope = recorded[field]
-        assert capture_policy.is_capture_envelope(envelope), field
-        assert envelope["disposition"] == "omit"
-        assert envelope["classification"] == "user-text"
-        assert envelope["original_bytes"] > 0
-        assert envelope["digest"].startswith("sha256:")
-        assert envelope["reason"]
-        assert "prefix" not in envelope
-    # Not anywhere else in the database either.
-    assert secret_answer.encode() not in Path(db_path).read_bytes()
-
-    # The pass is still a recorded pass: what it did, when, and how it ended
-    # are all still there. Only the text is withheld.
-    teacher = _pass_projection(
-        _reader(db_path), turn_key, tracing.PASS_TEACHER
-    ).turns[0]
-    assert teacher.pass_content_recorded is True
-    assert teacher.status == "completed"
-    assert teacher.answer is None
-    assert teacher.plan is None
-    # The envelope travels to the reader, which is what lets the UI say
-    # "withheld" rather than "this pass recorded nothing".
-    assert capture_policy.is_capture_envelope(teacher.pass_content["answer"])
-    assert capture_policy.is_capture_envelope(teacher.pass_content["plan"])
-    assert _pass_projection(
-        _reader(db_path), turn_key, tracing.PASS_TEACHER
-    ).timing["wall_ms"] is not None
 
 
 def test_a_capped_pass_answer_and_plan_keep_a_visible_prefix(
@@ -1048,10 +947,10 @@ def test_a_capped_pass_answer_and_plan_keep_a_visible_prefix(
 ):
     """Over-limit text is cut, and the cut is stated rather than implied.
 
-    The tracing attribute cap runs before the sink's policy and leaves its own
-    envelope. Both fields have to come back as a quoted prefix plus a recorded
-    original length, or a reader compares two passes on the first 64 bytes of
-    each and never learns that is what they are looking at.
+    The tracing attribute cap leaves its own envelope. Both fields have to come
+    back as a quoted prefix plus a recorded original length, or a reader
+    compares two passes on the first 64 bytes of each and never learns that is
+    what they are looking at.
     """
     monkeypatch.setattr(tracing, "MAX_ATTR_BYTES", 64)
     long_answer = "I checked every list and here is the full rundown: " + "x" * 400
@@ -1090,181 +989,6 @@ def test_a_capped_pass_answer_and_plan_keep_a_visible_prefix(
         assert projected == envelope["value"]
         assert projected and produced.startswith(projected)
         assert len(projected) < len(produced)
-
-
-def test_a_long_pass_answer_and_plan_are_withheld_even_though_capped_first(
-    initialized_fastworkflow, todo_workflow_path, tmp_path, db_path, monkeypatch
-):
-    """The longer the text, the more it was exposed. That was the defect.
-
-    `tracing.cap_attr_value` replaces an over-limit attribute with a mapping
-    whose `value` is a RAW prefix, and the first version of the sink's
-    classification policed strings only — so a short pass answer was withheld
-    under the evidence profile and a long one had its first N bytes stored
-    verbatim. Both fields, through the real producer, with a sentinel chosen so
-    its presence anywhere in the database is unambiguous.
-    """
-    monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
-    monkeypatch.setattr(tracing, "MAX_ATTR_BYTES", 32)
-    sentinel = WITHHELD_SENTINEL
-    long_answer = sentinel * 20
-    turn_key = _run_distillation_turn(
-        monkeypatch,
-        todo_workflow_path,
-        tmp_path,
-        db_path,
-        scripts=[
-            _PassScript(
-                commands=["list_todo_lists"],
-                plan=[sentinel * 20],
-                answer=long_answer,
-                cost=0.10,
-            ),
-            STUDENT_SCRIPT,
-        ],
-    )
-
-    spans = _reader(db_path).trace("store-1", turn_key)
-    recorded = json.loads(
-        next(
-            span
-            for span in spans
-            if span["name"] == tracing.SPAN_DISTILLATION_PASS
-            and json.loads(span["attributes"])[tracing.ATTR_PASS]
-            == tracing.PASS_TEACHER
-        )["attributes"]
-    )
-    for field in ("answer", "plan"):
-        envelope = recorded[field]
-        assert capture_policy.is_capture_envelope(envelope), field
-        assert envelope["disposition"] == "omit"
-        assert envelope["classification"] == "user-text"
-        # The cap envelope did not survive: its `value` is the prefix being
-        # withheld and its `sha256` digests the unscrubbed original, which
-        # beside a withheld value is a confirmation oracle for a guess.
-        assert "value" not in envelope
-        assert "sha256" not in envelope
-        # What survives is the measurement, flagged as partial, so nobody reads
-        # the policy's own `original_bytes` as the size of the whole value.
-        assert envelope["truncated_before_capture"] is True
-        assert envelope["original_length"] > envelope["original_bytes"]
-
-    # Not in the stored attributes, not anywhere else in the file the API and
-    # the browser both read from.
-    assert sentinel not in json.dumps(recorded)
-    assert sentinel.encode() not in Path(db_path).read_bytes()
-
-    teacher = _pass_projection(
-        _reader(db_path), turn_key, tracing.PASS_TEACHER
-    ).turns[0]
-    assert teacher.answer is None
-    assert teacher.plan is None
-    assert sentinel not in json.dumps(teacher.as_dict(), default=str)
-
-
-def test_a_capped_pass_field_keeps_its_prefix_under_the_debug_profile(tmp_path):
-    """The other half of the same fix: the debug profile still changes nothing.
-
-    A cut value under `debug` keeps the cap envelope it arrived in, prefix and
-    all. If closing the evidence leak had also withheld text under the profile
-    whose entire contract is "today's behavior", that would be a regression
-    dressed as a fix.
-    """
-    capped = {
-        "truncated": True,
-        "original_length": 400,
-        "sha256": "abc123",
-        "value": "the first thirty-two bytes here",
-    }
-
-    policed = obs._policed_span_attributes(
-        tracing.SPAN_DISTILLATION_PASS,
-        {tracing.ATTR_PASS: tracing.PASS_TEACHER, "answer": capped},
-        redactor=obs.Redactor(),
-        policy=capture_policy.debug_policy(),
-    )
-
-    assert policed["answer"] == capped
-    assert comparison_module._recorded_text(policed["answer"]) == capped["value"]
-
-
-def test_a_declared_bounded_text_policy_cuts_the_pass_fields_too(tmp_path):
-    """The two fields are declarable, not merely covered by a profile default.
-
-    A deployment that wants pass text bounded rather than withheld writes a
-    field policy against the paths the store declares for them. Driven through
-    the sink's own helper with a real compiled policy, because the path a
-    declared policy takes through `CapturePolicy.apply` is not the path a
-    profile default takes.
-    """
-    policy = capture_policy.evidence_policy(
-        tuple(
-            capture_policy.CaptureFieldPolicy(
-                field_path=path,
-                classification="user-text",
-                disposition="bounded-text",
-                max_bytes=32,
-                redact_before_trace=True,
-            )
-            for path in (obs.POLICY_PATH_PASS_ANSWER, obs.POLICY_PATH_PASS_PLAN)
-        )
-    )
-    answer = "a" * 200
-    plan = "b" * 200
-
-    policed = obs._policed_span_attributes(
-        tracing.SPAN_DISTILLATION_PASS,
-        {
-            tracing.ATTR_PASS: tracing.PASS_TEACHER,
-            "model": "local/echo",
-            "answer": answer,
-            "plan": plan,
-            "status": "completed",
-        },
-        redactor=obs.Redactor(),
-        policy=policy,
-    )
-
-    for field in ("answer", "plan"):
-        envelope = policed[field]
-        assert capture_policy.is_capture_envelope(envelope), field
-        assert envelope["disposition"] == "bounded-text"
-        assert envelope["prefix"] == field[0:1] * 0 + envelope["prefix"]
-        assert len(envelope["prefix"]) == 32
-        assert envelope["original_bytes"] == 200
-        # The reader quotes the surviving prefix rather than reporting the
-        # field as unrecorded.
-        assert comparison_module._recorded_text(envelope) == envelope["prefix"]
-    # Everything the policy was not asked about is untouched, including the
-    # pass id the whole comparison is resolved by.
-    assert policed[tracing.ATTR_PASS] == tracing.PASS_TEACHER
-    assert policed["model"] == "local/echo"
-    assert policed["status"] == "completed"
-    # And a span nobody declared fields for is returned as it came.
-    bag = {"answer": answer}
-    assert obs._policed_span_attributes(
-        tracing.SPAN_AGENT_STEP, bag, redactor=obs.Redactor(), policy=policy
-    ) is bag
-
-
-def test_a_withheld_pass_field_is_not_reported_as_nothing_recorded():
-    """`None` from the reader is ambiguous, and the envelope is what resolves it.
-
-    A withheld value and a value nobody recorded both project as `None`. The
-    difference has to survive to the reader, or the UI shows "(no answer
-    recorded)" for text it is deliberately not showing.
-    """
-    withheld = capture_policy.evidence_policy().apply(
-        obs.POLICY_PATH_PASS_ANSWER, "text", classification="user-text"
-    )
-
-    assert capture_policy.is_capture_envelope(withheld)
-    assert comparison_module._recorded_text(withheld) is None
-    assert "prefix" not in withheld
-    # A bounded envelope, by contrast, still yields its prefix.
-    assert comparison_module._recorded_text(
-        dict(withheld, prefix="tex", disposition="bounded-text")
-    ) == "tex"
 
 
 # ----------------------------------------------------------------------
@@ -1413,18 +1137,18 @@ def pass_world(initialized_fastworkflow, todo_workflow_path, tmp_path, monkeypat
     )
     experiment_id = f"exp-{uuid.uuid4().hex}"
     task_id = f"task_{uuid.uuid4().hex}"
-    channels = {n: f"ch-{uuid.uuid4().hex[:8]}" for n in (1, 2, 3)}
+    channels = {n: f"ch-{uuid.uuid4().hex[:8]}" for n in (1, 2)}
     controller.create_experiment(
         experiment_id,
         "recorded passes",
         declared_tasks=1,
-        declared_attempts=3,
-        declarations=[(task_id, n, channels[n]) for n in (1, 2, 3)],
+        declared_attempts=2,
+        declarations=[(task_id, n, channels[n]) for n in (1, 2)],
         workflow_name=setup.workflow_name_for(todo_workflow_path),
     )
 
     conversations = {}
-    for attempt in (1, 2, 3):
+    for attempt in (1, 2):
         conversations[attempt] = store.mint_conversation_id(
             channels[attempt],
             experiment_id=experiment_id,
@@ -1452,45 +1176,6 @@ def pass_world(initialized_fastworkflow, todo_workflow_path, tmp_path, monkeypat
             "attempt": 1,
         },
     )
-
-    # Attempt 3: the same producer under the evidence capture profile, with
-    # both text fields long enough that the emitter caps them BEFORE the sink
-    # polices them — the shape that leaked a raw prefix. The page has to say
-    # the text is withheld, say the measurements are of a prefix, and show none
-    # of the text.
-    #
-    # Recorded BEFORE the hand-seeded attempt below, deliberately: seeding uses
-    # fixed 2023 span timestamps, and a later sink opening on this database
-    # prunes by age and takes them with it. Ordering is cheaper than dating the
-    # seed against a clock the retention window also reads.
-    monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
-    monkeypatch.setattr(tracing, "MAX_ATTR_BYTES", 32)
-    try:
-        _run_distillation_turn(
-            monkeypatch,
-            todo_workflow_path,
-            tmp_path,
-            db,
-            scripts=[
-                _PassScript(
-                    commands=["list_todo_lists"],
-                    plan=[WITHHELD_SENTINEL * 20],
-                    answer=WITHHELD_SENTINEL * 20,
-                    cost=0.10,
-                ),
-                STUDENT_SCRIPT,
-            ],
-            identity={
-                "channel_id": channels[3],
-                "conversation_id": conversations[3],
-                "experiment_id": experiment_id,
-                "task_id": task_id,
-                "attempt": 3,
-            },
-        )
-    finally:
-        monkeypatch.delenv(obs.CAPTURE_PROFILE_VAR, raising=False)
-        monkeypatch.setattr(tracing, "MAX_ATTR_BYTES", tracing._DEFAULT_MAX_ATTR_BYTES)
 
     # Attempt 2, stamped but undescribed. Written the way a recorder writes,
     # through the store's own row upserts.
@@ -1533,7 +1218,7 @@ def pass_world(initialized_fastworkflow, todo_workflow_path, tmp_path, monkeypat
     row["ordinal"] = 1
     _write(store, row, spans)
 
-    for attempt in (1, 2, 3):
+    for attempt in (1, 2):
         controller.finish_attempt(
             experiment_id, task_id, attempt, outcome="pass", outcome_source="derived"
         )
@@ -1608,12 +1293,7 @@ def test_the_page_keeps_the_two_labels_distinct():
     assert "function appendRecordedEnvelope(block, turn)" in source
     # The plan is offered from the pass's recorded value and nowhere else.
     assert 'box.appendChild(el("summary", null, "Plan this pass generated"));' in source
-    # Both policed fields are badged, through the page's own envelope renderer
-    # rather than a second vocabulary for the same thing.
     assert '[["answer", "answer"], ["plan", "plan"]].forEach' in source
-    assert '"this pass\'s " + field[1] + " — " + envelopeText(env)' in source
-    assert "appendPoliced(block, recordedAnswer);" in source
-    assert "appendPoliced(box, recordedPlan);" in source
 
 
 # ----------------------------------------------------------------------

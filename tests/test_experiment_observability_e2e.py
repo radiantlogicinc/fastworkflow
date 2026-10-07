@@ -11,8 +11,6 @@ import sqlite3
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -23,14 +21,6 @@ import fastworkflow
 from fastworkflow.observability import store as obs
 from fastworkflow import tracing
 from fastworkflow.experiment.runner import ExperimentController
-from fastworkflow.observability.workspace import WORKSPACE_SCHEMA
-from fastworkflow.review.adapters import (
-    exp028_answer_rating_to_sidecar_export,
-    ido_rating_to_sidecar_export,
-    sidecar_export_to_exp028_answer_rating,
-    sidecar_export_to_ido_rating,
-)
-from fastworkflow.run_chatbot.server import ChatbotServer
 from fastworkflow.turn import TurnOutput, TurnResult, TurnStatus
 
 
@@ -79,32 +69,6 @@ def _archive_unchanged(source: Path, destination: Path) -> dict[str, Any]:
     return archive
 
 
-def _http_request(
-    server: ChatbotServer,
-    method: str,
-    path: str,
-    body: dict[str, Any] | None = None,
-    *,
-    capability: str | None = None,
-) -> tuple[int, dict[str, Any]]:
-    request = urllib.request.Request(
-        f"http://127.0.0.1:{server.port}{path}",
-        method=method,
-        data=None if body is None else json.dumps(body).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {server.token}",
-            "Content-Type": "application/json",
-        },
-    )
-    if capability is not None:
-        request.add_header("X-Review-Capability", capability)
-    try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            return response.status, json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        return exc.code, json.loads(exc.read())
-
-
 def _turn_row(
     turn_key: str,
     experiment_id: str,
@@ -149,75 +113,6 @@ def _turn_row(
     }
 
 
-def _assignment(
-    assignment_id: str,
-    turn_ref: dict[str, str],
-    question_ids: tuple[str, ...],
-) -> dict[str, Any]:
-    return {
-        "id": assignment_id,
-        "rater_slots": ["rater-a", "rater-b"],
-        "adjudicator_slots": ["adjudicator"],
-        "blinded": True,
-        "rows": [{"id": "shared-row", "turn_ref": turn_ref}],
-        "questions": [
-            {
-                "id": question_id,
-                "prompt": f"Rate {question_id}.",
-                "type": "bounded-note",
-                "max_length": 80,
-            }
-            for question_id in question_ids
-        ],
-    }
-
-
-def _exercise_review_contract(
-    server: ChatbotServer,
-    assignment: dict[str, Any],
-    to_contract: Any,
-    to_sidecar: Any,
-) -> list[str]:
-    status, created = _http_request(
-        server, "POST", "/api/review/assignments", assignment
-    )
-    assert status == 201
-    answer_path = f"/api/review/assignments/{assignment['id']}/answers"
-    question_id = assignment["questions"][0]["id"]
-    submitted: list[str] = []
-    for rater_slot in ("rater-a", "rater-b"):
-        capability = created["rater_capabilities"][rater_slot]
-        for revision in (1, 2):
-            answer = f"{assignment['id']}-{rater_slot}-revision-{revision}"
-            submitted.append(answer)
-            answer_status, payload = _http_request(
-                server,
-                "POST",
-                answer_path,
-                {
-                    "row_id": "shared-row",
-                    "question_id": question_id,
-                    "answer": answer,
-                },
-                capability=capability,
-            )
-            assert answer_status == 200
-            assert payload["answer"]["revision"] == revision
-
-    export_status, exported = _http_request(
-        server,
-        "GET",
-        f"/api/review/assignments/{assignment['id']}/export",
-        capability=created["adjudicator_capabilities"]["adjudicator"],
-    )
-    assert export_status == 200
-    sidecar_export = exported["export"]
-    contract = to_contract(sidecar_export)
-    assert contract["schema"] == assignment["id"]
-    assert to_sidecar(json.loads(json.dumps(contract))) == sidecar_export
-    return submitted
-
-
 @pytest.fixture
 def loopback_observability(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     package_path = fastworkflow.get_fastworkflow_package_path()
@@ -230,7 +125,6 @@ def loopback_observability(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root_a.mkdir()
     root_b.mkdir()
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(root_a))
-    monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
     monkeypatch.setenv("FW_OBS_INLINE_ARTIFACT_BYTES", "1")
     monkeypatch.setattr(
         sys, "argv", ["pytest", "--workflow_path", workflow_path]
@@ -248,8 +142,6 @@ def loopback_observability(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             readiness["store_id"],
             migrate=False,
             external=True,
-            capture_profile=readiness["capture_profile"],
-            capture_policy_version=readiness["capture_policy_version"],
         )
         for experiment_id, task_id in (
             ("exp-pending", "task-pending"),
@@ -517,88 +409,10 @@ def loopback_observability(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     archives.mkdir()
     archive_a = _archive_unchanged(source_a, archives / "store-a.sqlite3")
     archive_b = _archive_unchanged(source_b, archives / "store-b.sqlite3")
-    turn_ref_a = {
-        "store_id": "store-a",
-        "logical_turn_key": http_turns["task-pending"],
-    }
-    manifest = archives / "workspace.json"
-    manifest.write_text(
-        json.dumps(
-            {
-                "schema": WORKSPACE_SCHEMA,
-                "workspace_id": "observability-e2e",
-                "label": "External experiment observability E2E",
-                "stores": [
-                    {
-                        "store_id": "store-a",
-                        "label": "HTTP capture",
-                        "path": Path(archive_a["path"]).name,
-                        "mode": "sealed",
-                        "sha256": archive_a["sha256"],
-                        "store_identity": archive_a["store_identity"],
-                    },
-                    {
-                        "store_id": "store-b",
-                        "label": "Historical capture",
-                        "path": Path(archive_b["path"]).name,
-                        "mode": "sealed",
-                        "sha256": archive_b["sha256"],
-                        "store_identity": archive_b["store_identity"],
-                    },
-                ],
-                "experiments": [
-                    {
-                        "experiment_id": "logical-native",
-                        "segments": [
-                            {
-                                "store_id": "store-a",
-                                "local_experiment_id": "exp-pending",
-                            },
-                            {
-                                "store_id": "store-b",
-                                "local_experiment_id": "exp-native-b",
-                            },
-                        ],
-                    }
-                ],
-                "projected_attempts": [
-                    {
-                        "logical_attempt": {
-                            "experiment_id": "logical-projected",
-                            "task_id": "task-projected",
-                            "attempt": 1,
-                        },
-                        "attempt_refs": [
-                            {
-                                "store_id": "store-a",
-                                "local_experiment_id": "exp-pending",
-                                "task_id": "task-pending",
-                                "attempt": 1,
-                                "turn_ref": turn_ref_a,
-                            },
-                            {
-                                "store_id": "store-b",
-                                "local_experiment_id": "exp-native-b",
-                                "task_id": "task-native-b",
-                                "attempt": 1,
-                                "turn_ref": {
-                                    "store_id": "store-b",
-                                    "logical_turn_key": "turn-native-b",
-                                },
-                            },
-                        ],
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
     yield {
         "controller": controller,
-        "manifest": manifest,
         "archive_a": Path(archive_a["path"]),
         "archive_b": Path(archive_b["path"]),
-        "turn_ref_a": turn_ref_a,
         "turn_key_a": http_turns["task-pending"],
     }
 
@@ -609,91 +423,21 @@ def test_external_experiment_observability_end_to_end(loopback_observability):
         path: path.read_bytes()
         for path in (evidence["archive_a"], evidence["archive_b"])
     }
-    server = ChatbotServer(
-        port=0, workspace_manifest_path=str(evidence["manifest"])
-    )
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    submitted_answers: list[str] = []
-    try:
-        assert len(_http_request(server, "GET", "/api/workspace/stores")[1]["stores"]) == 2
-        native_attempts = _http_request(
-            server,
-            "GET",
-            "/api/workspace/experiment/logical-native/attempts",
-        )[1]["attempts"]
-        assert {attempt["store_id"] for attempt in native_attempts} == {
-            "store-a",
-            "store-b",
-        }
-        projected = _http_request(
-            server,
-            "GET",
-            "/api/workspace/projected_attempts"
-            "?experiment=logical-projected&task=task-projected&attempt=1",
-        )[1]["projected_attempts"]
-        assert {
-            source["resolved_turn"]["store_id"]
-            for source in projected[0]["resolved_sources"]
-        } == {"store-a", "store-b"}
-        scoped_turn = _http_request(
-            server,
-            "GET",
-            f"/api/workspace/turn/store-a/{evidence['turn_key_a']}",
-        )[1]["turn"]
-        assert scoped_turn["task_id"] == "task-pending"
-
-        ido_assignment = _assignment(
-            "ido-rating-v1",
-            evidence["turn_ref_a"],
-            (
-                "primary",
-                "contributing_causes",
-                "coverage",
-                "declines",
-                "note",
-            ),
-        )
-        submitted_answers.extend(
-            _exercise_review_contract(
-                server,
-                ido_assignment,
-                sidecar_export_to_ido_rating,
-                ido_rating_to_sidecar_export,
-            )
-        )
-        exp028_assignment = _assignment(
-            "exp028-answer-rating-v1",
-            evidence["turn_ref_a"],
-            ("presented", "not_presented", "overclaimed", "not_decidable"),
-        )
-        submitted_answers.extend(
-            _exercise_review_contract(
-                server,
-                exp028_assignment,
-                sidecar_export_to_exp028_answer_rating,
-                exp028_answer_rating_to_sidecar_export,
-            )
-        )
-    finally:
-        server.shutdown()
-        thread.join(timeout=5)
+    # Each sealed archive opens read-only and still holds the turn it captured.
+    for path, turn_key, task_id in (
+        (evidence["archive_a"], evidence["turn_key_a"], "task-pending"),
+        (evidence["archive_b"], "turn-native-b", "task-native-b"),
+    ):
+        archived = obs.ReadOnlyObservabilityStore(str(path)).get_turn(turn_key)
+        assert archived is not None and archived["task_id"] == task_id
 
     assert {
         path: path.read_bytes()
         for path in (evidence["archive_a"], evidence["archive_b"])
     } == archive_before
     controller = evidence["controller"]
-    # The agent-memory feedback row was the other way a blinded answer could
-    # have leaked back into the model's context: it was joined into
-    # `get_memory_window` and replayed as `dspy.History`. fix-9eg.16 removed
-    # the table and the join, so the check is now that the API is gone rather
-    # than that the row is empty — an absent surface cannot leak.
+    # fix-9eg.16 removed the agent-memory feedback table and its join into
+    # `get_memory_window`, so the check is that the API is gone rather than
+    # that the row is empty -- an absent surface cannot leak.
     assert not hasattr(controller.store, "get_feedback")
-    turn = controller.store.get_turn(evidence["turn_key_a"])
-    assert turn is not None
-    memory = controller.store.get_memory_window(
-        turn["channel_id"], turn["conversation_id"], 10
-    )
-    serialized_memory = json.dumps(memory)
-    assert all(answer not in serialized_memory for answer in submitted_answers)
+    assert controller.store.get_turn(evidence["turn_key_a"]) is not None

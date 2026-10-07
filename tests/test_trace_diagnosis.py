@@ -24,7 +24,6 @@ from pathlib import Path
 import pytest
 
 from fastworkflow import tracing
-from fastworkflow.observability import capture_policy
 from fastworkflow.observability import diagnosis as diag
 from fastworkflow.observability import store as obs
 from fastworkflow.observability.comparison import (
@@ -48,24 +47,6 @@ STORE_ID = "diagnosis-store"
 # ----------------------------------------------------------------------
 
 
-def _handle(context_type: str) -> dict:
-    """A type-only §6.7 handle, as `tracing.context_handle` projects one.
-
-    Built by the real projector rather than hand-written, so the fixture cannot
-    drift from the contract the runtime actually records. `instance_key=None` is
-    what `tracing.context_handle` passes, which is why every handle this build
-    writes is type-only.
-    """
-    return capture_policy.project_context_handle(
-        context_type=context_type,
-        instance_key=None,
-        security_scope_ref=tracing.UNSCOPED_SECURITY_SCOPE,
-        projector_id=tracing.CONTEXT_PROJECTOR_ID,
-        projector_version=tracing.CONTEXT_PROJECTOR_VERSION,
-        env={},
-    ).model_dump(mode="json")
-
-
 def _execute_span(
     span_id: str,
     turn_key: str,
@@ -86,9 +67,9 @@ def _execute_span(
     if success is not None:
         attributes["success"] = success
     if context_before is not None:
-        attributes[tracing.ATTR_CONTEXT_BEFORE] = _handle(context_before)
+        attributes[tracing.ATTR_CONTEXT_BEFORE] = context_before
     if context_after is not None:
-        attributes[tracing.ATTR_CONTEXT_AFTER] = _handle(context_after)
+        attributes[tracing.ATTR_CONTEXT_AFTER] = context_after
     if parameters is not None:
         attributes["parameters"] = parameters
     if extra:
@@ -887,47 +868,10 @@ def _one_dispatch(
     return store.get_spans(turn_key)
 
 
-def _concrete(context_type: str, instance_key: str, key_version: str = "1") -> dict:
-    """A CONCRETE handle, from the real projector under a real HMAC key.
-
-    Nothing in the runtime produces one today (`fix-ppmo`), but §6.7 provides
-    for it and the diagnosis must be right when it arrives, so the fixture is
-    the projector's own output rather than a guess at its shape.
-    """
-    return capture_policy.project_context_handle(
-        context_type=context_type,
-        instance_key=instance_key,
-        security_scope_ref=tracing.UNSCOPED_SECURITY_SCOPE,
-        projector_id=tracing.CONTEXT_PROJECTOR_ID,
-        projector_version=tracing.CONTEXT_PROJECTOR_VERSION,
-        hmac_key_version=key_version,
-        env={capture_policy.HMAC_KEY_VAR: f"test-key-{key_version}"},
-    ).model_dump(mode="json")
-
-
-def test_the_handle_fixtures_are_what_they_claim_to_be() -> None:
-    """Guards the navigation tests from becoming vacuous.
-
-    If `_concrete` silently produced a type-only handle -- which is what happens
-    when no HMAC key reaches the projector -- every fingerprint test below would
-    pass for the wrong reason.
-    """
-    type_only = _handle("Project")
-    assert type_only["instance_fingerprint"] is None
-
-    first = _concrete("Project", "project-a")
-    second = _concrete("Project", "project-b")
-    assert first["instance_fingerprint"] is not None
-    assert first["instance_fingerprint"] != second["instance_fingerprint"]
-    assert first["context_type"] == second["context_type"] == "Project"
-    for key in diag.FINGERPRINT_COMPATIBILITY_KEYS:
-        assert first[key] and first[key] == second[key], key
-
-
-def test_matching_type_only_handles_do_not_prove_the_context_stayed_put(
+def test_matching_context_types_do_not_prove_the_context_stayed_put(
     store: obs.ObservabilityStore,
 ) -> None:
-    """Every handle this build writes is type-only (`instance_key=None`).
+    """The recorded value is a context TYPE, not an instance.
 
     `Project` before and `Project` after is equally consistent with one project
     throughout and with a move between two of them, so the honest answer is
@@ -937,118 +881,12 @@ def test_matching_type_only_handles_do_not_prove_the_context_stayed_put(
     markers = diag.turn_markers("turn-00", spans)
 
     assert not markers.has(diag.MARKER_CONTEXT_NAVIGATION)
-    assert markers.navigation["type_only"] == 1
+    assert markers.navigation["same_type"] == 1
     assert markers.navigation["unknown"] == 0
-    assert markers.coverage["dispatches_with_type_only_handles"] == 1
-    # A universal property of the projector, not a per-turn capture gap, so it
+    assert markers.coverage["dispatches_with_same_context_type"] == 1
+    # A property of what a type can say, not a per-turn capture gap, so it
     # does not spend the `partial_evidence` chip.
     assert not markers.has(diag.MARKER_PARTIAL_EVIDENCE)
-
-
-def test_concrete_handles_of_one_type_can_prove_a_move_between_instances(
-    store: obs.ObservabilityStore,
-) -> None:
-    turn_key = "turn-00"
-    span = _execute_span(
-        f"{turn_key}-ex", turn_key, call_id="c1", command_name="open_project", start_ns=T0
-    )
-    span.attributes[tracing.ATTR_CONTEXT_BEFORE] = _concrete("Project", "project-a")
-    span.attributes[tracing.ATTR_CONTEXT_AFTER] = _concrete("Project", "project-b")
-    _write(
-        store,
-        _turn_row(turn_key, record=_record(turn_key, refs=[("c1", 1, f"{turn_key}-ex")])),
-        [span],
-    )
-
-    markers = diag.turn_markers(turn_key, store.get_spans(turn_key))
-    assert markers.has(diag.MARKER_CONTEXT_NAVIGATION)
-    assert markers.navigation["transitions"][0]["from"] == "Project"
-    assert markers.navigation["transitions"][0]["to"] == "Project"
-
-
-def test_concrete_handles_with_the_same_instance_are_unchanged(
-    store: obs.ObservabilityStore,
-) -> None:
-    turn_key = "turn-00"
-    span = _execute_span(
-        f"{turn_key}-ex", turn_key, call_id="c1", command_name="rename", start_ns=T0
-    )
-    span.attributes[tracing.ATTR_CONTEXT_BEFORE] = _concrete("Project", "project-a")
-    span.attributes[tracing.ATTR_CONTEXT_AFTER] = _concrete("Project", "project-a")
-    _write(
-        store,
-        _turn_row(turn_key, record=_record(turn_key, refs=[("c1", 1, f"{turn_key}-ex")])),
-        [span],
-    )
-
-    markers = diag.turn_markers(turn_key, store.get_spans(turn_key))
-    assert not markers.has(diag.MARKER_CONTEXT_NAVIGATION)
-    assert markers.navigation["type_only"] == 0
-    assert markers.navigation["unknown"] == 0
-
-
-def _navigation_state(store: obs.ObservabilityStore, before: dict, after: dict) -> dict:
-    """Diagnose one dispatch carrying two fully projected context handles."""
-    turn_key = "turn-00"
-    span = _execute_span(
-        f"{turn_key}-ex", turn_key, call_id="c1", command_name="rename", start_ns=T0
-    )
-    span.attributes[tracing.ATTR_CONTEXT_BEFORE] = before
-    span.attributes[tracing.ATTR_CONTEXT_AFTER] = after
-    _write(
-        store,
-        _turn_row(turn_key, record=_record(turn_key, refs=[("c1", 1, f"{turn_key}-ex")])),
-        [span],
-    )
-    markers = diag.turn_markers(turn_key, store.get_spans(turn_key))
-    return {
-        "navigated": markers.has(diag.MARKER_CONTEXT_NAVIGATION),
-        "type_only": markers.navigation["type_only"],
-    }
-
-
-def test_fingerprints_from_different_keys_are_not_compared(
-    store: obs.ObservabilityStore,
-) -> None:
-    """Digests minted under different HMAC keys differ for reasons that have
-    nothing to do with the instance; comparing them would invent a move."""
-    state = _navigation_state(
-        store, _concrete("Project", "project-a", "1"), _concrete("Project", "project-b", "2")
-    )
-    assert state["navigated"] is False
-    assert state["type_only"] == 1
-
-
-@pytest.mark.parametrize("key", ["projector_id", "projector_version", "security_scope_ref"])
-def test_fingerprints_are_not_compared_across_incompatible_metadata(
-    store: obs.ObservabilityStore, key: str
-) -> None:
-    """A digest is an identity only relative to what minted and scoped it.
-
-    A different projector may have hashed a different instance key, and a
-    different security scope is not asserting the same thing about the same
-    instance -- so "the digests differ" would not mean the context moved.
-    """
-    before = _concrete("Project", "project-a")
-    after = _concrete("Project", "project-b")
-    after[key] = "something-else"
-
-    state = _navigation_state(store, before, after)
-    assert state["navigated"] is False, f"{key} disagrees; digests are not comparable"
-    assert state["type_only"] == 1
-
-
-@pytest.mark.parametrize("key", diag.FINGERPRINT_COMPATIBILITY_KEYS)
-def test_fingerprints_are_not_compared_when_their_metadata_is_missing(
-    store: obs.ObservabilityStore, key: str
-) -> None:
-    before = _concrete("Project", "project-a")
-    after = _concrete("Project", "project-b")
-    before[key] = None
-
-    state = _navigation_state(store, before, after)
-    assert state["navigated"] is False, f"missing {key} makes the digest unreadable"
-    assert state["type_only"] == 1
 
 
 def test_a_producers_explicit_navigation_flag_is_evidence(
@@ -1058,7 +896,7 @@ def test_a_producers_explicit_navigation_flag_is_evidence(
 
     The pilot corpus carries `auto_navigated` spans that no emitter in this tree
     writes. A producer stating that it navigated settles the question that
-    type-only handles cannot.
+    two equal context types cannot.
     """
     spans = _one_dispatch(
         store,
@@ -1070,7 +908,7 @@ def test_a_producers_explicit_navigation_flag_is_evidence(
     markers = diag.turn_markers("turn-00", spans)
 
     assert markers.has(diag.MARKER_CONTEXT_NAVIGATION)
-    assert markers.navigation["type_only"] == 0
+    assert markers.navigation["same_type"] == 0
 
 
 def test_a_navigation_flag_recorded_false_does_not_prove_the_negative(
@@ -1086,13 +924,13 @@ def test_a_navigation_flag_recorded_false_does_not_prove_the_negative(
     markers = diag.turn_markers("turn-00", spans)
 
     assert not markers.has(diag.MARKER_CONTEXT_NAVIGATION)
-    assert markers.navigation["type_only"] == 1, "still unproven, not proven unchanged"
+    assert markers.navigation["same_type"] == 1, "still unproven, not proven unchanged"
 
 
-def test_navigation_is_unknown_when_no_handle_was_recorded(
+def test_navigation_is_unknown_when_no_context_type_was_recorded(
     store: obs.ObservabilityStore,
 ) -> None:
-    """The pilot store's exception path: status error, no handles, no success."""
+    """The pilot store's exception path: status error, no context type, no success."""
     turn_key = "turn-00"
     span = _execute_span(
         f"{turn_key}-ex",
@@ -1116,8 +954,33 @@ def test_navigation_is_unknown_when_no_handle_was_recorded(
     assert not markers.has(diag.MARKER_STEP_UNSUCCESSFUL), "absent success is not false"
     assert markers.has(diag.MARKER_STEP_ERROR), "the recorded status is a fact"
     assert markers.has(diag.MARKER_PARTIAL_EVIDENCE)
-    assert markers.coverage["dispatches_without_context_handles"] == 1
+    assert markers.coverage["dispatches_without_context_type"] == 1
     assert markers.coverage["dispatches_without_success"] == 1
+
+
+@pytest.mark.parametrize(
+    ("attributes", "state", "basis", "source", "destination"),
+    [
+        ({"context_before": "Workspace", "context_after": "Project"},
+         diag.NAV_CHANGED, "context_type_change", "Workspace", "Project"),
+        ({"context_before": "Project", "context_after": "Project", "auto_navigated": True},
+         diag.NAV_CHANGED, "recorded_flag", "Project", "Project"),
+        ({"context_before": "Project", "context_after": "Project"},
+         diag.NAV_UNKNOWN, "same_context_type", "Project", "Project"),
+        ({"context_before": "Project"},
+         diag.NAV_UNKNOWN, "no_context_recorded", "Project", None),
+        ({}, diag.NAV_UNKNOWN, "no_context_recorded", None, None),
+    ],
+)
+def test_dispatch_navigation_names_its_basis_and_both_ends(
+    attributes: dict, state: str, basis: str, source: str | None, destination: str | None
+) -> None:
+    navigation = diag._dispatch_navigation(attributes)
+
+    assert navigation["state"] == state
+    assert navigation["basis"] == basis
+    assert navigation["from"] == source
+    assert navigation["to"] == destination
 
 
 def test_completed_turn_containing_an_unsuccessful_command_is_flagged(

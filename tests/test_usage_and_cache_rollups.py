@@ -132,8 +132,8 @@ def _llm_call(
 def _rows(spans: list[tracing.Span]) -> list[dict]:
     """The spans as a reader sees them: plain rows with JSON text attributes.
 
-    `usage_rollup` is called by the server on rows out of the store and by the
-    workspace on rows it decoded itself, so the text form is the stricter of the
+    `usage_rollup` is called by the server on rows out of the store and may be
+    handed rows a reader decoded itself, so the text form is the stricter of the
     two and is what these unit-scale assertions use.
     """
     return [

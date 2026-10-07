@@ -1,15 +1,13 @@
-"""Experiment provenance flattening and benchmark-pin checks.
+"""Experiment provenance flattening.
 
 Moved verbatim from ``run_chatbot.server``. No handler state.
 """
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterable, Mapping
 from typing import Any, Optional
 
-from fastworkflow.benchmark.catalog import BenchmarkManifestError, load_version
 from fastworkflow.run_chatbot.turn_annotations import (
     _EXPERIMENT_PROVENANCE_COLUMNS,
     _SNAPSHOT_PROVENANCE_KEYS,
@@ -59,74 +57,6 @@ def _git_revision_of(record: Mapping[str, Any]) -> Optional[str]:
     return None
 
 
-def benchmark_pin_check(
-    workflow_folderpath: Optional[str], detail: Mapping[str, Any]
-) -> Optional[dict[str, Any]]:
-    """Check an experiment's benchmark pin against the catalogue file itself.
-
-    The pin (`benchmark_id@version` plus the digest recorded when the run was
-    declared) is stored in the experiment row; the version file it names lives
-    in the workflow folder. Showing the recorded digest alone tells a reader
-    nothing about whether the corpus still says what it said — that needs the
-    file, which is why a sealed workspace now carries the folder.
-
-    Four honest answers, never a hidden one: `match`, `mismatch` (both digests
-    quoted verbatim, the reader decides what it means), `catalogue_unavailable`
-    (with the reason: no folder declared, folder gone, benchmark or version
-    missing), and `pin_incomplete` (the run recorded an id and version but no
-    digest, so there is nothing to compare). ``None`` only when nothing was
-    pinned at all.
-    """
-    benchmark_id = _text_or_none(detail.get("benchmark_id"))
-    version = _text_or_none(detail.get("benchmark_version"))
-    if not benchmark_id or not version:
-        return None
-    pinned = _text_or_none(detail.get("benchmark_digest_sha256"))
-    check: dict[str, Any] = {
-        "benchmark_id": benchmark_id,
-        "benchmark_version": version,
-        "pinned_digest": pinned,
-        "catalogue_digest": None,
-        "workflow_folderpath": workflow_folderpath,
-        "status": "catalogue_unavailable",
-        "detail": "",
-    }
-    if not workflow_folderpath:
-        check["detail"] = (
-            "this workspace manifest names no workflow folder, so the "
-            "benchmark catalogue cannot be read"
-        )
-        return check
-    if not os.path.isdir(workflow_folderpath):
-        check["detail"] = (
-            f"the workflow folder named by this workspace is not on this "
-            f"machine: {workflow_folderpath}"
-        )
-        return check
-    try:
-        loaded = load_version(workflow_folderpath, benchmark_id, version)
-    except (BenchmarkManifestError, OSError) as exc:
-        check["detail"] = f"{benchmark_id}@{version} cannot be read: {exc}"
-        return check
-    check["catalogue_digest"] = loaded.get("digest_sha256")
-    if not pinned:
-        check["status"] = "pin_incomplete"
-        check["detail"] = (
-            "the experiment recorded no benchmark digest; the catalogue file "
-            "is shown but nothing was pinned to compare it against"
-        )
-        return check
-    if check["catalogue_digest"] == pinned:
-        check["status"] = "match"
-        check["detail"] = "the catalogue file still matches the pinned digest"
-    else:
-        check["status"] = "mismatch"
-        check["detail"] = (
-            f"pinned {pinned}, catalogue {check['catalogue_digest']}"
-        )
-    return check
-
-
 def experiment_provenance(
     detail: Mapping[str, Any], attempts: Iterable[Mapping[str, Any]]
 ) -> dict[str, Any]:
@@ -134,7 +64,7 @@ def experiment_provenance(
 
     Three sources, each named on its field: the experiment row's own columns;
     the evidence-run records' `observability` block (ObservabilityProvenance:
-    capture policy and span-contract versions, per-emitter versions, DB
+    span-contract version, per-emitter versions, DB
     schema, the FW_OBS_* config in effect); and the attempts' runtime
     snapshots (workflow fingerprint and model version). A field two segments
     or two attempts disagree on is reported with every value and where each

@@ -2,8 +2,8 @@
 
 Integration throughout: a real `ObservabilityStore` on disk, real span rows
 through `upsert_span_rows`, real turn rows through `upsert_turn_row`, the real
-execution ledger from `run_chatbot/server.py`, a real sealed workspace archive
-and the real `add_human_feedback` validator. No mocks and no fixtures that
+execution ledger from `run_chatbot/server.py` and the real
+`add_human_feedback` validator. No mocks and no fixtures that
 stand in for a component -- the whole point of this module is that what the
 browser shows and what an agent reads come from the same recorded evidence, and
 a fake store would not test that.
@@ -38,7 +38,6 @@ from fastworkflow.observability.comparison import (
     PassSelector,
     StoreExecutionReader,
     UnknownRecordedPass,
-    WorkspaceExecutionReader,
     align_steps,
     anchor_for_step,
     anchors_for_pair,
@@ -53,10 +52,6 @@ from fastworkflow.observability.pair_review import (
     STATE_NOT_REVIEWED,
     STATE_REVIEWED,
     PairReviewStore,
-)
-from fastworkflow.observability.workspace import (
-    WORKSPACE_SCHEMA,
-    load_observability_workspace,
 )
 from fastworkflow.run_chatbot.server import cost_rollup, execution_ledger
 
@@ -407,7 +402,7 @@ class TestExecutionRef:
         whole = ExecutionRef(store_id="s", turn_keys=("t",))
         assert len({teacher.ref_id(), student.ref_id(), whole.ref_id()}) == 3
 
-    def test_the_workspace_turn_ref_field_names_parse(self):
+    def test_the_reader_turn_row_field_names_parse(self):
         ref = ExecutionRef.from_mapping(
             {"store_id": "s", "logical_turn_keys": ["t1", "t2"]}
         )
@@ -913,7 +908,7 @@ class TestRecordedPasses:
         assert [step.command_call_id for step in left.steps] == ["t1", "t2"]
         assert [step.command_call_id for step in right.steps] == ["s1", "s2"]
         assert all(step.pass_id == "teacher" for step in left.steps)
-        # The other pass's steps are withheld from this view but counted, not
+        # The other pass's steps are left out of this view but counted, not
         # silently dropped.
         assert {step.command_call_id for step in left.unassigned_steps} == {"s1", "s2"}
 
@@ -1609,134 +1604,6 @@ class TestAnchorsAndDigest:
             comparison.left.ref, comparison.right.ref
         )
         assert json.loads(json.dumps(wire))["summary"] == comparison.summary()
-
-
-# ----------------------------------------------------------------------
-# Sealed archives read through the workspace
-# ----------------------------------------------------------------------
-
-
-class TestWorkspaceReader:
-    def test_a_sealed_archive_projects_through_the_workspace_reader(
-        self, tmp_path: Path
-    ):
-        source = tmp_path / "live.sqlite3"
-        live = obs.ObservabilityStore(str(source))
-        live.create_experiment(
-            "exp-sealed", "sealed run", declared_tasks=1, declared_attempts=1
-        )
-        live.start_attempt("exp-sealed", "task-1", 1, "channel-1")
-        live.finish_attempt(
-            "exp-sealed", "task-1", 1, outcome="pass", outcome_source="test"
-        )
-        turn_key = "turn-sealed"
-        row = _turn_row(
-            turn_key,
-            record=_record(
-                turn_key,
-                refs=[("q1", 0, "q-ex1")],
-                outputs=[_output("q1", "add_todo", {"title": "sealed"})],
-            ),
-            experiment_id="exp-sealed",
-            task_id="task-1",
-            attempt=1,
-        )
-        _write(
-            live,
-            row,
-            [
-                _execute_span(
-                    "q-ex1",
-                    turn_key,
-                    call_id="q1",
-                    command_name="add_todo",
-                    start_ns=T0,
-                    parameters={"title": "sealed"},
-                )
-            ],
-        )
-        archive = obs.ObservabilityStore(str(source), migrate=False).archive_to(
-            str(tmp_path / "sealed.sqlite3")
-        )
-        manifest = tmp_path / "workspace.json"
-        manifest.write_text(
-            json.dumps(
-                {
-                    "schema": WORKSPACE_SCHEMA,
-                    "workspace_id": "ws-1",
-                    "label": "sealed",
-                    "stores": [
-                        {
-                            "store_id": "sealed-1",
-                            "label": "sealed-1",
-                            "path": Path(archive["path"]).name,
-                            "mode": "sealed",
-                            "sha256": archive["sha256"],
-                            "store_identity": archive["store_identity"],
-                        }
-                    ],
-                    "experiments": [],
-                    "projected_attempts": [],
-                }
-            ),
-            encoding="utf-8",
-        )
-        workspace = load_observability_workspace(manifest)
-        before = Path(archive["path"]).stat()
-        projection = _project(
-            ExecutionRef(
-                store_id="sealed-1",
-                turn_keys=(turn_key,),
-                experiment_id="exp-sealed",
-                task_id="task-1",
-                attempt=1,
-            ),
-            WorkspaceExecutionReader(workspace),
-        )
-        assert [step.command_name for step in projection.steps] == ["add_todo"]
-        assert projection.steps[0].parameters == {"title": "sealed"}
-        after = Path(archive["path"]).stat()
-        # Comparison is a read: the sealed bytes are untouched.
-        assert (before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns)
-
-    def test_the_workspace_reader_still_refuses_an_unknown_store(self, tmp_path: Path):
-        source = tmp_path / "live2.sqlite3"
-        live = obs.ObservabilityStore(str(source))
-        _write(live, _turn_row("turn-x", record=_record("turn-x", refs=[])), [])
-        archive = obs.ObservabilityStore(str(source), migrate=False).archive_to(
-            str(tmp_path / "sealed2.sqlite3")
-        )
-        manifest = tmp_path / "workspace2.json"
-        manifest.write_text(
-            json.dumps(
-                {
-                    "schema": WORKSPACE_SCHEMA,
-                    "workspace_id": "ws-2",
-                    "label": "sealed",
-                    "stores": [
-                        {
-                            "store_id": "sealed-2",
-                            "label": "sealed-2",
-                            "path": Path(archive["path"]).name,
-                            "mode": "sealed",
-                            "sha256": archive["sha256"],
-                            "store_identity": archive["store_identity"],
-                        }
-                    ],
-                    "experiments": [],
-                    "projected_attempts": [],
-                }
-            ),
-            encoding="utf-8",
-        )
-        workspace = load_observability_workspace(manifest)
-        from fastworkflow.observability.workspace import UnknownWorkspaceStore
-
-        with pytest.raises(UnknownWorkspaceStore):
-            _project(
-                ExecutionRef(store_id="not-registered", turn_keys=("turn-x",)),
-                WorkspaceExecutionReader(workspace),
-            )
 
 
 # ----------------------------------------------------------------------

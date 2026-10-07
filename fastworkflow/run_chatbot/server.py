@@ -50,22 +50,13 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from fastworkflow import state_paths
 from fastworkflow.observability import feedback
-from fastworkflow.observability.diagnosis import InvalidTurnQuery
+from fastworkflow.observability.diagnosis import InvalidTurnQuery, search_turns
 from fastworkflow.observability.derived_cache import DerivedTurnCache
 from fastworkflow.observability.store import (
     IncompatibleObservabilityDB,
     ObservabilityStore,
     ReadOnlyObservabilityStore,
     Redactor,
-)
-from fastworkflow.observability.workspace import (
-    ObservabilityWorkspace,
-    WorkspaceError,
-    load_observability_workspace,
-)
-from fastworkflow.review.sidecar import (
-    ReviewSidecar,
-    ReviewValidationError,
 )
 from fastworkflow.run_chatbot import launcher
 from fastworkflow.run_chatbot import selection_api
@@ -78,13 +69,10 @@ from fastworkflow.run_chatbot.turn_annotations import (
     TRAINING_RUN_MAX_LIMIT,
     _wire_bool,
     _wire_number,
-    _workspace_segment_verdicts,
     annotate_attempt_rows,
-    annotate_projected_attempts,
     annotate_turn_detail,
     annotate_turn_diagnosis,
     annotate_turn_rows,
-    annotate_workspace_attempts,
     cost_rollup,
     count_llm_calls_cut_at_limit,
     diagnostic_store_id,
@@ -99,7 +87,6 @@ from fastworkflow.run_chatbot.turn_annotations import (
     turn_span_stamps,
 )
 from fastworkflow.run_chatbot.provenance import (
-    benchmark_pin_check,
     experiment_provenance,
     provenance_differences,
 )
@@ -117,8 +104,6 @@ from fastworkflow.run_chatbot.handler_control import _ControlPlaneRoutes
 from fastworkflow.run_chatbot.handler_experiment import _ExperimentRoutes
 from fastworkflow.run_chatbot.handler_feedback import _FeedbackRoutes
 from fastworkflow.run_chatbot.handler_navigation import _NavigationRoutes
-from fastworkflow.run_chatbot.handler_review import _ReviewRoutes
-from fastworkflow.run_chatbot.handler_workspace import _WorkspaceRoutes
 from fastworkflow.run_chatbot.http_common import (
     STORE_UNAVAILABLE,
     run_clear_conversations,
@@ -416,20 +401,9 @@ class ChatbotServer:
         port: int = 0,
         token: Optional[str] = None,
         spawn_options: Optional[dict] = None,
-        workspace_manifest_path: Optional[str] = None,
     ) -> None:
         self.db_path = db_path or ""
         self.workflow_path = workflow_path
-        self.workspace: Optional[ObservabilityWorkspace] = (
-            load_observability_workspace(workspace_manifest_path)
-            if workspace_manifest_path
-            else None
-        )
-        self.workspace_manifest_path = (
-            str(self.workspace.manifest_path) if self.workspace is not None else ""
-        )
-        self._review_sidecar: Optional[ReviewSidecar] = None
-        self._review_sidecar_lock = threading.Lock()
         # Auto-spawn posture for the workflow's FastAPI server; see
         # run_chatbot_main. no_server=True keeps the chatbot debug-only.
         self.spawn_options = dict(spawn_options or {"no_server": True})
@@ -529,19 +503,6 @@ class ChatbotServer:
         except Exception:
             return None
 
-    def open_review_sidecar(self) -> ReviewSidecar:
-        """Return the manifest-bound review store for the active workspace."""
-        if self.workspace is None or not self.workspace_manifest_path:
-            raise ReviewValidationError(
-                "review assignments require an active observability workspace"
-            )
-        with self._review_sidecar_lock:
-            if self._review_sidecar is None:
-                self._review_sidecar = ReviewSidecar.from_workspace_manifest(
-                    self.workspace_manifest_path
-                )
-            return self._review_sidecar
-
     @property
     def url(self) -> str:
         return f"http://127.0.0.1:{self.port}/?token={self.token}"
@@ -604,7 +565,6 @@ class ChatbotServer:
             env_file_path = self.env_file_path
             passwords_file_path = self.passwords_file_path
             spawn_error = self.spawn_error
-            workspace = self.workspace
             channel_id = self.channel_id
             user_id = self.user_id
             train_log_path = self.train_log_path
@@ -617,7 +577,7 @@ class ChatbotServer:
         # An omitted spawn still reports server_url when --server-port named an
         # existing server, so the Advanced panel can be prefilled.
         expose_url = running or bool(no_server and server_url)
-        payload = {
+        return {
             "workflow_path": workflow_path,
             "workflow_name": (
                 os.path.basename(os.path.abspath(workflow_path))
@@ -645,44 +605,6 @@ class ChatbotServer:
             ),
             "train_log_path": resolved_train_log or None,
         }
-        if workspace is not None:
-            payload.update(
-                {
-                    "workspace_mode": True,
-                    "workspace": workspace.summary(),
-                    "workflow_path": "",
-                    "workflow_name": "",
-                    "db_path": "",
-                    "server_url": None,
-                    "server_running": False,
-                    "env_setup_required": False,
-                    "read_only": True,
-                    "server_log_path": None,
-                    "train_log_path": None,
-                }
-            )
-        else:
-            payload.update({"workspace_mode": False, "read_only": False})
-        return payload
-
-    def activate_workspace(self, manifest_path: str) -> dict[str, Any]:
-        """Load a manifest selected through the token-gated browser picker."""
-        with self._activate_lock:
-            workspace = load_observability_workspace(manifest_path)
-            with self._session_state_lock:
-                old_proc = self.server_proc
-            if old_proc is not None and old_proc.poll() is None:
-                launcher.terminate_server(old_proc)
-            self._publish_session_state(
-                server_proc=None,
-                server_url=None,
-                workflow_path="",
-                db_path="",
-                workspace=workspace,
-                workspace_manifest_path=str(workspace.manifest_path),
-            )
-            self._review_sidecar = None
-            return self.session_payload()
 
     def activate_workflow(self, workflow_path: str) -> dict[str, Any]:
         """Point the chatbot at a workflow and (unless disabled) make sure its
@@ -960,23 +882,11 @@ class ChatbotServer:
 
 # Write dispatch. The 405 allowlist is this table: a path is admitted exactly
 # when one row matches, and every row names a handler, so an admitted path
-# cannot fall through into clear-conversations. `allowed_in_workspace=False`
-# is the refusal that today sits after the earlier POST branches (and before
-# both PATCH handlers); routes left True refuse inside their own handlers.
-_LIVE_WORKSPACE_REFUSAL = (
-    "workspace mode is read-only; live and destructive actions are disabled"
-)
-_PATCH_WORKSPACE_REFUSAL = (
-    "workspace mode is read-only; experiment annotations cannot be changed"
-)
-
-
+# cannot fall through into clear-conversations.
 class _WriteRoute(NamedTuple):
     method: str
     match: Callable[[str], bool]
     handler: str
-    allowed_in_workspace: bool = True
-    workspace_refusal: str = ""
     require_object_body: bool = False
     reads_body: bool = True
 
@@ -1004,12 +914,6 @@ def _setup_post(path: str) -> bool:
     )
 
 
-def _review_capture_post(path: str) -> bool:
-    return path.startswith("/api/review/assignments/") and (
-        path.endswith("/answers") or path.endswith("/adjudications")
-    )
-
-
 def _benchmark_analysis_put(path: str) -> bool:
     return path.startswith("/api/benchmarks/") and path.endswith("/analysis")
 
@@ -1033,11 +937,6 @@ def _checked_write_routes(
     for route in routes:
         if not route.handler:
             raise RuntimeError(f"{route.method} write route has no handler")
-        if not route.allowed_in_workspace and not route.workspace_refusal:
-            raise RuntimeError(
-                f"{route.method} {route.handler} refuses workspace mode "
-                "without a message"
-            )
     return routes
 
 
@@ -1050,45 +949,12 @@ _WRITE_ROUTES = _checked_write_routes((
     _WriteRoute("POST", _benchmark_experiment_post, "_post_benchmark_record"),
     _WriteRoute("POST", selection_api.owns_write, "_post_selection"),
     _WriteRoute("POST", _setup_post, "_post_experiment_setup"),
-    _WriteRoute("POST", _review_capture_post, "_post_review_capture"),
-    _WriteRoute("POST", _exact("/api/review/assignments"), "_post_review_assignment"),
     _WriteRoute("POST", _benchmark_version_post, "_post_benchmark_version"),
-    # Dispatched only after the workspace read-only refusal below. The rows
-    # above are reached first, and each of those handlers does its own check.
+    _WriteRoute("POST", _exact("/api/select_workflow"), "_post_select_workflow"),
+    _WriteRoute("POST", _exact("/api/configure_env"), "_post_configure_env"),
+    _WriteRoute("POST", _exact("/api/train"), "_post_train"),
     _WriteRoute(
-        "POST",
-        _exact("/api/select_workspace"),
-        "_post_select_workspace",
-        allowed_in_workspace=False,
-        workspace_refusal=_LIVE_WORKSPACE_REFUSAL,
-    ),
-    _WriteRoute(
-        "POST",
-        _exact("/api/select_workflow"),
-        "_post_select_workflow",
-        allowed_in_workspace=False,
-        workspace_refusal=_LIVE_WORKSPACE_REFUSAL,
-    ),
-    _WriteRoute(
-        "POST",
-        _exact("/api/configure_env"),
-        "_post_configure_env",
-        allowed_in_workspace=False,
-        workspace_refusal=_LIVE_WORKSPACE_REFUSAL,
-    ),
-    _WriteRoute(
-        "POST",
-        _exact("/api/train"),
-        "_post_train",
-        allowed_in_workspace=False,
-        workspace_refusal=_LIVE_WORKSPACE_REFUSAL,
-    ),
-    _WriteRoute(
-        "POST",
-        _exact("/api/clear_conversations"),
-        "_post_clear_conversations",
-        allowed_in_workspace=False,
-        workspace_refusal=_LIVE_WORKSPACE_REFUSAL,
+        "POST", _exact("/api/clear_conversations"), "_post_clear_conversations"
     ),
     _WriteRoute(
         "PUT",
@@ -1107,16 +973,12 @@ _WRITE_ROUTES = _checked_write_routes((
         "PATCH",
         _benchmark_registration_prefix,
         "_patch_registration",
-        allowed_in_workspace=False,
-        workspace_refusal=_PATCH_WORKSPACE_REFUSAL,
         require_object_body=True,
     ),
     _WriteRoute(
         "PATCH",
         _experiment_patch,
         "_patch_experiment",
-        allowed_in_workspace=False,
-        workspace_refusal=_PATCH_WORKSPACE_REFUSAL,
         require_object_body=True,
     ),
 ))
@@ -1130,8 +992,6 @@ def _match_write_route(method: str, path: str) -> Optional[_WriteRoute]:
 
 
 class _ChatbotRequestHandler(
-    _ReviewRoutes,
-    _WorkspaceRoutes,
     _ExperimentRoutes,
     _BenchmarkRoutes,
     _FeedbackRoutes,
@@ -1378,10 +1238,6 @@ class _ChatbotRequestHandler(
             return False
         return True
 
-    def _review_capability(self) -> str:
-        """Return the separately presented rater capability."""
-        return (self.headers.get("X-Review-Capability") or "").strip()
-
     # -- routing ---------------------------------------------------------
 
     def do_GET(self) -> None:  # noqa: N802
@@ -1426,9 +1282,6 @@ class _ChatbotRequestHandler(
                 headers,
             )
             return
-        if path == "/trace" or path.startswith("/trace/"):
-            self._handle_trace_navigation(path, query)
-            return
         if path.startswith("/api/"):
             self._handle_api(path, query)
             return
@@ -1466,12 +1319,6 @@ class _ChatbotRequestHandler(
                 return
         if route.require_object_body and not isinstance(body, dict):
             self._error(400, "body must be a JSON object")
-            return
-        if (
-            not route.allowed_in_workspace
-            and self.chatbot.workspace is not None
-        ):
-            self._error(403, route.workspace_refusal)
             return
         getattr(self, route.handler)(path, body, query)
 
@@ -1549,6 +1396,44 @@ class _ChatbotRequestHandler(
             read_log_tail(log_path, tail, self.chatbot.token)
         )
 
+    def _search_turns_response(self, store: Any, q: Any) -> None:
+        """Answer a turn search over the complete authorized dataset.
+
+        The predicate lives in `diagnosis` rather than here, so every reader of
+        a store means the same thing by the same code.
+
+        The response keeps `turns` at its top level, so a client reading only
+        that keeps working, and adds the counts, facets and continuation the
+        list needs to say honestly how much of the dataset it has looked at.
+        """
+        try:
+            query = turn_query_from_params(q)
+        except InvalidTurnQuery as exc:
+            self._error(400, str(exc))
+            return
+        try:
+            with self.chatbot._turns_scan_lock:
+                page = search_turns(
+                    store,
+                    query,
+                    store_id=diagnostic_store_id(store),
+                    with_facets=_wire_bool(q("facets"), "facets") is not False,
+                    derived_cache=self.chatbot._derived_turn_cache,
+                    page_stamps=turn_span_stamps,
+                )
+        except InvalidTurnQuery as exc:
+            self._error(400, str(exc))
+            return
+        payload = page.as_dict()
+        # The rail's existing chips read the cut-at-limit tally and the cost
+        # roll-up, which are tier-1/2 stamps rather than diagnostic markers and
+        # so are not part of the scan's projection. Stamping the PAGE keeps
+        # that read bounded by the page: the scan may have walked the store,
+        # but only these rows are rendered. When the scan already stamped the
+        # page (spans were in hand), this is a no-op.
+        annotate_turn_rows(store, payload["turns"])
+        self._send_json(payload)
+
     def _handle_api(self, path: str, query: dict[str, list[str]]) -> None:
         # Authoring and navigation do not depend on execution evidence. In
         # particular, an incompatible selected store must not trap the user
@@ -1596,42 +1481,7 @@ class _ChatbotRequestHandler(
         except IncompatibleObservabilityDB as exc:
             self._error(409, str(exc))
             return
-        if path.startswith("/api/review/assignments/"):
-            self._handle_review_assignment(path)
-        elif path == "/api/workspace" or path.startswith("/api/workspace/"):
-            self._handle_workspace(path, q)
-        elif self.chatbot.workspace is not None and path in {
-            "/api/turns",
-            "/api/experiments",
-        }:
-            self._error(
-                400,
-                "workspace reads must be scoped by store_id; unscoped search is "
-                "refused. Search one store with "
-                "/api/workspace/turns?store_id=<id>",
-            )
-        elif self.chatbot.workspace is not None and (
-            path == "/api/training-runs" or path.startswith("/api/training-run/")
-        ):
-            # Same rule as turns: a workspace holds several stores and two of
-            # them may hold the same run_id, so an unscoped read would have to
-            # pick one. It names the scoped route instead of guessing.
-            self._error(
-                400,
-                "workspace training-history reads must name their store; list "
-                "one store with /api/workspace/training-runs?store_id=<id>",
-            )
-        elif self.chatbot.workspace is not None and (
-            path.startswith("/api/turn/")
-            or path.startswith("/api/spans/")
-            or path.startswith("/api/prompt/")
-            or path.startswith("/api/experiment/")
-        ):
-            self._error(
-                400,
-                "workspace reads must use the store-aware /api/workspace routes",
-            )
-        elif path == "/api/meta":
+        if path == "/api/meta":
             self._send_json(
                 {
                     "workflow_path": self.chatbot.workflow_path,
@@ -1913,34 +1763,17 @@ def run_chatbot_main(args) -> int:
     install them, then starts the FastAPI server unless ``--server-port``
     named an existing server.
     """
-    workspace_manifest_path = getattr(args, "workspace_manifest", None)
     spawn_options = spawn_options_from_cli_args(args)
-    if workspace_manifest_path:
-        # Workspace inspection never starts or connects to a live workflow server.
-        spawn_options = {"no_server": True}
     try:
-        server = ChatbotServer(
-            port=0,
-            spawn_options=spawn_options,
-            workspace_manifest_path=workspace_manifest_path,
-        )
-    except (OSError, WorkspaceError, ValueError) as exc:
+        server = ChatbotServer(port=0, spawn_options=spawn_options)
+    except OSError as exc:
         print(f"Error: cannot start the chatbot ({exc}).")
         return 1
 
     # -- banner ---------------------------------------------------------
     print("fastWorkflow Chatbot")
-    if server.workspace is not None:
-        print(
-            "  read-only workspace: "
-            + server.workspace.label
-            + " ("
-            + str(server.workspace.manifest_path)
-            + ")"
-        )
-    else:
-        print("  pick a workflow in the browser (bundled examples")
-        print("  and local folders are listed; you can browse anywhere).")
+    print("  pick a workflow in the browser (bundled examples")
+    print("  and local folders are listed; you can browse anywhere).")
     print(f"\n  Open in your browser:\n\n    {server.url}\n")
     print("Press Ctrl+C to stop.", flush=True)
     _open_in_browser(server.url)

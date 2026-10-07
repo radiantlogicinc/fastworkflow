@@ -148,16 +148,13 @@ def experiment_store_readiness(db_path: str) -> dict[str, str]:
             f"{observability_store.FEATURE_EXPERIMENT_CLAIMS_V1!r}"
         )
     store_id = store.store_identity()
-    regime = store.capture_regime()
-    if store_id is None or regime is None:
+    if store_id is None:
         raise MissingExperimentLifecycleFeature(
-            f"{db_path!r} has no installed store identity or capture regime"
+            f"{db_path!r} has no installed store identity"
         )
     return {
         "store_id": store_id,
         "resolved_path": os.path.realpath(db_path),
-        "capture_profile": regime[0],
-        "capture_policy_version": regime[1],
     }
 
 
@@ -307,8 +304,6 @@ class ExperimentController:
         *,
         migrate: bool = False,
         external: bool = True,
-        capture_profile: Optional[str] = None,
-        capture_policy_version: Optional[str] = None,
     ) -> None:
         if not workflow_folderpath:
             raise ValueError("workflow_folderpath is required")
@@ -317,9 +312,7 @@ class ExperimentController:
         if external and migrate:
             raise ValueError("external controllers must open with migrate=False")
         # The folder this controller's runs come from. Not stored in the DB (no
-        # schema change): it is the caller's own fact about this machine, and it
-        # travels out again at seal time so a workspace manifest can name the
-        # workflow whose benchmark catalogue the run was pinned against.
+        # schema change): it is the caller's own fact about this machine.
         self.workflow_folderpath = os.path.abspath(workflow_folderpath)
         db_path = state_paths.observability_db(self.workflow_folderpath)
         if external and not os.path.isfile(db_path):
@@ -355,23 +348,6 @@ class ExperimentController:
                 f"{actual_store_identity!r} at {os.path.realpath(db_path)!r}"
             )
         self.store_identity = actual_store_identity
-        target_regime = self.store.capture_regime()
-        if target_regime is None:
-            raise MissingExperimentLifecycleFeature(
-                f"{db_path!r} has no installed capture regime"
-            )
-        target_profile, target_policy_version = target_regime
-        incoming = (
-            capture_profile or target_profile,
-            capture_policy_version or target_policy_version,
-        )
-        if incoming != target_regime:
-            raise observability_store.CaptureRegimeChanged(
-                "<target-store>",
-                f"{target_profile}/{target_policy_version}",
-                f"{incoming[0]}/{incoming[1]}",
-            )
-        self.capture_profile, self.capture_policy_version = target_regime
 
     def _require_writer_drained(self) -> None:
         if not self.external:
@@ -550,8 +526,6 @@ class ExperimentController:
             benchmark_id=benchmark_id,
             benchmark_version=benchmark_version,
             benchmark_digest_sha256=benchmark_digest_sha256,
-            capture_profile=self.capture_profile,
-            capture_policy_version=self.capture_policy_version,
             declarations=declarations,
         )
 
@@ -687,23 +661,15 @@ class ExperimentController:
         written to the source afterwards exists only in the source, and the
         archive is the copy a reader opens. Sealing used to archive first, which
         is why the trial's sealed archive reported `capture_complete` about an
-        experiment `workspace.json` presented as sealed.
+        experiment presented as sealed.
 
         The digest cannot go the same way: the archive does not exist yet when
         the status is stamped, and a file cannot contain its own hash. It lands
-        afterwards on the source row and, through this return value, in the
-        manifest. Between the two writes the row is `complete` with no digest —
+        afterwards on the source row (and the live DB's `sealed_archives`
+        row). Between the two writes the row is `complete` with no digest —
         an unfinished seal, which `experiment_scores` refuses to report on and
         which this method re-enters rather than rejects, so a seal that lost its
         archive to a full disk is retryable instead of terminal.
-
-        The controller's `workflow_folderpath` rides out on the same return
-        value, for the manifest writer to record as the sealed workspace's
-        `workflow_folderpath` (fix-zns). It is what makes a sealed
-        archive able to say which workflow's benchmark catalogue its pin refers
-        to; without it, a reader can see the pinned digest and has nothing to
-        check it against. It is not written to the store: the experiments table
-        holds `workflow_name`, not a folder, and this needs no schema change.
         """
         self._require_writer_drained()
         experiment = self.store.get_experiment(experiment_id)
@@ -718,7 +684,7 @@ class ExperimentController:
         if experiment["status"] not in {"capture_complete", "complete"}:
             raise ValueError(
                 f"experiment {experiment_id!r} is {experiment['status']!r}; "
-                "workspace evidence can only seal capture_complete data"
+                "sealing only accepts capture_complete data"
             )
         # A writer in this process may still hold this experiment's records
         # unwritten, and refusing it AFTER the promotion would leave an
@@ -744,7 +710,6 @@ class ExperimentController:
         )
         archive["experiment_id"] = experiment_id
         archive["experiment_status"] = status
-        archive["workflow_folderpath"] = self.workflow_folderpath
         return archive
 
     def invalidate_experiment(

@@ -19,7 +19,6 @@ from fastworkflow.experiment.runner import (
 
 @pytest.fixture
 def installed_db(tmp_path, monkeypatch):
-    monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
     folder = str(tmp_path / "workflow")
     store = obs.ObservabilityStore(state_paths.observability_db(folder))
     identity = store.store_identity()
@@ -226,15 +225,6 @@ def test_external_open_refuses_marker_from_incomplete_mixed_version(tmp_path):
                     ),
                 ),
                 (obs.STORE_IDENTITY_DIAGNOSTIC, "mixed-store"),
-                (
-                    obs.CAPTURE_REGIME_DIAGNOSTIC,
-                    json.dumps(
-                        {
-                            "capture_profile": "evidence",
-                            "capture_policy_version": obs.CAPTURE_POLICY_VERSION,
-                        }
-                    ),
-                ),
             ],
         )
 
@@ -262,7 +252,7 @@ def test_required_evidence_segment_count_blocks_completion(installed_db):
     assert "1 required" in experiment["invalid_detail"]
 
 
-def test_readiness_reports_durable_store_identity_and_regime(installed_db):
+def test_readiness_reports_durable_store_identity(installed_db):
     folder, identity = installed_db
     path = state_paths.observability_db(folder)
     payload = experiment_store_readiness(path)
@@ -270,8 +260,6 @@ def test_readiness_reports_durable_store_identity_and_regime(installed_db):
     assert payload == {
         "store_id": identity,
         "resolved_path": os.path.realpath(path),
-        "capture_profile": "evidence",
-        "capture_policy_version": obs.CAPTURE_POLICY_VERSION,
     }
     assert obs.ObservabilityStore(path).store_identity() == identity
 

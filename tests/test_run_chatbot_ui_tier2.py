@@ -18,14 +18,12 @@ reads only.
     recorded" -- never zero -- for calls that carried none.
 
 Server tests seed a real store in tmp_path through the store's own write
-methods, read it back through the stdlib server, then archive it and read it
-again through a workspace manifest. The SPA is one self-contained file, so
-its render functions are pinned by presence.
+methods and read it back through the stdlib server. The SPA is one
+self-contained file, so its render functions are pinned by presence.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import subprocess
@@ -39,11 +37,6 @@ import pytest
 from fastworkflow import state_paths, tracing
 from fastworkflow.observability import store as obs
 from fastworkflow.experiment.runner import ExperimentController
-from fastworkflow.observability.workspace import (
-    WORKSPACE_SCHEMA,
-    UnknownWorkspaceStore,
-    load_observability_workspace,
-)
 from fastworkflow.run_chatbot import server as run_chatbot_server
 from fastworkflow.run_chatbot.server import (
     LOW_CONFIDENCE_DEFAULT_MARGIN,
@@ -66,8 +59,6 @@ TASK = "task-1"
 TURN_A = "20260907T100000-plain"    # attempt 1: three dispatches, asked outside
 TURN_B = "20260907T100100-resumed"  # attempt 2: resumed; one dispatch pre-resume
 SNAPSHOT_1 = {
-    "capture_profile": "debug",
-    "capture_policy_version": "1",
     "workflow_fingerprint": "sha256:same",
     "workflow_model_version": "20260905T132341Z-a0605e",
     "workflow_scope_rule_version": 1,
@@ -77,12 +68,10 @@ SNAPSHOT_2 = dict(SNAPSHOT_1, workflow_model_version="20260906T000000Z-ffffff")
 OBSERVABILITY = {
     "schema_version": 1,
     "enabled": True,
-    "capture_profile": "debug",
-    "capture_policy_version": "1",
     "span_contract_version": 3,
     "span_contract_versions": {"fw.turn": 1, "fw.llm.call": 1},
     "db_schema_version": 3,
-    "config": {"FW_OBS_CAPTURE_PROFILE": "debug", "FW_OBS_RETENTION_DAYS": "30"},
+    "config": {"FW_OBS_RETENTION_DAYS": "30"},
     "dspy_history_enabled": True,
     "evidence_grade": True,
 }
@@ -90,7 +79,7 @@ OBSERVABILITY_BASE = dict(
     OBSERVABILITY,
     span_contract_version=2,
     span_contract_versions={"fw.turn": 1},
-    config={"FW_OBS_CAPTURE_PROFILE": "debug", "FW_OBS_RETENTION_DAYS": "7"},
+    config={"FW_OBS_RETENTION_DAYS": "7"},
 )
 
 
@@ -457,8 +446,6 @@ class TestCost:
 def _detail(experiment_id, observability_records, **columns):
     detail = {
         "experiment_id": experiment_id,
-        "capture_profile": "debug",
-        "capture_policy_version": "1",
         "workflow_name": "wf",
         "benchmark_id": None,
         "benchmark_version": None,
@@ -487,11 +474,11 @@ class TestProvenance:
             _detail(EXP, [OBSERVABILITY]),
             [{"task_id": TASK, "attempt": 1, "runtime_snapshot": SNAPSHOT_1}],
         )
-        assert _field(provenance, "capture_profile", "experiment")["value"] == "debug"
+        assert _field(provenance, "workflow_name", "experiment")["value"] == "wf"
         assert _field(provenance, "span_contract_version", "evidence_run")["value"] == 3
         assert _field(provenance, "span_contract_versions.fw.llm.call")["value"] == 1
         assert _field(provenance, "config.FW_OBS_RETENTION_DAYS")["value"] == "30"
-        assert _field(provenance, "capture_policy_version", "evidence_run")["value"] == "1"
+        assert _field(provenance, "db_schema_version", "evidence_run")["value"] == 3
         assert _field(provenance, "workflow_fingerprint", "runtime_snapshot")["value"] == "sha256:same"
         assert _field(provenance, "effective_features.decision_signals_v1")["value"] == "shadow"
         assert provenance["inconsistent"] == 0
@@ -561,7 +548,7 @@ class TestProvenance:
         }
         # git_revision: unrecorded on both sides, so nothing to quote
         assert ("evidence_run", "git_revision") not in by_key
-        assert ("experiment", "capture_profile") not in by_key
+        assert ("experiment", "workflow_name") not in by_key
         assert provenance_differences(treatment, treatment) == []
 
     def test_an_inconsistent_side_compares_as_its_list_of_values(self):
@@ -631,7 +618,6 @@ def _as_span(span):
 @pytest.fixture
 def workflow_path(tmp_path, monkeypatch) -> str:
     monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
-    monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "debug")
     wf = tmp_path / "ui_workflow"
     wf.mkdir()
     return str(wf)
@@ -778,7 +764,6 @@ class TestLiveRoutes:
         exp = _get_json(server, f"/api/experiment/{EXP}")["experiment"]
         provenance = exp["provenance"]
         assert _field(provenance, "git_revision")["recorded"] is False
-        assert _field(provenance, "capture_profile", "experiment")["value"] == "debug"
         assert _field(provenance, "span_contract_version", "evidence_run")["value"] == 3
         assert _field(provenance, "span_contract_versions.fw.turn")["value"] == 1
         model = _field(provenance, "workflow_model_version", "runtime_snapshot")
@@ -821,141 +806,6 @@ class TestLiveRoutes:
         assert status == 404
 
 
-# ----------------------------------------------------------------------
-# The same store, archived, through the read-only workspace
-# ----------------------------------------------------------------------
-
-
-@pytest.fixture
-def workspace_manifest(seeded_db, tmp_path):
-    archive = obs.ObservabilityStore(seeded_db, migrate=False).archive_to(
-        str(tmp_path / "sealed.sqlite3")
-    )
-    manifest = tmp_path / "workspace.json"
-    manifest.write_text(
-        json.dumps(
-            {
-                "schema": WORKSPACE_SCHEMA,
-                "workspace_id": "workspace-ui-tier2",
-                "label": "UI tier 2 archive",
-                "stores": [
-                    {
-                        "store_id": "sealed",
-                        "label": "sealed",
-                        "path": Path(archive["path"]).name,
-                        "mode": "sealed",
-                        "sha256": archive["sha256"],
-                        "store_identity": archive["store_identity"],
-                    }
-                ],
-                "experiments": [
-                    {
-                        "experiment_id": "logical",
-                        "label": "logical",
-                        "segments": [
-                            {"segment_id": "seg-main", "store_id": "sealed",
-                             "local_experiment_id": EXP},
-                        ],
-                    }
-                ],
-                "projected_attempts": [
-                    {
-                        "logical_attempt": {
-                            "experiment_id": "historical", "task_id": "joined", "attempt": 1,
-                        },
-                        "attempt_refs": [
-                            {
-                                "store_id": "sealed", "local_experiment_id": EXP,
-                                "task_id": TASK, "attempt": 1,
-                                "turn_ref": {"store_id": "sealed", "logical_turn_key": TURN_A},
-                            }
-                        ],
-                        "turn_refs": [{"store_id": "sealed", "logical_turn_key": TURN_A}],
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    return manifest, archive
-
-
-def test_workspace_readers_expose_the_archived_experiment_and_attempts(workspace_manifest):
-    manifest, _ = workspace_manifest
-    workspace = load_observability_workspace(manifest)
-    experiment = workspace.experiment("sealed", EXP)
-    assert experiment["experiment_id"] == EXP and experiment["capture_profile"] == "debug"
-    assert [s["evidence_run_id"] for s in experiment["evidence_runs"]] == ["evr-tier2"]
-    assert workspace.experiment("sealed", "no-such") is None
-    rows = workspace.attempts_in_store("sealed", EXP)
-    assert [r["attempt"] for r in rows] == [1, 2]
-    assert rows[0]["runtime_snapshot"] == SNAPSHOT_1
-    assert workspace.attempts_in_store("sealed", "no-such") == []
-    for bad in ("", "other"):
-        with pytest.raises(UnknownWorkspaceStore):
-            workspace.experiment(bad, EXP)
-        with pytest.raises(UnknownWorkspaceStore):
-            workspace.attempts_in_store(bad, EXP)
-
-
-class TestWorkspaceRoutes:
-    @pytest.fixture
-    def ws_server(self, workspace_manifest):
-        manifest, archive = workspace_manifest
-        srv, thread = _serve(archive["path"], workspace_manifest_path=str(manifest))
-        yield srv
-        srv.shutdown()
-        thread.join(timeout=5)
-
-    def test_segments_carry_the_archived_provenance(self, ws_server):
-        segments = _get_json(ws_server, "/api/workspace/experiment/logical/segments")["segments"]
-        assert len(segments) == 1
-        provenance = segments[0]["provenance"]
-        assert _field(provenance, "git_revision")["recorded"] is False
-        assert _field(provenance, "span_contract_version", "evidence_run")["value"] == 3
-        assert _field(provenance, "workflow_model_version", "runtime_snapshot")["consistent"] is False
-        assert segments[0]["evidence"]["state"] == "valid"
-
-    def test_attempts_and_turn_refs_carry_signals_and_cost(self, ws_server):
-        rows = {r["attempt"]: r for r in _get_json(
-            ws_server, "/api/workspace/experiment/logical/attempts")["attempts"]}
-        assert rows[1]["llm_cost"]["total"] == 0.0015
-        assert rows[2]["llm_cost"]["total"] is None and rows[2]["llm_cost"]["unrecorded"] == 1
-        ref = rows[1]["turn_refs"][0]
-        assert ref["decision_signals"]["intent_margin_min"] == 0.1
-        assert ref["decision_signals"]["consequence_max"] == "high"
-        assert ref["llm_cost"]["recorded"] == 1 and ref["llm_calls_cut_at_limit"] == 0
-        assert rows[2]["turn_refs"][0]["decision_signals"]["intent_margin_min"] is None
-
-    def test_projected_attempts_are_stamped_once(self, ws_server):
-        projected = _get_json(
-            ws_server, "/api/workspace/projected_attempts?experiment=historical"
-        )["projected_attempts"]
-        assert len(projected) == 1
-        row = projected[0]
-        assert row["llm_cost"] == {"calls": 2, "recorded": 1, "unrecorded": 1, "total": 0.0015}
-        assert row["resolved_turns"][0]["decision_signals"]["asked_user"] == 1
-        assert row["resolved_sources"][0]["resolved_turn"]["llm_cost"]["total"] == 0.0015
-
-    def test_scoped_turn_read_carries_the_ledger(self, ws_server):
-        turn = _get_json(ws_server, f"/api/workspace/turn/sealed/{TURN_B}")["turn"]
-        rows = turn["execution_ledger"]["rows"]
-        assert [(r["command_call_id"], r["in_record"]) for r in rows] == [
-            ("call-b1", False), ("call-b2", True)
-        ]
-        assert turn["decision_signals"]["asked_user"] == 1
-        assert turn["llm_cost"]["total"] is None
-        status, _ = _get(ws_server, f"/api/turn/{TURN_B}")
-        assert status == 400   # unscoped reads stay refused in workspace mode
-
-    def test_archive_stays_byte_identical_after_the_reads(self, ws_server, workspace_manifest):
-        _, archive = workspace_manifest
-        _get_json(ws_server, "/api/workspace/experiment/logical/segments")
-        _get_json(ws_server, "/api/workspace/experiment/logical/attempts")
-        _get_json(ws_server, f"/api/workspace/turn/sealed/{TURN_A}")
-        assert hashlib.sha256(Path(archive["path"]).read_bytes()).hexdigest() == archive["sha256"]
-
-
 def test_annotate_turn_detail_reads_only_what_it_is_handed():
     turn = {"record": turn_a_record()}
     annotate_turn_detail(turn, turn_a_spans())
@@ -993,15 +843,12 @@ class TestPage:
         assert b'id="convList"' in page
         # Rail rows are label-only (owner decision 2026-09-29); signals show in the turn view.
         assert b"appendSignalChips(container, turn.decision_signals)" in page # turn header
-        assert b"appendSignalChips(sub, stamps.decision_signals)" in page     # workspace links
         assert b'"asked the user"' in page and b'"consequence "' in page
         # (c) the collapsed provenance fold and the comparability check
-        assert b"function renderProvenance(container, provenance, label)" in page
         assert b"function renderProvenanceDifferences(container, differences)" in page
         # Experiment detail stays concise; provenance remains available to the
-        # API, workspace segments, and baseline comparison diagnostics.
-        assert b'renderProvenance(card, exp.provenance, "provenance")' not in page
-        assert b"renderProvenance(segBox, segment.provenance," in page
+        # API and baseline comparison diagnostics.
+        assert b"renderProvenance(" not in page
         assert page.count(b"renderProvenanceDifferences(container, cmp.provenance_differences)") == 2
         assert b'"not recorded"' in page
         assert b"the comparison is shown regardless" in page
@@ -1023,7 +870,6 @@ class TestPage:
         # carries Best run and comparability and no cost at all, so reading
         # `row.llm_cost` there would have shown nothing for every attempt.
         assert b"appendCostChip(subLine, extra.llm_cost)" in page
-        assert b"appendCostChip(outcomeLine, row.llm_cost)" in page
         assert b'row("LLM cost", fmtCostAmount(turn.llm_cost))' in page
         # Inside #detail, not a new panel; the rules the page already keeps.
         assert b"innerHTML" not in page

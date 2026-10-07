@@ -1,19 +1,12 @@
 """The five persisted surfaces neither protection layer reaches on its own.
 
-`observability_store` has two independent protections, and between them they
-can miss five write paths:
-
-* `Redactor` — an unconditional, profile-independent scrub of credential shapes
-  and loaded secret env values, applied at the sink boundary.
-* `CapturePolicy` — a per-field classification layer whose `debug` default is
-  inert and whose `evidence` profile is default-deny.
-
-Both are wired into the TurnResult pipeline. Conversation labels written through
-the SYNC store path, review-note comments, train-run metrics, writer diagnostics,
-and the
-scalar columns beside a span's (already scrubbed) attributes JSON do not go
-through that pipeline, so without their own protection they reach SQLite
-verbatim under every profile.
+`observability_store` protects what it persists with `Redactor` — an
+unconditional scrub of credential shapes and loaded secret env values, applied
+at the sink boundary — and it is wired into the TurnResult pipeline.
+Conversation labels written through the SYNC store path, review-note comments,
+train-run metrics, writer diagnostics, and the scalar columns beside a span's
+(already scrubbed) attributes JSON do not go through that pipeline, so without
+their own protection they would reach SQLite verbatim.
 
 Item 5 — the sync label path — is the one that is live rather than latent:
 `run_fastapi_mcp/utils.ensure_topic_and_summary` calls
@@ -23,18 +16,16 @@ therefore build NO sink at all, because a test that reached the store through
 `SQLiteTraceSink.record_conversation_label` would be exercising the queued route
 that was already protected and proving nothing about production.
 
-Three properties are load-bearing here and are asserted for every surface:
+Two properties are load-bearing here and are asserted for every surface:
 
-1. **A planted credential does not survive to the DB**, under either profile.
-2. **Withholding leaves a badge, never silence**: a viewer must be able to say
-   "a value was here, this is its class, size and digest".
-3. **The `debug` profile writes the same bytes it always did**, so turning
-   capture policy on changes nothing for existing debug stores.
+1. **A planted credential does not survive to the DB.**
+2. **A value with no credential in it is written byte for byte**, so the scrub
+   changes nothing it does not have to.
 
-Two of the five are deliberately scrub-only, and the tests pin those decisions
-rather than leaving them to be re-litigated by whoever reads the code next:
-`human_feedback.comment` is the record of what a reviewer judged, and
-`diagnostics` is the evidence gate's own input. Surface 1 used to be
+The tests pin why `human_feedback.comment` and `diagnostics` keep their
+content rather than leaving it to be re-litigated by whoever reads the code
+next: the first is the record of what a reviewer judged, and the second is the
+evidence gate's own input. Surface 1 used to be
 `feedback.feedback_json`, the agent's memory of being corrected; fix-9eg.16
 removed that table and the prompt injection that read it, so the scrub is
 pinned on the review-note column that replaced it as the place free text from
@@ -52,13 +43,8 @@ import pytest
 
 import fastworkflow
 from fastworkflow import TurnStatus, tracing
-from fastworkflow.observability import control, feedback
+from fastworkflow.observability import feedback
 from fastworkflow.observability import store as obs
-from fastworkflow.observability.capture_policy import (
-    CaptureFieldPolicy,
-    evidence_policy,
-    is_capture_envelope,
-)
 
 # A credential shape `Redactor._SECRET_PATTERNS` recognizes without any help from
 # the environment.
@@ -91,12 +77,6 @@ def planted_credentials(monkeypatch):
     monkeypatch.setenv(API_KEY_VAR, ENV_SECRET)
 
 
-@pytest.fixture
-def evidence_profile(monkeypatch):
-    """Run the store under the default-deny profile."""
-    monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, "evidence")
-
-
 def _rows(db_path: str, sql: str, params=()) -> list[dict]:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -104,24 +84,6 @@ def _rows(db_path: str, sql: str, params=()) -> list[dict]:
         return [dict(row) for row in conn.execute(sql, params).fetchall()]
     finally:
         conn.close()
-
-
-def _badge(stored: str) -> dict:
-    """The policy envelope a withheld TEXT column now holds.
-
-    Asserts the four things §12.0 delta 3 requires a viewer to be able to show, so
-    every caller of this helper gets the "degrades, does not go dark" check for
-    free rather than choosing which parts of it to remember.
-    """
-    assert isinstance(stored, str), f"not bindable as TEXT: {stored!r}"
-    envelope = json.loads(stored)
-    assert is_capture_envelope(envelope), envelope
-    assert envelope["classification"], envelope
-    assert envelope["original_bytes"] > 0, envelope
-    assert envelope["digest"].startswith("sha256:"), envelope
-    assert envelope["reason"], envelope
-    assert envelope["policy_version"], envelope
-    return envelope
 
 
 def _turn_result(summary="user asked about a kayak", traces="get_order -> ok"):
@@ -228,7 +190,7 @@ class TestSyncPathConversationLabels:
         assert REDACTED in row["topic"]
         assert REDACTED in row["summary"]
 
-    def test_debug_profile_stores_the_label_unchanged(self, db_path):
+    def test_a_clean_label_is_stored_unchanged(self, db_path):
         store = obs.ObservabilityStore(db_path)
         conv = store.mint_conversation_id("chan")
         stored = store.record_conversation_label("chan", conv, "Kayak order", TENANT)
@@ -238,42 +200,24 @@ class TestSyncPathConversationLabels:
         assert row["summary"] == TENANT
         assert stored == "Kayak order"
 
-    def test_evidence_profile_withholds_the_label_behind_a_badge(
-        self, db_path, evidence_profile
-    ):
+    def test_the_returned_topic_is_what_was_actually_stored(self, db_path):
+        """Ruling I9's contract: a caller that logs the label must log the
+        scrubbed topic, not its own candidate — otherwise the operator's log
+        carries the credential the DB was kept free of."""
         store = obs.ObservabilityStore(db_path)
         conv = store.mint_conversation_id("chan")
-        store.record_conversation_label("chan", conv, f"Kayak for {TENANT}", TENANT)
-
-        row = _rows(db_path, "SELECT * FROM conversations")[0]
-        for column in ("topic", "summary"):
-            badge = _badge(row[column])
-            assert badge["classification"] == "user-text"
-            assert badge["disposition"] == "omit"
-        assert TENANT not in json.dumps(row)
-
-    def test_the_returned_topic_is_what_was_actually_stored(
-        self, db_path, evidence_profile
-    ):
-        """Ruling I9's contract: a caller that logs the label must log the badge,
-        not its own candidate — otherwise the operator's log carries the value the
-        DB was told to withhold."""
-        store = obs.ObservabilityStore(db_path)
-        conv = store.mint_conversation_id("chan")
-        returned = store.record_conversation_label("chan", conv, TENANT, None)
+        returned = store.record_conversation_label("chan", conv, f"Key {SK_TOKEN}", None)
 
         stored = _rows(db_path, "SELECT topic FROM conversations")[0]["topic"]
         assert returned == stored
-        assert TENANT not in returned
+        assert SK_TOKEN not in returned
 
-    def test_the_blank_topic_sentinel_survives_the_policy(
-        self, db_path, evidence_profile
-    ):
-        """A blank generated topic must stay NULL, not become a badge.
+    def test_the_blank_topic_sentinel_survives_the_scrub(self, db_path):
+        """A blank generated topic must stay NULL.
 
         `_label_is_due` treats a blank topic as "no successful title yet" and
-        retries; a badge is non-blank, so policing a blank one would permanently
-        freeze the conversation as titled-but-empty.
+        retries; storing anything non-blank for it would permanently freeze the
+        conversation as titled-but-empty.
         """
         store = obs.ObservabilityStore(db_path)
         conv = store.mint_conversation_id("chan")
@@ -294,9 +238,7 @@ class TestSyncPathConversationLabels:
         assert row["topic"] == "Kayak order"
         assert row["summary"] == "second"
 
-    def test_topic_uniquification_still_runs_under_the_default_profile(self, db_path):
-        """Policing happens AFTER `_unique_topic_in_txn`, so the suffix can never
-        land outside the envelope's closing brace."""
+    def test_topic_uniquification_still_runs(self, db_path):
         store = obs.ObservabilityStore(db_path)
         first = store.mint_conversation_id("chan")
         second = store.mint_conversation_id("chan")
@@ -306,28 +248,12 @@ class TestSyncPathConversationLabels:
         topics = {r["topic"] for r in _rows(db_path, "SELECT topic FROM conversations")}
         assert topics == {"Kayak order", "kayak order 1"}
 
-    def test_a_withheld_topic_is_still_parseable_json(self, db_path, evidence_profile):
-        """Two conversations, same title: under `evidence` they digest identically
-        and uniquification stops distinguishing them — which is acceptable, but
-        the column must still hold JSON rather than an envelope with ` 1` glued
-        onto the end of it."""
-        store = obs.ObservabilityStore(db_path)
-        first = store.mint_conversation_id("chan")
-        second = store.mint_conversation_id("chan")
-        store.record_conversation_label("chan", first, "Kayak order", "s1")
-        store.record_conversation_label("chan", second, "Kayak order", "s2")
-
-        for row in _rows(db_path, "SELECT topic FROM conversations"):
-            _badge(row["topic"])
-
-    def test_both_label_routes_agree_on_what_they_store(
-        self, db_path, tmp_path, evidence_profile
-    ):
+    def test_both_label_routes_agree_on_what_they_store(self, db_path, tmp_path):
         """The queued route scrubs in `SQLiteTraceSink._apply_label` before
         reaching `apply_label_txn`; the sync route does not. Scrubbing first
-        inside the enforcement point is what makes both produce the same
-        envelope — and a digest that depended on which route wrote the row would
-        be a digest nobody could compare across two runs.
+        inside the enforcement point is what makes both produce the same topic —
+        and a topic that depended on which route wrote the row could not be
+        compared across two runs.
         """
         sync_store = obs.ObservabilityStore(db_path)
         sync_store.record_conversation_label("chan", 1, f"Key {SK_TOKEN}", TENANT)
@@ -342,7 +268,8 @@ class TestSyncPathConversationLabels:
             sink.close()
         queued_topic = _rows(queued_path, "SELECT topic FROM conversations")[0]["topic"]
 
-        assert _badge(sync_topic)["digest"] == _badge(queued_topic)["digest"]
+        assert SK_TOKEN not in sync_topic
+        assert sync_topic == queued_topic
 
 
 # ----------------------------------------------------------------------
@@ -364,7 +291,7 @@ class TestSpanScalarColumns:
         assert REDACTED in row["context"]
         assert REDACTED in row["channel_id"]
 
-    def test_debug_profile_stores_every_scalar_unchanged(self, db_path):
+    def test_a_clean_span_stores_every_scalar_unchanged(self, db_path):
         span = _span()
         row = _write_span(db_path, span)
         assert row["name"] == span.name
@@ -372,45 +299,13 @@ class TestSpanScalarColumns:
         assert row["context"] == span.context
         assert row["channel_id"] == span.channel_id
 
-    def test_evidence_profile_withholds_the_context_display_name(
-        self, db_path, evidence_profile
-    ):
-        """`context` is the one scalar that can carry entity content: it comes
-        from a workflow-supplied `get_displayname(instance)` hook."""
-        row = _write_span(db_path, _span())
-        badge = _badge(row["context"])
-        assert badge["classification"] == "user-text"
-        assert badge["disposition"] == "omit"
-        assert TENANT not in json.dumps(row)
-
-    def test_evidence_profile_keeps_the_closed_vocabularies_usable(
-        self, db_path, evidence_profile
-    ):
-        """`name` and `command_name` are declared rather than withheld.
-
-        Declaring them is what FW-REQ-002 clause 3 asks for; withholding them
-        would break `list_turns(command_name=...)` and the `idx_spans_command`
-        lookup behind the debug UI's command filter, for no reduction in
-        exposure — both are closed vocabularies the workflow itself defines.
-        """
-        span = _span()
-        row = _write_span(db_path, span)
-        assert row["name"] == span.name
-        assert row["command_name"] == span.command_name
-
-        store = obs.ObservabilityStore(db_path)
-        assert store.get_spans(span.trace_id)[0]["command_name"] == span.command_name
-
-    def test_evidence_profile_leaves_channel_id_joinable(
-        self, db_path, evidence_profile
-    ):
+    def test_channel_id_stays_joinable(self, db_path):
         """SCRUB-ONLY, and the reason is erasure, not convenience.
 
         `forget_channel` deletes spans with `WHERE channel_id=?`. Digesting this
-        column — which is what the `identifier` default would do — would narrow
-        first-class erasure to whatever the `trace_id IN (...)` fallback still
-        covers. Reducing exposure by weakening erasure is not a trade worth
-        making.
+        column would narrow first-class erasure to whatever the
+        `trace_id IN (...)` fallback still covers. Reducing exposure by
+        weakening erasure is not a trade worth making.
         """
         span = _span()
         _write_span(db_path, span)
@@ -419,24 +314,23 @@ class TestSpanScalarColumns:
         assert store.forget_channel(span.channel_id)["spans"] == 1
         assert _rows(db_path, "SELECT * FROM spans") == []
 
-    def test_a_null_scalar_stays_null(self, db_path, evidence_profile):
-        """An absent context must not become the string "" or a badge for
-        nothing: `COALESCE(excluded.context, spans.context)` in the upsert
-        depends on NULL staying NULL."""
+    def test_a_null_scalar_stays_null(self, db_path):
+        """An absent context must not become the string "": `COALESCE(
+        excluded.context, spans.context)` in the upsert depends on NULL staying
+        NULL."""
         row = _write_span(db_path, _span(context=None, command_name=None))
         assert row["context"] is None
         assert row["command_name"] is None
 
     def test_span_attributes_are_still_scrubbed(self, db_path, planted_credentials):
-        """The span-attribute scrub, re-asserted because the capture-policy
-        work rewrote the tuple bound around it."""
+        """The span-attribute scrub, re-asserted beside the scalar columns."""
         row = _write_span(db_path, _span(attributes={"leak": f"key {ENV_SECRET}"}))
         assert ENV_SECRET not in row["attributes"]
         assert REDACTED in row["attributes"]
 
 
 # ----------------------------------------------------------------------
-# Surface 1: human_feedback.comment — credential scrub, deliberately no policy
+# Surface 1: human_feedback.comment — credential scrub only
 # ----------------------------------------------------------------------
 
 
@@ -589,48 +483,14 @@ class TestFeedback:
         assert stored["pair_key"] == pair_key
         assert left_row is not None
 
-    def test_a_sealed_turn_comment_scrubs_its_anchors_the_same_way(
-        self, db_path, tmp_path, planted_credentials
-    ):
-        """The second writer is the one nobody remembers to check.
 
-        A note recorded against sealed evidence takes a different code path
-        into a different table, and the scrub has to be on both or the
-        redaction guarantee depends on which store happened to be writable.
+    def test_feedback_content_is_kept(self, db_path):
+        """PINS A DELIBERATE DECISION: the comment is scrubbed, never replaced.
+
+        A review comment IS the record of what a reviewer judged, and anything
+        in its place makes the task Feedback view unreadable while looking like
+        it still works. Credentials are scrubbed above; the prose is kept.
         """
-        store = obs.ObservabilityStore(db_path)
-        turn_key = _feedback_turn(db_path)
-        assert store.get_turn(turn_key) is not None
-        evidence = obs.ReadOnlyObservabilityStore(db_path)
-        live_path = str(tmp_path / "live.sqlite3")
-        annotated = control.SealedEvidence(
-            evidence, obs.ObservabilityStore(live_path), "0" * 64
-        )
-        annotated.add_human_feedback(
-            turn_key, target_kind="turn", span_ids=[],
-            target_label=f"Turn {SK_TOKEN}", provenance="human",
-            comment=f"sealed note with {ENV_SECRET}",
-            category="observations_analysis", subcategory="observation",
-        )
-
-        row = _rows(live_path, "SELECT * FROM sealed_turn_comments")[0]
-        whole = "\n".join(str(value) for value in row.values())
-        assert SK_TOKEN not in whole and ENV_SECRET not in whole
-        assert REDACTED in row["anchors_json"]
-
-    @pytest.mark.parametrize("profile", ["debug", "evidence"])
-    def test_feedback_content_survives_both_profiles(self, db_path, monkeypatch, profile):
-        """PINS A DELIBERATE DECISION: no capture policy on this column.
-
-        The reason changed with the surface. It used to be that the column fed
-        `dspy.History`, so a withheld-content envelope would have changed how
-        the agent behaved. That path is gone. What is left is the reason the
-        notes exist at all: a review comment IS the record of what a reviewer
-        judged, and an envelope in its place makes the task Feedback view
-        unreadable while looking like it still works. Credentials are scrubbed
-        above; the prose is kept.
-        """
-        monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, profile)
         store = obs.ObservabilityStore(db_path)
         turn_key = _feedback_turn(db_path)
         _note(store, turn_key, TENANT)
@@ -654,8 +514,8 @@ def _metrics(extra: str = "") -> dict:
         "contexts": {"global": {"thresholds": {"threshold": 0.71}}},
         # `heldout_evaluation.EscalationScore.failures` records the verbatim
         # utterance of every failing case, and `metrics_persistence` copies the
-        # whole escalation block through. This is why the column is classified
-        # `opaque-payload` rather than treated as a bag of numbers.
+        # whole escalation block through, so the column carries free text and
+        # not only numbers.
         "totals": {"escalation": {"failures": [{"utterance": TENANT}]}},
     }
 
@@ -675,55 +535,15 @@ class TestTrainRunMetrics:
         assert REDACTED in stored
         json.loads(stored)  # still parses
 
-    def test_debug_profile_stores_the_metrics_unchanged(self, db_path):
+    def test_clean_metrics_are_stored_unchanged(self, db_path):
         store = obs.ObservabilityStore(db_path)
         store.record_train_run("run-1", "fp", None, None, _metrics())
 
         runs = store.list_train_runs()
         assert json.loads(runs[0]["metrics_json"]) == _metrics()
 
-    def test_evidence_profile_withholds_the_metrics_behind_a_badge(
-        self, db_path, evidence_profile
-    ):
-        store = obs.ObservabilityStore(db_path)
-        store.record_train_run("run-1", "fp", "then", "now", _metrics())
-
-        row = _rows(db_path, "SELECT * FROM train_runs")[0]
-        badge = _badge(row["metrics_json"])
-        assert badge["classification"] == "opaque-payload"
-        assert badge["disposition"] == "omit"
-        assert TENANT not in row["metrics_json"]
-        # The provenance columns are unpoliced, so a bundle still knows a
-        # training run happened and which sources produced it.
-        assert row["run_id"] == "run-1"
-        assert row["workflow_fingerprint"] == "fp"
-        assert row["completed_at"] == "now"
-
-    def test_an_evidence_deployment_can_re_admit_reviewed_metrics(
-        self, db_path, evidence_profile
-    ):
-        """The escape hatch the write site promises has to actually exist."""
-        store = obs.ObservabilityStore(db_path)
-        # The lazy cache `_store_capture_policy` fills; set here to inject the
-        # declared field policy a deployment would configure.
-        store._capture_policy = evidence_policy(
-            (
-                CaptureFieldPolicy(
-                    field_path=obs.POLICY_PATH_TRAIN_METRICS,
-                    classification="controlled-vocabulary",
-                    disposition="bounded-text",
-                    redact_before_trace=False,
-                ),
-            )
-        )
-        store.record_train_run("run-1", "fp", None, None, _metrics())
-
-        stored = _rows(db_path, "SELECT metrics_json FROM train_runs")[0]["metrics_json"]
-        assert json.loads(stored) == _metrics()
-
-
 # ----------------------------------------------------------------------
-# Surface 3: diagnostics — credential scrub, deliberately no capture policy
+# Surface 3: diagnostics — credential scrub only
 # ----------------------------------------------------------------------
 
 
@@ -750,19 +570,14 @@ class TestDiagnostics:
         assert ENV_SECRET not in health["last_error"]
         assert REDACTED in health["last_error"]
 
-    @pytest.mark.parametrize("profile", ["debug", "evidence"])
-    def test_writer_health_stays_readable_under_both_profiles(
-        self, db_path, monkeypatch, profile
-    ):
-        """PINS A DELIBERATE DECISION: no capture policy on this table.
+    def test_writer_health_stays_readable(self, db_path):
+        """PINS A DELIBERATE DECISION: this table is scrubbed, never replaced.
 
         `health_delta` and `evidence_run` read `writer_health` to decide whether
         a run may be reported as evidence at all, and `problems()` names the
         affected turn keys so a partly-damaged run can be salvaged instead of
-        discarded. Withholding it under `evidence` would blind the evidence gate
-        under the one profile that exists to make the gate mean something.
+        discarded. Replacing it would blind the evidence gate.
         """
-        monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, profile)
         store = obs.ObservabilityStore(db_path)
         turn_keys = ["20260828T000000.000000Z-aaaaaaaaaaaa"]
         _set_diagnostic(
@@ -784,14 +599,10 @@ class TestDiagnostics:
         assert not delta.evidence_valid
         assert any("DROPPED" in problem for problem in delta.problems())
 
-    @pytest.mark.parametrize("profile", ["debug", "evidence"])
-    def test_a_live_sink_still_publishes_its_health_row(
-        self, db_path, monkeypatch, profile
-    ):
+    def test_a_live_sink_still_publishes_its_health_row(self, db_path):
         """End to end: the writer thread's own heartbeat goes through
-        `set_diagnostic`, so a policy there would take the health row out from
-        under a running sink rather than merely out of a bundle."""
-        monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, profile)
+        `set_diagnostic`, so anything that replaced it there would take the health row
+        out from under a running sink rather than merely out of a bundle."""
         sink = obs.SQLiteTraceSink(db_path)
         try:
             sink.emit_turn_record(_turn_result())
@@ -812,22 +623,16 @@ class TestDiagnostics:
 
 
 class TestConversationMemory:
-    @pytest.mark.parametrize("profile", ["debug", "evidence"])
-    def test_memory_rebuilds_intact_under_both_profiles(
-        self, db_path, monkeypatch, profile
-    ):
+    def test_memory_rebuilds_intact(self, db_path):
         """Summary and traces both have to arrive.
 
-        `test_capture_policy_wiring` pins them through
-        `_POLICY_EXEMPT_TURN_COLUMNS`; this asserts the whole shape
-        `restore_history_from_turns` consumes. There were three keys until
+        This asserts the whole shape `restore_history_from_turns` consumes. There were three keys until
         fix-9eg.16: the third joined the agent-memory feedback row into the
         window and thence into the agent's prompt. Recorded review notes
         deliberately do NOT travel this path, which is asserted here as well
         — a redaction test is exactly where a reappearing prompt channel
         would need to be noticed.
         """
-        monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, profile)
         sink = obs.SQLiteTraceSink(db_path)
         turn = _turn_result()
         try:
@@ -849,15 +654,11 @@ class TestConversationMemory:
         ]
         assert "helpful" not in json.dumps(window)
 
-    @pytest.mark.parametrize("profile", ["debug", "evidence"])
-    def test_a_labeled_conversation_still_lists_and_dumps(
-        self, db_path, monkeypatch, profile
-    ):
-        """A withheld label must not take the conversation out of the history
+    def test_a_labeled_conversation_still_lists_and_dumps(self, db_path):
+        """A scrubbed label must not take the conversation out of the history
         list: `list_conversation_summaries` is how a user finds it again, and
         `_label_is_due` reads the stored topic to decide whether to spend another
         LLM call on one that is already titled."""
-        monkeypatch.setenv(obs.CAPTURE_PROFILE_VAR, profile)
         sink = obs.SQLiteTraceSink(db_path)
         try:
             sink.emit_turn_record(_turn_result())
@@ -870,7 +671,7 @@ class TestConversationMemory:
 
         listed = store.list_conversation_summaries("chan", 10)
         assert [c["conversation_id"] for c in listed] == [1]
-        assert listed[0]["topic"]  # non-blank, whatever the profile did to it
+        assert listed[0]["topic"]
 
         stored_topic, usable = store.conversation_label_state("chan", 1)
         assert usable == 1
@@ -881,15 +682,13 @@ class TestConversationMemory:
 
 
 # ----------------------------------------------------------------------
-# Phase 0: the default profile changes nothing but the scrub
+# The scrub changes nothing it does not have to
 # ----------------------------------------------------------------------
 
 
-def test_the_default_profile_leaves_all_five_surfaces_byte_identical(db_path):
-    """One test covering all five at once, because the Phase-0 promise is about
-    the set of them rather than about any one."""
-    assert obs.resolve_capture_policy().profile == "debug"
-
+def test_clean_values_leave_all_five_surfaces_byte_identical(db_path):
+    """One test covering all five at once, because the promise is about the set
+    of them rather than about any one."""
     store = obs.ObservabilityStore(db_path)
     conv = store.mint_conversation_id("chan")
     store.record_conversation_label("chan", conv, "Kayak order", TENANT)
@@ -914,31 +713,3 @@ def test_the_default_profile_leaves_all_five_surfaces_byte_identical(db_path):
     assert span_row["command_name"] == span.command_name
     assert span_row["name"] == span.name
     assert span_row["channel_id"] == span.channel_id
-
-
-def test_every_declared_policy_path_is_reachable_from_a_write_site():
-    """A path constant nobody can spell is a policy nobody can override.
-
-    Guards against a constant being renamed here while the write site keeps its
-    own literal, which would leave a deployment's `CaptureFieldPolicy` silently
-    matching nothing.
-    """
-    paths = {
-        obs.POLICY_PATH_SPAN_NAME,
-        obs.POLICY_PATH_SPAN_COMMAND_NAME,
-        obs.POLICY_PATH_SPAN_CONTEXT,
-        obs.POLICY_PATH_CONVERSATION_TOPIC,
-        obs.POLICY_PATH_CONVERSATION_SUMMARY,
-        obs.POLICY_PATH_TRAIN_METRICS,
-        # ido-zlm. The sixth surface is not a column of this database at all:
-        # the offload evidence sidecar's raw command response, written by
-        # `observation_offloading.archive.persist` through
-        # `protect_offload_observation`. It is listed here for the same reason
-        # as the other five -- a deployment re-admitting it under the evidence
-        # profile has to be able to spell the path.
-        obs.POLICY_PATH_OFFLOAD_OBSERVATION,
-    }
-    assert len(paths) == 7
-    # The turn-column paths `_policed_column` builds must not collide with them.
-    turn_paths = {f"turn.{column}" for column, _ in obs._POLICED_TURN_COLUMNS}
-    assert not paths & turn_paths
