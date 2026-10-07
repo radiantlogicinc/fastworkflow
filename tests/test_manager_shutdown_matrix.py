@@ -41,6 +41,7 @@ from dotenv import dotenv_values
 
 import fastworkflow
 from fastworkflow.run_fastapi_mcp import checkpoint
+from fastworkflow.runtime_manifest import ManifestConformanceError
 from fastworkflow.run_fastapi_mcp.turns import ExecState, TurnRegistry
 from fastworkflow.run_fastapi_mcp.utils import ChannelRuntime, ChannelSessionManager
 
@@ -995,3 +996,24 @@ def test_pinned_channels_hold_the_cache_over_target_and_are_counted(
     assert all("(2 pinned)" in m for m in warnings), (
         f"the warning did not name how many candidates were pinned: {warnings}"
     )
+
+
+def test_a_startup_failure_surfaces_as_itself(app_module, monkeypatch):
+    """Hazard: the shutdown half of the lifespan masks why startup failed.
+
+    The checkpoint reaper is only created once startup succeeds, so a shutdown
+    that cancels it unconditionally raised UnboundLocalError over the real
+    error, and the server log led with the wrong exception.
+    """
+
+    def refuse(*_args, **_kwargs):
+        raise ManifestConformanceError(["the manifest is nonconformant"])
+
+    monkeypatch.setattr(app_module, "check_startup_conformance", refuse)
+
+    async def body():
+        async with app_module.lifespan(app_module.app):
+            pass
+
+    with pytest.raises(ManifestConformanceError, match="nonconformant"):
+        asyncio.run(body())

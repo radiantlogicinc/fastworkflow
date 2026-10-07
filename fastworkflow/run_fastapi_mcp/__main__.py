@@ -602,6 +602,7 @@ async def lifespan(_app: FastAPI):
             if runtime:
                 runtime.execution_context.close()
 
+    reaper: asyncio.Task | None = None
     try:
         initialize_fastworkflow_on_startup()
         # Log startup info AFTER init() so log level from env file is respected
@@ -624,9 +625,10 @@ async def lifespan(_app: FastAPI):
         yield
     finally:
         logger.info("FastWorkflow FastAPI service shutting down...")
-        reaper.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await reaper
+        if reaper is not None:
+            reaper.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await reaper
         still_busy = await wait_for_active_turns_to_complete(
             max_wait_seconds=SHUTDOWN_DRAIN_SECONDS
         )

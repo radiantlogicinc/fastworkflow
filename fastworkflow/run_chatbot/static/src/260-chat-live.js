@@ -740,6 +740,17 @@ function tmAutoConnect(deadlineMs) {
   connText("Starting the workflow server (first start loads models — this can take a minute)…");
   function probe() {
     if (tm.epoch !== epoch || !tm.baseUrl) { return; }
+    /* `checkSession` keeps `session` current, and a server that died while
+       starting will never answer readyz: say so instead of probing it until
+       the deadline. */
+    if (session && session.server_running === false
+        && session.server_exit_code !== null && session.server_exit_code !== undefined) {
+      setPill("err", "server failed to start");
+      connText("The workflow server exited during startup (exit code " +
+        session.server_exit_code + ") — check the server log. " +
+        "Switch workflow (same one is fine) restarts it.", "err", "server");
+      return;
+    }
     if (Date.now() > deadline) {
       setPill("err", "server not ready");
       connText("The workflow server did not become ready. Check the server log, " +
