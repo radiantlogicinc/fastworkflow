@@ -39,7 +39,7 @@ from fastworkflow.observation_offloading.archive import (
 )
 from fastworkflow.observation_offloading.search import search_memory
 from fastworkflow.observation_offloading.state import (
-    reset_runtime_state,
+    reset_observation_state,
     snapshot_events,
 )
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
@@ -101,7 +101,7 @@ class ArchiveInitialisationFailure(unittest.TestCase):
     """Construction degrades; it does not raise."""
 
     def setUp(self) -> None:
-        reset_runtime_state()
+        reset_observation_state()
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.cleanup)
         self.previous_root = os.environ.get("FASTWORKFLOW_STATE_ROOT")
@@ -121,7 +121,7 @@ class ArchiveInitialisationFailure(unittest.TestCase):
         else:
             os.environ["FASTWORKFLOW_STATE_ROOT"] = self.previous_root
         self.temp.cleanup()
-        reset_runtime_state()
+        reset_observation_state()
 
     def state_root_still_works(self) -> bool:
         """The rest of the state root is usable: only the archive is broken."""
@@ -190,11 +190,10 @@ class ArchiveInitialisationFailure(unittest.TestCase):
         break_with_garbage(self.archive_path)
         store = open_handle_archive(self.archive_path)
         scope = RuntimeHandleScope(
-            store_identity="s", channel_id="c", experiment_id="e",
-            task_id="t", attempt=0, turn_key="k",
+            channel_id="c", turn_key="k",
         )
         with self.assertRaises(PersistenceError):
-            store.persist(scope, alias="O1", offload_order=1, command_name="c",
+            store.persist(scope, alias="O0", command_name="c",
                           step_index=0, text="x", text_sha256="0" * 64)
         self.assertIsNone(store.get(scope, "O1"))
         self.assertEqual(store.list(scope), [])
@@ -208,17 +207,17 @@ class ArchiveInitialisationFailure(unittest.TestCase):
         agent = build_tool_agent(
             SimpleNamespace(), Signature, [noop_tool], max_iters=3
         )
-        self.assertIsInstance(agent.observation_archive, UnavailableHandleArchive)
-        self.assertEqual(set(agent.tools), {"noop_tool", "search_memory", "finish"})
+        self.assertTrue([e for e in snapshot_events() if e["kind"] == "archive_unavailable"])
+        self.assertEqual(set(agent.tools), {"noop_tool", "finish"})
 
     @unittest.skipIf(os.geteuid() == 0, "root ignores the permission bit")
     def test_the_agent_is_built_when_the_archive_cannot_be_opened(self) -> None:
         break_with_permissions(self.archive_path)
         self.assertTrue(self.state_root_still_works())
-        agent = build_tool_agent(
+        build_tool_agent(
             SimpleNamespace(), Signature, [noop_tool], max_iters=3
         )
-        self.assertIsInstance(agent.observation_archive, UnavailableHandleArchive)
+        self.assertTrue([e for e in snapshot_events() if e["kind"] == "archive_unavailable"])
 
     def test_a_step_keeps_its_observation_inline_instead_of_aborting(self) -> None:
         """The compacting hook runs, refuses the write and changes nothing."""
@@ -230,7 +229,7 @@ class ArchiveInitialisationFailure(unittest.TestCase):
         trajectory = {
             "thought_0": "look",
             "tool_name_0": "execute_workflow_query",
-            "tool_args_0": {"command": "show_holders"},
+            "tool_args_0": {"command": "show_owners"},
             "observation_0": observation,
         }
         self.assertTrue(agent._on_step_complete(0, trajectory))
@@ -250,23 +249,21 @@ class ArchiveInitialisationFailure(unittest.TestCase):
     def test_the_result_handle_store_is_not_redirected_to_another_file(self) -> None:
         """An unavailable archive must not silently move evidence elsewhere."""
         break_with_garbage(self.archive_path)
-        agent = build_tool_agent(
+        build_tool_agent(
             SimpleNamespace(), Signature, [noop_tool], max_iters=3
         )
-        self.assertEqual(
-            os.path.abspath(agent.observation_archive.db_path),
-            os.path.abspath(self.archive_path),
-        )
+        unavailable = [e for e in snapshot_events() if e["kind"] == "archive_unavailable"]
+        self.assertEqual(unavailable[-1]["db_path"], os.path.abspath(self.archive_path))
 
     def test_a_degraded_run_writes_no_second_evidence_file(
         self,
     ) -> None:
         """Degrading neither repairs the broken file nor writes evidence beside it."""
         break_with_garbage(self.archive_path)
-        agent = build_tool_agent(
+        build_tool_agent(
             SimpleNamespace(), Signature, [noop_tool], max_iters=3
         )
-        self.assertIsInstance(agent.observation_archive, UnavailableHandleArchive)
+        self.assertTrue([e for e in snapshot_events() if e["kind"] == "archive_unavailable"])
         with open(self.archive_path, "rb") as handle:
             self.assertEqual(handle.read(), NOT_A_DATABASE)
         self.assertEqual(
@@ -281,7 +278,7 @@ class InlineOnlyTurn(unittest.TestCase):
     workflow_path = str(Path(__file__).parent.joinpath("todo_list_workflow").resolve())
 
     def setUp(self) -> None:
-        reset_runtime_state()
+        reset_observation_state()
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.cleanup)
         self.state_root = os.path.join(self.temp.name, "state")
@@ -298,7 +295,7 @@ class InlineOnlyTurn(unittest.TestCase):
                 workflow.close()
             except Exception:  # noqa: BLE001
                 pass
-        reset_runtime_state()
+        reset_observation_state()
         os.environ.pop("FASTWORKFLOW_STATE_ROOT", None)
         self.temp.cleanup()
 
@@ -322,7 +319,7 @@ class InlineOnlyTurn(unittest.TestCase):
         agent = build_tool_agent(ctx, Signature, [execute_workflow_query], max_iters=8)
         ctx._workflow_tool_agent = agent
         self.open_sessions.append((ctx, workflow))
-        self.assertIsInstance(agent.observation_archive, UnavailableHandleArchive)
+        self.assertTrue([e for e in snapshot_events() if e["kind"] == "archive_unavailable"])
 
         agent.extract = lambda **kwargs: dspy.Prediction(final_answer="done")
         queue = iter([("execute_workflow_query", {"command": "show_rows"}),
@@ -338,7 +335,7 @@ class InlineOnlyTurn(unittest.TestCase):
             prediction = agent.forward(user_query="fixture")
 
         self.assertEqual(prediction.final_answer, "done")
-        trajectory = agent.current_trajectory
+        trajectory = agent.trajectory
         self.assertIn(rows[0], str(trajectory.get("observation_0")))
         kinds = {e["kind"] for e in snapshot_events()}
         self.assertIn("archive_unavailable", kinds)

@@ -56,11 +56,6 @@ from dotenv import dotenv_values
 import fastworkflow
 from fastworkflow import state_paths
 from fastworkflow.experiment.readiness import runtime_readiness_snapshot
-from fastworkflow.runtime_manifest import (
-    check_startup_conformance,
-    deployment_env,
-    register_runtime_metadata,
-)
 from fastworkflow.utils.logging import logger
 
 from fastapi import FastAPI, HTTPException, status, Depends, Header, Request, Response
@@ -86,6 +81,7 @@ from .utils import (
     InitializeResponse,
     SessionData,
     InvokeRequest,
+    apply_dspy_cache_choice,
     PerformActionRequest,
     PostFeedbackRequest,
     observability_feedback,
@@ -410,23 +406,6 @@ async def lifespan(_app: FastAPI):
         if ARGS.passwords_file_path:
             env_vars.update(dotenv_values(ARGS.passwords_file_path))
         fastworkflow.init(env_vars=env_vars)
-
-        # Startup conformance for the optional workflow runtime manifest
-        # (arch §7.1). Raising here aborts the lifespan, so a nonconformant
-        # manifest or an over-permissive deployment declaration never reaches
-        # readiness — the same reasoning as the session-cap and topic-deadline
-        # checks below: a configuration that would reject traffic should reject
-        # startup instead.
-        # Retained rather than discarded (arch §12.0 delta 4): the effect
-        # contracts validated here are what the per-command ConsequenceAssessment
-        # reads at execution time. Without this the runtime cannot tell a
-        # workflow that declared `read_only` from one that declared nothing.
-        register_runtime_metadata(
-            ARGS.workflow_path,
-            check_startup_conformance(
-                ARGS.workflow_path, env=deployment_env(fastworkflow._env_vars)
-            ),
-        )
 
         # A FastAPI process serves exactly one workflow. Pin it on the manager
         # now, before any lazily-built store reads it, so conversation, session
@@ -1645,6 +1624,7 @@ async def invoke_agent(
     
     Requires a valid JWT access token in the Authorization header (Bearer token format).
     """
+    apply_dspy_cache_choice(request.use_dspy_cache)
     channel_id = session.channel_id
     user_id = session.user_id
     try:
@@ -1762,6 +1742,7 @@ async def invoke_agent_stream(
     Requires a valid JWT access token in the Authorization header (Bearer token format).
     Exposed as 'invoke_agent' tool for MCP clients (who don't need JWT auth).
     """
+    apply_dspy_cache_choice(request.use_dspy_cache)
     channel_id = session.channel_id
     user_id = session.user_id
 
@@ -1972,6 +1953,7 @@ async def invoke_assistant(
     
     Requires a valid JWT access token in the Authorization header (Bearer token format).
     """
+    apply_dspy_cache_choice(request.use_dspy_cache)
     channel_id = session.channel_id
     user_id = session.user_id
     try:
@@ -2357,8 +2339,15 @@ async def post_feedback(
             # lands in the same DB the writer is appending evidence to.
             _reject_if_busy(channel_id)
             async with runtime.lock:
+                # [R9] /invoke_agent hands back the EXECUTION key; the evidence
+                # store is keyed by the LOGICAL one. Translate a retired
+                # execution key the way GET /turns/{turn_key} does.
+                request.turn_key = (
+                    turn_registry.resolve_retired_logical_key(request.turn_key, channel_id)
+                    or request.turn_key
+                )
                 try:
-                    stored = record_turn_feedback(runtime, request, logger)
+                    record_turn_feedback(runtime, request, logger)
                 except FeedbackTurnNotFound as exc:
                     # 404, not 400, and the same 404 an unknown key gets: a
                     # write refused for ownership must not confirm that the
@@ -2371,7 +2360,10 @@ async def post_feedback(
                         detail=str(exc),
                     ) from exc
                 logger.info(f"Recorded a review note for session {channel_id}")
-                return {"status": "ok", "feedback": stored}
+                # Returns the turn's notes, including the one just recorded (spec 5.10).
+                return {"status": "ok", "feedback": observability_feedback.present(
+                    runtime.observability_store.list_human_feedback(request.turn_key)
+                )}
 
     except HTTPException:
         raise
@@ -2433,14 +2425,18 @@ async def get_feedback(
             # Ownership, not mere presence. The store is shared by every
             # channel this server serves, so a turn being IN it says nothing
             # about who may read the notes on it (fix-bnym).
+            # [R9] Same key translation as POST /post_feedback.
+            store_key = (
+                turn_registry.resolve_retired_logical_key(turn_key, channel_id) or turn_key
+            )
             try:
-                assert_channel_owns_turn(store, runtime.channel_id, turn_key)
+                assert_channel_owns_turn(store, runtime.channel_id, store_key)
             except FeedbackTurnNotFound as exc:
                 raise _turn_not_found(turn_key) from exc
             return {
                 "turn_key": turn_key,
                 "feedback": observability_feedback.present(
-                    store.list_human_feedback(turn_key)
+                    store.list_human_feedback(store_key)
                 ),
             }
     except HTTPException:

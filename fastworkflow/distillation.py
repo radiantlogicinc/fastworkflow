@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Optional
 
+import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
 
 import fastworkflow
@@ -611,15 +612,7 @@ class DistillationSession:
             _what_can_i_do,
         )
 
-        # Load execution insights for the agent
-        execution_insights = getattr(
-            self.chat_session, "_execution_insights", None
-        )
-
-        agent = initialize_workflow_tool_agent(
-            self.chat_session,
-            execution_insights=execution_insights,
-        )
+        agent = initialize_workflow_tool_agent(self.chat_session)
 
         # Temporarily install this agent
         original_agent = self.chat_session._workflow_tool_agent
@@ -629,9 +622,6 @@ class DistillationSession:
             refined_message = self.chat_session._refine_user_query(
                 message, self.chat_session.conversation_history
             )
-
-            # Get planning insights for injection into planner prompt
-            planning_insights = getattr(self.chat_session, '_planning_insights', None)
 
             # Set up planner LM for this pass
             planner_lm = dspy_utils.get_lm(planner_lm_role, planner_api_key_role)
@@ -646,7 +636,10 @@ class DistillationSession:
             # Build initial query with next steps using the PLANNER LLM
             # The hook in build_query_with_next_steps will auto-capture the plan
             command_info = build_query_with_next_steps(
-                refined_message, self.chat_session, planning_insights=planning_insights, planner_lm=planner_lm
+                refined_message,
+                self.chat_session,
+                planner_lm=planner_lm,
+                planner_user_query=message,
             )
 
             # Get available commands for current context
@@ -692,7 +685,7 @@ class DistillationSession:
             actions = list(self.chat_session.action_log)
 
             # Capture the full ReAct trajectory
-            trajectory = dict(agent.current_trajectory)
+            trajectory = dict(agent.trajectory)
 
             self.chat_session.summarize_and_record_turn(message, actions, result_text)
 

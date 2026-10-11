@@ -10,6 +10,7 @@ import argparse
 from pathlib import Path
 from typing import Optional
 
+import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
 
 

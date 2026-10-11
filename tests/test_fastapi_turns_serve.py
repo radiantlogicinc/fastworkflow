@@ -239,10 +239,13 @@ def test_completed_turn_is_served_from_the_store(
         assert again.status_code == 200
         assert again.json() == data
 
-        # The execution key was the registry's handle only; the store is keyed
-        # by the logical key, so once the record retires it no longer resolves.
+        # The execution key still reaches the same durable record: once the
+        # registry drops the execution, its retired-key alias (turns.py,
+        # _remember_retired_key, [R9]/fix-85g.9) maps it to the logical key for
+        # the retention window.
         by_exec = client.get(f"/turns/{exec_key}", headers=headers)
-        assert by_exec.status_code == 404
+        assert by_exec.status_code == 200
+        assert by_exec.json()["turn_key"] == logical_key
 
 
 # ---------------------------------------------------------------------------

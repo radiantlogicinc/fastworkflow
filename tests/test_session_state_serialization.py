@@ -18,7 +18,6 @@ from fastworkflow.session_state_store import (
     DiskSessionStateStore,
     IncompatibleSessionState,
 )
-from fastworkflow.turn_plan import PlanStep, PlanSubject, TurnPlan
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
 
@@ -88,7 +87,7 @@ def test_serialize_restore_resume_across_contexts(
     monkeypatch.setattr(
         "fastworkflow.workflow_agent.build_query_with_next_steps",
         lambda user_query, session, with_agent_inputs_and_trajectory=False,
-        planning_insights=None, planner_lm=None, **kwargs: user_query,
+        planner_lm=None, **kwargs: user_query,
     )
     monkeypatch.setattr(
         "fastworkflow.workflow_agent._what_can_i_do",
@@ -207,41 +206,10 @@ def test_unreadable_schema_version_applies_nothing(
     ctx.close()
 
 
-def test_the_turn_plan_is_an_additive_json_native_key(
+def test_legacy_turn_plan_keys_in_a_blob_do_not_fail_restore(
     initialized_fastworkflow, todo_workflow_path
 ):
-    """No schema bump: a blob with the plan is still this version, and saves as it is."""
-    channel_id = f"plan_{uuid.uuid4().hex[:8]}"
-    ctx = WorkflowExecutionContext(run_as_agent=True, session_key=channel_id)
-    ctx.bind_app_workflow(
-        fastworkflow.Workflow.create(todo_workflow_path, workflow_id_str=channel_id)
-    )
-    blob = ctx.serialize_state(channel_id=channel_id)
-    assert blob["schema_version"] == SCHEMA_VERSION
-    assert (blob["turn_plan"], blob["turn_plan_status"]) == (None, "not_planned")
-
-    ctx._turn_plan = TurnPlan(
-        steps=[PlanStep(text="Show all todo items", commands=["show_all_todos"])],
-        subjects=[PlanSubject(name="groceries", kind="list")],
-    )
-    ctx._turn_plan_status = "planned"
-    store = DiskSessionStateStore(str(initialized_fastworkflow / "state"))
-    store.save(channel_id, ctx.serialize_state(channel_id=channel_id))
-    loaded = store.load(channel_id)
-    assert TurnPlan.model_validate(loaded["turn_plan"]) == ctx._turn_plan
-    assert loaded["turn_plan_status"] == "planned"
-    ctx.close()
-
-
-def test_a_plan_that_does_not_validate_is_lost_on_resume_not_a_failed_restore(
-    initialized_fastworkflow, todo_workflow_path, jev_stub, monkeypatch
-):
-    from fastworkflow.observation_offloading import finish_check
-
-    monkeypatch.setenv(finish_check.CHECK_ENV, "jev")
-    monkeypatch.setenv(finish_check.KEY_ENV, "stub-key")
-    finish_check._CHECKERS.clear()
-    channel_id = f"plan_bad_{uuid.uuid4().hex[:8]}"
+    channel_id = f"plan_legacy_{uuid.uuid4().hex[:8]}"
     ctx = WorkflowExecutionContext(run_as_agent=True, session_key=channel_id)
     ctx.bind_app_workflow(
         fastworkflow.Workflow.create(todo_workflow_path, workflow_id_str=channel_id)
@@ -254,12 +222,7 @@ def test_a_plan_that_does_not_validate_is_lost_on_resume_not_a_failed_restore(
         "turn_plan_status": "planned",
     })
     assert ctx.awaiting_user
-    agent = ctx.workflow_tool_agent
-    assert agent.finish_checker is not None
-    assert ctx._turn_plan is None and ctx._turn_plan_status == "lost_on_resume"
-    # The mirror the finish check reads is seeded from the suspension.
-    assert agent.current_trajectory == _suspended_react_blob()["trajectory"]
-    finish_check._CHECKERS.clear()
+    assert ctx.workflow_tool_agent is not None
     ctx.close()
 
 

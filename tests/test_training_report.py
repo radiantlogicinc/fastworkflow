@@ -47,6 +47,7 @@ from fastworkflow.train.heldout_evaluation import (
     HeldoutReport,
     RoutingScore,
 )
+from tests.llm_credentials import syndata_llm_available
 
 HELLO_WORLD_PATH = os.path.join("fastworkflow", "examples", "hello_world")
 EXAMPLE_COMMAND_INFO = os.path.join(HELLO_WORLD_PATH, COMMAND_INFO_FOLDERNAME)
@@ -854,11 +855,6 @@ def _datasets_available() -> bool:
     return importlib.util.find_spec("datasets") is not None
 
 
-def _looks_like_real_key(value) -> bool:
-    """Reject empty / placeholder keys like ``<API KEY ...>``."""
-    return bool(value) and "<" not in value and "your-" not in value.lower()
-
-
 def _resolve_env_vars() -> dict:
     """Build the training env, matching test_train_modern_stack.py."""
     example_env = os.path.join("fastworkflow", "examples", "fastworkflow.env")
@@ -899,9 +895,9 @@ def test_report_describes_a_real_training_run(tmp_path_factory):
     if not _datasets_available():
         pytest.skip("datasets package not installed; training cannot run.")
     env_vars = _resolve_env_vars()
-    if not _looks_like_real_key(env_vars.get("LITELLM_API_KEY_SYNDATA_GEN")):
+    if not syndata_llm_available(env_vars):
         pytest.skip(
-            "No real LITELLM_API_KEY_SYNDATA_GEN available; cannot run synthetic "
+            "No usable LLM credentials for LLM_SYNDATA_GEN; cannot run synthetic "
             "utterance generation required for model training."
         )
 

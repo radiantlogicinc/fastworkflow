@@ -34,6 +34,7 @@ as a tuning override.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
@@ -43,20 +44,13 @@ from fastworkflow.observation_offloading.archive import (
     RuntimeHandleArchive,
     RuntimeHandleScope,
 )
-from fastworkflow.observation_offloading.compact import record_foreign_line
 from fastworkflow.observation_offloading.labels import (
     annotated_observation,
     is_offload_label,
     label_alias,
-    owns_line,
     printed_alias,
 )
-from fastworkflow.observation_offloading.state import (
-    context_changed_of,
-    context_clause_of,
-    default_scope,
-    stored_handles,
-)
+from fastworkflow.observation_offloading.state import default_scope
 
 logger = logging.getLogger(__name__)
 
@@ -176,26 +170,14 @@ def _step_indexes(trajectory: Mapping[str, Any]) -> list[int]:
     return sorted(indexes)
 
 
-def _candidates(
-    trajectory: Mapping[str, Any],
-    executes: Optional[list[tuple[int, int]]] = None,
-    scope: Optional[RuntimeHandleScope] = None,
-) -> list[tuple[int, str, str]]:
+def _candidates(trajectory: Mapping[str, Any]) -> list[tuple[int, str, str]]:
     """``(step_index, alias, text)`` for every aliased execute observation.
 
     Most recent first. The alias comes off the observation itself -- the printed
-    alias line, or the label's own alias -- so this never has to recompute execute
-    ordinals or know how many steps the loop truncated away. An execute step with
-    no alias on it (an error string, a refusal) is not a candidate: there is
-    nothing stored to put back.
-
-    When the agent's execute ledger is given (``executes``), a step whose line
-    names any alias but its own is not a candidate either: on a step that was
-    never annotated that line is the backend's text, and resolving it would put
-    another observation's evidence in this step's place. Without the ledger the
-    alias read off the text is taken as it stands.
+    alias line, or the label's own alias -- and must match ``O{step_index}``. An
+    execute step with no alias on it (an error string, a refusal) is not a
+    candidate: there is nothing stored to put back.
     """
-    ledger = {index: f"O{ordinal}" for index, ordinal in (executes or [])}
     found: list[tuple[int, str, str]] = []
     for index in _step_indexes(trajectory):
         if str(trajectory.get(f"tool_name_{index}") or "") != "execute_workflow_query":
@@ -204,11 +186,7 @@ def _candidates(
         if not isinstance(text, str) or not text:
             continue
         alias = label_alias(text) if is_offload_label(text) else printed_alias(text)
-        if not alias:
-            continue
-        expected = ledger.get(index)
-        if expected is not None and not owns_line(text, expected):
-            record_foreign_line("rehydration", index, text, expected, scope)
+        if alias != f"O{index}":
             continue
         found.append((index, alias, text))
     found.reverse()
@@ -225,18 +203,12 @@ def archived_observation(
     scope: RuntimeHandleScope,
     archive: RuntimeHandleArchive,
 ) -> Optional[str]:
-    """The raw archived text for *alias*, hot cache first, then SQLite.
-
-    The same resolution ``search_memory`` uses, for the same reason: both tiers
-    hold the identical digest-verified bytes, and the hot one saves a read.
-    """
-    handle = stored_handles(scope).get(alias)
-    if handle is None:
-        try:
-            handle = archive.get(scope, alias)
-        except Exception:  # noqa: BLE001 - a read failure is a miss, never a turn failure
-            logger.debug("answer rehydration could not read %s", alias, exc_info=True)
-            return None
+    """The archived text for *alias*, as the store holds it."""
+    try:
+        handle = archive.get(scope, alias)
+    except Exception:  # noqa: BLE001 - a read failure is a miss, never a turn failure
+        logger.debug("answer rehydration could not read %s", alias, exc_info=True)
+        return None
     if handle is None:
         return None
     text = handle.get("text")
@@ -252,25 +224,20 @@ def rehydrated_label(
     """The label's observation, re-printed exactly as the agent first saw it.
 
     The archive stores the command response WITHOUT the presentation line, so
-    the line is rebuilt here from the alias and the context clause recorded for
-    it at dispatch. An alias with no recorded clause prints the plain alias
-    line: the clause is presentation and its absence is never guessed at.
-
-    ``annotated_observation`` joins the two, exactly as the compaction hook did
-    when the step completed, so a response whose own first line is shaped like
-    an alias line is quoted here too and reads back as the same response.
+    the line is rebuilt here from the context and change stored on the evidence
+    row beside the text, so a label rehydrated in a process that never ran the
+    turn prints the clause and the change the agent first saw.
     """
-    text = archived_observation(alias, scope=scope, archive=archive)
-    if text is None:
+    try:
+        row = archive.get(scope, alias)
+    except Exception:  # noqa: BLE001 - a read failure is a miss, never a turn failure
+        logger.debug("answer rehydration could not read %s", alias, exc_info=True)
+        return None
+    if row is None or not isinstance(row.get("text"), str):
         return None
     return annotated_observation(
-        alias,
-        # The archive that holds the text also holds the subject recorded
-        # for it (ido-dhw), so a label rehydrated in a process that never
-        # ran the turn prints the same clause the agent first saw.
-        context_clause_of(scope, alias, selected_archive=archive),
-        text,
-        context_changed=context_changed_of(scope, alias),
+        alias, row["context_clause"], row["text"],
+        context_changed=row["context_changed"],
     )
 
 
@@ -289,13 +256,8 @@ def rehydrate(
     scope: Optional[RuntimeHandleScope] = None,
     archive: Optional[RuntimeHandleArchive] = None,
     budget: Optional[int] = None,
-    executes: Optional[list[tuple[int, int]]] = None,
 ) -> tuple[dict[str, Any], RehydrationReport]:
     """The extractor's copy of *trajectory*, with the evidence behind it put back.
-
-    ``executes`` is the agent's own ``(step_index, ordinal)`` ledger. With it, a
-    line on an execute step that names any alias but that step's own is never
-    resolved (see ``_candidates``); without it behaviour is unchanged.
 
     Returns ``(trajectory_copy, report)``. The input mapping is never mutated:
     the copy is what the extract call receives, so the ReAct loop keeps the
@@ -319,12 +281,13 @@ def rehydrate(
     report.bytes_before = trajectory_bytes(trajectory)
     used = report.bytes_before
     seen_labels: set[str] = set()
-    candidates = _candidates(trajectory, executes, selected_scope)
+    seen_label_digests: set[str] = set()
+    candidates = _candidates(trajectory)
     stopped = False
 
     for position, (index, alias, text) in enumerate(candidates):
         if stopped:
-            # ``ido-1tu``/F34. The note says evidence EXISTS under these
+            # The note says evidence EXISTS under these
             # observations and was not put back, so only an alias that had
             # something to put back belongs in it. A plain inline observation
             # whose full text is already in the trajectory lost nothing to the
@@ -333,6 +296,7 @@ def rehydrate(
             if _evidence_behind(
                 alias, text, scope=selected_scope, archive=archive,
                 report=report, seen_labels=seen_labels,
+                seen_label_digests=seen_label_digests,
             ):
                 report.dropped_aliases.append(alias)
             continue
@@ -342,13 +306,20 @@ def rehydrate(
         # observation's own text otherwise.
         base = text
         if is_offload_label(text):
-            if alias in seen_labels:
-                # ``ido-1tu``/F34. One alias names one archived observation,
+            archived = archived_observation(alias, scope=selected_scope, archive=archive)
+            if archived is None:
+                report.unresolved_aliases.append(alias)
+                continue
+            digest = hashlib.sha256(archived.encode("utf-8")).hexdigest()
+            if alias in seen_labels or digest in seen_label_digests:
+                # One alias names one archived observation,
                 # however many steps print its label. A more recent step
                 # already carries that text in full, so restoring it again
                 # would spend the budget twice on bytes the extractor is
                 # holding -- the rule ``seen_blocks`` applies to a handle's
-                # rows, applied to a label.
+                # rows, applied to a label. Under ``O{step_index}`` numbering a
+                # repeat command gets a new alias but the same archived bytes;
+                # dedupe on digest so the budget is still spent once.
                 continue
             restored = rehydrated_label(
                 alias, scope=selected_scope, archive=archive
@@ -375,9 +346,10 @@ def rehydrate(
         used += added
         report.counts[kind] += 1
         if kind == KIND_LABEL:
-            # ``ido-1tu``/F34. This alias's archived text is now in the copy;
+            # This alias's archived text is now in the copy;
             # an older step printing the same label needs nothing further.
             seen_labels.add(alias)
+            seen_label_digests.add(digest)
         report.rehydrated.append({
             "alias": alias,
             "kind": kind,
@@ -406,6 +378,7 @@ def _evidence_behind(
     archive: RuntimeHandleArchive,
     report: RehydrationReport,
     seen_labels: set[str],
+    seen_label_digests: set[str],
 ) -> bool:
     """Would the walk have put anything back for this observation?
 
@@ -424,8 +397,11 @@ def _evidence_behind(
     if is_offload_label(text):
         if alias in seen_labels:
             return False
-        if archived_observation(alias, scope=scope, archive=archive) is None:
+        archived = archived_observation(alias, scope=scope, archive=archive)
+        if archived is None:
             report.unresolved_aliases.append(alias)
+            return False
+        if hashlib.sha256(archived.encode("utf-8")).hexdigest() in seen_label_digests:
             return False
         return True
     return False

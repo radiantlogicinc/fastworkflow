@@ -42,6 +42,7 @@ from fastworkflow.train.utterance_cache import (
     UtteranceCache,
     set_utterance_cache,
 )
+from tests.llm_credentials import syndata_llm_available
 
 
 # Every test here shares one module fixture that trains TWICE, so the whole module is
@@ -55,11 +56,6 @@ HELLO_WORLD_PATH = os.path.join("fastworkflow", "examples", "hello_world")
 
 def _datasets_available() -> bool:
     return importlib.util.find_spec("datasets") is not None
-
-
-def _looks_like_real_key(value) -> bool:
-    """Reject empty / placeholder keys like ``<API KEY ...>``."""
-    return bool(value) and "<" not in value and "your-" not in value.lower()
 
 
 def _resolve_env_vars() -> dict:
@@ -149,9 +145,9 @@ def two_runs(tmp_path_factory):
         pytest.skip("datasets package not installed; intent-detection training is skipped.")
 
     env_vars = _resolve_env_vars()
-    if not _looks_like_real_key(env_vars.get("LITELLM_API_KEY_SYNDATA_GEN")):
+    if not syndata_llm_available(env_vars):
         pytest.skip(
-            "No real LITELLM_API_KEY_SYNDATA_GEN available; cannot run synthetic "
+            "No usable LLM credentials for LLM_SYNDATA_GEN; cannot run synthetic "
             "utterance generation required for model training."
         )
 

@@ -421,6 +421,13 @@ class CommandDirectory(BaseModel):
             )
             command_directory.register_command_metadata(qualified_cmd, metadata)
 
+        # Core contexts' callback classes (e.g. `occupiable = False` on IntentDetection)
+        # are registered with their commands; the scan above does not reach them.
+        for context_name in sorted({name.split("/")[0] for name in discovered_commands if "/" in name}):
+            CommandDirectory._register_context_class(
+                command_directory, context_name,
+                Path(internal_cmd_root) / context_name, internal_wf_path)
+
     @staticmethod
     @lru_cache(maxsize=1)  # Only need to cache one result since core commands are fixed
     def _discover_core_commands(internal_wf_path: str) -> set[str]:
@@ -621,6 +628,10 @@ def _command_source_roots(workflow_folderpath: str) -> list[Path]:
             for base_path in inheritance_model.resolve_base_paths(workflow_folderpath)
         )
     roots.append(Path(workflow_folderpath) / "_commands")
+    # Core commands and their context classes are registered into every directory
+    # (see `_register_core_commands`), so their source must invalidate it too.
+    import fastworkflow
+    roots.append(Path(fastworkflow.get_internal_workflow_path("command_metadata_extraction")) / "_commands")
     return roots
 
 

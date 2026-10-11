@@ -55,6 +55,7 @@ from fastworkflow.train.personas import (
     set_persona_source,
     validate_persona_id,
 )
+from tests.llm_credentials import syndata_llm_available
 
 RETAIL_PATH = os.path.join("fastworkflow", "examples", "retail_workflow")
 HELLO_WORLD_PATH = os.path.join("fastworkflow", "examples", "hello_world")
@@ -72,6 +73,15 @@ def _resolve_env_vars() -> dict:
         env_vars.update(dotenv_values(local_env))
     if os.path.exists(local_pwd):
         env_vars.update(dotenv_values(local_pwd))
+    for key in (
+        "LLM_SYNDATA_GEN",
+        "LITELLM_API_KEY_SYNDATA_GEN",
+        "LITELLM_PROXY_API_BASE",
+        "LITELLM_PROXY_API_KEY",
+    ):
+        val = os.environ.get(key)
+        if val and "<" not in val:
+            env_vars[key] = val
     return env_vars
 
 
@@ -637,19 +647,10 @@ def test_only_an_app_supplied_set_can_skip_the_datasets_package(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _looks_like_real_key(value) -> bool:
-    """Reject empty / placeholder keys like ``<API KEY ...>``.
-
-    Copied from `test_train_modern_stack` so this file skips under the same conditions the
-    rest of the training suite does.
-    """
-    return bool(value) and "<" not in value and "your-" not in value.lower()
-
-
 @pytest.mark.skipif(
-    not _looks_like_real_key(_resolve_env_vars().get("LITELLM_API_KEY_SYNDATA_GEN")),
+    not syndata_llm_available(_resolve_env_vars()),
     reason=(
-        "No real LITELLM_API_KEY_SYNDATA_GEN available; cannot exercise synthetic "
+        "No usable LLM credentials for LLM_SYNDATA_GEN; cannot exercise synthetic "
         "utterance generation."
     ),
 )

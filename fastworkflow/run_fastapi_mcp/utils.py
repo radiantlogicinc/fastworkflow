@@ -224,6 +224,25 @@ class InvokeRequest(BaseModel):
     """
     user_query: str
     timeout_seconds: int = 60
+    # None leaves the process's DSPy cache setting as it is.
+    use_dspy_cache: Optional[bool] = None
+
+
+_dspy_cache_enabled: Optional[bool] = None
+
+
+def apply_dspy_cache_choice(use_dspy_cache: Optional[bool]) -> None:
+    """Turn the process-wide DSPy cache on or off when the request asks for a change."""
+    global _dspy_cache_enabled
+    if use_dspy_cache is None or use_dspy_cache == _dspy_cache_enabled:
+        return
+    from fastworkflow.utils.dspy_cache_utils import (
+        clear_dspy_cache_completely, reset_dspy_cache_settings)
+    if use_dspy_cache:
+        reset_dspy_cache_settings()
+    else:
+        clear_dspy_cache_completely()
+    _dspy_cache_enabled = use_dspy_cache
 
 
 class PerformActionRequest(BaseModel):

@@ -24,12 +24,6 @@ def run_main(args):
 
     import fastworkflow
     from fastworkflow.utils.logging import logger
-    from fastworkflow.runtime_manifest import (
-        ManifestConformanceError,
-        check_startup_conformance,
-        deployment_env,
-        register_runtime_metadata,
-    )
 
     # Progress bar helper
     from fastworkflow.utils.startup_progress import StartupProgress
@@ -153,27 +147,6 @@ def run_main(args):
 
     fastworkflow.init(env_vars=env_vars)
     StartupProgress.advance("fastworkflow.init complete")
-
-    # Startup conformance for the optional workflow runtime manifest (arch §7.1).
-    # A workflow without one is the normal case and passes silently with every
-    # feature off; a manifest naming an unknown feature or a version this engine
-    # does not support, or a deployment asking for more than the workflow
-    # declared, stops here rather than at the first turn that would have used it.
-    try:
-        # Retained rather than discarded (arch §12.0 delta 4): the effect
-        # contracts validated here are what the per-command ConsequenceAssessment
-        # reads at execution time. Without this the runtime cannot tell a
-        # workflow that declared `read_only` from one that declared nothing.
-        register_runtime_metadata(
-            args.workflow_path,
-            check_startup_conformance(
-                args.workflow_path, env=deployment_env(fastworkflow._env_vars)
-            ),
-        )
-    except ManifestConformanceError as e:
-        StartupProgress.end()
-        console.print(f"[bold red]Error:[/bold red] {e}")
-        exit(1)
 
     # Fail fast if the workflow has not been trained. Otherwise intent detection
     # crashes on the first command when CommandRouter cannot find the model

@@ -1,10 +1,10 @@
 """The credential-free runtime snapshot on 3.3 (fix-qe2, trimmed port).
 
-The ido source tests pinned planner arms, packing and catalogue fields; none
+The source workflow tests pinned planner arms, packing and catalogue fields; none
 of those exist here and none are ported. What is pinned instead is the
-3.3-shaped snapshot: manifest identity and feature vector, the trained model
-version, whether pruning is suppressed, the served command count, the pid -- and,
-above all, that nothing resembling a credential can reach it.
+3.3-shaped snapshot: the workflow's content-hash identity, the trained model
+version, whether pruning is suppressed, the pid -- and, above all, that nothing
+resembling a credential can reach it.
 """
 
 from __future__ import annotations
@@ -15,12 +15,7 @@ import os
 import pytest
 
 from fastworkflow.observability import store as obs
-from fastworkflow.runtime_manifest import (
-    RuntimeManifest,
-    clear_runtime_metadata,
-    merge_and_gate,
-    register_runtime_metadata,
-)
+from fastworkflow.observability.provenance import workflow_identity
 from fastworkflow.experiment.readiness import (
     runtime_readiness_snapshot,
     snapshot_env_names,
@@ -30,12 +25,7 @@ from fastworkflow.experiment.readiness import (
 
 
 KEPT_FIELDS = {
-    "runtime_metadata_registered",
-    "effective_features",
-    "has_workflow_manifest",
     "workflow_fingerprint",
-    "workflow_scope_rule_version",
-    "command_surface_count",
     "workflow_model_version",
     "workflow_model_legacy_layout",
     "observability_enabled",
@@ -44,7 +34,7 @@ KEPT_FIELDS = {
     "configuration_valid",
 }
 
-# Present in the ido source; deliberately absent here (see the module
+# Present in the source workflow; deliberately absent here (see the module
 # docstring for the reason each one is missing on 3.3).
 NOT_PORTED_FIELDS = {
     "plan_decomposition",
@@ -65,20 +55,12 @@ NOT_PORTED_FIELDS = {
 }
 
 
-def _metadata(**manifest_fields):
-    manifest = (
-        RuntimeManifest(schema_version=1, manifest_version="1.0.0", **manifest_fields)
-        if manifest_fields
-        else None
-    )
-    return merge_and_gate(manifest, deployment_features={})
-
-
-@pytest.fixture(autouse=True)
-def _isolated_registry():
-    clear_runtime_metadata()
-    yield
-    clear_runtime_metadata()
+@pytest.fixture
+def workflow(tmp_path):
+    root = tmp_path / "wf"
+    (root / "_commands").mkdir(parents=True)
+    (root / "_commands" / "a.py").write_text("x = 1\n", encoding="utf-8")
+    return str(root)
 
 
 # ----------------------------------------------------------------------
@@ -87,11 +69,9 @@ def _isolated_registry():
 
 
 def test_the_snapshot_has_exactly_the_kept_fields_and_none_of_the_unported_ones(
-    tmp_path,
+    workflow,
 ):
-    snapshot = runtime_readiness_snapshot(
-        str(tmp_path), metadata=_metadata(workflow_fingerprint="sha256:abc")
-    )
+    snapshot = runtime_readiness_snapshot(workflow)
 
     assert set(snapshot) == KEPT_FIELDS
     assert not (set(snapshot) & NOT_PORTED_FIELDS)
@@ -100,57 +80,20 @@ def test_the_snapshot_has_exactly_the_kept_fields_and_none_of_the_unported_ones(
     json.dumps(snapshot)
 
 
-def test_manifest_identity_features_and_command_count_come_from_the_metadata(
-    tmp_path,
-):
-    metadata = _metadata(workflow_fingerprint="sha256:abc")
+def test_the_workflow_is_identified_by_its_computed_content_hash(workflow):
+    snapshot = runtime_readiness_snapshot(workflow)
 
-    snapshot = runtime_readiness_snapshot(str(tmp_path), metadata=metadata)
-
-    assert snapshot["runtime_metadata_registered"] is True
-    assert snapshot["has_workflow_manifest"] is True
-    assert snapshot["workflow_fingerprint"] == "sha256:abc"
-    assert snapshot["workflow_scope_rule_version"] == metadata.workflow_scope_rule_version
-    assert snapshot["effective_features"] == dict(sorted(metadata.feature_modes.items()))
-    assert list(snapshot["effective_features"]) == sorted(snapshot["effective_features"])
-    assert snapshot["command_surface_count"] == len(metadata.commands)
-    assert snapshot["command_surface_count"] > 0
+    assert snapshot["workflow_fingerprint"] == workflow_identity(workflow)
+    assert snapshot["workflow_fingerprint"].startswith("sha256:")
     assert snapshot["pid"] == os.getpid()
     assert snapshot["configuration_valid"] is True
 
 
-def test_a_workflow_without_a_manifest_still_reports_the_core_surface(tmp_path):
-    snapshot = runtime_readiness_snapshot(str(tmp_path), metadata=_metadata())
-
-    assert snapshot["runtime_metadata_registered"] is True
-    assert snapshot["has_workflow_manifest"] is False
-    assert snapshot["workflow_fingerprint"] is None
-    assert snapshot["command_surface_count"] > 0
-    assert snapshot["configuration_valid"] is True
-
-
-def test_the_snapshot_defaults_to_the_metadata_registered_at_startup(tmp_path):
-    """The probe and the bind both call with only the workflow path; what
-    they describe is what `register_runtime_metadata` retained."""
-    register_runtime_metadata(str(tmp_path), _metadata(workflow_fingerprint="sha256:reg"))
-
-    snapshot = runtime_readiness_snapshot(str(tmp_path))
-
-    assert snapshot["runtime_metadata_registered"] is True
-    assert snapshot["workflow_fingerprint"] == "sha256:reg"
-
-
-def test_an_unregistered_runtime_is_described_but_not_valid(tmp_path):
-    """None is a real answer (an embedder that ran no entry point), reported
-    rather than raised -- but a server that cannot state its feature vector
-    cannot be certified as running any configuration."""
-    snapshot = runtime_readiness_snapshot(str(tmp_path))
-
-    assert snapshot["runtime_metadata_registered"] is False
-    assert snapshot["effective_features"] == {}
-    assert snapshot["workflow_fingerprint"] is None
-    assert snapshot["command_surface_count"] == 0
-    assert snapshot["configuration_valid"] is False
+def test_an_unreadable_workflow_raises_for_the_probe_to_report(tmp_path):
+    """The probe turns this into configuration_valid=False; it is not a
+    silent identity of None."""
+    with pytest.raises(Exception):
+        runtime_readiness_snapshot(str(tmp_path / "missing"))
 
 
 # ----------------------------------------------------------------------
@@ -158,22 +101,22 @@ def test_an_unregistered_runtime_is_described_but_not_valid(tmp_path):
 # ----------------------------------------------------------------------
 
 
-def test_pruning_suppression_is_read_the_way_the_sink_reads_it(tmp_path, monkeypatch):
+def test_pruning_suppression_is_read_the_way_the_sink_reads_it(workflow, monkeypatch):
     monkeypatch.setenv(obs.SUPPRESS_PRUNE_VAR, "1")
 
-    snapshot = runtime_readiness_snapshot(str(tmp_path), metadata=_metadata())
+    snapshot = runtime_readiness_snapshot(workflow)
 
     assert snapshot["pruning_suppressed"] is True
     assert snapshot["configuration_valid"] is True
 
 
-def test_in_process_pruning_suppression_is_visible(tmp_path, monkeypatch):
+def test_in_process_pruning_suppression_is_visible(workflow, monkeypatch):
     monkeypatch.delenv(obs.SUPPRESS_PRUNE_VAR, raising=False)
-    assert runtime_readiness_snapshot(str(tmp_path), metadata=_metadata())[
+    assert runtime_readiness_snapshot(workflow)[
         "pruning_suppressed"
     ] is False
     with obs.suppress_pruning():
-        assert runtime_readiness_snapshot(str(tmp_path), metadata=_metadata())[
+        assert runtime_readiness_snapshot(workflow)[
             "pruning_suppressed"
         ] is True
 
@@ -211,7 +154,7 @@ def test_the_snapshot_pins_the_trained_model_version_and_never_invents_one(
     pointer.write_text('{"version_id": "20990101T000000Z-000000"}', encoding="utf-8")
     assert workflow_model_version(str(tmp_path)) is None
 
-    snapshot = runtime_readiness_snapshot(str(tmp_path), metadata=_metadata())
+    snapshot = runtime_readiness_snapshot(str(tmp_path))
     assert "workflow_model_version" in snapshot
 
 
@@ -226,7 +169,7 @@ def test_a_legacy_layout_is_distinguished_from_an_untrained_workflow(tmp_path):
     legacy.mkdir(parents=True)
     (legacy / next(iter(MODEL_ARTIFACT_MARKERS))).write_bytes(b"\x00")
 
-    snapshot = runtime_readiness_snapshot(str(tmp_path), metadata=_metadata())
+    snapshot = runtime_readiness_snapshot(str(tmp_path))
     assert snapshot["workflow_model_version"] is None
     assert snapshot["workflow_model_legacy_layout"] is True
 
@@ -264,7 +207,6 @@ def test_the_snapshot_carries_no_value_from_any_secret_looking_env_var(
         {**sentinels, "FILE_ONLY_SECRET_KEY": "plant-file-secret"},
         raising=False,
     )
-    register_runtime_metadata(str(tmp_path), _metadata(workflow_fingerprint="sha256:x"))
 
     snapshot = runtime_readiness_snapshot(str(tmp_path))
     rendered = json.dumps(snapshot)
@@ -275,15 +217,9 @@ def test_the_snapshot_carries_no_value_from_any_secret_looking_env_var(
     for key in snapshot:
         upper = key.upper()
         assert not any(word in upper for word in ("KEY", "SECRET", "TOKEN", "PASSWORD")), key
-    # Only scalars and the (string -> string) feature vector; no nested
-    # structures that could smuggle a config dump.
+    # Only scalars; no nested structures that could smuggle a config dump.
     for key, value in snapshot.items():
-        if key == "effective_features":
-            assert all(
-                isinstance(k, str) and isinstance(v, str) for k, v in value.items()
-            )
-        else:
-            assert value is None or isinstance(value, (bool, int, str)), key
+        assert value is None or isinstance(value, (bool, int, str)), key
 
 
 def test_the_env_names_the_snapshot_consults_are_pinned():

@@ -310,7 +310,7 @@ def tag_cycle(tag, v=0):
 
 
 task = Task("periodic-review", "...", ["entity-360", "stewardship"],
-            [step("open_directory", 0, expect_context="Explorer"),
+            [step("open_item_explorer", 0, expect_context="ItemExplorer"),
              *entity_overview(0),
              *tag_cycle(WORKING_TAG, 0)])
 ```

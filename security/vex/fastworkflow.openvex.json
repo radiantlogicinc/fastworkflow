@@ -3,8 +3,8 @@
   "@id": "https://github.com/radiantlogicinc/fastworkflow/security/vex/fastworkflow.openvex.json",
   "author": "fastworkflow maintainers <drawal@radiantlogic.com>",
   "role": "document creator",
-  "timestamp": "2026-08-21T02:56:00Z",
-  "version": 6,
+  "timestamp": "2026-10-11T00:00:00Z",
+  "version": 7,
   "statements": [
     {
       "vulnerability": {
@@ -35,6 +35,267 @@
       "justification": "vulnerable_code_cannot_be_controlled_by_adversary",
       "impact_statement": "Same assessment as GHSA-w8v5-vhqr-4h9v: DiskCache pickle RCE is not reachable by remote fastWorkflow clients; requires local write to the DSPy cache directory.",
       "status_notes": "Paired statement so Trivy/OSV-keyed tools and Grype/GHSA-keyed tools both suppress Dependabot #48."
+    },
+    {
+      "vulnerability": {
+        "@id": "https://nvd.nist.gov/vuln/detail/CVE-2026-12772",
+        "name": "CVE-2026-12772",
+        "aliases": [
+          "GHSA-mf52-j94g-746m",
+          "PYSEC-2026-4073"
+        ]
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/litellm@1.95.1"
+        },
+        {
+          "@id": "pkg:pypi/litellm@1.101.0"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "Vulnerable component: authenticate_user in litellm/proxy/auth/login_utils.py. Affects litellm up to 1.82.2 only (OSV/NVD range); fastworkflow locks litellm 1.95.x and the scanned image carries 1.101.0, so the vulnerable code is not present. Independently, the affected code is in the litellm PROXY server (litellm/proxy/...), which fastworkflow never runs: it uses litellm only as a client via dspy.LM and litellm.completion and depends on plain litellm without the proxy extra.",
+      "status_notes": "Reviewed 2026-10-11 against the ido-talk-to-ido 3.1.0-dev image scan (2026-09-22) and the fastworkflow 3.6.0 lock. Scanner match is a range false positive."
+    },
+    {
+      "vulnerability": {
+        "@id": "https://nvd.nist.gov/vuln/detail/CVE-2026-12795",
+        "name": "CVE-2026-12795",
+        "aliases": [
+          "GHSA-j37q-q7p9-vpwm",
+          "PYSEC-2026-4071"
+        ]
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/litellm@1.95.1"
+        },
+        {
+          "@id": "pkg:pypi/litellm@1.101.0"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "Vulnerable component: SSO debug flow in litellm/proxy/management_endpoints/ui_sso.py. Affects litellm up to 1.82.2 only (OSV/NVD range); fastworkflow locks litellm 1.95.x and the scanned image carries 1.101.0, so the vulnerable code is not present. Independently, the affected code is in the litellm PROXY server (litellm/proxy/...), which fastworkflow never runs: it uses litellm only as a client via dspy.LM and litellm.completion and depends on plain litellm without the proxy extra.",
+      "status_notes": "Reviewed 2026-10-11 against the ido-talk-to-ido 3.1.0-dev image scan (2026-09-22) and the fastworkflow 3.6.0 lock. Scanner match is a range false positive."
+    },
+    {
+      "vulnerability": {
+        "@id": "https://nvd.nist.gov/vuln/detail/CVE-2026-12796",
+        "name": "CVE-2026-12796",
+        "aliases": [
+          "GHSA-w2mh-qq9q-453x",
+          "PYSEC-2026-4076"
+        ]
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/litellm@1.95.1"
+        },
+        {
+          "@id": "pkg:pypi/litellm@1.101.0"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "Vulnerable component: get_redirect_response_from_openid in litellm/proxy/management_endpoints/ui_sso.py. Affects litellm up to 1.82.2 only (OSV/NVD range); fastworkflow locks litellm 1.95.x and the scanned image carries 1.101.0, so the vulnerable code is not present. Independently, the affected code is in the litellm PROXY server (litellm/proxy/...), which fastworkflow never runs: it uses litellm only as a client via dspy.LM and litellm.completion and depends on plain litellm without the proxy extra.",
+      "status_notes": "Reviewed 2026-10-11 against the ido-talk-to-ido 3.1.0-dev image scan (2026-09-22) and the fastworkflow 3.6.0 lock. Scanner match is a range false positive."
+    },
+    {
+      "vulnerability": {
+        "@id": "https://nvd.nist.gov/vuln/detail/CVE-2025-14921",
+        "name": "CVE-2025-14921"
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/transformers@5.17.0"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "Vulnerable component: Transformer-XL model-file deserialization (ZDI deserialization/code-injection batch; requires a user to load or convert a malicious checkpoint of that architecture). fastworkflow loads only BERT-family checkpoints with transformers (intent detection: google/bert_uncased_L-4_H-128_A-2 and distilbert-base-uncased, or operator-set INTENT_DETECTION_* models, plus models it trained itself; consistency: sentence-transformers/all-MiniLM-L6-v2 with local_files_only=True), never with trust_remote_code, and it never runs transformers' checkpoint conversion scripts. None of these model types or conversion scripts is reachable.",
+      "status_notes": "Reviewed 2026-10-11 against the ido-talk-to-ido 3.1.0-dev image scan (2026-09-22) and the fastworkflow 3.6.0 lock. No patched release listed upstream; OSV ranges name 4.5x/5.0.0rc0 builds."
+    },
+    {
+      "vulnerability": {
+        "@id": "https://nvd.nist.gov/vuln/detail/CVE-2025-14924",
+        "name": "CVE-2025-14924"
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/transformers@5.17.0"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "Vulnerable component: megatron_gpt2 checkpoint parsing (ZDI deserialization/code-injection batch; requires a user to load or convert a malicious checkpoint of that architecture). fastworkflow loads only BERT-family checkpoints with transformers (intent detection: google/bert_uncased_L-4_H-128_A-2 and distilbert-base-uncased, or operator-set INTENT_DETECTION_* models, plus models it trained itself; consistency: sentence-transformers/all-MiniLM-L6-v2 with local_files_only=True), never with trust_remote_code, and it never runs transformers' checkpoint conversion scripts. None of these model types or conversion scripts is reachable.",
+      "status_notes": "Reviewed 2026-10-11 against the ido-talk-to-ido 3.1.0-dev image scan (2026-09-22) and the fastworkflow 3.6.0 lock. No patched release listed upstream; OSV ranges name 4.5x/5.0.0rc0 builds."
+    },
+    {
+      "vulnerability": {
+        "@id": "https://nvd.nist.gov/vuln/detail/CVE-2025-14926",
+        "name": "CVE-2025-14926"
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/transformers@5.17.0"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "Vulnerable component: SEW checkpoint conversion convert_config (ZDI deserialization/code-injection batch; requires a user to load or convert a malicious checkpoint of that architecture). fastworkflow loads only BERT-family checkpoints with transformers (intent detection: google/bert_uncased_L-4_H-128_A-2 and distilbert-base-uncased, or operator-set INTENT_DETECTION_* models, plus models it trained itself; consistency: sentence-transformers/all-MiniLM-L6-v2 with local_files_only=True), never with trust_remote_code, and it never runs transformers' checkpoint conversion scripts. None of these model types or conversion scripts is reachable.",
+      "status_notes": "Reviewed 2026-10-11 against the ido-talk-to-ido 3.1.0-dev image scan (2026-09-22) and the fastworkflow 3.6.0 lock. No patched release listed upstream; OSV ranges name 4.5x/5.0.0rc0 builds."
+    },
+    {
+      "vulnerability": {
+        "@id": "https://nvd.nist.gov/vuln/detail/CVE-2025-14927",
+        "name": "CVE-2025-14927"
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/transformers@5.17.0"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "Vulnerable component: SEW-D checkpoint conversion convert_config (ZDI deserialization/code-injection batch; requires a user to load or convert a malicious checkpoint of that architecture). fastworkflow loads only BERT-family checkpoints with transformers (intent detection: google/bert_uncased_L-4_H-128_A-2 and distilbert-base-uncased, or operator-set INTENT_DETECTION_* models, plus models it trained itself; consistency: sentence-transformers/all-MiniLM-L6-v2 with local_files_only=True), never with trust_remote_code, and it never runs transformers' checkpoint conversion scripts. None of these model types or conversion scripts is reachable.",
+      "status_notes": "Reviewed 2026-10-11 against the ido-talk-to-ido 3.1.0-dev image scan (2026-09-22) and the fastworkflow 3.6.0 lock. No patched release listed upstream; OSV ranges name 4.5x/5.0.0rc0 builds."
+    },
+    {
+      "vulnerability": {
+        "@id": "https://nvd.nist.gov/vuln/detail/CVE-2025-14928",
+        "name": "CVE-2025-14928"
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/transformers@5.17.0"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "Vulnerable component: HuBERT checkpoint conversion convert_config (ZDI deserialization/code-injection batch; requires a user to load or convert a malicious checkpoint of that architecture). fastworkflow loads only BERT-family checkpoints with transformers (intent detection: google/bert_uncased_L-4_H-128_A-2 and distilbert-base-uncased, or operator-set INTENT_DETECTION_* models, plus models it trained itself; consistency: sentence-transformers/all-MiniLM-L6-v2 with local_files_only=True), never with trust_remote_code, and it never runs transformers' checkpoint conversion scripts. None of these model types or conversion scripts is reachable.",
+      "status_notes": "Reviewed 2026-10-11 against the ido-talk-to-ido 3.1.0-dev image scan (2026-09-22) and the fastworkflow 3.6.0 lock. No patched release listed upstream; OSV ranges name 4.5x/5.0.0rc0 builds."
+    },
+    {
+      "vulnerability": {
+        "@id": "https://nvd.nist.gov/vuln/detail/CVE-2025-14929",
+        "name": "CVE-2025-14929"
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/transformers@5.17.0"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "Vulnerable component: X-CLIP checkpoint conversion (ZDI deserialization/code-injection batch; requires a user to load or convert a malicious checkpoint of that architecture). fastworkflow loads only BERT-family checkpoints with transformers (intent detection: google/bert_uncased_L-4_H-128_A-2 and distilbert-base-uncased, or operator-set INTENT_DETECTION_* models, plus models it trained itself; consistency: sentence-transformers/all-MiniLM-L6-v2 with local_files_only=True), never with trust_remote_code, and it never runs transformers' checkpoint conversion scripts. None of these model types or conversion scripts is reachable.",
+      "status_notes": "Reviewed 2026-10-11 against the ido-talk-to-ido 3.1.0-dev image scan (2026-09-22) and the fastworkflow 3.6.0 lock. No patched release listed upstream; OSV ranges name 4.5x/5.0.0rc0 builds."
+    },
+    {
+      "vulnerability": {
+        "@id": "https://nvd.nist.gov/vuln/detail/CVE-2025-14930",
+        "name": "CVE-2025-14930"
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/transformers@5.17.0"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "Vulnerable component: GLM4 weight parsing (ZDI deserialization/code-injection batch; requires a user to load or convert a malicious checkpoint of that architecture). fastworkflow loads only BERT-family checkpoints with transformers (intent detection: google/bert_uncased_L-4_H-128_A-2 and distilbert-base-uncased, or operator-set INTENT_DETECTION_* models, plus models it trained itself; consistency: sentence-transformers/all-MiniLM-L6-v2 with local_files_only=True), never with trust_remote_code, and it never runs transformers' checkpoint conversion scripts. None of these model types or conversion scripts is reachable.",
+      "status_notes": "Reviewed 2026-10-11 against the ido-talk-to-ido 3.1.0-dev image scan (2026-09-22) and the fastworkflow 3.6.0 lock. No patched release listed upstream; OSV ranges name 4.5x/5.0.0rc0 builds."
+    },
+    {
+      "vulnerability": {
+        "@id": "https://nvd.nist.gov/vuln/detail/CVE-2026-4538",
+        "name": "CVE-2026-4538"
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/torch@2.13.0"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "Vulnerable component: pt2 loading handler (deserialization, local access). fastworkflow uses torch only for CPU inference/fine-tuning of its BERT-family intent models (CPU wheel from the pytorch-cpu index). It never loads .pt2/exported programs, never uses TorchScript or flatbuffer modules, has no CUDA/NCCL path in the CPU build, and neither it nor the BERT/DistilBERT modeling code it runs calls torch.nan_to_num.",
+      "status_notes": "Reviewed 2026-10-11 against the ido-talk-to-ido 3.1.0-dev image scan (2026-09-22) and the fastworkflow 3.6.0 lock. No fixed torch release listed upstream."
+    },
+    {
+      "vulnerability": {
+        "@id": "https://nvd.nist.gov/vuln/detail/CVE-2025-3000",
+        "name": "CVE-2025-3000"
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/torch@2.13.0"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "Vulnerable component: torch.jit.script memory corruption (local). fastworkflow uses torch only for CPU inference/fine-tuning of its BERT-family intent models (CPU wheel from the pytorch-cpu index). It never loads .pt2/exported programs, never uses TorchScript or flatbuffer modules, has no CUDA/NCCL path in the CPU build, and neither it nor the BERT/DistilBERT modeling code it runs calls torch.nan_to_num.",
+      "status_notes": "Reviewed 2026-10-11 against the ido-talk-to-ido 3.1.0-dev image scan (2026-09-22) and the fastworkflow 3.6.0 lock. No fixed torch release listed upstream."
+    },
+    {
+      "vulnerability": {
+        "@id": "https://nvd.nist.gov/vuln/detail/CVE-2025-3121",
+        "name": "CVE-2025-3121"
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/torch@2.13.0"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "Vulnerable component: torch.jit.jit_module_from_flatbuffer memory corruption (local). fastworkflow uses torch only for CPU inference/fine-tuning of its BERT-family intent models (CPU wheel from the pytorch-cpu index). It never loads .pt2/exported programs, never uses TorchScript or flatbuffer modules, has no CUDA/NCCL path in the CPU build, and neither it nor the BERT/DistilBERT modeling code it runs calls torch.nan_to_num.",
+      "status_notes": "Reviewed 2026-10-11 against the ido-talk-to-ido 3.1.0-dev image scan (2026-09-22) and the fastworkflow 3.6.0 lock. No fixed torch release listed upstream."
+    },
+    {
+      "vulnerability": {
+        "@id": "https://nvd.nist.gov/vuln/detail/CVE-2025-3136",
+        "name": "CVE-2025-3136"
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/torch@2.13.0"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "Vulnerable component: torch.cuda.memory.caching_allocator_delete memory corruption (local). fastworkflow uses torch only for CPU inference/fine-tuning of its BERT-family intent models (CPU wheel from the pytorch-cpu index). It never loads .pt2/exported programs, never uses TorchScript or flatbuffer modules, has no CUDA/NCCL path in the CPU build, and neither it nor the BERT/DistilBERT modeling code it runs calls torch.nan_to_num.",
+      "status_notes": "Reviewed 2026-10-11 against the ido-talk-to-ido 3.1.0-dev image scan (2026-09-22) and the fastworkflow 3.6.0 lock. No fixed torch release listed upstream."
+    },
+    {
+      "vulnerability": {
+        "@id": "https://nvd.nist.gov/vuln/detail/CVE-2025-4287",
+        "name": "CVE-2025-4287"
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/torch@2.13.0"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "Vulnerable component: torch.cuda.nccl.reduce denial of service (local). fastworkflow uses torch only for CPU inference/fine-tuning of its BERT-family intent models (CPU wheel from the pytorch-cpu index). It never loads .pt2/exported programs, never uses TorchScript or flatbuffer modules, has no CUDA/NCCL path in the CPU build, and neither it nor the BERT/DistilBERT modeling code it runs calls torch.nan_to_num.",
+      "status_notes": "Reviewed 2026-10-11 against the ido-talk-to-ido 3.1.0-dev image scan (2026-09-22) and the fastworkflow 3.6.0 lock. No fixed torch release listed upstream."
+    },
+    {
+      "vulnerability": {
+        "@id": "https://nvd.nist.gov/vuln/detail/CVE-2025-55554",
+        "name": "CVE-2025-55554"
+      },
+      "products": [
+        {
+          "@id": "pkg:pypi/torch@2.13.0"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "Vulnerable component: integer overflow in torch.nan_to_num(...).long(). fastworkflow uses torch only for CPU inference/fine-tuning of its BERT-family intent models (CPU wheel from the pytorch-cpu index). It never loads .pt2/exported programs, never uses TorchScript or flatbuffer modules, has no CUDA/NCCL path in the CPU build, and neither it nor the BERT/DistilBERT modeling code it runs calls torch.nan_to_num.",
+      "status_notes": "Reviewed 2026-10-11 against the ido-talk-to-ido 3.1.0-dev image scan (2026-09-22) and the fastworkflow 3.6.0 lock. No fixed torch release listed upstream."
     }
   ]
 }

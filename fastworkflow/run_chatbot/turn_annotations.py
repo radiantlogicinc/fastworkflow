@@ -185,9 +185,8 @@ def annotate_attempt_rows(
 #     `fw.command.execute` spans (and the span-less inner hops those spans
 #     file under `child_calls`);
 # (b) the turn's decision signals -- the least confident intent resolution's
-#     top-k margin, whether the user was asked, and the worst consequence
-#     class any dispatch was assessed at -- and the low-confidence filter
-#     they feed;
+#     top-k margin and whether the user was asked -- and the low-confidence
+#     filter they feed;
 # (c) an experiment's provenance, flattened from the evidence-run records,
 #     the experiment row and the attempts' runtime snapshots, plus the
 #     field-by-field difference between two experiments' provenance;
@@ -219,13 +218,12 @@ _EXPERIMENT_PROVENANCE_COLUMNS = (
     "benchmark_digest_sha256",
 )
 # The attempt's stamped runtime snapshot (runtime_readiness) keys that pin
-# what ran; `effective_features` is flattened one level.
+# what ran. Snapshots stored before feature modes were retired may also carry
+# `effective_features`; the provenance reader flattens it if present.
 _SNAPSHOT_PROVENANCE_KEYS = (
     "workflow_fingerprint",
     "workflow_model_version",
     "workflow_model_legacy_layout",
-    "workflow_scope_rule_version",
-    "command_surface_count",
 )
 
 

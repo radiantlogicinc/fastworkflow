@@ -31,6 +31,7 @@ from fastworkflow.train.generate_synthetic import (
     utterance_fingerprint,
 )
 from fastworkflow.train.utterance_cache import MODE_REUSE, UtteranceCache
+from tests.llm_credentials import syndata_llm_available
 
 
 # Every test in this module drives a real `train_workflow`, so every one of them costs
@@ -68,11 +69,6 @@ _MODEL_ARTIFACTS = [
 
 def _datasets_available() -> bool:
     return importlib.util.find_spec("datasets") is not None
-
-
-def _looks_like_real_key(value) -> bool:
-    """Reject empty / placeholder keys like ``<API KEY ...>``."""
-    return bool(value) and "<" not in value and "your-" not in value.lower()
 
 
 def _resolve_env_vars() -> dict:
@@ -264,9 +260,9 @@ def trained_hello_world(tmp_path_factory):
         pytest.skip("datasets package not installed; intent-detection training is skipped.")
 
     env_vars = _resolve_env_vars()
-    if not _looks_like_real_key(env_vars.get("LITELLM_API_KEY_SYNDATA_GEN")):
+    if not syndata_llm_available(env_vars):
         pytest.skip(
-            "No real LITELLM_API_KEY_SYNDATA_GEN available; cannot run synthetic "
+            "No usable LLM credentials for LLM_SYNDATA_GEN; cannot run synthetic "
             "utterance generation required for model training."
         )
 
@@ -342,8 +338,8 @@ def test_benchmark_that_leaks_a_seed_utterance_fails_fast(tmp_path_factory):
         pytest.skip("datasets package not installed; training entry point is skipped.")
 
     env_vars = _resolve_env_vars()
-    if not _looks_like_real_key(env_vars.get("LITELLM_API_KEY_SYNDATA_GEN")):
-        pytest.skip("No real LITELLM_API_KEY_SYNDATA_GEN available; training is skipped.")
+    if not syndata_llm_available(env_vars):
+        pytest.skip("No usable LLM credentials for LLM_SYNDATA_GEN; training is skipped.")
 
     workflow_path = str(tmp_path_factory.mktemp("leak_hello_world") / "hello_world")
     shutil.copytree(
@@ -412,8 +408,8 @@ def test_benchmark_routing_cases_are_scored(tmp_path_factory):
         pytest.skip("datasets package not installed; intent-detection training is skipped.")
 
     env_vars = _resolve_env_vars()
-    if not _looks_like_real_key(env_vars.get("LITELLM_API_KEY_SYNDATA_GEN")):
-        pytest.skip("No real LITELLM_API_KEY_SYNDATA_GEN available; training is skipped.")
+    if not syndata_llm_available(env_vars):
+        pytest.skip("No usable LLM credentials for LLM_SYNDATA_GEN; training is skipped.")
 
     workflow_path = str(tmp_path_factory.mktemp("bench_hello_world") / "hello_world")
     shutil.copytree(

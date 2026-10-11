@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 import re
@@ -8,37 +7,17 @@ from typing import TYPE_CHECKING, Any, Callable, Literal
 from litellm import ContextWindowExceededError
 from litellm import exceptions as litellm_exceptions
 
+import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
+from dspy.utils.exceptions import AdapterParseError
 from dspy.adapters.types.tool import Tool
 from dspy.primitives.module import Module
 from dspy.signatures.signature import ensure_signature
 
 from fastworkflow import tracing
-from fastworkflow.context_budget import env_value
 from fastworkflow.utils.dspy_logger import DSPyForward
 
 logger = logging.getLogger(__name__)
-
-# Temporary disable-only controls retained for controlled runs and provenance.
-# Historical four-arm reproduction uses its pinned revisions.
-EVAL_FINISH_REMINDERS_ENV = "FW_EVAL_FINISH_REMINDERS"
-
-
-def _evaluation_control(
-    name: str, *, default_enabled: bool = True
-) -> tuple[bool, str | None]:
-    """Read a disable-only control the way ``FW_FINISH_CHECK`` is read.
-
-    The workflow's ``fastworkflow.env`` first, then the process; an empty value
-    is unset. Anything set other than ``0`` is refused, so a stray ``=1`` fails
-    the agent build instead of silently running the default arm.
-    """
-    raw = env_value(name)
-    if not raw:
-        return default_enabled, None
-    if raw != "0":
-        raise ValueError(f"{name} must be exactly 0 when set")
-    return False, raw
 
 if TYPE_CHECKING:
     from dspy.signatures.signature import Signature
@@ -68,6 +47,9 @@ class NoSuspendedAgentStateError(RuntimeError):
 
 
 class fastWorkflowReAct(Module):
+    # Called after each completed tool step (not on suspension); class default for agents built via __new__.
+    on_step_end: Callable[[], None] | None = None
+
     def __init__(self, signature: type["Signature"], tools: list[Callable], max_iters: int = 10,
                  on_step_complete: Callable[[int, dict], bool] | None = None):
         """
@@ -96,15 +78,6 @@ class fastWorkflowReAct(Module):
         self.signature = signature = ensure_signature(signature)
         self.max_iters = max_iters
         self.iteration_counter = 0
-        self.finish_reminders_enabled, reminder_override = _evaluation_control(
-            EVAL_FINISH_REMINDERS_ENV
-        )
-        self.evaluation_control_overrides = {
-            name: value
-            for name, value in ((EVAL_FINISH_REMINDERS_ENV, reminder_override),)
-            if value is not None
-        }
-
         tools = [t if isinstance(t, Tool) else Tool(t) for t in tools]
         tools = {tool.name: tool for tool in tools}
 
@@ -130,59 +103,68 @@ class fastWorkflowReAct(Module):
             args={},
         )
 
-        instr.extend(f"({idx + 1}) {tool}" for idx, tool in enumerate(tools.values()))
-        instr.append("When providing `next_tool_args`, the value inside the field must be in JSON format")
-
-        # Build the ReAct signature with trajectory input.
-        # available_commands is injected into system message by CommandsSystemPreludeAdapter
-        # (see fastworkflow/utils/chat_adapter.py) and is NOT included in the trajectory
-        # formatting to avoid token bloat across iterations.
-        react_signature = (
-            dspy.Signature({**signature.input_fields}, "\n".join(instr))
-            .append("trajectory", dspy.InputField(), type_=str)
-            .append("next_thought", dspy.OutputField(), type_=str)
-            .append("next_tool_name", dspy.OutputField(), type_=Literal[tuple(tools.keys())])
-            .append("next_tool_args", dspy.OutputField(), type_=dict[str, Any])
-        )
-
         fallback_signature = dspy.Signature(
             {**signature.input_fields, **signature.output_fields},
             signature.instructions,
         ).append("trajectory", dspy.InputField(), type_=str)
 
         self.tools = tools
-        self.react = dspy.Predict(react_signature)
+        self._instructions_head = instr
+        self._disabled_tools: frozenset[str] = frozenset()
+        self.react = dspy.Predict(self._react_signature())
         self.extract = dspy.ChainOfThought(fallback_signature)
 
         self.inputs = {}
-        self.current_trajectory = {}
+        self.trajectory: dict[str, Any] = {}
+        # Caller-owned state for one executor run; reset in forward().
+        self.run_state: dict[str, Any] = {}
         self._on_step_complete = on_step_complete
         self._suspended: dict[str, Any] | None = None
         # True when the most recent _run_loop ended because max_iters was
         # reached without the agent selecting the `finish` tool.
         self._exhausted_last_run = False
-        # How many finish-check notes this TURN has injected (ido-8ps.27's roster
-        # nudge until fix-4dsr). The cap is one, so a turn can be reminded and
-        # can then still decide it is done.
-        self._finish_notes_fired = 0
-        # Attached by the builder (observation_offloading/agent.py): the
-        # finish-time execution check and where to read the turn's plan. None
-        # means no check.
-        self.finish_checker = None
-        self.plan_source = None
-        # How many times the context-window fallback has truncated a trajectory
-        # in this process. Only read as a delta around one call (ido-8ps.18, to
-        # tell an extract that overflowed from one that did not); it changes
-        # nothing about what the fallback does.
+        # How many times the context-window fallback has fired in this process.
+        # Only read as a delta around one call (to tell an extract
+        # that overflowed from one that did not).
         self._truncation_count = 0
+        # Steps the fallback has dropped from the model's view of self.trajectory
+        # in the current turn. The canonical trajectory is never trimmed.
+        self._dropped_steps = 0
 
-    def _note_step(self, idx: int, tool_name: str) -> None:
-        """A step has been chosen and mirrored, and has not been dispatched yet.
+    _disabled_tools: frozenset[str] = frozenset()  # class default: agents built via __new__ (tests) have none
 
-        A no-op here. ``StructuredContinuationReAct`` overrides it to assign the
-        step's ``O`` ordinal, which has to be decided before the tool runs
-        because the command inside the tool declares a result handle under it.
+    @property
+    def disabled_tools(self) -> frozenset[str]:
+        """Tools the agent may not use now: not listed to the model, refused if called.
+
+        Assign a collection to change it; the ReAct signature is rebuilt to match.
         """
+        return self._disabled_tools
+
+    @disabled_tools.setter
+    def disabled_tools(self, names) -> None:
+        self._disabled_tools = frozenset(names)
+        self.react.signature = self._react_signature()
+
+    def _react_signature(self):
+        """The ReAct signature, listing the tools that are not disabled."""
+        enabled = {name: tool for name, tool in self.tools.items() if name not in self._disabled_tools}
+        instr = [
+            *self._instructions_head,
+            *(f"({idx + 1}) {tool}" for idx, tool in enumerate(enabled.values())),
+            "When providing `next_tool_args`, the value inside the field must be in JSON format",
+        ]
+        # Build the ReAct signature with trajectory input.
+        # available_commands is injected into system message by CommandsSystemPreludeAdapter
+        # (see fastworkflow/utils/chat_adapter.py) and is NOT included in the trajectory
+        # formatting to avoid token bloat across iterations.
+        return (
+            dspy.Signature({**self.signature.input_fields}, "\n".join(instr))
+            .append("trajectory", dspy.InputField(), type_=str)
+            .append("next_thought", dspy.OutputField(), type_=str)
+            .append("next_tool_name", dspy.OutputField(), type_=Literal[tuple(enabled.keys())])
+            .append("next_tool_args", dspy.OutputField(), type_=dict[str, Any])
+        )
 
     def clear_suspension(self) -> None:
         """Drop any in-memory suspended ReAct state (used on abort/finalize)."""
@@ -199,7 +181,8 @@ class fastWorkflowReAct(Module):
             "max_iters": self._suspended["max_iters"],
             "clarification": self._suspended.get("clarification"),
             "iteration_counter": self.iteration_counter,
-            "finish_notes_fired": getattr(self, "_finish_notes_fired", 0),
+            "dropped_steps": self._dropped_steps,
+            "disabled_tools": sorted(self._disabled_tools),
         }
 
     def import_suspended(self, data: dict[str, Any]) -> None:
@@ -212,38 +195,17 @@ class fastWorkflowReAct(Module):
             "clarification": data.get("clarification"),
         }
         self.iteration_counter = data.get("iteration_counter", 0)
-        # A suspension exported before the roster nudge was replaced carries its
-        # count under the old key; the cap it enforces is the same.
-        self._finish_notes_fired = data.get(
-            "finish_notes_fired", data.get("roster_nudges_fired", 0)
-        )
-        # The finish check reads the turn's steps from current_trajectory, which
-        # starts empty in a process that only imported this suspension. Only
-        # with a check attached is it seeded, from a copy of the stash (the two
-        # must stay separate objects), so without one nothing changes. The
-        # stash holds what survived the context-window fallback, not
-        # necessarily every step: ``mirror_restored`` says the mirror came
-        # from it. "Attached" means active (``workflow_agent.finish_check_active``,
-        # not imported here: it imports this module): a check switched off by
-        # FW_EVAL_FINISH_REMINDERS=0 seeds nothing either.
-        self.mirror_restored = False
-        if (not getattr(self, "current_trajectory", None)
-                and getattr(self, "finish_checker", None) is not None
-                and bool(getattr(self, "finish_reminders_enabled", True))):
-            self.current_trajectory = dict(self._suspended["trajectory"])
-            self.mirror_restored = True
+        self._dropped_steps = data.get("dropped_steps", 0)
+        self.disabled_tools = data.get("disabled_tools", [])
 
     def planner_view(self) -> tuple[dict[str, Any], dict[str, Any]]:
         """The request and trajectory a mid-turn replan plans from.
 
-        ``inputs`` and ``current_trajectory`` when set. A process that only
-        imported a suspension has neither until ``resume()`` runs, which is
-        after the ask_user replan; each empty one falls back to a copy of the
-        suspended stash's. The stash has no ``action_N`` keys and carries the
-        trajectory as the agent saw it (offload labels, not raw observations).
+        Each comes from this agent when set, else from the suspended stash: a
+        process that only imported a suspension has neither until ``resume()``.
         """
         inputs = self.inputs
-        trajectory = self.current_trajectory
+        trajectory = self.trajectory
         stash = self._suspended
         if stash is not None:
             if not inputs:
@@ -257,33 +219,43 @@ class fastWorkflowReAct(Module):
         trajectory_signature = dspy.Signature(f"{', '.join(trajectory.keys())} -> x")
         return adapter.format_user_message_content(trajectory_signature, trajectory)
 
+    def prompt_overhead_bytes(self, input_args: dict[str, Any]) -> int:
+        """UTF-8 bytes of the executor prompt that is not the trajectory.
+
+        The messages ``self.react`` sends for ``input_args`` with an empty
+        trajectory: instructions, inputs, command list and demos.
+        """
+        adapter = dspy.settings.adapter or dspy.ChatAdapter()
+        messages = adapter.format(
+            self.react.signature,
+            demos=getattr(self.react, "demos", []),
+            inputs={**input_args, "trajectory": ""},
+        )
+        return sum(len(str(m.get("content", "")).encode("utf-8")) for m in messages)
+
     @DSPyForward.intercept
     def forward(self, **input_args):
         self.inputs = input_args
         self.clear_suspension()
 
-        # Reset the full-trajectory mirror at the start of each logical turn.
-        # resume() must NOT reset it, so a suspended->resumed turn accumulates one
-        # coherent trajectory. current_trajectory is a SEPARATE object from the
-        # working `trajectory` below (which is what gets stashed in _suspended),
-        # so mirroring into it never corrupts suspend/resume bookkeeping.
-        self.current_trajectory = {}
-        self._finish_notes_fired = 0
+        self.trajectory = {}
+        self.run_state = {}
+        self.iteration_counter = 0
+        self._dropped_steps = 0
 
-        trajectory: dict[str, Any] = {}
         max_iters = input_args.pop("max_iters", self.max_iters)
-        idx = 0
+        idx = input_args.pop("first_step", 0)
         exception_count = 0
 
         suspended = self._run_loop(
-            trajectory, idx, input_args, max_iters, exception_count
+            self.trajectory, idx, input_args, max_iters, exception_count
         )
         if suspended is not None:
             return suspended
 
-        extract = self._extract_prediction(trajectory, **input_args)
+        extract = self._extract_prediction(self.trajectory, **input_args)
         return dspy.Prediction(
-            trajectory=trajectory, exhausted=self._exhausted_last_run, **extract
+            trajectory=self.trajectory, exhausted=self._exhausted_last_run, **extract
         )
 
     def resume(self, observation: str):
@@ -294,7 +266,7 @@ class fastWorkflowReAct(Module):
             )
 
         stash = self._suspended
-        trajectory = stash["trajectory"]
+        self.trajectory = stash["trajectory"]
         idx = stash["idx"]
         input_args = stash["input_args"]
         max_iters = stash["max_iters"]
@@ -304,23 +276,18 @@ class fastWorkflowReAct(Module):
         # dict this loop unpacks on each step.
         self.inputs = input_args
 
-        trajectory[f"observation_{idx}"] = observation
-        # Mirror the resumed observation (the user's ask_user answer) into
-        # current_trajectory. Without this the highest-value context — what the
-        # user said in response to the clarification — would be missing from the
-        # trajectory the planner and distillation see.
-        self.current_trajectory[f"observation_{idx}"] = observation
+        self.trajectory[f"observation_{idx}"] = observation
         idx += 1
         self.iteration_counter += 1
         self._suspended = None
 
-        suspended = self._run_loop(trajectory, idx, input_args, max_iters, 0)
+        suspended = self._run_loop(self.trajectory, idx, input_args, max_iters, 0)
         if suspended is not None:
             return suspended
 
-        extract = self._extract_prediction(trajectory, **input_args)
+        extract = self._extract_prediction(self.trajectory, **input_args)
         return dspy.Prediction(
-            trajectory=trajectory, exhausted=self._exhausted_last_run, **extract
+            trajectory=self.trajectory, exhausted=self._exhausted_last_run, **extract
         )
 
     def _run_loop(
@@ -357,7 +324,10 @@ class fastWorkflowReAct(Module):
                 )
                 if pred is None:
                     raise ValueError("Tool returned is None")
-            except ValueError as err:
+            # A reply no adapter could parse, or a call that timed out, is a bad
+            # step, not a failed turn: it is recovered from like an invalid tool
+            # choice, so one bad completion cannot throw away every step taken.
+            except (ValueError, AdapterParseError, litellm_exceptions.Timeout) as err:
                 repaired = _command_named_as_tool(
                     err, self.tools, input_args.get("available_commands")
                 )
@@ -369,7 +339,6 @@ class fastWorkflowReAct(Module):
                         f"Agent failed to select a valid tool: {_fmt_exc(err)}"
                     )
                     trajectory[f"observation_{idx}"] = invalid_tool_obs
-                    self.current_trajectory[f"observation_{idx}"] = invalid_tool_obs
                     idx += 1
                     recovery_thought = (
                         "To execute a command, I should use one of the available tools"
@@ -379,8 +348,6 @@ class fastWorkflowReAct(Module):
                     )
                     trajectory[f"thought_{idx}"] = recovery_thought
                     trajectory[f"observation_{idx}"] = recovery_obs
-                    self.current_trajectory[f"thought_{idx}"] = recovery_thought
-                    self.current_trajectory[f"observation_{idx}"] = recovery_obs
                     idx += 1
                     exception_count += 1
                     tracing.end_span(
@@ -396,8 +363,8 @@ class fastWorkflowReAct(Module):
                         break
                     continue
             except BaseException as err:
-                # Anything else from the reasoning call — AdapterParseError,
-                # provider errors, control signals. The caller's retry loop
+                # Anything else from the reasoning call — provider errors,
+                # control signals. The caller's retry loop
                 # re-enters this method, and a step span left on the stack
                 # would parent the ENTIRE retried attempt under a phantom
                 # span that is never emitted. Close it, then propagate.
@@ -422,24 +389,12 @@ class fastWorkflowReAct(Module):
             if repaired_tool_name is not None:
                 step_attributes["repaired_tool_name"] = repaired_tool_name
 
-            # Mirror the full step into current_trajectory (consumed by the planner
-            # for replanning and by distillation as the agent trajectory). Keep the
-            # legacy action_{idx} entry too for any consumer that still reads it.
-            self.current_trajectory[f"thought_{idx}"] = pred.next_thought
-            self.current_trajectory[f"tool_name_{idx}"] = pred.next_tool_name
-            self.current_trajectory[f"tool_args_{idx}"] = pred.next_tool_args
-            self.current_trajectory[f"action_{idx}"] = (
-                f"{pred.next_tool_name}: {pred.next_tool_args}"
-            )
-            # The step exists and its tool is known, and nothing has dispatched
-            # yet: the one moment a subclass can number it before any code the
-            # tool calls asks what its number is (ido-7qd).
-            self._note_step(idx, pred.next_tool_name)
-
             try:
-                observation = self.tools[pred.next_tool_name](**pred.next_tool_args)
+                if pred.next_tool_name in self.disabled_tools:
+                    observation = f"{pred.next_tool_name} is not available now."
+                else:
+                    observation = self.tools[pred.next_tool_name](**pred.next_tool_args)
                 trajectory[f"observation_{idx}"] = observation
-                self.current_trajectory[f"observation_{idx}"] = observation
                 step_attributes["observation"] = _as_text(observation)
             except AskUserSuspend as err:
                 self._suspended = {
@@ -469,7 +424,6 @@ class fastWorkflowReAct(Module):
                     f"Execution error in {pred.next_tool_name}: {_fmt_exc(err)}"
                 )
                 trajectory[f"observation_{idx}"] = error_observation
-                self.current_trajectory[f"observation_{idx}"] = error_observation
                 step_attributes["observation"] = error_observation
                 step_attributes["tool_error"] = type(err).__name__
                 step_status = tracing.STATUS_ERROR
@@ -485,24 +439,11 @@ class fastWorkflowReAct(Module):
                 )
                 raise
 
-            # ido-8ps.27 / fix-4dsr: the one interception point. The finish action has been
-            # recognised and its "Completed." observation written, the answer
-            # has NOT been extracted yet, and the loop is by definition not
-            # exhausted. If the finish check finds plan steps the turn's record
-            # shows no command carrying out, and there is budget to reach them,
-            # the observation of this step becomes a bounded note naming them
-            # and the loop continues. At most one per turn; never on
-            # exhaustion; never an ask_user round.
-            nudge = ""
-            if pred.next_tool_name == "finish":
-                nudge = self._intercept_finish(trajectory, idx, input_args, max_iters)
-                if nudge:
-                    step_attributes["observation"] = nudge
-                    step_attributes["finish_check_note"] = True
-
             tracing.end_span(
                 host, step_span, status=step_status, attributes=step_attributes
             )
+            if self.on_step_end is not None:
+                self.on_step_end()
 
             # Step-completion callback for distillation: lets external code inspect
             # each completed step and stop execution early (e.g. on trajectory
@@ -514,11 +455,15 @@ class fastWorkflowReAct(Module):
             if on_step_complete and not on_step_complete(idx, trajectory):
                 break
 
-            if pred.next_tool_name == "finish" and not nudge:
+            if pred.next_tool_name == "finish":
                 break
 
             idx += 1
+            # Still counted: execute_workflow_query reads iteration_counter <= 0
+            # as "this command came from the user".
             self.iteration_counter += 1
+            # The cap is a hand-off signal: the caller summarises progress and
+            # runs a fresh executor to continue the same sub-task.
             if self.iteration_counter >= max_iters:
                 logger.warning("Max iterations reached")
                 self._exhausted_last_run = True
@@ -526,136 +471,8 @@ class fastWorkflowReAct(Module):
 
         return None
 
-    def _intercept_finish(self, trajectory, idx, input_args, max_iters) -> str:
-        """The finish action's one interception point, for BOTH loops.
-
-        The note, and the rule that a fired note REPLACES this step's
-        observation and returns control to the loop, used to live inline in
-        ``_run_loop`` -- so ``aforward`` recognised finish and broke with no
-        note and no fired-note bookkeeping: two loops, two different
-        behaviours for the same rule.
-        The note and the trajectory writes are here; what stays with each loop
-        is what only that loop has -- the sync loop's step span attributes.
-
-        Returns the note, or ``""`` when there is none, which is what each loop
-        tests to decide whether to break on the finish action.
-        """
-        nudge = self._finish_check_note(input_args, max_iters)
-        if nudge:
-            trajectory[f"observation_{idx}"] = nudge
-            self.current_trajectory[f"observation_{idx}"] = nudge
-        return nudge
-
-    async def aforward(self, **input_args):
-        trajectory = {}
-        max_iters = input_args.pop("max_iters", self.max_iters)
-        # The per-TURN state the note's "at most one" is counted in, reset here
-        # for the same reason `forward` resets it (ido-dpx/F15): this call is a
-        # logical turn, and a turn inherits neither the previous turn's mirror
-        # nor its note count.
-        self.current_trajectory = {}
-        self._finish_notes_fired = 0
-        # The rest of the per-turn state the synchronous entry
-        # (``StructuredContinuationReAct.forward``) resets: the finish check's
-        # dispatch outcomes and incomplete-ledger mark, and one vendor budget
-        # per turn for routing and the check together.
-        self.dispatch_outcomes = {}
-        self.ledger_incomplete = False
-        budget_factory = getattr(self, "vendor_budget_factory", None)
-        self.vendor_budget = budget_factory() if callable(budget_factory) else None
-        for idx in range(max_iters):
-            try:
-                pred = await self._async_call_with_potential_trajectory_truncation(self.react, trajectory, **input_args)
-            except ValueError as err:
-                repaired = _command_named_as_tool(
-                    err, self.tools, input_args.get("available_commands")
-                )
-                if repaired is None:
-                    logger.warning(f"Ending the trajectory: Agent failed to select a valid tool: {_fmt_exc(err)}")
-                    break
-                repaired.pop("repaired_tool_name")
-                pred = dspy.Prediction(**repaired)
-
-            trajectory[f"thought_{idx}"] = pred.next_thought
-            trajectory[f"tool_name_{idx}"] = pred.next_tool_name
-            trajectory[f"tool_args_{idx}"] = pred.next_tool_args
-
-            try:
-                trajectory[f"observation_{idx}"] = await self.tools[pred.next_tool_name].acall(**pred.next_tool_args)
-            except Exception as err:
-                trajectory[f"observation_{idx}"] = f"Execution error in {pred.next_tool_name}: {_fmt_exc(err)}"
-
-            if pred.next_tool_name == "finish":
-                # A fired nudge replaces this step's observation and returns
-                # control to the loop; no nudge ends the turn, as before.
-                # The check makes blocking HTTP calls, so it runs off the event loop;
-                # with no check attached there is nothing to intercept and no thread hop.
-                if getattr(self, "finish_checker", None) is None or not await asyncio.to_thread(
-                    self._intercept_finish, trajectory, idx, input_args, max_iters
-                ):
-                    break
-            # What `_finish_check_note` reads to know how much room is left. The sync
-            # loop has always counted its steps here; without the same count the
-            # async loop would offer a note on a turn with nothing left to do.
-            self.iteration_counter += 1
-
-        extract = await self._async_extract_prediction(trajectory, **input_args)
-        return dspy.Prediction(trajectory=trajectory, **extract)
-
-    def _finish_check_note(self, input_args, max_iters) -> str:
-        """The finish-time execution check's note, or ``""``.
-
-        Called from ``_intercept_finish``, the one place a finish action is
-        recognised, before answer extraction. The check itself
-        (``fastworkflow.observation_offloading.finish_check``) is attached by whoever builds the agent
-        as ``finish_checker``; without one, or with it switched off, there is no
-        note and the turn finishes as it always did.
-
-        ``iterations_left`` is what the agent would still have AFTER spending
-        this step on the note: the loop increments the counter once more and
-        stops at ``max_iters``. The check declines below its minimum, which is
-        how "never on exhaustion" is kept -- a turn with no room is a turn the
-        note cannot help. That gate is this segment's room only. A segmented
-        agent (``later_segment_iterations``) restarts its counter at every
-        segment, so the count the note STATES adds what its later segments
-        still hold (``shown_iterations_left``); it does not change when the
-        note may fire.
-
-        A finish not offered to an attached check (switched off, or this turn's
-        note already spent) is still recorded by it (``record_skip``); with no
-        check attached nothing is recorded.
-        """
-        checker = getattr(self, "finish_checker", None)
-        if checker is None:
-            return ""
-        left = int(max_iters) - int(getattr(self, "iteration_counter", 0)) - 1
-        skipped = ("disabled" if not getattr(self, "finish_reminders_enabled", True)
-                   else "cap reached" if getattr(self, "_finish_notes_fired", 0) >= 1 else "")
-        if skipped:
-            record_skip = getattr(checker, "record_skip", None)
-            if callable(record_skip):
-                try:
-                    record_skip(self, reason=skipped, iterations_left=left)
-                except Exception as error:  # noqa: BLE001 - recording must never fail a turn
-                    logger.warning("finish check event not recorded: %s", type(error).__name__)
-            return ""
-        try:
-            later = getattr(self, "later_segment_iterations", None)
-            later_room = int(later(max_iters)) if callable(later) else 0
-            if later_room > 0:
-                text = checker.note(self, input_args, iterations_left=left,
-                                    shown_iterations_left=max(0, left) + later_room)
-            else:
-                text = checker.note(self, input_args, iterations_left=left)
-        except Exception as error:  # noqa: BLE001 - a note must never fail a turn
-            logger.warning("finish check skipped: %s: %s", type(error).__name__, error)
-            return ""
-        if text:
-            self._finish_notes_fired = getattr(self, "_finish_notes_fired", 0) + 1
-        return text
-
     def _rehydrate_for_extract(self, trajectory):
-        """``(trajectory_for_the_extractor, report, budget, scope_id)``.
+        """``(trajectory_for_the_extractor, report, budget, scope)``.
 
         It returns a COPY in which offload labels carry the stored evidence
         behind them (see ``fastworkflow.answer_rehydration``). The loop's own
@@ -665,27 +482,29 @@ class fastWorkflowReAct(Module):
         pointers is worse than one over evidence and far better than no answer.
         """
         from fastworkflow import answer_rehydration
-        from fastworkflow.observation_offloading.state import record_event
+        from fastworkflow.observation_offloading.state import (
+            current_scope,
+            durable_archive,
+            record_event,
+        )
 
         budget = answer_rehydration.max_bytes_from_env()
-        scope = getattr(self, "continuation_scope", None)
-        scope_id = getattr(scope, "scope_id", None)
+        scope = current_scope()
+        archive = durable_archive()
         record_event(
             {
                 "kind": "rehydration_started",
-                "scope_id": scope_id,
                 "budget_bytes": budget,
                 "bytes_before": answer_rehydration.trajectory_bytes(trajectory),
-            }
+            },
+            scope=scope, store=archive,
         )
         try:
-            pairs = getattr(self, "execute_ordinal_pairs", None)
             rehydrated, report = answer_rehydration.rehydrate(
                 trajectory,
                 scope=scope,
-                archive=getattr(self, "observation_archive", None),
+                archive=archive,
                 budget=budget,
-                executes=pairs(trajectory) if callable(pairs) else None,
             )
         except Exception as error:  # noqa: BLE001
             logger.warning(
@@ -694,21 +513,21 @@ class fastWorkflowReAct(Module):
             record_event(
                 {
                     "kind": "rehydration_failed",
-                    "scope_id": scope_id,
                     "error": type(error).__name__,
                     "detail": str(error)[:300],
-                }
+                },
+                scope=scope, store=archive,
             )
-            return trajectory, None, budget, scope_id
-        return rehydrated, report, budget, scope_id
+            return trajectory, None, budget, scope
+        return rehydrated, report, budget, scope
 
 
 
     def _record_extract_finished(
-        self, report, *, budget, scope_id, started, truncations_before
+        self, report, *, budget, scope, started, truncations_before
     ):
         """Close the rehydration record for one extract call."""
-        from fastworkflow.observation_offloading.state import record_event
+        from fastworkflow.observation_offloading.state import durable_archive, record_event
 
         duration_ms = round((time.monotonic() - started) * 1000.0, 3)
         overflowed = getattr(self, "_truncation_count", 0) > truncations_before
@@ -716,28 +535,28 @@ class fastWorkflowReAct(Module):
             record_event(
                 {
                     "kind": "rehydration_overflow",
-                    "scope_id": scope_id,
                     "truncations": (
                         getattr(self, "_truncation_count", 0) - truncations_before
                     ),
                     "budget_bytes": budget,
                     "bytes_after": report.bytes_after,
-                }
+                },
+                scope=scope, store=durable_archive(),
             )
         record_event(
             {
                 "kind": "rehydration_finished",
-                "scope_id": scope_id,
                 "extract_duration_ms": duration_ms,
                 "extract_prompt_tokens": _extract_prompt_tokens(),
                 "rehydration_overflow": overflowed,
                 **report.as_event(),
-            }
+            },
+            scope=scope, store=durable_archive(),
         )
 
     def _extract_prediction(self, trajectory, **input_args):
         """The extract call, with rehydration."""
-        selected, report, budget, scope_id = self._rehydrate_for_extract(trajectory)
+        selected, report, budget, scope = self._rehydrate_for_extract(trajectory)
         if report is None:
             return self._call_with_potential_trajectory_truncation(
                 self.extract, selected, **input_args
@@ -750,89 +569,65 @@ class fastWorkflowReAct(Module):
             )
         finally:
             self._record_extract_finished(
-                report, budget=budget, scope_id=scope_id, started=started,
+                report, budget=budget, scope=scope, started=started,
                 truncations_before=truncations_before,
             )
 
-    async def _async_extract_prediction(self, trajectory, **input_args):
-        """``_extract_prediction`` for the async loop, same rules."""
-        selected, report, budget, scope_id = self._rehydrate_for_extract(trajectory)
-        if report is None:
-            return await self._async_call_with_potential_trajectory_truncation(
-                self.extract, selected, **input_args
-            )
-        truncations_before = getattr(self, "_truncation_count", 0)
-        started = time.monotonic()
-        try:
-            return await self._async_call_with_potential_trajectory_truncation(
-                self.extract, selected, **input_args
-            )
-        finally:
-            self._record_extract_finished(
-                report, budget=budget, scope_id=scope_id, started=started,
-                truncations_before=truncations_before,
-            )
+    def _model_view(self, trajectory: dict[str, Any]) -> dict[str, Any]:
+        """A copy of ``trajectory`` without the oldest steps the fallback dropped.
+
+        Steps are dropped by step index, not by key count: a parse-error recovery
+        writes an ``observation_<n>`` with no thought, then a full thought/observation
+        pair, so steps do not all have 4 keys.
+        """
+        dropped = set(_step_indexes(trajectory)[: self._dropped_steps])
+        return {k: v for k, v in trajectory.items() if _step_index(k) not in dropped}
 
     def _call_with_potential_trajectory_truncation(self, module, trajectory, **input_args):
         for _ in range(3):
             try:
                 return module(
                     **input_args,
-                    trajectory=self._format_trajectory(trajectory),
+                    trajectory=self._format_trajectory(self._model_view(trajectory)),
                 )
-            except litellm_exceptions.BadRequestError: 
+            except (litellm_exceptions.BadRequestError, ContextWindowExceededError):
                 logger.warning("Trajectory exceeded the context window, truncating the oldest tool call information.")
                 self._count_truncation()
-                trajectory = self.truncate_trajectory(trajectory)
-            except ContextWindowExceededError:
-                logger.warning("Trajectory exceeded the context window, truncating the oldest tool call information.")
-                self._count_truncation()
-                trajectory = self.truncate_trajectory(trajectory)
-
-    async def _async_call_with_potential_trajectory_truncation(self, module, trajectory, **input_args):
-        for _ in range(3):
-            try:
-                return await module.acall(
-                    **input_args,
-                    trajectory=self._format_trajectory(trajectory),
-                )
-            except ContextWindowExceededError:
-                logger.warning("Trajectory exceeded the context window, truncating the oldest tool call information.")
-                self._count_truncation()
-                trajectory = self.truncate_trajectory(trajectory)
+                self.truncate_trajectory(trajectory)
 
     def _count_truncation(self) -> None:
         """Bookkeeping only: the fallback's behaviour is untouched."""
         self._truncation_count = getattr(self, "_truncation_count", 0) + 1
 
     def truncate_trajectory(self, trajectory):
-        """Truncates the trajectory so that it fits in the context window.
+        """Drop the oldest step from what the model is shown. ``trajectory`` is never changed.
 
-        Users can override this method to implement their own truncation logic.
+        Each call adds one step to ``_dropped_steps``; ``_model_view`` applies
+        that to a copy when the trajectory is formatted.
         """
-        # Every key is a step key: the coverage statement and its key were
-        # removed with answer_coverage in fix-4dsr and nothing writes such a key
-        # any more. The rest of this comment is history from when it existed:
-        # The coverage statement is a rule ABOUT the trajectory, not a step of
-        # it, and it is the one key whose whole job is to be read. Dropping it as
-        # "the oldest tool call information" would be a bug. It exists only on
-        # the extractor's copy and only with the flag on, so with the flag off
-        # this line selects exactly the keys it always did.
-        # (The coverage statement and its key were removed with
-        # answer_coverage in fix-4dsr; nothing writes such a key any more, so
-        # every key is a step key.)
-        keys = list(trajectory)
-        if len(keys) < 4:
-            # Every tool call has 4 keys: thought, tool_name, tool_args, and observation.
+        if len(_step_indexes(trajectory)) - self._dropped_steps < 1:
             raise ValueError(
                 "The trajectory is too long so your prompt exceeded the context window, but the trajectory cannot be "
                 "truncated because it only has one tool call."
             )
-
-        for key in keys[:4]:
-            trajectory.pop(key)
-
+        self._dropped_steps += 1
         return trajectory
+
+
+_STEP_KEY = re.compile(r"^(?:thought|tool_name|tool_args|observation)_(\d+)$")
+
+
+def _step_index(key: str) -> int | None:
+    """The step index a trajectory key belongs to, or None for an unrecognised key."""
+    match = _STEP_KEY.match(key)
+    return int(match.group(1)) if match else None
+
+
+def _step_indexes(trajectory: dict[str, Any]) -> list[int]:
+    """Distinct step indexes in trajectory order, oldest first."""
+    return list(dict.fromkeys(
+        index for index in (_step_index(k) for k in trajectory) if index is not None
+    ))
 
 
 def _extract_prompt_tokens() -> int | None:
@@ -917,7 +712,7 @@ def _command_named_as_tool(
 ) -> dict[str, Any] | None:
     """The step the agent meant when it named a workflow command as its tool.
 
-    Small models write ``next_tool_name: open_directory`` instead of calling
+    Small models write ``next_tool_name: open_item_explorer`` instead of calling
     ``execute_workflow_query`` with that command. When the rejected name is a
     command listed for the current context and its args are a JSON object
     whose values hold no tag-like text, return the equivalent

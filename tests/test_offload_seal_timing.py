@@ -1,16 +1,10 @@
-"""Evidence is redacted when it is written; only memory holds the raw text.
+"""Evidence is redacted when it is written, and every reader gets the stored text.
 
 With ``FW_OFFLOAD_EVIDENCE_REDACTION`` on (the default), what reaches the
 observability database is what the store's scrub-and-capture pipeline makes of
-a command response, from the very first write. Redacting at the write would
-change what the agent reads back mid-turn, so the process that wrote a redacted
-row also keeps its RAW text in memory for as long as the turn is live, and
-every read that process makes during the turn -- the hot cache,
-``search_memory``, answer rehydration -- is exact. That memory is released at
-the moments the runtime already decides a turn is over: the agent binding the
-next turn, and the execution context being closed. A suspended turn keeps it.
-A turn resumed in a DIFFERENT process has no such memory and reads the stored,
-redacted text; that is the accepted cost.
+a command response, from the very first write, and every read -- the live
+turn's included -- returns those redacted bytes. There is no process-local copy
+of the raw text, so a resumed turn reads exactly what any other process reads.
 
 There is no seal, no ledger of raw rows, and no crash sweep any more: a
 process that dies mid-turn leaves nothing raw on disk, because nothing raw was
@@ -33,6 +27,8 @@ import sqlite3
 import tempfile
 import unittest
 import uuid
+from types import SimpleNamespace
+from unittest.mock import patch
 from pathlib import Path
 
 import dspy
@@ -44,20 +40,18 @@ from fastworkflow.observability import store as obs
 from fastworkflow.observation_offloading import archive as archive_module
 from fastworkflow.observation_offloading import state as offload_state
 from fastworkflow.observation_offloading.agent import build_tool_agent
+from fastworkflow.observation_offloading.search import search_memory
 from fastworkflow.observation_offloading.archive import (
     PersistenceError,
     RuntimeHandleArchive,
     RuntimeHandleScope,
 )
-from fastworkflow.observation_offloading.compact import archive_execute_observations
+from fastworkflow.observation_offloading.compact import archive_step
 from fastworkflow.observation_offloading.state import (
-    record_context_clause,
-    reset_runtime_state,
-    stored_handles,
-)
-from fastworkflow.observation_offloading.state import (
-    current_execute_alias,
-    current_scope,
+    archive_for_path,
+    observability_db_path,
+    reset_observation_state,
+    scope_for_host,
 )
 from fastworkflow.utils.react import AskUserSuspend
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
@@ -84,15 +78,13 @@ def response_with_credential(command: str = "sync") -> str:
 
 def chatbot_scope(channel: str = "chat", turn: str = "turn-1") -> RuntimeHandleScope:
     return RuntimeHandleScope(
-        store_identity="store", channel_id=channel, experiment_id="unbound",
-        task_id="unbound", attempt=0, turn_key=turn,
+        channel_id=channel, turn_key=turn,
     )
 
 
 def experiment_scope(channel: str = "exp", turn: str = "turn-1") -> RuntimeHandleScope:
     return RuntimeHandleScope(
-        store_identity="store", channel_id=channel, experiment_id="exp-7",
-        task_id="task-3", attempt=1, turn_key=turn,
+        channel_id=channel, turn_key=turn,
     )
 
 
@@ -110,8 +102,8 @@ class EvidenceFixture(unittest.TestCase):
     """An observability database in a temporary directory, clean configuration."""
 
     def setUp(self) -> None:
-        reset_runtime_state()
-        self.addCleanup(reset_runtime_state)
+        reset_observation_state()
+        self.addCleanup(reset_observation_state)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self._restore_env: dict[str, str | None] = {}
@@ -139,84 +131,42 @@ class EvidenceFixture(unittest.TestCase):
         scope = scope or chatbot_scope()
         target = archive or RuntimeHandleArchive(self.db_path)
         stored = target.persist(
-            scope, alias=alias, offload_order=order,
-            command_name="execute_workflow_query", step_index=order,
+            scope, alias=alias, command_name="execute_workflow_query", step_index=order,
             text=text, text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
         return target, stored
 
 
 class WriteTimeRedactionTests(EvidenceFixture):
-    """The file is redacted from the first write; the live turn still reads raw."""
+    """The file is redacted from the first write, and so is every read of it."""
 
     def test_a_mid_turn_row_is_already_redacted_on_disk(self) -> None:
         text = response_with_credential()
         archive, stored = self.persist(text)
         scope = chatbot_scope()
 
-        # The live turn reads exactly what the command returned...
-        self.assertEqual(stored["text"], text)
-        self.assertEqual(archive.get(scope, "O1")["text"], text)
-        self.assertEqual(archive.list(scope)[0]["text"], text)
-        # ...while the file never held the credential, not even mid-turn.
+        # Every read, mid-turn included, gets the redacted text...
+        self.assertIn(REDACTED, stored["text"])
+        self.assertEqual(archive.get(scope, "O1")["text"], stored["text"])
+        self.assertEqual(archive.list(scope)[0]["text"], stored["text"])
+        # ...and the file never held the credential.
         blob = self.file_bytes()
         self.assertNotIn(SK_TOKEN.encode("ascii"), blob)
         self.assertIn(b"rows: 3 users synchronised", blob)
 
-    def test_the_raw_copy_is_released_with_the_turn(self) -> None:
-        text = response_with_credential()
-        archive, _ = self.persist(text)
-        scope = chatbot_scope()
-
-        offload_state.reclaim_scope(scope)
-
-        stored = archive.get(scope, "O1")
-        self.assertIn(REDACTED, stored["text"])
-        self.assertNotIn(SK_TOKEN, stored["text"])
-        # Everything that was not a secret survives, which is what keeps a
-        # redacted archive worth reading.
-        self.assertIn("rows: 3 users synchronised", stored["text"])
-        self.assertEqual(
-            stored["text_sha256"],
-            hashlib.sha256(stored["text"].encode("utf-8")).hexdigest(),
-        )
-        # Releasing twice is harmless.
-        offload_state.reclaim_scope(scope)
-        self.assertEqual(archive.get(scope, "O1")["text"], stored["text"])
-
-    def test_releasing_one_turn_keeps_the_turn_beside_it_exact(self) -> None:
-        """One turn finishing must not degrade the turn running beside it."""
-        mine = chatbot_scope("mine", "turn-1")
-        theirs = chatbot_scope("theirs", "turn-2")
-        archive, _ = self.persist(response_with_credential(), scope=mine)
-        self.persist(response_with_credential(), scope=theirs, archive=archive)
-
-        offload_state.reclaim_scope(mine)
-
-        self.assertIn(REDACTED, archive.get(mine, "O1")["text"])
-        self.assertEqual(archive.get(theirs, "O1")["text"],
-                         response_with_credential())
-
-    def test_redaction_off_keeps_no_raw_copy_and_stores_verbatim(self) -> None:
-        """Off means never redact, so there is nothing for memory to shadow."""
+    def test_redaction_off_stores_verbatim(self) -> None:
         os.environ[REDACTION_ENV] = REDACTION_OFF
         text = response_with_credential()
         archive, stored = self.persist(text)
         scope = chatbot_scope()
 
         self.assertEqual(stored["text"], text)
-        self.assertNotIn(scope.scope_id, archive_module._live_raw)
         self.assertIn(SK_TOKEN.encode("ascii"), self.file_bytes())
-        offload_state.reclaim_scope(scope)
         self.assertEqual(archive.get(scope, "O1")["text"], text)
 
-    def test_a_fresh_archive_with_no_raw_copy_reads_the_redacted_text(self) -> None:
-        """What another process reads: the stored bytes, nothing from memory."""
-        text = response_with_credential()
-        self.persist(text)
+    def test_a_fresh_archive_reads_the_redacted_text(self) -> None:
+        self.persist(response_with_credential())
         scope = chatbot_scope()
-        # A different process never saw the write, so it holds no raw copy.
-        archive_module.clear_live_raw()
 
         other = RuntimeHandleArchive(self.db_path)
         stored = other.get(scope, "O1")
@@ -269,51 +219,35 @@ class FidelityRecordTests(EvidenceFixture):
 
 
 class ErasureAndRetentionTests(EvidenceFixture):
-    """A live turn's evidence is erased like any other, raw copy included."""
+    """A turn's evidence is erased and pruned like any other."""
 
-    def test_a_channel_is_erased_with_or_without_a_raw_copy_in_memory(self) -> None:
-        for moment, release in (("live", False), ("finished", True)):
-            with self.subTest(moment=moment):
-                reset_runtime_state()
-                db_path = os.path.join(self.temp.name, f"{moment}.sqlite3")
-                scope = chatbot_scope("erase")
-                archive = RuntimeHandleArchive(db_path)
-                self.persist(response_with_credential(), scope=scope,
-                             archive=archive)
-                if release:
-                    offload_state.reclaim_scope(scope)
+    def test_a_channel_is_erased(self) -> None:
+        scope = chatbot_scope("erase")
+        archive = RuntimeHandleArchive(self.db_path)
+        self.persist(response_with_credential(), scope=scope, archive=archive)
 
-                deleted = obs.ObservabilityStore(db_path).forget_channel("erase")
+        deleted = obs.ObservabilityStore(self.db_path).forget_channel("erase")
 
-                self.assertEqual(deleted["offload_evidence"], 1)
-                self.assertIsNone(archive.get(scope, "O1"))
-                self.assertNotIn(scope.scope_id, archive_module._live_raw)
-                blob = file_bytes(db_path)
-                self.assertNotIn(b"okta-prod", blob)
-                self.assertNotIn(SK_TOKEN.encode("ascii"), blob)
+        self.assertEqual(deleted["offload_evidence"], 1)
+        self.assertIsNone(archive.get(scope, "O1"))
+        blob = self.file_bytes()
+        self.assertNotIn(b"okta-prod", blob)
+        self.assertNotIn(SK_TOKEN.encode("ascii"), blob)
 
-    def test_retention_prunes_a_turn_with_or_without_a_raw_copy(self) -> None:
-        for moment, release in (("live", False), ("finished", True)):
-            with self.subTest(moment=moment):
-                reset_runtime_state()
-                db_path = os.path.join(self.temp.name, f"prune-{moment}.sqlite3")
-                scope = chatbot_scope("old")
-                archive = RuntimeHandleArchive(db_path)
-                self.persist(response_with_credential(), scope=scope,
-                             archive=archive)
-                if release:
-                    offload_state.reclaim_scope(scope)
-                with sqlite3.connect(db_path) as conn:
-                    conn.execute("UPDATE offload_evidence SET persisted_at=?",
-                                 ("2000-01-01T00:00:00Z",))
-                    conn.commit()
+    def test_retention_prunes_a_turn(self) -> None:
+        scope = chatbot_scope("old")
+        archive = RuntimeHandleArchive(self.db_path)
+        self.persist(response_with_credential(), scope=scope, archive=archive)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE offload_evidence SET persisted_at=?",
+                         ("2000-01-01T00:00:00Z",))
+            conn.commit()
 
-                deleted = obs.ObservabilityStore(db_path).prune(
-                    retention_days=30, max_bytes=1_000_000_000)
+        deleted = obs.ObservabilityStore(self.db_path).prune(
+            retention_days=30, max_bytes=1_000_000_000)
 
-                self.assertEqual(deleted["offload_evidence"], 1)
-                self.assertIsNone(archive.get(scope, "O1"))
-                self.assertNotIn(scope.scope_id, archive_module._live_raw)
+        self.assertEqual(deleted["offload_evidence"], 1)
+        self.assertIsNone(archive.get(scope, "O1"))
 
     def test_an_experiment_turn_is_erased_too(self) -> None:
         erased = experiment_scope("exp-channel")
@@ -331,14 +265,13 @@ class ErasureAndRetentionTests(EvidenceFixture):
 class DigestTests(EvidenceFixture):
     """The caller's digest, the stored digest, and idempotence after release."""
 
-    def test_the_archiver_is_idempotent_after_the_turn_is_released(self) -> None:
-        """A re-persist once the raw copy is gone is a readback, not a collision.
+    def test_the_archiver_is_idempotent_on_a_later_persist(self) -> None:
+        """A re-persist after the in-process memo is gone is a readback, not a collision.
 
-        The in-process memo that makes the archiver skip a step it already
-        wrote is dropped with the turn, so a process that revisits the scope
-        reaches ``persist`` with the RAW digest of text whose row holds the
-        redacted bytes. The archive recognises it by redacting the candidate
-        the same way and comparing stored digests; no raw digest is persisted.
+        A process that revisits the scope reaches ``persist`` with the RAW
+        digest of text whose row holds the redacted bytes. The archive redacts
+        the candidate the same way and compares stored digests; no raw digest
+        is persisted.
         """
         scope = chatbot_scope()
         archive = RuntimeHandleArchive(self.db_path)
@@ -349,16 +282,12 @@ class DigestTests(EvidenceFixture):
             "tool_args_0": {"command": "show_connector"},
             "observation_0": text,
         }
-        archive_execute_observations(trajectory, scope=scope,
-                                     selected_archive=archive)
-        offload_state.reclaim_scope(scope)
-        stored = archive.get(scope, "O1")
-        archive_module.clear_live_raw()
+        archive_step(trajectory, 0, scope=scope, selected_archive=archive)
+        stored = archive.get(scope, "O0")
 
-        again = archive_execute_observations(trajectory, scope=scope,
-                                             selected_archive=archive)
+        again = archive_step(trajectory, 0, scope=scope, selected_archive=archive)
 
-        self.assertEqual([row["alias"] for row in again], ["O1"])
+        self.assertTrue(again)
         refused = [event for event in offload_state.snapshot_events()
                    if event["kind"] == "archive_refused"]
         self.assertEqual(refused, [])
@@ -367,8 +296,7 @@ class DigestTests(EvidenceFixture):
             (digest,) = conn.execute(
                 "SELECT text_sha256 FROM offload_evidence").fetchone()
         self.assertEqual(digest, stored["text_sha256"])
-        # ...and this process, which holds the raw text again, reads it again.
-        self.assertEqual(stored_handles(scope)["O1"]["text"], text)
+        self.assertEqual(archive.get(scope, "O0")["text"], stored["text"])
         self.assertNotIn(SK_TOKEN.encode("ascii"), self.file_bytes())
 
     def test_the_raw_digest_is_never_written_to_the_file(self) -> None:
@@ -378,22 +306,19 @@ class DigestTests(EvidenceFixture):
         raw_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         archive, stored = self.persist(text, scope=scope)
 
-        # The live turn is handed the raw digest with the raw text...
-        self.assertEqual(stored["text_sha256"], raw_digest)
-        # ...and the file holds neither.
+        # The row carries the digest of the redacted bytes, never the raw one.
+        self.assertNotEqual(stored["text_sha256"], raw_digest)
         blob = self.file_bytes()
         self.assertNotIn(raw_digest.encode("ascii"), blob)
         self.assertNotIn(SK_TOKEN.encode("ascii"), blob)
 
-    def test_a_different_text_is_still_refused_after_release(self) -> None:
+    def test_a_different_text_is_still_refused(self) -> None:
         scope = chatbot_scope()
         archive, _ = self.persist(response_with_credential(), scope=scope)
-        offload_state.reclaim_scope(scope)
         other = "a completely different observation with no secret\n"
         with self.assertRaises(PersistenceError):
             archive.persist(
-                scope, alias="O1", offload_order=1,
-                command_name="execute_workflow_query", step_index=1,
+                scope, alias="O1", command_name="execute_workflow_query", step_index=1,
                 text=other,
                 text_sha256=hashlib.sha256(other.encode("utf-8")).hexdigest(),
             )
@@ -402,7 +327,6 @@ class DigestTests(EvidenceFixture):
         """``_decode_row`` verifies every read against the stored bytes."""
         scope = chatbot_scope()
         self.persist(response_with_credential(), scope=scope)
-        archive_module.clear_live_raw()
         reopened = RuntimeHandleArchive(self.db_path)
         self.assertIsNotNone(reopened.get(scope, "O1"))
         self.assertEqual(len(reopened.list(scope)), 1)
@@ -413,8 +337,6 @@ class NoSealLifecycleTests(EvidenceFixture):
 
     def test_a_process_that_died_mid_turn_left_nothing_raw_on_disk(self) -> None:
         self.persist(response_with_credential())
-        # The process dies: its memory is gone and nobody releases anything.
-        archive_module.clear_live_raw()
         self.assertNotIn(SK_TOKEN.encode("ascii"), self.file_bytes())
         stored = RuntimeHandleArchive(self.db_path).get(chatbot_scope(), "O1")
         self.assertIn(REDACTED, stored["text"])
@@ -494,7 +416,7 @@ class LiveTurnFixture(unittest.TestCase):
     workflow_path = str(Path(__file__).parent.joinpath("todo_list_workflow").resolve())
 
     def setUp(self) -> None:
-        reset_runtime_state()
+        reset_observation_state()
         self.temp = tempfile.TemporaryDirectory()
         self._restore_env: dict[str, str | None] = {}
         for name in (REDACTION_ENV,):
@@ -511,7 +433,7 @@ class LiveTurnFixture(unittest.TestCase):
                 workflow.close()
             except Exception:  # noqa: BLE001
                 pass
-        reset_runtime_state()
+        reset_observation_state()
         os.environ.pop("FASTWORKFLOW_STATE_ROOT", None)
         for name, value in self._restore_env.items():
             if value is None:
@@ -531,8 +453,6 @@ class LiveTurnFixture(unittest.TestCase):
         ctx.push_active_workflow(workflow)
 
         def execute_workflow_query(command: str) -> str:
-            alias = current_execute_alias()
-            record_context_clause(current_scope(), alias, "Fixture " + command)
             return response_with_credential(command)
 
         def ask_user(question: str) -> str:
@@ -542,6 +462,7 @@ class LiveTurnFixture(unittest.TestCase):
                                  [execute_workflow_query, ask_user], max_iters=8)
         ctx._workflow_tool_agent = agent
         agent.extract = lambda **kwargs: dspy.Prediction(final_answer="done")
+        self.archive = archive_for_path(observability_db_path(ctx))
         self.open_sessions.append((ctx, workflow))
         return ctx, workflow, agent
 
@@ -567,146 +488,44 @@ class LiveTurnFixture(unittest.TestCase):
 
     def reads(self, agent, scope, alias: str = "O1") -> dict[str, str]:
         """Every read path an agent has, at one moment."""
-        archive = agent.observation_archive
-        # search_memory's own two-tier resolution: hot cache, then SQLite.
-        served = stored_handles(scope).get(alias) or archive.get(scope, alias)
+        archive = self.archive
+        served = archive.get(scope, alias)
         return {
             "search_memory": None if served is None else served["text"],
             "rehydration": archived_observation(alias, scope=scope,
                                                 archive=archive),
-            "archive_row": (archive.get(scope, alias) or {}).get("text"),
+            "archive_row": (served or {}).get("text"),
         }
 
-    def assert_all_raw(self, reads: dict[str, str], where: str) -> None:
+    def assert_all_redacted(self, reads: dict[str, str], where: str) -> None:
         for path, text in reads.items():
             with self.subTest(path=path, moment=where):
                 self.assertIsNotNone(text, f"{path} read nothing {where}")
-                self.assertIn(SK_TOKEN, text, f"{path} was degraded {where}")
-                self.assertNotIn(REDACTED, text)
+                self.assertIn(REDACTED, text, f"{path} was not redacted {where}")
+                self.assertNotIn(SK_TOKEN, text)
 
     def assert_stored_text(self, agent, scope, alias: str = "O1") -> None:
-        """What a reader with no raw copy gets: the redacted row."""
-        row = agent.observation_archive.get(scope, alias)
+        """Every reader gets the redacted row."""
+        row = self.archive.get(scope, alias)
         self.assertIsNotNone(row)
         self.assertIn(REDACTED, row["text"])
         self.assertNotIn(SK_TOKEN, row["text"])
 
     def assert_disk_is_redacted(self, agent) -> None:
         self.assertNotIn(SK_TOKEN.encode("ascii"),
-                         file_bytes(agent.observation_archive.db_path))
-
-
-class TurnCompletionReleasesTests(LiveTurnFixture):
-    """The raw copies follow the runtime's existing notion of "over"."""
-
-    def test_binding_the_next_scope_releases_the_previous_turns_raw_copy(self) -> None:
-        ctx, workflow, agent = self.make_session(channel="chan", turn="turn-1")
-        self.script(agent, [("execute_workflow_query", {"command": "first"}),
-                            ("finish", {})])
-        with tracing.host_scope(ctx):
-            agent.forward(user_query="fixture")
-        first = agent.continuation_scope
-        # Mid-turn, every read is raw and the file is not.
-        self.assert_all_raw(self.reads(agent, first), "during the turn")
-        self.assert_disk_is_redacted(agent)
-
-        # The agent binding the NEXT turn is it saying the previous one is over.
-        ctx._turn_key = "turn-2"
-        self.script(agent, [("execute_workflow_query", {"command": "second"}),
-                            ("finish", {})])
-        with tracing.host_scope(ctx):
-            agent.forward(user_query="fixture")
-        second = agent.continuation_scope
-
-        self.assertNotEqual(first, second)
-        self.assert_stored_text(agent, first)
-        # And the turn that is actually running kept its raw evidence.
-        self.assert_all_raw(self.reads(agent, second), "in the second turn")
-        self.assert_disk_is_redacted(agent)
-
-    def test_closing_the_session_releases_the_turns_raw_copy(self) -> None:
-        ctx, workflow, agent = self.make_session(channel="closed", turn="turn-1")
-        self.script(agent, [("execute_workflow_query", {"command": "only"}),
-                            ("finish", {})])
-        with tracing.host_scope(ctx):
-            agent.forward(user_query="fixture")
-        scope = agent.continuation_scope
-        self.assert_all_raw(self.reads(agent, scope), "during the turn")
-
-        self.close_session(ctx, workflow)
-
-        self.assert_stored_text(agent, scope)
-        self.assertNotIn(scope.scope_id, archive_module._live_raw)
-        # The hot copy went too, so memory cannot serve raw text for the turn.
-        self.assertEqual(stored_handles(scope), {})
-
-    def test_the_awaiting_user_guard_keeps_the_raw_copy(self) -> None:
-        """A turn waiting on the user is not over, so its reads stay exact."""
-        ctx, workflow, agent = self.make_session(channel="susp", turn="turn-1")
-        self.script(agent, [("execute_workflow_query", {"command": "one"}),
-                            ("ask_user", {"question": "continue?"})])
-        with tracing.host_scope(ctx):
-            prediction = agent.forward(user_query="fixture")
-        self.assertTrue(prediction.suspended)
-        scope = agent.continuation_scope
-
-        ctx._awaiting_user = True
-        ctx.pop_active_workflow()
-        ctx.close()
-
-        self.assert_all_raw(self.reads(agent, scope), "after a suspended close")
-        self.assert_disk_is_redacted(agent)
-
-    def test_an_exported_suspension_keeps_the_raw_copy(self) -> None:
-        """The second half of the guard: ``export_suspended() is not None``."""
-        ctx, workflow, agent = self.make_session(channel="susp2", turn="turn-1")
-        self.script(agent, [("execute_workflow_query", {"command": "one"}),
-                            ("ask_user", {"question": "continue?"})])
-        with tracing.host_scope(ctx):
-            agent.forward(user_query="fixture")
-        scope = agent.continuation_scope
-        self.assertIsNotNone(agent.export_suspended())
-
-        # _awaiting_user was never set -- only the agent knows it is suspended.
-        self.assertFalse(ctx._awaiting_user)
-        ctx.pop_active_workflow()
-        ctx.close()
-
-        self.assertIn(scope.scope_id, archive_module._live_raw)
-        self.assertIn(SK_TOKEN, agent.observation_archive.get(scope, "O1")["text"])
-
-    def test_the_bind_scope_guard_keeps_a_still_suspended_agents_raw_copy(self) -> None:
-        """``bind_scope`` releases nothing while ``self._suspended is not None``."""
-        ctx, workflow, agent = self.make_session(channel="susp3", turn="turn-1")
-        self.script(agent, [("execute_workflow_query", {"command": "one"}),
-                            ("ask_user", {"question": "continue?"})])
-        with tracing.host_scope(ctx):
-            agent.forward(user_query="fixture")
-        scope = agent.continuation_scope
-        self.assertIsNotNone(agent._suspended)
-
-        # A caller binding a scope by hand over a still-suspended agent.
-        ctx._turn_key = "turn-2"
-        with tracing.host_scope(ctx):
-            agent.bind_scope()
-
-        self.assertNotEqual(agent.continuation_scope, scope)
-        self.assertIn(SK_TOKEN, agent.observation_archive.get(scope, "O1")["text"])
+                         file_bytes(self.archive.db_path))
 
 
 class SuspensionRoundTripTests(LiveTurnFixture):
-    """A suspension resumed in the same process, and in a fresh one."""
+    """A suspension resumed in a fresh process, reading the stored text."""
 
     def test_a_suspension_resumed_in_a_fresh_process_reads_the_stored_text(self) -> None:
-        """The accepted cost of redacting at the write, pinned rather than implied.
+        """A resumed turn reads the stored, redacted text, as any process does.
 
         The turn suspends, its payload goes through ``json.dumps``/``loads``
         exactly as a session state file carries it, the session is CLOSED (the
         eviction), and every process-local registry is emptied -- as close to
-        a fresh process as one interpreter allows. That process has no raw
-        copy, so the archive answers with the stored, redacted text. Once the
-        resumed turn's own compaction re-archives the observations its
-        trajectory still holds, this process holds their raw text again.
+        a fresh process as one interpreter allows.
         """
         ctx, workflow, agent = self.make_session(channel="rt", turn="turn-1")
         self.script(agent, [("execute_workflow_query", {"command": "first"}),
@@ -715,23 +534,33 @@ class SuspensionRoundTripTests(LiveTurnFixture):
         with tracing.host_scope(ctx):
             prediction = agent.forward(user_query="fixture")
         self.assertTrue(prediction.suspended)
-        scope = agent.continuation_scope
-        path = agent.observation_archive.db_path
-        self.assert_all_raw(self.reads(agent, scope, "O1"), "during the turn")
+        scope = scope_for_host(ctx)
+        path = self.archive.db_path
+        self.assert_all_redacted(self.reads(agent, scope, "O1"), "during the turn")
 
         blob = json.loads(json.dumps(agent.export_suspended()))
         ctx._awaiting_user = True
         ctx.pop_active_workflow()
         ctx.close()
-        reset_runtime_state()
-        self.assertEqual(stored_handles(scope), {})
+        reset_observation_state()
 
         ctx2, workflow2, agent2 = self.make_session(channel="rt", turn="turn-1")
         agent2.import_suspended(blob)
-        self.assertEqual(agent2.continuation_scope, scope)
-        self.assertEqual(agent2.observation_archive.db_path, path)
-        for alias in ("O1", "O2"):
+        self.assertEqual(scope_for_host(ctx2), scope)
+        self.assertEqual(self.archive.db_path, path)
+        for alias in ("O0", "O1"):
             self.assert_stored_text(agent2, scope, alias)
+        # search_memory in the fresh process finds the handle stored before the
+        # suspension, redacted, through the turn key the agent resumes under.
+        lm = SimpleNamespace(history=[], model="fixture-lm")
+        with patch("fastworkflow.observation_offloading.search.get_lm", return_value=lm), \
+                patch("fastworkflow.observation_offloading.search.dspy") as fake_dspy:
+            fake_dspy.Predict.return_value = lambda **kw: SimpleNamespace(answer=kw["observation"])
+            found = search_memory("what is the api key?", "O1", scope=scope_for_host(ctx2),
+                                  selected_archive=self.archive)
+        self.assertNotIn("no matching offloaded handle", found)
+        self.assertIn(REDACTED, found)
+        self.assertNotIn(SK_TOKEN, found)
 
         self.script(agent2, [("execute_workflow_query", {"command": "third"}),
                              ("finish", {})])
@@ -739,11 +568,11 @@ class SuspensionRoundTripTests(LiveTurnFixture):
             resumed = agent2.resume("go on")
 
         self.assertIn(SK_TOKEN, resumed.trajectory["observation_3"])
-        self.assert_all_raw(self.reads(agent2, scope, "O3"), "after the resume")
+        self.assert_all_redacted(self.reads(agent2, scope, "O3"), "after the resume")
         self.assert_disk_is_redacted(agent2)
 
         self.close_session(ctx2, workflow2)
-        for alias in ("O1", "O2", "O3"):
+        for alias in ("O0", "O1", "O3"):
             self.assert_stored_text(agent2, scope, alias)
 
 
@@ -766,15 +595,16 @@ class SummaryTests(LiveTurnFixture):
     def finalize(self, ctx, agent, scope):
         """Run the real ``_finalize_agent_output``, capturing what it summarises."""
         seen: dict[str, object] = {}
-        archive = agent.observation_archive
+        archive = self.archive
 
         def spy(user_query, workflow_actions, final_agent_response):
             seen["user_query"] = user_query
             seen["workflow_actions"] = json.loads(json.dumps(workflow_actions))
             seen["final_agent_response"] = final_agent_response
             # What the archive served, and what the file held, AT THE MOMENT
-            # the summary was produced.
-            row = archive.get(scope, "O1")
+            # the summary was produced. The turn's only execute observation is
+            # step 0, so its handle is O0 (O{step_index}).
+            row = archive.get(scope, "O0")
             seen["archive_text_at_summary_time"] = None if row is None else row["text"]
             seen["file_at_summary_time"] = file_bytes(archive.db_path)
             return "a summary mentioning the api key", json.dumps({"seen": True})
@@ -791,7 +621,7 @@ class SummaryTests(LiveTurnFixture):
                             ("finish", {})])
         with tracing.host_scope(ctx):
             agent.forward(user_query="fixture")
-        scope = agent.continuation_scope
+        scope = scope_for_host(ctx)
         # The action log the real dispatch path appends, with the real response.
         ctx.append_action_log({
             "command": "show_connector",
@@ -819,13 +649,13 @@ class SummaryTests(LiveTurnFixture):
         # runtime, which is the other way this could regress.
         self.assertIn(SK_TOKEN, ctx.action_log[0]["response"])
 
-    def test_at_summary_time_the_file_is_redacted_and_the_turn_reads_raw(self) -> None:
+    def test_at_summary_time_the_file_is_redacted(self) -> None:
         ctx, workflow, agent = self.make_session(channel="order", turn="turn-1")
         self.script(agent, [("execute_workflow_query", {"command": "show"}),
                             ("finish", {})])
         with tracing.host_scope(ctx):
             agent.forward(user_query="fixture")
-        scope = agent.continuation_scope
+        scope = scope_for_host(ctx)
         ctx.append_action_log({
             "command": "show_connector",
             "command_name": "show_connector",
@@ -835,11 +665,11 @@ class SummaryTests(LiveTurnFixture):
 
         seen, _ = self.finalize(ctx, agent, scope)
 
-        self.assertIn(SK_TOKEN, seen["archive_text_at_summary_time"])
+        self.assertIn(REDACTED, seen["archive_text_at_summary_time"])
+        self.assertNotIn(SK_TOKEN, seen["archive_text_at_summary_time"])
         self.assertNotIn(SK_TOKEN.encode("ascii"), seen["file_at_summary_time"])
-        # Only the session close, which is strictly later, ends the raw reads.
         self.close_session(ctx, workflow)
-        self.assert_stored_text(agent, scope)
+        self.assert_stored_text(agent, scope, "O0")
 
 
 if __name__ == "__main__":  # pragma: no cover

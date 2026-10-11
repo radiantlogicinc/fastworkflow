@@ -369,7 +369,10 @@ def test_no_store_io_while_the_registry_lock_is_held(app_module):
         runtime = await _build_runtime(app_module, channel_id)
         store = runtime.observability_store
         assert store is not None
-        original_connect = store._connect
+        # Every store connection is opened through _open_connection: _connect
+        # wraps it, and the synchronous turn-record write (sink._sync_write)
+        # calls it directly. Watching only _connect misses the turn write.
+        original_connect = store._open_connection
 
         def watched_connect(*args, **kwargs):
             io["operations"] += 1
@@ -377,7 +380,7 @@ def test_no_store_io_while_the_registry_lock_is_held(app_module):
                 io["under_registry_lock"] += 1
             return original_connect(*args, **kwargs)
 
-        store._connect = watched_connect
+        store._open_connection = watched_connect
         try:
             await _run_one_turn(
                 app_module, runtime, registry, kind="initialize_startup",
@@ -387,7 +390,7 @@ def test_no_store_io_while_the_registry_lock_is_held(app_module):
                 work=lambda: _record_turn(runtime, "a turn worth saving"),
             )
         finally:
-            store._connect = original_connect
+            store._open_connection = original_connect
 
     asyncio.run(body())
 

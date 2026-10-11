@@ -274,7 +274,7 @@ def seed_winner(store: obs.ObservabilityStore) -> str:
             "w-ex1",
             turn_key,
             call_id="w1",
-            command_name="open_directory",
+            command_name="open_item_explorer",
             start_ns=T0,
             parameters={"path": "/a"},
             child_calls=[
@@ -296,7 +296,7 @@ def seed_winner(store: obs.ObservabilityStore) -> str:
         turn_key,
         refs=[("w1", 0, "w-ex1"), ("w2", 1, "w-ex2")],
         outputs=[
-            _output("w1", "open_directory", {"path": "/a"}),
+            _output("w1", "open_item_explorer", {"path": "/a"}),
             _output(
                 "w2",
                 "add_todo",
@@ -326,7 +326,7 @@ def seed_candidate(store: obs.ObservabilityStore) -> str:
             "c-ex1",
             turn_key,
             call_id="c1",
-            command_name="open_directory",
+            command_name="open_item_explorer",
             start_ns=T0,
             parameters={"path": "/a"},
         ),
@@ -354,7 +354,7 @@ def seed_candidate(store: obs.ObservabilityStore) -> str:
         turn_key,
         refs=[("c1", 0, "c-ex1"), ("c2", 1, "c-ex2"), ("c3", 2, "c-ex3")],
         outputs=[
-            _output("c1", "open_directory", {"path": "/a"}),
+            _output("c1", "open_item_explorer", {"path": "/a"}),
             _output(
                 "c2",
                 "add_todo",
@@ -802,7 +802,7 @@ def seed_teacher_student(store: obs.ObservabilityStore) -> str:
             "t-ex1",
             turn_key,
             call_id="t1",
-            command_name="open_directory",
+            command_name="open_item_explorer",
             start_ns=T0,
             parameters={"path": "/a"},
             extra={"fw.pass": "teacher"},
@@ -820,7 +820,7 @@ def seed_teacher_student(store: obs.ObservabilityStore) -> str:
             "s-ex1",
             turn_key,
             call_id="s1",
-            command_name="open_directory",
+            command_name="open_item_explorer",
             start_ns=T0 + 10_000_000,
             parameters={"path": "/a"},
             extra={"fw.pass": "student"},
@@ -848,14 +848,14 @@ def seed_teacher_student(store: obs.ObservabilityStore) -> str:
             ("s2", 3, "s-ex2"),
         ],
         outputs=[
-            _output("t1", "open_directory", {"path": "/a"}),
+            _output("t1", "open_item_explorer", {"path": "/a"}),
             _output(
                 "t2",
                 "add_todo",
                 {"title": "correct"},
                 artifacts={"teacher_note": "produced by a teacher dispatch"},
             ),
-            _output("s1", "open_directory", {"path": "/a"}),
+            _output("s1", "open_item_explorer", {"path": "/a"}),
             _output("s2", "add_todo", {"title": "wrong"}),
             _output_without_call_id(
                 "summarize", artifacts={"shared_note": "no call id to join on"}
@@ -1184,7 +1184,7 @@ class TestAlignment:
             for pair in pairs
         ]
         assert described == [
-            (PAIR_MATCHED, "open_directory", "open_directory"),
+            (PAIR_MATCHED, "open_item_explorer", "open_item_explorer"),
             # The span-less inner hop exists only on the winner's side.
             (PAIR_LEFT_ONLY, "wildcard", None),
             (PAIR_MATCHED, "add_todo", "add_todo"),
@@ -1513,7 +1513,7 @@ class TestAnchorsAndDigest:
             anchor.turn_key,
             target_kind=anchor.target_kind,
             span_ids=list(anchor.span_ids),
-            target_label="open_directory",
+            target_label="open_item_explorer",
             provenance="human",
             comment="matched the reference",
             category="conclusions",

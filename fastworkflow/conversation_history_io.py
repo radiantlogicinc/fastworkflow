@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
 
 

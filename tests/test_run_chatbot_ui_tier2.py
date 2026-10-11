@@ -7,7 +7,7 @@ reads only.
     with the trace's `fw.command.execute` spans on `command_call_id`; a
     resumed turn is one ledger, not a restart;
 (b) per-turn chips from `decision_uncertainty` (least confident top-k
-    margin), `fw.ask_user` (asked) and `consequence` (worst class), and a
+    margin) and `fw.ask_user` (asked), and a
     rail filter that counts only turns with a RECORDED margin below the
     user's threshold;
 (c) a collapsed provenance section from the evidence-run records, the
@@ -61,7 +61,8 @@ TURN_B = "20260907T100100-resumed"  # attempt 2: resumed; one dispatch pre-resum
 SNAPSHOT_1 = {
     "workflow_fingerprint": "sha256:same",
     "workflow_model_version": "20260905T132341Z-a0605e",
-    "workflow_scope_rule_version": 1,
+    # A stored snapshot from before feature modes were retired still carries
+    # this; the provenance reader must keep accepting it.
     "effective_features": {"decision_signals_v1": "shadow"},
 }
 SNAPSHOT_2 = dict(SNAPSHOT_1, workflow_model_version="20260906T000000Z-ffffff")
@@ -204,19 +205,19 @@ def turn_a_spans():
         _span("a-exec", TURN_A, "fw.agent.execute", "a-root", T0 + 1_000_000,
               dur=40_000_000, kind="internal"),
         _span("a-tc1", TURN_A, "fw.agent.tool_call", "a-exec", T0 + 2_000_000,
-              command_name="open_directory", context="global",
+              command_name="open_item_explorer", context="global",
               attributes={"command_call_id": "call-1",
                           "consequence": {"consequence_class": "low"}}),
-        _execute("a-ex1", TURN_A, "a-tc1", T0 + 2_100_000, "call-1", "open_directory",
+        _execute("a-ex1", TURN_A, "a-tc1", T0 + 2_100_000, "call-1", "open_item_explorer",
                  consequence="high", dur=900_000,
                  child_calls=[{"call_id": "call-1a", "parent_call_id": "call-1",
                                "command_name": "wildcard"}]),
         _intent("a-nlu1", TURN_A, "a-ex1", T0 + 2_200_000, _uncertainty(0.9, 0.95)),
         _span("a-tc2", TURN_A, "fw.agent.tool_call", "a-exec", T0 + 10_000_000,
-              command_name="find_identity", context="DirectoryExplorer",
+              command_name="find_person", context="ItemExplorer",
               attributes={"command_call_id": "call-2"}),
-        _execute("a-ex2", TURN_A, "a-tc2", T0 + 10_100_000, "call-2", "find_identity",
-                 context="DirectoryExplorer", consequence="medium", dur=2_000_000),
+        _execute("a-ex2", TURN_A, "a-tc2", T0 + 10_100_000, "call-2", "find_person",
+                 context="ItemExplorer", consequence="medium", dur=2_000_000),
         _intent("a-nlu2", TURN_A, "a-ex2", T0 + 10_200_000, _uncertainty(0.1, 0.4)),
         _intent("a-nlu3", TURN_A, "a-ex2", T0 + 10_300_000, _uncertainty()),
         _llm("a-llm1", TURN_A, "a-exec", T0 + 20_000_000, 0.0015,
@@ -274,7 +275,7 @@ class TestExecutionLedger:
         assert [r["command_call_id"] for r in rows] == ["call-1", "call-1a", "call-2"]
         assert [r["position"] for r in rows] == [1, 2, 3]
         first = rows[0]
-        assert first["command_name"] == "open_directory"
+        assert first["command_name"] == "open_item_explorer"
         assert first["context"] == "global"
         assert first["status"] == "ok"
         assert first["success"] is True
@@ -345,7 +346,7 @@ class TestExecutionLedger:
     def test_attributes_may_arrive_as_row_text(self):
         spans = [dict(s, attributes=json.dumps(s["attributes"])) for s in turn_a_spans()]
         rows = execution_ledger(turn_a_record(), spans)["rows"]
-        assert rows[0]["command_name"] == "open_directory"
+        assert rows[0]["command_name"] == "open_item_explorer"
         assert rows[1]["command_name"] == "wildcard"
 
 
@@ -355,25 +356,20 @@ class TestExecutionLedger:
 
 
 class TestDecisionSignals:
-    def test_the_least_confident_margin_asked_and_worst_consequence(self):
+    def test_the_least_confident_margin_and_asked(self):
         signals = turn_decision_signals(turn_a_spans())
         assert signals["intent_margin_min"] == 0.1
         assert signals["intent_margin_decisions"] == 2
         assert signals["intent_decisions"] == 3
         assert signals["intent_decisions_without_margin"] == 1
         assert signals["asked_user"] == 1
-        # execute spans decide (high, medium); the tool_call's `low` is the
-        # same dispatch seen from above and does not count twice
-        assert signals["consequence_max"] == "high"
-        assert signals["consequence_assessed"] == 2
+        assert "consequence_max" not in signals
 
     def test_no_signal_is_no_chip_not_zero(self):
         signals = turn_decision_signals(turn_b_spans())
         assert signals["intent_margin_min"] is None
         assert signals["intent_margin_decisions"] == 0
         assert signals["intent_decisions"] == 1       # deterministic, explained
-        assert signals["consequence_max"] is None
-        assert signals["consequence_assessed"] == 0
         assert signals["asked_user"] == 1
         empty = turn_decision_signals([])
         assert empty["intent_margin_min"] is None and empty["asked_user"] == 0
@@ -387,13 +383,6 @@ class TestDecisionSignals:
         assert turn_decision_signals(spans)["intent_margin_min"] is None
         bad["signals"][0]["value"] = float("nan")
         assert turn_decision_signals(spans)["intent_margin_min"] is None
-        odd = _execute("e", "t", None, T0, "c", "cmd", consequence="absurd")
-        assert turn_decision_signals([odd])["consequence_max"] is None
-
-    def test_tool_call_consequence_is_the_fallback_when_no_execute_span_exists(self):
-        spans = [_span("tc", "t", "fw.agent.tool_call", None, T0,
-                       attributes={"consequence": {"consequence_class": "critical"}})]
-        assert turn_decision_signals(spans)["consequence_max"] == "critical"
 
     def test_low_confidence_requires_a_recorded_margin_below_the_threshold(self):
         assert is_low_confidence({"intent_margin_min": 0.1}, 0.2)
@@ -730,7 +719,6 @@ class TestLiveRoutes:
         a, b = turns[TURN_A], turns[TURN_B]
         assert a["decision_signals"]["intent_margin_min"] == 0.1
         assert a["decision_signals"]["asked_user"] == 1
-        assert a["decision_signals"]["consequence_max"] == "high"
         assert a["llm_cost"] == {"calls": 2, "recorded": 1, "unrecorded": 1, "total": 0.0015}
         assert a["llm_calls_cut_at_limit"] == 0
         assert b["decision_signals"]["intent_margin_min"] is None
@@ -843,7 +831,7 @@ class TestPage:
         assert b'id="convList"' in page
         # Rail rows are label-only (owner decision 2026-09-29); signals show in the turn view.
         assert b"appendSignalChips(container, turn.decision_signals)" in page # turn header
-        assert b'"asked the user"' in page and b'"consequence "' in page
+        assert b'"asked the user"' in page
         # (c) the collapsed provenance fold and the comparability check
         assert b"function renderProvenanceDifferences(container, differences)" in page
         # Experiment detail stays concise; provenance remains available to the

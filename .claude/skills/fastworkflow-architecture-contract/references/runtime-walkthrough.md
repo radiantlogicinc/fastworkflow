@@ -83,7 +83,8 @@ INTENT_AMBIGUITY_CLARIFICATION, INTENT_MISUNDERSTANDING_CLARIFICATION, PARAMETER
 `_process_agent_message` (`workflow_execution_context.py:804-815`):
 1. `_ensure_agent_initialized` (`:675-677`) builds the `fastWorkflowReAct` tool agent
    (`workflow_agent.py:387-471`, `max_iters=25`, tools: `what_can_i_do`,
-   `execute_workflow_query`, `intent_misunderstood`, `ask_user`). (It also built an
+   `execute_workflow_query`, `ask_user`; `intent_misunderstood` and `whats_done_and_what_remains`
+   were removed later, and `search_memory` is disabled since 2026-10-09). (It also built an
    intent-clarification agent until that was removed on 2026-10-05.)
 2. `_run_agent` (`:709-734`): clears the action log, refines the query with the last 5
    conversation-history entries (`_refine_user_query`, `:981-991`), prepends an

@@ -1372,7 +1372,7 @@ which section 3.1 confirms *are* captured), raw parameters, and error detail. De
 record** — cheapest as a read-time filter on `workflow_name`/an `internal: bool` flag stamped
 per `CommandOutput`. Deciding this now shapes whether the flag exists in the schema. (The
 agent's consultations of the string-returning helper tools — `what_can_i_do`,
-`intent_misunderstood` — are visible only in the trajectory, R28; note that in the projection
+`intent_misunderstood` (since removed from the agent) — are visible only in the trajectory, R28; note that in the projection
 docs.)
 
 **RESOLVED 2026-06-11 (with Dhar).** Decisions:
@@ -1389,7 +1389,7 @@ docs.)
    record, additionally including internal CME executions, raw parameters, tracebacks (A5),
    `trajectory_ref` (A37), and `refined_user_message` (A36 — "what the system did to your
    words" is developer material). Helper-tool consultations (`what_can_i_do`,
-   `intent_misunderstood`) are visible only in the trajectory, noted in the projection docs.
+   `intent_misunderstood`, since removed from the agent) are visible only in the trajectory, noted in the projection docs.
 
 Recorded in `docs/turn_result_design.md`, Amendments A39.
 

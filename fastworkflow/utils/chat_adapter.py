@@ -32,6 +32,7 @@ keeping them out of the trajectory to prevent token bloat across iterations.
 This scoped approach ensures the adapter only affects workflow agent calls, not other
 DSPy operations in the system.
 """
+import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
 from dspy.adapters.json_adapter import JSONAdapter
 
@@ -89,9 +90,25 @@ def _inject_commands_prelude(formatted, title, cmds):
     return formatted
 
 
+def _without_leaked_thinking(completion: str) -> str:
+    """The reply after the model's thinking, when the thinking leaked into it.
+
+    Some models (seen with nemotron on Bedrock) put their thinking in the
+    reply text, ending it with ``</think>``. Drafting, they sketch the output
+    format - ``[[ ## next_steps ## ]]`` then ``1. ...`` - and the parser,
+    which keeps the first occurrence of each field, took that sketch for the
+    answer: a planner reply of ``...`` / ``1. ...`` / ``2. ...``.
+    """
+    head, marker, answer = completion.rpartition("</think>")
+    return answer if marker else completion
+
+
 class CommandsSystemPreludeJSONAdapter(JSONAdapter):
     """The JSONAdapter DSPy retries with when a chat-format reply does not parse,
     carrying the same available-commands prelude as the chat attempt."""
+
+    def parse(self, signature, completion):
+        return super().parse(signature, _without_leaked_thinking(completion))
 
     def __init__(self, title: str, **kwargs):
         super().__init__(**kwargs)
@@ -153,6 +170,9 @@ class CommandsSystemPreludeAdapter(dspy.ChatAdapter):
         formatted = self.base.format(signature, demos, inputs_for_base)
 
         return _inject_commands_prelude(formatted, self.title, cmds)
+
+    def parse(self, signature, completion):
+        return super().parse(signature, _without_leaked_thinking(completion))
 
     def _make_json_adapter_fallback(self):
         # DSPy's private hook (ChatAdapter.__call__/acall build the retry

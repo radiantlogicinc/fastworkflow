@@ -256,3 +256,5 @@ rejected_examples.json
 
 # Beads / Dolt files (added by bd init)
 .beads/proxieddb/
+# Local backups of env files (e.g. env/.env.bak-groq)
+.env.bak-*

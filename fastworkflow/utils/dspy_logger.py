@@ -15,6 +15,7 @@ from contextvars import ContextVar
 from logging.handlers import RotatingFileHandler
 from typing import Any, Callable, Dict, Optional, Tuple
 
+import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
 from dspy.utils.callback import BaseCallback
 from pydantic import BaseModel
@@ -304,31 +305,47 @@ def _reasoning_from(value: Any) -> Any:
     return found[0] if len(found) == 1 else found
 
 
-def _recorded_cache_hit(response: Any) -> Optional[bool]:
-    """The response's own `cache_hit` flag, or None when it has none.
+def _recorded_cache_hit(entry: Any) -> Optional[bool]:
+    """Whether a DSPy history entry was served from DSPy's cache, or None if unknown.
 
-    `LMResponse.cache_hit` is a real boolean on every normalized DSPy response
-    (`dspy/core/types.py`), so a hit AND a miss are both genuinely on record and
-    both are worth recording.
+    Rules, in order:
 
-    What is not on record is a history entry whose `response` is absent, is a
-    plain mapping, or is a provider object from before the field existed. This
-    used to be `bool(getattr(response, "cache_hit", False))`, which turned every
-    one of those absences into a recorded MISS -- a claim that the provider was
-    called, invented out of having nothing to read. None means unknown, and the
-    caller then omits the attribute entirely rather than writing a value a
-    reader would take at face value.
-
-    This changes what is CAPTURED from here on. Spans already on record that say
-    `cache_hit: false` cannot be reinterpreted: there is no way to tell, after
-    the fact, which of them read a real flag. Nothing about caching itself
-    changes -- this function only decides whether the observation is publishable.
+    1. A per-response ``cache_hit`` flag, read as an explicit bool only. DSPy 3.4
+       stamps ``cache_hit=True`` on the response only on a cache hit
+       (``dspy/clients/cache.py``, ``_prepare_cached_response``); nothing stamps
+       False, so a flag of False is never expected from a real provider call.
+       ``entry["response"]`` may be a tuple of responses (the multi-candidate
+       native path). Each member is read, and the flag is used only if every
+       non-None member agrees.
+    2. Otherwise, a miss when ``entry["usage"]["total_tokens"]`` is an int
+       (not bool) greater than zero. A cache hit always has usage cleared to
+       ``{}`` (same ``cache.py`` function), so non-empty usage with tokens is
+       evidence the provider was actually called.
+    3. Otherwise None. Empty usage is never read as a hit: it is equally what a
+       response with no usage report looks like.
     """
-    if isinstance(response, Mapping):
-        value = response.get("cache_hit")
-    else:
-        value = getattr(response, "cache_hit", None)
-    return value if isinstance(value, bool) else None
+
+    def flag_of(response: Any) -> Optional[bool]:
+        if isinstance(response, Mapping):
+            value = response.get("cache_hit")
+        else:
+            value = getattr(response, "cache_hit", None)
+        return value if isinstance(value, bool) else None
+
+    if not isinstance(entry, Mapping):
+        return None
+    response = entry.get("response")
+    members = list(response) if isinstance(response, tuple) else [response]
+    flags = {flag for flag in map(flag_of, members) if flag is not None}
+    if len(flags) == 1:
+        return flags.pop()
+
+    usage = entry.get("usage")
+    if isinstance(usage, Mapping):
+        tokens = usage.get("total_tokens")
+        if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens > 0:
+            return False
+    return None
 
 
 class DSPyObservabilityCallback(BaseCallback):
@@ -396,7 +413,7 @@ class DSPyObservabilityCallback(BaseCallback):
         prompt = payload.pop("prompt", None)
         payload.pop("items", None)
         payload.pop("request", None)
-        # ido-mn1.6.18: DSPy hands the provider arguments to the callback under
+        # DSPy hands the provider arguments to the callback under
         # a nested `kwargs` key, so leaving the payload as-is recorded
         # `call_kwargs = {"kwargs": {"max_tokens": ...}}`. Every reader of this
         # span asks for a provider argument BY NAME (`call_kwargs.max_tokens`,
@@ -475,7 +492,7 @@ class DSPyObservabilityCallback(BaseCallback):
                     "provider_response": _json_text(entry.get("response")),
                 }
             )
-            cached = _recorded_cache_hit(entry.get("response"))
+            cached = _recorded_cache_hit(entry)
             if cached is not None:
                 attributes["cache_hit"] = cached
         elif entry is not None:

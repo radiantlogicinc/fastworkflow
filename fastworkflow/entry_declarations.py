@@ -6,9 +6,19 @@ routing definition or the context model records the fact, and inferring it from
 a command's NAME would bake one workflow's spelling conventions into the
 framework.
 
-The live caller is the foreign-context refusal guard in
+The live callers read the declaration to name the entry command: the
+foreign-context refusal guard in
 ``fastworkflow/_workflows/command_metadata_extraction/intent_detection.py``,
-which reads the declaration to name the entry command in its refusal.
+and the unavailable-command path in ``fastworkflow/context_navigation.py``.
+
+Two more facts follow the same pattern. ``occupiable = False`` on a context's
+callback class (read by :func:`declared_occupiable`) marks a mixin context a user
+cannot enter. ``descends_to = "<Context>"`` and ``descend_parameter = "<param>"``
+on a command's ``ResponseGenerator`` class (read by ``context_navigation``) say
+a command enters a context, and only when that parameter is passed if one is
+named. Absent attributes mean the
+workflow declares nothing: the context is listed and the command has no
+navigation effect.
 """
 from __future__ import annotations
 
@@ -35,6 +45,16 @@ CONTEXT_ENTER_COMMAND_ATTRS = ("enter_command", "enter_commands")
 # The declaration
 # ---------------------------------------------------------------------------
 
+def _declared_context_class(workflow_folderpath: str, context_name: str):
+    """The context's callback class, or None when it has none."""
+    import fastworkflow
+
+    app_crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
+    return app_crd.context_model.get_context_class(
+        context_name, fastworkflow.ModuleType.CONTEXT_CLASS
+    )
+
+
 def declared_entry_commands(workflow_folderpath: str, context_name: str) -> list[str]:
     """The ``enter_command`` declarations *context_name* carries, verbatim.
 
@@ -44,12 +64,7 @@ def declared_entry_commands(workflow_folderpath: str, context_name: str) -> list
     than a failed turn, so nothing here is allowed to raise.
     """
     try:
-        import fastworkflow
-
-        app_crd = fastworkflow.RoutingRegistry.get_definition(workflow_folderpath)
-        context_class = app_crd.context_model.get_context_class(
-            context_name, fastworkflow.ModuleType.CONTEXT_CLASS
-        )
+        context_class = _declared_context_class(workflow_folderpath, context_name)
         for attribute in CONTEXT_ENTER_COMMAND_ATTRS:
             value = getattr(context_class, attribute, None)
             if isinstance(value, str) and value.strip():
@@ -62,3 +77,22 @@ def declared_entry_commands(workflow_folderpath: str, context_name: str) -> list
             context_name, exc,
         )
     return []
+
+
+def declared_occupiable(workflow_folderpath: str, context_name: str) -> bool | None:
+    """The ``occupiable`` declaration of *context_name*, or None when undeclared.
+
+    ``occupiable = False`` on the context's callback class marks a mixin context a
+    user cannot enter. None means the class does not say, and the context is
+    listed. Never raises.
+    """
+    try:
+        value = getattr(_declared_context_class(workflow_folderpath, context_name),
+                        "occupiable", None)
+    except Exception as exc:  # noqa: BLE001 - an undeclared fact must not fail a turn
+        logger.debug(
+            "no occupiable declaration readable for context %r: %r",
+            context_name, exc,
+        )
+        return None
+    return value if isinstance(value, bool) else None

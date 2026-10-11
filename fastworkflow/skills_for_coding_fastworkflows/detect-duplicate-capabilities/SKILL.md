@@ -13,8 +13,8 @@ description: >-
 
 # Detecting duplicate capabilities
 
-Some workflows expose the same capability twice: `ControlsMonitor/list_findings` and
-`Directory/search_control_findings` answer the same question. Others hold legitimate neighbours
+Some workflows expose the same capability twice: `Monitor/list_flags` and
+`Catalog/search_flags` answer the same question. Others hold legitimate neighbours
 or opposites whose seed lists do not yet express the distinction. **Both shapes present
 identically** — as benchmark failures — and the fix for one is the opposite of the fix for the
 other. These two scans exist to tell them apart.

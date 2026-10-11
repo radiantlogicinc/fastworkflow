@@ -61,8 +61,7 @@ class EvidenceRunInvalid(RuntimeError):
     """A run that was required to be evidence-grade was not.
 
     Carries every problem found rather than the first, so an operator sees the
-    whole picture in one pass — same reasoning as
-    `runtime_manifest.ManifestConformanceError`.
+    whole picture in one pass.
     """
 
     def __init__(self, run_id: str, problems: tuple[str, ...]) -> None:

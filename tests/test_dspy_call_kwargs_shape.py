@@ -66,12 +66,12 @@ def test_per_call_provider_arguments_are_queryable_by_their_own_name(tmp_path):
         tmp_path,
         lambda: dspy.Predict("question -> answer")(
             question="q?",
-            config={"max_tokens": 1234, "timeout": 9.5},
+            config={"max_tokens": 1234, "temperature": 0.25},  # DSPy 3.4 refuses a per-call timeout on a test engine
         ),
     )
     call_kwargs = json.loads(attributes["call_kwargs"])
     assert call_kwargs["max_tokens"] == 1234
-    assert call_kwargs["timeout"] == 9.5
+    assert call_kwargs["temperature"] == 0.25
     # The failure this contract exists to prevent: the arguments present, but
     # one level down, where no reader looks.
     assert "kwargs" not in call_kwargs

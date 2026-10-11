@@ -160,6 +160,8 @@ def _raising_registry(monkeypatch, exc_factory):
             raise exc_factory()
 
     class RaisingCRD:
+        contexts = {"*": ["fail"]}
+
         def get_command_class(self, name, module_type):
             if (
                 name == "fail"
@@ -350,6 +352,8 @@ def _perform_action_registry(monkeypatch, *, with_parameters_class):
     """
 
     class CRD:
+        contexts = {"*": ["fail"]}
+
         def get_command_class(self, name, module_type):
             if name != "fail":
                 return None
@@ -438,6 +442,8 @@ def test_a_cme_hop_failure_reaches_the_failure_output_and_the_error_span(monkeyp
     fastworkflow.init({})
 
     class CRD:
+        contexts = {"*": ["anything"]}
+
         def get_command_class(self, name, module_type):
             if (
                 name == "wildcard"

@@ -18,15 +18,6 @@ transport-queue contract, so queue-less embedders still trace.
 This module is stdlib-only by design: it is imported by core runtime
 modules and must never pull torch/dspy/transformers.
 
-For the decision-signal capture slice (arch §12.0 deltas 1/2/4) this module also
-imports ``decision_signals``, an architecture §22 leaf module — standard
-library, Pydantic, and ``runtime_manifest`` only. The invariant the paragraph
-above protects is unchanged: nothing on this import path reaches torch, dspy or
-transformers. It is imported here rather than at each emission site because
-``command_executor`` and ``workflow_execution_context`` both stamp the same
-consequence assessment, and ``workflow_execution_context`` cannot import
-``command_executor`` at module scope (it defers that import to ``__init__`` to
-break a cycle).
 """
 
 from __future__ import annotations
@@ -41,8 +32,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Optional, Protocol, runtime_checkable
 
-from fastworkflow import runtime_manifest
-from fastworkflow.observability import decision_signals, enrichment
+from fastworkflow.observability import enrichment
 
 logger = logging.getLogger(__name__)
 
@@ -102,9 +92,8 @@ def host_scope(host: Any) -> Iterator[None]:
 ATTR_COMMAND_CALL_ID = "command_call_id"
 ATTR_PARENT_CALL_ID = "parent_call_id"
 ATTR_CHILD_CALLS = "child_calls"
-ATTR_CONSEQUENCE = "consequence"
 # The active command context's TYPE name (a context class name such as
-# "Identity") before and after the command ran; None when no workflow or context
+# "Order") before and after the command ran; None when no workflow or context
 # could be read. A type, not an instance: two equal values do not prove the
 # command stayed on the same object.
 ATTR_CONTEXT_BEFORE = "context_before"
@@ -222,12 +211,11 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # fw.nlu.intent v3 keeps the known-name keys and does not carry
 # auto_navigation_enabled. Auto-navigation was removed.
 #
-# v6: fw.search.route added -- the optional decision-model call that routes a
-# search_memory request over a listing (observation_offloading/search_router.py).
+# v6: fw.search.route added -- a removed optional decision-model routing step
+# on search_memory over listings (span name kept for historical traces).
 # No existing span changed.
 #
-# v7: fw.finish_check added -- the optional finish-time execution check
-# (fastworkflow/observation_offloading/finish_check.py) -- and fw.agent.step v3 replaces the
+# v7: fw.finish_check added (historical; no longer emitted) -- and fw.agent.step v3 replaces the
 # `roster_nudge` attribute with `finish_check_note` (the roster nudge was removed).
 #
 # v8: fw.planner.plan / fw.planner.replan v2 -- `plan` may be the structured plan
@@ -245,7 +233,18 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # v10: fw.command.execute v4 and fw.agent.tool_call v2 -- `context_before` /
 # `context_after` change from a context-handle mapping to the plain context type
 # name string.
-SPAN_CONTRACT_VERSION = 10
+#
+# v11: fw.command.execute v5 and fw.agent.tool_call v3 -- the `consequence`
+# attribute is gone. It was graded from the workflow's runtime manifest, which
+# no longer exists, so a run recorded before this and after it differ in which
+# keys they carry.
+#
+# v12: fw.agent.step v5 and fw.planner.plan / fw.planner.replan v3 -- the
+# `finish_check_note` attribute on fw.agent.step and the `subjects` attribute on
+# the planner spans are no longer written (the finish check and structured
+# planning were removed). fw.search.route is no longer declared: nothing emits
+# it, so it has no contract left to version.
+SPAN_CONTRACT_VERSION = 12
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -331,21 +330,6 @@ PASS_STUDENT = "student"
 # outcome to completed is how a failure becomes invisible in a roll-up.
 PASS_STATUS_UNKNOWN = "unknown"
 
-# The decision-model call that may route one search_memory request over a
-# listing. A model call of its own, so kind "llm"; not fw.llm.call, which is the
-# DSPy callback's record and what cost and cut-at-limit readers key on. It
-# carries the verdict and its cost, never the question or the observation --
-# those are on the search's offload event, and copying them here would put them
-# in a second store.
-SPAN_SEARCH_ROUTE = "fw.search.route"
-
-# The finish-time execution check: the decision-model calls that judge, when the
-# agent chooses finish, which plan steps the turn's record shows executed. It
-# carries counts, cost and the outcome; the flagged steps themselves are on the
-# check's offload event, not here.
-SPAN_FINISH_CHECK = "fw.finish_check"
-
-
 # ----------------------------------------------------------------------
 # Per-emitter attribute contracts (arch §12.0 delta 5, FW-REQ-019 clause 3)
 # ----------------------------------------------------------------------
@@ -402,13 +386,14 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
             {"agent_query", "attempt", "user_response", "human_wait_ms"}
         ),
     ),
-    # v3: the four auto-navigation keys (v2, ido-8ps.9) are gone with the
+    # v3: the four auto-navigation keys (v2) are gone with the
     # two-step dispatch that wrote them. Every execute step is now a step the
     # agent typed, so there is no composed-step shape to tell apart.
     # v4: `context_before` / `context_after` change from a context-handle
     # mapping to the plain context type name string.
+    # v5: `consequence` is no longer written (see SPAN_CONTRACT_VERSION v11).
     SPAN_COMMAND_EXECUTE: SpanContract(
-        version=4,
+        version=5,
         attributes=frozenset(
             {
                 "raw_command",
@@ -421,7 +406,6 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 ATTR_CHILD_CALLS,
                 ATTR_CONTEXT_BEFORE,
                 ATTR_CONTEXT_AFTER,
-                ATTR_CONSEQUENCE,
             }
         ),
     ),
@@ -436,8 +420,9 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # written in.
     # v2: `context_before` / `context_after` change from a context-handle
     # mapping to the plain context type name string.
+    # v3: `consequence` is no longer written (see SPAN_CONTRACT_VERSION v11).
     SPAN_AGENT_TOOL_CALL: SpanContract(
-        version=2,
+        version=3,
         attributes=frozenset(
             {
                 "raw_command",
@@ -447,7 +432,6 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 ATTR_COMMAND_CALL_ID,
                 ATTR_CONTEXT_BEFORE,
                 ATTR_CONTEXT_AFTER,
-                ATTR_CONSEQUENCE,
             }
         ),
     ),
@@ -467,18 +451,19 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
             }
         ),
     ),
-    # v2: `roster_nudge` (ido-8ps.27) marks the one step whose observation is
+    # v2: `roster_nudge` marks the one step whose observation is
     # not a tool result at all. A finish action taken while named items of the
     # request were never the subject of a command has its "Completed."
     # observation replaced by a bounded harness note and the loop continues, so
     # a reader counting tool results would otherwise count that note as one.
-    # v3: the same marker, renamed `finish_check_note`: the note now comes from
-    # the finish-time execution check (fix-4dsr), which replaced the roster nudge.
+    # v3: the same marker, renamed `finish_check_note` (fix-4dsr); no longer set.
     # v4: `repaired_tool_name` (fix-8q7a) is the workflow command the model named
     # as its tool; `tool_name`/`tool_args` are the execute_workflow_query call the
     # step ran instead.
+    # v5: `finish_check_note` (v3's rename) is no longer written; see
+    # SPAN_CONTRACT_VERSION v12.
     SPAN_AGENT_STEP: SpanContract(
-        version=4,
+        version=5,
         attributes=frozenset(
             {
                 "step_index",
@@ -490,7 +475,6 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
                 "recovered",
                 "tool_error",
                 "error_type",
-                "finish_check_note",
                 "repaired_tool_name",
             }
         ),
@@ -500,21 +484,22 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # `replan_trigger` is on both — None on a first plan says "this was the first
     # plan", where an absent key would only say "older record".
     # v2: `plan` is the structured plan rendered as a numbered list with
-    # "(optional)" / "(needs the user)" flags when the finish check is on;
+    # "(optional)" / "(needs the user)" flags when structured planning was on;
     # `plan_source` says which planner produced it ("structured", "text",
     # "text_fallback" after a failed or empty structured call, "none" for no
     # plan) and `subjects` holds the structured plan's subject names, redacted
     # when recorded.
     # Structured planning is disabled (2026-09-28): new spans carry only
-    # `plan_source` "text" or "none" and `subjects` []; older records may still
-    # hold "structured" / "text_fallback".
+    # `plan_source` "text" or "none"; older records may still hold "structured"
+    # / "text_fallback" and a `subjects` list.
+    # v3: `subjects` is no longer written (see SPAN_CONTRACT_VERSION v12).
     SPAN_PLANNER_PLAN: SpanContract(
-        version=2,
-        attributes=frozenset({"model", "replan_trigger", "plan", "plan_source", "subjects"}),
+        version=3,
+        attributes=frozenset({"model", "replan_trigger", "plan", "plan_source"}),
     ),
     SPAN_PLANNER_REPLAN: SpanContract(
-        version=2,
-        attributes=frozenset({"model", "replan_trigger", "plan", "plan_source", "subjects"}),
+        version=3,
+        attributes=frozenset({"model", "replan_trigger", "plan", "plan_source"}),
     ),
     # One distillation pass. `fw.pass` is the membership stamp every descendant
     # inherits through ancestry; the rest is the pass's OWN content, recorded
@@ -617,40 +602,6 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
             }
         ),
     ),
-    SPAN_SEARCH_ROUTE: SpanContract(
-        version=1,
-        attributes=frozenset(
-            {
-                "model",
-                "choice",
-                "p_all_rows",
-                "for_report",
-                "latency_ms",
-                "input_tokens",
-                "output_tokens",
-                "error_type",
-            }
-        ),
-    ),
-    SPAN_FINISH_CHECK: SpanContract(
-        version=1,
-        attributes=frozenset(
-            {
-                "model",
-                "plan_source",
-                "steps",
-                "subjects",
-                "questions",
-                "requests",
-                "splits",
-                "input_tokens",
-                "latency_ms",
-                "flagged",
-                "fired",
-                "error_type",
-            }
-        ),
-    ),
 }
 
 # `fw.train.*` is a reserved PREFIX with no emitter — nothing in the package opens
@@ -682,11 +633,11 @@ STATUS_CANCELLED = "cancelled"
 STATUS_AWAITING_USER = "awaiting_user"
 
 #: The cap on ONE span-attribute value written to the observability store, in
-#: UTF-8 bytes. A constant since ``ido-pyw.1``: it bounds a database row, not a
+#: UTF-8 bytes. A constant: it bounds a database row, not a
 #: model prompt, so it is not one of the context-window budgets in
 #: ``fastworkflow.context_budget`` and does not scale with a model.
 MAX_ATTR_BYTES = 16384
-#: The pre-``ido-pyw.1`` name, kept as an alias for readers of the provenance
+#: The pre-rename name, kept as an alias for readers of the provenance
 #: record.
 _DEFAULT_MAX_ATTR_BYTES = MAX_ATTR_BYTES
 
@@ -1040,42 +991,6 @@ def end_span(
 # exit criterion and architecture §17.3's stop condition, and it is asserted
 # both structurally and behaviorally by tests/test_no_capture_control_flow.py.
 
-def consequence_assessment(
-    workflow_folderpath: Optional[str], command_name: Optional[str]
-) -> Optional[dict[str, Any]]:
-    """Grade one executed command per §6.6.1, as a plain JSON-able dict.
-
-    The effect contract comes from the workflow's runtime manifest, retained at
-    startup by `runtime_manifest.register_runtime_metadata`. Nothing registered
-    for this workflow, or nothing declared for this command, yields
-    `effect_kind="unknown"` — never `read_only` (§7.3) — and `assess_consequence`
-    floors unknown at high, which is §6.6.1's rule that an absent contract is a
-    reason for more caution rather than less.
-
-    Reversibility and blast radius have no declaration to read anywhere in the
-    manifest schema today, so they stay `unknown` and carry their own floors.
-    Recording a guess is the one failure mode that would produce a clean-looking
-    row and a wrong one.
-    """
-    try:
-        metadata = (
-            runtime_manifest.get_runtime_metadata(workflow_folderpath)
-            if workflow_folderpath
-            else None
-        )
-        effect_kind = (
-            metadata.effect_kind(command_name)
-            if metadata is not None and command_name
-            else "unknown"
-        )
-        return decision_signals.assess_consequence(
-            effect_kind=effect_kind
-        ).model_dump(mode="json")
-    except Exception as exc:
-        logger.warning(f"consequence assessment failed: {exc!r}")
-        return None
-
-
 def context_type(workflow: Any) -> Optional[str]:
     """The name of *workflow*'s active command context, or None. Never raises:
     a capture failure must not fail a turn."""
@@ -1123,7 +1038,7 @@ def capture_attributes(
     *,
     command_name: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Call-id, context type before/after and consequence for one executed command.
+    """Call-id and context type before/after for one executed command.
 
     §12.1.1 requires the dispatch paths to capture the same things, so the
     projection lives here once. All three ``fw.agent.tool_call`` emitters call it
@@ -1136,8 +1051,8 @@ def capture_attributes(
 
     The call id is read off the CommandOutput rather than minted here — the
     dispatcher that ran the command already stamped it, and a second id would join
-    nothing. ``command_name`` overrides what the CommandOutput reports for the
-    direct-action path, where it reports nothing.
+    nothing. ``command_name`` is accepted from callers on the direct-action path
+    but no longer read: the only consumer was the consequence lookup.
     """
     if span is None:
         return {}
@@ -1145,10 +1060,6 @@ def capture_attributes(
         ATTR_COMMAND_CALL_ID: getattr(command_output, "command_call_id", None),
         ATTR_CONTEXT_BEFORE: context_type_before,
         ATTR_CONTEXT_AFTER: context_type(workflow),
-        ATTR_CONSEQUENCE: consequence_assessment(
-            getattr(workflow, "folderpath", None),
-            command_name or getattr(command_output, "command_name", None) or None,
-        ),
     }
 
 

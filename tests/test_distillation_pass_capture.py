@@ -138,7 +138,7 @@ class _ScriptedAgent:
     def __init__(self, chat_session, pending: list[_PassScript]) -> None:
         self._chat_session = chat_session
         self._pending = pending
-        self.current_trajectory: dict = {}
+        self.trajectory: dict = {}
 
     def __call__(self, **_kwargs):
         from fastworkflow.workflow_agent import _execute_workflow_query
@@ -167,7 +167,7 @@ class _ScriptedAgent:
         for command in script.commands:
             _execute_workflow_query(command, self._chat_session)
 
-        self.current_trajectory = {"thought_0": f"scripted: {script.answer}"}
+        self.trajectory = {"thought_0": f"scripted: {script.answer}"}
         if script.fails:
             raise RuntimeError("scripted student pass failure")
         return type(
@@ -191,7 +191,7 @@ def _script_the_llm_boundaries(monkeypatch, ctx, scripts: list[_PassScript]) -> 
         lambda chat_session, **_kwargs: _ScriptedAgent(chat_session, pending),
     )
 
-    def scripted_planner(user_query, session, planning_insights=None, planner_lm=None):
+    def scripted_planner(user_query, session, planner_lm=None, **_):
         # The real planner's hook appends to this list as it plans; the capture
         # is what `_run_agent_pass` records as the pass's plan.
         capture = getattr(session, "_planning_steps_capture", None)

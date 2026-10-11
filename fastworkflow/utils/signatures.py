@@ -1,5 +1,7 @@
 import sys
 import ast
+import inspect
+import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
 import os
 from contextlib import suppress
@@ -716,7 +718,16 @@ Today's date is {today}.
                 return (True, "All required parameters are valid.", {}, [])
 
             try:
-                is_valid, message = self.input_for_param_extraction_class.validate_extracted_parameters(app_workflow, subject_command_name, cmd_parameters)
+                hook = self.input_for_param_extraction_class.validate_extracted_parameters
+                # The command text goes only to a hook that declares `command_text`,
+                # so every existing (workflow, command, cmd_parameters) hook is
+                # called exactly as before.
+                hook_kwargs = (
+                    {"command_text": self.command}
+                    if "command_text" in inspect.signature(hook).parameters
+                    else {}
+                )
+                is_valid, message = hook(app_workflow, subject_command_name, cmd_parameters, **hook_kwargs)
                 if diagnostics is not None:
                     diagnostics["validation_hook"] = {
                         "ran": True,

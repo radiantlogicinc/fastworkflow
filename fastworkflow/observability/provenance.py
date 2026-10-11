@@ -40,7 +40,7 @@ hashes absolute paths plus `(size, mtime_ns)`. That one is correct for
 invalidating a cache and wrong for identifying a workflow; it is recorded
 because §6.3 asks for it, under a name that says which one it is.
 
-Leaf module (arch §22): standard library, Pydantic, and `runtime_manifest` only.
+Leaf module (arch §22): standard library and Pydantic only.
 Values that live behind a non-leaf module — the trained-artifact id and layout
 flag in `train.artifact_versioning`, the legacy fingerprint in
 `command_directory`, DSPy's process-global cache state — are caller-supplied
@@ -61,20 +61,10 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional
 from urllib.parse import urlsplit, urlunsplit
 
-from pydantic import BaseModel, ConfigDict, Field
-
-from fastworkflow.runtime_manifest import (
-    MANIFEST_FILENAME,
-    WORKFLOW_SCOPE_RULE_VERSION,
-    FingerprintVerification,
-    RuntimeMetadata,
-    canonical_content_hash,
-    imported_package_entries,
-    workflow_content_hash,
-)
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Lock files worth hashing, enumerated rather than globbed. Recording *which*
 # were found is itself provenance: a `uv.lock` appearing later should show up as
@@ -402,12 +392,165 @@ def capture_engine_provenance() -> EngineProvenance:
 
 
 # ----------------------------------------------------------------------
+# Content hashing
+# ----------------------------------------------------------------------
+
+
+def canonical_content_hash(entries: Iterable[tuple[str, bytes]]) -> str:
+    """``sha256:<hex>`` over ``(relative path, exact bytes)`` pairs.
+
+    The recipe, written out because being independently recomputable is the
+    point: sort entries by POSIX path; per entry feed the hash the path bytes, a
+    NUL, the decimal content length, a NUL, then the content bytes. The length
+    makes the encoding self-delimiting: with NUL separators alone, one file
+    holding ``b"b\\0c\\0d"`` and two files holding ``b"b"`` and ``b"d"`` would
+    hash identically.
+
+    Absolute paths, paths escaping the root and duplicate paths raise rather than
+    hash. An absolute path makes the value depend on where the tree lives, and a
+    duplicate means the caller's collection lost a file.
+    """
+    normalized: dict[str, bytes] = {}
+    for path, content in entries:
+        posix_path = str(path).replace(os.sep, "/").replace("\\", "/")
+        segments = posix_path.split("/")
+        drive_letter = len(segments[0]) == 2 and segments[0][1] == ":"
+        if not posix_path or posix_path.startswith("/") or drive_letter or ".." in segments:
+            raise ValueError(
+                f"canonical_content_hash requires tree-relative paths; got {path!r}."
+            )
+        if posix_path in normalized:
+            raise ValueError(
+                f"canonical_content_hash received duplicate path {posix_path!r}; "
+                "the caller's collection has lost a file."
+            )
+        normalized[posix_path] = bytes(content)
+
+    digest = hashlib.sha256()
+    for path in sorted(normalized):
+        content = normalized[path]
+        digest.update(path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(len(content)).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(content)
+    return f"sha256:{digest.hexdigest()}"
+
+
+# Which revision of the file-selection rule below produced a hash. Provenance
+# records it beside `workflow_source_hash`: bundles are immutable, so a hash
+# recorded under one rule must not be compared with one from another. Bump it
+# when the selection changes.
+#
+# v1: the rules below, including FRAMEWORK_ARTIFACT_PREFIX and the dot rule.
+# v2 (16 September 2026): a root-level `benchmarks` tree and the runtime store
+#     at the root left the selection. Both accumulate beside a workflow rather
+#     than determining what it does, and benchmarks were routinely git-ignored,
+#     so the identity could not be reproduced from a clean clone.
+WORKFLOW_SCOPE_RULE_VERSION = 2
+
+# What determines what a workflow does: command sources, context models and the
+# guidance markdown that distillation acts on.
+_CONTENT_SUFFIXES: tuple[str, ...] = (".py", ".json", ".md")
+
+# Under a workflow root but not part of its identity. Matched at any depth.
+# Names starting with FRAMEWORK_ARTIFACT_PREFIX (trained artifacts, runtime state)
+# are excluded structurally rather than listed.
+_EXCLUDED_TREES: frozenset[str] = frozenset({"Insights", "__pycache__"})
+_FRAMEWORK_ARTIFACT_PREFIX = "___"
+# Matched directly under the workflow root only: `benchmarks` is an ordinary word,
+# and a command package with that name is source.
+_EXCLUDED_ROOT_TREES: frozenset[str] = frozenset({"benchmarks"})
+# The runtime observability store and its sidecars, at the root only.
+_RUNTIME_STORE_PREFIX = "observability.sqlite3"
+_EXCLUDED_FILES: frozenset[str] = frozenset({
+    "fastworkflow.env",  # local and secret; identical builds differ
+    "fastworkflow.passwords.env",
+    "fastworkflow.env.example",
+    "fastworkflow.passwords.env.example",
+})
+
+
+def workflow_content_entries(workflow_folderpath: str) -> list[tuple[str, bytes]]:
+    """``(relative posix path, bytes)`` for the files that define a workflow.
+
+    Dot-prefixed files and directories are tool bookkeeping, not source, and are
+    skipped; the rest is selected by suffix minus the exclusions above.
+    """
+    root = Path(workflow_folderpath)
+    if not root.is_dir():
+        # os.walk yields nothing for a missing path, so a typo would hash the empty
+        # tree and record a well-formed identity for it.
+        raise ValueError(f"workflow folder does not exist: {workflow_folderpath}")
+
+    entries: list[tuple[str, bytes]] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        at_root = Path(dirpath) == root
+        dirnames[:] = sorted(
+            name for name in dirnames
+            if not name.startswith((".", _FRAMEWORK_ARTIFACT_PREFIX))
+            and name not in _EXCLUDED_TREES
+            and not (at_root and name in _EXCLUDED_ROOT_TREES)
+        )
+        for filename in sorted(filenames):
+            if filename.startswith(".") or (at_root and filename.startswith(_RUNTIME_STORE_PREFIX)):
+                continue
+            full = Path(dirpath) / filename
+            relative = full.relative_to(root).as_posix()
+            if relative in _EXCLUDED_FILES or not relative.endswith(_CONTENT_SUFFIXES):
+                continue
+            entries.append((relative, full.read_bytes()))
+    return entries
+
+
+def imported_package_entries() -> list[tuple[str, bytes]]:
+    """``(path relative to the package's parent, bytes)`` for the imported fastworkflow modules.
+
+    Arch §6.3 asks for the modules a run actually imported, not the checkout: a
+    checkout holds modules a run never loads. A module whose file lies outside the
+    package directory (an editable-install shim, a C extension) is skipped, because
+    it has no stable relative path.
+    """
+    root_module = sys.modules.get("fastworkflow")
+    root_file = getattr(root_module, "__file__", None) if root_module else None
+    if not root_file:
+        return []
+    package_dir = Path(root_file).resolve().parent
+    parent_dir = package_dir.parent
+
+    entries: dict[str, bytes] = {}
+    for name, module in list(sys.modules.items()):
+        if name != "fastworkflow" and not name.startswith("fastworkflow."):
+            continue
+        filename = getattr(module, "__file__", None)
+        if not filename:
+            continue
+        path = Path(filename).resolve()
+        if not path.is_file() or package_dir not in path.parents:
+            continue
+        entries[path.relative_to(parent_dir).as_posix()] = path.read_bytes()
+    return sorted(entries.items())
+
+
+# ----------------------------------------------------------------------
 # Workflow identity
 # ----------------------------------------------------------------------
 
 
+# Fields this record used to carry, from when the workflow's runtime manifest
+# declared a fingerprint and feature modes. Rows written under that schema still
+# load; the values are dropped rather than migrated.
+_RETIRED_WORKFLOW_FIELDS = frozenset({
+    "declared_workflow_fingerprint",
+    "declared_scope_rule_version",
+    "fingerprint_verified",
+    "runtime_manifest_fingerprint",
+    "runtime_feature_snapshot",
+})
+
+
 class WorkflowProvenance(BaseModel):
-    """Which workflow, at which content, with which features on."""
+    """Which workflow, at which content."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -420,18 +563,16 @@ class WorkflowProvenance(BaseModel):
     # bundles immutable, so an old bundle cannot be re-derived under a new rule
     # and a reader that ignores this reports rule changes as workflow drift.
     workflow_scope_rule_version: int = WORKFLOW_SCOPE_RULE_VERSION
-    declared_workflow_fingerprint: Optional[str] = None
-    # The rule the *generator* used, which is why it is recorded separately from
-    # the field above rather than assumed equal to it. Those two disagreeing is
-    # the whole reason `fingerprint_verified` can be None on a workflow that
-    # declared a fingerprint.
-    declared_scope_rule_version: Optional[int] = None
-    fingerprint_verified: Optional[bool] = None
-    runtime_manifest_fingerprint: Optional[str] = None
     command_surface_fingerprint: Optional[str] = None
-    runtime_feature_snapshot: dict[str, str] = Field(default_factory=dict)
     trained_artifact_id: Optional[str] = None
     trained_artifact_legacy_layout: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_retired_fields(cls, data: Any) -> Any:
+        if isinstance(data, Mapping):
+            return {k: v for k, v in data.items() if k not in _RETIRED_WORKFLOW_FIELDS}
+        return data
 
     @property
     def trained(self) -> Optional[bool]:
@@ -449,34 +590,23 @@ class WorkflowProvenance(BaseModel):
         return True if self.trained_artifact_legacy_layout else None
 
 
-def runtime_manifest_fingerprint(workflow_folderpath: str) -> Optional[str]:
-    """Canonical hash of the manifest file itself, or None when absent.
+def workflow_identity(workflow_folderpath: str) -> str:
+    """The workflow's identity: the canonical content hash of its tree on disk.
 
-    Distinct from `workflow_fingerprint`, which the manifest *declares* about
-    the tree. This one identifies the declaration.
+    Shared by provenance and the readiness probe so both name a workflow the
+    same way.
     """
-    path = Path(workflow_folderpath) / MANIFEST_FILENAME
-    try:
-        if not path.is_file():
-            return None
-        return canonical_content_hash([(MANIFEST_FILENAME, path.read_bytes())])
-    except OSError:
-        return None
+    return canonical_content_hash(workflow_content_entries(workflow_folderpath))
 
 
 def capture_workflow_provenance(
     workflow_folderpath: str,
-    metadata: RuntimeMetadata,
     *,
     command_surface_fingerprint: Optional[str] = None,
     trained_artifact_id: Optional[str] = None,
     trained_artifact_legacy_layout: bool = False,
 ) -> WorkflowProvenance:
     """Identity of the workflow this run executed.
-
-    `metadata` is the result of `check_startup_conformance`, so the feature
-    snapshot recorded here is the *effective* post-gating one rather than what
-    the manifest asked for.
 
     The three keyword arguments are caller-supplied because reaching for them
     would make this module depend on command routing and the training stack,
@@ -491,29 +621,9 @@ def capture_workflow_provenance(
     Omitting `trained_artifact_legacy_layout` when the workflow is on the old
     layout records a trained workflow as untrained; see `WorkflowProvenance.trained`.
     """
-    source_hash = workflow_content_hash(workflow_folderpath)
-    declared = metadata.workflow_fingerprint
-    verification = FingerprintVerification(
-        declared=declared,
-        computed=source_hash,
-        declared_scope_rule_version=metadata.workflow_scope_rule_version,
-    )
     return WorkflowProvenance(
-        workflow_source_hash=source_hash,
-        declared_workflow_fingerprint=declared,
-        declared_scope_rule_version=metadata.workflow_scope_rule_version,
-        # None, not False, when the two sides selected different files: a
-        # generator on an older scope rule produces a digest that answers a
-        # different question, and recording that as a failed verification would
-        # be the record asserting drift it has no evidence for. `reproducible`
-        # reads this as `is not False`, so an incomparable pair does not silently
-        # demote a run that is otherwise fully pinned.
-        fingerprint_verified=None if verification.incomparable else (
-            None if declared is None else verification.matches
-        ),
-        runtime_manifest_fingerprint=runtime_manifest_fingerprint(workflow_folderpath),
+        workflow_source_hash=workflow_identity(workflow_folderpath),
         command_surface_fingerprint=command_surface_fingerprint,
-        runtime_feature_snapshot=dict(metadata.feature_modes),
         trained_artifact_id=trained_artifact_id,
         trained_artifact_legacy_layout=trained_artifact_legacy_layout,
     )
@@ -577,10 +687,9 @@ def capture_model_provenance(
     `env` takes a mapping rather than reading `os.environ`, because none of
     these variables are in the OS environment in a normal deployment — they are
     loaded from the workflow's env files into `fastworkflow._env_vars`. A leaf
-    may not reach for that, so callers pass
-    `runtime_manifest.deployment_env(fastworkflow._env_vars)`; reading
-    `os.environ` alone would capture nothing and record it as "no models
-    configured".
+    may not reach for that, so callers pass the env-file values merged with
+    `os.environ`; reading `os.environ` alone would capture nothing and record it
+    as "no models configured".
 
     `cache_enabled` is caller-supplied because DSPy's cache is process-global
     state (`dspy.settings`), not configuration this module can see. Pass it: a
@@ -731,9 +840,8 @@ class RuntimeProvenance(BaseModel):
     def reproducible(self) -> bool:
         """Whether the *code and models* this run used are pinned by this record.
 
-        Requires a known-clean revision, a declared fingerprint that verified
-        (or none declared — `workflow_source_hash` pins the tree either way),
-        and a cache known to be off.
+        Requires a known-clean revision and a cache known to be off. The
+        workflow is pinned by `workflow_source_hash`.
 
         Every condition demands a positive answer, never merely the absence of a
         negative. `cache_enabled` defaults to None, so accepting "not False"
@@ -746,14 +854,12 @@ class RuntimeProvenance(BaseModel):
         """
         return (
             self.engine.reproducible
-            and self.workflow.fingerprint_verified is not False
             and self.models.evidence_about_the_model is True
         )
 
 
 def capture_runtime_provenance(
     workflow_folderpath: str,
-    metadata: RuntimeMetadata,
     *,
     env: Optional[Mapping[str, str]] = None,
     command_surface_fingerprint: Optional[str] = None,
@@ -776,7 +882,6 @@ def capture_runtime_provenance(
         engine=capture_engine_provenance(),
         workflow=capture_workflow_provenance(
             workflow_folderpath,
-            metadata,
             command_surface_fingerprint=command_surface_fingerprint,
             trained_artifact_id=trained_artifact_id,
             trained_artifact_legacy_layout=trained_artifact_legacy_layout,

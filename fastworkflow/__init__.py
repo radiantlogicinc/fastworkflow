@@ -1,3 +1,8 @@
+import sys as _sys
+# dspy imported first leaves a lazy `openai` stand-in that breaks litellm's import;
+# touching it loads the real package. Only then, so `import fastworkflow` stays light.
+if "dspy" in _sys.modules and "openai" in _sys.modules:
+    _sys.modules["openai"].__version__
 import contextlib
 from dataclasses import dataclass
 from datetime import datetime
@@ -442,7 +447,6 @@ __all__ = (
     "Workflow",
     "WorkflowExecutionContext",
     "active_workflow",
-    "agent_runtime",
     "chat_session",
     "clear_workflow_stack",
     "context_budget",
@@ -464,7 +468,6 @@ __all__ = (
     "os",
     "pop_active_workflow",
     "push_active_workflow",
-    "runtime_manifest",
     "session_state_store",
     "state_paths",
     "state_serialization",
@@ -472,7 +475,6 @@ __all__ = (
     "time",
     "tracing",
     "turn",
-    "turn_plan",
     "utils",
     "workflow",
     "workflow_execution_context",

@@ -10,6 +10,11 @@ from fastworkflow.build.genai_postprocessor import GenAIPostProcessor, run_genai
 from fastworkflow.build.class_analysis_structures import ClassInfo, MethodInfo
 
 
+def _fake_env_var(name, *args, **kwargs):
+    """get_env_var stub: numeric for the LLM timeout get_lm() float()s, 'test_value' otherwise."""
+    return '120' if name == 'LLM_TIMEOUT_SECONDS' else 'test_value'
+
+
 class TestGenAIPostProcessorIntegrationUpdated(unittest.TestCase):
     """Test the integration of GenAI postprocessor with LibCST-based implementation."""
     
@@ -82,7 +87,7 @@ class ResponseGenerator:
     @patch('fastworkflow.get_env_var')
     def test_end_to_end_processing(self, mock_get_env):
         """Test end-to-end processing of a workflow."""
-        mock_get_env.return_value = 'test_value'
+        mock_get_env.side_effect = _fake_env_var
         
         # Create classes dict
         classes = {
@@ -128,7 +133,7 @@ class ResponseGenerator:
     @patch('fastworkflow.get_env_var')
     def test_run_genai_postprocessor_function(self, mock_get_env):
         """Test the run_genai_postprocessor function."""
-        mock_get_env.return_value = 'test_value'
+        mock_get_env.side_effect = _fake_env_var
         
         # Create classes dict
         classes = {
@@ -157,7 +162,7 @@ class ResponseGenerator:
     @patch('fastworkflow.get_env_var')
     def test_skip_genai_flag(self, mock_get_env):
         """Test that the skip_genai flag works."""
-        mock_get_env.return_value = 'test_value'
+        mock_get_env.side_effect = _fake_env_var
         
         # Create classes dict
         classes = {
@@ -186,7 +191,7 @@ class ResponseGenerator:
     @patch('fastworkflow.get_env_var')
     def test_error_handling(self, mock_get_env):
         """Test error handling in the processor."""
-        mock_get_env.return_value = 'test_value'
+        mock_get_env.side_effect = _fake_env_var
         
         with patch('fastworkflow.build.genai_postprocessor.dspy.LM'), \
              patch('fastworkflow.build.genai_postprocessor.dspy.context', new=lambda *args, **kwargs: contextlib.nullcontext()), \

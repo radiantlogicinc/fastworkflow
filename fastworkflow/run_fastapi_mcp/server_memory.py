@@ -41,6 +41,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
 from dspy.clients import base_lm
 from litellm import ModelResponse

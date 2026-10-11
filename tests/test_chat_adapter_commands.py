@@ -276,3 +276,25 @@ def test_the_json_retry_keeps_the_commands_out_of_the_user_message():
 
     assert formatted[0]["role"] == "system" and "real_command_a" in formatted[0]["content"]
     assert all("real_command_a" not in m["content"] for m in formatted[1:])
+
+
+def test_a_reply_with_leaked_thinking_is_parsed_after_the_thinking():
+    import dspy
+    from fastworkflow.utils.chat_adapter import (
+        CommandsSystemPreludeAdapter, CommandsSystemPreludeJSONAdapter)
+
+    class Plan(dspy.Signature):
+        user_query: str = dspy.InputField()
+        next_steps: str = dspy.OutputField()
+
+    reply = ("Let me sketch the format:\n[[ ## next_steps ## ]]\n1. ...\n2. ...\n"
+             "[[ ## completed ## ]]\nNow produce.\n</think>\n"
+             "[[ ## next_steps ## ]]\n1. open_item_explorer\n2. find_person Jane Roe\n"
+             "[[ ## completed ## ]]")
+
+    parsed = CommandsSystemPreludeAdapter().parse(Plan, reply)
+    assert parsed["next_steps"] == "1. open_item_explorer\n2. find_person Jane Roe"
+
+    json_reply = 'thinking {"next_steps": "1. ..."} </think>{"next_steps": "1. open_item_explorer"}'
+    parsed = CommandsSystemPreludeJSONAdapter("Commands").parse(Plan, json_reply)
+    assert parsed["next_steps"] == "1. open_item_explorer"

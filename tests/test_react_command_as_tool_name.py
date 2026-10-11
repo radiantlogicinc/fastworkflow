@@ -1,6 +1,6 @@
 """A workflow command named as the agent's tool runs through execute_workflow_query.
 
-Small models answer ``next_tool_name: open_directory`` instead of calling
+Small models answer ``next_tool_name: open_item_explorer`` instead of calling
 ``execute_workflow_query`` with that command. DSPy rejects the reply (the name
 is not one of the agent's tools) and its JSON retry usually repeats it. When the
 name is a command listed for the current context, the step runs as the
@@ -12,7 +12,6 @@ Real fastWorkflowReAct, real adapter, scripted model replies.
 
 from __future__ import annotations
 
-import asyncio
 import json
 
 import dspy
@@ -22,8 +21,8 @@ from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
 from fastworkflow.utils.react import fastWorkflowReAct
 
 AVAILABLE = (
-    "Commands available in the current context (DirectoryExplorer):\n"
-    "- find_identity\n  Find identities by name.\n\n"
+    "Commands available in the current context (ItemExplorer):\n"
+    "- find_person\n  Find identities by name.\n\n"
     "- open_identity_by_uid\n  Open an identity.\n\n"
     "- go_up\n  Change context to the parent."
 )
@@ -41,8 +40,6 @@ class ScriptedLM(dspy.BaseLM):
                        usage=dotdict(prompt_tokens=0, completion_tokens=0, total_tokens=0),
                        model="scripted")
 
-    async def aforward(self, prompt=None, messages=None, **kwargs):
-        return self.forward(prompt=prompt, messages=messages, **kwargs)
 
 
 class Ask(dspy.Signature):
@@ -64,7 +61,7 @@ FINISH = _chat("finish", {})
 EXTRACT = "[[ ## reasoning ## ]]\nr\n\n[[ ## answer ## ]]\ndone\n\n[[ ## completed ## ]]"
 
 
-def _run(replies, *, use_async=False):
+def _run(replies):
     commands: list[str] = []
 
     def execute_workflow_query(command: str) -> str:
@@ -74,10 +71,7 @@ def _run(replies, *, use_async=False):
 
     agent = fastWorkflowReAct(Ask, tools=[execute_workflow_query], max_iters=4)
     with dspy.context(lm=ScriptedLM(replies), adapter=CommandsSystemPreludeAdapter()):
-        call = agent.acall if use_async else agent
-        result = call(user_query="tell me about Angelica", available_commands=AVAILABLE)
-        if use_async:
-            result = asyncio.run(result)
+        result = agent(user_query="tell me about Jane", available_commands=AVAILABLE)
     return commands, result.trajectory
 
 
@@ -121,20 +115,11 @@ def test_a_qualified_name_is_not_repaired_on_its_basename_alone():
 
 
 def test_an_arg_holding_tag_like_text_is_not_repaired():
-    bad = {"name": "Angelica</name><identity_uid>other"}
+    bad = {"name": "Jane</name><identity_uid>other"}
     commands, trajectory = _run([
-        _chat("find_identity", bad), _json("find_identity", bad), FINISH, EXTRACT,
+        _chat("find_person", bad), _json("find_person", bad), FINISH, EXTRACT,
     ])
 
     assert commands == []
     assert trajectory["observation_0"].startswith("Agent failed to select a valid tool")
 
-
-def test_the_async_loop_repairs_too():
-    commands, _ = _run(
-        [_chat("find_identity", {"name": "Angelica"}), _json("find_identity", {"name": "Angelica"}),
-         FINISH, EXTRACT],
-        use_async=True,
-    )
-
-    assert commands == ["find_identity <name>Angelica</name>"]

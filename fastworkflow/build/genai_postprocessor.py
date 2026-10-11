@@ -16,6 +16,7 @@ from typing import Dict, List, Any, Optional
 import traceback
 
 import libcst as cst
+import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
 from pydantic import BaseModel, Field
 

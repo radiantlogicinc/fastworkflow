@@ -190,8 +190,118 @@ function tmBubble(role, text) {
   return msg;
 }
 
+/* GFM table: a header row, a | --- | rule, then body rows. Pipes inside
+   `code` or escaped as \| stay in the cell. Cells are text nodes [R22]. */
+function splitTableRow(line) {
+  var raw = String(line).replace(/\r$/, "").trim();
+  if (raw.charAt(0) === "|") { raw = raw.slice(1); }
+  if (raw.charAt(raw.length - 1) === "|" &&
+      !(raw.length >= 2 && raw.charAt(raw.length - 2) === "\\")) {
+    raw = raw.slice(0, -1);
+  }
+  var cells = [];
+  var buf = "";
+  var inCode = false;
+  var j, ch;
+  for (j = 0; j < raw.length; j++) {
+    ch = raw.charAt(j);
+    if (ch === "`") {
+      inCode = !inCode;
+      buf += ch;
+      continue;
+    }
+    if (!inCode && ch === "\\" && raw.charAt(j + 1) === "|") {
+      buf += "|";
+      j += 1;
+      continue;
+    }
+    if (!inCode && ch === "|") {
+      cells.push(buf.trim());
+      buf = "";
+      continue;
+    }
+    buf += ch;
+  }
+  cells.push(buf.trim());
+  return cells;
+}
+function isTableRuleCell(cell) {
+  return /^:?-{3,}:?$/.test(cell);
+}
+function tableAlignments(line) {
+  if (String(line).indexOf("|") < 0) { return null; }
+  var cells = splitTableRow(line);
+  var i;
+  if (!cells.length) { return null; }
+  for (i = 0; i < cells.length; i++) {
+    if (!isTableRuleCell(cells[i])) { return null; }
+  }
+  return cells.map(function (cell) {
+    var left = cell.charAt(0) === ":";
+    var right = cell.charAt(cell.length - 1) === ":";
+    if (left && right) { return "center"; }
+    if (right) { return "right"; }
+    return left ? "left" : "";
+  });
+}
+function tableAt(lines, index) {
+  if (index + 1 >= lines.length) { return false; }
+  if (String(lines[index]).indexOf("|") < 0) { return false; }
+  if (tableAlignments(lines[index])) { return false; }
+  var align = tableAlignments(lines[index + 1]);
+  return !!(align && splitTableRow(lines[index]).length);
+}
+function hasMarkdownTable(text) {
+  var lines = String(text).split("\n");
+  var i;
+  for (i = 0; i < lines.length - 1; i++) {
+    if (tableAt(lines, i)) { return true; }
+  }
+  return false;
+}
+function appendTable(container, lines, index) {
+  var align = tableAlignments(lines[index + 1]) || [];
+  var headers = splitTableRow(lines[index]);
+  var width = Math.max(headers.length, align.length);
+  var wrap = el("div", "mdTable");
+  var table = el("table");
+  var thead = el("thead");
+  var headRow = el("tr");
+  var c;
+  for (c = 0; c < width; c++) {
+    var th = el("th", align[c] ? ("align-" + align[c]) : null);
+    th.setAttribute("scope", "col");
+    appendInline(th, headers[c] || "");
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+  var tbody = el("tbody");
+  var i = index + 2;
+  while (i < lines.length && String(lines[i]).trim() && !tableAt(lines, i)) {
+    if (String(lines[i]).indexOf("|") < 0) { break; }
+    if (tableAlignments(lines[i])) { break; }
+    var cells = splitTableRow(lines[i]);
+    var row = el("tr");
+    var n = Math.max(width, cells.length);
+    for (c = 0; c < n; c++) {
+      var td = el("td", align[c] ? ("align-" + align[c]) : null);
+      appendInline(td, cells[c] || "");
+      row.appendChild(td);
+    }
+    tbody.appendChild(row);
+    i += 1;
+  }
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  container.appendChild(wrap);
+  return i;
+}
+
 function looksLikeMarkdown(text) {
-  return /(^|\n)\s{0,3}#{1,6}\s/.test(text) ||
+  text = String(text == null ? "" : text).replace(/\r\n?/g, "\n");
+  return hasMarkdownTable(text) ||
+    /(^|\n)\s{0,3}#{1,6}\s/.test(text) ||
     /(^|\n)\s{0,3}(?:[-*+]|\d+\.)\s/.test(text) ||
     /```/.test(text) ||
     /\*\*[^*]+\*\*/.test(text) ||
@@ -308,7 +418,7 @@ function startsBlock(line) {
 }
 
 function appendMarkdown(container, text) {
-  text = String(text == null ? "" : text);
+  text = String(text == null ? "" : text).replace(/\r\n?/g, "\n");
   if (!looksLikeMarkdown(text)) {
     container.appendChild(document.createTextNode(text));
     return;
@@ -337,6 +447,10 @@ function appendMarkdown(container, text) {
       appendInline(h, heading[2]);
       container.appendChild(h);
       i += 1;
+      continue;
+    }
+    if (tableAt(lines, i)) {
+      i = appendTable(container, lines, i);
       continue;
     }
     if (isListLine(line, false) || isListLine(line, true)) {
@@ -372,7 +486,8 @@ function appendMarkdown(container, text) {
       continue;
     }
     var para = [];
-    while (i < lines.length && lines[i].trim() && !startsBlock(lines[i])) {
+    while (i < lines.length && lines[i].trim() && !startsBlock(lines[i]) &&
+        !tableAt(lines, i)) {
       para.push(lines[i]);
       i += 1;
     }

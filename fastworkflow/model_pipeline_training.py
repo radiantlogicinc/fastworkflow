@@ -367,7 +367,7 @@ def analyze_model_confidence(model, test_loader, device, model_name=""):
     return stats, all_confidences, all_predictions, all_labels, failed_cases
 
 # ---------------------------------------------------------------------------
-# R3 (ido-8ps.25): tier threshold vs ambiguity threshold must not collapse.
+# R3: tier threshold vs ambiguity threshold must not collapse.
 #
 # `ModelPipeline.predict` escalates to the large model when
 # `confidence < confidence_threshold` (the TIER threshold), and
@@ -376,7 +376,7 @@ def analyze_model_confidence(model, test_loader, device, model_name=""):
 # or below its tier threshold, every prediction the tiny tier keeps is by
 # construction above the ambiguity threshold, so the tier can never report an
 # ambiguity: it either escalates or resolves outright, and a wrong resolution is
-# silent. Measured on IDO's published router 20260905T132341Z-a0605e this held in
+# silent. Measured on a published router 20260905T132341Z-a0605e this held in
 # ALL 18 trained contexts (7 of them with the two files byte-identical), because
 # `find_optimal_threshold` sweeps upward from `tiny_stats['failed']['mean']` while
 # the writer used that same failed-mean as the ambiguity threshold.
@@ -394,7 +394,7 @@ def analyze_model_confidence(model, test_loader, device, model_name=""):
 # 0.05 is far above float noise and narrow enough not to undo a deliberately high
 # tier threshold.
 #
-# CEILING (ido-ik6) — `MAX_AMBIGUITY_THRESHOLD` exists so a context can still resolve
+# CEILING — `MAX_AMBIGUITY_THRESHOLD` exists so a context can still resolve
 # a single label: an ambiguity threshold at 1.0 would make `confidence >
 # ambiguous_threshold` unsatisfiable. It is a *resolvability* cap, not a second
 # invariant, so it must never be allowed to pull the ambiguity threshold down to or

@@ -12,10 +12,7 @@ leave it on so a secret is not written to disk. Each archived observation
 records which mode produced it, so an archive stays auditable about its own
 fidelity.
 
-The process that wrote a redacted row keeps its raw text in memory while the
-turn is live, so its own reads are exact; that is the subject of
-``test_offload_seal_timing``. The claims here about STORED text are made after
-that memory is released, which is what any other process sees.
+Every read, in every process, returns the stored text.
 
 The claims are made in BYTES wherever a leak is the thing being denied: every
 scan opens the database (and its write-ahead log) and searches the raw bytes.
@@ -39,12 +36,10 @@ from fastworkflow.observation_offloading.archive import (
     RuntimeHandleScope,
     redaction_mode,
 )
-from fastworkflow.observation_offloading.compact import archive_execute_observations
+from fastworkflow.observation_offloading.compact import archive_step
 from fastworkflow.observation_offloading.state import (
-    archived_digest,
-    reclaim_scope,
-    reset_runtime_state,
-    stored_handles,
+    reset_observation_state,
+    snapshot_events,
 )
 
 REDACTION_ENV = archive_module.REDACTION_ENV
@@ -86,15 +81,13 @@ def innocent_response() -> str:
 def chatbot_scope(channel: str = "chat", turn: str = "turn-1") -> RuntimeHandleScope:
     """A scope exactly as ``scope_for_host`` builds it with no experiment claim."""
     return RuntimeHandleScope(
-        store_identity="store", channel_id=channel, experiment_id="unbound",
-        task_id="unbound", attempt=0, turn_key=turn,
+        channel_id=channel, turn_key=turn,
     )
 
 
 def experiment_scope(channel: str = "chat", turn: str = "turn-1") -> RuntimeHandleScope:
     return RuntimeHandleScope(
-        store_identity="store", channel_id=channel, experiment_id="exp-7",
-        task_id="task-3", attempt=1, turn_key=turn,
+        channel_id=channel, turn_key=turn,
     )
 
 
@@ -102,8 +95,8 @@ class RedactionFixture(unittest.TestCase):
     """An observability database in a temporary directory, clean configuration."""
 
     def setUp(self) -> None:
-        reset_runtime_state()
-        self.addCleanup(reset_runtime_state)
+        reset_observation_state()
+        self.addCleanup(reset_observation_state)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self._restore_env: dict[str, str | None] = {}
@@ -142,17 +135,14 @@ class RedactionFixture(unittest.TestCase):
                     blob += handle.read()
         return blob
 
-    def persist(self, text: str, *, scope=None, alias: str = "O1", release: bool = True):
-        """Archive *text*; by default end the turn, so reads return what is stored."""
+    def persist(self, text: str, *, scope=None, alias: str = "O1"):
+        """Archive *text* and return the archive with the row it stores."""
         scope = scope or chatbot_scope()
         archive = RuntimeHandleArchive(self.db_path)
         archive.persist(
-            scope, alias=alias, offload_order=1,
-            command_name="execute_workflow_query", step_index=1,
+            scope, alias=alias, command_name="execute_workflow_query", step_index=1,
             text=text, text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         )
-        if release:
-            reclaim_scope(scope)
         return archive, archive.get(scope, alias)
 
 
@@ -179,7 +169,7 @@ class DefaultIsOnTests(RedactionFixture):
         """The warning is not the point; what it falls back to is."""
         os.environ[REDACTION_ENV] = "yes-please"
         with self.assertLogs(archive_module.logger, level="WARNING"):
-            self.persist(response_with_credential(), release=False)
+            self.persist(response_with_credential())
         self.assertNotIn(SK_TOKEN.encode("ascii"), self.file_bytes())
         record = RuntimeHandleArchive(self.db_path).capture_record(chatbot_scope(), "O1")
         self.assertEqual(record["redaction"], REDACTION_ON)
@@ -222,8 +212,8 @@ class StoredBytesTests(RedactionFixture):
         blob = self.file_bytes()
         self.assertIn(SK_TOKEN.encode("ascii"), blob)
         self.assertIn(ENV_SECRET.encode("ascii"), blob)
-        # And the archive reproduces the observation exactly, even with no raw
-        # copy in memory, which is the reason a developer turns the toggle off.
+        # And the archive reproduces the observation exactly, which is the
+        # reason a developer turns the toggle off.
         self.assertEqual(stored["text"], text)
         self.assertEqual(archive.get(chatbot_scope(), "O1")["text"], text)
 
@@ -231,17 +221,15 @@ class StoredBytesTests(RedactionFixture):
         text = innocent_response()
         for mode in (REDACTION_ON, REDACTION_OFF):
             with self.subTest(mode=mode):
-                reset_runtime_state()
+                reset_observation_state()
                 os.environ[REDACTION_ENV] = mode
                 db_path = os.path.join(self.temp.name, f"{mode}.sqlite3")
                 archive = RuntimeHandleArchive(db_path)
                 digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
                 archive.persist(
-                    chatbot_scope(), alias="O1", offload_order=1,
-                    command_name="execute_workflow_query", step_index=1,
+                    chatbot_scope(), alias="O1", command_name="execute_workflow_query", step_index=1,
                     text=text, text_sha256=digest,
                 )
-                reclaim_scope(chatbot_scope())
                 stored = archive.get(chatbot_scope(), "O1")
                 self.assertEqual(stored["text"], text)
                 self.assertEqual(stored["text_sha256"], digest)
@@ -272,11 +260,9 @@ class CaptureRecordTests(RedactionFixture):
 
     def test_a_redacted_row_is_distinguishable_from_one_with_no_secret(self) -> None:
         """The requirement the redaction mode alone does not meet."""
-        archive, _ = self.persist(response_with_credential(), alias="O1",
-                                  release=False)
+        archive, _ = self.persist(response_with_credential(), alias="O1")
         archive.persist(
-            chatbot_scope(), alias="O2", offload_order=2,
-            command_name="execute_workflow_query", step_index=2,
+            chatbot_scope(), alias="O2", command_name="execute_workflow_query", step_index=2,
             text=innocent_response(),
             text_sha256=hashlib.sha256(
                 innocent_response().encode("utf-8")
@@ -310,28 +296,24 @@ class CaptureRecordTests(RedactionFixture):
             RuntimeHandleArchive(self.db_path).capture_record(chatbot_scope(), "O404")
         )
 
-    def test_the_record_describes_the_bytes_that_were_actually_kept(self) -> None:
-        """A second persist of the same alias does not rewrite either half.
+    def test_a_second_persist_under_a_changed_toggle_is_a_collision(self) -> None:
+        """Insert-or-nothing keeps the first row; its bytes and record stand.
 
-        The row was written under redaction ``off``. Turning the toggle on
-        afterwards and re-persisting the SAME text must not change either the
-        bytes or the record that describes them, because ``persist`` is
-        insert-or-nothing. It is also not a collision -- it is the same
-        observation -- so it is allowed rather than refused.
+        The row was written under redaction ``off``. Re-persisting the same text
+        under ``on`` stores different bytes, so the stored digests differ and the
+        write is refused rather than rewriting either half of the row.
         """
         os.environ[REDACTION_ENV] = REDACTION_OFF
         archive, _ = self.persist(response_with_credential())
         os.environ[REDACTION_ENV] = REDACTION_ON
-        again = archive.persist(
-            chatbot_scope(), alias="O1", offload_order=1,
-            command_name="execute_workflow_query", step_index=1,
-            text=response_with_credential(),
-            text_sha256=hashlib.sha256(
-                response_with_credential().encode("utf-8")
-            ).hexdigest(),
-        )
-        self.assertEqual(again["text"], response_with_credential())
-        reclaim_scope(chatbot_scope())
+        with self.assertRaises(PersistenceError):
+            archive.persist(
+                chatbot_scope(), alias="O1", command_name="execute_workflow_query", step_index=1,
+                text=response_with_credential(),
+                text_sha256=hashlib.sha256(
+                    response_with_credential().encode("utf-8")
+                ).hexdigest(),
+            )
         self.assertEqual(
             archive.get(chatbot_scope(), "O1")["text"], response_with_credential()
         )
@@ -339,22 +321,15 @@ class CaptureRecordTests(RedactionFixture):
             archive.capture_record(chatbot_scope(), "O1")["redaction"], REDACTION_OFF
         )
 
-    def test_a_different_text_under_one_alias_is_still_a_collision(self) -> None:
-        """Refused while the raw copy is held, and after it is released."""
+    def test_a_different_text_under_one_alias_is_a_collision(self) -> None:
+        archive, _ = self.persist(response_with_credential())
         other = "an entirely different observation\n"
-        for release in (False, True):
-            with self.subTest(released=release):
-                reset_runtime_state()
-                scope = chatbot_scope(turn=f"turn-{release}")
-                archive, _ = self.persist(response_with_credential(), scope=scope,
-                                          release=release)
-                with self.assertRaises(PersistenceError):
-                    archive.persist(
-                        scope, alias="O1", offload_order=1,
-                        command_name="execute_workflow_query", step_index=1,
-                        text=other,
-                        text_sha256=hashlib.sha256(other.encode("utf-8")).hexdigest(),
-                    )
+        with self.assertRaises(PersistenceError):
+            archive.persist(
+                chatbot_scope(), alias="O1", command_name="execute_workflow_query", step_index=1,
+                text=other,
+                text_sha256=hashlib.sha256(other.encode("utf-8")).hexdigest(),
+            )
 
 
 class DigestMeaningTests(RedactionFixture):
@@ -364,8 +339,7 @@ class DigestMeaningTests(RedactionFixture):
         archive = RuntimeHandleArchive(self.db_path)
         with self.assertRaises(PersistenceError):
             archive.persist(
-                chatbot_scope(), alias="O1", offload_order=1,
-                command_name="execute_workflow_query", step_index=1,
+                chatbot_scope(), alias="O1", command_name="execute_workflow_query", step_index=1,
                 text=response_with_credential(),
                 text_sha256=hashlib.sha256(b"something else").hexdigest(),
             )
@@ -394,26 +368,16 @@ class DigestMeaningTests(RedactionFixture):
             "tool_args_0": {"command": "show_connector"},
             "observation_0": text,
         }
-        archived = archive_execute_observations(
-            trajectory, scope=scope, selected_archive=archive
-        )
+        self.assertTrue(archive_step(trajectory, 0, scope=scope, selected_archive=archive))
         raw_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        self.assertEqual([row["alias"] for row in archived], ["O1"])
-        # The archiver's own record of "this text is already written" is the
-        # digest of what the COMMAND returned, unchanged by redaction. It is an
-        # idempotence key; computing it from the stored bytes would make the
-        # archiver rewrite every step at every step.
-        self.assertEqual(archived[0]["text_sha256"], raw_digest)
-        self.assertEqual(archived_digest(scope, "O1"), raw_digest)
-        # While the turn is live this process reads the raw text with its raw
-        # digest, so the hot copy, the archive read and the agent's prompt agree.
-        self.assertEqual(archive.get(scope, "O1")["text_sha256"], raw_digest)
-        self.assertEqual(stored_handles(scope)["O1"]["text"], text)
-        # The file never held the raw text.
+        # The event names the digest of what the COMMAND returned, unchanged by
+        # redaction; the row keeps the digest of its redacted bytes.
+        (event,) = [e for e in snapshot_events() if e["kind"] == "observation_archived"]
+        self.assertEqual(event["text_sha256"], raw_digest)
+        # The file never held the raw text, and the row's digest covers the
+        # redacted bytes it keeps.
         self.assertNotIn(SK_TOKEN.encode("ascii"), self.file_bytes())
-        # And once the turn is over the archive's digest covers what it kept.
-        reclaim_scope(scope)
-        stored = archive.get(scope, "O1")
+        stored = archive.get(scope, "O0")
         self.assertNotEqual(stored["text_sha256"], raw_digest)
         self.assertEqual(
             stored["text_sha256"],
@@ -431,13 +395,9 @@ class DigestMeaningTests(RedactionFixture):
             "tool_args_0": {"command": "show_connector"},
             "observation_0": text,
         }
-        archive_execute_observations(
-            trajectory, scope=scope, selected_archive=archive
-        )
+        self.assertTrue(archive_step(trajectory, 0, scope=scope, selected_archive=archive))
         raw_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        self.assertEqual(archived_digest(scope, "O1"), raw_digest)
-        self.assertEqual(archive.get(scope, "O1")["text_sha256"], raw_digest)
-        self.assertEqual(stored_handles(scope)["O1"]["text_sha256"], raw_digest)
+        self.assertEqual(archive.get(scope, "O0")["text_sha256"], raw_digest)
 
 
 class ErasureStillWorksTests(RedactionFixture):
@@ -455,7 +415,6 @@ class ErasureStillWorksTests(RedactionFixture):
         self.assertIsNone(archive.capture_record(scope, "O1"))
         blob = self.file_bytes()
         self.assertNotIn(b"okta-prod", blob)
-        self.assertNotIn(scope.scope_id.encode("ascii"), blob)
 
     def test_an_experiment_scope_is_erased_like_any_other(self) -> None:
         experiment = experiment_scope("exp-channel")

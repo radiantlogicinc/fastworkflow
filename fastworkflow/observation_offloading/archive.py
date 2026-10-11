@@ -1,8 +1,8 @@
 """Turn-scoped archive for persist-before-label offloads.
 
 The evidence lives in the workflow's own observability database, in the
-``offload_evidence`` and ``offload_subjects`` tables that
-``observability.store`` creates with the rest of its schema. Each row is keyed
+``offload_evidence`` table that ``observability.store`` creates with the rest of
+its schema. Each row is keyed
 by the TURN that produced it and carries that turn's channel id, exactly like a
 span or an artifact, so the evidence lives and dies with its turn: this module
 writes and reads rows and never deletes them, and ``ObservabilityStore``'s
@@ -17,16 +17,8 @@ and ``off`` stores the response verbatim. Every row records which of the two
 produced it, whether the stored bytes differ from what the command returned,
 and how many bytes it returned.
 
-Redacting at the write would change what an agent reads back mid-turn, so the
-RAW text of every row whose stored bytes differ is also kept in this process's
-memory for as long as its turn is live. Every in-flight read this process makes
--- the trajectory's own hot cache, ``search_memory``, answer rehydration -- is
-therefore exact. That memory is released with the rest of the turn's process
-state, by ``state.release_scope``, at the moments the runtime already decides a
-turn is over (``StructuredContinuationReAct.bind_scope``,
-``WorkflowExecutionContext._reclaim_offloading_scope`` and
-``agent_runtime.reclaim_scope``). A turn resumed in a DIFFERENT process has no
-such memory and reads the stored, redacted text; that is accepted.
+Every reader, in every process, gets the stored (redacted) text back: there is
+no process-local copy of an observation to read in its place.
 """
 from __future__ import annotations
 
@@ -37,7 +29,7 @@ import os
 import sqlite3
 import threading
 from contextlib import closing
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping, Optional
 
@@ -59,7 +51,7 @@ ALIAS_COLLISION_MESSAGE = (
 
 
 # ---------------------------------------------------------------------------
-# Redaction policy (ido-zlm)
+# Redaction policy
 # ---------------------------------------------------------------------------
 
 REDACTION_ENV = "FW_OFFLOAD_EVIDENCE_REDACTION"
@@ -140,40 +132,10 @@ def capture_record_for(text: str, *, mode: Optional[str] = None) -> tuple[str, d
     return stored, record
 
 
-# ---------------------------------------------------------------------------
-# The live turn's raw copies
-# ---------------------------------------------------------------------------
-
-_live_lock = threading.Lock()
-#: ``scope_id -> {(db_path, alias): raw copy}`` for every row this process
-#: wrote whose stored bytes differ from what the command returned. Each copy is
-#: ``{"text", "text_sha256", "stored_sha256"}``; ``stored_sha256`` ties it to
-#: the exact row it shadows, so a copy never overlays a row it did not write.
-#: Keyed by scope id because that is the unit ``state.release_scope`` releases.
-_live_raw: dict[str, dict[tuple[str, str], dict[str, str]]] = {}
-
-
-def release_live_raw(scope_id: str) -> None:
-    """Forget the raw copies of one scope's redacted observations."""
-    with _live_lock:
-        _live_raw.pop(str(scope_id), None)
-
-
-def clear_live_raw() -> None:
-    """Forget every raw copy this process holds."""
-    with _live_lock:
-        _live_raw.clear()
-
-
 #: How long an event write waits for the database lock before it is dropped.
 #: Events are diagnostics: a turn must never stall behind one, so this is far
 #: shorter than the evidence writes' wait.
 EVENT_WRITE_TIMEOUT_SECONDS = 0.5
-
-#: How long ``list_summaries`` waits for the database lock. It only feeds a
-#: suggestion printed beside an answer that is already complete, so it gives
-#: up on the same terms as an event write rather than the evidence writes' 30 s.
-SUMMARY_READ_TIMEOUT_SECONDS = 0.5
 
 
 def _utc_now() -> str:
@@ -182,47 +144,10 @@ def _utc_now() -> str:
 
 @dataclass(frozen=True)
 class RuntimeHandleScope:
-    """One turn's identity inside this process.
+    """One turn's identity: the channel and turn key that key its evidence rows."""
 
-    ``scope_id`` keys every process-local cache of the offloading runtime and
-    travels with a suspended turn, so the dataclass keeps all six fields. What
-    is PERSISTED is narrower: ``turn_key`` and ``channel_id`` key and erase
-    the evidence rows, and ``scope_id`` is stored beside them only so an
-    erasure can reach this process's caches.
-
-    Every read and subject write matches the channel as well as the turn key,
-    so a scope pairing another channel with this turn's key reads nothing and
-    cannot replace this channel's subjects; persisting under it collides.
-    """
-
-    store_identity: str
     channel_id: str
-    experiment_id: str
-    task_id: str
-    attempt: int
     turn_key: str
-
-    @property
-    def scope_id(self) -> str:
-        encoded = json.dumps(
-            asdict(self),
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        return hashlib.sha256(encoded).hexdigest()
-
-
-def is_broad_scope(scope: RuntimeHandleScope) -> bool:
-    """Whether *scope* is keyed by something wider than one turn.
-
-    The process-default scope and the between-turns fallback both use the
-    channel (or the process) as the turn key, so their rows span every turn --
-    and, for the default scope, every session -- that fell back to it.
-    Enumerating the handles of such a scope lists other turns' commands and
-    subjects, so ``list_summaries`` refuses to.
-    """
-    return scope.turn_key == scope.channel_id
 
 
 class RuntimeHandleArchive:
@@ -263,11 +188,12 @@ class RuntimeHandleArchive:
         scope: RuntimeHandleScope,
         *,
         alias: str,
-        offload_order: int,
         command_name: str,
         step_index: int,
         text: str,
         text_sha256: str,
+        context_clause: Optional[str] = None,
+        context_changed: bool = False,
     ) -> dict[str, Any]:
         """Store one observation and return it as this process reads it.
 
@@ -278,14 +204,15 @@ class RuntimeHandleArchive:
         What is stored is ``capture_record_for(text)``: redacted under
         ``on``, verbatim under ``off``. The row's ``text_sha256`` covers the
         STORED bytes, so ``_decode_row`` verifies a read against the bytes
-        beside it. When the stored bytes differ, the raw text is kept in memory
-        for the live turn and the returned row -- which callers put in their
-        hot cache -- is the raw one, so it agrees with the agent's own prompt.
+        beside it.
+
+        ``context_clause`` is the context the command ran in (``None`` when none
+        was recorded, ``""`` at the root) and ``context_changed`` whether it moved
+        the context.
 
         The insert is insert-or-nothing, so a re-persist of the same alias is a
         readback. A different observation under an alias already stored is a
-        collision and raises; it is recognised by the raw digest when this
-        process holds the raw copy, and by the stored digest otherwise.
+        collision and raises.
         """
         payload = text.encode("utf-8")
         if hashlib.sha256(payload).hexdigest() != text_sha256:
@@ -298,18 +225,17 @@ class RuntimeHandleArchive:
             conn.execute(
                 """
                 INSERT INTO offload_evidence (
-                    turn_key, channel_id, scope_id, alias, offload_order,
-                    command_name, step_index, text_utf8, text_sha256,
-                    redaction, redacted, raw_utf8_bytes, persisted_at
+                    turn_key, channel_id, alias, command_name, step_index,
+                    text_utf8, text_sha256, redaction, redacted,
+                    raw_utf8_bytes, persisted_at, context_clause,
+                    context_changed
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(turn_key, alias) DO NOTHING
                 """,
                 (
                     scope.turn_key,
                     scope.channel_id,
-                    scope.scope_id,
                     alias,
-                    offload_order,
                     command_name,
                     step_index,
                     stored_payload,
@@ -318,26 +244,13 @@ class RuntimeHandleArchive:
                     1 if capture["redacted"] else 0,
                     int(capture["raw_utf8_bytes"]),
                     _utc_now(),
+                    context_clause,
+                    1 if context_changed else 0,
                 ),
             )
             conn.commit()
-        row_sha256 = self._stored_sha256(scope, alias)
-        if row_sha256 is None:
+        if self._stored_sha256(scope, alias) != stored_sha256:
             raise PersistenceError(ALIAS_COLLISION_MESSAGE)
-        live = self._live_copy(scope, alias, row_sha256)
-        if live is not None:
-            same = live["text_sha256"] == text_sha256
-        else:
-            same = row_sha256 in (stored_sha256, text_sha256)
-        if not same:
-            raise PersistenceError(ALIAS_COLLISION_MESSAGE)
-        if live is None and row_sha256 == stored_sha256 and stored_text != text:
-            with _live_lock:
-                _live_raw.setdefault(scope.scope_id, {})[(self.db_path, str(alias))] = {
-                    "text": text,
-                    "text_sha256": text_sha256,
-                    "stored_sha256": stored_sha256,
-                }
         stored = self.get(scope, alias)
         if stored is None:
             raise PersistenceError(ALIAS_COLLISION_MESSAGE)
@@ -352,43 +265,25 @@ class RuntimeHandleArchive:
             ).fetchone()
         return None if row is None else str(row["text_sha256"])
 
-    def _live_copy(
-        self, scope: RuntimeHandleScope, alias: str, stored_sha256: str
-    ) -> Optional[dict[str, str]]:
-        """The raw copy shadowing this exact stored row, if this process holds one."""
-        with _live_lock:
-            copy = _live_raw.get(scope.scope_id, {}).get((self.db_path, str(alias)))
-        if copy is None or copy["stored_sha256"] != stored_sha256:
-            return None
-        return copy
-
-    def _read(self, scope: RuntimeHandleScope, row: sqlite3.Row) -> dict[str, Any]:
-        decoded = self._decode_row(row)
-        live = self._live_copy(scope, decoded["alias"], decoded["text_sha256"])
-        if live is not None:
-            decoded["text"] = live["text"]
-            decoded["text_sha256"] = live["text_sha256"]
-        return decoded
-
     def get(self, scope: RuntimeHandleScope, alias: str) -> Optional[dict[str, Any]]:
         with closing(self._connect()) as conn:
             row = conn.execute(
                 """
-                SELECT alias, offload_order, command_name, step_index,
-                       text_utf8, text_sha256
+                SELECT alias, command_name, step_index, text_utf8, text_sha256,
+                       context_clause, context_changed
                 FROM offload_evidence
                 WHERE turn_key = ? AND channel_id = ? AND alias = ?
                 """,
                 (scope.turn_key, scope.channel_id, alias),
             ).fetchone()
-        return None if row is None else self._read(scope, row)
+        return None if row is None else self._decode_row(row)
 
     def list(self, scope: RuntimeHandleScope, alias: str = "", *,
              timeout: float = 30.0) -> list[dict[str, Any]]:
         """Every stored row of *scope* (or just *alias*), waiting at most *timeout* for the lock."""
         query = """
-            SELECT alias, offload_order, command_name, step_index,
-                   text_utf8, text_sha256
+            SELECT alias, command_name, step_index, text_utf8, text_sha256,
+                   context_clause, context_changed
             FROM offload_evidence
             WHERE turn_key = ? AND channel_id = ?
         """
@@ -396,41 +291,10 @@ class RuntimeHandleArchive:
         if alias:
             query += " AND alias = ?"
             params.append(alias)
-        query += " ORDER BY offload_order, alias"
+        query += " ORDER BY step_index, alias"
         with closing(self._connect(timeout=timeout)) as conn:
             rows = conn.execute(query, params).fetchall()
-        return [self._read(scope, row) for row in rows]
-
-    def list_summaries(self, scope: RuntimeHandleScope) -> list[dict[str, Any]]:
-        """``alias``, ``command``, ``offload_order`` and ``utf8_bytes`` of every row.
-
-        The stored text is measured in SQL and never loaded, for callers that
-        choose among a turn's handles without reading them. ``text_utf8`` is
-        written as a BLOB, so ``length()`` is its stored UTF-8 byte count and
-        SQLite answers it from the record header without reading the content
-        (a ``CAST`` would materialise the value first). It is the STORED
-        size -- what a search of the row reads -- not ``raw_utf8_bytes``, which
-        is the pre-redaction size and differs from it for a redacted row.
-
-        Nothing is listed for a broad scope (``is_broad_scope``), and rows are
-        filtered by channel as well as turn key. The wait for the database is
-        ``SUMMARY_READ_TIMEOUT_SECONDS``; a failure raises.
-        """
-        if is_broad_scope(scope):
-            return []
-        with closing(self._connect(timeout=SUMMARY_READ_TIMEOUT_SECONDS)) as conn:
-            rows = conn.execute(
-                """
-                SELECT alias, command_name, offload_order, length(text_utf8)
-                FROM offload_evidence
-                WHERE turn_key = ? AND channel_id = ?
-                ORDER BY offload_order, alias
-                """,
-                (scope.turn_key, scope.channel_id),
-            ).fetchall()
-        return [{"alias": alias, "command": command, "offload_order": order,
-                 "utf8_bytes": int(size or 0)}
-                for alias, command, order, size in rows]
+        return [self._decode_row(row) for row in rows]
 
     # -- diagnostic events ---------------------------------------------------
 
@@ -450,7 +314,6 @@ class RuntimeHandleArchive:
         row = (
             scope.turn_key,
             scope.channel_id,
-            scope.scope_id,
             str(event.get("kind") or ""),
             stored_text,
             capture["redaction"],
@@ -467,9 +330,9 @@ class RuntimeHandleArchive:
                 conn.execute(
                     """
                     INSERT INTO offload_events (
-                        turn_key, channel_id, scope_id, kind, event_json,
+                        turn_key, channel_id, kind, event_json,
                         redaction, redacted, recorded_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     row,
                 )
@@ -482,75 +345,7 @@ class RuntimeHandleArchive:
                     pass
                 raise
 
-    # -- subject metadata (ido-dhw, F3) ------------------------------------
-
-    def put_subject(
-        self, scope: RuntimeHandleScope, alias: str, context_clause: str
-    ) -> None:
-        """Record the subject *alias* is evidence about, durably.
-
-        An UPSERT, not insert-or-nothing: the dispatch-time stamp is a first
-        answer and a later, better-informed writer may replace it. The empty
-        string is a real value -- "this ran at the workflow root" -- and is
-        stored as one; absence of the row is the only thing that means "no
-        subject was recorded".
-        """
-        with closing(self._connect()) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
-                """
-                INSERT INTO offload_subjects (
-                    turn_key, channel_id, scope_id, alias, context_clause,
-                    recorded_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(turn_key, alias) DO UPDATE SET
-                    context_clause = excluded.context_clause,
-                    recorded_at = excluded.recorded_at
-                WHERE offload_subjects.channel_id = excluded.channel_id
-                """,
-                (
-                    scope.turn_key,
-                    scope.channel_id,
-                    scope.scope_id,
-                    str(alias),
-                    str(context_clause or ""),
-                    _utc_now(),
-                ),
-            )
-            conn.commit()
-
-    def get_subject(self, scope: RuntimeHandleScope, alias: str, *,
-                    timeout: float = 30.0) -> Optional[str]:
-        """The recorded clause, ``""`` at the root, ``None`` when UNRECORDED.
-
-        ``None`` is the answer an alias nobody stamped gives, and it is never
-        upgraded to a guess. The wait for the lock is at most *timeout*.
-        """
-        with closing(self._connect(timeout=timeout)) as conn:
-            row = conn.execute(
-                "SELECT context_clause FROM offload_subjects "
-                "WHERE turn_key = ? AND channel_id = ? AND alias = ?",
-                (scope.turn_key, scope.channel_id, str(alias)),
-            ).fetchone()
-        return None if row is None else str(row["context_clause"])
-
-    def forget_subject(self, scope: RuntimeHandleScope, alias: str) -> None:
-        """Drop the recorded subject, so *alias* reads as UNRECORDED again.
-
-        The durable half of ``state.forget_context_clause``: a dispatch-time
-        stamp that turns out to be the wrong subject must not survive on disk
-        after the process that corrected it is gone.
-        """
-        with closing(self._connect()) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
-                "DELETE FROM offload_subjects "
-                "WHERE turn_key = ? AND channel_id = ? AND alias = ?",
-                (scope.turn_key, scope.channel_id, str(alias)),
-            )
-            conn.commit()
-
-    # -- capture fidelity (ido-zlm) ----------------------------------------
+    # -- capture fidelity ----------------------------------------
 
     def capture_record(
         self, scope: RuntimeHandleScope, alias: str
@@ -587,11 +382,14 @@ class RuntimeHandleArchive:
             raise PersistenceError("runtime archive text failed digest verification")
         return {
             "alias": str(row["alias"]),
-            "offload_order": int(row["offload_order"]),
             "command": str(row["command_name"]),
             "step_index": int(row["step_index"]),
             "text": payload.decode("utf-8"),
             "text_sha256": digest,
+            "context_clause": (
+                None if row["context_clause"] is None else str(row["context_clause"])
+            ),
+            "context_changed": bool(row["context_changed"]),
         }
 
 
@@ -603,7 +401,7 @@ class UnavailableHandleArchive:
     permission bit, a path that holds something which is not a database, or a
     database written by a newer build. Evidence storage is an
     availability optimisation, and the surrounding design already says what a
-    storage failure costs -- ``archive_execute_observations`` and
+    storage failure costs -- ``archive_step`` and
     ``compact_trajectory`` record the refusal and leave the observation inline.
     Without this stand-in an INITIALISATION failure costs the whole turn instead,
     because it raises out of the agent's constructor and the persist-before-label
@@ -611,8 +409,8 @@ class UnavailableHandleArchive:
 
     So the failure is degraded to the policy the writes already have, rather
     than to a second one. Every write refuses with the ``PersistenceError`` the
-    write path expects, so the caller records ``archive_refused`` /
-    ``offload_refused`` per alias and keeps the original text; every read answers
+    write path expects, so the caller records ``archive_refused`` per alias and
+    keeps the original text; every read answers
     "nothing stored here", which is the same answer as an alias that was never
     archived, so ``search_memory`` reports a miss instead of raising. Nothing is
     ever marked archived, so no part of the runtime claims durability this
@@ -646,28 +444,7 @@ class UnavailableHandleArchive:
              timeout: float = 30.0) -> list[dict[str, Any]]:
         return []
 
-    def list_summaries(self, scope: RuntimeHandleScope) -> list[dict[str, Any]]:
-        return []
-
     def persist_event(self, scope: RuntimeHandleScope, event: Mapping[str, Any]) -> None:
         raise PersistenceError(
             f"runtime handle archive unavailable at {self.db_path}: {self.reason}"
         )
-
-    # The subject surface, inert for the same reason the rest of this class
-    # is: nothing may claim a durability this object cannot provide, and every
-    # read answers "nothing recorded here" -- which is exactly the UNRECORDED
-    # answer readers already handle.
-    def put_subject(
-        self, scope: RuntimeHandleScope, alias: str, context_clause: str
-    ) -> None:
-        raise PersistenceError(
-            f"runtime handle archive unavailable at {self.db_path}: {self.reason}"
-        )
-
-    def get_subject(self, scope: RuntimeHandleScope, alias: str, *,
-                    timeout: float = 30.0) -> Optional[str]:
-        return None
-
-    def forget_subject(self, scope: RuntimeHandleScope, alias: str) -> None:
-        return None

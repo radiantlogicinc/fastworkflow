@@ -135,12 +135,10 @@ def observation_row(key: str, text: str) -> dict[str, Any]:
     Two digests, because the slot and the evidence are not the same bytes.
     ``sha256`` is the PROMPT SLOT exactly as the model received
     it, header and all, and is what a reader has to hash to prove what was
-    sent. ``response_sha256`` is the command response inside that slot --
-    ``canonical_response`` takes the offloading package's handle line and its
-    escape back off -- and is what ``fw.agent.step`` recorded, because that span
-    closes before the completion hook annotates. Comparing the first with the
-    second is comparing non-equivalent bytes, and it reported unchanged resident
-    evidence as mismatched.
+    sent. ``response_sha256`` is the command response inside that slot, with
+    the offloading package's handle line stripped. ``fw.agent.step`` records the
+    tool return, which for an execute step already carries that line, so the
+    slot digest is the one that matches it.
 
     ``alias`` is read from either line the offloading package prints, not from
     the offload label alone: since the handle line became unconditional the
@@ -157,12 +155,14 @@ def observation_row(key: str, text: str) -> dict[str, Any]:
     # startup. Importing the observation_offloading package here at module load
     # would execute its agent compatibility exports and cycle back to tracing.
     from fastworkflow.observation_offloading.labels import (  # noqa: PLC0415
-        canonical_response, is_offload_label, observation_alias,
+        is_offload_label, label_alias, printed_alias, strip_alias_line,
     )
 
     probe = text.lstrip()
-    alias, source = observation_alias(probe)
-    response = canonical_response(probe)
+    header = printed_alias(probe)
+    alias = header or label_alias(probe)
+    source = "header" if header else ("label" if alias else None)
+    response = None if is_offload_label(probe) else strip_alias_line(probe)
     encoded = text.encode("utf-8")
     return {
         "key": key, "alias": alias, "alias_source": source,
@@ -225,8 +225,7 @@ def manifest_from_messages_json(messages_json: str) -> Optional[dict[str, Any]]:
 def _comparable_digests(row: Mapping[str, Any]) -> set[str]:
     """Digests of this row that a step's own evidence can honestly be equal to.
 
-    The canonical response first -- that is the raw tool return the step span
-    recorded -- and the prompt-slot digest too, because a slot this enricher
+    The response first, then the prompt-slot digest, because a slot this enricher
     never annotated (an older recording, a non-execute tool) has only that one
     and the two are then the same bytes anyway.
     """
@@ -243,10 +242,9 @@ def classify_against_steps(
 ) -> dict[str, list[int]]:
     """Each step's recorded observation digest against the manifest's rows.
 
-    ``step_sha256_by_index`` is the digest of the RAW tool return from
-    ``fw.agent.step`` -- recorded before the completion hook prints the handle
-    line -- so residency is decided against the response inside the slot, not
-    against the annotated slot.
+    ``step_sha256_by_index`` is the digest of the tool return from
+    ``fw.agent.step``. Residency is decided against the slot or the response
+    inside it, whichever the step's own bytes equal.
 
     ``mismatched`` therefore means the evidence genuinely differs, and it still
     can: a rehydrated listing carries its own response plus the stored rows

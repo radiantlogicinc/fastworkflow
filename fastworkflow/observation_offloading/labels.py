@@ -11,18 +11,25 @@ OFFLOAD_MARK = "Offloaded observation "
 #: trajectory recorded before the change resumes.
 LABEL_RE = re.compile(
     r"^(?:Offloaded observation |Use search_memory tool to search inside Observation )"
-    r"(O[1-9]\d*) returned by ")
-#: The A1 handle line, with the ido-8ps.13 context clause optional. The clause
+    r"(O(?:0|[1-9]\d*)) returned by ")
+#: The A1 handle line, with the context clause optional. The clause
 #: can never contain a parenthesis or a newline (``context_clause`` removes
 #: both), so the closing ``)`` is unambiguous and a line printed before the
 #: clause existed still matches.
-#: The clause reads " ran in <clause>" and may be followed by
-#: ``CONTEXT_CHANGE_SUFFIX``; the earlier ", in <clause>" form is still matched.
-#: A printed clause never contains a semicolon either, so it cannot end in
-#: something the suffix would be mistaken for.
+#: The clause is printed as " ran in context '<ContextName>' and <instance
+#: label>" (" and ..." only when there is a label). A command that moved the
+#: context prints " ran in prior context ..." and is followed by
+#: "; now in context '<ContextName>' and <instance label>", or by
+#: ``CONTEXT_CHANGE_SUFFIX`` when the destination was not recorded. The earlier
+#: " ran in <clause>" and ", in <clause>" forms are still matched. A printed
+#: clause never contains a semicolon either, so it cannot end in something the
+#: suffix would be mistaken for.
 ALIAS_LINE_RE = re.compile(
-    r"^Observation (O[1-9]\d*) \(execute_workflow_query"
-    r"(?:(?:, in| ran in) ([^()\n]*?))?(; and resulted in a context change)?\)\n")
+    r"^Observation (?P<alias>O(?:0|[1-9]\d*)) \(execute_workflow_query"
+    r"(?: ran in (?:prior )?context '(?P<name>[^'()\n]*)'(?: and (?P<label>[^()\n]*?))?"
+    r"|(?:, in| ran in) (?P<clause>[^()\n]*?))?"
+    r"(?P<changed>; and resulted in a context change"
+    r"|; now in context '[^'()\n]*'(?: and [^()\n]*?)?)?\)\n")
 #: What the handle line names the root context as. The root's clause is empty.
 ROOT_CONTEXT_LABEL = "global"
 #: Appended to the handle line when the command moved the context. The new
@@ -32,31 +39,6 @@ CONTEXT_CHANGE_SUFFIX = "; and resulted in a context change"
 MAX_INSTANCE_LABEL_CHARS = 80
 #: Longest context name printed, for the same reason.
 MAX_CONTEXT_NAME_CHARS = 60
-SEARCH_ANSWER_KEY_RE = re.compile(r"^(O[1-9]\d*)#a([1-9]\d*)$")
-#: What a command response is quoted with when its own first line is shaped
-#: like a line this module prints (``ido-cku``). Two characters, visible, and
-#: self-escaping: see ``escape_response``.
-RESPONSE_ESCAPE = "> "
-
-
-def search_answer_key(alias: str, sequence: int) -> str:
-    r"""Archive key for one complete search answer, under the searched handle.
-
-    Deliberately NOT an O alias. The agent-visible ``O`` namespace is execute
-    ordinals only, and ``search_memory`` validates its ``alias`` argument
-    against ``O[1-9]\d*``, so this key can never be passed back as a handle: a
-    bounded answer's marking names a record, not a searchable observation. The
-    searched alias is kept as the prefix so the archived answer is filed under
-    the observation that produced it, and ``sequence`` separates repeated
-    searches of the same observation within one scope.
-    """
-    if not sequence >= 1:
-        raise ValueError("search answer sequence must be a positive integer")
-    return f"{alias}#a{sequence}"
-
-
-def is_search_answer_key(key: str) -> bool:
-    return SEARCH_ANSWER_KEY_RE.match(key) is not None
 
 
 def _clipped(value: str, limit: int) -> str:
@@ -84,7 +66,16 @@ def context_clause(context_name: str, instance_label: str = "") -> str:
     return f"{name} {label}" if label else name
 
 
-def alias_line(alias: str, context: str | None = None, *, context_changed: bool = False) -> str:
+def _printed_context(clause: str) -> str:
+    """``context '<ContextName>' and <instance label>`` for a ``context_clause``."""
+    # A context name never contains a space, so the first word is the name.
+    name, _, label = clause.partition(" ")
+    printed = f"context '{name or ROOT_CONTEXT_LABEL}'"
+    return f"{printed} and {label}" if label else printed
+
+
+def alias_line(alias: str, context: str | None = None, *, context_changed: bool = False,
+               now_in: str | None = None) -> str:
     """The canonical handle line printed above an inline execute observation.
 
     This is the only identifier the agent is ever asked to pass to
@@ -98,99 +89,47 @@ def alias_line(alias: str, context: str | None = None, *, context_changed: bool 
     is then byte-for-byte the bare alias line.
 
     ``context_changed`` says the command moved the context, so the agent does
-    not read the context it ran in as the one it is now in.
+    not read the context it ran in as the one it is now in. ``now_in`` is the
+    ``context_clause`` the command left the agent in; it is named when given,
+    and is not recorded with an archived observation, so a reprint says only
+    that the context changed.
     """
     if context is None:
         return f"Observation {alias} (execute_workflow_query)\n"
-    clause = _clipped(context, MAX_CONTEXT_NAME_CHARS + MAX_INSTANCE_LABEL_CHARS + 1)
-    suffix = f" ran in {clause or ROOT_CONTEXT_LABEL}"
-    if context_changed:
-        suffix += CONTEXT_CHANGE_SUFFIX
+    limit = MAX_CONTEXT_NAME_CHARS + MAX_INSTANCE_LABEL_CHARS + 1
+    clause = _clipped(context, limit)
+    if not context_changed:
+        suffix = f" ran in {_printed_context(clause)}"
+    elif now_in is None:
+        suffix = f" ran in prior {_printed_context(clause)}{CONTEXT_CHANGE_SUFFIX}"
+    else:
+        suffix = (f" ran in prior {_printed_context(clause)}"
+                  f"; now in {_printed_context(_clipped(now_in, limit))}")
     return f"Observation {alias} (execute_workflow_query{suffix})\n"
 
 
-def _escape_depth(text: str) -> int | None:
-    """Escape markers standing between the start of *text* and a line of ours.
-
-    ``0`` for a text that already opens with a handle line or an offload label,
-    ``n`` for one behind ``n`` markers, ``None`` for anything else -- which is
-    the overwhelmingly common case and the one that is never escaped at all.
-    Counting the markers is what makes the escape reversible: a response that
-    genuinely begins with the marker is escaped once more, so removing exactly
-    one marker always lands back on the response that was given.
-    """
-    depth = 0
-    rest = text
-    while rest.startswith(RESPONSE_ESCAPE):
-        rest = rest[len(RESPONSE_ESCAPE):]
-        depth += 1
-    if ALIAS_LINE_RE.match(rest) or LABEL_RE.match(rest):
-        return depth
-    return None
-
-
-def escape_response(text: str) -> str:
-    """*text* made safe to print underneath a handle line.
-
-    A command response whose own first line is shaped like a handle line or an
-    offload label would otherwise be read back as one: the framework would
-    trust a name the backend printed, and a response opening "Observation O7
-    (execute_workflow_query)" would be taken for observation seven. Only this
-    module may name an alias, so such a response is quoted with a marker. The
-    marker is visible on purpose -- the agent should see that the line below
-    the handle line is part of the output, not a second header -- and the quote
-    is undone by ``strip_alias_line`` before anything is stored or hashed.
-    """
-    return RESPONSE_ESCAPE + text if _escape_depth(text) is not None else text
-
-
-def unescape_response(text: str) -> str:
-    """The response ``escape_response`` was given back, exactly."""
-    depth = _escape_depth(text)
-    return text[len(RESPONSE_ESCAPE):] if depth else text
-
-
-#: A line that could pass for framework output on a path that prints stored
-#: text verbatim between framework lines: a ``[search_memory ...]`` marker, a
-#: handle line or search-answer header (``Observation O7 (``), or an offload
-#: label. Matched anywhere in the line and in any case, since the reader is a
-#: model, not this module's anchored regexes.
-_MARKER_SHAPE_RE = re.compile(
-    r"\[search_memory"
-    r"|\bObservation O[1-9]\d* \("
-    r"|\b(?:Offloaded observation |Use search_memory tool to search inside Observation )"
-    r"O[1-9]\d* returned by ",
-    re.IGNORECASE)
-
-
-def quote_marker_lines(text: str) -> str:
-    """*text* with every line shaped like framework output quoted by ``RESPONSE_ESCAPE``.
-
-    For backend text printed verbatim beside framework markers (a short
-    observation, served listing rows), so a stored line cannot forge a marker,
-    a hint or a handle. Every other line, and the line structure, is unchanged.
-    One-way: nothing reads these texts back, so unlike ``escape_response``
-    there is no inverse, and an already-quoted marker line is quoted again.
-    """
-    return "\n".join(RESPONSE_ESCAPE + line if _MARKER_SHAPE_RE.search(line) else line
-                     for line in text.split("\n"))
-
-
 def annotated_observation(alias: str, context: str | None = None, text: str = "",
-                          *, context_changed: bool = False) -> str:
+                          *, context_changed: bool = False, now_in: str | None = None) -> str:
     """The observation as the agent sees it: our handle line, then the response.
 
-    The one place the two are joined, so the compaction hook that prints the
-    line on a completed step and the rehydration that re-prints it over an
-    archived response escape a shape-colliding response identically.
+    The one place the two are joined, so the step that prints the line and the
+    rehydration that re-prints it build the same observation.
     """
-    return alias_line(alias, context, context_changed=context_changed) + escape_response(text)
+    return alias_line(alias, context, context_changed=context_changed, now_in=now_in) + text
 
 
 def printed_alias(text: str) -> str | None:
     """The alias already printed on this observation, or None."""
     match = ALIAS_LINE_RE.match(text)
-    return match.group(1) if match else None
+    return match.group("alias") if match else None
+
+
+def _matched_clause(match: re.Match) -> str | None:
+    """The clause a matched handle line printed, in ``context_clause`` form."""
+    if match.group("name") is not None:
+        label = match.group("label")
+        return f"{match.group('name')} {label}" if label else match.group("name")
+    return match.group("clause")
 
 
 def printed_context(text: str) -> str | None:
@@ -203,98 +142,59 @@ def printed_context(text: str) -> str | None:
     match = ALIAS_LINE_RE.match(text)
     if match is None:
         return None
-    clause = match.group(2)
+    clause = _matched_clause(match)
     return None if clause == ROOT_CONTEXT_LABEL else (clause or None)
 
 
-#: Which line of ours named an observation's alias. An alias is evidence only
-#: with its provenance: a reader that cannot tell the printed handle line from
-#: an offload label cannot tell a resident observation from a pointer to one.
-ALIAS_SOURCE_HEADER = "header"
-ALIAS_SOURCE_LABEL = "label"
+def printed_subject(text: str) -> tuple[str | None, bool]:
+    """The (context clause, changed) an observation's handle line records, as the archive stores them.
 
-
-def observation_alias(text: str) -> tuple[str | None, str | None]:
-    """The alias an observation carries, and which line of ours named it.
-
-    The two shapes this module prints are the only two an alias can come from:
-    the handle line ``annotated_observation`` puts above a resident response,
-    and the offload label that replaces a response entirely. Readers that knew
-    only the label reported no alias at all for the normal, inline case,
-    which is every execute observation since the handle line became
-    unconditional.
-
-    Both reads are anchored at byte zero and agree with the writer: our line
-    is always the FIRST line of an annotated observation,
-    and a response whose own first line has either shape is printed under it
-    behind ``RESPONSE_ESCAPE`` -- which neither ``ALIAS_LINE_RE`` nor
-    ``LABEL_RE`` matches. So a backend's text can never be read as an alias
-    here, and the header is checked first because an escaped label-shaped
-    response stands UNDER a header naming the step's real ordinal.
-
-    ``(None, None)`` for an observation carrying neither shape.
+    ``(None, False)`` when no clause was printed; ``""`` for the root context.
     """
-    alias = printed_alias(text)
-    if alias is not None:
-        return alias, ALIAS_SOURCE_HEADER
-    alias = label_alias(text)
-    return (alias, ALIAS_SOURCE_LABEL) if alias is not None else (None, None)
+    match = ALIAS_LINE_RE.match(text)
+    clause = None if match is None else _matched_clause(match)
+    if clause is None:
+        return None, False
+    clause = "" if clause == ROOT_CONTEXT_LABEL else clause
+    return clause, match.group("changed") is not None
 
 
-def owns_line(text: str, alias: str) -> bool:
-    """Whether *text* opens with a line of ours naming *alias*, the step's own.
+#: A context an alias line names, in either "ran in context" or "now in context" form.
+CONTEXT_IN_RE = re.compile(
+    r"(?:ran in (?:prior )?|now in )context '(?P<name>[^'()\n]*)'(?: and (?P<label>[^()\n;]*))?")
 
-    A step's alias comes from the agent's execute ledger, never from its text.
-    Once a step is annotated, a backend line shaped like ours is always escaped,
-    so this is true of every handle line and label the framework wrote. It is
-    false for such a line on a step that was never annotated -- a trajectory
-    built outside the loop, or one whose compaction failed before the handle
-    line was printed -- where the line is the backend's text and names nothing.
-    Every reader that strips a handle line or resolves a label asks this first.
+
+def printed_instances(text: str) -> list[tuple[str, str, str]]:
+    """(context name, instance id, instance label) the handle line of *text* names, in printed order.
+
+    Only contexts that printed an instance are listed. The instance clause is
+    ``<instance id> <label>``: its first word is the id, the rest the label.
     """
-    return observation_alias(text)[0] == alias
+    match = ALIAS_LINE_RE.match(text)
+    if match is None:
+        return []
+    found = []
+    for named in CONTEXT_IN_RE.finditer(match.group(0)):
+        instance = (named.group("label") or "").strip()
+        if instance:
+            instance_id, _, label = instance.partition(" ")
+            found.append((named.group("name"), instance_id, label.strip()))
+    return found
 
 
 def command_response(text: str, alias: str) -> str:
     """The exact command response in the observation slot of step *alias*.
 
     Only a handle line naming *alias* is presentation, so only that line is
-    removed; any other first line is the response's own and stays in the
-    archive, its digest and every search of it.
+    removed. Any other first line is the response's own.
     """
     return strip_alias_line(text) if printed_alias(text) == alias else text
 
 
-def canonical_response(text: str) -> str | None:
-    """The command response an observation slot carries, byte for byte, or None.
-
-    The counterpart of ``observation_alias`` for evidence rather than naming:
-    what a digest of this observation has to be taken over for it to be
-    comparable with the raw tool return recorded on ``fw.agent.step``.
-    Our handle line and the escape underneath it are
-    presentation added after that record was closed, so both come off.
-
-    ``None`` for an offload label, which holds no response at all -- its bytes
-    stand for evidence that lives in the archive, and comparing them with a
-    response would be comparing a pointer with the thing pointed at.
-    """
-    if printed_alias(text) is not None:
-        return strip_alias_line(text)
-    return None if is_offload_label(text) else text
-
-
 def strip_alias_line(text: str) -> str:
-    """The original command response, without OUR printed alias line.
-
-    The inverse of ``annotated_observation``: the presentation line goes, and
-    the escape that protected a response of the same shape is undone, so what
-    comes back is the command response byte for byte. A response
-    that was never annotated, or one carrying a line somebody else printed, is
-    returned untouched -- ``unescape_response`` only ever runs on the text that
-    stood under a line this module wrote.
-    """
+    """The command response without the handle line printed above it."""
     match = ALIAS_LINE_RE.match(text)
-    return unescape_response(text[match.end():]) if match else text
+    return text[match.end():] if match else text
 
 
 def estimated_tokens(text: str) -> int:

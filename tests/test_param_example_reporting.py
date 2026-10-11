@@ -588,3 +588,32 @@ def test_an_undigestable_command_still_trains_just_without_reuse(workflow_dir):
     assert cache.stats["stored"] == 0
     assert cache.stats["hit"] == 0
     assert not os.path.exists(cache.root)
+
+
+def test_a_bare_call_example_answers_missing_for_required_fields(monkeypatch):
+    from fastworkflow.utils.generate_param_examples import missing_value_example
+    from fastworkflow.utils.signatures import INVALID_INT_VALUE
+
+    monkeypatch.setattr(fastworkflow, "get_env_var", lambda name, *a, **k: "NOT_FOUND")
+
+    class Params(BaseModel):
+        entity_type: str = Field(description="family")
+        limit: int = Field(description="rows")
+        start: int | None = None
+
+    example = missing_value_example("Ctx/show_things", Params.model_fields)
+
+    assert example == {
+        "fields": {"command": "show_things", "entity_type": "NOT_FOUND",
+                   "limit": INVALID_INT_VALUE, "start": None},
+        "inputs": ["command"],
+    }
+
+
+def test_a_command_without_required_fields_gets_no_bare_call_example():
+    from fastworkflow.utils.generate_param_examples import missing_value_example
+
+    class Params(BaseModel):
+        start: int | None = None
+
+    assert missing_value_example("show_things", Params.model_fields) is None

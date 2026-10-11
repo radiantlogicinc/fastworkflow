@@ -184,22 +184,19 @@ def test_run_agent_threads_planning_context_to_planner(
     todo_workflow_path,
     monkeypatch,
 ):
-    """_run_agent must forward the session's planning_insights and the stashed
-    planner LM (_current_planner_lm) to build_query_with_next_steps. This guards
-    the planner-LM/insights wiring that distillation depends on — a regression
-    here silently reverts replans to the default LLM_PLANNER.
+    """_run_agent must forward the stashed planner LM (_current_planner_lm) to
+    build_query_with_next_steps. This guards the planner-LM wiring that
+    distillation depends on — a regression here silently reverts replans to the
+    default LLM_PLANNER.
     """
     ctx, _wf = _make_agent_ctx(initialized_fastworkflow, todo_workflow_path, monkeypatch)
 
-    sentinel_insights = "PLANNING_INSIGHTS_SENTINEL"
     sentinel_planner_lm = object()
-    ctx._planning_insights = sentinel_insights
     ctx._current_planner_lm = sentinel_planner_lm
 
     captured: dict = {}
 
     def capturing_planner(user_query, session, **kwargs):
-        captured["planning_insights"] = kwargs.get("planning_insights")
         captured["planner_lm"] = kwargs.get("planner_lm")
         return user_query
 
@@ -221,7 +218,6 @@ def test_run_agent_threads_planning_context_to_planner(
 
     ctx._execute_message("do the thing")
 
-    assert captured["planning_insights"] is sentinel_insights
     assert captured["planner_lm"] is sentinel_planner_lm
 
 

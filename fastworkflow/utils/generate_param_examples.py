@@ -1,7 +1,9 @@
 import ast
+import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
 import hashlib
 import random
+import sys
 import re
 import json
 from enum import Enum
@@ -656,12 +658,12 @@ def canonicalized(value):
     return value
 
 # Functions in this module that provably cannot change what is generated or what is
-# written: two file-writing helpers that training never calls, and the cache plumbing
-# itself (whose behaviour is already covered by the fingerprint it computes).
+# written: the cache plumbing itself (whose behaviour is already covered by the
+# fingerprint it computes).
 _UNDIGESTED_FUNCTIONS: frozenset[str] = frozenset(
     {
-        "save_examples_to_file",
-        "save_examples_to_json",
+        # Appended by the trainer after generation; never cached.
+        "missing_value_example",
         "param_example_fingerprint",
         "prompt_source_digest",
         "_digested_functions",
@@ -1151,28 +1153,28 @@ def generate_dspy_examples(
             
     # return validated_examples, rejected_examples
 
-def save_examples_to_file(examples: List[str], filename: str = "dspy_examples.py"):
-    """Save generated examples to a Python file"""
-    with open(filename, "w") as f:
-        f.write("import dspy\n\n")
-        f.write("examples = [\n")
-        for example in examples:
-            f.write(f"    {example},\n")
-        f.write("]\n")
+def missing_value_example(command_name: str, field_annotations: Dict[str, Any]) -> Optional[Dict]:
+    """A few-shot example of a bare call whose required parameters are all missing.
 
-def save_examples_to_json(examples: List[str], command_name: str, filename: str = "dspy_examples.json"):
-    """Save generated examples to a JSON file"""
-    import json
+    Generated examples always carry a value for every required field, so the runtime
+    extractor never sees what "not given" looks like and invents one instead (a bare
+    `show_affected_entities` came back with entity_type='resource'). This example
+    answers with the same "missing" markers `create_signature_from_pydantic_model`
+    tells the extractor to use. None when the command has no required field.
+    """
+    from fastworkflow.utils.signatures import INVALID_INT_VALUE
 
-    # Format examples properly as strings
-    formatted_examples = list(examples)
-
-    data = {
-        "command_name": command_name,
-        "examples": formatted_examples
-    }
-
-    with open(filename, "w") as f:
-        json.dump(data, f, indent=2)
-    
-    
+    missing_markers = {str: fastworkflow.get_env_var("NOT_FOUND"),
+                       int: INVALID_INT_VALUE,
+                       float: -sys.float_info.max}
+    fields = {"command": command_name.split("/")[-1]}
+    has_required = False
+    for name, field in field_annotations.items():
+        if field.is_required():
+            has_required = True
+            fields[name] = missing_markers.get(field.annotation)
+        else:
+            fields[name] = field.default
+    if not has_required:
+        return None
+    return {"fields": fields, "inputs": ["command"]}

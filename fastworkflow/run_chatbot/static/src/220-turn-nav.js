@@ -478,7 +478,8 @@ function formatByteSize(n) {
   if (n >= 1024) { return Math.round(n / 1024) + " KB"; }
   return n + " B";
 }
-function appendAttrSection(container, label, value) {
+function appendAttrSection(container, label, value, opts) {
+  opts = opts || {};
   if (value === null || value === undefined || value === "") { return; }
   var parsed = parsedAttr(value);
   var size = estimateSerializedSize(parsed);
@@ -492,6 +493,13 @@ function appendAttrSection(container, label, value) {
       det.appendChild(el("pre", "json", pretty(parsed)));
     });
     container.appendChild(det);
+    return;
+  }
+  if (opts.collapsed) {
+    var folded = el("details");
+    folded.appendChild(el("summary", null, label));
+    folded.appendChild(el("pre", "json", pretty(parsed)));
+    container.appendChild(folded);
     return;
   }
   var block = el("div", "msgBlock");

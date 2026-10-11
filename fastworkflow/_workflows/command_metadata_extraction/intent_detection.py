@@ -611,9 +611,9 @@ class CommandNamePrediction:
             }
 
         # A command name ends at whitespace or a '(' -- ANY whitespace, not a
-        # space alone: `list_permissions\n<scope>all</scope>` otherwise makes the
+        # space alone: `list_orders\n<scope>all</scope>` otherwise makes the
         # whole line the tentative name, so neither the matcher nor the foreign-
-        # name guard sees one (F31/ido-nx6). "" splits to [], hence the guard.
+        # name guard sees one. "" splits to [], hence the guard.
         tentative_command_name = (
             command.split(None, 1)[0].split("(", 1)[0] if command.strip() else "")
         normalized_command_name = tentative_command_name.lower()
@@ -635,14 +635,14 @@ class CommandNamePrediction:
             and (owner_contexts := self.foreign_owner_contexts(
                 normalized_command_name, command_name_dict, command_context_name))
         ):
-            # R1 (ido-8ps.8): a known command name may not be answered by a
+            # R1 a known command name may not be answered by a
             # context that does not own it. The exact-name matcher above is
             # scoped to THIS context's command set, so a root ('*') or sibling
             # command typed verbatim -- `fetch_result_page <handle>O9</handle>`,
-            # `show_holders <filter>...`, `list_permissions` -- is invisible to
+            # `show_items <filter>...`, `list_orders` -- is invisible to
             # layers 1 and 2 here and would be adjudicated by this context's
             # classifier, which answered four of them with a confident
-            # "No permissions found." (ido-8ps.6.1 section 4.2: 69 silent
+            # "No orders found." (69 silent
             # misroutes across 31 stored runs).
             #
             # None is already the signal that drives the parent-chain walk

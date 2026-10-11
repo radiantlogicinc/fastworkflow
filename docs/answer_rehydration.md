@@ -1,11 +1,15 @@
 # Answer-time rehydration
 
+> **Status (2026-10-09):** `search_memory` is disabled (commented out of the agent's tools,
+> code kept), so the loop below can no longer search an offload alias. The rehydration at
+> answer time is unchanged.
+
 The ReAct loop and the extract step read the same `trajectory` for two different
 jobs, and only one of them benefits from compaction.
 
 The **loop** is a reader that can ask for more. When compaction swaps a 3 KB
-listing for its 250 B offload label, the agent can still call `search_memory` on
-that alias. That is what holds the peak prompt at
+listing for its 250 B offload label, the agent could call `search_memory` on
+that alias until it was disabled on 2026-10-09. That is what holds the peak prompt at
 ~37k tokens against the control's ~80k, and the benchmark measured it as a clear
 win on trajectory correctness: 0 silent misroutes in 512 execute spans, 44 of 45
 searches answered on valid handles, 479 of 479 observations archived.
@@ -76,7 +80,7 @@ answers. The agent signature, the `search_memory` description and the offload
 label now also say observations are *normally* restored; see
 [`observation_search.md`](observation_search.md).)
 
-Ascending by execute ordinal, always the same line for the same run. It exists so
+Ascending by step index, always the same line for the same run. It exists so
 the extractor can report those slots as **unresolved** rather than guessing at
 them — the opposite of the pointer answer, which claims the evidence was seen.
 The line is appended after the budget rather than reserved inside it, so a
@@ -114,7 +118,7 @@ with `ObservabilityStore.offload_events(kind="rehydration_finished", ...)`.
 
 | Event | Carries |
 |---|---|
-| `rehydration_started` | `budget_bytes`, `bytes_before`, `scope_id` |
+| `rehydration_started` | `budget_bytes`, `bytes_before` |
 | `rehydration_finished` | `bytes_before`, `bytes_after`, `bytes_added`, `rehydrated_labels`, per-alias `{alias, kind, added_bytes}`, `dropped_aliases`, `unresolved_aliases`, `stopped_on`, `extract_prompt_tokens`, `extract_duration_ms`, `rehydration_overflow` |
 | `rehydration_overflow` | how many times the fallback truncated, the budget, `bytes_after` |
 | `rehydration_failed` | the exception type and detail; the extract call then runs on the plain trajectory |
@@ -129,10 +133,7 @@ estimated.
 single place the copy is built. Every extract call site goes through it:
 
 * `fastworkflow/utils/react.py` — `forward` (agent-selected finish and the
-  iteration ceiling), `resume` (an `ask_user` continuation), `aforward`;
-* `fastworkflow/observation_offloading/continuation.py` —
-  `StructuredContinuationReAct._finish_prediction`, which is the one extract call
-  of a segmented turn and therefore the site the measured configuration uses.
+  iteration ceiling), `resume` (an `ask_user` continuation), `aforward`.
 
 A failure anywhere in the copy — an unreadable or broken archive —
 falls back to the plain call on the trajectory object it was handed, and records

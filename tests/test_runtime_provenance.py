@@ -13,7 +13,6 @@ statements, rather than by hoping nobody adds a heavy import later.
 from __future__ import annotations
 
 import ast
-import os
 import subprocess
 import tomllib
 from pathlib import Path
@@ -25,6 +24,7 @@ from fastworkflow.observability.provenance import (
     LLM_ROLE_VARS,
     LOCK_FILENAMES,
     ORPHAN_ROLE_VARS,
+    WORKFLOW_SCOPE_RULE_VERSION,
     EngineProvenance,
     ModelProvenance,
     RuntimeProvenance,
@@ -33,20 +33,13 @@ from fastworkflow.observability.provenance import (
     capture_model_provenance,
     capture_runtime_provenance,
     capture_workflow_provenance,
+    workflow_identity,
     git_is_dirty,
     git_revision,
     installed_version,
     lock_hashes,
-    runtime_manifest_fingerprint,
     secret_fingerprint,
     source_version,
-)
-from fastworkflow.runtime_manifest import (
-    WORKFLOW_SCOPE_RULE_VERSION,
-    RuntimeManifest,
-    check_startup_conformance,
-    merge_and_gate,
-    workflow_content_hash,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -60,21 +53,12 @@ def _write_workflow(root, files: dict[str, str]) -> str:
     return str(root)
 
 
-def _metadata(**manifest_fields):
-    manifest = (
-        RuntimeManifest(schema_version=1, manifest_version="1.0.0", **manifest_fields)
-        if manifest_fields
-        else None
-    )
-    return merge_and_gate(manifest, deployment_features={})
-
-
 # ======================================================================
 # Leaf constraint (arch §22)
 # ======================================================================
 
 
-@pytest.mark.parametrize("module", ["runtime_manifest.py", "observability/provenance.py"])
+@pytest.mark.parametrize("module", ["observability/provenance.py"])
 def test_leaf_modules_import_only_stdlib_pydantic_and_other_leaves(module):
     """Arch §22, checked structurally so it cannot rot.
 
@@ -82,7 +66,7 @@ def test_leaf_modules_import_only_stdlib_pydantic_and_other_leaves(module):
     rule is about what they import, so read the imports rather than trusting a
     comment: any `fastworkflow.*` import must name another declared leaf.
     """
-    leaves = {"fastworkflow.runtime_manifest", "fastworkflow.observability.provenance"}
+    leaves = {"fastworkflow.observability.provenance"}
     tree = ast.parse((REPO_ROOT / "fastworkflow" / module).read_text(encoding="utf-8"))
 
     imported: list[str] = []
@@ -302,14 +286,11 @@ def test_lock_hashes_of_a_directory_without_locks_is_empty(tmp_path):
 # ======================================================================
 
 
-def test_workflow_hash_and_declared_fingerprint_are_compared(tmp_path):
+def test_workflow_identity_is_the_computed_content_hash(tmp_path):
     root = _write_workflow(tmp_path / "wf", {"_commands/a.py": "x = 1\n"})
-    computed = workflow_content_hash(root)
-    provenance = capture_workflow_provenance(
-        root, _metadata(workflow_fingerprint=computed)
-    )
-    assert provenance.workflow_source_hash == computed
-    assert provenance.fingerprint_verified is True
+    provenance = capture_workflow_provenance(root)
+    assert provenance.workflow_source_hash == workflow_identity(root)
+    assert provenance.workflow_source_hash == workflow_identity(root)
 
 
 def test_the_scope_rule_that_produced_the_hash_is_recorded(tmp_path):
@@ -325,7 +306,7 @@ def test_the_scope_rule_that_produced_the_hash_is_recorded(tmp_path):
     hashed, and the selection can change without changing the record's shape.
     """
     root = _write_workflow(tmp_path / "wf", {"_commands/a.py": "x = 1\n"})
-    provenance = capture_workflow_provenance(root, _metadata())
+    provenance = capture_workflow_provenance(root)
     assert provenance.workflow_scope_rule_version == WORKFLOW_SCOPE_RULE_VERSION
 
     # A bundle recorded under an older rule keeps saying so, rather than being
@@ -335,71 +316,29 @@ def test_the_scope_rule_that_produced_the_hash_is_recorded(tmp_path):
     assert archived.workflow_source_hash == provenance.workflow_source_hash
 
 
-def test_a_fingerprint_from_another_scope_rule_records_none_not_false(tmp_path):
-    """False would be the record asserting drift it has no evidence for.
-
-    The generator's rule and this engine's rule are both recorded, because a
-    reader that saw only one of them could not tell an unverified fingerprint
-    from an incomparable one. `reproducible` reads the flag as `is not False`,
-    so an incomparable pair does not silently demote a run that is otherwise
-    fully pinned — which is right, since nothing about it is unpinned.
-    """
+def test_records_written_under_the_retired_manifest_fields_still_load(tmp_path):
+    """Rows stored before the manifest's fingerprint and feature modes were
+    retired carry extra keys. They load, and the retired values are dropped."""
     root = _write_workflow(tmp_path / "wf", {"_commands/a.py": "x = 1\n"})
-    provenance = capture_workflow_provenance(
-        root,
-        _metadata(
-            workflow_fingerprint="sha256:computed-under-an-older-selection",
-            workflow_scope_rule_version=WORKFLOW_SCOPE_RULE_VERSION + 1,
-        ),
-    )
-    assert provenance.fingerprint_verified is None
-    assert provenance.declared_scope_rule_version == WORKFLOW_SCOPE_RULE_VERSION + 1
-    assert provenance.workflow_scope_rule_version == WORKFLOW_SCOPE_RULE_VERSION
+    current = capture_workflow_provenance(root)
+    legacy = current.model_dump() | {
+        "declared_workflow_fingerprint": "sha256:old",
+        "declared_scope_rule_version": 1,
+        "fingerprint_verified": False,
+        "runtime_manifest_fingerprint": "sha256:manifest",
+        "runtime_feature_snapshot": {"turn_budget_v1": "off"},
+    }
+    loaded = WorkflowProvenance.model_validate(legacy)
+    assert loaded == current
+    assert not hasattr(loaded, "fingerprint_verified")
 
 
-def test_a_stale_declared_fingerprint_is_recorded_as_unverified(tmp_path):
-    """Recording a fingerprint that does not describe the tree it came from is
-    worse than recording nothing, so the record says which it was."""
+def test_an_unknown_field_is_still_refused(tmp_path):
     root = _write_workflow(tmp_path / "wf", {"_commands/a.py": "x = 1\n"})
-    provenance = capture_workflow_provenance(
-        root, _metadata(workflow_fingerprint="sha256:deadbeef")
-    )
-    assert provenance.fingerprint_verified is False
-
-
-def test_no_manifest_means_unverified_is_none_not_false(tmp_path):
-    root = _write_workflow(tmp_path / "wf", {"_commands/a.py": "x = 1\n"})
-    provenance = capture_workflow_provenance(root, _metadata())
-    assert provenance.declared_workflow_fingerprint is None
-    assert provenance.fingerprint_verified is None
-    assert provenance.runtime_manifest_fingerprint is None
-
-
-def test_the_manifest_file_gets_its_own_fingerprint(tmp_path):
-    """Distinct from workflow_fingerprint, which the manifest *declares* about
-    the tree; this one identifies the declaration."""
-    root = tmp_path / "wf"
-    root.mkdir()
-    assert runtime_manifest_fingerprint(str(root)) is None
-    (root / "workflow_runtime.json").write_text('{"schema_version": 1}', encoding="utf-8")
-    value = runtime_manifest_fingerprint(str(root))
-    assert value and value.startswith("sha256:")
-
-
-def test_the_feature_snapshot_is_the_effective_post_gating_one(tmp_path):
-    """What actually ran, not what the manifest asked for. A manifest declaring
-    shadow with no deployment enablement contributed nothing to the run."""
-    root = _write_workflow(tmp_path / "wf", {"_commands/a.py": "x = 1\n"})
-    metadata = merge_and_gate(
-        RuntimeManifest(
-            schema_version=1,
-            manifest_version="1.0.0",
-            features={"turn_budget_v1": "shadow"},
-        ),
-        deployment_features={},
-    )
-    provenance = capture_workflow_provenance(root, metadata)
-    assert provenance.runtime_feature_snapshot["turn_budget_v1"] == "off"
+    with pytest.raises(ValidationError):
+        WorkflowProvenance.model_validate(
+            capture_workflow_provenance(root).model_dump() | {"invented_field": 1}
+        )
 
 
 def test_a_legacy_layout_workflow_is_not_reported_as_untrained():
@@ -424,7 +363,6 @@ def test_the_caller_supplied_values_land_where_they_are_labelled(tmp_path):
     root = _write_workflow(tmp_path / "wf", {"_commands/a.py": "x = 1\n"})
     provenance = capture_workflow_provenance(
         root,
-        _metadata(),
         command_surface_fingerprint="legacy-abc",
         trained_artifact_id="v1",
         trained_artifact_legacy_layout=False,
@@ -589,7 +527,6 @@ def test_capture_runtime_provenance_assembles_all_three_sections(tmp_path):
     root = _write_workflow(tmp_path / "wf", {"_commands/a.py": "x = 1\n"})
     provenance = capture_runtime_provenance(
         root,
-        check_startup_conformance(root, env={}),
         env={"LLM_AGENT": "vendor/a"},
         cache_enabled=False,
     )
@@ -602,7 +539,7 @@ def test_capture_runtime_provenance_assembles_all_three_sections(tmp_path):
 def _reproducible_record(tmp_path, **overrides):
     root = _write_workflow(tmp_path / "wf", {"_commands/a.py": "x = 1\n"})
     provenance = capture_runtime_provenance(
-        root, check_startup_conformance(root, env={}), env={}, cache_enabled=False
+        root, env={}, cache_enabled=False
     )
     return provenance.model_copy(
         update={
@@ -614,8 +551,8 @@ def _reproducible_record(tmp_path, **overrides):
     )
 
 
-def test_reproducibility_requires_clean_source_verified_manifest_and_no_cache(tmp_path):
-    """Three independent ways a run can fail to be reproducible, each of which
+def test_reproducibility_requires_clean_source_and_no_cache(tmp_path):
+    """Two independent ways a run can fail to be reproducible, each of which
     a harness would otherwise have to remember to check separately."""
     assert _reproducible_record(tmp_path).reproducible is True
 
@@ -624,11 +561,6 @@ def test_reproducibility_requires_clean_source_verified_manifest_and_no_cache(tm
         update={"engine": record.engine.model_copy(update={"source_dirty": True})}
     )
     assert dirty.reproducible is False
-
-    stale = record.model_copy(
-        update={"workflow": record.workflow.model_copy(update={"fingerprint_verified": False})}
-    )
-    assert stale.reproducible is False
 
     cached = record.model_copy(
         update={"models": record.models.model_copy(update={"cache_enabled": True})}
@@ -653,18 +585,10 @@ def test_an_unknown_cache_state_is_not_reproducible(tmp_path):
     assert unknown.reproducible is False
 
 
-def test_an_undeclared_fingerprint_does_not_block_reproducibility(tmp_path):
-    """workflow_source_hash pins the tree whether or not a manifest declared
-    anything, so "nothing declared" is not the same as "declared and wrong"."""
-    record = _reproducible_record(tmp_path)
-    assert record.workflow.fingerprint_verified is None
-    assert record.reproducible is True
-
-
 def test_a_serialized_record_round_trips(tmp_path):
     root = _write_workflow(tmp_path / "wf", {"_commands/a.py": "x = 1\n"})
     provenance = capture_runtime_provenance(
-        root, check_startup_conformance(root, env={}), env={"LLM_AGENT": "vendor/a"}
+        root, env={"LLM_AGENT": "vendor/a"}
     )
     assert RuntimeProvenance.model_validate_json(provenance.model_dump_json()) == provenance
 

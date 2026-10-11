@@ -12,6 +12,11 @@ from fastworkflow.build.class_analysis_structures import ClassInfo, MethodInfo, 
 import libcst as cst
 
 
+def _fake_env_var(name, *args, **kwargs):
+    """get_env_var stub: numeric for the LLM timeout get_lm() float()s, 'test_value' otherwise."""
+    return '120' if name == 'LLM_TIMEOUT_SECONDS' else 'test_value'
+
+
 class TestGenAIPostProcessorUpdated(unittest.TestCase):
     """Test the updated GenAI postprocessor with LibCST-based implementation."""
     
@@ -84,7 +89,7 @@ class ResponseGenerator:
     @patch('fastworkflow.get_env_var')
     def test_initialization(self, mock_get_env):
         """Test that the processor initializes correctly."""
-        mock_get_env.return_value = 'test_value'
+        mock_get_env.side_effect = _fake_env_var
         
         with patch('fastworkflow.build.genai_postprocessor.dspy.LM'), \
              patch('fastworkflow.build.genai_postprocessor.dspy.context', new=lambda *args, **kwargs: contextlib.nullcontext()):
@@ -103,7 +108,7 @@ class ResponseGenerator:
     @patch('fastworkflow.get_env_var')
     def test_extract_current_state(self, mock_get_env):
         """Test extraction of current state from a command file."""
-        mock_get_env.return_value = 'test_value'
+        mock_get_env.side_effect = _fake_env_var
         
         with patch('fastworkflow.build.genai_postprocessor.dspy.LM'), \
              patch('fastworkflow.build.genai_postprocessor.dspy.context', new=lambda *args, **kwargs: contextlib.nullcontext()):
@@ -134,7 +139,7 @@ class ResponseGenerator:
     @patch('fastworkflow.get_env_var')
     def test_generate_enhanced_content(self, mock_get_env):
         """Test generation of enhanced content for a command file."""
-        mock_get_env.return_value = 'test_value'
+        mock_get_env.side_effect = _fake_env_var
         
         with patch('fastworkflow.build.genai_postprocessor.dspy.LM'), \
              patch('fastworkflow.build.genai_postprocessor.dspy.context', new=lambda *args, **kwargs: contextlib.nullcontext()):
@@ -190,7 +195,7 @@ class ResponseGenerator:
     @patch('fastworkflow.get_env_var')
     def test_process_command_file_targeted(self, mock_get_env):
         """Test processing a command file with targeted updates."""
-        mock_get_env.return_value = 'test_value'
+        mock_get_env.side_effect = _fake_env_var
         
         with patch('fastworkflow.build.genai_postprocessor.dspy.LM'), \
              patch('fastworkflow.build.genai_postprocessor.dspy.context', new=lambda *args, **kwargs: contextlib.nullcontext()), \
@@ -235,7 +240,7 @@ class ResponseGenerator:
     @patch('fastworkflow.get_env_var')
     def test_process_workflow(self, mock_get_env):
         """Test processing an entire workflow."""
-        mock_get_env.return_value = 'test_value'
+        mock_get_env.side_effect = _fake_env_var
         
         # Create context directory
         context_dir = os.path.join(self.workflow_path, "_commands", "TestContext")
@@ -279,7 +284,7 @@ class ResponseGenerator:
     @patch('fastworkflow.get_env_var')
     def test_generate_context_handler_docstring(self, mock_get_env):
         """Test generating docstring for context handler file."""
-        mock_get_env.return_value = 'test_value'
+        mock_get_env.side_effect = _fake_env_var
         
         # Create context directory and handler file
         context_dir = os.path.join(self.workflow_path, "_commands", "TestContext")
@@ -318,7 +323,7 @@ class TestContextHandler:
     @patch('fastworkflow.get_env_var')
     def test_generate_workflow_description(self, mock_get_env):
         """Test generating workflow description file."""
-        mock_get_env.return_value = 'test_value'
+        mock_get_env.side_effect = _fake_env_var
         
         with patch('fastworkflow.build.genai_postprocessor.dspy.LM'), \
              patch('fastworkflow.build.genai_postprocessor.dspy.context', new=lambda *args, **kwargs: contextlib.nullcontext()):

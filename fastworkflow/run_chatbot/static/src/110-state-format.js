@@ -230,9 +230,8 @@ function renderServerConfiguration(container, attempt) {
 /* `signals` is the server's turn_decision_signals(): the least confident
    intent decision's classifier top-k margin (null when no decision recorded
    one -- an exact-prefix match records no number, which is neither confident
-   nor low), how many times the user was asked, and the worst consequence
-   class a dispatch was assessed at. No signal = no chip, and never a filter
-   hit. The threshold is the user's: no calibrated one is on record, because
+   nor low) and how many times the user was asked. No signal = no chip, and
+   never a filter hit. The threshold is the user's: no calibrated one is on record, because
    decision_signals is capture-only, so the default below is a viewing aid
    the rail says as much about. */
 var LOW_CONFIDENCE_DEFAULT_MARGIN = 0.2;
@@ -254,12 +253,6 @@ function signalChips(signals) {
   if (signals.asked_user) {
     chips.push(el("span", "chipSignal asked",
       "asked the user" + (signals.asked_user > 1 ? " ×" + signals.asked_user : "")));
-  }
-  if (typeof signals.consequence_max === "string" && signals.consequence_max) {
-    var m = signals.consequence_assessed || 0;
-    chips.push(el("span", "chipSignal consequence",
-      "consequence " + signals.consequence_max
-      + (m > 1 ? " (max of " + m + ")" : "")));
   }
   return chips;
 }

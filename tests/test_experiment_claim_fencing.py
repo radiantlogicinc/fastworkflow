@@ -7,6 +7,7 @@ import json
 import multiprocessing
 import sqlite3
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -167,7 +168,9 @@ def test_secret_replay_guess_and_channel_mismatch_are_refused(controller):
     assert claim.epoch == 1
 
 
-def test_two_process_stores_race_one_claim_exactly_one_wins(controller):
+def test_two_process_stores_race_one_claim_exactly_one_wins(controller, monkeypatch):
+    # Spawn children inherit sys.path; another repo's `tests` package may precede ours.
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1]))
     bootstrap = _register(controller)
     context = multiprocessing.get_context("spawn")
     barrier = context.Barrier(2)
@@ -188,7 +191,9 @@ def test_two_process_stores_race_one_claim_exactly_one_wins(controller):
     for process in processes:
         process.start()
     for process in processes:
-        process.join(timeout=10)
+        # Covers spawn start-up (importing fastworkflow takes >10s on a loaded box);
+        # the barrier, not this timeout, is what makes the race simultaneous.
+        process.join(timeout=60)
         assert process.exitcode == 0
     results = [outcomes.get(timeout=2) for _ in processes]
     assert [result[0] for result in results].count("claimed") == 1

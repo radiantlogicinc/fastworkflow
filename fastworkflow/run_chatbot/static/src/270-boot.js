@@ -13,13 +13,11 @@ document.getElementById("refreshBtn").addEventListener("click", function () {
 });
 function clearedSummary(data) {
   /* The server returns clear_conversations()'s per-table delete counts under
-     `deleted`, or an empty object when there was no store to clear. The
-     process-cache count is not a deletion, so it does not make a clear count
-     as having removed something. */
+     `deleted`, or an empty object when there was no store to clear. */
   var deleted = (data && data.deleted) || {};
   var total = 0;
   Object.keys(deleted).forEach(function (key) {
-    if (key !== "offload_scopes_released") { total += Number(deleted[key]) || 0; }
+    total += Number(deleted[key]) || 0;
   });
   if (!total) { return "There was nothing to clear."; }
   var convs = Number(deleted.conversations) || 0;

@@ -38,7 +38,7 @@
 > entry points and library embedders alike, so a server lacks conversation
 > persistence only when its observability store cannot be opened. The same
 > release moved observation-offloading evidence into this DB
-> (`offload_evidence`, `offload_subjects`, `offload_events`), erased and pruned
+> (`offload_evidence`, `offload_events`), erased and pruned
 > with its turn; see `docs/observation_search.md`, "Retention, redaction and
 > known limits".
 

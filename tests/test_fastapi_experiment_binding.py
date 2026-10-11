@@ -378,10 +378,8 @@ def test_the_runtime_probe_reports_a_valid_credential_free_snapshot(
     runtime = body["runtime"]
     assert body["status"] == "ready"
     assert runtime["configuration_valid"] is True
-    assert runtime["runtime_metadata_registered"] is True
+    assert runtime["workflow_fingerprint"].startswith("sha256:")
     assert runtime["pid"] == os.getpid()
-    assert runtime["command_surface_count"] > 0
-    assert isinstance(runtime["effective_features"], dict)
     # The snapshot itself carries no path, no store location, no env value.
     # (The surrounding body's `experiment_store_readiness.resolved_path` is
     # the pre-existing fix-rj2 handshake, outside this snapshot.)
@@ -397,7 +395,7 @@ def test_an_invalid_runtime_configuration_makes_the_pod_not_ready(
 ):
     monkeypatch.setattr(
         "fastworkflow.run_fastapi_mcp.__main__.runtime_readiness_snapshot",
-        lambda _path: {"configuration_valid": False, "runtime_metadata_registered": False},
+        lambda _path: {"configuration_valid": False},
     )
 
     response = binding_harness.client.get("/probes/readyz?runtime=true")

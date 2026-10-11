@@ -140,6 +140,7 @@
     <div id="composer">
       <textarea id="chatInput" rows="1" placeholder="Message the agent…" disabled></textarea>
       <div id="composerActions">
+        <label id="dspyCacheToggle" title="Reuse cached LLM responses (DSPy cache). Uncheck for fresh plans and answers."><input type="checkbox" id="useDspyCache" checked> LLM cache</label>
         <button id="chatSend" class="primary" disabled>Send</button>
         <button id="composerTip" type="button" aria-label="Composer tip">Tip<div class="composerTipBubble" role="tooltip">Messages go to the agent. Start a message with "/" to run a command deterministically (no agent). Enter sends, Shift+Enter adds a line. Every turn is inspectable in the Debug tab.</div></button>
       </div>

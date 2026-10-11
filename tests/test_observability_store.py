@@ -859,6 +859,73 @@ class TestMaintenance:
         remaining = _rows(db_path, "SELECT span_id FROM spans")
         assert [r["span_id"] for r in remaining] == ["new"]
 
+    @staticmethod
+    def _turn(store, turn_key, *, status="completed", experiment_id=None):
+        with store._connect() as conn:
+            store.upsert_turn_row(conn, dict(
+                turn_key=turn_key, channel_id="chan", conversation_id=None,
+                ordinal=None, user_message="q", refined_user_message=None,
+                entry_workflow_name="wf", entry_context="", status=status,
+                success=1, failure_reason=None, answer="a" * 4_000,
+                conversation_summary=None, conversation_traces=None,
+                started_at=None, completed_at=None, suspended_ms=0,
+                continuation_of=None, record_version=1, record_json="{}",
+                experiment_id=experiment_id, task_id=None, attempt=None,
+            ), [], obs.Redactor())
+
+    def test_size_cap_evicts_finished_turn_records_last(self, db_path):
+        """fix-nczr.2: with nothing else left over the cap, the oldest finished
+        non-experiment turns go; in-flight and experiment turns stay."""
+        store = obs.ObservabilityStore(db_path)
+        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1)
+        self._turn(store, "20000101T000000-old")
+        self._turn(store, "20000101T000001-running", status="running")
+        self._turn(store, "20000101T000002-exp", experiment_id="exp-1")
+
+        deleted = store.prune(retention_days=30, max_bytes=1)
+
+        assert deleted["turns"] == 1
+        kept = {r["turn_key"] for r in _rows(db_path, "SELECT turn_key FROM turns")}
+        assert kept == {"20000101T000001-running", "20000101T000002-exp"}
+
+    def test_under_cap_prune_keeps_turn_records(self, db_path):
+        store = obs.ObservabilityStore(db_path)
+        self._turn(store, "20000101T000000-old")
+
+        deleted = store.prune(retention_days=30, max_bytes=1_000_000_000)
+
+        assert "turns" not in deleted
+        assert len(_rows(db_path, "SELECT turn_key FROM turns")) == 1
+
+    def test_writer_prunes_periodically(self, db_path, monkeypatch):
+        """fix-nczr.1: a long-lived sink re-runs the prune, not only at startup."""
+        calls = []
+        monkeypatch.setattr(
+            obs.ObservabilityStore, "prune", lambda self, *a, **k: calls.append(1)
+        )
+        monkeypatch.setattr(obs, "_PRUNE_INTERVAL_S", 0.0)
+        sink = obs.SQLiteTraceSink(db_path)
+        try:
+            deadline = time.monotonic() + 5
+            while len(calls) < 3 and time.monotonic() < deadline:
+                time.sleep(0.01)
+        finally:
+            sink.close()
+        assert len(calls) >= 3  # startup + at least two writer passes
+
+    def test_malformed_int_knob_warns_once_and_uses_default(self, monkeypatch):
+        """fix-nczr.4"""
+        from fastworkflow.utils.logging import logger
+
+        warnings = []
+        monkeypatch.setattr(logger, "warning", lambda msg, *a, **k: warnings.append(msg))
+        monkeypatch.setenv("FW_OBS_DB_MAX_BYTES", "2GB")
+        monkeypatch.setattr(obs, "_warned_env_values", set())
+
+        assert obs._env_int("FW_OBS_DB_MAX_BYTES", 7) == 7
+        assert obs._env_int("FW_OBS_DB_MAX_BYTES", 7) == 7
+        assert len(warnings) == 1 and "2GB" in warnings[0]
+
     def test_forget_channel_erases_across_tables(
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch, db_path, sink
     ):

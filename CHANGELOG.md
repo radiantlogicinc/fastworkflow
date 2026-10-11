@@ -1,5 +1,64 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **The observability record bounds itself in long-lived servers**
+  (`fix-nczr`): the writer re-runs the retention prune hourly instead of only
+  at recorder startup, and once only turn records are left over
+  `FW_OBS_DB_MAX_BYTES` the oldest finished non-experiment turns are evicted
+  whole, so the cap is a real bound. No new settings. A malformed `FW_OBS_*`
+  integer now logs a warning, and so does an unsealed experiment holding the
+  file over the cap.
+
+## 3.6.0 — DSPy 3.4, request splitting, workflow facts on classes
+
+### Added
+
+- **Request splitting** (`b647f25`): the agent splits a request into
+  independent sub-tasks (workflow skills from `_skills/` as job types,
+  optional `_skills/split_instructions.md`) and runs them one by one; the
+  25-step cap hands a sub-task to a fresh executor (at most 2 hand-offs).
+- **Execution guards**: multi-command calls are refused, a command that
+  returns the same result again is blocked for a step, and unparsable
+  replies and LLM timeouts are recovered as bad steps.
+- **`LLM_TIMEOUT_SECONDS`** bounds each LLM call (default 120); parameter
+  validation hooks may declare `command_text` to receive the command as written.
+
+### Changed
+
+- **dspy is required at `>=3.4.0,<3.5`** with the `typesafe` extra. Every
+  module imports litellm before dspy, and `import fastworkflow` repairs
+  DSPy's lazy `openai` stand-in when dspy was imported first, so a bare
+  `import fastworkflow` no longer loads litellm. Provider cache misses are
+  recorded as misses again (DSPy 3.4 flags only hits).
+- **`workflow_runtime.json` is retired** (`c4c901b`): a context's callback
+  class declares `occupiable = False`, a command's ResponseGenerator declares
+  `descends_to` / `descend_parameter`; workflow identity is the
+  framework-computed content hash.
+- **Observation offloading is simplified** (`4257d2a`): observations are
+  saved once per step and offloaded when the whole executor prompt exceeds
+  `FW_TRAJECTORY_MAX_BYTES`. **Observability schema v9**: offload rows lose
+  `scope_id` / `offload_order`, `offload_subjects` is dropped.
+- **The initial planner gets every prior turn summary** instead of the last
+  trajectory; the planner and agent tools get prescriptive context navigation.
+- `POST /post_feedback` and `GET /feedback` accept a retired execution key
+  ([R9]); `/post_feedback` returns the turn's comments.
+- **Observation handles use the ReAct step index** (`O0`, `O1`, …): execute ordinals,
+  `ordinal_offset`, forced-replan continuation segments, and `alias_conflict` are
+  removed; max-iters exhaustion follows the base ReAct loop.
+
+### Security
+
+- Floors: `transformers>=5.17.0` (CVE-2026-75104, CVE-2026-80047; pulls
+  tokenizers 0.23.3), `anyio>=4.14.2` (CVE-2026-63374, CVE-2026-64847),
+  `fsspec>=2026.6.0` (CVE-2026-104851), `multidict>=6.9.1` (CVE-2026-104874).
+- OpenVEX v7 (`security/vex/fastworkflow.openvex.json`) marks not_affected:
+  litellm CVE-2026-12772/12795/12796 (proxy-only, fixed after 1.82.2), the
+  transformers ZDI checkpoint batch CVE-2025-14921/14924/14926–14930, and
+  torch CVE-2026-4538, CVE-2025-3000/3121/3136/4287/55554.
+
 Releases before 3.4.0 were announced in their merge-commit subjects
 (`feat: v3.2.0 — observability store, chatbot debug UI, …`) and are recoverable
 with `git tag` and `git log --first-parent main`. This file starts at 3.4.0; it

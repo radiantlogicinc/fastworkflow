@@ -233,19 +233,21 @@ class TestAdditiveSchema:
         assert {"experiment_id", "task_id", "attempt"} <= conv_cols
         assert {"idx_turns_experiment", "idx_conv_experiment_attempt"} <= indexes
 
-    def test_schema_version_is_eight_for_create_time_only_columns(self, db_path):
+    def test_schema_version_is_nine_for_create_time_only_columns(self, db_path):
         """fix-42b added create-time-only experiment columns and bumped v1->v2;
         fix-qe2 added experiment_attempts.runtime_snapshot_json and bumped
         v2->v3; fix-aw5 added feedback in v4; fix-46l.2 added feedback
         provenance in v5; fix-w6w added experiment archival in v6; fix-9eg.16
         dropped the agent-memory `feedback` table and gave `human_feedback`
         its taxonomy, identity and anchor columns in v7; fix-0gh0 dropped the
-        capture-policy columns from experiments and offload_evidence in v8. All
-        are create-time shapes with no migration path."""
+        capture-policy columns from experiments and offload_evidence in v8;
+        fix-cws4.8 dropped offload scope/order columns and offload_subjects and
+        made the run context a column of offload_evidence in v9. All are
+        create-time shapes with no migration path."""
         obs.ObservabilityStore(db_path)
         conn = sqlite3.connect(db_path)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
             attempt_cols = {
                 r[1] for r in conn.execute("PRAGMA table_info(experiment_attempts)")
             }
@@ -254,7 +256,7 @@ class TestAdditiveSchema:
             }
         finally:
             conn.close()
-        assert obs.SCHEMA_VERSION == 8
+        assert obs.SCHEMA_VERSION == 9
         assert "runtime_snapshot_json" in attempt_cols
         assert "archived" in experiment_cols
         assert not {"capture_profile", "capture_policy_version"} & experiment_cols

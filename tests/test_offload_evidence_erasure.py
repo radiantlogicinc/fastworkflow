@@ -1,8 +1,7 @@
 """Offload evidence lives in the observability database and dies with its turn.
 
-Every archived execute response is a row of ``offload_evidence`` (and its
-subject a row of ``offload_subjects``) in the workflow's own observability
-database, keyed by the turn that produced it and carrying that turn's channel
+Every archived execute response is a row of ``offload_evidence`` in the
+workflow's own observability database, keyed by the turn that produced it and carrying that turn's channel
 id. ``ObservabilityStore.forget_channel``, ``clear_conversations`` and
 ``prune`` erase those rows in the same transactions that erase the turn
 record, experiment runs included. The evidence used to live in a second file
@@ -31,47 +30,26 @@ from fastworkflow.observation_offloading.archive import (
 )
 from fastworkflow.observation_offloading.state import (
     record_event,
-    register_scope,
-    reset_runtime_state,
+    reset_observation_state,
 )
 from fastworkflow.run_chatbot.server import run_clear_conversations, run_forget_channel
 
 #: The evidence tables and the column that dates each row.
 EVIDENCE_TABLES = {
     "offload_evidence": "persisted_at",
-    "offload_subjects": "recorded_at",
     "offload_events": "recorded_at",
 }
 
-#: A credential shape the store's ``Redactor`` recognises with no help from
-#: the environment.
-SK_TOKEN = "sk-livekey1234567890abcdef"
 
 
 def chatbot_scope(channel: str, turn: str = "turn-1") -> RuntimeHandleScope:
-    """A scope exactly as ``scope_for_host`` builds it with no experiment claim."""
+    """A scope exactly as ``scope_for_host`` builds it."""
     return RuntimeHandleScope(
-        store_identity="store",
         channel_id=channel,
-        experiment_id="unbound",
-        task_id="unbound",
-        attempt=0,
         turn_key=turn,
     )
 
 
-def experiment_scope(
-    channel: str, turn: str = "turn-1", experiment: str = "exp-7"
-) -> RuntimeHandleScope:
-    """A scope as it is built when the session carries an experiment claim."""
-    return RuntimeHandleScope(
-        store_identity="store",
-        channel_id=channel,
-        experiment_id=experiment,
-        task_id="task-3",
-        attempt=1,
-        turn_key=turn,
-    )
 
 
 def rows(marker: str, count: int = 30) -> list[str]:
@@ -105,10 +83,10 @@ class EvidenceFixture(unittest.TestCase):
     """An observability database populated through the real writers."""
 
     def setUp(self) -> None:
-        reset_runtime_state()
+        reset_observation_state()
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.addCleanup(reset_runtime_state)
+        self.addCleanup(reset_observation_state)
         self._restore_env: dict[str, str | None] = {}
         for name in (archive_module.REDACTION_ENV,):
             self._restore_env[name] = os.environ.pop(name, None)
@@ -129,25 +107,24 @@ class EvidenceFixture(unittest.TestCase):
     ) -> RuntimeHandleArchive:
         """One turn's worth of evidence, written by the production writers.
 
-        An archived observation, its recorded subject and one diagnostic event
-        naming the same marker -- one row in each of the tables a turn writes.
+        An archived observation and one diagnostic event naming the same
+        marker -- one row in each of the tables a turn writes.
         """
         text = text or (
             "Observation O1 (execute_workflow_query)\n" + "\n".join(rows(marker))
         )
         archive = RuntimeHandleArchive(self.db_path)
-        register_scope(scope, archive)
-        record_event({"kind": "search_memory", "scope_id": scope.scope_id,
-                      "question": "whose rows?", "answer": marker})
-        archive.put_subject(scope, "O1", "Fixture " + marker)
+        record_event({"kind": "search_memory",
+                      "question": "whose rows?", "answer": marker},
+                     scope=scope, store=archive)
         archive.persist(
             scope,
             alias="O1",
-            offload_order=1,
             command_name="execute_workflow_query",
             step_index=1,
             text=text,
             text_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            context_clause="Fixture " + marker,
         )
         return archive
 
@@ -195,7 +172,7 @@ class EvidenceFixture(unittest.TestCase):
         recovered = archive.get(scope, "O1")
         self.assertIsNotNone(recovered)
         self.assertIn(marker, recovered["text"])
-        self.assertEqual(archive.get_subject(scope, "O1"), "Fixture " + marker)
+        self.assertEqual(recovered["context_clause"], "Fixture " + marker)
 
     def assert_erased(self, scope: RuntimeHandleScope, marker: str):
         """Nothing of this turn is left anywhere in the file."""
@@ -205,10 +182,8 @@ class EvidenceFixture(unittest.TestCase):
         )
         archive = RuntimeHandleArchive(self.db_path)
         self.assertIsNone(archive.get(scope, "O1"))
-        self.assertIsNone(archive.get_subject(scope, "O1"))
         blob = self.file_bytes()
         self.assertNotIn(marker.encode("utf-8"), blob)
-        self.assertNotIn(scope.scope_id.encode("ascii"), blob)
 
 
 class ChannelErasureTests(EvidenceFixture):
@@ -232,71 +207,28 @@ class ChannelErasureTests(EvidenceFixture):
         self.assert_readable(kept, "confidential-keep")
         self.assertEqual(deleted["turns"], 1)
         self.assertEqual(deleted["offload_evidence"], 1)
-        self.assertEqual(deleted["offload_subjects"], 1)
         self.assertEqual(deleted["offload_events"], 1)
-        self.assertEqual(deleted["offload_scopes_released"], 1)
         with sqlite3.connect(self.db_path) as conn:
             self.assertEqual(
                 [row[0] for row in conn.execute("SELECT channel_id FROM turns")],
                 ["keep"],
             )
 
-    def test_both_evidence_tables_are_erased_with_the_channel(self):
-        """A subject recorded without an observation goes with the channel too.
-
-        A subject is written at dispatch, before its step completes, and
-        stays on its own when the archive refuses the observation. It names
-        whose listing a step was, so it is exactly the text a deletion request
-        is about.
-        """
-        scope = chatbot_scope("erase")
-        archive = RuntimeHandleArchive(self.db_path)
-        archive.put_subject(scope, "O7", "Fixture subject-only-erase")
-        self.assertEqual(counts(self.db_path), {"offload_evidence": 0,
-                                                "offload_subjects": 1,
-                                                "offload_events": 0})
-
-        deleted = obs.ObservabilityStore(self.db_path).forget_channel("erase")
-
-        self.assertEqual(deleted["offload_subjects"], 1)
-        self.assertEqual(set(counts(self.db_path).values()), {0})
-        self.assertNotIn(b"subject-only-erase", self.file_bytes())
-
     def test_clear_conversations_removes_all_evidence(self):
         first = chatbot_scope("one")
-        second = experiment_scope("two", turn="turn-2")
+        second = chatbot_scope("two", turn="turn-2")
         self.populate(first, "confidential-one")
         self.populate(second, "confidential-two")
 
         deleted = run_clear_conversations(self.db_path)
 
         self.assertEqual(deleted["offload_evidence"], 2)
-        self.assertEqual(deleted["offload_subjects"], 2)
         self.assert_erased(first, "confidential-one")
         self.assert_erased(second, "confidential-two")
 
     def test_forget_channel_of_an_unknown_channel_erases_nothing(self):
         deleted = obs.ObservabilityStore(self.db_path).forget_channel("nobody")
         self.assertEqual(deleted["offload_evidence"], 0)
-        self.assertEqual(deleted["offload_subjects"], 0)
-
-    def test_erasure_drops_the_raw_copy_a_live_turn_was_reading(self):
-        """In-process memory is part of the channel too.
-
-        With redaction on, this process keeps the raw text of a redacted
-        observation for as long as its turn is live. Forgetting the channel
-        must not leave that copy answering reads after the row is gone.
-        """
-        scope = chatbot_scope("erase")
-        text = f"connector: okta-prod\napi_key: {SK_TOKEN}\n"
-        archive = self.populate(scope, "unused", text=text)
-        self.assertEqual(archive.get(scope, "O1")["text"], text)
-        self.assertIn(scope.scope_id, archive_module._live_raw)
-
-        obs.ObservabilityStore(self.db_path).forget_channel("erase")
-
-        self.assertNotIn(scope.scope_id, archive_module._live_raw)
-        self.assertIsNone(archive.get(scope, "O1"))
 
 
 class ExperimentEvidenceTests(EvidenceFixture):
@@ -309,7 +241,7 @@ class ExperimentEvidenceTests(EvidenceFixture):
         that says whether a row belongs to an experiment, and no store
         identity.
         """
-        self.populate(experiment_scope("exp-channel"), "confidential-exp")
+        self.populate(chatbot_scope("exp-channel"), "confidential-exp")
         with sqlite3.connect(self.db_path) as conn:
             for table in EVIDENCE_TABLES:
                 columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
@@ -321,7 +253,7 @@ class ExperimentEvidenceTests(EvidenceFixture):
         self.assertNotIn(b"exp-7", self.file_bytes())
 
     def test_a_forget_aimed_at_another_channel_leaves_an_experiment_run(self):
-        kept = experiment_scope("exp-channel")
+        kept = chatbot_scope("exp-channel")
         erased = chatbot_scope("chat-channel", turn="turn-2")
         self.populate(kept, "confidential-exp")
         self.populate(erased, "confidential-chat")
@@ -332,7 +264,7 @@ class ExperimentEvidenceTests(EvidenceFixture):
         self.assert_erased(erased, "confidential-chat")
 
     def test_an_experiment_run_is_erased_by_a_forget_of_its_own_channel(self):
-        scope = experiment_scope("exp-channel")
+        scope = chatbot_scope("exp-channel")
         self.populate(scope, "confidential-exp")
         self.seed_turn(scope)
 
@@ -342,7 +274,7 @@ class ExperimentEvidenceTests(EvidenceFixture):
         self.assert_erased(scope, "confidential-exp")
 
     def test_an_experiment_run_is_aged_by_retention_like_any_turn(self):
-        scope = experiment_scope("exp-channel")
+        scope = chatbot_scope("exp-channel")
         self.populate(scope, "confidential-exp")
         self.age_rows(400)
 
@@ -380,7 +312,7 @@ class ExperimentEvidenceTests(EvidenceFixture):
 
 
     def test_clear_conversations_erases_experiment_evidence(self):
-        scope = experiment_scope("exp-channel")
+        scope = chatbot_scope("exp-channel")
         self.populate(scope, "confidential-exp")
 
         obs.ObservabilityStore(self.db_path).clear_conversations()
@@ -446,16 +378,15 @@ class RetentionTests(EvidenceFixture):
         self.assert_erased(old, "confidential-old")
         self.assert_readable(recent, "confidential-recent")
         self.assertEqual(deleted["offload_evidence"], 1)
-        self.assertEqual(deleted["offload_subjects"], 1)
 
     def test_a_turn_is_aged_by_its_earliest_row_so_it_goes_whole(self):
         scope = chatbot_scope("chat")
         self.populate(scope, "confidential")
-        # Only the subject is old: it is written at dispatch, before the
-        # observation, so the turn began before the horizon and goes entirely.
+        # Only the event is old: the turn began before the horizon, so it goes
+        # entirely, evidence row included.
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
-                "UPDATE offload_subjects SET recorded_at=?",
+                "UPDATE offload_events SET recorded_at=?",
                 ("2000-01-01T00:00:00Z",),
             )
             conn.commit()
@@ -506,7 +437,7 @@ class RetentionTests(EvidenceFixture):
 
     def test_a_bound_experiment_turn_keeps_its_evidence_past_horizon_and_cap(self):
         """Bound through its turn record's experiment (`fix-10vj.2`)."""
-        bound = experiment_scope("exp-channel", turn="turn-exp", experiment="exp-7")
+        bound = chatbot_scope("exp-channel", turn="turn-exp")
         chat = chatbot_scope("chat", turn="turn-chat")
         self.populate(bound, "confidential-exp")
         self.populate(chat, "confidential-chat")
@@ -558,17 +489,9 @@ class EventErasureTests(EvidenceFixture):
         self.assertEqual(remaining[0]["event"]["answer"], "confidential-keep")
         self.assertNotIn(b"confidential-erase", self.file_bytes())
 
-    def test_an_erasure_reports_the_scopes_it_released(self):
-        """What replaced the event-file line count: the process scopes dropped."""
-        self.populate(chatbot_scope("erase"), "confidential-erase")
-        store = obs.ObservabilityStore(self.db_path)
-        self.assertEqual(store.forget_channel("erase")["offload_scopes_released"], 1)
-        self.assertEqual(store.forget_channel("erase")["offload_scopes_released"], 0)
-        self.assertNotIn("offload_events_removed", store.forget_channel("erase"))
-
     def test_clear_conversations_removes_every_event(self):
         self.populate(chatbot_scope("one"), "confidential-one")
-        self.populate(experiment_scope("two", turn="turn-2"), "confidential-two")
+        self.populate(chatbot_scope("two", turn="turn-2"), "confidential-two")
 
         deleted = obs.ObservabilityStore(self.db_path).clear_conversations()
 
@@ -592,8 +515,8 @@ class EventErasureTests(EvidenceFixture):
     def test_an_event_alone_ages_its_turn(self):
         """A turn whose earliest row is an event is dated by that event."""
         scope = chatbot_scope("chat", turn="turn-events-only")
-        register_scope(scope, RuntimeHandleArchive(self.db_path))
-        record_event({"kind": "rehydration_started", "scope_id": scope.scope_id})
+        record_event({"kind": "rehydration_started"},
+                     scope=scope, store=RuntimeHandleArchive(self.db_path))
         self.age_rows(400)
 
         deleted = obs.ObservabilityStore(self.db_path).prune(

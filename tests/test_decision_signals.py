@@ -1,11 +1,9 @@
-"""Coverage for the uncertainty and consequence contracts (arch §6.6.1).
+"""Coverage for the uncertainty contract (arch §6.6.1).
 
 These are capture-only records, so there is no behavior to assert — what is worth
 testing is the set of ways a plausible-looking record can be wrong. Most of this
 file is therefore about rejection:
 
-* an unknown effect contract quietly grading as `none`, which §6.6.1 forbids and
-  which produces a clean row rather than an error;
 * `True` entering a calibration curve as a confidence of 1.0, which Pydantic's
   lax bool-to-int coercion allowed until a `before` validator stopped it;
 * a decision that carries neither a signal nor a reason it has none, which is
@@ -32,41 +30,18 @@ from pydantic import ValidationError
 
 import fastworkflow.observability.decision_signals as decision_signals
 from fastworkflow.observability.decision_signals import (
-    _CONSEQUENCE_ORDER,
-    _EFFECT_BASE,
-    _REVERSIBILITY_FLOOR,
-    ASSESSOR_VERSION,
     SIGNAL_DOMAINS,
     SLOT_BINDING_SOURCES,
-    BlastRadius,
-    ConsequenceAssessment,
-    ConsequenceClass,
     DecisionKind,
     DecisionUncertainty,
-    Reversibility,
     SignalKind,
     UncertaintySignal,
     ambiguity_set_size,
-    assess_consequence,
     classifier_confidence,
     classifier_topk_margin,
     fuzzy_distance,
     slot_binding_source,
 )
-from fastworkflow.runtime_manifest import EffectKind
-
-EFFECT_KINDS = get_args(EffectKind)
-REVERSIBILITIES = get_args(Reversibility)
-BLAST_RADII = get_args(BlastRadius)
-
-
-def _every_assessor_input():
-    """The assessor's entire input space. Small enough to enumerate exhaustively."""
-    for effect_kind in EFFECT_KINDS:
-        for reversibility in REVERSIBILITIES:
-            for blast_radius in BLAST_RADII:
-                for decision_critical in (False, True):
-                    yield effect_kind, reversibility, blast_radius, decision_critical
 
 
 # ----------------------------------------------------------------------
@@ -82,15 +57,6 @@ def test_every_signal_kind_declares_a_domain():
     Adding a kind without answering that question must fail here.
     """
     assert set(SIGNAL_DOMAINS) == set(get_args(SignalKind))
-
-
-def test_effect_and_reversibility_tables_are_exhaustive():
-    assert set(_EFFECT_BASE) == set(EFFECT_KINDS)
-    assert set(_REVERSIBILITY_FLOOR) == set(REVERSIBILITIES)
-
-
-def test_consequence_order_covers_the_enum():
-    assert set(_CONSEQUENCE_ORDER) == set(get_args(ConsequenceClass))
 
 
 def test_message_intent_is_a_recorded_decision_kind():
@@ -287,177 +253,6 @@ def test_candidate_count_cannot_be_negative():
 
 
 # ----------------------------------------------------------------------
-# Consequence: unknown is not zero, and a read is not automatically cheap
-# ----------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("inputs", list(_every_assessor_input()))
-def test_unknown_effect_is_never_graded_below_high(inputs):
-    """§6.6.1: an absent effect contract reads as write-capable and high."""
-    effect_kind, reversibility, blast_radius, decision_critical = inputs
-    assessment = assess_consequence(
-        effect_kind=effect_kind,
-        reversibility=reversibility,
-        blast_radius=blast_radius,
-        decision_critical=decision_critical,
-    )
-    if effect_kind == "unknown":
-        assert assessment.consequence_class in ("high", "critical")
-        assert assessment.write_capable is True
-
-
-def test_the_default_assessor_never_claims_zero_consequence():
-    """`none` is a claim about the world a declared contract cannot support."""
-    produced = {
-        assess_consequence(
-            effect_kind=effect_kind,
-            reversibility=reversibility,
-            blast_radius=blast_radius,
-            decision_critical=decision_critical,
-        ).consequence_class
-        for effect_kind, reversibility, blast_radius, decision_critical in _every_assessor_input()
-    }
-    assert "none" not in produced
-
-
-def test_a_read_whose_result_authorizes_something_is_not_low():
-    """§4.15's stale-attribute case: cost is carried by what acts on the result."""
-    plain = assess_consequence(
-        effect_kind="read_only", reversibility="reversible", blast_radius="single-entity"
-    )
-    critical = assess_consequence(
-        effect_kind="read_only",
-        reversibility="reversible",
-        blast_radius="single-entity",
-        decision_critical=True,
-    )
-    assert plain.consequence_class == "low"
-    assert _CONSEQUENCE_ORDER.index(critical.consequence_class) > _CONSEQUENCE_ORDER.index(
-        plain.consequence_class
-    )
-
-
-def test_unknown_reversibility_is_planned_for_as_irreversible():
-    assert _REVERSIBILITY_FLOOR["unknown"] == _REVERSIBILITY_FLOOR["irreversible"]
-
-
-def test_tenant_wide_blast_radius_is_critical():
-    assert (
-        assess_consequence(
-            effect_kind="write", reversibility="irreversible", blast_radius="tenant-wide"
-        ).consequence_class
-        == "critical"
-    )
-
-
-def test_read_only_is_the_only_effect_that_is_not_write_capable():
-    for effect_kind in EFFECT_KINDS:
-        assessment = assess_consequence(effect_kind=effect_kind)
-        assert assessment.write_capable is (effect_kind != "read_only")
-
-
-def test_the_assessor_is_deterministic():
-    """FW-REQ-021 clause 12: reproduces identically on replay, with no model call."""
-    for inputs in _every_assessor_input():
-        effect_kind, reversibility, blast_radius, decision_critical = inputs
-        results = {
-            assess_consequence(
-                effect_kind=effect_kind,
-                reversibility=reversibility,
-                blast_radius=blast_radius,
-                decision_critical=decision_critical,
-            ).consequence_class
-            for _ in range(3)
-        }
-        assert len(results) == 1
-
-
-def test_the_assessor_records_its_version():
-    """§6.6.1: so a reassessment is distinguishable from a behavior change."""
-    assert assess_consequence(effect_kind="write").assessor_version == ASSESSOR_VERSION
-
-
-def test_risk_class_is_carried_without_being_reinterpreted():
-    """§4.15: `risk_class` is the task-level declaration, not the action grade."""
-    assessment = assess_consequence(effect_kind="read_only", risk_class="tier-3")
-    assert assessment.risk_class == "tier-3"
-    assert assessment.consequence_class != "tier-3"
-
-
-# ----------------------------------------------------------------------
-# The same floors hold for a hand-built record, not only the assessor
-# ----------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        pytest.param(
-            dict(
-                consequence_class="none",
-                effect_kind="unknown",
-                reversibility="reversible",
-                blast_radius="single-entity",
-            ),
-            id="unknown-effect-as-none",
-        ),
-        pytest.param(
-            dict(
-                consequence_class="low",
-                effect_kind="unknown",
-                reversibility="reversible",
-                blast_radius="single-entity",
-            ),
-            id="unknown-effect-as-low",
-        ),
-        pytest.param(
-            dict(
-                consequence_class="low",
-                effect_kind="read_only",
-                reversibility="unknown",
-                blast_radius="single-entity",
-            ),
-            id="unknown-reversibility-as-low",
-        ),
-        pytest.param(
-            dict(
-                consequence_class="low",
-                effect_kind="read_only",
-                reversibility="reversible",
-                blast_radius="unknown",
-            ),
-            id="unknown-blast-radius-as-low",
-        ),
-        pytest.param(
-            dict(
-                consequence_class="none",
-                effect_kind="write",
-                reversibility="reversible",
-                blast_radius="single-entity",
-            ),
-            id="write-as-none",
-        ),
-    ],
-)
-def test_a_hand_built_record_cannot_grade_below_its_floor(kwargs):
-    with pytest.raises(ValidationError):
-        ConsequenceAssessment(decision_critical=False, **kwargs)
-
-
-def test_a_workflow_assessor_may_still_assert_none_for_a_pure_read():
-    """The member stays usable by an assessor that knows more than the manifest."""
-    assessment = ConsequenceAssessment(
-        consequence_class="none",
-        effect_kind="read_only",
-        reversibility="reversible",
-        blast_radius="single-entity",
-        decision_critical=False,
-        assessor_version="workflow/1",
-    )
-    assert assessment.consequence_class == "none"
-
-
-# ----------------------------------------------------------------------
 # Conformance against other files
 # ----------------------------------------------------------------------
 
@@ -494,7 +289,7 @@ def test_slot_binding_vocabulary_matches_what_the_runtime_emits():
 
 
 def test_module_stays_a_leaf():
-    """Arch §22: standard library, Pydantic, and `runtime_manifest` only."""
+    """Arch §22: standard library and Pydantic only."""
     tree = ast.parse(Path(inspect.getfile(decision_signals)).read_text(encoding="utf-8"))
     fastworkflow_imports = {
         node.module
@@ -503,7 +298,7 @@ def test_module_stays_a_leaf():
         and node.module
         and node.module.startswith("fastworkflow")
     }
-    assert fastworkflow_imports == {"fastworkflow.runtime_manifest"}
+    assert fastworkflow_imports == set()
 
 
 def test_module_defines_no_decision_function():

@@ -64,8 +64,8 @@ cross-process resume — the baseline is not serialized).
 Around the agent's task-planner calls. Attributes: `model`, the plan text
 (capped) and, on replans, `replan_trigger`: `parameter_extraction_error` or
 `ask_user_response`. Since contract v2 (aggregate span contract 8) also
-`plan_source` — `structured` (the finish check's structured planner),
-`text` (the plain-text planner, the default with the check off),
+`plan_source` — `structured` (historical structured planner),
+`text` (the plain-text planner),
 `text_fallback` (the structured call failed to parse or returned no steps, so
 the plain-text planner ran), or `none` (no plan) — and `subjects`, the
 structured plan's subject names, credential-scrubbed (`[]` for a
@@ -73,9 +73,8 @@ text plan and for continuation replans). With `plan_source: structured` the
 plan text is a numbered list whose steps may carry `(optional)` /
 `(needs the user)` flags. Spans written before v2 lack both keys.
 Structured planning is disabled since 2026-09-28: new spans carry only
-`plan_source` `text` or `none` and `subjects` `[]`, with the finish check on
-or off; `structured` and `text_fallback` appear only in records written
-before then.
+`plan_source` `text` or `none` and `subjects` `[]`; `structured` and
+`text_fallback` appear only in records written before then.
 
 ### `fw.agent.execute` (kind `internal`) — the ReAct loop as a phase
 Sibling of `fw.planner.plan` under the turn; NOT `fw.command.execute` (that is
@@ -87,8 +86,7 @@ Child of `fw.agent.execute`; the step's reasoning `fw.llm.call` and its
 `fw.agent.tool_call` nest under it. Attributes: `step_index`, `thought`,
 `tool_name`, `tool_args`, `observation`; on failures `error_type`/`tool_error`
 and `recovered`; on suspension `clarification` (status `awaiting_user`);
-`finish_check_note` on the one `finish` step whose observation was replaced by
-the finish-time execution check's note (that observation is not a tool result).
+`finish_check_note` (historical whitelist key; no longer set on new spans).
 
 ### `fw.agent.tool_call` (kind `tool`)
 One per agent → workflow invocation; `raw_command` is the exact command text

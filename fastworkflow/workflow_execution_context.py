@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from queue import Queue
 from typing import Any, Optional
 
+import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
 
 import fastworkflow
@@ -39,26 +40,31 @@ from fastworkflow.state_serialization import validate_state
 from fastworkflow.observability import store as observability_store
 from fastworkflow.observability.execution_recorder import ExecutionRecorder, record_execution
 from fastworkflow.turn import TurnResult, TurnStatus, mint_turn_key
-from fastworkflow.turn_plan import TurnPlan
 from fastworkflow.utils.logging import logger
 from fastworkflow.utils import dspy_logger, dspy_utils
 from fastworkflow.utils.react import NoSuspendedAgentStateError
 
-#: Why the turn has the plan it has. The finish check records the cause of a
-#: missing plan as ``no_plan_cause``.
-TURN_PLAN_PLANNED = "planned"
-#: The planner returned no plan at all.
-TURN_PLAN_PLANNER_EMPTY = "planner_empty"
-#: The planner returned a plan the check could not read steps out of.
-TURN_PLAN_UNREADABLE = "plan_unreadable"
-#: The turn was resumed from a session state written without its plan.
-TURN_PLAN_LOST_ON_RESUME = "lost_on_resume"
-#: No plan was made for the check: it was not active, or the turn was not planned.
-TURN_PLAN_NOT_PLANNED = "not_planned"
-TURN_PLAN_STATUSES = frozenset({
-    TURN_PLAN_PLANNED, TURN_PLAN_PLANNER_EMPTY, TURN_PLAN_UNREADABLE,
-    TURN_PLAN_LOST_ON_RESUME, TURN_PLAN_NOT_PLANNED,
-})
+#: A sub-task that hits the ReAct step cap is continued by a fresh executor at most this many times.
+MAX_HANDOFFS = 2
+
+
+def _opened_part(trajectory: dict[str, Any]) -> str:
+    """The context instances a run's observations entered, one line each; "" when none.
+
+    Read from the observation headers fastworkflow prints, so the ids are exact
+    where a summary of the run would drop them.
+    """
+    from fastworkflow.observation_offloading.labels import printed_instances
+
+    opened: dict[tuple[str, str, str], None] = {}
+    for key, observation in trajectory.items():
+        if key.startswith("observation_") and isinstance(observation, str):
+            opened.update(dict.fromkeys(printed_instances(observation)))
+    if not opened:
+        return ""
+    lines = [f"- {name} {instance_id}" + (f" ({label})" if label else "")
+             for name, instance_id, label in opened]
+    return "Opened in this sub-task:\n" + "\n".join(lines)
 
 
 def _agent_result_attributes(result: Any, attempts: int) -> dict[str, Any]:
@@ -149,7 +155,7 @@ class WorkflowExecutionContext:
                          including an explicit ``tracing.NoOpTraceSink()``,
                          which records no spans or turn records -- is always
                          kept. Observation offloading still writes its
-                         evidence, subjects and events to the workflow's
+                         evidence and events to the workflow's
                          observability database whatever the sink.
         """
         self._session_key = session_key
@@ -175,19 +181,19 @@ class WorkflowExecutionContext:
         self._awaiting_user = False
         self._suspended_user_message: Optional[str] = None
         self._pending_clarification_request: Optional[str] = None
+        # Sub-task split of one turn (see _run_agent / _run_subtasks_from).
+        self._subtasks: list[str] = []
+        # Original sub-task number of each entry in _subtasks; a hand-off continuation shares its origin.
+        self._origins: list[int] = []
+        self._subtask_index = 0
+        self._subtask_answers: list[str] = []
+        # Set when a sub-task hit the step cap with no hand-off left: the turn is then exhausted.
+        self._subtask_exhausted = False
+        self._next_step = 0
 
         # Insights-distillation (teacher/student) state — CLI/Topology-A only.
         self._generate_insights = generate_insights
         self._distillation_insights_count = 0
-        self._planning_insights: Optional[str] = None
-        self._execution_insights: Optional[str] = None
-
-        # The turn's initial plan, which the finish-time execution check
-        # verifies, and why there is none when there is none: one of
-        # TURN_PLAN_STATUSES. Written by the planner at the start of a turn and
-        # carried across a cross-process ask_user resume by serialize_state.
-        self._turn_plan: Optional[TurnPlan] = None
-        self._turn_plan_status: str = TURN_PLAN_NOT_PLANNED
 
         # Observability (design §3.1): sink + identity + span bookkeeping.
         # The sink is a per-context attribute, not transport state [R28].
@@ -979,6 +985,12 @@ class WorkflowExecutionContext:
             "awaiting_user": self._awaiting_user,
             "suspended_user_message": self._suspended_user_message,
             "pending_clarification_request": self._pending_clarification_request,
+            "subtasks": list(self._subtasks),
+            "subtask_origins": list(self._origins),
+            "subtask_index": self._subtask_index,
+            "subtask_answers": list(self._subtask_answers),
+            "subtask_exhausted": self._subtask_exhausted,
+            "next_step": self._next_step,
             "react": react_blob,
             "nlu_stage": nlu_stage,
             "turn": self._serialize_turn_accumulator(),
@@ -1000,14 +1012,6 @@ class WorkflowExecutionContext:
             "attempt": self._attempt,
             "claim_epoch": self._claim_epoch,
             "server_incarnation": self._server_incarnation,
-            # Additive keys, read with .get: a blob written before them resumes
-            # a suspended turn with no plan, recorded as lost on resume. The
-            # plan is null whenever the finish check is off.
-            "turn_plan": (
-                self._turn_plan.model_dump(mode="json")
-                if self._turn_plan is not None else None
-            ),
-            "turn_plan_status": self._turn_plan_status,
         }
         # No default=str round-trip. This is the first serializer, so coercing
         # here is what made every downstream strictness check vacuous: an
@@ -1041,6 +1045,14 @@ class WorkflowExecutionContext:
         self._pending_clarification_request = state.get(
             "pending_clarification_request"
         )
+        # Absent from blobs written before sub-task splitting; the defaults mean "not split".
+        self._subtasks = list(state.get("subtasks") or [])
+        # Absent before hand-off continuations: each entry is then its own origin.
+        self._origins = list(state.get("subtask_origins") or range(len(self._subtasks)))
+        self._subtask_index = int(state.get("subtask_index") or 0)
+        self._subtask_answers = list(state.get("subtask_answers") or [])
+        self._subtask_exhausted = bool(state.get("subtask_exhausted"))
+        self._next_step = int(state.get("next_step") or 0)
 
         self._action_log = list(state.get("action_log") or [])
         # Absent from blobs written before ruling I3 landed; a missing key just
@@ -1082,31 +1094,6 @@ class WorkflowExecutionContext:
             self._ensure_agent_initialized()
             if self._workflow_tool_agent is not None:
                 self._workflow_tool_agent.import_suspended(react_blob)
-            # The suspended turn's plan, which only the finish check reads.
-            # Advisory, so it never fails a restore: a plan that does not
-            # validate is a plan lost on resume, like one in a blob written
-            # without the key. Only for an ACTIVE check
-            # (``workflow_agent.finish_check_active``): one switched off by
-            # FW_EVAL_FINISH_REMINDERS=0 restores nothing.
-            agent = self._workflow_tool_agent
-            if (getattr(agent, "finish_checker", None) is not None
-                    and bool(getattr(agent, "finish_reminders_enabled", True))):
-                plan: Optional[TurnPlan] = None
-                status = TURN_PLAN_LOST_ON_RESUME
-                if "turn_plan" in state:
-                    raw_plan = state.get("turn_plan")
-                    raw_status = state.get("turn_plan_status")
-                    try:
-                        plan = TurnPlan.model_validate(raw_plan) if raw_plan is not None else None
-                    except ValueError:
-                        plan = None
-                    else:
-                        status = raw_status if raw_status in TURN_PLAN_STATUSES else (
-                            TURN_PLAN_PLANNED if plan is not None else TURN_PLAN_NOT_PLANNED)
-                    if plan is None and status == TURN_PLAN_PLANNED:
-                        status = TURN_PLAN_LOST_ON_RESUME
-                self._turn_plan = plan
-                self._turn_plan_status = status
 
         saved_context_name = state.get("current_command_context_name")
         if (
@@ -1335,8 +1322,6 @@ class WorkflowExecutionContext:
             self._app_workflow.remove_context_change_listener(listener)
             self._context_change_listener = None
 
-        self._reclaim_offloading_scope()
-
         if self._cme_workflow is None:
             return True
         try:
@@ -1345,64 +1330,6 @@ class WorkflowExecutionContext:
             # Child cme workflows should not occur; ignore if mis-invoked.
             logger.debug("WorkflowExecutionContext.close: cme_workflow is not a root session")
             return False
-
-    def _reclaim_offloading_scope(self) -> None:
-        """Release this session's offloading state.
-
-        ``close`` is the one production signal that a session is over in this
-        process: the fleet's session cache calls it when it retires or removes a
-        channel, and an embedder calls it when its session ends. Until this, the
-        offloading runtime's per-scope registries -- the archive memo, the
-        context clauses, the hot observations, the raw in-flight copies of
-        redacted evidence and the turn's diagnostic events -- only ever grew,
-        for the lifetime of the process.
-
-        Two turns are NOT reclaimed. A turn suspended on ask_user is still
-        resumable: its scope is the one the resume writes and reads handles
-        under, and an eviction is precisely the case where it is expected to
-        come back. And nothing per-agent is touched at all -- the execute
-        numbering ledger, the suspended trajectory and the truncated-execute
-        count are the agent's own memory, they die with it, and a resume
-        rebuilds them from the suspension payload.
-
-        Evidence is redacted when it is written, and this process keeps the
-        raw text of redacted observations only while their turn is live, so
-        its own reads stay exact. Releasing the scope is what ends that: after
-        it, a read of the turn's evidence returns the stored text. A suspended
-        turn keeps its raw copies, by the same test as it keeps the rest.
-
-        Best effort by construction: failing to reclaim memory must never turn
-        a session close into an error the caller has to handle.
-        """
-        # getattr, not plain attribute access: ``close`` is reachable on a
-        # context built through ``__new__`` without ``__init__`` -- the
-        # context-change listener test constructs one exactly that way -- so
-        # neither attribute is guaranteed to exist. A context with no agent has
-        # no scope to reclaim, which is the same answer as an agent with no
-        # scope. A context that cannot say whether it is awaiting the user is
-        # assumed to be mid-turn, because declining to reclaim costs memory
-        # while reclaiming early would take a live turn's raw evidence copies.
-        agent = getattr(self, "_workflow_tool_agent", None)
-        scope = getattr(agent, "continuation_scope", None)
-        if scope is None:
-            return
-        try:
-            if getattr(self, "_awaiting_user", True) or agent.export_suspended() is not None:
-                return
-            runtime = getattr(agent, "turn_runtime", None)
-            if runtime is None:
-                from fastworkflow.agent_runtime import build_turn_runtime
-
-                runtime = build_turn_runtime(
-                    scope, archive=getattr(agent, "observation_archive", None)
-                )
-                agent.turn_runtime = runtime
-            runtime.finish_scope(scope)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug(
-                "WorkflowExecutionContext.close: could not reclaim "
-                f"offloading state ({type(exc).__name__}: {exc})"
-            )
 
     # ------------------------------------------------------------------
     # Active workflow stack (contextvar)
@@ -1433,7 +1360,19 @@ class WorkflowExecutionContext:
         full internal TurnResult is built and projected onto the slim public
         TurnOutput (see docs/turn_result_design_final.md section 1a).
         """
-        command_output = self._execute_message(message)
+        try:
+            command_output = self._execute_message(message)
+        except Exception as exc:
+            # A turn that raised is still a turn: record it as failed, with its
+            # spans closed under it, before the error propagates. Without this
+            # the turn had no record at all and read as lost.
+            first_line = (str(exc).strip().splitlines() or [""])[0]
+            try:
+                self._build_turn_result(
+                    None, failure_reason=f"{type(exc).__name__}: {first_line}"[:500])
+            except Exception:  # noqa: BLE001 - never mask the turn's own error
+                logger.warning("could not record the failed turn", exc_info=True)
+            raise
         turn_result = self._build_turn_result(command_output)
         return turn_result.turn_output
 
@@ -1467,18 +1406,24 @@ class WorkflowExecutionContext:
                 self._app_workflow.flush()
 
     def _build_turn_result(
-        self, command_output: fastworkflow.CommandOutput
+        self, command_output: Optional[fastworkflow.CommandOutput],
+        failure_reason: Optional[str] = None,
     ) -> TurnResult:
         """Assemble the TurnResult (and its public turn_output) for the message.
 
         The turn's ``answer`` is plain text — the agent's final answer (or the
         deterministic command's response text). Per-command structured results
         (success/artifacts) live on ``command_outputs``.
+
+        ``failure_reason`` set means the turn raised instead of producing an
+        output: it is recorded as FAILED with that reason.
         """
         answer = command_output.command_response.response if command_output else ""
 
-        failure_reason: Optional[str] = None
-        if self._awaiting_user:
+        if failure_reason is not None:
+            status = TurnStatus.FAILED
+            completed_at: Optional[datetime] = datetime.now(timezone.utc)
+        elif self._awaiting_user:
             status = TurnStatus.AWAITING_USER
             completed_at: Optional[datetime] = None
         else:
@@ -1821,21 +1766,8 @@ class WorkflowExecutionContext:
         if self._app_workflow:
             self._app_workflow.context["run_as_agent"] = True
 
-        # Load workflow-specific insights for insights distillation (if present).
-        # These enhance the agent + planner signatures; absent files -> None (no-op).
-        from fastworkflow.utils.insights_loader import load_workflow_insights
-        if self._app_workflow:
-            self._planning_insights = load_workflow_insights(
-                self._app_workflow.folderpath, "planning_agent"
-            )
-            self._execution_insights = load_workflow_insights(
-                self._app_workflow.folderpath, "execution_agent"
-            )
-
         from fastworkflow.workflow_agent import initialize_workflow_tool_agent
-        self._workflow_tool_agent = initialize_workflow_tool_agent(
-            self, execution_insights=self._execution_insights
-        )
+        self._workflow_tool_agent = initialize_workflow_tool_agent(self)
 
         # Re-scope the active ReAct agent's available_commands whenever the context changes,
         # driven by the workflow's context-change observer (the single switch chokepoint)
@@ -1855,10 +1787,25 @@ class WorkflowExecutionContext:
         self._awaiting_user = False
         self._suspended_user_message = None
         self._pending_clarification_request = None
+        self._clear_subtask_state()
         if self._workflow_tool_agent is not None and hasattr(
             self._workflow_tool_agent, "clear_suspension"
         ):
             self._workflow_tool_agent.clear_suspension()
+
+    def _clear_subtask_state(self) -> None:
+        self._subtasks = []
+        self._origins = []
+        self._subtask_index = 0
+        self._subtask_answers = []
+        self._subtask_exhausted = False
+        self._next_step = 0
+        self._enable_all_tools()
+
+    def _enable_all_tools(self) -> None:
+        """Lift any tool restriction a reply left on the agent (see _apply_reply_intent)."""
+        if self._workflow_tool_agent is not None:
+            self._workflow_tool_agent.disabled_tools = frozenset()
 
     def _agent_dspy_context(self):
         """Return (lm, adapter) for agent-mode dspy.context blocks."""
@@ -1910,9 +1857,9 @@ class WorkflowExecutionContext:
                         # evidence rows exist under this turn's keys, which a
                         # retry would reuse. A resumed turn always qualifies,
                         # because resume writes the observation key first.
-                        mirror = getattr(
-                            self._workflow_tool_agent, "current_trajectory", None) or {}
-                        if any(str(key).startswith("observation_") for key in mirror):
+                        trajectory = getattr(
+                            self._workflow_tool_agent, "trajectory", None) or {}
+                        if any(str(key).startswith("observation_") for key in trajectory):
                             raise
                         continue
                     tracing.end_span(
@@ -1944,29 +1891,145 @@ class WorkflowExecutionContext:
 
         refined_user_query = self._refine_user_query(message, self.conversation_history)
         self._turn_refined_message = refined_user_query
+        self._clear_subtask_state()
 
-        from fastworkflow.workflow_agent import build_query_with_next_steps, _what_can_i_do
+        if fastworkflow.get_env_var("FW_SPLIT_REQUESTS", default="1") != "0":
+            from fastworkflow.workflow_agent import split_into_subtasks
 
-        # When there is prior conversation history, pass the agent trajectory and
-        # inputs to the planner so it does not re-plan steps already completed in
-        # earlier turns (uses TaskPlannerWithTrajectoryAndAgentInputsSignature).
-        has_history = bool(self.conversation_history.messages)
+            subtasks = split_into_subtasks(
+                refined_user_query,
+                planner_lm=getattr(self, "_current_planner_lm", None),
+                workflow_folderpath=self._app_workflow.folderpath if self._app_workflow else None,
+            )
+            if len(subtasks) > 1:
+                self._subtasks = subtasks
+                self._origins = list(range(len(subtasks)))
+                return self._run_subtasks_from(0)
+
+        # An unsplit request is one sub-task, so a run that hits the step cap is handed off the same way.
+        self._subtasks = [refined_user_query]
+        self._origins = [0]
+        result = self._call_agent_for_query(refined_user_query, message)
+        if getattr(result, "exhausted", None) is not True:
+            return result
+        self._record_subtask_answer(result)
+        self._hand_off(0)
+        return self._run_subtasks_from(1)
+
+    def _call_agent_for_query(self, query: str, planner_user_query: str, *,
+                              first_step: int | None = None,
+                              template_text: str | None = None):
+        """Plan one query with the planner, then run the ReAct agent on it.
+
+        ``template_text`` picks the skill template; it defaults to the query itself.
+        """
+        from fastworkflow.workflow_agent import (
+            build_query_with_next_steps, _what_can_i_do, plan_template_for)
+
+        plan_template = (plan_template_for(template_text or query, self._app_workflow.folderpath)
+                         if self._app_workflow is not None else "")
+        # Initial turn planning uses every prior turn summary, not the previous
+        # turn's full agent trajectory (mid-turn replans still use trajectory).
         command_info_and_refined_message_with_todolist = build_query_with_next_steps(
-            refined_user_query,
+            query,
             self,
-            with_agent_inputs_and_trajectory=has_history,
-            planning_insights=self._planning_insights,
+            with_agent_inputs_and_trajectory=False,
             planner_lm=getattr(self, "_current_planner_lm", None),
+            planner_user_query=planner_user_query,
+            plan_template=plan_template or None,
         )
         available_commands = _what_can_i_do(self)
+        step_kwargs = {} if first_step is None else {"first_step": first_step}
 
         return self._call_agent_with_retry(
             lambda: self._workflow_tool_agent(
                 user_query=command_info_and_refined_message_with_todolist,
                 available_commands=available_commands,
+                **step_kwargs,
             ),
             trace_input=command_info_and_refined_message_with_todolist,
         )
+
+    def _run_subtasks_from(self, start: int):
+        """Run sub-tasks start.. one after another; the combined answer, or a suspension.
+
+        Each sub-task's ReAct steps continue numbering from the previous one so
+        archive aliases stay unique across the turn. A run that hits the step cap
+        is continued by a fresh executor, inserted as the next entry (see _hand_off).
+        """
+        k = start
+        # A while loop: a hand-off inserts an entry after the current one, so the end moves.
+        while k < len(self._subtasks):
+            self._subtask_index = k
+            origin = self._origins[k]
+            # A hand-off continuation keeps the stop/abort decision of the run before it.
+            if k == 0 or self._origins[k - 1] != origin:
+                self._enable_all_tools()
+            query = self._subtasks[k]
+            result = self._call_agent_for_query(
+                query, query, first_step=self._next_step,
+                template_text=self._original_text(origin),
+            )
+            if getattr(result, "suspended", None) is True:
+                return result
+            self._record_subtask_answer(result)
+            if getattr(result, "exhausted", None) is True:
+                self._hand_off(k)
+            k += 1
+
+        return dspy.Prediction(final_answer=self._combined_answer(),
+                               exhausted=self._subtask_exhausted)
+
+    def _original_text(self, origin: int) -> str:
+        """The sub-task text an origin was split out as (its first entry, before any hand-off)."""
+        return self._subtasks[self._origins.index(origin)]
+
+    def _hand_off(self, k: int) -> None:
+        """Queue a fresh-executor continuation of sub-task k, which hit the step cap.
+
+        The progress check reads the agent's current trajectory, so it runs before
+        the next run replaces that trajectory. At most MAX_HANDOFFS continuations per sub-task.
+        """
+        origin = self._origins[k]
+        if self._origins.count(origin) > MAX_HANDOFFS:
+            # No continuation left: the capped answer stands as partial and the turn is exhausted.
+            self._subtask_exhausted = True
+            return
+        from fastworkflow.workflow_agent import run_progress_check
+
+        done = run_progress_check(self, "step_limit", done_only=True).strip()
+        opened = _opened_part(getattr(self._workflow_tool_agent, "trajectory", None) or {})
+        logger.info("sub-task %d hit the step limit; handing off to a fresh executor (hand-off %d)",
+                    origin + 1, self._origins.count(origin))
+        self._subtasks.insert(k + 1, (
+            f"{self._original_text(origin)}\n\n"
+            "Already done in this sub-task (do not repeat it; observation ids such as O12 can be looked up):\n"
+            f"{done}"
+            + (f"\n\n{opened}" if opened else "")))
+        self._origins.insert(k + 1, origin)
+        # The continuation replaces this capped run's answer, which was written without finishing.
+        self._subtask_answers[k] = ""
+
+    def _combined_answer(self) -> str:
+        """Answers grouped under their original sub-task; a single-origin turn is its answers with no heading."""
+        answers: dict[int, list[str]] = {}
+        for origin, answer in zip(self._origins, self._subtask_answers):
+            if answer:
+                answers.setdefault(origin, []).append(answer)
+        if len(answers) == 1:
+            return "\n\n".join(next(iter(answers.values())))
+        return "\n\n".join(
+            f"### {origin + 1}. {self._original_text(origin)}\n" + "\n\n".join(parts)
+            for origin, parts in answers.items()
+        )
+
+    def _record_subtask_answer(self, result) -> None:
+        self._subtask_answers.append(result.final_answer)
+        trajectory = getattr(self._workflow_tool_agent, "trajectory", None) or {}
+        steps = [int(key.rsplit("_", 1)[1]) for key in trajectory
+                 if key.rsplit("_", 1)[-1].isdigit()]
+        if steps:
+            self._next_step = max(steps) + 1
 
     def _call_agent_resume(self, observation: str):
         return self._call_agent_with_retry(
@@ -2075,6 +2138,11 @@ class WorkflowExecutionContext:
             self,
         )
         agent_result = self._call_agent_resume(observation)
+        if self._subtasks and getattr(agent_result, "suspended", None) is not True:
+            self._record_subtask_answer(agent_result)
+            if getattr(agent_result, "exhausted", None) is True:
+                self._hand_off(self._subtask_index)
+            agent_result = self._run_subtasks_from(self._subtask_index + 1)
         self._turn_agent_result = agent_result
         if getattr(agent_result, "suspended", None) is True:
             self._pending_clarification_request = agent_result.clarification

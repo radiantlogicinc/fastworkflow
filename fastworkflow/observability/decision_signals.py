@@ -1,8 +1,7 @@
 """How unsure the runtime was, and what it would have cost to be wrong.
 
 Architecture §6.6.1, satisfying the P0 (representation) clauses of FW-REQ-021.
-Two records: `DecisionUncertainty` says how confidently the runtime committed to
-one decision, and `ConsequenceAssessment` says what that decision risked.
+`DecisionUncertainty` says how confidently the runtime committed to one decision.
 
 **This module is capture-only, and that is a load-bearing property rather than a
 phase-ordering accident.** Nothing here compares a value to a threshold, and
@@ -14,7 +13,7 @@ instrumentation slice into an unmeasured behavior change, which is why the
 absence of any such branch is both an EXP-003 exit criterion and an architecture
 §17.3 stop condition. There is deliberately no `should_proceed()` here to import.
 
-Four things this module exists to get right, each measured against this codebase
+Two things this module exists to get right, each measured against this codebase
 rather than assumed:
 
 **`fuzzy-score` is a distance, and the name lies about the direction.** The enum
@@ -25,18 +24,6 @@ Recording that under a name a reader will take for a similarity inverts every
 calibration curve drawn from it. The polarity is therefore machine-readable in
 `SIGNAL_DOMAINS`, not left to the field name.
 
-**Unknown is not zero.** An absent effect contract yields `effect_kind="unknown"`,
-and §6.6.1 requires that this reads as write-capable and high consequence. The
-enum's ordering in `runtime_manifest._EFFECT_SEVERITY` already places `unknown`
-above `read_only` for the same reason. Here it is enforced by a validator rather
-than left to each caller's care, because "unknown quietly became `none`" is a
-failure that produces a clean-looking record and no error.
-
-**A read is not automatically cheap.** §4.15: reading a stale attribute that will
-authorize a later revocation is not low consequence. Consequence is a property of
-the candidate action *in its binding*, so `decision_critical` — whether anything
-downstream depends on the result — escalates a read.
-
 **A decision with no signals must say so.** Exit criterion 1 accepts an explicit
 reason why no signal applies, but not silence: an exact-prefix match genuinely has
 no uncertainty to report, while an uninstrumented emitter has uncertainty nobody
@@ -44,8 +31,7 @@ captured, and a record that omits both looks identical. `signals_absent_reason`
 separates them, and is a closed vocabulary rather than free text so that the
 §6.6.1 "no free text, no entity content" rule holds for the whole record.
 
-Leaf module (arch §22): standard library, Pydantic, and `runtime_manifest` only —
-`EffectKind` is imported rather than restated so that the two cannot drift.
+Leaf module (arch §22): standard library and Pydantic only.
 """
 
 from __future__ import annotations
@@ -55,8 +41,6 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from fastworkflow.runtime_manifest import EffectKind
-
 # Version of the *shape* of these records. Bumped when a field or an enum member
 # is added, because a calibration report joins signals across runs and needs to
 # know that an absent kind means "this engine could not emit it" rather than "it
@@ -64,10 +48,6 @@ from fastworkflow.runtime_manifest import EffectKind
 # the *producer* of one value: retraining the intent classifier changes what a
 # confidence of 0.8 means without changing this contract at all.
 SIGNAL_CONTRACT_VERSION = 1
-
-# Version of the default consequence assessor below. §6.6.1 requires this be
-# recorded so that a reassessment is distinguishable from a behavior change.
-ASSESSOR_VERSION = "default/1"
 
 SignalKind = Literal[
     "classifier-confidence",
@@ -89,20 +69,6 @@ DecisionKind = Literal[
     "predicate-evaluation",
     "message-intent",
 ]
-
-ConsequenceClass = Literal["none", "low", "medium", "high", "critical"]
-Reversibility = Literal["reversible", "compensable", "irreversible", "unknown"]
-BlastRadius = Literal["single-entity", "multi-entity", "tenant-wide", "unknown"]
-
-# Ordered worst-last so that escalation is an index comparison. Not a public
-# contract: consumers read the class name.
-_CONSEQUENCE_ORDER: tuple[ConsequenceClass, ...] = (
-    "none",
-    "low",
-    "medium",
-    "high",
-    "critical",
-)
 
 # Exactly what `parameter_extraction.py` records as `extraction_method` today,
 # plus `db_lookup`, which substitutes a value during validation and is therefore
@@ -163,8 +129,7 @@ SIGNAL_DOMAINS: dict[str, SignalDomain] = {
 class _Strict(BaseModel):
     """Reject unknown keys and mutation.
 
-    Same reasoning as `runtime_manifest._Strict`: a typo'd field that parses is a
-    field nobody notices is missing. Frozen additionally means a captured signal
+    A typo'd field that parses is a field nobody notices is missing. Frozen additionally means a captured signal
     cannot be edited after the fact by the code being measured.
     """
 
@@ -292,144 +257,6 @@ class DecisionUncertainty(_Strict):
                 "not exist yet"
             )
         return self
-
-
-class ConsequenceAssessment(_Strict):
-    """What this candidate action risked if the decision was wrong.
-
-    Per §4.15 this describes the action *in its binding*, not the command
-    definition: the same command against a different entity can carry a
-    different blast radius.
-    """
-
-    consequence_class: ConsequenceClass
-    effect_kind: EffectKind
-    reversibility: Reversibility
-    blast_radius: BlastRadius
-    # Whether anything downstream depends on this result. §4.15's stale-attribute
-    # case: a read that authorizes a later revocation is not low consequence.
-    decision_critical: bool
-    # The task-level declaration from a supported-task contract (§4.8), carried
-    # for correlation. The action-level evaluation is `consequence_class`.
-    risk_class: Optional[str] = None
-    assessor_version: str = ASSESSOR_VERSION
-
-    @property
-    def write_capable(self) -> bool:
-        """Whether this action may write. `unknown` counts (§6.6.1)."""
-        return self.effect_kind != "read_only"
-
-    @model_validator(mode="after")
-    def _unknown_is_never_free(self) -> "ConsequenceAssessment":
-        """§6.6.1: unknown never resolves to `none`, and reads as high.
-
-        Enforced on the model rather than trusted to `assess_consequence`,
-        because a hand-built record is the case that would otherwise slip
-        through — and it produces a plausible-looking row, not an error.
-        """
-        floor: Optional[ConsequenceClass] = None
-        if self.effect_kind == "unknown":
-            floor = "high"
-        elif self.reversibility == "unknown" or self.blast_radius == "unknown":
-            floor = "high"
-        elif self.effect_kind == "write" and self.consequence_class == "none":
-            floor = "low"
-
-        if floor is not None and _rank(self.consequence_class) < _rank(floor):
-            raise ValueError(
-                f"consequence_class '{self.consequence_class}' is below the "
-                f"'{floor}' floor implied by effect_kind='{self.effect_kind}', "
-                f"reversibility='{self.reversibility}', "
-                f"blast_radius='{self.blast_radius}'; an unknown contract is a "
-                "reason for more caution, not less (arch §6.6.1)"
-            )
-        return self
-
-
-# Where an action starts before its reversibility and blast radius are taken into
-# account. `unknown` outranks `read_only` for the same reason it does in
-# `runtime_manifest._EFFECT_SEVERITY`: an absent contract is a reason for more
-# caution, not less (§6.6.1).
-_EFFECT_BASE: dict[EffectKind, ConsequenceClass] = {
-    "read_only": "low",
-    "write": "medium",
-    "unknown": "high",
-}
-
-# The floor each reversibility imposes; None leaves the base alone. `unknown`
-# shares `irreversible`'s floor deliberately — not knowing whether an effect can
-# be undone is planned for as though it cannot be.
-_REVERSIBILITY_FLOOR: dict[Reversibility, Optional[ConsequenceClass]] = {
-    "reversible": None,
-    "compensable": "medium",
-    "irreversible": "high",
-    "unknown": "high",
-}
-
-
-def _rank(consequence_class: ConsequenceClass) -> int:
-    return _CONSEQUENCE_ORDER.index(consequence_class)
-
-
-def _raise_to(current: ConsequenceClass, floor: ConsequenceClass) -> ConsequenceClass:
-    return current if _rank(current) >= _rank(floor) else floor
-
-
-def _step_up(current: ConsequenceClass) -> ConsequenceClass:
-    return _CONSEQUENCE_ORDER[min(_rank(current) + 1, len(_CONSEQUENCE_ORDER) - 1)]
-
-
-def assess_consequence(
-    *,
-    effect_kind: EffectKind,
-    reversibility: Reversibility = "unknown",
-    blast_radius: BlastRadius = "unknown",
-    decision_critical: bool = False,
-    risk_class: Optional[str] = None,
-) -> ConsequenceAssessment:
-    """Grade one candidate action, conservatively and deterministically.
-
-    Deterministic given its inputs and free of model calls, so a replay
-    reproduces it exactly. It reads no threshold and returns no decision — the
-    P1 decision table of §19.6 is the thing that eventually consumes this, and it
-    does not exist yet.
-
-    **`none` is unreachable from this assessor, by design.** Claiming an action
-    has zero consequence is a claim about the world that a declared effect
-    contract cannot support — a read still has privacy impact and may still feed
-    a later write. The member stays in the enum for a workflow-supplied assessor
-    that knows more than the manifest does; the default one never asserts it.
-
-    Callers get the effect contract from `RuntimeMetadata.effect_kind()`, which
-    already answers `unknown` for an undeclared command rather than guessing
-    `read_only`.
-    """
-    consequence = _EFFECT_BASE[effect_kind]
-
-    if floor := _REVERSIBILITY_FLOOR[reversibility]:
-        consequence = _raise_to(consequence, floor)
-
-    if blast_radius == "tenant-wide":
-        consequence = _raise_to(consequence, "critical")
-    elif blast_radius == "multi-entity":
-        consequence = _step_up(consequence)
-    elif blast_radius == "unknown":
-        consequence = _raise_to(consequence, "high")
-
-    # §4.15's stale-attribute case, and the reason a read is not automatically
-    # cheap: the cost is carried by whatever acts on the result.
-    if decision_critical:
-        consequence = _step_up(consequence)
-
-    return ConsequenceAssessment(
-        consequence_class=consequence,
-        effect_kind=effect_kind,
-        reversibility=reversibility,
-        blast_radius=blast_radius,
-        decision_critical=decision_critical,
-        risk_class=risk_class,
-        assessor_version=ASSESSOR_VERSION,
-    )
 
 
 # ----------------------------------------------------------------------

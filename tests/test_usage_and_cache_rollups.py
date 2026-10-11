@@ -1410,6 +1410,31 @@ class _EchoLM(dspy.BaseLM):
         )
 
 
+class _UnflaggedLM(dspy.BaseLM):
+    """A real DSPy LM whose provider response carries usage but no cache flag.
+
+    Models a provider path that never stamps `cache_hit`: DSPy's miss path
+    leaves the flag absent, and usage is the only evidence of the call.
+    """
+
+    def __init__(self, *, usage: dict):
+        super().__init__(model="local/unflagged")
+        self._usage = usage
+
+    def forward(self, prompt=None, messages=None, **kwargs):
+        return dotdict(
+            choices=[
+                dotdict(
+                    message=dotdict(content="[[ ## answer ## ]]\n4", tool_calls=None),
+                    finish_reason="stop",
+                )
+            ],
+            model="local/unflagged",
+            usage=dotdict(**self._usage),
+            id="resp-unflagged",
+        )
+
+
 def _capture_llm_call(
     tmp_path: Path, lm, *, disable_history: bool = False
 ) -> list[dict]:
@@ -1501,17 +1526,18 @@ class TestTheProducerOnlyClaimsACacheStateItRead:
         first has no field, the second has a value no reader should coerce."""
         from fastworkflow.utils.dspy_logger import _recorded_cache_hit
 
-        assert _recorded_cache_hit(response) is expected
+        assert _recorded_cache_hit({"response": response}) is expected
 
     def test_a_real_normalized_response_reports_both_states(self):
-        """`LMResponse.cache_hit` is a plain bool on DSPy's normalized response
-        type, so reading it as an attribute is not a guess."""
-        from dspy.core.types import LMResponse
+        """`CallResult.cache_hit` is a plain bool on DSPy 3.4's per-call result
+        type (the successor of the retired 3.3 `LMResponse`), so reading it as
+        an attribute is not a guess."""
+        from dspy.clients.call_result import CallResult
 
         from fastworkflow.utils.dspy_logger import _recorded_cache_hit
 
-        assert _recorded_cache_hit(LMResponse.from_text("x", cache_hit=True)) is True
-        assert _recorded_cache_hit(LMResponse.from_text("x", cache_hit=False)) is False
+        assert _recorded_cache_hit({"response": CallResult(cache_hit=True)}) is True
+        assert _recorded_cache_hit({"response": CallResult(cache_hit=False)}) is False
 
     def test_a_response_from_before_the_field_existed_reads_as_unknown(self):
         """The field is not guaranteed by anything but LMResponse; a raw
@@ -1522,7 +1548,42 @@ class TestTheProducerOnlyClaimsACacheStateItRead:
             def __init__(self):
                 self.id = "chatcmpl-legacy"
 
-        assert _recorded_cache_hit(ProviderResponseWithoutTheField()) is None
+        assert (
+            _recorded_cache_hit({"response": ProviderResponseWithoutTheField()})
+            is None
+        )
+
+    def test_an_unflagged_miss_is_recorded_from_its_usage(self, tmp_path):
+        """No flag, but the provider reported tokens: the call happened, and
+        a cache hit would have cleared usage, so this is a recorded miss."""
+        spans = _capture_llm_call(tmp_path, _UnflaggedLM(usage=COMPLETE_USAGE))
+        attributes = json.loads(spans[0]["attributes"])
+
+        assert attributes["cache_hit"] is False
+        assert _cache_state_of(attributes) == CACHE_MISS
+
+    def test_an_unflagged_response_with_empty_usage_stays_unknown(self, tmp_path):
+        """Empty usage is what a cache hit looks like, and also what a response
+        with no usage report looks like. Neither is evidence of a hit, so the
+        producer must not infer one."""
+        spans = _capture_llm_call(tmp_path, _UnflaggedLM(usage={}))
+        attributes = json.loads(spans[0]["attributes"])
+
+        assert "cache_hit" not in attributes
+        assert _cache_state_of(attributes) == CACHE_UNKNOWN
+
+    def test_a_tuple_of_hit_flagged_responses_records_a_hit(self):
+        """The multi-candidate native path keeps a tuple of responses; when
+        every flagged member agrees, that agreed flag is the state of the call."""
+        from dspy.clients.call_result import CallResult
+
+        from fastworkflow.utils.dspy_logger import _recorded_cache_hit
+
+        entry = {
+            "response": (CallResult(cache_hit=True), CallResult(cache_hit=True)),
+            "usage": {},
+        }
+        assert _recorded_cache_hit(entry) is True
 
 
 if __name__ == "__main__":

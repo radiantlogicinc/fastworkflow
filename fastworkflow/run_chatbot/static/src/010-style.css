@@ -280,7 +280,6 @@ main { flex: 1; display: flex; min-height: 0; }
 }
 .chipSignal.low { color: var(--fail); border-color: var(--fail); background: var(--fail-soft); }
 .chipSignal.asked { color: var(--bar-human); border-color: var(--bar-human); }
-.chipSignal.consequence { color: var(--bar-command); border-color: var(--bar-command); }
 .chipCost.unrecorded { font-style: italic; }
 /* fix-9eg.18.2/.18.3: diagnostic markers. Every marker carries its own word
    and glyph, so the severity classes below only reinforce a distinction the
@@ -345,8 +344,8 @@ table.ledger td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospa
 .promptAsSent > summary:hover { color: var(--on-accent); background: var(--accent); }
 .promptInput { border: 1px solid var(--accent); border-left-width: 4px; border-radius: 8px;
   background: var(--accent-soft); padding: 8px 10px 10px; margin-top: 6px; }
-.promptInputLabel { color: var(--accent); font-size: 11px; font-weight: 700;
-  text-transform: uppercase; letter-spacing: .04em; }
+.promptInputLabel { color: var(--accent); font-size: 13px; font-weight: 700;
+  letter-spacing: .01em; margin-bottom: 4px; }
 .promptInput > .msgBlock { margin-top: 8px; }
 .promptStatus.warn { color: var(--fail); }
 .expInvalid { border-left: 4px solid var(--fail); background: var(--fail-soft);
@@ -487,6 +486,18 @@ button.newConv:hover { filter: brightness(1.1); }
 }
 .chatMsg .bubble.md hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
 .chatMsg .bubble.md a { color: var(--accent-ink); }
+.chatMsg .bubble.md .mdTable { overflow-x: auto; margin: 8px 0; max-width: 100%; }
+.chatMsg .bubble.md table {
+  border-collapse: collapse; width: max-content; min-width: 100%;
+  font-size: 12.5px; line-height: 1.45;
+}
+.chatMsg .bubble.md th, .chatMsg .bubble.md td {
+  border: 1px solid var(--border); padding: 4px 8px; text-align: left;
+  vertical-align: top; white-space: normal; overflow-wrap: anywhere;
+}
+.chatMsg .bubble.md th { background: var(--code-bg); font-weight: 600; }
+.chatMsg .bubble.md th.align-center, .chatMsg .bubble.md td.align-center { text-align: center; }
+.chatMsg .bubble.md th.align-right, .chatMsg .bubble.md td.align-right { text-align: right; }
 .chatMsg.system { max-width: 100%; }
 .chatMsg.system .bubble { background: var(--warn-bg); border-color: var(--warn-border);
   box-shadow: none; font-size: 12.5px; }

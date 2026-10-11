@@ -4,8 +4,8 @@ Opt-in: agent-facing `search_turns` callers pass nothing and behave as before.
 The chatbot hands one of these in so a warm `/api/turns` avoids re-decoding
 span attribute JSON when the underlying span set is unchanged.
 
-Default capacity targets ~64 MB of typical entries (measured ~4 KB mean on the
-ido store: markers.as_dict() + stamps JSON), not a small fixed count that a
+Default capacity targets ~64 MB of typical entries (measured ~4 KB mean on a
+store: markers.as_dict() + stamps JSON), not a small fixed count that a
 complete scan would thrash through.
 """
 
@@ -17,7 +17,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Hashable, Mapping, Optional
 
-# Mean entry on the ido corpus was ~4 KB of JSON; 16_000 * 4 KB ≈ 64 MB.
+# Mean entry on the reference corpus was ~4 KB of JSON; 16_000 * 4 KB ≈ 64 MB.
 DEFAULT_MAX_ENTRIES = 16_000
 DEFAULT_MAX_BYTES = 64 * 1024 * 1024
 

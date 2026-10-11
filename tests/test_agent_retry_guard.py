@@ -20,7 +20,7 @@ from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
 class _Agent:
     def __init__(self, trajectory):
-        self.current_trajectory = dict(trajectory)
+        self.trajectory = dict(trajectory)
 
 
 class _Host:

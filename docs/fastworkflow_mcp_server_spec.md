@@ -6,7 +6,7 @@ The spec balances two interaction styles:
 - Coarse-grained tools mirroring the FastAPI behavior (initialize, invoke_agent/assistant, conversations, recorded feedback comments).
 - A fine-grained explicit `execute_command` tool for clients that prefer to perform their own planning and parameter formatting.
 
-No agent-internal tools (e.g., ask_user, intent_misunderstood) are exposed. Current context is not returned by `get_workflow_info`; clients should use the `what_is_current_context` command (discoverable via `get_commands`) and read the `context` field in every `CommandOutput`.
+No agent-internal tools (e.g., ask_user, what_can_i_do) are exposed. Current context is not returned by `get_workflow_info`; clients should use the `what_is_current_context` command (discoverable via `get_commands`) and read the `context` field in every `CommandOutput`.
 
 
 ## 1) Scope and Goals

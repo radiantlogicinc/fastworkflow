@@ -7,41 +7,18 @@ has been measured against realized correctness, which does not exist until G2A.
 The failure mode is invisible in a diff review: one `if` in one emitter, in a file
 whose whole purpose is recording, and the slice is no longer Phase 0.
 
-Two halves, because either alone can pass while the property is false:
-
-**Structural.** An AST pass over the three runtime files this slice touched,
-asserting no captured value reaches a condition — including via a boolean
-computed first and branched on later, which a naive `if` scan would miss. Modelled
-on `test_module_defines_no_decision_function` in tests/test_observability/decision_signals.py.
-
-**Behavioral.** The same command run under different capture configurations must
-produce byte-identical outcomes. The structural test can only see the files it
-knows about; this one would catch a read anywhere at all, because a read that
-changes nothing observable is not the read the stop condition is about.
+**Structural.** An AST pass over the runtime files this slice touched, asserting
+no captured value reaches a condition, including via a boolean computed first and
+branched on later, which a naive `if` scan would miss. Modelled on
+`test_module_defines_no_decision_function` in tests/test_observability/decision_signals.py.
 """
 
 from __future__ import annotations
 
 import ast
-import uuid
-from contextlib import suppress
 from pathlib import Path
 
 import pytest
-
-import fastworkflow
-from fastworkflow import tracing
-from fastworkflow.runtime_manifest import (
-    CommandDeclaration,
-    EffectContract,
-    RuntimeManifest,
-    clear_runtime_metadata,
-    merge_and_gate,
-    register_runtime_metadata,
-)
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
-
-from tests.todo_list_workflow.application.todo_manager import TodoListManager
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -76,13 +53,8 @@ CAPTURED_NAMES = frozenset(
         "uncertainty",
         "calibrated",
         # the producers
-        "consequence_assessment",
-        "assess_consequence",
-        "ConsequenceAssessment",
         "DecisionUncertainty",
         "UncertaintySignal",
-        # the span attribute keys, so `attributes[ATTR_CONSEQUENCE]` counts too
-        "ATTR_CONSEQUENCE",
         "ATTR_CHILD_CALLS",
     }
 )
@@ -159,89 +131,3 @@ def test_the_scan_would_actually_catch_a_read():
             for _kind, _lineno, subtree in _condition_subtrees(tree)
         ]
         assert any(hits), "the scan missed a read it is supposed to catch"
-
-
-# ----------------------------------------------------------------------
-# Behavioral half
-# ----------------------------------------------------------------------
-
-
-LIST_COMMAND = "TodoListManager/list_todo_lists"
-
-
-@pytest.fixture
-def todo_workflow_path() -> str:
-    return str(Path(__file__).parent.joinpath("todo_list_workflow").resolve())
-
-
-@pytest.fixture
-def initialized_fastworkflow():
-    fastworkflow.init({})
-    from fastworkflow.command_routing import RoutingRegistry
-
-    RoutingRegistry.clear_registry()
-    yield
-    RoutingRegistry.clear_registry()
-
-
-def _run_one_command(todo_workflow_path: str, tmp_path) -> fastworkflow.TurnOutput:
-    workflow = fastworkflow.Workflow.create(
-        todo_workflow_path,
-        workflow_id_str=f"nocontrolflow-{uuid.uuid4().hex}",
-    )
-    ctx = WorkflowExecutionContext(run_as_agent=False)
-    ctx.bind_app_workflow(workflow)
-    workflow.root_command_context = TodoListManager(str(tmp_path / "todo_list.json"))
-    try:
-        return ctx.process_action_turn(
-            fastworkflow.Action(command_name=LIST_COMMAND, command="list them")
-        )
-    finally:
-        with suppress(Exception):
-            ctx.close()
-
-
-def test_a_declared_effect_contract_changes_no_outcome(
-    initialized_fastworkflow, todo_workflow_path, tmp_path
-):
-    """`write` and undeclared grade differently and must execute identically.
-
-    This is the strongest available statement of the stop condition: the two runs
-    produce the most different consequence assessments the assessor can produce
-    from a declaration, so if anything downstream consulted one, the answers would
-    diverge.
-    """
-    undeclared = _run_one_command(todo_workflow_path, tmp_path)
-
-    manifest = RuntimeManifest(
-        schema_version=1,
-        manifest_version="1.0.0",
-        commands={
-            LIST_COMMAND: CommandDeclaration(effect=EffectContract(kind="write"))
-        },
-    )
-    register_runtime_metadata(
-        todo_workflow_path, merge_and_gate(manifest, deployment_features={}, env={})
-    )
-    try:
-        declared = _run_one_command(todo_workflow_path, tmp_path)
-    finally:
-        clear_runtime_metadata()
-
-    assert declared.answer == undeclared.answer
-    assert declared.success == undeclared.success
-    assert declared.status == undeclared.status
-
-
-def test_the_projection_helpers_return_data_not_decisions():
-    """The helper never answers "should we proceed", at any argument.
-
-    A helper that returned a bool would be the stop condition arriving disguised
-    as a convenience, so the shape is pinned rather than left to review.
-    """
-    for value in (
-        tracing.consequence_assessment(None, None),
-        tracing.consequence_assessment("/no/such/workflow", "anything"),
-    ):
-        assert isinstance(value, dict)
-        assert not isinstance(value, bool)

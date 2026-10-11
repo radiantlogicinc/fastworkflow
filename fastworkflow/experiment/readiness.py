@@ -1,6 +1,6 @@
 """Credential-free runtime introspection for deployment readiness probes.
 
-Ported (trimmed) from the ido branch's `experiment/readiness.py` (fix-qe2). The
+Ported (trimmed) from the source branch's `experiment/readiness.py`. The
 source module reports the planner execution path -- plan decomposition mode,
 execution arm, packing, task-card catalogue, stress-mode deadlines. None of
 that exists on this branch, and none of it is ported: a snapshot field whose
@@ -8,15 +8,15 @@ value is a constant here would be noise for the cross-server comparison it is
 meant to serve. What is kept is everything the 3.3 runtime actually has and
 that changes what a server does per turn:
 
-* the effective feature vector and manifest identity from the runtime
-  manifest registered at startup (`runtime_manifest`);
+* the workflow's identity: the canonical content hash of its tree, the same
+  hash provenance records;
 * the trained model version, because `___command_info/` is under no hashed
   root, so a retrain changes the system under measurement while every
   source fingerprint stays byte-identical;
 * whether retention pruning is suppressed in THIS process;
-* the served command count and the process id.
+* the process id.
 
-Omitted, with the reason, so a reader of the ido snapshot knows why the
+Omitted, with the reason, so a reader of the source snapshot knows why the
 fields are missing rather than assuming the port forgot them:
 
 * catalogue fingerprint / skill count: no `skill_catalog` module on 3.3.
@@ -32,6 +32,10 @@ fields are missing rather than assuming the port forgot them:
 switch named below, a flag. No path,
 no key, no token, no env-file value reaches the snapshot; the fingerprint is
 a content hash and the model version is a generated id.
+
+The snapshot no longer reports feature modes, the manifest's declared
+fingerprint, the scope rule version or the command count: nothing reads the
+workflow runtime manifest any more, so those values would describe nothing.
 """
 
 from __future__ import annotations
@@ -40,7 +44,7 @@ import os
 from typing import Any, Optional
 
 from fastworkflow.observability import store as observability_store
-from fastworkflow.runtime_manifest import RuntimeMetadata, get_runtime_metadata
+from fastworkflow.observability.provenance import workflow_identity
 
 
 def workflow_model_version(workflow_path: str) -> Optional[str]:
@@ -88,44 +92,18 @@ def workflow_model_legacy_layout(workflow_path: str) -> Optional[bool]:
         return None
 
 
-def runtime_readiness_snapshot(
-    workflow_path: str,
-    *,
-    metadata: Optional[RuntimeMetadata] = None,
-) -> dict[str, Any]:
-    """Report this process's effective runtime without exposing deployment secrets.
+def runtime_readiness_snapshot(workflow_path: str) -> dict[str, Any]:
+    """Report this process's runtime without exposing deployment secrets.
 
-    `metadata` defaults to what `register_runtime_metadata` retained at startup
-    for `workflow_path`. None is a real answer (an embedder that never ran a
-    fastWorkflow entry point) and is reported as `runtime_metadata_registered:
-    False` with an empty feature vector, which makes `configuration_valid`
-    False: a server that cannot describe its feature vector cannot be
-    certified as running any particular configuration.
+    The workflow is identified by its computed content hash, so a snapshot
+    names the tree the process will run. Raises when that tree cannot be read;
+    the probe callers turn that into a configuration failure.
     """
-    effective_metadata = (
-        get_runtime_metadata(workflow_path) if metadata is None else metadata
-    )
-    registered = effective_metadata is not None
-
     snapshot: dict[str, Any] = {
-        "runtime_metadata_registered": registered,
-        "effective_features": (
-            dict(sorted(effective_metadata.feature_modes.items()))
-            if registered
-            else {}
-        ),
-        "has_workflow_manifest": (
-            bool(effective_metadata.has_workflow_manifest) if registered else False
-        ),
-        "workflow_fingerprint": (
-            effective_metadata.workflow_fingerprint if registered else None
-        ),
-        "workflow_scope_rule_version": (
-            effective_metadata.workflow_scope_rule_version if registered else None
-        ),
-        "command_surface_count": (
-            len(effective_metadata.commands) if registered else 0
-        ),
+        # Kept under its historical key so clients reading the probe keep
+        # working; the value is now the computed content hash, not a declared one.
+        "workflow_fingerprint": workflow_identity(workflow_path),
+        "configuration_valid": True,
         "workflow_model_version": workflow_model_version(workflow_path),
         "workflow_model_legacy_layout": workflow_model_legacy_layout(workflow_path),
         # Recording has no switch. What can still differ between processes is
@@ -139,7 +117,6 @@ def runtime_readiness_snapshot(
         "pruning_suppressed": observability_store.pruning_suppressed(),
         "pid": os.getpid(),
     }
-    snapshot["configuration_valid"] = registered
     return snapshot
 
 

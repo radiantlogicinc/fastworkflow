@@ -24,7 +24,7 @@ from fastworkflow.model_pipeline_training import (
     set_active_artifact_version,
     GLOBAL_CONTEXT_FOLDER,
 )
-from fastworkflow.utils.generate_param_examples import generate_dspy_examples
+from fastworkflow.utils.generate_param_examples import generate_dspy_examples, missing_value_example
 from fastworkflow.command_directory import CommandDirectory, get_cached_command_directory
 from fastworkflow.command_routing import RoutingDefinition, RoutingRegistry
 from fastworkflow.command_context_model import CommandContextModel
@@ -585,6 +585,10 @@ def _generate_dspy_examples_helper(workflow):
             num_examples=15,
             validation_threshold=0.3  # You can adjust this threshold as needed
             )
+            # Appended after generation so the example cache is unchanged, and only
+            # beside real examples: alone it would teach "every field is missing".
+            if examples and (negative := missing_value_example(command_name, fields.model_fields)):
+                examples = [*examples, negative]
             output_dir = os.path.join(workflow.folderpath, "___command_info")
             os.makedirs(output_dir, exist_ok=True)
 

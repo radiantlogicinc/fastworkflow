@@ -70,7 +70,7 @@ _WRITER = textwrap.dedent(
     """
 )
 
-# A separate-process experiment run: what a driver such as ido does. Commands
+# A separate-process experiment run: what a driver such as a benchmark harness does. Commands
 # answer deterministically at `CommandExecutor.invoke_command`, the boundary
 # `tests/test_experiment_container.py::deterministic_commands` uses; the
 # workflow, the WEC, the sink, the evidence run and the seal are all real.

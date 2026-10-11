@@ -313,16 +313,12 @@ def turn_decision_signals(spans: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     None when no decision carried one (an exact-prefix match records
     `signals_absent_reason: deterministic-resolution` and no number, which is
     not confidence 1.0 and not low confidence either). `asked_user` counts
-    `fw.ask_user` spans. `consequence_max` is the worst `consequence_class`
-    any `fw.command.execute` assessed (falling back to `fw.agent.tool_call`
-    when a trace has no execute spans), None when none was assessed.
+    `fw.ask_user` spans.
     """
     margins: list[float] = []
     intent_decisions = 0
     decisions_without_margin = 0
     asked = 0
-    execute_classes: list[str] = []
-    tool_call_classes: list[str] = []
     for span in spans:
         name = span.get("name")
         attributes = _span_attributes(span)
@@ -345,22 +341,12 @@ def turn_decision_signals(spans: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
                 decisions_without_margin += 1
         elif name == SPAN_ASK_USER:
             asked += 1
-        elif name in (SPAN_COMMAND_EXECUTE, SPAN_AGENT_TOOL_CALL):
-            consequence = _mapping_attr(attributes.get("consequence"))
-            cls = consequence.get("consequence_class") if consequence else None
-            if isinstance(cls, str) and cls in CONSEQUENCE_ORDER:
-                (execute_classes if name == SPAN_COMMAND_EXECUTE else tool_call_classes).append(cls)
-    classes = execute_classes or tool_call_classes
     return {
         "intent_margin_min": min(margins) if margins else None,
         "intent_margin_decisions": len(margins),
         "intent_decisions": intent_decisions,
         "intent_decisions_without_margin": decisions_without_margin,
         "asked_user": asked,
-        "consequence_max": (
-            max(classes, key=CONSEQUENCE_ORDER.index) if classes else None
-        ),
-        "consequence_assessed": len(classes),
     }
 
 

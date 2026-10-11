@@ -34,11 +34,11 @@ def _messages(steps: int) -> list[dict]:
     trajectory = "".join(
         f"[[ ## thought_{i} ## ]]\nthought {i}\n\n"
         f"[[ ## observation_{i} ## ]]\nObservation O{i + 1} (execute_workflow_query, in Identity)\n"
-        f"Context is now 'DirectoryExplorer'\n\n"
+        f"Context is now 'ItemExplorer'\n\n"
         for i in range(steps)
     )
     user = (
-        "[[ ## user_query ## ]]\nfind Angelica Schneider\n\n"
+        "[[ ## user_query ## ]]\nfind Sam Poe\n\n"
         f"[[ ## trajectory ## ]]\n{trajectory}"
         "Respond with the corresponding output fields."
     )

@@ -651,10 +651,7 @@ class TestApi:
                 {"confirm": "clear all conversations"},
             )
             assert status == 200
-        counted = {
-            key: value for key, value in body["deleted"].items()
-            if key != "offload_scopes_released"
-        }
+        counted = dict(body["deleted"])
         assert counted and set(counted.values()) == {0}
 
 
@@ -716,7 +713,7 @@ class TestCliPaths:
     def test_run_prune_returns_counts(self, seeded_db):
         deleted = run_chatbot_server.run_prune(seeded_db)
         assert set(deleted) == {
-            "spans", "artifacts", "offload_evidence", "offload_subjects",
+            "spans", "artifacts", "offload_evidence",
             "offload_events", "prompt_slots",
         }
         # Everything seeded is recent; nothing crosses the retention horizon.

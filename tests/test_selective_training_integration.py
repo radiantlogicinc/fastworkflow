@@ -60,6 +60,7 @@ from fastworkflow.train.generate_synthetic import (
     utterance_fingerprint,
 )
 from fastworkflow.train.utterance_cache import MODE_REUSE, UtteranceCache
+from tests.llm_credentials import syndata_llm_available
 
 
 MESSAGING_APP_PATH = os.path.join("fastworkflow", "examples", "messaging_app_4")
@@ -87,11 +88,6 @@ PREMIUM_SESSION_COMMAND = "PremiumSession/end_session"
 
 def _datasets_available() -> bool:
     return importlib.util.find_spec("datasets") is not None
-
-
-def _looks_like_real_key(value) -> bool:
-    """Reject empty / placeholder keys like ``<API KEY ...>``."""
-    return bool(value) and "<" not in value and "your-" not in value.lower()
 
 
 def _resolve_env_vars() -> dict:
@@ -1448,9 +1444,9 @@ def test_selective_retrain_updates_the_changed_context_and_preserves_the_others(
     """
     if not _datasets_available():
         pytest.skip("datasets package not installed; training is skipped.")
-    if not _looks_like_real_key(env_vars.get("LITELLM_API_KEY_SYNDATA_GEN")):
+    if not syndata_llm_available(env_vars):
         pytest.skip(
-            "No real LITELLM_API_KEY_SYNDATA_GEN available; cannot run the real "
+            "No usable LLM credentials for LLM_SYNDATA_GEN; cannot run the real "
             "DSPy parameter-example generation that precedes model training."
         )
 

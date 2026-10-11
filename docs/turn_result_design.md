@@ -220,8 +220,8 @@ command_output = CommandExecutor.invoke_command(chat_session_obj, command)
 ```
 
 Appending `command_output` to a WEC-held turn list right here captures everything with no
-path-by-path plumbing. The agent helper tools `what_can_i_do`, `intent_misunderstood`, and
-`ask_user` return strings and never reach `invoke_command`, so they are naturally excluded.
+path-by-path plumbing. The agent helper tools `what_can_i_do` and `ask_user` return strings (`intent_misunderstood` has since been
+removed from the agent) and never reach `invoke_command`, so they are naturally excluded.
 
 ---
 

@@ -1,9 +1,9 @@
 """Which context instance a command ran in, in the workflow's own terms.
 
 A listing produced by navigating into a context carries no identifier of the
-instance it belongs to: ``list_permissions`` inside ``Account`` prints
-``permission_uid  label`` rows, and the only thing tying them to Alan Cooper is
-that the previous step entered his account. The link lives in the ORDER of the
+instance it belongs to: ``list_orders`` inside ``Customer`` prints
+``order_id  label`` rows, and the only thing tying them to Jane Roe is
+that the previous step entered that customer's record. The link lives in the ORDER of the
 commands, so any reader that is not allowed to use history --
 ``search_memory``, answer-time rehydration, the extract step, a human scrolling
 a store -- cannot recover it. Measured on a real workflow, that missing link was

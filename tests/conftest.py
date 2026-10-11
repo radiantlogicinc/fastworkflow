@@ -16,9 +16,6 @@ import pytest
 import fastworkflow
 from fastworkflow import context_budget
 from fastworkflow.observability import store as observability_store
-from fastworkflow.observation_offloading import jev_client
-from tests.jev_stub import JevStub
-
 # Add the project root to the Python path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
@@ -167,24 +164,19 @@ def pytest_configure(config):
 
 
 @pytest.fixture
-def jev_stub(monkeypatch):
-    """A loopback stand-in for TypeSafe's Jev API (``tests/jev_stub.py``), reached through FW_JEV_BASE_URL.
+def reference_agent_window(monkeypatch):
+    """Pin the agent model to the budget calibration reference.
 
-    Real HTTP through the real typesafe_sdk: the owner-approved harness for the
-    Jev-backed features, in place of a scripted client.
+    The budgets derive from the agent model's context window, so a test that
+    asserts the reference values must not depend on whatever ``LLM_AGENT`` the
+    machine (or the repo-root ``.env`` litellm loads) names. This pins it to
+    ``context_budget``'s calibration model, whose window is the reference.
     """
-    stub = JevStub()
-    monkeypatch.setenv(jev_client.BASE_URL_ENV, stub.base_url)
-    monkeypatch.delitem(fastworkflow._env_vars, jev_client.BASE_URL_ENV, raising=False)
-    monkeypatch.delenv(jev_client.SDK_BASE_URL_ENV, raising=False)
-    yield stub
-    stub.close()
-    # A request the test abandoned still holds a vendor worker until it ends by
-    # itself, and counts toward the orphan cap while it runs; the next test
-    # must not find the pool busy.
-    deadline = time.monotonic() + 5
-    while (jev_client.calls_in_flight() or jev_client.calls_orphaned()) and time.monotonic() < deadline:
-        time.sleep(0.02)
+    monkeypatch.delenv(context_budget.MODEL_CONTEXT_TOKENS_ENV, raising=False)
+    monkeypatch.setenv(context_budget.AGENT_MODEL_ENV, "cerebras/gpt-oss-120b")
+    context_budget.reset_cache()
+    yield
+    context_budget.reset_cache()
 
 
 @pytest.fixture

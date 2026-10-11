@@ -408,16 +408,16 @@ function renderSpanLevel(container, span, role, fold) {
     /* Input then output, adjacent: the pair is the question a reader has, and
        anything that separates them (the wire messages especially) makes them
        scroll apart. Everything below is corroborating detail. */
-    appendAttrSection(container, "module input", a.module_input);
-    appendAttrSection(container, "module output (parsed)", a.module_output);
+    appendAttrSection(container, "module input", a.module_input, { collapsed: true });
+    appendAttrSection(container, "module output (parsed)", a.module_output, { collapsed: true });
     appendAttrSection(container, "reasoning", a.reasoning);
-    appendAttrSection(container, "LLM input (messages)", a.messages);
+    appendAttrSection(container, "LLM input (messages)", a.messages, { collapsed: true });
     appendPromptAsSent(container, span);
     appendAttrSection(container, "LLM input (prompt)", a.prompt);
-    appendAttrSection(container, "LLM output (raw)", a.output);
-    appendAttrSection(container, "provider response", a.provider_response);
-    appendAttrSection(container, "usage", a.usage);
-    appendAttrSection(container, "usage", a.usage_capture);
+    appendAttrSection(container, "LLM output (raw)", a.output, { collapsed: true });
+    appendAttrSection(container, "provider response", a.provider_response, { collapsed: true });
+    appendAttrSection(container, "usage", a.usage, { collapsed: true });
+    appendAttrSection(container, "usage", a.usage_capture, { collapsed: true });
     appendAttrSection(container, "module exception", a.module_exception);
     appendAttrSection(container, "exception", a.exception);
     appendCollapsedSection(container, "call kwargs", a.call_kwargs);
@@ -469,53 +469,48 @@ function inlinePromptMessages(messages) {
 
 /* The prompt a call was sent. An over-cap call is rebuilt by the server from
    the pieces it stored (`prompt_slots_ref`), because `messages` above holds
-   only the cut envelope for such a call; that is fetched on expand, since a
-   rebuilt agent prompt is tens of KB. A call under the cap recorded its
-   messages whole, so they are rendered from the span itself. */
+   only the cut envelope for such a call; that is fetched when the call is
+   opened, since a rebuilt agent prompt is tens of KB. A call under the cap
+   recorded its messages whole, so they are rendered from the span itself.
+   This block stays expanded: it is the primary view on an LLM call page. */
+function promptAsSentPanelTitle(sizeBytes) {
+  return "LLM input as sent (" + formatByteSize(sizeBytes) + ")";
+}
+
 function appendPromptAsSent(container, span) {
   var a = span.attributes || {};
   var ref = a.prompt_slots_ref;
   if (!ref || typeof ref !== "object") {
     var messages = inlinePromptMessages(a.messages);
     if (!messages) { return; }
-    var inline = el("details", "promptAsSent");
-    inline.appendChild(el("summary", null, "LLM input as sent ("
-      + formatByteSize(estimateSerializedSize(messages)) + ")"));
-    inline.addEventListener("toggle", function () {
-      if (!inline.open || inline.dataset.loaded) { return; }
-      inline.dataset.loaded = "1";
-      var body = el("div");
-      body.appendChild(el("div", "promptStatus",
-        "recorded whole — the messages this call stored, as sent"));
-      renderPromptMessages(body, messages);
-      inline.appendChild(body);
-    });
+    var panelTitle = promptAsSentPanelTitle(estimateSerializedSize(messages));
+    var inline = el("div", "promptAsSent");
+    var body = el("div");
+    body.appendChild(el("div", "promptStatus",
+      "recorded whole — the messages this call stored, as sent"));
+    renderPromptMessages(body, messages, panelTitle);
+    inline.appendChild(body);
     container.appendChild(inline);
     return;
   }
   var route = "/api/prompt/" + encodeURIComponent(span.trace_id) + "/"
     + encodeURIComponent(span.span_id);
-  var det = el("details", "promptAsSent");
-  det.appendChild(el("summary", null, "LLM input as sent ("
-    + formatByteSize(ref.messages_bytes || 0) + ")"));
-  det.addEventListener("toggle", function () {
-    if (!det.open || det.dataset.loaded) { return; }
-    det.dataset.loaded = "1";
-    var body = el("div");
-    body.appendChild(el("div", "promptStatus", "loading…"));
-    det.appendChild(body);
-    api(route).then(function (result) {
-      clear(body);
-      renderPromptAsSent(body, result.prompt || {});
-    }).catch(function (e) {
-      clear(body);
-      body.appendChild(el("div", "empty", "Failed to load the prompt: " + e.message));
-    });
+  var panelTitle = promptAsSentPanelTitle(ref.messages_bytes || 0);
+  var block = el("div", "promptAsSent");
+  var body = el("div");
+  body.appendChild(el("div", "promptStatus", "loading…"));
+  block.appendChild(body);
+  container.appendChild(block);
+  api(route).then(function (result) {
+    clear(body);
+    renderPromptAsSent(body, result.prompt || {}, panelTitle);
+  }).catch(function (e) {
+    clear(body);
+    body.appendChild(el("div", "empty", "Failed to load the prompt: " + e.message));
   });
-  container.appendChild(det);
 }
 
-function renderPromptAsSent(body, prompt) {
+function renderPromptAsSent(body, prompt, panelTitle) {
   if (!prompt.available) {
     body.appendChild(el("div", "promptStatus", prompt.reason || "no prompt pieces recorded"));
     return;
@@ -534,14 +529,14 @@ function renderPromptAsSent(body, prompt) {
       : "the rebuilt messages do not match the recorded digest");
   }
   body.appendChild(el("div", prompt.verified ? "promptStatus" : "promptStatus warn", status));
-  renderPromptMessages(body, prompt.messages || []);
+  renderPromptMessages(body, prompt.messages || [], panelTitle);
 }
 
 /* One panel around every message: together they are the single input the LLM
    received, not separate inputs. */
-function renderPromptMessages(body, messages) {
+function renderPromptMessages(body, messages, panelTitle) {
   var panel = el("div", "promptInput");
-  panel.appendChild(el("div", "promptInputLabel", "LLM input"));
+  panel.appendChild(el("div", "promptInputLabel", panelTitle || "LLM input as sent"));
   messages.forEach(function (message) {
     var block = el("div", "msgBlock");
     var role = (message && message.role) || "message";
@@ -615,6 +610,24 @@ function phaseOf(span) {
   return PHASE_OTHER;
 }
 
+/* What a step label names. `execute_workflow_query` on every step says
+   nothing, so such a step shows the command it ran: the routed name from the
+   first fw.command.execute under `roots`, or, when routing failed and no
+   command ran, the first word of the command the agent sent. */
+function invokedCommand(toolName, toolArgs, roots, kids) {
+  if (toolName !== "execute_workflow_query") { return toolName; }
+  var pending = roots.slice();
+  while (pending.length) {
+    var span = pending.shift();
+    if (span.name === "fw.command.execute" && span.command_name) {
+      return String(span.command_name).split("/").pop();
+    }
+    pending = (kids[span.span_id] || []).slice().sort(byStartNs).concat(pending);
+  }
+  var args = attrObject(toolArgs) || {};
+  return String(args.command || "").trim().split(/\s+/)[0] || toolName;
+}
+
 /* -- recorded agent loop: fw.agent.execute / fw.agent.step -------------- */
 function buildRecordedStepNode(span, ordinal, incomingObservation, kids, byId) {
   var attrs = span.attributes || {};
@@ -622,7 +635,7 @@ function buildRecordedStepNode(span, ordinal, incomingObservation, kids, byId) {
     .map(function (child) { return spanNode(child, kids, byId); });
   return makeNode("step", "Step " + ordinal, {
     crumb: "Step " + ordinal,
-    detail: attrs.tool_name || "",
+    detail: invokedCommand(attrs.tool_name || "", attrs.tool_args, [span], kids),
     category: "cat-tool",
     status: span.status,
     span: span,
@@ -757,7 +770,7 @@ function buildStepNode(step, incomingObservation, kids, byId) {
   var covered = [step.reasoning].concat(step.actions);
   return makeNode("step", "Step " + step.no, {
     crumb: "Step " + step.no,
-    detail: toolName,
+    detail: invokedCommand(toolName, out.next_tool_args, step.actions, kids),
     category: "cat-tool",
     children: children,
     extent: spanExtent(covered),
@@ -897,7 +910,7 @@ function buildPlanningNode(spans, kids, byId, ordinalLabel) {
         kv.appendChild(el("dd", null, attrs.replan_trigger));
       }
       container.appendChild(kv);
-      appendAttrSection(container, "planner input", planIn);
+      appendAttrSection(container, "planner input", planIn, { collapsed: true });
       appendAttrSection(container, "plan handed to the executor", attrs.plan);
     }
   });

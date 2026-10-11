@@ -35,7 +35,7 @@ from fastworkflow.observation_offloading.archive import (
     RuntimeHandleArchive,
     RuntimeHandleScope,
 )
-from fastworkflow.observation_offloading.state import reset_runtime_state
+from fastworkflow.observation_offloading.state import reset_observation_state
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
 
 
@@ -51,11 +51,7 @@ def noop_tool(command: str) -> str:
 
 def scope_for(turn: str) -> RuntimeHandleScope:
     return RuntimeHandleScope(
-        store_identity="store",
         channel_id="chat",
-        experiment_id="unbound",
-        task_id="unbound",
-        attempt=0,
         turn_key=turn,
     )
 
@@ -65,11 +61,9 @@ def plant_aged_turn(db_path: str, turn: str, *, days: int = 400) -> None:
     scope = scope_for(turn)
     text = "aged row for %s\n" % turn * 20
     archive = RuntimeHandleArchive(db_path)
-    archive.put_subject(scope, "O1", "Fixture " + turn)
     archive.persist(
         scope,
         alias="O1",
-        offload_order=1,
         command_name="execute_workflow_query",
         step_index=1,
         text=text,
@@ -81,9 +75,6 @@ def plant_aged_turn(db_path: str, turn: str, *, days: int = 400) -> None:
     with sqlite3.connect(db_path) as conn:
         conn.execute(
             "UPDATE offload_evidence SET persisted_at=? WHERE turn_key=?", (stamp, turn)
-        )
-        conn.execute(
-            "UPDATE offload_subjects SET recorded_at=? WHERE turn_key=?", (stamp, turn)
         )
         conn.commit()
 
@@ -99,7 +90,7 @@ class StateRoot(unittest.TestCase):
     """A private state root with a short retention horizon."""
 
     def setUp(self) -> None:
-        reset_runtime_state()
+        reset_observation_state()
         self.temp = tempfile.TemporaryDirectory()
         self._restore: dict[str, str | None] = {}
         for name, value in (
@@ -111,7 +102,7 @@ class StateRoot(unittest.TestCase):
         self.addCleanup(self.cleanup)
 
     def cleanup(self) -> None:
-        reset_runtime_state()
+        reset_observation_state()
         for name, value in self._restore.items():
             if value is None:
                 os.environ.pop(name, None)
@@ -156,7 +147,7 @@ class ArchiveOpenPrunesOncePerPath(StateRoot):
     def test_a_runtime_reset_forgets_which_paths_were_pruned(self) -> None:
         open_handle_archive(self.db_path)
         plant_aged_turn(self.db_path, "turn-before-reset")
-        reset_runtime_state()
+        reset_observation_state()
 
         open_handle_archive(self.db_path)
 

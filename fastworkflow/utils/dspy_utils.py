@@ -1,3 +1,9 @@
+# Before anything imports dspy: dspy 3.4 puts a lazy stand-in for `openai` in
+# sys.modules, and litellm importing an openai submodule through that stand-in
+# fails with a circular import. Loaded first, the real openai is used instead.
+# Every module that imports dspy carries the litellm line directly above its dspy import.
+# The dspy-first case (dspy imported before fastworkflow) is repaired in fastworkflow/__init__.py.
+import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
 from pydantic import BaseModel, Field
 from typing import Type, Optional, Dict, Any, Union, get_args, get_origin, Tuple, List
@@ -51,6 +57,9 @@ def get_lm(model_env_var: str, api_key_env_var: Optional[str] = None, **kwargs):
     # Unset leaves today's behavior exactly as it was.
     if fastworkflow.get_env_var("FW_LM_CACHE", default="1") in ("0", "false", "False"):
         kwargs.setdefault("cache", False)
+    # Without one, a provider request that stalls blocks the turn for minutes.
+    kwargs.setdefault(
+        "timeout", float(fastworkflow.get_env_var("LLM_TIMEOUT_SECONDS", default="120")))
 
     model = fastworkflow.get_env_var(model_env_var)
     if not model:

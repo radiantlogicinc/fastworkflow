@@ -1,5 +1,6 @@
 from typing import Annotated, Type, Union, get_args, get_origin
 
+import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
 from dspy import Signature
 from pydantic import BaseModel

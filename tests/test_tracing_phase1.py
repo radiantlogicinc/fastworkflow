@@ -496,6 +496,28 @@ class TestSuspensionRootSpan:
         assert sink.turn_records[1].turn_output.status == TurnStatus.COMPLETED
 
 
+class TestFailedTurnIsRecorded:
+    def test_a_turn_that_raises_is_recorded_as_failed_and_closed(
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
+    ):
+        sink = RecordingTraceSink()
+        ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch, sink=sink)
+        mock_agent = MagicMock(side_effect=RuntimeError("boom\nsecond line"))
+        _set_agents(ctx, mock_agent)
+
+        with pytest.raises(RuntimeError, match="boom"):
+            ctx.process_turn("clean up my tasks")
+
+        assert len(sink.turn_records) == 1
+        record = sink.turn_records[0]
+        assert record.turn_output.status == TurnStatus.FAILED
+        assert record.turn_output.failure_reason == "RuntimeError: boom"
+        assert record.completed_at is not None
+        root = sink.named(tracing.SPAN_TURN)[-1]
+        assert root.status == TurnStatus.FAILED.value
+        assert root.end_ns is not None
+
+
 # ----------------------------------------------------------------------
 # Planner spans
 # ----------------------------------------------------------------------
@@ -561,33 +583,7 @@ class TestPlannerSpans:
         assert plans[0].attributes["replan_trigger"] is None
         assert "step one" in plans[0].attributes["plan"]
         assert plans[0].attributes["plan_source"] == "text"
-        assert plans[0].attributes["subjects"] == []
         assert not sink.named(tracing.SPAN_PLANNER_REPLAN)
-
-    @pytest.mark.skip(reason="structured planning disabled 2026-09-28 (owner decision)")
-    def test_structured_plan_span_carries_source_and_subjects(
-        self, initialized_fastworkflow, todo_workflow_path, monkeypatch
-    ):
-        from fastworkflow.turn_plan import PlanStep, PlanSubject
-
-        # The structured planner runs only when the agent's finish check is active.
-        sink = RecordingTraceSink()
-        ctx, wf = _make_assistant_ctx(todo_workflow_path, monkeypatch, sink=sink)
-        ctx._workflow_tool_agent = SimpleNamespace(
-            finish_checker=object(), finish_reminders_enabled=True)
-        ctx._begin_turn("do the thing")
-
-        self._plan(ctx, wf, monkeypatch, prediction=SimpleNamespace(
-            steps=[PlanStep(text="List Alan Cooper's todo items", commands=["list_todos"])],
-            subjects=[PlanSubject(name="Alan Cooper", kind="person")],
-            reasoning="",
-        ))
-
-        plan, = sink.named(tracing.SPAN_PLANNER_PLAN)
-        assert plan.attributes["plan_source"] == "structured"
-        assert plan.attributes["subjects"] == ["Alan Cooper"]
-        assert "List Alan Cooper's todo items" in plan.attributes["plan"]
-        assert ctx._turn_plan.subjects[0].name == "Alan Cooper"
 
     def test_replan_span_carries_trigger(
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch
@@ -631,7 +627,8 @@ class TestAgentLoopSpans:
         agent.iteration_counter = 0
         agent.max_iters = 5
         agent.inputs = {}
-        agent.current_trajectory = {}
+        agent.trajectory = {}
+        agent._dropped_steps = 0
         agent._suspended = None
         agent.tools = tools
         pending = list(script)
@@ -894,7 +891,8 @@ class TestStepSpanExceptionSafety:
         agent.iteration_counter = 0
         agent.max_iters = 5
         agent.inputs = {}
-        agent.current_trajectory = {}
+        agent.trajectory = {}
+        agent._dropped_steps = 0
         agent._suspended = None
         agent.tools = tools
         agent.react = react_fn

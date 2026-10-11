@@ -3,14 +3,17 @@ Agent integration module for fastWorkflow.
 Provides workflow tool agent functionality for intelligent tool selection.
 """
 
+import functools
+import os
+import re
 import time
 import traceback
 from datetime import datetime, timezone
 
+import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_utils.py)
 import dspy
-# Structured planning disabled 2026-09-28 (owner decision); kept for reference.
-# from dspy.utils.exceptions import AdapterParseError
-# from pydantic import ValidationError
+from dspy.adapters.types.tool import Tool
+from dspy.experimental import Choice, TypeSafe
 
 import fastworkflow
 from fastworkflow import tracing
@@ -18,53 +21,49 @@ from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_execution_context import CommandCancelledError
 from fastworkflow.utils import dspy_utils
 from fastworkflow.command_metadata_api import CommandMetadataAPI
-from fastworkflow.command_executor import CommandNotFoundError
+from fastworkflow.command_executor import AlreadyInContextError, CommandNotFoundError
+from fastworkflow.context_navigation import (
+    enters_current_context, render_already_in_context, unavailable_command_message)
 from fastworkflow.utils.react import AskUserSuspend
 from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
-from fastworkflow.observation_offloading.agent import build_tool_agent, remember_dispatched_command
-# Structured planning disabled 2026-09-28 (owner decision); kept for reference.
-# from fastworkflow.observation_offloading.archive import capture_record_for
-from fastworkflow.observation_offloading.finish_check import record_dispatch
-from fastworkflow.workflow_execution_context import (
-    TURN_PLAN_NOT_PLANNED,
-    TURN_PLAN_PLANNED,
-    TURN_PLAN_PLANNER_EMPTY,
-    TURN_PLAN_UNREADABLE,
+from fastworkflow.observation_offloading.agent import build_tool_agent
+from fastworkflow.observation_offloading.search import search_memory as search_observation
+from fastworkflow.observation_offloading.labels import annotated_observation
+from fastworkflow.observation_offloading.state import (
+    archive_for_path,
+    current_execute_alias,
+    observability_db_path,
+    scope_for_host,
 )
-from fastworkflow.turn_plan import (
-    # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
-    # STRUCTURED_PLAN_GUIDE,
-    # PlanStep,
-    # PlanSubject,
-    TurnPlan,
-    parse_text_plan,
-    # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
-    # render,
-    workflow_command_names,
-)
+from fastworkflow.context_identity import context_clause_for
 
-#: The internal workflow every output of a command stopped before the
-#: application carries as its workflow_name.
-CME_WORKFLOW_NAME = "command_metadata_extraction"
-#: NLU stages a command is left in when it did not run: the step needs
-#: parameters, or its command was ambiguous or not understood.
-_NOT_RUN_STAGES = (
-    fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION,
-    fastworkflow.NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
-    fastworkflow.NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION,
-)
+_FINAL_ANSWER_DESC = "The answer from the evidence gathered: one line for each part of the request, giving what was found with its names and uids, or saying plainly that it was not found or not reached. Never claim work the trajectory does not show, and do not say the task is complete."
 
 class WorkflowAgentSignature(dspy.Signature):
     """
     Carefully review the user request, then execute the next steps using available tools for building the final answer.
-    Every user intent must be fully addressed before returning the final answer.
+    Address every part of the request before finishing.
     A command output offloaded to memory is not lost: every observation of this turn is normally restored in full
     when the final answer is written. If the answer's evidence limit is reached, the oldest observations are not
-    restored and the answer names them. Search memory only for a value you need to choose your next step,
-    never to collect rows for the final answer.
+    restored and the answer names them. If you need a value from an offloaded observation to choose your next
+    step, run its command again; never re-run commands just to collect rows for the final answer.
     """
     user_query = dspy.InputField(desc="The natural language user query.")
-    final_answer = dspy.OutputField(desc="Comprehensive final answer with supporting evidence to demonstrate that every user intent has been fully addressed.")
+    final_answer = dspy.OutputField(desc=_FINAL_ANSWER_DESC)
+
+def run_progress_check(chat_session_obj, trigger: str, *, done_only: bool = False) -> str:
+    """What's done and what remains, from the agent's current view of its trajectory.
+
+    done_only: return just the "what's done" summary, without the remaining steps.
+    """
+    return build_query_with_next_steps(
+        "",
+        chat_session_obj, with_agent_inputs_and_trajectory=True,
+        planner_lm=getattr(chat_session_obj, '_current_planner_lm', None),
+        trace_trigger=trigger,
+        done_only=done_only,
+    )
+
 
 def _append_action_record(chat_session_obj, record: dict) -> None:
     """Append to session-scoped action log (WEC or ChatSession delegating to core).
@@ -129,14 +128,26 @@ def _what_can_i_do(chat_session_obj: fastworkflow.ChatSession) -> str:
     """
     Returns a list of available commands, including their names and parameters.
     """
-    current_workflow = chat_session_obj.get_active_workflow()
-    return CommandMetadataAPI.get_command_display_text(
+    return _executor_commands_text(chat_session_obj.get_active_workflow())
+
+
+def _executor_commands_text(current_workflow, exclude: frozenset[str] = frozenset()) -> str:
+    """The active context's commands in full (minus *exclude*), then one line per other context."""
+    commands = CommandMetadataAPI.get_command_display_text(
         subject_workflow_path=current_workflow.folderpath,
         cme_workflow_path=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
         active_context_name=current_workflow.current_command_context_name,
+        exclude=exclude,
     )
+    other_contexts = CommandMetadataAPI.get_other_contexts_text(
+        subject_workflow_path=current_workflow.folderpath,
+        active_context_name=current_workflow.current_command_context_name,
+        navigation_workflow=current_workflow,
+        exclude=exclude,
+    )
+    return f"{commands}\n\n{other_contexts}" if other_contexts else commands
 
-def _refresh_agent_available_commands(host) -> None:
+def _refresh_agent_available_commands(host, exclude: frozenset[str] = frozenset()) -> None:
     """Re-scope the active ReAct agent's ``available_commands`` to the CURRENT context.
 
     Invoked by the workflow's context-change observer (registered in WEC agent init), so it
@@ -167,22 +178,53 @@ def _refresh_agent_available_commands(host) -> None:
     if current_workflow is None:
         return
 
-    inputs["available_commands"] = CommandMetadataAPI.get_command_display_text(
-        subject_workflow_path=current_workflow.folderpath,
-        cme_workflow_path=fastworkflow.get_internal_workflow_path(
-            "command_metadata_extraction"
-        ),
-        active_context_name=current_workflow.current_command_context_name,
-    )
+    inputs["available_commands"] = _executor_commands_text(current_workflow, exclude)
 
 
-def _intent_misunderstood(
-        chat_session_obj: fastworkflow.ChatSession) -> str:
+_REPEAT_REASON = "it just returned the same result again"
+
+
+class _RepeatGuard:
+    """One executor run's repeat memory; lives in the agent's ``run_state``.
+
+    ``pending`` is set by a repeat in the step now running and becomes
+    ``blocked_command`` (name, reason) at the end of that step, so it governs
+    exactly the next step.
     """
-    Shows the full list of available command names so you can specify the command name you really meant
-    Call this tool when your intent is misunderstood (i.e. the wrong command name is executed).
-    """
-    return _what_can_i_do(chat_session_obj = chat_session_obj)
+
+    def __init__(self) -> None:
+        self.last_results: dict[tuple[str, str], str] = {}
+        self.pending: tuple[str, str] | None = None
+        self.blocked_command: tuple[str, str] | None = None
+
+
+def _repeat_guard(chat_session_obj) -> _RepeatGuard | None:
+    run_state = getattr(getattr(chat_session_obj, "workflow_tool_agent", None), "run_state", None)
+    if run_state is None:
+        return None
+    return run_state.setdefault("repeat", _RepeatGuard())
+
+
+def _set_blocked_command(chat_session_obj, guard: _RepeatGuard, block: tuple[str, str] | None) -> None:
+    guard.blocked_command = block
+    _refresh_agent_available_commands(chat_session_obj, exclude=frozenset({block[0]}) if block else frozenset())
+
+
+def _end_repeat_step(chat_session_obj) -> None:
+    """End-of-step hook: a repeat in the step that just ran blocks the NEXT step only."""
+    guard = _repeat_guard(chat_session_obj)
+    if guard is None:
+        return
+    upcoming, guard.pending = guard.pending, None
+    if upcoming != guard.blocked_command:
+        _set_blocked_command(chat_session_obj, guard, upcoming)
+
+
+def _clear_blocked_command(chat_session_obj) -> None:
+    """Drop the block now: ask_user suspends the run, so the end-of-step hook would not run."""
+    guard = _repeat_guard(chat_session_obj)
+    if guard is not None and guard.blocked_command is not None:
+        _set_blocked_command(chat_session_obj, guard, None)
 
 
 def _display_context_name(context: str) -> str:
@@ -194,24 +236,36 @@ def _command_name_matches(token: str, name: str) -> bool:
     return token.lower() == (name if "/" in token else name.split("/")[-1]).lower()
 
 
+def core_command_names() -> frozenset[str]:
+    """The framework's core command names, as the routing registry lists them (qualified
+    by context): the IntentDetection and ErrorCorrection contexts of the internal
+    command_metadata_extraction workflow.
+
+    Read from the routing registry on every call rather than memoised: the registry
+    can be cleared and rebuilt, and a stale answer would outlive it.
+    """
+    cme = fastworkflow.RoutingRegistry.get_definition(
+        fastworkflow.get_internal_workflow_path("command_metadata_extraction"))
+    return frozenset(name
+                     for context in ("IntentDetection", "ErrorCorrection")
+                     for name in cme.get_command_names(context))
+
+
 def _explicit_agent_command(command: str, workflow) -> str:
     """Resolve the agent tool's command token against its current command surface.
 
     This tool takes command names, not natural-language intents. Never let a
     command name that is unavailable here fall through to fuzzy/cache/classifier
-    substitution: name the contexts that do have it instead. A token that names
-    no command in any context of the workflow is not a command name, so it goes
-    to the assistant NLU unchanged. Parameter extraction still runs as before.
+    substitution: name the contexts that do have it, and the commands that
+    reach one of them from here, instead. A token that names no command in any
+    context of the workflow is not a command name, so it goes to the assistant
+    NLU unchanged. Parameter extraction still runs as before.
     """
     parts = command.strip().split(maxsplit=1)
     token = parts[0].lstrip("/") if parts else ""
     app = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
-    cme = fastworkflow.RoutingRegistry.get_definition(
-        fastworkflow.get_internal_workflow_path("command_metadata_extraction"))
     current_context = workflow.current_command_context_name
-    available = (set(app.get_command_names(current_context))
-                 | set(cme.get_command_names("IntentDetection"))
-                 | set(cme.get_command_names("ErrorCorrection")))
+    available = set(app.get_command_names(current_context)) | core_command_names()
     matches = [name for name in available if _command_name_matches(token, name)]
     if not matches:
         home_contexts = {
@@ -224,12 +278,11 @@ def _explicit_agent_command(command: str, workflow) -> str:
         inherited = set().union(*(app.context_model.inherited_base_contexts(c)
                                   for c in home_contexts))
         home_contexts = sorted(home_contexts - inherited)
-        raise CommandNotFoundError(
-            f"Command {token!r} is not available in the current context "
-            f"{_display_context_name(current_context)!r}. It is available in: "
-            f"{', '.join(repr(_display_context_name(c)) for c in home_contexts)}. "
-            "Navigate to one of those contexts first (go_up or reset_context "
-            "return to an enclosing context), then retry the command.")
+        if enters_current_context(workflow, token, current_context):
+            raise AlreadyInContextError(
+                render_already_in_context(token, current_context, workflow))
+        raise CommandNotFoundError(unavailable_command_message(
+            workflow, token, current_context, home_contexts))
     if len(matches) != 1:
         raise CommandNotFoundError(
             f"Command {token!r} is ambiguous in context "
@@ -243,6 +296,16 @@ def _explicit_agent_command(command: str, workflow) -> str:
     return short + (" " + parts[1] if len(parts) > 1 else "")
 
 
+def _commands_in(command: str, names: set[str]) -> list[str]:
+    """The lines of *command* that start with a known command name (short, lowercased)."""
+    found = []
+    for line in (raw.strip() for raw in command.splitlines()):
+        token = re.split(r"[\s<]", line, maxsplit=1)[0].lstrip("/")
+        if line and token.split("/")[-1].lower() in names:
+            found.append(line)
+    return found
+
+
 def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSession) -> str:
     """
     Executes the command and returns either a response, or a clarification request.
@@ -250,6 +313,28 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     Commands must be formatted using plain text for command name followed by XML tags enclosing parameter values (if any) as follows: command_name <param1_name>param1_value</param1_name> <param2_name>param2_value</param2_name> ...
     Don't use this tool to respond to a clarification requests in PARAMETER EXTRACTION ERROR state
     """
+    # Refuse a bundle of several commands before anything runs: intent detection
+    # would execute only the first one and silently drop the rest.
+    active = chat_session_obj.get_active_workflow()
+    if active is not None:
+        app = fastworkflow.RoutingRegistry.get_definition(active.folderpath)
+        known = {name.split("/")[-1].lower()
+                 for names in app.contexts.values() for name in names}
+        known |= {name.split("/")[-1].lower() for name in core_command_names()}
+        known.discard("wildcard")
+        commands = _commands_in(command, known)
+        if len(commands) >= 2:
+            return (f"You sent {len(commands)} commands in one call; nothing ran. "
+                    f"Send one command per call: {commands[0]} first.")
+
+    # A command blocked for this step (it just repeated its own result) is refused unrun.
+    guard = _repeat_guard(chat_session_obj)
+    token = (command.split() or [""])[0].lstrip("/").split("/")[-1].lower()
+    if guard is not None and guard.blocked_command and token == guard.blocked_command[0].lower():
+        return (f"{guard.blocked_command[0]} is unavailable for this step: "
+                f"{guard.blocked_command[1]}. Use what it returned, or do something else.")
+    ran_in = active.current_command_context_name if active is not None else None
+
     # Emit trace event before execution
     if chat_session_obj.command_trace_queue is not None:
         chat_session_obj.command_trace_queue.put(fastworkflow.CommandTraceEvent(
@@ -294,9 +379,6 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     from fastworkflow.command_executor import CommandExecutor, _annotation
     started = datetime.now(timezone.utc)
     try:
-        # A command rejected below never reaches invoke_command, which is where
-        # the context it ran in is otherwise filed for its alias line.
-        CommandExecutor._remember_execute_context(chat_session_obj)
         resolved_command = _explicit_agent_command(command, chat_session_obj.get_active_workflow())
         command_output = CommandExecutor.invoke_command(chat_session_obj, resolved_command)
     except BaseException as e:
@@ -321,6 +403,18 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
             # span so it does not leak, but do not build a failure CommandOutput
             # for it — that is reserved for real command failures, and this
             # frame must not dress an interpreter-level signal as one.
+            tracing.end_span(
+                chat_session_obj,
+                span,
+                status=tracing.STATUS_ERROR,
+                attributes={"error_type": type(e).__name__},
+            )
+            raise
+        if isinstance(e, CommandNotFoundError):
+            # Routing guidance, not a command failure: no command ran, and the
+            # caller hands the agent the message as its observation. Recording
+            # it as a failed CommandOutput put a traceback artifact in the
+            # turn's answer and marked the turn unsuccessful.
             tracing.end_span(
                 chat_session_obj,
                 span,
@@ -404,6 +498,13 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     else:
         response_text = "Command executed successfully but produced no output."
 
+    # Same command text, same context, same response as this run's previous call: block it next step.
+    if guard is not None:
+        key = (ran_in, " ".join(command.split()))
+        if guard.last_results.get(key) == response_text:
+            guard.pending = ((name or token).split("/")[-1], _REPEAT_REASON)
+        guard.last_results[key] = response_text
+
     tracing.end_span(
         chat_session_obj,
         span,
@@ -441,24 +542,10 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
         "response": response_text
     }
     _append_action_record(chat_session_obj, record)
-    # Which qualified command this step's alias ran, for search_memory's
-    # narrowing inputs. A CME command (the abort after a parameter-extraction
-    # error, go_up) is not the command the step asked for.
-    if command_output.workflow_name != CME_WORKFLOW_NAME:
-        remember_dispatched_command(getattr(chat_session_obj, "workflow_tool_agent", None), name)
 
     # Check workflow context to determine if we're in an error state that needs specialized handling
     cme_workflow = chat_session_obj.cme_workflow
     nlu_stage = cme_workflow.context.get("NLU_Pipeline_Stage")
-
-    # For the finish check's ledger: did this step reach a command? Recorded
-    # before the error-state branches below, which abort and re-record it as
-    # not run. go_up and reset_context are CME commands that succeed, so they ran.
-    record_dispatch(
-        getattr(chat_session_obj, "workflow_tool_agent", None),
-        ran=not (nlu_stage in _NOT_RUN_STAGES or (
-            command_output.workflow_name == CME_WORKFLOW_NAME and not command_output.success)),
-    )
 
     # Intent ambiguity / misunderstanding: the NLU's reply already lists the
     # candidate commands (ambiguity) or this context's commands (misunderstanding),
@@ -469,23 +556,18 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
         fastworkflow.NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION,
     ):
         abort_confirmation = _execute_workflow_query('abort', chat_session_obj=chat_session_obj)
-        # The abort ran; the step it cleared up after did not.
-        record_dispatch(getattr(chat_session_obj, "workflow_tool_agent", None), ran=False)
         return f'{response_text}\n{abort_confirmation}'
     # Handle parameter extraction errors with abort
     if nlu_stage == fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION:
         abort_confirmation = _execute_workflow_query('abort', chat_session_obj=chat_session_obj)
-        # The abort ran; the step it cleared up after did not.
-        record_dispatch(getattr(chat_session_obj, "workflow_tool_agent", None), ran=False)
-        # Thread the active planning context so replanning uses the same planner LM
-        # and insights as the current turn (critical for distillation: otherwise
+        # Thread the active planner LM so replanning uses the same planner LM
+        # as the current turn (critical for distillation: otherwise
         # replans silently fall back to LLM_PLANNER instead of the teacher/student LM).
-        planning_insights = getattr(chat_session_obj, '_planning_insights', None)
         planner_lm = getattr(chat_session_obj, '_current_planner_lm', None)
         return build_query_with_next_steps(
             f'{response_text}\n{abort_confirmation}',
             chat_session_obj, with_agent_inputs_and_trajectory=True,
-            planning_insights=planning_insights, planner_lm=planner_lm,
+            planner_lm=planner_lm,
             trace_trigger="parameter_extraction_error",
         )
 
@@ -495,6 +577,14 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
         del workflow.context["is_user_command"]
 
     return response_text
+
+
+def _apply_reply_intent(agent, intent: str) -> None:
+    """Take ask_user away after a reply that stops the asking; leave only finish after an abort."""
+    if intent == "stop_asking":
+        agent.disabled_tools = agent.disabled_tools | {"ask_user"}
+    elif intent == "abort":
+        agent.disabled_tools = set(agent.tools) - {"finish"}
 
 
 def _post_ask_user_response(
@@ -523,13 +613,16 @@ def _post_ask_user_response(
     if workflow:
         workflow.context["raw_user_message"] = user_response
 
-    planning_insights = getattr(chat_session_obj, '_planning_insights', None)
+    _apply_reply_intent(
+        chat_session_obj.workflow_tool_agent,
+        classify_user_reply(user_response, clarification_request),
+    )
+
     planner_lm = getattr(chat_session_obj, '_current_planner_lm', None)
     return build_query_with_next_steps(
         user_response,
         chat_session_obj,
         with_agent_inputs_and_trajectory=True,
-        planning_insights=planning_insights,
         planner_lm=planner_lm,
         trace_trigger="ask_user_response",
     )
@@ -575,7 +668,6 @@ def _ask_user_tool(clarification_request: str, chat_session_obj: fastworkflow.Ch
     )
 
 def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_iters: int = 25,
-                                   execution_insights: str | None = None,
                                    on_step_complete=None):
     """
     Initialize and return a DSPy ReAct agent that exposes individual MCP tools.
@@ -584,8 +676,6 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
     Args:
         chat_session: fastworkflow.ChatSession instance
         max_iters: Maximum iterations for the ReAct agent
-        execution_insights: Optional workflow-specific execution anti-patterns to
-            append to the agent signature docstring (knowledge distillation).
         on_step_complete: Optional callback(step_idx, trajectory) -> bool for
             step-by-step interception (distillation). Return False to stop early.
 
@@ -596,42 +686,18 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
     if not chat_session_obj:
         raise ValueError("chat session cannot be null")
 
-    # Build the agent signature. When execution insights are supplied, append them
-    # to WorkflowAgentSignature's instructions as anti-patterns to avoid; otherwise
-    # use the module-level WorkflowAgentSignature unchanged.
-    if execution_insights:
-        enhanced_docstring = (
-            f"{WorkflowAgentSignature.__doc__}\n\nCRITICAL ANTI-PATTERNS TO AVOID:\n{execution_insights}"
-        )
+    AgentSignature = WorkflowAgentSignature
 
-        class AgentSignature(dspy.Signature):
-            __doc__ = enhanced_docstring
-            user_query = dspy.InputField(desc="The natural language user query.")
-            final_answer = dspy.OutputField(desc="Comprehensive final answer with supporting evidence to demonstrate that every user intent has been fully addressed.")
-    else:
-        AgentSignature = WorkflowAgentSignature
-
-    def what_can_i_do() -> str:
+    # **_ignored on the zero-argument tools: a small model often passes one
+    # anyway, and that should not cost it a traceback for an observation.
+    # Wrapped below with an empty args schema, so the model is shown none.
+    def what_can_i_do(**_ignored) -> str:
         """
         Returns a list of available commands, including their names and parameters
         """
         return _what_can_i_do(chat_session_obj=chat_session_obj)
 
-    def intent_misunderstood() -> str:
-        """
-        Shows the full list of available command names so you can specify the command name you really meant
-        Call this tool when your intent is misunderstood (i.e. the wrong command name is executed).
-        """
-        return _intent_misunderstood(chat_session_obj = chat_session_obj)
-
-    def execute_workflow_query(command: str) -> str:
-        """
-        Takes just a single argument called 'command'.
-        Executes the command and returns either a response, or a clarification request.
-        Use the "what_can_i_do" tool to get details on available commands, including their names and parameters. Fyi, values in the 'examples' field are fake and for illustration purposes only.
-        Commands must be formatted using plain text for command name followed by XML tags enclosing parameter values (if any) as follows: command_name <param1_name>param1_value</param1_name> <param2_name>param2_value</param2_name> ...
-        Don't use this tool to respond to a clarification requests in PARAMETER EXTRACTION ERROR state
-        """
+    def run_execute_workflow_query(command: str) -> str:
         # Check if this command originated from user input (iteration_counter == 0)
         # Set flag in workflow context so validate_extracted_parameters can access it
         is_user_command = chat_session_obj.workflow_tool_agent.iteration_counter <= 0 
@@ -644,6 +710,8 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
         for attempt in range(max_retries):
             try:
                 return _execute_workflow_query(command, chat_session_obj=chat_session_obj)
+            except AlreadyInContextError as e:
+                return reenter_from_parent(command, e)
             except CommandNotFoundError as e:
                 # Deterministic and recoverable: the message says where to go.
                 return str(e)
@@ -655,12 +723,57 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
                 # Continue to next attempt
                 logger.warning(f"Attempt {attempt + 1} failed for command '{command}': {str(e)}")
 
+    def reenter_from_parent(command: str, refusal: AlreadyInContextError) -> str:
+        """Open another instance of the context the agent is in: go_up, then the command.
+
+        A weak model told "go_up first" retries the same command in place many
+        times over. Re-opening the SAME instance is refused as before, since
+        going up and back in would only repeat it.
+        """
+        workflow = chat_session_obj.get_active_workflow()
+        name, _, instance = context_clause_for(workflow).partition(" ")
+        uid = instance.split(" ")[0]
+        if uid and uid in command:
+            return str(refusal)
+        _execute_workflow_query("go_up", chat_session_obj=chat_session_obj)
+        try:
+            return (f"(Left the current {name} with go_up first.)\n"
+                    + _execute_workflow_query(command, chat_session_obj=chat_session_obj))
+        except CommandNotFoundError as again:
+            return str(again)
+
+    def execute_workflow_query(command: str) -> str:
+        """
+        Takes just a single argument called 'command'.
+        Executes the command and returns either a response, or a clarification request.
+        Use the "what_can_i_do" tool to get details on available commands, including their names and parameters. Fyi, values in the 'examples' field are fake and for illustration purposes only.
+        Commands must be formatted using plain text for command name followed by XML tags enclosing parameter values (if any) as follows: command_name <param1_name>param1_value</param1_name> <param2_name>param2_value</param2_name> ...
+        Don't use this tool to respond to a clarification requests in PARAMETER EXTRACTION ERROR state
+        """
+        # The context this command RUNS IN, taken before dispatch: a command that
+        # moves the context is evidence about the context it ran in.
+        alias = current_execute_alias(chat_session_obj.workflow_tool_agent)
+        workflow = chat_session_obj.get_active_workflow()
+        clause = context_clause_for(workflow)
+        context_before = getattr(workflow, "current_command_context", None)
+        response = run_execute_workflow_query(command)
+        if alias is None:
+            return response
+        workflow_after = chat_session_obj.get_active_workflow()
+        context_changed = getattr(workflow_after, "current_command_context", None) is not context_before
+        # Name where the command left the agent: a weak model otherwise reads
+        # the context the command ran in as the one it is now in.
+        now_in = context_clause_for(workflow_after) if context_changed else None
+        return annotated_observation(alias, clause, response,
+                                     context_changed=context_changed, now_in=now_in)
+
     def ask_user(clarification_request: str) -> str:
         """
-        Only as the last resort, request clarification for missing information from the human user. 
+        Only as the last resort, request clarification for missing information from the human user. Ask at most once about the same thing.
         The clarification_request must be plain text without any formatting.
         Note that using the wrong command name can produce missing information errors. Double-check with the what_can_i_do tool to verify that the correct command name is being used 
         """
+        _clear_blocked_command(chat_session_obj)
         # reset iteration counter, everytime we ask the user
         # reset to -1, because we are dual purposing (iteration_counter <= 0) to check
         # if command passed to execute_workflow_query() originated either:
@@ -670,63 +783,319 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
             return _ask_user_tool(clarification_request, chat_session_obj=chat_session_obj)
         raise AskUserSuspend(clarification_request)
 
+    def search_memory(question: str, alias: str) -> str:
+        """
+        Answers a question about ONE earlier execute_workflow_query observation.
+        alias is the O-number printed on that observation's first line ("Observation O8 (...)") or in its offload label, e.g. O8.
+        Goal is to locate values needed to choose the next step: a uid, a count, one field, whether an item is present.
+        Offloaded observations are restored for the final answer, so do not search just to collect rows to report.
+        question must be clear, relevant and complete sentence
+        """
+        return search_observation(
+            question, alias,
+            scope=scope_for_host(chat_session_obj),
+            selected_archive=archive_for_path(observability_db_path(chat_session_obj)),
+        )
+
     tools = [
-        what_can_i_do,
+        Tool(what_can_i_do, args={}),
         execute_workflow_query,
-        # missing_information_guidance,
-        intent_misunderstood,
         ask_user,
+        # search_memory disabled 2026-10-09: in live runs it retrieved nothing useful; kept for later.
+        # search_memory,
     ]
 
-    return build_tool_agent(
+    agent = build_tool_agent(
         chat_session_obj,
         AgentSignature,
         tools,
         max_iters=max_iters,
         on_step_complete=on_step_complete,
     )
+    agent.on_step_end = lambda: _end_repeat_step(chat_session_obj)
+    return agent
 
 
-def finish_check_active(agent) -> bool:
-    """Whether the finish-time check will verify the plan made for *agent*'s turn.
+def _previous_turn_summaries_for_planner(chat_session_obj: fastworkflow.ChatSession) -> str:
+    """Every completed turn summary for the initial planner (not mid-turn replans)."""
+    history = getattr(chat_session_obj, "conversation_history", None)
+    messages = getattr(history, "messages", None) if history is not None else None
+    if not messages:
+        return ""
+    lines: list[str] = []
+    for turn_number, message in enumerate(messages, start=1):
+        if not isinstance(message, dict):
+            continue
+        summary = message.get("conversation summary") or message.get("conversation_summary")
+        if summary:
+            lines.append(f"Turn {turn_number}: {summary}")
+    return "\n".join(lines)
 
-    The one decision the planner and the agent share: a check attached when the
-    agent was built, and not switched off by ``FW_EVAL_FINISH_REMINDERS=0``. With
-    it off, nothing the check adds runs -- no note, and no structured plan.
 
-    Structured planning is disabled (2026-09-28): with the check active the
-    planner still makes a plain-text plan, parsed for the check by
-    ``parse_text_plan``; this decision still gates that parse and the plan's
-    seeding and restore.
+#: More sub-tasks than this is a list too long to fan out: run the request whole.
+MAX_SUBTASKS = 10
+
+_NUMBERED_LINE = re.compile(r"^\s*\d+[.)]\s+(.*\S)\s*$")
+#: Typographic hyphens a model writes into names it was asked to copy exactly.
+_HYPHENS = str.maketrans({"\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-"})
+
+
+class SplitIntoSubtasks(dspy.Signature):
     """
-    return (getattr(agent, "finish_checker", None) is not None
-            and bool(getattr(agent, "finish_reminders_enabled", True)))
+    Split the user's request into the separate requests it bundles together.
+    A sub-task is a request the user could have sent on its own, with its own answer. It is NOT a step: never break one request into the steps needed to carry it out.
+    - job_types lists kinds of job a request in this workflow may contain, and how each one splits. Use it only to decide how to split: every sub-task is made from the user's own words, never from job_types text, and a job type the user did not ask for is not a sub-task.
+    - Sentences that only give background (why the user needs it, what is happening to a group) or announce what follows are not sub-tasks.
+    - Copy the user's own words, and every name exactly as written. A name that contains "and" is one name: keep it whole. Change only what a sub-task needs to make sense on its own: replace words that point to another part of the request ("it", "both", "each of them", "the same treatment", "that group", he/she) with what they refer to, using names.
+    - When the same work is asked for several named items, make one sub-task per item. What is asked about one item stays together in that item's sub-task.
+    - Work asked for a group as a whole (every member of a group, a whole list) is one sub-task.
+    - An item together with the things it refers to is one sub-task, even when the request says it in two sentences.
+    - Never add, drop or reinterpret any work the user asked for.
+    - A request that asks for one thing is returned unchanged, as a single sub-task.
+
+    Example 1
+    user_query: The job on item Alpha and the job on item Beta both fail: check each item and the thing it feeds. Three people need a new account: Pat Doe, Lee Kim and Sam Roe. Go through the whole Group North list too, every member's record. The case 'Queue stalls at night' is still open, so work it and hand it to one of the owners it names. Max Ong is moving teams, so a new locker for Max Ong.
+    subtasks:
+    1. The job on item Alpha fails: check item Alpha and the thing it feeds.
+    2. The job on item Beta fails: check item Beta and the thing it feeds.
+    3. Pat Doe needs a new account.
+    4. Lee Kim needs a new account.
+    5. Sam Roe needs a new account.
+    6. Go through the whole Group North list, every member's record.
+    7. The case 'Queue stalls at night' is still open: work it and hand it to one of the owners it names.
+    8. Max Ong is moving teams: a new locker for Max Ong.
+
+    Example 2
+    user_query: Show me Pat Doe's record, its owner and the items attached to it.
+    subtasks:
+    1. Show me Pat Doe's record, its owner and the items attached to it.
+
+    Example 3
+    user_query: Find item Alpha and tell me who uses it, then list the cases it has.
+    subtasks:
+    1. Find item Alpha and tell me who uses it.
+    2. List the cases item Alpha has.
+    """
+    job_types: str = dspy.InputField(desc="kinds of job a request may contain, and how each one splits")
+    user_query: str = dspy.InputField()
+    subtasks: str = dspy.OutputField(desc="the sub-tasks as a numbered list, one per line")
 
 
-def _text_turn_plan(plan_text: str, workflow_path: str) -> TurnPlan | None:
-    """The finish check's plan recovered from plain text; None if it cannot be."""
+@functools.lru_cache(maxsize=None)
+def load_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+    """``(name, description, steps)`` for each ``_skills/<name>/SKILL.md`` of the workflow.
+
+    A skill file is plain text: its first line describes the job, every other
+    non-empty line is one step. The folder name is the skill's name.
+    """
+    root = os.path.join(workflow_folderpath, "_skills")
+    skills = []
+    for name in sorted(os.listdir(root)) if os.path.isdir(root) else ():
+        path = os.path.join(root, name, "SKILL.md")
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8") as handle:
+                lines = [line.strip() for line in handle if line.strip()]
+            if lines:
+                skills.append((name, lines[0], tuple(lines[1:])))
+    return tuple(skills)
+
+
+@functools.lru_cache(maxsize=None)
+def _skill_file_text(workflow_folderpath: str, filename: str) -> str | None:
+    """Text of the optional ``_skills/<filename>`` of the workflow, or None when absent."""
+    path = os.path.join(workflow_folderpath, "_skills", filename)
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
+@functools.lru_cache(maxsize=None)
+def _split_signature(workflow_folderpath: str) -> type[dspy.Signature]:
+    """``SplitIntoSubtasks``, instructed by the workflow's ``_skills/split_instructions.md`` when it has one."""
+    instructions = _skill_file_text(workflow_folderpath, "split_instructions.md")
+    if instructions is None:
+        return SplitIntoSubtasks
+    return SplitIntoSubtasks.with_instructions(instructions)
+
+
+def _job_types_for(workflow_folderpath: str | None) -> str:
+    """One ``- name: description`` line per skill of the workflow; "(none)" without skills."""
+    skills = load_skills(workflow_folderpath) if workflow_folderpath else ()
+    if not skills:
+        return "(none)"
+    return "\n".join(f"- {name}: {description}" for name, description, _ in skills)
+
+
+#: A matched skill's steps are offered to the planner only at or above this Jev
+#: probability (measured offline: at 0.5, 96.6% of sub-tasks get a template, 1.1% a wrong one).
+SKILL_MATCH_THRESHOLD = 0.5
+
+
+@functools.lru_cache(maxsize=None)
+def _jev_lm():
+    """The Jev (dspy.experimental TypeSafe) LM, or None without a JEV_API_KEY."""
+    key = fastworkflow.get_env_var("JEV_API_KEY", default=None)
+    return TypeSafe(api_key=key, cache=True) if key else None
+
+
+def _choice_value_and_probability(choice) -> tuple[str, float]:
+    value = str(choice.value)
+    return value, float((choice.probabilities or {}).get(value, choice.confidence))
+
+
+@functools.lru_cache(maxsize=None)
+def _skill_matcher(workflow_folderpath: str):
+    """``(predictor, jev_lm)`` choosing a sub-task's skill, or None without skills or a Jev key."""
+    skills = load_skills(workflow_folderpath)
+    jev_lm = _jev_lm()
+    if not skills or jev_lm is None:
+        return None
+    options = tuple((name, description) for name, description, _ in skills) + (
+        ("none", "None of the job types fits this sub-task."),)
+
+    class MatchSkill(dspy.Signature):
+        """Decide which job type a sub-task asks for."""
+
+        subtask: str = dspy.InputField(desc="one sub-task from a user request")
+        job_types: str = dspy.InputField(desc="the available job types, one per line as '- name: description'")
+        job: Choice[options] = dspy.OutputField(
+            desc="Which job type does this sub-task ask for? 'none' if none of them fits.")
+
+    return dspy.Predict(MatchSkill), jev_lm
+
+
+def match_skill(text: str, workflow_folderpath: str) -> tuple[str, tuple[str, ...]] | None:
+    """``(name, steps)`` of the skill ``text`` asks for, when Jev is confident; None otherwise.
+
+    Never raises: a failed match only means the planner gets no template.
+    """
     try:
-        return parse_text_plan(plan_text, workflow_command_names(workflow_path))
-    except Exception as error:  # noqa: BLE001 - a plan the check cannot read must not fail the turn
-        logger.warning(f"text plan not parsed ({type(error).__name__}); the finish check has no plan")
+        matcher = _skill_matcher(workflow_folderpath)
+        if matcher is None:
+            return None
+        predictor, jev_lm = matcher
+        skills = load_skills(workflow_folderpath)
+        job_types = "\n".join(f"- {name}: {description}" for name, description, _ in skills)
+        with dspy.context(lm=jev_lm):
+            choice = predictor(subtask=text, job_types=job_types).job
+        value, probability = _choice_value_and_probability(choice)
+        logger.info(f"skill match for {text!r}: {value} (confidence {probability:.2f})")
+        steps = {name: steps for name, _, steps in skills}
+        if value in steps and probability >= SKILL_MATCH_THRESHOLD:
+            return value, steps[value]
+        return None
+    except Exception:  # noqa: BLE001 - a template is an optimisation; never fail the turn
+        logger.warning("could not match the sub-task to a skill", exc_info=True)
         return None
 
 
-# Structured planning disabled 2026-09-28 (owner decision); kept for reference.
-# def _redacted_subject_names(turn_plan: TurnPlan | None) -> list[str]:
-#     """The plan's subject names as the credential scrub would store them."""
-#     if turn_plan is None:
-#         return []
-#     try:
-#         return [capture_record_for(subject.name)[0] for subject in turn_plan.subjects]
-#     except Exception:  # noqa: BLE001 - record no names rather than unredacted ones
-#         return []
+def plan_template_for(text: str, workflow_folderpath: str) -> str:
+    """The matched skill's steps as a planner template for ``text``; "" when no skill matches."""
+    matched = match_skill(text, workflow_folderpath)
+    if matched is None:
+        return ""
+    _name, steps = matched
+    lines = "\n".join(f"- {step}" for step in steps)
+    return (f"A job like this is usually done as:\n{lines}\n"
+            "Adapt this to the request: drop steps it does not need and add steps it asks for.")
+
+
+#: A reply's non-answer intent applies only at or above this Jev probability.
+REPLY_INTENT_THRESHOLD = 0.5
+REPLY_INTENTS = (
+    ("answer", "The reply answers the question or gives direction for the work to go on."),
+    ("stop_asking", "The reply declines to answer or says not to ask again, but does not ask to stop the work."),
+    ("abort", "The reply asks to stop, cancel or abort the work."),
+)
+
+
+class ClassifyReply(dspy.Signature):
+    """Decide what a user's reply to the agent's clarification request does."""
+
+    question: str = dspy.InputField(desc="the clarification request the agent asked the user")
+    reply: str = dspy.InputField(desc="the user's reply")
+    intent: Choice[REPLY_INTENTS] = dspy.OutputField(desc="What does the reply do?")
+
+
+def classify_user_reply(reply: str, question: str) -> str:
+    """The reply's intent: "abort", "stop_asking", or "answer" (the default).
+
+    Any other intent needs Jev to be confident. Never raises: without a Jev key,
+    or on a failure, the reply is taken as an answer.
+    """
+    jev_lm = _jev_lm()
+    if jev_lm is None:
+        return "answer"
+    try:
+        with dspy.context(lm=jev_lm):
+            choice = dspy.Predict(ClassifyReply)(question=question, reply=reply).intent
+        value, probability = _choice_value_and_probability(choice)
+        logger.info(f"reply intent for {reply!r}: {value} (confidence {probability:.2f})")
+        if value != "answer" and probability >= REPLY_INTENT_THRESHOLD:
+            return value
+        return "answer"
+    except Exception:  # noqa: BLE001 - the reply is then taken as an answer; never fail the turn
+        logger.warning("could not classify the reply intent", exc_info=True)
+        return "answer"
+
+
+#: Phrases that point at other parts of the request instead of naming them; a sub-task with one is broken.
+_UNRESOLVED_REFERENCE = re.compile(
+    r"\b(?:each of them|both of them|all of them|the same treatment|the same look)\b", re.IGNORECASE)
+
+
+def _visibly_broken(subtasks: list[str]) -> bool:
+    """Two identical sub-tasks, or one that still refers to the rest of the request ("each of them")."""
+    return len(set(subtasks)) < len(subtasks) or any(_UNRESOLVED_REFERENCE.search(t) for t in subtasks)
+
+
+def split_into_subtasks(user_query: str, planner_lm=None,
+                        workflow_folderpath: str | None = None) -> list[str]:
+    """The request as independent sub-tasks, in order; ``[user_query]`` when it is not split.
+
+    One call on the planner LM, with no command catalog: the split is about the
+    request, not about how to carry it out. It is shown the workflow's skills
+    (``_skills``), as the kinds of job it may contain.
+    Any failure, an empty answer, or more than MAX_SUBTASKS sub-tasks leaves the
+    request whole.
+    """
+    if planner_lm is None:
+        planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
+    job_types = _job_types_for(workflow_folderpath)
+    # Temperature 0, so the same request splits the same way; a split that is
+    # visibly broken is retried once at 0.7, which also misses the LM cache.
+    # A split whose only flaw is a leftover reference ("each of them") is still
+    # better than none, so it is kept when the retry does not fix it.
+    usable = None
+    for temperature in (0.0, 0.7):
+        try:
+            with dspy.context(lm=planner_lm.copy(temperature=temperature),
+                              adapter=CommandsSystemPreludeAdapter()):
+                signature = _split_signature(workflow_folderpath) if workflow_folderpath else SplitIntoSubtasks
+                text = dspy.ChainOfThought(signature)(
+                    job_types=job_types, user_query=user_query).subtasks or ""
+        except Exception:  # noqa: BLE001 - splitting is an optimisation; never fail the turn
+            logger.warning("could not split the request; running it whole", exc_info=True)
+            return [user_query]
+        subtasks = [match.group(1).translate(_HYPHENS) for line in text.splitlines()
+                    if (match := _NUMBERED_LINE.match(line))]
+        if not subtasks or len(subtasks) > MAX_SUBTASKS:
+            return [user_query]
+        if not _visibly_broken(subtasks):
+            return subtasks
+        if usable is None and len(set(subtasks)) == len(subtasks):
+            usable = subtasks
+    return usable or [user_query]
 
 
 def build_query_with_next_steps(user_query: str,
     chat_session_obj: fastworkflow.ChatSession, with_agent_inputs_and_trajectory: bool = False,
-    planning_insights: str | None = None, planner_lm = None,
-    trace_trigger: str | None = None) -> str:
+    planner_lm = None,
+    trace_trigger: str | None = None,
+    planner_user_query: str | None = None,
+    plan_template: str | None = None,
+    done_only: bool = False) -> str:
     """
     Generate a todo list.
     Return a string that combine the user query and todo list
@@ -735,75 +1104,62 @@ def build_query_with_next_steps(user_query: str,
         user_query: The user's natural language query
         chat_session_obj: The active chat session
         with_agent_inputs_and_trajectory: Whether to include agent trajectory for replanning
-        planning_insights: Optional workflow-specific planning insights to append to
-            the planner signature docstring (knowledge distillation)
         planner_lm: Optional planner LM to use (if None, uses LLM_PLANNER from env)
         trace_trigger: What re-triggered planning mid-turn (e.g.
             "ask_user_response", "parameter_extraction_error"). None means the
             turn's initial plan; set, it marks the span fw.planner.replan.
+        planner_user_query: Current-turn text for the planner LLM only. When prior
+            turns are supplied via ``previous_turn_summaries``, pass the raw user
+            message here so ``user_query`` (often a refined string that already
+            embeds recent summaries) is not duplicated in the planner prompt.
+        plan_template: Optional skill steps for the planner only, appended to the
+            request in the planner prompt (not in the returned string). Used on
+            the turn's initial plan, not on a replan.
+        done_only: With a trajectory, return only the "what's done" summary.
     """
+    current_workflow = chat_session_obj.get_active_workflow()
     base_docstring = """
     Carefully review the user_query and generate a next steps sequence based only on available commands.
     Walk the graph of commands based on the 'available_from' hints to build the most appropriate command sequence.
+    Use names and values exactly as written in the user_query; never abbreviate or reword them.
 
     IMPORTANT: 9 times out of 10 information can be found via available commands. However, when generating the plan:
     - If required information is missing and cannot be found via commands, explicitly specify in the plan that the user needs to be consulted
     - If confirmation is needed before proceeding, explicitly specify in the plan that user confirmation is required
     """
-    if planning_insights:
-        enhanced_docstring = f"{base_docstring}\n\nCRITICAL PATTERNS FOR THIS WORKFLOW:\n{planning_insights}"
-    else:
-        enhanced_docstring = base_docstring
-
-    # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
-    # structured_docstring = f"{enhanced_docstring}\n{STRUCTURED_PLAN_GUIDE}"
-    # steps_desc = "the plan's steps in order, each one short sentence"
-    # subjects_desc = "the specific named items the request asks about (people, accounts, records...), each once"
-    #
-    # class TaskPlannerSignature(dspy.Signature):
-    #     __doc__ = structured_docstring
-    #     user_query: str = dspy.InputField()
-    #     subjects: list[PlanSubject] = dspy.OutputField(desc=subjects_desc)
-    #     steps: list[PlanStep] = dspy.OutputField(desc=steps_desc)
-    #
-    # class TaskPlannerWithTrajectoryAndAgentInputsSignature(dspy.Signature):
-    #     __doc__ = structured_docstring
-    #     agent_inputs: dict = dspy.InputField()
-    #     agent_trajectory: dict = dspy.InputField()
-    #     user_response: str = dspy.InputField()
-    #     subjects: list[PlanSubject] = dspy.OutputField(desc=subjects_desc)
-    #     steps: list[PlanStep] = dspy.OutputField(desc=steps_desc)
-
-    # The plain-text planner, used only when the structured call fails.
-    # With structured planning disabled (2026-09-28) it is the only planner.
+    # The plain-text planner.
     class TaskPlannerTextSignature(dspy.Signature):
-        __doc__ = enhanced_docstring
+        __doc__ = base_docstring
         user_query: str = dspy.InputField()
         next_steps: str = dspy.OutputField(desc="task descriptions as a numbered list of short sentences separated by line breaks")
 
     class TaskPlannerTextWithTrajectoryAndAgentInputsSignature(dspy.Signature):
-        __doc__ = enhanced_docstring
+        __doc__ = base_docstring
         agent_inputs: dict = dspy.InputField()
         agent_trajectory: dict = dspy.InputField()
-        user_response: str = dspy.InputField()
+        user_response: str = dspy.InputField(desc="the user's latest response, empty for a progress check")
+        whats_done: str = dspy.OutputField(desc="concise summary of what the agent_trajectory has accomplished so far, including key values found")
+        next_steps: str = dspy.OutputField(desc="the remaining tasks of the original plan, revised for what is done, as a numbered list of short sentences separated by line breaks")
+
+    class TaskPlannerTextWithPreviousTurnSummariesSignature(dspy.Signature):
+        __doc__ = base_docstring
+        user_query: str = dspy.InputField()
+        previous_turn_summaries: str = dspy.InputField(
+            desc="Summaries of every completed turn before this one, oldest first"
+        )
         next_steps: str = dspy.OutputField(desc="task descriptions as a numbered list of short sentences separated by line breaks")
 
-    current_workflow = chat_session_obj.get_active_workflow()
     available_commands = CommandMetadataAPI.get_all_contexts_command_display_text(
         subject_workflow_path=current_workflow.folderpath,
         cme_workflow_path=fastworkflow.get_internal_workflow_path("command_metadata_extraction"),
         active_context_name=current_workflow.current_command_context_name,
+        navigation_workflow=current_workflow,
     )
 
     # Use provided planner_lm if available (distillation mode), else build from env
     if planner_lm is None:
         planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
     agent_adapter = CommandsSystemPreludeAdapter()
-    # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
-    # # A structured reply that does not parse goes straight to the text planner:
-    # # DSPy's JSON retry would re-ask without the command list and accept a plan
-    # # whose commands the model never saw.
-    # structured_adapter = CommandsSystemPreludeAdapter(use_json_adapter_fallback=False)
 
     # fw.planner.plan for the turn's initial plan, fw.planner.replan for
     # mid-turn re-planning (trace_trigger names what re-triggered it).
@@ -816,22 +1172,13 @@ def build_query_with_next_steps(user_query: str,
             "replan_trigger": trace_trigger,
         },
     )
-    # The turn's INITIAL plan is what the finish check verifies; a replan
-    # (trace_trigger set) never replaces it. Cleared first so a turn whose
-    # planning fails is never checked against the previous turn's plan.
-    if trace_trigger is None:
-        chat_session_obj._turn_plan = None
-        chat_session_obj._turn_plan_status = TURN_PLAN_NOT_PLANNED
 
-    # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
-    # def plan_with(structured: bool):
+    def with_template(text: str) -> str:
+        return f"{text}\n\n{plan_template}" if plan_template else text
+
     def plan_with():
         if with_agent_inputs_and_trajectory:
             workflow_tool_agent = chat_session_obj.workflow_tool_agent
-            # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
-            # task_planner_func = dspy.ChainOfThought(
-            #     TaskPlannerWithTrajectoryAndAgentInputsSignature if structured
-            #     else TaskPlannerTextWithTrajectoryAndAgentInputsSignature)
             task_planner_func = dspy.ChainOfThought(TaskPlannerTextWithTrajectoryAndAgentInputsSignature)
             agent_inputs, agent_trajectory = workflow_tool_agent.planner_view()
             cleaned_agent_inputs = {k: v for k, v in agent_inputs.items() if k != "available_commands"}
@@ -840,100 +1187,50 @@ def build_query_with_next_steps(user_query: str,
                 agent_trajectory = agent_trajectory,
                 user_response = user_query,
                 available_commands=available_commands) # Note that this is not part of the signature. It is extra metadata that will be picked up by the CommandsSystemPreludeAdapter
-        # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
-        # task_planner_func = dspy.ChainOfThought(
-        #     TaskPlannerSignature if structured else TaskPlannerTextSignature)
+        previous_turn_summaries = (
+            _previous_turn_summaries_for_planner(chat_session_obj)
+            if trace_trigger is None
+            else ""
+        )
+        if previous_turn_summaries:
+            task_planner_func = dspy.ChainOfThought(
+                TaskPlannerTextWithPreviousTurnSummariesSignature
+            )
+            planner_query = (
+                planner_user_query
+                if planner_user_query is not None
+                else user_query
+            )
+            return task_planner_func(
+                user_query=with_template(planner_query),
+                previous_turn_summaries=previous_turn_summaries,
+                available_commands=available_commands,
+            )
         task_planner_func = dspy.ChainOfThought(TaskPlannerTextSignature)
         return task_planner_func(
-            user_query=user_query,
+            user_query=with_template(user_query),
             available_commands=available_commands) # Note that this is not part of the signature. It is extra metadata that will be picked up by the CommandsSystemPreludeAdapter
 
-    # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
-    # # The structured plan exists for the finish check, and costs the planner
-    # # call real time (measured with cerebras/gpt-oss-120b on three todo-list
-    # # requests: median 12.1 s structured against 3.7 s plain text). A
-    # # deployment without the check keeps the plain-text planner it always had,
-    # # and so does a replan: only the turn's initial plan is ever checked.
-    # structured = trace_trigger is None and finish_check_active(
-    #     getattr(chat_session_obj, "workflow_tool_agent", None))
-    # Only the turn's initial plan is ever checked, so a replan is not parsed.
-    check_active = trace_trigger is None and finish_check_active(
-        getattr(chat_session_obj, "workflow_tool_agent", None))
-    turn_plan: TurnPlan | None = None
     plan_text = ""
     try:
         with dspy.context(lm=planner_lm, adapter=agent_adapter):
-            # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
-            # if structured:
-            #     try:
-            #         with dspy.context(adapter=structured_adapter):
-            #             prediction = plan_with(structured=True)
-            #         steps = list(prediction.steps or [])
-            #         if steps:
-            #             turn_plan = TurnPlan(steps=steps, subjects=list(prediction.subjects or []))
-            #             plan_text = render(turn_plan.steps)
-            #         else:
-            #             logger.warning("structured planner returned no steps; using the plain-text planner")
-            #     # Only an answer that does not parse into the structure falls
-            #     # back; a provider error (rate limit, timeout, auth) propagates
-            #     # as it did before, rather than doubling the calls to a provider
-            #     # that failed.
-            #     except (AdapterParseError, ValidationError, ValueError, TypeError) as structured_error:
-            #         logger.warning(
-            #             f"structured planner failed ({type(structured_error).__name__}); "
-            #             "using the plain-text planner")
-            if turn_plan is None:
-                # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
-                # prediction = plan_with(structured=False)
-                prediction = plan_with()
-                plan_text = prediction.next_steps or ""
-                # Only the finish check reads a text plan's steps back out.
-                # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
-                # if structured:
-                if check_active:
-                    turn_plan = _text_turn_plan(plan_text, current_workflow.folderpath)
+            prediction = plan_with()
+            plan_text = prediction.next_steps or ""
     except BaseException:
         tracing.end_span(chat_session_obj, span, status=tracing.STATUS_ERROR)
         raise
-    if not plan_text:
-        plan_source = "none"
-    # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
-    # elif not structured:
-    #     plan_source = "text"
-    # elif turn_plan is not None and turn_plan.source == "structured":
-    #     plan_source = "structured"
-    # else:
-    #     plan_source = "text_fallback"
-    else:
-        plan_source = "text"
     tracing.end_span(
         chat_session_obj,
         span,
         attributes={
             "plan": plan_text,
-            "plan_source": plan_source,
-            # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
-            # "subjects": _redacted_subject_names(turn_plan),
-            "subjects": [],
+            "plan_source": "text" if plan_text else "none",
         },
     )
 
-    # Why the finish check has the plan it has; only a plan made for it counts.
-    # Structured planning disabled 2026-09-28 (owner decision); kept for reference.
-    # if trace_trigger is None and structured:
-    if check_active:
-        if turn_plan is not None and turn_plan.steps:
-            chat_session_obj._turn_plan_status = TURN_PLAN_PLANNED
-        elif not plan_text:
-            chat_session_obj._turn_plan_status = TURN_PLAN_PLANNER_EMPTY
-        else:
-            chat_session_obj._turn_plan_status = TURN_PLAN_UNREADABLE
-
-    if not plan_text:
+    # A mid-turn replan with nothing remaining still reports what's done and says to finish.
+    if not plan_text and not with_agent_inputs_and_trajectory:
         return user_query
-
-    if trace_trigger is None:
-        chat_session_obj._turn_plan = turn_plan
 
     generated_plan = plan_text.split()
     # Capture the generated plan for distillation when a capture list is present
@@ -949,9 +1246,16 @@ def build_query_with_next_steps(user_query: str,
         ))
 
     steps_formatted = " ".join(generated_plan)
-    user_query_and_next_steps = f"{user_query}\n\nExecute these next steps:\n{steps_formatted}"
-    return (
-        f'User Query:\n{user_query_and_next_steps}'
-        if with_agent_inputs_and_trajectory else
-        user_query_and_next_steps
-    )
+    if with_agent_inputs_and_trajectory:
+        whats_done = getattr(prediction, "whats_done", "") or ""
+        if done_only:
+            return whats_done
+        sections = [f"User Query:\n{user_query}"] if user_query else []
+        sections.append(f"What's done:\n{whats_done}")
+        sections.append(
+            f"What remains (execute these next steps):\n{steps_formatted}"
+            if steps_formatted else
+            "Nothing left to do. Call finish now."
+        )
+        return "\n\n".join(sections)
+    return f"{user_query}\n\nExecute these next steps:\n{steps_formatted}"

@@ -79,6 +79,10 @@ def _run_in_venv(script_source: str, python: str = _VENV_PYTHON) -> dict:
     Assertions stay in the parent process: the script only reports what it saw,
     so a failure reads as a pytest diff rather than a subprocess traceback.
     """
+    # Import litellm first: dspy imported first breaks litellm's openai import
+    # (circular import on dspy 3.4). Probes import dspy themselves, so they need
+    # this ordering here; importing fastworkflow no longer loads litellm.
+    script_source = "import litellm  # noqa: F401  (must precede dspy)\n" + script_source
     with tempfile.TemporaryDirectory() as tmp_dir:
         script_path = os.path.join(tmp_dir, "dspy_memory_probe.py")
         with open(script_path, "w", encoding="utf-8") as handle:

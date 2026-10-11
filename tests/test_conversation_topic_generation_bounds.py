@@ -151,7 +151,7 @@ def test_the_deadline_is_sent_to_the_llm_client_not_wrapped_around_the_await(
 
 
 def test_the_retry_count_is_pinned_because_it_multiplies_the_deadline(
-    conversation_store_env, recorded_transport
+    conversation_store_env, recorded_transport, monkeypatch
 ):
     """A timeout is only a bound once the attempt count is known.
 
@@ -159,11 +159,26 @@ def test_the_retry_count_is_pinned_because_it_multiplies_the_deadline(
     provider is the deadline times the attempts. dspy.LM defaults to
     ``num_retries=3``; leaving that alone would make the real worst case four
     times what the timeout advertises.
+
+    DSPy 3.4 retries in its own execution loop (``lm.num_retries`` attempts)
+    and always hands litellm ``num_retries=0``, so the pin is read off the LM
+    that generation builds, not off the transport.
     """
+    built: list = []
+    real_get_lm = fastworkflow.conversation_labeling.get_lm
+
+    def record_lm(*args, **kwargs):
+        lm = real_get_lm(*args, **kwargs)
+        built.append(lm)
+        return lm
+
+    monkeypatch.setattr(fastworkflow.conversation_labeling, "get_lm", record_lm)
+
     with pytest.raises(Exception):
         generate_topic_and_summary(_turns("retries"))
 
-    assert recorded_transport["num_retries"] == TOPIC_GENERATION_MAX_RETRIES
+    assert len(built) == 1
+    assert built[0].num_retries == TOPIC_GENERATION_MAX_RETRIES
     assert TOPIC_GENERATION_MAX_RETRIES < 3, (
         "the retry count is not pinned below dspy's default, so the effective "
         "bound is four attempts, not the advertised one"

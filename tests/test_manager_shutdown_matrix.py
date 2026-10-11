@@ -41,7 +41,6 @@ from dotenv import dotenv_values
 
 import fastworkflow
 from fastworkflow.run_fastapi_mcp import checkpoint
-from fastworkflow.runtime_manifest import ManifestConformanceError
 from fastworkflow.run_fastapi_mcp.turns import ExecState, TurnRegistry
 from fastworkflow.run_fastapi_mcp.utils import ChannelRuntime, ChannelSessionManager
 
@@ -1007,13 +1006,13 @@ def test_a_startup_failure_surfaces_as_itself(app_module, monkeypatch):
     """
 
     def refuse(*_args, **_kwargs):
-        raise ManifestConformanceError(["the manifest is nonconformant"])
+        raise RuntimeError("startup refused")
 
-    monkeypatch.setattr(app_module, "check_startup_conformance", refuse)
+    monkeypatch.setattr(app_module.fastworkflow, "init", refuse)
 
     async def body():
         async with app_module.lifespan(app_module.app):
             pass
 
-    with pytest.raises(ManifestConformanceError, match="nonconformant"):
+    with pytest.raises(RuntimeError, match="startup refused"):
         asyncio.run(body())

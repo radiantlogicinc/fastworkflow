@@ -35,7 +35,7 @@ from fastworkflow.turn import (
     validate_artifacts_serializable,
     warn_on_unserializable_artifacts,
 )
-from fastworkflow.workflow_execution_context import WorkflowExecutionContext
+from fastworkflow.workflow_execution_context import MAX_HANDOFFS, WorkflowExecutionContext
 from tests.todo_list_workflow.application.todo_manager import TodoListManager
 
 TURN_KEY_RE = re.compile(r"^\d{8}T\d{6}\.\d{6}Z-[0-9a-f]{12}$")
@@ -87,7 +87,7 @@ def _make_agent_ctx(todo_workflow_path, monkeypatch):
     monkeypatch.setattr(
         "fastworkflow.workflow_agent.build_query_with_next_steps",
         lambda user_query, session, with_agent_inputs_and_trajectory=False,
-        planning_insights=None, planner_lm=None, **kwargs: user_query,
+        planner_lm=None, **kwargs: user_query,
     )
     monkeypatch.setattr(
         "fastworkflow.workflow_agent._what_can_i_do",
@@ -387,6 +387,10 @@ class TestAgentTurn:
         self, initialized_fastworkflow, todo_workflow_path, monkeypatch
     ):
         ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch)
+        # Every executor run hits the step cap: the hand-offs run out, and the
+        # last run's partial answer is what the turn returns.
+        monkeypatch.setattr("fastworkflow.workflow_agent.run_progress_check",
+                            lambda *args, **kwargs: "done so far")
 
         mock_agent = MagicMock()
         mock_agent.return_value = SimpleNamespace(
@@ -398,8 +402,9 @@ class TestAgentTurn:
 
         # the turn failed to complete: status carries the failure, failure_reason
         # elaborates it (orthogonal to success)
+        assert mock_agent.call_count == MAX_HANDOFFS + 1
         assert result.status == TurnStatus.FAILED
-        assert isinstance(result.answer, str)
+        assert result.answer == "Ran out of iterations"
         assert result.failure_reason == "max_iters_exhausted"
         # success is purely command-based: this mock ran no commands, so no
         # command failed -> success is True even though the turn FAILED to complete
@@ -528,6 +533,30 @@ class TestFailureCapture:
         assert "RuntimeError" in artifacts["traceback"]
         assert entry.started_at is not None
         assert entry.duration_ms is not None
+
+    def test_a_command_not_found_is_not_captured_as_a_failed_output(
+        self, initialized_fastworkflow, todo_workflow_path, monkeypatch, tmp_path
+    ):
+        ctx, _wf = _make_assistant_ctx(todo_workflow_path, monkeypatch)
+        _enter_todo_list_manager(_wf, tmp_path)
+
+        from fastworkflow.command_executor import CommandNotFoundError
+        from fastworkflow.workflow_agent import _execute_workflow_query
+
+        def unroutable_invoke(cls, session, command: str):
+            raise CommandNotFoundError("not available here; go_up and retry")
+
+        _patch_invoke_with(monkeypatch, unroutable_invoke)
+
+        ctx._begin_turn("trigger a routing miss")
+        ctx.push_active_workflow(_wf)
+        try:
+            with pytest.raises(CommandNotFoundError):
+                _execute_workflow_query("delete_todo_list", ctx)
+        finally:
+            ctx.pop_active_workflow()
+
+        assert ctx._turn_outputs == []
 
 
 # ----------------------------------------------------------------------

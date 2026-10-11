@@ -151,24 +151,12 @@ inferred:
 | Span name | Where emitted | Key attributes |
 |---|---|---|
 | `fw.agent.execute` | `WEC._call_agent_with_retry` — the one choke point both the fresh forward and the resume pass through | agent_input, resumed, model, attempts, final_answer, suspended, clarification, exhausted |
-| `fw.agent.step` | each iteration of `fastWorkflowReAct._run_loop` | step_index, thought, tool_name, tool_args, observation, clarification, tool_error; `finish_check_note` (per-span v3, aggregate contract 7; replaced `roster_nudge`) marks the `finish` step whose observation is the finish check's note rather than a tool result |
-| `fw.search.route` | `SearchRouter.route` (`observation_offloading/search_router.py`), inside a `search_memory` step, only when routing is enabled (`FW_SEARCH_ROUTER=jev`, or since 2026-09-27 the name of a registered decision provider) and the observation holds a listing. Not started once the turn's routing calls (3) or vendor time (10 s) are spent: that search records the router error `router_budget` on its offload event, with no span. Kind `llm`; added in span contract v6 | model, choice, p_all_rows, for_report, latency_ms, input_tokens, output_tokens, error_type |
-| `fw.finish_check` | `FinishChecker.note` (`observation_offloading/finish_check.py`), inside the agent's `finish` step, only when the check is enabled (`FW_FINISH_CHECK=jev`, or since 2026-09-27 the name of a registered decision provider), a plan has a checked step and at least two iterations are left (and, since 2026-09-27, the turn's ledger is complete: a `ledger incomplete` finish opens no span). Kind `llm`; added in span contract v7 | model, plan_source, steps, subjects (a count), questions, requests, splits, input_tokens, latency_ms, flagged, fired, error_type |
+| `fw.agent.step` | each iteration of `fastWorkflowReAct._run_loop` | step_index, thought, tool_name, tool_args, observation, clarification, tool_error; `finish_check_note` (per-span v3, aggregate contract 7; historical whitelist key, no longer set) |
+| `fw.search.route` | *(removed)* optional decision-model routing on `search_memory` over listings; span name retained for historical traces only. Kind `llm`; added in span contract v6 | model, choice, p_all_rows, for_report, latency_ms, input_tokens, output_tokens, error_type |
+| `fw.finish_check` | *(removed)* finish-time execution check; span name retained for historical traces only. Kind `llm`; added in span contract v7 | model, plan_source, steps, subjects (a count), questions, requests, splits, input_tokens, latency_ms, flagged, fired, error_type |
 
-`fw.search.route` records the verdict and its cost, never the question or the
-observation (those stay on the search's offload event). It is not
-`fw.llm.call`, so the cost and cut-at-limit readers keyed on that name do not
-count it. The same holds for `fw.finish_check`: its tokens are outside every
-`fw.llm.call` total, and which steps it flagged is on the `finish_check` offload
-event (by step and subject index), not the span.
-
-Neither span's attributes nor its contract version changed on 2026-09-27. The
-diagnostics added then -- `provider`, `vendor_ms`, `error_status`,
-`error_request_id`, `error_code`, `error_stage`, and on the finish check
-`calibration`, `user_replies`, `no_plan_cause`, `subjects_capped`,
-`ledger_bytes` and `ledger_rows_trimmed` -- are on the offload events only
-(`search_memory`'s `router` field and `finish_check`); see
-[observation_search.md](observation_search.md#finish-time-execution-check).
+Current runs no longer emit `fw.search.route` or `fw.finish_check`. Historical
+traces may still contain either span.
 
 `fw.agent.execute` is the executor as a phase, sibling to `fw.planner.plan`
 under `fw.turn`; it is **not** `fw.command.execute`, which is one command inside
@@ -308,6 +296,12 @@ retired with the chatbot UI rework. Erasure is the store API plus the
 chatbot's confirmed **Clear conversations** action (which also deletes the
 legacy per-channel DB files, Phase-7 ruling C1); pruning runs automatically
 at sink startup only. The R21/R12 mechanisms themselves are unchanged.
+
+*Amendment (2026-10-11, fix-nczr):* the writer thread re-runs the startup
+prune hourly, replacing `studio --prune` as the recurring trigger, and the
+size cap now evicts the oldest finished non-experiment turn records once
+nothing else unbound is left, so `FW_OBS_DB_MAX_BYTES` bounds the file. R16
+still exempts turns and conversations from the age horizon.
 
 **Maintenance ownership `[R12]`:** opportunistic bounded prune at sink
 startup + `fastworkflow studio --prune`; `incremental_vacuum` in the same

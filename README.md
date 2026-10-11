@@ -373,11 +373,11 @@ Insights distillation (`fastworkflow run --generate_insights`) stays CLI-only by
 
 ### Retention and erasure
 
-Trace data grows. Spans and artifacts are pruned beyond a retention horizon; **turn records and conversations are never deleted by a default prune**, so history survives.
+Trace data grows, so the record bounds itself with two settings and no setup: `FW_OBS_RETENTION_DAYS` (default 30) ages out spans and artifacts, and `FW_OBS_DB_MAX_BYTES` (default 1 GiB, `-wal` file included) caps the file. The prune runs when the recorder starts and then **hourly**, so a long-lived server stays bounded without restarts. Turn records and conversations are exempt from the age horizon, so history survives; only when the file is still over the cap with every span gone are the **oldest finished turn records** evicted, whole (their artifacts, offload evidence and review notes with them). Turns of an unsealed experiment are never evicted: seal the experiment or call `release_experiment_evidence` to let them go, and the recorder logs a warning while they alone hold the file over the cap.
 
 Use **Clear conversations** in Debug mode for an explicit, confirmed reset. It removes conversation labels, turns, spans, artifacts, feedback, and legacy per-channel conversation files. Training runs, writer diagnostics, and monotonic conversation counters survive, so identities are never reused after a clear.
 
-There is no switch to turn recording off. fastWorkflow always keeps this local record, including when you embed the core as a library rather than using `run`, `run_fastapi_mcp` or `run_chatbot`: one SQLite database per workflow at `<FASTWORKFLOW_STATE_ROOT>/workflows/<workflow-id>/observability.sqlite3` (the state root defaults to `~/.local/state/fastworkflow`), created readable by its owner only (the file `0600`, its directory `0700`). It is pruned automatically when the recorder starts: `FW_OBS_RETENTION_DAYS` sets the age horizon and `FW_OBS_DB_MAX_BYTES` the size cap (see [Environment variables reference](#environment-variables-reference)). Point `FASTWORKFLOW_STATE_ROOT` elsewhere to keep it on a different disk.
+There is no switch to turn recording off. fastWorkflow always keeps this local record, including when you embed the core as a library rather than using `run`, `run_fastapi_mcp` or `run_chatbot`: one SQLite database per workflow at `<FASTWORKFLOW_STATE_ROOT>/workflows/<workflow-id>/observability.sqlite3` (the state root defaults to `~/.local/state/fastworkflow`), created readable by its owner only (the file `0600`, its directory `0700`). It is pruned automatically when the recorder starts and hourly after that: `FW_OBS_RETENTION_DAYS` sets the age horizon and `FW_OBS_DB_MAX_BYTES` the size cap (see [Environment variables reference](#environment-variables-reference)). Point `FASTWORKFLOW_STATE_ROOT` elsewhere to keep it on a different disk.
 
 Phase 0 capture/tracing overhead (bead `fix-49m.2`, not a CI gate) was measured with a stubbed LM on hello-world `add_two_numbers` turns, observability on, no network: command-gap p50 **+0.7%** and turn-wall p50 **+1.6%** vs fork `9904df5` (change 4 `5b1e85e` in between). Reports and method: https://gist.github.com/dharrawal/2e123360ace2e948a138c52ce9f00601
 
@@ -455,6 +455,10 @@ Three norms, in priority order:
 1. **A credential that arrives with a request belongs to that request.** Re-supply it per request rather than storing it in workflow context. fastWorkflow does this with the caller's JWT: it is refreshed on every authenticated request and is never written to session state.
 2. **Keep secrets and PII out of command contexts, workflow context, and agent trajectories.** Pass an opaque handle — a user id, a lookup key — and resolve it to the sensitive value inside the command, where it stays in memory and never reaches a parameter, a trace, or a trajectory.
 3. **If state is both long-lived and genuinely secret, encrypt it — with a key that does not travel with the ciphertext.** A key sitting beside the data it protects moves an audit checkbox, not the exposure. Use your deployment's KMS or secret manager.
+
+### Disk usage
+
+The always-on observability record bounds itself with the defaults — about 1 GiB per workflow, data older than 30 days aged out, enforced at startup and hourly (see [Retention and erasure](#retention-and-erasure)). Size the volume under `FASTWORKFLOW_STATE_ROOT` for `FW_OBS_DB_MAX_BYTES` per workflow plus headroom, lower it if that is too much, and keep `FW_OBS_SUPPRESS_PRUNE` unset in production: it turns pruning off entirely.
 
 ---
 
@@ -675,10 +679,10 @@ Two files per workflow (templates ship with `fastworkflow examples fetch`).
 | `LITELLM_PROXY_API_BASE` | LiteLLM Proxy URL | with `litellm_proxy/` models | *not set* |
 | `INTENT_DETECTION_TINY_MODEL` | HF id for the small intent model | `train` (optional) | `google/bert_uncased_L-4_H-128_A-2` |
 | `INTENT_DETECTION_LARGE_MODEL` | HF id for the large intent model | `train` (optional) | `distilbert-base-uncased` |
-| `FW_OBS_RETENTION_DAYS` | Age beyond which the automatic prune (run at recorder startup) drops spans/artifacts (turn records are exempt) | Optional | `30` |
-| `FW_OBS_DB_MAX_BYTES` | Size cap; the automatic prune evicts oldest spans first while over it | Optional | `1073741824` (1 GiB) |
+| `FW_OBS_RETENTION_DAYS` | Age beyond which the automatic prune (run at recorder startup and hourly) drops spans/artifacts (turn records are exempt) | Optional | `30` |
+| `FW_OBS_DB_MAX_BYTES` | Size cap, `-wal` file included; the automatic prune (startup and hourly) evicts oldest spans first, then the oldest finished non-experiment turn records, while over it. A non-integer value is ignored with a warning | Optional | `1073741824` (1 GiB) |
 | `FW_OBS_CAPTURE_TRACEBACKS` | Persist exception tracebacks as artifacts. Off by default because tracebacks can carry sensitive values | Optional | `0` |
-| `FW_OBS_SUPPRESS_PRUNE` | Withhold the automatic prune. **This is the cross-process contract for a measured run**: the in-process `suppress_pruning()` helper only covers the process that calls it, so when a harness drives a separate server the variable must be in the *server's* environment **before it starts** — the recorder prunes once on construction, so setting it afterwards is too late. Confirm the value took hold with `GET /probes/readyz?observability=true`, which reports `pruning_suppressed`; the server also logs the regime at startup | Optional | `0` |
+| `FW_OBS_SUPPRESS_PRUNE` | Withhold the automatic prune. **This is the cross-process contract for a measured run**: the in-process `suppress_pruning()` helper only covers the process that calls it, so when a harness drives a separate server the variable must be in the *server's* environment **before it starts** — the recorder prunes on construction (and hourly after), so setting it afterwards is too late. Confirm the value took hold with `GET /probes/readyz?observability=true`, which reports `pruning_suppressed`; the server also logs the regime at startup | Optional | `0` |
 
 ### `fastworkflow.passwords.env`
 

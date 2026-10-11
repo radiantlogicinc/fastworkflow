@@ -498,7 +498,7 @@ Net line estimates are for production code; tests are given in parentheses.
 - `launcher.py`: `TRAIN_PID_FILENAME`, `write_pid_file`, `_read_pid_record` and the pid-file scan become the `training_process` row (§2.7). `chatbot_train.log` is kept.
 - `store.py`: delete `LEGACY_OFFLOAD_SIDECAR_SUFFIX` and `_remove_legacy_offload_sidecar`.
 - Delete the `conversations/` handling in `http_common.py`, `server.py`, `run_fastapi_mcp/__main__.py`, `utils.get_channelconversations_dir` and `state_paths.conversations_dir`.
-- Tests: port `test_run_chatbot_train` and `test_training_history`; delete the conversations-dir and legacy-offload cases in `test_state_paths`, `test_run_chatbot_server`, `test_offload_*` and `test_context_runtime_manifest`; update `soak/memory_soak.py`.
+- Tests: port `test_run_chatbot_train` and `test_training_history`; delete the conversations-dir and legacy-offload cases in `test_state_paths`, `test_run_chatbot_server`, and `test_offload_*`; update `soak/memory_soak.py`.
 
 **`.5` — consistency cache.** About −45 (tests about −150).
 

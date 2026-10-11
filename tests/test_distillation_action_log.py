@@ -160,12 +160,12 @@ class _ScriptedAgent:
     def __init__(self, chat_session, command_names: list[str]):
         self._chat_session = chat_session
         self._command_names = command_names
-        self.current_trajectory: dict = {}
+        self.trajectory: dict = {}
 
     def __call__(self, **_kwargs):
         for name in self._command_names:
             _append_action_record(self._chat_session, _action(name))
-        self.current_trajectory = {"thought_0": "scripted"}
+        self.trajectory = {"thought_0": "scripted"}
         return type("AgentResult", (), {"final_answer": "done"})()
 
 

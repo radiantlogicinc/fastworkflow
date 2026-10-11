@@ -1,0 +1,444 @@
+{
+  "enterable_contexts": [
+    "*",
+    "Account",
+    "Application",
+    "ControlFinding",
+    "ControlsMonitor",
+    "DirectoryExplorer",
+    "Group",
+    "Identity",
+    "Organization",
+    "Permission",
+    "ReconciliationWorkspace",
+    "Repository"
+  ],
+  "enterable_display_text": "Commands available in the current context (global):\n- go_up\n  Change context to the parent of the current context. This could change the commands that are available.\n\n- open_controls_monitor\n  Enter ControlsMonitor for control performance, dashboards, and findings by control code. Skip if already in ControlsMonitor or ControlFinding. Not for how risky an entity already in context is (assess_risk).\n\n- open_directory\n  Enter DirectoryExplorer so find_* and open_*_by_uid are available. Skip if already in DirectoryExplorer or an entity opened from it. Entry is not the answer \u2014 continue with find_*, browse_catalog, or open_*_by_uid.\n\n- open_reconciliation\n  Enter the account-to-identity reconciliation workspace.\n\n- reset_context\n  Reset the current context to the global context (*). This could change the commands that are available.\n\n- what_can_i_do\n  List all the commands available in the current context along with their metadata\n  outputs:\n  - valid_command_names, type: list[str]\n\n- what_is_current_context\n  Show the current context and its properties (if any).\n\n- who_am_i\n  Report the acting user, roles and enabled features.\n\nCommands available after entering the ControlsMonitor context (not callable until then):\n- list_controls\n  List available controls and the codes used to query their findings.\n  Before executing list_controls, navigate to ControlsMonitor as follows: open_controls_monitor\n- list_findings\n  List the current defects for a control.\n  Before executing list_findings, navigate to ControlsMonitor as follows: open_controls_monitor\n- open_finding\n  Open a control finding for detail and action, and open one if a uid is given.\n  Before executing open_finding, navigate to ControlsMonitor as follows: open_controls_monitor\n\nCommands available after entering the DirectoryExplorer context (not callable until then):\n- find_account\n  Find accounts by login/name and stop at the match list. Not for open/inspect (open_account_by_uid then open_portrait) or what logins are on file (browse_catalog).\n  Before executing find_account, navigate to DirectoryExplorer as follows: open_directory\n- find_group\n  Find groups by name and stop at the match list. Not for open/inspect (open_group_by_uid then open_portrait) or what groups are on file (browse_catalog).\n  Before executing find_group, navigate to DirectoryExplorer as follows: open_directory\n- find_identity\n  Find identities by name, login or email and stop at the match list. Not for open/inspect (open_identity_by_uid then open_portrait) or what people are on file (browse_catalog).\n  Before executing find_identity, navigate to DirectoryExplorer as follows: open_directory\n- find_organization\n  Find organisations/business units by name and stop at the match list. Not for open/inspect (open_organization_by_uid then open_portrait) or what orgs are on file (browse_catalog).\n  Before executing find_organization, navigate to DirectoryExplorer as follows: open_directory\n- find_permission\n  Find permissions/entitlements by name and stop at the match list. Not for open/inspect (open_permission_by_uid then open_portrait) or what rights are on file (browse_catalog).\n  Before executing find_permission, navigate to DirectoryExplorer as follows: open_directory\n- who_has_access_to\n  List identities/accounts with access to a named resource from Directory. When already on a Permission, use show_holders instead.\n  Before executing who_has_access_to, navigate to DirectoryExplorer as follows: open_directory\n- browse_catalog\n  Wildcard-find the directory catalog, then portrait a representative\n(root organisation when orgs were listed). Requires DirectoryExplorer\n(open_directory first if global). Do not call the individual find_*\ncommands, show_properties, or open_*_by_uid first. If this already ran and\nthe user repeated the vague request, open the next unused representative\ninstead of browsing again.\n  Before executing browse_catalog, navigate to DirectoryExplorer as follows: open_directory\n- open_account_by_uid\n  Open an account by uid after find_account.\n  Before executing open_account_by_uid, navigate to DirectoryExplorer as follows: open_directory\n- open_application_by_uid\n  Open an application by uid after find_application.\n  Before executing open_application_by_uid, navigate to DirectoryExplorer as follows: open_directory\n- open_group_by_uid\n  Open a group by uid after find_group.\n  Before executing open_group_by_uid, navigate to DirectoryExplorer as follows: open_directory\n- open_identity_by_uid\n  Open an identity by uid after find_identity, then use open_portrait. Walk available_from on identity_uid if the uid is missing.\n  Before executing open_identity_by_uid, navigate to DirectoryExplorer as follows: open_directory\n- open_organization_by_uid\n  Open an organisation by uid after find_organization.\n  Before executing open_organization_by_uid, navigate to DirectoryExplorer as follows: open_directory\n- open_permission_by_uid\n  Open a permission by uid after find_permission.\n  Before executing open_permission_by_uid, navigate to DirectoryExplorer as follows: open_directory\n- open_repository_by_uid\n  Open a repository by uid after find_repository.\n  Before executing open_repository_by_uid, navigate to DirectoryExplorer as follows: open_directory\n- find_application\n  Find applications/systems by name and stop at the match list. Not for open/inspect (open_application_by_uid then open_portrait) or what apps are on file (browse_catalog).\n  Before executing find_application, navigate to DirectoryExplorer as follows: open_directory\n- find_repository\n  Find repositories/connectors by name and stop at the match list. Not for open/inspect (open_repository_by_uid then open_portrait) or what feeds are on file (browse_catalog).\n  Before executing find_repository, navigate to DirectoryExplorer as follows: open_directory\n\nCommands available after entering the ReconciliationWorkspace context (not callable until then):\n- list_unreconciled_accounts\n  List the accounts of a repository or application with their reconciliation state.\n  Before executing list_unreconciled_accounts, navigate to ReconciliationWorkspace as follows: open_reconciliation\n\nCommands available after entering the Application context (not callable until then):\n- list_accounts\n  List accounts on this application, and open one if a uid is given.\n  Before executing list_accounts, navigate to Application as follows: open_directory, then open_application_by_uid <application_uid> (needs application_uid)\n- list_rights\n  List the application's rights, and open one if a uid is given.\n  Before executing list_rights, navigate to Application as follows: open_directory, then open_application_by_uid <application_uid> (needs application_uid)\n- open_group\n  Open one of this application's groups by uid.\n  Before executing open_group, navigate to Application as follows: open_directory, then open_application_by_uid <application_uid> (needs application_uid)\n- show_app_owner\n  Show the application's owner.\n  Before executing show_app_owner, navigate to Application as follows: open_directory, then open_application_by_uid <application_uid> (needs application_uid)\n- add_tag\n  Add a tag to the current entity.\n  Before executing add_tag, navigate to Application as follows: open_directory, then open_application_by_uid <application_uid> (needs application_uid)\n- assess_risk\n  Show the current entity's risk score together with the control findings\nthat drive it. Requires current entity context; if not in one: via go_up ->\nopen_directory -> find_* -> open_*_by_uid, or in current context. Do not\nstop at show_risk_score. Not for why a named finding was flagged\n(explain_risk) and not for how to fix (propose_fix).\n  Before executing assess_risk, navigate to Application as follows: open_directory, then open_application_by_uid <application_uid> (needs application_uid)\n- list_controls_hit\n  List the control violations the current entity triggers.\n  Before executing list_controls_hit, navigate to Application as follows: open_directory, then open_application_by_uid <application_uid> (needs application_uid)\n- list_remediation_actions\n  List the remediation actions available for the current entity. Only when the request asks for corrections, fixes or remediations; not part of an audit, a look or a walk.\n  Before executing list_remediation_actions, navigate to Application as follows: open_directory, then open_application_by_uid <application_uid> (needs application_uid)\n- open_portrait\n  Show the current entity's relational portrait in one call. Requires\ncurrent entity context; if still in DirectoryExplorer, open by uid first\n(via go_up -> open_directory -> find_* -> open_*_by_uid, or in current\ncontext). Do not call show_properties or show_metadata first. Do not go_up\nuntil the user asks. The command already includes the type-specific\nrelations.\n  Before executing open_portrait, navigate to Application as follows: open_directory, then open_application_by_uid <application_uid> (needs application_uid)\n- propose_fix\n  List the control findings on this entity and the remediation actions\nthat could resolve them. Only when the request asks for corrections, fixes\nor remediations; not part of an audit, a look or a walk. Requires current\nentity context; if not in one:\nvia go_up -> open_directory -> find_* -> open_*_by_uid, or in current\ncontext. The corrections listed are on offer for the user to apply; this\nworkflow does not run them. Do not substitute explain_risk.\n  Before executing propose_fix, navigate to Application as follows: open_directory, then open_application_by_uid <application_uid> (needs application_uid)\n- remove_tag\n  Remove a tag from the current entity.\n  Before executing remove_tag, navigate to Application as follows: open_directory, then open_application_by_uid <application_uid> (needs application_uid)\n- show_metadata\n  Show custom metadata and tags on the current entity.\n  Before executing show_metadata, navigate to Application as follows: open_directory, then open_application_by_uid <application_uid> (needs application_uid)\n- show_properties\n  Show the current entity's core attribute fields only. Not the relational portrait (open_portrait) and not a named find.\n  Before executing show_properties, navigate to Application as follows: open_directory, then open_application_by_uid <application_uid> (needs application_uid)\n- show_risk_score\n  Show only the numeric risk score. For how risky this entity is use assess_risk (score plus the findings that drive it).\n  Before executing show_risk_score, navigate to Application as follows: open_directory, then open_application_by_uid <application_uid> (needs application_uid)\n\nCommands available after entering the ControlFinding context (not callable until then):\n- explain_risk\n  Explain why this control finding was flagged. Not for how risky the current entity is (assess_risk) and not for how to fix (propose_fix). show_metadata is not a substitute.\n  Before executing explain_risk, navigate to ControlFinding as follows: open_controls_monitor, then open_finding <finding_uid> (finding_uid required to enter ControlFinding)\n- show_affected_entities\n  List the entities of one family affected by this finding.\n  Before executing show_affected_entities, navigate to ControlFinding as follows: open_controls_monitor, then open_finding <finding_uid> (finding_uid required to enter ControlFinding)\n- show_metadata\n  Show the tags attached to the control this finding belongs to.\n  Before executing show_metadata, navigate to ControlFinding as follows: open_controls_monitor, then open_finding <finding_uid> (finding_uid required to enter ControlFinding)\n\nCommands available after entering the Identity context (not callable until then):\n- list_accounts\n  List the identity's accounts, and open one if a uid is given.\n  Before executing list_accounts, navigate to Identity as follows: open_directory, then open_identity_by_uid <identity_uid> (needs identity_uid)\n- list_entitlements\n  List the identity's entitlements.\n  Before executing list_entitlements, navigate to Identity as follows: open_directory, then open_identity_by_uid <identity_uid> (needs identity_uid)\n- list_groups\n  List the identity's group memberships.\n  Before executing list_groups, navigate to Identity as follows: open_directory, then open_identity_by_uid <identity_uid> (needs identity_uid)\n\nCommands available after entering the Organization context (not callable until then):\n- list_identities\n  List identities in this organisation, and open one if a uid is given.\n  Before executing list_identities, navigate to Organization as follows: open_directory, then open_organization_by_uid <organization_uid> (needs organization_uid)\n\nCommands available after entering the Repository context (not callable until then):\n- list_accounts\n  List accounts in this repository, and open one if a uid is given.\n  Before executing list_accounts, navigate to Repository as follows: open_directory, then open_repository_by_uid <repository_uid> (needs repository_uid)\n\nCommands available after entering the Account context (not callable until then):\n- list_permissions\n  List the account's permissions, and open one if a uid is given.\n  Before executing list_permissions, navigate to Account as follows: open_directory, then open_account_by_uid <account_uid> (needs account_uid)\n- show_account_custodians\n  Show the account's owner and managers together. Requires Account\ncontext; if still in DirectoryExplorer, open_account_by_uid first. If no\nmanager is assigned, still show the owner. Do not call show_account_owner\nor show_account_manager separately. Not the full account portrait\n(open_portrait).\n  Before executing show_account_custodians, navigate to Account as follows: open_directory, then open_account_by_uid <account_uid> (needs account_uid)\n- show_account_manager\n  Show the assigned managers of the account.\n  Before executing show_account_manager, navigate to Account as follows: open_directory, then open_account_by_uid <account_uid> (needs account_uid)\n- show_account_owner\n  Show the identity this account is reconciled to.\n  Before executing show_account_owner, navigate to Account as follows: open_directory, then open_account_by_uid <account_uid> (needs account_uid)\n\nCommands available after entering the Group context (not callable until then):\n- list_members\n  List the group's members.\n  Before executing list_members, navigate to Group as follows: open_directory, then open_group_by_uid <group_uid> (needs group_uid)\n- show_nesting\n  Show parent/child group nesting.\n  Before executing show_nesting, navigate to Group as follows: open_directory, then open_group_by_uid <group_uid> (needs group_uid)\n\nCommands available after entering the Permission context (not callable until then):\n- show_holders\n  List identities/accounts holding this permission.\n  Before executing show_holders, navigate to Permission as follows: open_directory, then open_permission_by_uid <permission_uid> (needs permission_uid)\n- show_sensitivity\n  Show the permission's sensitivity/risk classification.\n  Before executing show_sensitivity, navigate to Permission as follows: open_directory, then open_permission_by_uid <permission_uid> (needs permission_uid)",
+  "source": "ido/ido_workflow with workflow_runtime.json present (fix-d3eh.1)",
+  "unavailable_messages": [
+    {
+      "context": "*",
+      "homes": [
+        "Account",
+        "Application",
+        "Group",
+        "Identity",
+        "Organization",
+        "Permission",
+        "Repository"
+      ],
+      "message": "Command 'add_tag' is not available in the current context 'global'. It is available in: 'Account', 'Application', 'Group', 'Identity', 'Organization', 'Permission', 'Repository'. From here to 'Account': open_directory, then open_account_by_uid <account_uid> (needs account_uid). Then retry 'add_tag'. From here to 'Application': open_directory, then open_application_by_uid <application_uid> (needs application_uid). Then retry 'add_tag'. From here to 'Group': open_directory, then open_group_by_uid <group_uid> (needs group_uid). Then retry 'add_tag'. From here to 'Identity': open_directory, then open_identity_by_uid <identity_uid> (needs identity_uid). Then retry 'add_tag'. From here to 'Organization': open_directory, then open_organization_by_uid <organization_uid> (needs organization_uid). Then retry 'add_tag'. From here to 'Permission': open_directory, then open_permission_by_uid <permission_uid> (needs permission_uid). Then retry 'add_tag'. From here to 'Repository': open_directory, then open_repository_by_uid <repository_uid> (needs repository_uid). Then retry 'add_tag'.",
+      "token": "add_tag"
+    },
+    {
+      "context": "Account",
+      "homes": [
+        "DirectoryExplorer"
+      ],
+      "message": "Command 'browse_catalog' is not available in the current context 'Account'. It is available in: 'DirectoryExplorer'. From here to 'DirectoryExplorer': go_up, then open_directory. Then retry 'browse_catalog'.",
+      "token": "browse_catalog"
+    },
+    {
+      "context": "Account",
+      "homes": [
+        "Permission"
+      ],
+      "message": "Command 'show_holders' is not available in the current context 'Account'. It is available in: 'Permission'. From here to 'Permission': list_permissions <permission_uid> (permission_uid required to enter Permission). Then retry 'show_holders'.",
+      "token": "show_holders"
+    },
+    {
+      "context": "Account",
+      "homes": [
+        "Permission"
+      ],
+      "message": "Command 'show_sensitivity' is not available in the current context 'Account'. It is available in: 'Permission'. From here to 'Permission': list_permissions <permission_uid> (permission_uid required to enter Permission). Then retry 'show_sensitivity'.",
+      "token": "show_sensitivity"
+    },
+    {
+      "context": "Application",
+      "homes": [
+        "DirectoryExplorer"
+      ],
+      "message": "Command 'browse_catalog' is not available in the current context 'Application'. It is available in: 'DirectoryExplorer'. From here to 'DirectoryExplorer': go_up, then open_directory. Then retry 'browse_catalog'.",
+      "token": "browse_catalog"
+    },
+    {
+      "context": "Application",
+      "homes": [
+        "Group"
+      ],
+      "message": "Command 'list_members' is not available in the current context 'Application'. It is available in: 'Group'. From here to 'Group': open_group <group_uid> (needs group_uid). Then retry 'list_members'.",
+      "token": "list_members"
+    },
+    {
+      "context": "Application",
+      "homes": [
+        "Account"
+      ],
+      "message": "Command 'list_permissions' is not available in the current context 'Application'. It is available in: 'Account'. From here to 'Account': list_accounts <account_uid> (account_uid required to enter Account). Then retry 'list_permissions'.",
+      "token": "list_permissions"
+    },
+    {
+      "context": "Application",
+      "homes": [
+        "Account"
+      ],
+      "message": "Command 'show_account_custodians' is not available in the current context 'Application'. It is available in: 'Account'. From here to 'Account': list_accounts <account_uid> (account_uid required to enter Account). Then retry 'show_account_custodians'.",
+      "token": "show_account_custodians"
+    },
+    {
+      "context": "Application",
+      "homes": [
+        "Account"
+      ],
+      "message": "Command 'show_account_manager' is not available in the current context 'Application'. It is available in: 'Account'. From here to 'Account': list_accounts <account_uid> (account_uid required to enter Account). Then retry 'show_account_manager'.",
+      "token": "show_account_manager"
+    },
+    {
+      "context": "Application",
+      "homes": [
+        "Account"
+      ],
+      "message": "Command 'show_account_owner' is not available in the current context 'Application'. It is available in: 'Account'. From here to 'Account': list_accounts <account_uid> (account_uid required to enter Account). Then retry 'show_account_owner'.",
+      "token": "show_account_owner"
+    },
+    {
+      "context": "Application",
+      "homes": [
+        "Permission"
+      ],
+      "message": "Command 'show_holders' is not available in the current context 'Application'. It is available in: 'Permission'. From here to 'Permission': list_rights <permission_uid> (permission_uid required to enter Permission). Then retry 'show_holders'.",
+      "token": "show_holders"
+    },
+    {
+      "context": "Application",
+      "homes": [
+        "Group"
+      ],
+      "message": "Command 'show_nesting' is not available in the current context 'Application'. It is available in: 'Group'. From here to 'Group': open_group <group_uid> (needs group_uid). Then retry 'show_nesting'.",
+      "token": "show_nesting"
+    },
+    {
+      "context": "Application",
+      "homes": [
+        "Permission"
+      ],
+      "message": "Command 'show_sensitivity' is not available in the current context 'Application'. It is available in: 'Permission'. From here to 'Permission': list_rights <permission_uid> (permission_uid required to enter Permission). Then retry 'show_sensitivity'.",
+      "token": "show_sensitivity"
+    },
+    {
+      "context": "ControlCatalog",
+      "homes": [
+        "Account",
+        "Application",
+        "Group",
+        "Identity",
+        "Organization",
+        "Permission",
+        "Repository"
+      ],
+      "message": "Command 'add_tag' is not available in the current context 'ControlCatalog'. It is available in: 'Account', 'Application', 'Group', 'Identity', 'Organization', 'Permission', 'Repository'. From here to 'Account': go_up, then open_directory, then open_account_by_uid <account_uid> (needs account_uid). Then retry 'add_tag'. From here to 'Application': go_up, then open_directory, then open_application_by_uid <application_uid> (needs application_uid). Then retry 'add_tag'. From here to 'Group': go_up, then open_directory, then open_group_by_uid <group_uid> (needs group_uid). Then retry 'add_tag'. From here to 'Identity': go_up, then open_directory, then open_identity_by_uid <identity_uid> (needs identity_uid). Then retry 'add_tag'. From here to 'Organization': go_up, then open_directory, then open_organization_by_uid <organization_uid> (needs organization_uid). Then retry 'add_tag'. From here to 'Permission': go_up, then open_directory, then open_permission_by_uid <permission_uid> (needs permission_uid). Then retry 'add_tag'. From here to 'Repository': go_up, then open_directory, then open_repository_by_uid <repository_uid> (needs repository_uid). Then retry 'add_tag'.",
+      "token": "add_tag"
+    },
+    {
+      "context": "ControlFinding",
+      "homes": [
+        "Account",
+        "Application",
+        "Group",
+        "Identity",
+        "Organization",
+        "Permission",
+        "Repository"
+      ],
+      "message": "Command 'add_tag' is not available in the current context 'ControlFinding'. It is available in: 'Account', 'Application', 'Group', 'Identity', 'Organization', 'Permission', 'Repository'. From here to 'Account': go_up, then open_directory, then open_account_by_uid <account_uid> (needs account_uid). Then retry 'add_tag'. From here to 'Application': go_up, then open_directory, then open_application_by_uid <application_uid> (needs application_uid). Then retry 'add_tag'. From here to 'Group': go_up, then open_directory, then open_group_by_uid <group_uid> (needs group_uid). Then retry 'add_tag'. From here to 'Identity': go_up, then open_directory, then open_identity_by_uid <identity_uid> (needs identity_uid). Then retry 'add_tag'. From here to 'Organization': go_up, then open_directory, then open_organization_by_uid <organization_uid> (needs organization_uid). Then retry 'add_tag'. From here to 'Permission': go_up, then open_directory, then open_permission_by_uid <permission_uid> (needs permission_uid). Then retry 'add_tag'. From here to 'Repository': go_up, then open_directory, then open_repository_by_uid <repository_uid> (needs repository_uid). Then retry 'add_tag'.",
+      "token": "add_tag"
+    },
+    {
+      "context": "ControlsMonitor",
+      "homes": [
+        "Account",
+        "Application",
+        "Group",
+        "Identity",
+        "Organization",
+        "Permission",
+        "Repository"
+      ],
+      "message": "Command 'add_tag' is not available in the current context 'ControlsMonitor'. It is available in: 'Account', 'Application', 'Group', 'Identity', 'Organization', 'Permission', 'Repository'. From here to 'Account': go_up, then open_directory, then open_account_by_uid <account_uid> (needs account_uid). Then retry 'add_tag'. From here to 'Application': go_up, then open_directory, then open_application_by_uid <application_uid> (needs application_uid). Then retry 'add_tag'. From here to 'Group': go_up, then open_directory, then open_group_by_uid <group_uid> (needs group_uid). Then retry 'add_tag'. From here to 'Identity': go_up, then open_directory, then open_identity_by_uid <identity_uid> (needs identity_uid). Then retry 'add_tag'. From here to 'Organization': go_up, then open_directory, then open_organization_by_uid <organization_uid> (needs organization_uid). Then retry 'add_tag'. From here to 'Permission': go_up, then open_directory, then open_permission_by_uid <permission_uid> (needs permission_uid). Then retry 'add_tag'. From here to 'Repository': go_up, then open_directory, then open_repository_by_uid <repository_uid> (needs repository_uid). Then retry 'add_tag'.",
+      "token": "add_tag"
+    },
+    {
+      "context": "Directory",
+      "homes": [
+        "Account",
+        "Application",
+        "Group",
+        "Identity",
+        "Organization",
+        "Permission",
+        "Repository"
+      ],
+      "message": "Command 'add_tag' is not available in the current context 'Directory'. It is available in: 'Account', 'Application', 'Group', 'Identity', 'Organization', 'Permission', 'Repository'. From here to 'Account': go_up, then open_directory, then open_account_by_uid <account_uid> (needs account_uid). Then retry 'add_tag'. From here to 'Application': go_up, then open_directory, then open_application_by_uid <application_uid> (needs application_uid). Then retry 'add_tag'. From here to 'Group': go_up, then open_directory, then open_group_by_uid <group_uid> (needs group_uid). Then retry 'add_tag'. From here to 'Identity': go_up, then open_directory, then open_identity_by_uid <identity_uid> (needs identity_uid). Then retry 'add_tag'. From here to 'Organization': go_up, then open_directory, then open_organization_by_uid <organization_uid> (needs organization_uid). Then retry 'add_tag'. From here to 'Permission': go_up, then open_directory, then open_permission_by_uid <permission_uid> (needs permission_uid). Then retry 'add_tag'. From here to 'Repository': go_up, then open_directory, then open_repository_by_uid <repository_uid> (needs repository_uid). Then retry 'add_tag'.",
+      "token": "add_tag"
+    },
+    {
+      "context": "DirectoryExplorer",
+      "homes": [
+        "Account",
+        "Application",
+        "Group",
+        "Identity",
+        "Organization",
+        "Permission",
+        "Repository"
+      ],
+      "message": "Command 'add_tag' is not available in the current context 'DirectoryExplorer'. It is available in: 'Account', 'Application', 'Group', 'Identity', 'Organization', 'Permission', 'Repository'. From here to 'Account': open_account_by_uid <account_uid> (needs account_uid). Then retry 'add_tag'. From here to 'Application': open_application_by_uid <application_uid> (needs application_uid). Then retry 'add_tag'. From here to 'Group': open_group_by_uid <group_uid> (needs group_uid). Then retry 'add_tag'. From here to 'Identity': open_identity_by_uid <identity_uid> (needs identity_uid). Then retry 'add_tag'. From here to 'Organization': open_organization_by_uid <organization_uid> (needs organization_uid). Then retry 'add_tag'. From here to 'Permission': open_permission_by_uid <permission_uid> (needs permission_uid). Then retry 'add_tag'. From here to 'Repository': open_repository_by_uid <repository_uid> (needs repository_uid). Then retry 'add_tag'.",
+      "token": "add_tag"
+    },
+    {
+      "context": "EntityLookup",
+      "homes": [
+        "Account",
+        "Application",
+        "Group",
+        "Identity",
+        "Organization",
+        "Permission",
+        "Repository"
+      ],
+      "message": "Command 'add_tag' is not available in the current context 'EntityLookup'. It is available in: 'Account', 'Application', 'Group', 'Identity', 'Organization', 'Permission', 'Repository'. From here to 'Account': go_up, then open_directory, then open_account_by_uid <account_uid> (needs account_uid). Then retry 'add_tag'. From here to 'Application': go_up, then open_directory, then open_application_by_uid <application_uid> (needs application_uid). Then retry 'add_tag'. From here to 'Group': go_up, then open_directory, then open_group_by_uid <group_uid> (needs group_uid). Then retry 'add_tag'. From here to 'Identity': go_up, then open_directory, then open_identity_by_uid <identity_uid> (needs identity_uid). Then retry 'add_tag'. From here to 'Organization': go_up, then open_directory, then open_organization_by_uid <organization_uid> (needs organization_uid). Then retry 'add_tag'. From here to 'Permission': go_up, then open_directory, then open_permission_by_uid <permission_uid> (needs permission_uid). Then retry 'add_tag'. From here to 'Repository': go_up, then open_directory, then open_repository_by_uid <repository_uid> (needs repository_uid). Then retry 'add_tag'.",
+      "token": "add_tag"
+    },
+    {
+      "context": "Group",
+      "homes": [
+        "DirectoryExplorer"
+      ],
+      "message": "Command 'browse_catalog' is not available in the current context 'Group'. It is available in: 'DirectoryExplorer'. From here to 'DirectoryExplorer': go_up, then open_directory. Then retry 'browse_catalog'.",
+      "token": "browse_catalog"
+    },
+    {
+      "context": "Identity",
+      "homes": [
+        "DirectoryExplorer"
+      ],
+      "message": "Command 'browse_catalog' is not available in the current context 'Identity'. It is available in: 'DirectoryExplorer'. From here to 'DirectoryExplorer': go_up, then open_directory. Then retry 'browse_catalog'.",
+      "token": "browse_catalog"
+    },
+    {
+      "context": "Identity",
+      "homes": [
+        "Account"
+      ],
+      "message": "Command 'list_permissions' is not available in the current context 'Identity'. It is available in: 'Account'. From here to 'Account': list_accounts <account_uid> (account_uid required to enter Account). Then retry 'list_permissions'.",
+      "token": "list_permissions"
+    },
+    {
+      "context": "Identity",
+      "homes": [
+        "Account"
+      ],
+      "message": "Command 'show_account_custodians' is not available in the current context 'Identity'. It is available in: 'Account'. From here to 'Account': list_accounts <account_uid> (account_uid required to enter Account). Then retry 'show_account_custodians'.",
+      "token": "show_account_custodians"
+    },
+    {
+      "context": "Identity",
+      "homes": [
+        "Account"
+      ],
+      "message": "Command 'show_account_manager' is not available in the current context 'Identity'. It is available in: 'Account'. From here to 'Account': list_accounts <account_uid> (account_uid required to enter Account). Then retry 'show_account_manager'.",
+      "token": "show_account_manager"
+    },
+    {
+      "context": "Identity",
+      "homes": [
+        "Account"
+      ],
+      "message": "Command 'show_account_owner' is not available in the current context 'Identity'. It is available in: 'Account'. From here to 'Account': list_accounts <account_uid> (account_uid required to enter Account). Then retry 'show_account_owner'.",
+      "token": "show_account_owner"
+    },
+    {
+      "context": "Identity",
+      "homes": [
+        "Permission"
+      ],
+      "message": "Command 'show_holders' is not available in the current context 'Identity'. It is available in: 'Permission'. From here to 'Permission': list_accounts <account_uid> (account_uid required to enter Account), then list_permissions <permission_uid> (permission_uid required to enter Permission). Then retry 'show_holders'.",
+      "token": "show_holders"
+    },
+    {
+      "context": "Identity",
+      "homes": [
+        "Permission"
+      ],
+      "message": "Command 'show_sensitivity' is not available in the current context 'Identity'. It is available in: 'Permission'. From here to 'Permission': list_accounts <account_uid> (account_uid required to enter Account), then list_permissions <permission_uid> (permission_uid required to enter Permission). Then retry 'show_sensitivity'.",
+      "token": "show_sensitivity"
+    },
+    {
+      "context": "IntentDetection",
+      "homes": [
+        "Account",
+        "Application",
+        "Group",
+        "Identity",
+        "Organization",
+        "Permission",
+        "Repository"
+      ],
+      "message": "Command 'add_tag' is not available in the current context 'IntentDetection'. It is available in: 'Account', 'Application', 'Group', 'Identity', 'Organization', 'Permission', 'Repository'. From here to 'Account': go_up, then open_directory, then open_account_by_uid <account_uid> (needs account_uid). Then retry 'add_tag'. From here to 'Application': go_up, then open_directory, then open_application_by_uid <application_uid> (needs application_uid). Then retry 'add_tag'. From here to 'Group': go_up, then open_directory, then open_group_by_uid <group_uid> (needs group_uid). Then retry 'add_tag'. From here to 'Identity': go_up, then open_directory, then open_identity_by_uid <identity_uid> (needs identity_uid). Then retry 'add_tag'. From here to 'Organization': go_up, then open_directory, then open_organization_by_uid <organization_uid> (needs organization_uid). Then retry 'add_tag'. From here to 'Permission': go_up, then open_directory, then open_permission_by_uid <permission_uid> (needs permission_uid). Then retry 'add_tag'. From here to 'Repository': go_up, then open_directory, then open_repository_by_uid <repository_uid> (needs repository_uid). Then retry 'add_tag'.",
+      "token": "add_tag"
+    },
+    {
+      "context": "Organization",
+      "homes": [
+        "DirectoryExplorer"
+      ],
+      "message": "Command 'browse_catalog' is not available in the current context 'Organization'. It is available in: 'DirectoryExplorer'. From here to 'DirectoryExplorer': go_up, then open_directory. Then retry 'browse_catalog'.",
+      "token": "browse_catalog"
+    },
+    {
+      "context": "Organization",
+      "homes": [
+        "Application",
+        "Identity",
+        "Repository"
+      ],
+      "message": "Command 'list_accounts' is not available in the current context 'Organization'. It is available in: 'Application', 'Identity', 'Repository'. From here to 'Application': go_up, then open_directory, then open_application_by_uid <application_uid> (needs application_uid). Then retry 'list_accounts'. From here to 'Identity': list_identities <identity_uid> (identity_uid required to enter Identity). Then retry 'list_accounts'. From here to 'Repository': go_up, then open_directory, then open_repository_by_uid <repository_uid> (needs repository_uid). Then retry 'list_accounts'.",
+      "token": "list_accounts"
+    },
+    {
+      "context": "Organization",
+      "homes": [
+        "Identity"
+      ],
+      "message": "Command 'list_entitlements' is not available in the current context 'Organization'. It is available in: 'Identity'. From here to 'Identity': list_identities <identity_uid> (identity_uid required to enter Identity). Then retry 'list_entitlements'.",
+      "token": "list_entitlements"
+    },
+    {
+      "context": "Organization",
+      "homes": [
+        "Identity"
+      ],
+      "message": "Command 'list_groups' is not available in the current context 'Organization'. It is available in: 'Identity'. From here to 'Identity': list_identities <identity_uid> (identity_uid required to enter Identity). Then retry 'list_groups'.",
+      "token": "list_groups"
+    },
+    {
+      "context": "Organization",
+      "homes": [
+        "Account"
+      ],
+      "message": "Command 'list_permissions' is not available in the current context 'Organization'. It is available in: 'Account'. From here to 'Account': list_identities <identity_uid> (identity_uid required to enter Identity), then list_accounts <account_uid> (account_uid required to enter Account). Then retry 'list_permissions'.",
+      "token": "list_permissions"
+    },
+    {
+      "context": "Organization",
+      "homes": [
+        "Account"
+      ],
+      "message": "Command 'show_account_custodians' is not available in the current context 'Organization'. It is available in: 'Account'. From here to 'Account': list_identities <identity_uid> (identity_uid required to enter Identity), then list_accounts <account_uid> (account_uid required to enter Account). Then retry 'show_account_custodians'.",
+      "token": "show_account_custodians"
+    },
+    {
+      "context": "Organization",
+      "homes": [
+        "Account"
+      ],
+      "message": "Command 'show_account_manager' is not available in the current context 'Organization'. It is available in: 'Account'. From here to 'Account': list_identities <identity_uid> (identity_uid required to enter Identity), then list_accounts <account_uid> (account_uid required to enter Account). Then retry 'show_account_manager'.",
+      "token": "show_account_manager"
+    },
+    {
+      "context": "Organization",
+      "homes": [
+        "Account"
+      ],
+      "message": "Command 'show_account_owner' is not available in the current context 'Organization'. It is available in: 'Account'. From here to 'Account': list_identities <identity_uid> (identity_uid required to enter Identity), then list_accounts <account_uid> (account_uid required to enter Account). Then retry 'show_account_owner'.",
+      "token": "show_account_owner"
+    },
+    {
+      "context": "Permission",
+      "homes": [
+        "DirectoryExplorer"
+      ],
+      "message": "Command 'browse_catalog' is not available in the current context 'Permission'. It is available in: 'DirectoryExplorer'. From here to 'DirectoryExplorer': go_up, then open_directory. Then retry 'browse_catalog'.",
+      "token": "browse_catalog"
+    },
+    {
+      "context": "ReconciliationWorkspace",
+      "homes": [
+        "Account",
+        "Application",
+        "Group",
+        "Identity",
+        "Organization",
+        "Permission",
+        "Repository"
+      ],
+      "message": "Command 'add_tag' is not available in the current context 'ReconciliationWorkspace'. It is available in: 'Account', 'Application', 'Group', 'Identity', 'Organization', 'Permission', 'Repository'. From here to 'Account': go_up, then open_directory, then open_account_by_uid <account_uid> (needs account_uid). Then retry 'add_tag'. From here to 'Application': go_up, then open_directory, then open_application_by_uid <application_uid> (needs application_uid). Then retry 'add_tag'. From here to 'Group': go_up, then open_directory, then open_group_by_uid <group_uid> (needs group_uid). Then retry 'add_tag'. From here to 'Identity': go_up, then open_directory, then open_identity_by_uid <identity_uid> (needs identity_uid). Then retry 'add_tag'. From here to 'Organization': go_up, then open_directory, then open_organization_by_uid <organization_uid> (needs organization_uid). Then retry 'add_tag'. From here to 'Permission': go_up, then open_directory, then open_permission_by_uid <permission_uid> (needs permission_uid). Then retry 'add_tag'. From here to 'Repository': go_up, then open_directory, then open_repository_by_uid <repository_uid> (needs repository_uid). Then retry 'add_tag'.",
+      "token": "add_tag"
+    },
+    {
+      "context": "Repository",
+      "homes": [
+        "DirectoryExplorer"
+      ],
+      "message": "Command 'browse_catalog' is not available in the current context 'Repository'. It is available in: 'DirectoryExplorer'. From here to 'DirectoryExplorer': go_up, then open_directory. Then retry 'browse_catalog'.",
+      "token": "browse_catalog"
+    },
+    {
+      "context": "Repository",
+      "homes": [
+        "Account"
+      ],
+      "message": "Command 'list_permissions' is not available in the current context 'Repository'. It is available in: 'Account'. From here to 'Account': list_accounts <account_uid> (account_uid required to enter Account). Then retry 'list_permissions'.",
+      "token": "list_permissions"
+    },
+    {
+      "context": "Repository",
+      "homes": [
+        "Account"
+      ],
+      "message": "Command 'show_account_custodians' is not available in the current context 'Repository'. It is available in: 'Account'. From here to 'Account': list_accounts <account_uid> (account_uid required to enter Account). Then retry 'show_account_custodians'.",
+      "token": "show_account_custodians"
+    },
+    {
+      "context": "Repository",
+      "homes": [
+        "Account"
+      ],
+      "message": "Command 'show_account_manager' is not available in the current context 'Repository'. It is available in: 'Account'. From here to 'Account': list_accounts <account_uid> (account_uid required to enter Account). Then retry 'show_account_manager'.",
+      "token": "show_account_manager"
+    },
+    {
+      "context": "Repository",
+      "homes": [
+        "Account"
+      ],
+      "message": "Command 'show_account_owner' is not available in the current context 'Repository'. It is available in: 'Account'. From here to 'Account': list_accounts <account_uid> (account_uid required to enter Account). Then retry 'show_account_owner'.",
+      "token": "show_account_owner"
+    },
+    {
+      "context": "Repository",
+      "homes": [
+        "Permission"
+      ],
+      "message": "Command 'show_holders' is not available in the current context 'Repository'. It is available in: 'Permission'. From here to 'Permission': list_accounts <account_uid> (account_uid required to enter Account), then list_permissions <permission_uid> (permission_uid required to enter Permission). Then retry 'show_holders'.",
+      "token": "show_holders"
+    },
+    {
+      "context": "Repository",
+      "homes": [
+        "Permission"
+      ],
+      "message": "Command 'show_sensitivity' is not available in the current context 'Repository'. It is available in: 'Permission'. From here to 'Permission': list_accounts <account_uid> (account_uid required to enter Account), then list_permissions <permission_uid> (permission_uid required to enter Permission). Then retry 'show_sensitivity'.",
+      "token": "show_sensitivity"
+    },
+    {
+      "context": "Resource",
+      "homes": [
+        "DirectoryExplorer"
+      ],
+      "message": "Command 'browse_catalog' is not available in the current context 'Resource'. It is available in: 'DirectoryExplorer'. From here to 'DirectoryExplorer': go_up, then open_directory. Then retry 'browse_catalog'.",
+      "token": "browse_catalog"
+    }
+  ]
+}

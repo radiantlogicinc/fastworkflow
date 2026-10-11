@@ -34,8 +34,7 @@ from fastworkflow.observation_offloading.archive import (
 )
 from fastworkflow.observation_offloading.state import (
     record_event,
-    register_scope,
-    reset_runtime_state,
+    reset_observation_state,
     snapshot_events,
 )
 from fastworkflow.workflow_execution_context import WorkflowExecutionContext
@@ -50,8 +49,7 @@ REDACTED = "[REDACTED]"
 
 def chatbot_scope(channel: str = "chat", turn: str = "turn-1") -> RuntimeHandleScope:
     return RuntimeHandleScope(
-        store_identity="store", channel_id=channel, experiment_id="unbound",
-        task_id="unbound", attempt=0, turn_key=turn,
+        channel_id=channel, turn_key=turn,
     )
 
 
@@ -68,8 +66,8 @@ class EventFixture(unittest.TestCase):
     """An observability database in a temporary directory, clean configuration."""
 
     def setUp(self) -> None:
-        reset_runtime_state()
-        self.addCleanup(reset_runtime_state)
+        reset_observation_state()
+        self.addCleanup(reset_observation_state)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self._restore_env: dict[str, str | None] = {}
@@ -79,7 +77,9 @@ class EventFixture(unittest.TestCase):
         self.db_path = os.path.join(self.temp.name, "observability.sqlite3")
         self.archive = RuntimeHandleArchive(self.db_path)
         self.scope = chatbot_scope()
-        register_scope(self.scope, self.archive)
+
+    def record(self, event) -> None:
+        record_event(event, scope=self.scope, store=self.archive)
 
     def _restore_environment(self) -> None:
         for name, value in self._restore_env.items():
@@ -92,7 +92,7 @@ class EventFixture(unittest.TestCase):
         return obs.ObservabilityStore(self.db_path).offload_events(**filters)
 
     def search_event(self, answer: str) -> dict:
-        return {"kind": "search_memory", "scope_id": self.scope.scope_id,
+        return {"kind": "search_memory",
                 "alias": "O1", "question": "what is the key?",
                 "reasoning": "the connector listing names it", "answer": answer}
 
@@ -101,13 +101,12 @@ class PersistenceTests(EventFixture):
     """Every recorded event lands in the turn's database, keyed by its turn."""
 
     def test_a_recorded_event_is_stored_with_its_turn(self) -> None:
-        record_event(self.search_event("the key is on row 3"))
+        self.record(self.search_event("the key is on row 3"))
 
         stored = self.stored()
         self.assertEqual(len(stored), 1)
         row = stored[0]
-        self.assertEqual((row["turn_key"], row["channel_id"], row["scope_id"]),
-                         ("turn-1", "chat", self.scope.scope_id))
+        self.assertEqual((row["turn_key"], row["channel_id"]), ("turn-1", "chat"))
         self.assertEqual(row["kind"], "search_memory")
         self.assertEqual(row["event"]["answer"], "the key is on row 3")
         self.assertEqual(row["redaction"], archive_module.REDACTION_ON)
@@ -117,40 +116,35 @@ class PersistenceTests(EventFixture):
 
     def test_the_reader_filters_by_turn_channel_kind_and_limit(self) -> None:
         other = chatbot_scope("other", "turn-2")
-        register_scope(other, self.archive)
         for index in range(3):
-            record_event({"kind": "observation_archived",
-                          "scope_id": self.scope.scope_id, "n": index})
-        record_event({"kind": "hot_evict", "scope_id": other.scope_id})
+            self.record({"kind": "observation_archived", "n": index})
+        record_event({"kind": "archive_refused"},
+                     scope=other, store=self.archive)
 
         self.assertEqual(len(self.stored(turn_key="turn-1")), 3)
         self.assertEqual([row["kind"] for row in self.stored(channel_id="other")],
-                         ["hot_evict"])
+                         ["archive_refused"])
         self.assertEqual(len(self.stored(kind="observation_archived")), 3)
         self.assertEqual(
             [row["event"]["n"] for row in self.stored(turn_key="turn-1", limit=2)],
             [0, 1],
         )
 
-    def test_an_event_for_a_scope_this_process_never_saw_stays_in_memory(self) -> None:
-        """Without its scope an event cannot be placed in a turn, so it is not stored."""
-        record_event({"kind": "search_memory", "scope_id": "unknown-scope"})
+    def test_an_event_recorded_without_a_scope_stays_in_memory(self) -> None:
+        """Without a scope an event cannot be placed in a turn, so it is not stored."""
+        record_event({"kind": "search_memory", "alias": "O1"})
         self.assertEqual(self.stored(), [])
-        self.assertEqual(snapshot_events()[-1]["scope_id"], "unknown-scope")
-
-    def test_a_released_scope_stops_being_routed(self) -> None:
-        offload_state.reclaim_scope(self.scope)
-        record_event({"kind": "late", "scope_id": self.scope.scope_id})
-        self.assertEqual(self.stored(), [])
+        self.assertEqual(snapshot_events()[-1]["alias"], "O1")
 
     def test_an_unwritable_database_never_fails_the_event(self) -> None:
         broken = RuntimeHandleArchive(os.path.join(self.temp.name, "other.sqlite3"))
         broken.db_path = self.temp.name  # a directory: every connect fails
         scope = chatbot_scope("broken", "turn-9")
-        register_scope(scope, broken)
         with self.assertLogs(offload_state.logger, level="WARNING") as logs:
-            record_event({"kind": "probe", "scope_id": scope.scope_id})
-            record_event({"kind": "probe-again", "scope_id": scope.scope_id})
+            record_event({"kind": "probe"},
+                         scope=scope, store=broken)
+            record_event({"kind": "probe-again"},
+                         scope=scope, store=broken)
         # Logged once for the database, not once per event.
         self.assertEqual(len(logs.output), 1)
         self.assertEqual([item["kind"] for item in snapshot_events()],
@@ -165,7 +159,7 @@ class RedactionTests(EventFixture):
     """Event text is protected at the write exactly like evidence text."""
 
     def test_event_text_is_redacted_on_write_when_the_toggle_is_on(self) -> None:
-        record_event(self.search_event(f"the key is {SK_TOKEN}"))
+        self.record(self.search_event(f"the key is {SK_TOKEN}"))
 
         row = self.stored()[0]
         self.assertEqual(row["redaction"], archive_module.REDACTION_ON)
@@ -178,7 +172,7 @@ class RedactionTests(EventFixture):
 
     def test_event_text_is_stored_raw_when_the_toggle_is_off(self) -> None:
         os.environ[REDACTION_ENV] = archive_module.REDACTION_OFF
-        record_event(self.search_event(f"the key is {SK_TOKEN}"))
+        self.record(self.search_event(f"the key is {SK_TOKEN}"))
 
         row = self.stored()[0]
         self.assertEqual(row["redaction"], archive_module.REDACTION_OFF)
@@ -208,7 +202,7 @@ class LiveTurnEventTests(unittest.TestCase):
     workflow_path = str(Path(__file__).parent.joinpath("todo_list_workflow").resolve())
 
     def setUp(self) -> None:
-        reset_runtime_state()
+        reset_observation_state()
         self.temp = tempfile.TemporaryDirectory()
         self._restore = {name: os.environ.pop(name, None)
                          for name in (REDACTION_ENV,)}
@@ -224,7 +218,7 @@ class LiveTurnEventTests(unittest.TestCase):
                 workflow.close()
             except Exception:  # noqa: BLE001
                 pass
-        reset_runtime_state()
+        reset_observation_state()
         os.environ.pop("FASTWORKFLOW_STATE_ROOT", None)
         for name, value in self._restore.items():
             if value is not None:
@@ -264,7 +258,6 @@ class LiveTurnEventTests(unittest.TestCase):
             agent.forward(user_query="fixture")
 
         db_path = state_paths.observability_db(self.workflow_path)
-        self.assertEqual(agent.observation_archive.db_path, os.path.abspath(db_path))
         stored = obs.ObservabilityStore(db_path).offload_events(turn_key="events-turn")
         kinds = {row["kind"] for row in stored}
         self.assertIn("observation_archived", kinds)

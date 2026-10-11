@@ -228,7 +228,8 @@ function tmStreamTurn(text, pending) {
   }
 
   activity.setState("running");
-  tmFetch("/invoke_agent_stream", { user_query: text, timeout_seconds: 300 })
+  tmFetch("/invoke_agent_stream", { user_query: text, timeout_seconds: 300,
+                                   use_dspy_cache: document.getElementById("useDspyCache").checked })
     .then(function (r) {
       turnKey = r.headers.get("X-FW-Turn-Key") || null;
       if (r.status === 202) {
@@ -303,9 +304,15 @@ function tmStreamTurn(text, pending) {
           if (chunk.done) {
             frames.end();
             if (!finished) {
-              if (turnKey) {
+              if (lastError) {
+                /* The server ended the turn with an error frame: say so,
+                   rather than polling a key that stopped resolving with it. */
+                activity.setState("failed");
+                tmRenderError(pending, "The turn failed on the server: " + lastError);
+                done();
+              } else if (logicalKey || turnKey) {
                 activity.setState("stream ended early — recovering");
-                tmPollTurn(turnKey, pending, null, activity);
+                tmPollTurn(logicalKey || turnKey, pending, null, activity);
               } else {
                 activity.setState("failed");
                 tmRenderError(pending, lastError ||
@@ -380,8 +387,9 @@ function tmPollTurn(turnKey, bubbleMsg, deadlineMs, activity) {
         if (data === null) {
           if (missingUntil === null) { missingUntil = Date.now() + 20000; }
           if (Date.now() > missingUntil) {
-            fail("The server no longer has this turn (key " + turnKey +
-              "). It may have been lost in a restart; nothing was re-run.",
+            fail("The server has no record of this turn (key " + turnKey +
+              "). It may have failed before it was recorded, or been lost in " +
+              "a restart; nothing was re-run.",
               "lost");
             return;
           }
@@ -806,7 +814,8 @@ function tmSend() {
     tmStreamTurn(text, pending);
     return;
   }
-  tmFetch(path, { user_query: text, timeout_seconds: 60 })
+  tmFetch(path, { user_query: text, timeout_seconds: 60,
+                  use_dspy_cache: document.getElementById("useDspyCache").checked })
     .then(function (r) {
       return r.json().then(function (data) { return { status: r.status, data: data }; });
     })
