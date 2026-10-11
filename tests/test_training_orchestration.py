@@ -196,6 +196,16 @@ def test_cme_readiness_checks_only_contexts_the_trainer_produces(cme_copy):
             else:
                 artifact_path.write_text("{}", encoding="utf-8")
 
+    # Artifacts alone are not enough: readiness is judged against the recorded
+    # training signature (fix-a7r7).
+    assert not train_orchestration.is_fast_workflow_trained(str(package_root))
+    version_id = av.new_version_id()
+    signature, _ = selective_training.compute_training_signature(
+        str(cme_workflow), trainable_contexts
+    )
+    selective_training.save_training_signature(str(cme_workflow), version_id, signature)
+    av._write_pointer(str(cme_workflow), version_id, "test")
+
     assert train_orchestration.is_fast_workflow_trained(str(package_root))
     assert not (command_info / "ErrorCorrection").exists()
 
@@ -220,6 +230,14 @@ def test_cme_readiness_checks_only_contexts_the_trainer_produces(cme_copy):
     os.utime(
         command_source,
         (newest_artifact_mtime + 10, newest_artifact_mtime + 10),
+    )
+    # A newer mtime with the same content is what a checkout produces; it must
+    # not buy a paid CME retrain (fix-a7r7).
+    assert train_orchestration.is_fast_workflow_trained(str(package_root))
+
+    command_source.write_text(
+        command_source.read_text(encoding="utf-8") + "\n# changed\n",
+        encoding="utf-8",
     )
     assert not train_orchestration.is_fast_workflow_trained(str(package_root))
 

@@ -745,24 +745,21 @@ def is_fast_workflow_trained(fastworkflow_folderpath: str):
     if not required_artifact_paths:
         return False
 
-    oldest_model_mtime = min(
-        os.path.getmtime(path) for path in required_artifact_paths
-    )
-
-    commands_path = os.path.join(
+    # Stale means a command's source or seed utterances changed since the
+    # recorded training, by content. Modification times are not evidence: a
+    # checkout or pull rewrites them and used to buy a paid CME retrain
+    # (fix-a7r7). Global inputs are deliberately not compared here; the CME
+    # trainer itself judges those once it is asked to run.
+    signature = selective_training.load_training_signature(
         cme_workflow_folderpath,
-        "_commands",
+        artifact_versioning.resolve_current_version(cme_workflow_folderpath),
     )
-
-    for root, _, files in os.walk(commands_path):
-        for file in files:
-            if file.endswith(".pyc"):
-                continue
-            file_path = os.path.join(root, file)
-            if os.path.getmtime(file_path) > oldest_model_mtime:
-                return False
-
-    return True
+    if signature is None:
+        return False
+    return not selective_training.changed_commands(
+        signature.command_fingerprints,
+        selective_training.compute_command_fingerprints(cme_workflow_folderpath),
+    )
 
 
 def train_main(args):
