@@ -110,6 +110,11 @@ _PENDING_RETRY_MAX = 64
 
 _PRUNE_BATCH_ROWS = 5_000
 _PRUNE_MAX_BATCHES = 20
+# The writer re-runs the startup prune this often, so a long-lived server stays
+# inside the horizon and the cap, and a backlog larger than one bounded pass
+# drains over successive passes (fix-nczr.1). Not a knob: the horizon and the
+# cap are what an operator chooses; this only decides how promptly they hold.
+_PRUNE_INTERVAL_S = 3_600.0
 # Experiments whose evidence prune keeps, past the horizon and over the cap,
 # until a seal or `release_experiment_evidence` lets it go (design §7). The
 # release clause is appended only when the control tables exist; a DB without
@@ -696,10 +701,21 @@ def _env(name: str, default: str) -> str:
     return str(value).strip()
 
 
+_warned_env_values: set[tuple[str, str]] = set()
+
+
 def _env_int(name: str, default: int) -> int:
+    value = _env(name, str(default))
     try:
-        return int(_env(name, str(default)))
+        return int(value)
     except ValueError:
+        # Warn once per bad value: `FW_OBS_DB_MAX_BYTES=2GB` silently meaning
+        # 1 GiB is a retention setting nobody chose (fix-nczr.4).
+        if (name, value) not in _warned_env_values:
+            _warned_env_values.add((name, value))
+            logger.warning(
+                f"{name}={value!r} is not an integer; using the default {default}"
+            )
         return default
 
 
@@ -5243,9 +5259,14 @@ class ObservabilityStore:
         include_conversationless_turns: bool = False,
     ) -> dict[str, int]:
         """Bounded prune of spans/artifacts beyond the retention horizon, plus
-        oldest-first eviction while over the size cap. Conversations and turn
-        records are exempt (config §5). Offload evidence is pruned by the same
-        horizon and cap, one whole turn at a time. Runs incremental_vacuum.
+        oldest-first eviction while over the size cap. Runs at sink startup and
+        then hourly from the writer thread. Offload evidence is pruned by the
+        same horizon and cap, one whole turn at a time. Runs incremental_vacuum.
+
+        Conversations and turn records are exempt from the horizon (config §5)
+        but not from the cap: once nothing else unbound is left to evict, the
+        oldest finished turn records outside any experiment go, whole, so
+        ``FW_OBS_DB_MAX_BYTES`` bounds the file (fix-nczr.2).
 
         Evidence of a bound experiment (`_BOUND_EXPERIMENTS_SQL`) is exempt
         from both the horizon and the cap. When it alone keeps the DB over the
@@ -5348,16 +5369,8 @@ class ObservabilityStore:
                             (horizon_key, _PRUNE_BATCH_ROWS),
                         ).fetchall()
                     ]
-                    for key in keys:
-                        conn.execute("DELETE FROM spans WHERE trace_id=?", (key,))
-                        conn.execute("DELETE FROM artifacts WHERE turn_key=?", (key,))
-                        if has_prompt_slots:
-                            deleted["prompt_slots"] += conn.execute(
-                                "DELETE FROM prompt_slots WHERE turn_key=?", (key,)
-                            ).rowcount
-                        conn.execute("DELETE FROM turns WHERE turn_key=?", (key,))
-                    self._delete_offload_turns_in_txn(
-                        conn, keys, deleted
+                    self._delete_turn_records_in_txn(
+                        conn, keys, deleted, has_prompt_slots
                     )
                     conn.commit()
                     deleted["conversationless_turns"] += len(keys)
@@ -5406,8 +5419,30 @@ class ObservabilityStore:
                         ).rowcount
                 conn.commit()
                 if cur.rowcount == 0 and not oldest_turns and not slot_turns:
-                    only_bound_left = True
-                    break
+                    # Nothing but turn records is left to evict, so they go
+                    # too, oldest first and whole, or the cap is no bound
+                    # (fix-nczr.2). Only finished turns outside any
+                    # experiment: an experiment's turns are its denominator
+                    # and go by seal or release, never by eviction [DR44].
+                    marks = ",".join("?" for _ in TERMINAL_TURN_STATUSES)
+                    conn.execute("BEGIN IMMEDIATE")
+                    keys = [
+                        str(row[0])
+                        for row in conn.execute(
+                            "SELECT turn_key FROM turns WHERE experiment_id IS NULL "
+                            f"AND status IN ({marks}) ORDER BY turn_key LIMIT ?",
+                            (*sorted(TERMINAL_TURN_STATUSES),
+                             _OFFLOAD_PRUNE_BATCH_TURNS),
+                        ).fetchall()
+                    ]
+                    self._delete_turn_records_in_txn(
+                        conn, keys, deleted, has_prompt_slots
+                    )
+                    conn.commit()
+                    deleted["turns"] = deleted.get("turns", 0) + len(keys)
+                    if not keys:
+                        only_bound_left = True
+                        break
                 # Fetched to completion: each step of this pragma frees one page.
                 conn.execute("PRAGMA incremental_vacuum").fetchall()
                 conn.commit()
@@ -5418,6 +5453,12 @@ class ObservabilityStore:
                 if only_bound_left else 0
             )
             if bound_bytes:
+                logger.warning(
+                    f"Observability DB {self.db_path} is over FW_OBS_DB_MAX_BYTES "
+                    f"({max_bytes}) and {bound_bytes} bytes of it belong to "
+                    "unsealed experiments, which prune never evicts; seal them "
+                    "or call release_experiment_evidence (fix-nczr.3)"
+                )
                 self.set_diagnostic(conn, PRUNE_OVER_CAP_BOUND_DIAGNOSTIC, {
                     "bound_bytes": bound_bytes,
                     "db_size_bytes": self.db_size_bytes(),
@@ -5442,6 +5483,25 @@ class ObservabilityStore:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
         return deleted
+
+    def _delete_turn_records_in_txn(
+        self,
+        conn: sqlite3.Connection,
+        keys: list[str],
+        deleted: dict[str, int],
+        has_prompt_slots: bool,
+    ) -> None:
+        """Delete whole turns: the record, its spans, artifacts, prompt slots
+        and offload evidence (review notes go by the `turns` delete trigger)."""
+        for key in keys:
+            conn.execute("DELETE FROM spans WHERE trace_id=?", (key,))
+            conn.execute("DELETE FROM artifacts WHERE turn_key=?", (key,))
+            if has_prompt_slots:
+                deleted["prompt_slots"] += conn.execute(
+                    "DELETE FROM prompt_slots WHERE turn_key=?", (key,)
+                ).rowcount
+            conn.execute("DELETE FROM turns WHERE turn_key=?", (key,))
+        self._delete_offload_turns_in_txn(conn, keys, deleted)
 
     @staticmethod
     def _bound_evidence_bytes_in_txn(
@@ -5850,11 +5910,13 @@ class SQLiteTraceSink:
         # stamp to compare the `after` stamp against, so a run against a silent
         # writer is still reported as unmeasured rather than as clean.
         self._publish_baseline_health()
+        self._last_prune = time.monotonic()
         self._writer = threading.Thread(
             target=self._writer_loop, name="fw-obs-writer", daemon=True
         )
         self._writer.start()
-        # Opportunistic bounded prune at sink startup [R12].
+        # Opportunistic bounded prune at sink startup [R12]; the writer repeats
+        # it every `_PRUNE_INTERVAL_S` (`_maybe_prune`).
         try:
             self.store.prune()
         except Exception as exc:
@@ -6327,6 +6389,7 @@ class SQLiteTraceSink:
                 # between batches and between heartbeats — holding no
                 # transaction and owing no write.
                 self._park_if_quiescing()
+                self._maybe_prune()
                 item = self._next_item()
                 if item is None:
                     self._heartbeat(conn)
@@ -6350,6 +6413,20 @@ class SQLiteTraceSink:
                 except Exception:
                     pass
                 conn.close()
+
+    def _maybe_prune(self) -> None:
+        """Re-run the startup prune once `_PRUNE_INTERVAL_S` has passed.
+
+        On the writer thread, between batches, so it never races this sink's
+        own writes, and after the quiesce check, so an archive never sees it.
+        """
+        if time.monotonic() - self._last_prune < _PRUNE_INTERVAL_S:
+            return
+        self._last_prune = time.monotonic()
+        try:
+            self.store.prune()
+        except Exception as exc:  # a prune must never stop the writer
+            logger.warning(f"Observability periodic prune failed: {exc!r}")
 
     def _heartbeat(self, conn: sqlite3.Connection) -> None:
         """Idle-tick work: flush health, retry the pending ring, re-arm the breaker.

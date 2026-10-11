@@ -297,6 +297,12 @@ chatbot's confirmed **Clear conversations** action (which also deletes the
 legacy per-channel DB files, Phase-7 ruling C1); pruning runs automatically
 at sink startup only. The R21/R12 mechanisms themselves are unchanged.
 
+*Amendment (2026-10-11, fix-nczr):* the writer thread re-runs the startup
+prune hourly, replacing `studio --prune` as the recurring trigger, and the
+size cap now evicts the oldest finished non-experiment turn records once
+nothing else unbound is left, so `FW_OBS_DB_MAX_BYTES` bounds the file. R16
+still exempts turns and conversations from the age horizon.
+
 **Maintenance ownership `[R12]`:** opportunistic bounded prune at sink
 startup + `fastworkflow studio --prune`; `incremental_vacuum` in the same
 path; the `-wal` sidecar counts toward `FW_OBS_DB_MAX_BYTES`; Studio's read

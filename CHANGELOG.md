@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **The observability record bounds itself in long-lived servers**
+  (`fix-nczr`): the writer re-runs the retention prune hourly instead of only
+  at recorder startup, and once only turn records are left over
+  `FW_OBS_DB_MAX_BYTES` the oldest finished non-experiment turns are evicted
+  whole, so the cap is a real bound. No new settings. A malformed `FW_OBS_*`
+  integer now logs a warning, and so does an unsealed experiment holding the
+  file over the cap.
+
 ## 3.6.0 — DSPy 3.4, request splitting, workflow facts on classes
 
 ### Added

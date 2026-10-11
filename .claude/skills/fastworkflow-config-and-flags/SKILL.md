@@ -199,7 +199,8 @@ Unconditional behaviour, with no setting to change it: observability
 recording is always on, for fastWorkflow's entry points and library embedders alike
 (`get_observability_sink(workflow_path)` returns `None` only when the store cannot be
 opened; the DB is owner-only, 0600 file / 0700 dir, under `FASTWORKFLOW_STATE_ROOT`, pruned
-by `FW_OBS_RETENTION_DAYS` / `FW_OBS_DB_MAX_BYTES`). Offloading/search/answer-time events
+at startup and hourly by `FW_OBS_RETENTION_DAYS` / `FW_OBS_DB_MAX_BYTES`; the cap evicts
+oldest finished non-experiment turn records last, after spans). Offloading/search/answer-time events
 are recorded in process (a ring of a fixed 2,000) and in the `offload_events` table, read
 with `ObservabilityStore.offload_events(turn_key=..., channel_id=..., kind=...)`. The
 unserializable-artifact validator always runs and only warns (a hard rejection in v3.0 per
