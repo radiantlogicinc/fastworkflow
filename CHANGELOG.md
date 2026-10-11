@@ -37,6 +37,16 @@
   `ordinal_offset`, forced-replan continuation segments, and `alias_conflict` are
   removed; max-iters exhaustion follows the base ReAct loop.
 
+### Security
+
+- Floors: `transformers>=5.17.0` (CVE-2026-75104, CVE-2026-80047; pulls
+  tokenizers 0.23.3), `anyio>=4.14.2` (CVE-2026-63374, CVE-2026-64847),
+  `fsspec>=2026.6.0` (CVE-2026-104851), `multidict>=6.9.1` (CVE-2026-104874).
+- OpenVEX v7 (`security/vex/fastworkflow.openvex.json`) marks not_affected:
+  litellm CVE-2026-12772/12795/12796 (proxy-only, fixed after 1.82.2), the
+  transformers ZDI checkpoint batch CVE-2025-14921/14924/14926–14930, and
+  torch CVE-2026-4538, CVE-2025-3000/3121/3136/4287/55554.
+
 Releases before 3.4.0 were announced in their merge-commit subjects
 (`feat: v3.2.0 — observability store, chatbot debug UI, …`) and are recoverable
 with `git tag` and `git log --first-parent main`. This file starts at 3.4.0; it
