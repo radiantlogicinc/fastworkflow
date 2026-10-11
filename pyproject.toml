@@ -107,6 +107,8 @@ requests = ">=2.33.0"    # CVE-2026-25645 (extract_zipped_paths temp reuse)
 idna = ">=3.15"          # CVE-2026-45409
 pygments = ">=2.20.0"    # CVE-2026-4539 (ReDoS in AdlLexer)
 pyarrow = ">=23.0.1"     # PYSEC-2026-113 (use-after-free; only via datasets/training extra)
+fsspec = ">=2026.6.0"    # CVE-2026-104851 / GHSA-27vj-qcqg-25rc (ReferenceFileSystem template injection -> RCE); via torch/huggingface_hub/datasets
+multidict = ">=6.9.1"    # CVE-2026-104874 / GHSA-54p9-h82j-f925 (items-view union/subtraction reference leak); via aiohttp/yarl
 
 [tool.poetry.group.dev.dependencies]
 isort = "^5.13.2"
