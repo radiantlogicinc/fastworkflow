@@ -308,7 +308,7 @@ Rationale:
   5. `VACUUM INTO` the final file, then verify integrity, identity and the absence of sidecars, then chmod `0444`, as today.
 
   Rationale:
-  - It copies kilobytes to megabytes rather than the whole live DB (about 630 MB on ido) on every seal.
+  - It copies kilobytes to megabytes rather than the whole live DB (about 630 MB on a large downstream workflow) on every seal.
   - One read transaction is a consistent snapshot, however many other processes are writing.
 - **Whole-store archive (`experiment_id=None`), used by `archive.py` and operator archiving.** The existing backup, `VACUUM INTO` and verify path is kept, with one added step: drop the control tables from the backup temp file before `VACUUM INTO`.
   - It keeps the "refuse while another writer is alive" check. That check is correct for archiving a whole store, and wrong for the shared live DB's experiment seals, which no longer use this path.

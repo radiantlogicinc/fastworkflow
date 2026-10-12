@@ -18,87 +18,16 @@ from fastworkflow import context_navigation
 from fastworkflow.command_executor import CommandNotFoundError
 from fastworkflow.context_navigation import (
     DescendEdge,
-    collect_descend_edges,
     live_context_chain,
     plan_navigation,
     render_unavailable_command,
-    unavailable_command_message,
 )
 from fastworkflow.workflow_agent import _explicit_agent_command
 
-IDO_WORKFLOW = Path(__file__).resolve().parents[2] / "ido" / "ido_workflow"
-
-
 @pytest.fixture(autouse=True)
 def _restore_sys_path(monkeypatch):
-    """get_module() prepends the workflow's parent dir (~/rl/ido) to sys.path; undo it per test."""
+    """get_module() prepends the workflow's parent dir to sys.path; undo it per test."""
     monkeypatch.setattr(sys, "path", list(sys.path))
-
-
-@pytest.mark.skipif(
-    not IDO_WORKFLOW.is_dir(),
-    reason="ido workflow is not checked out beside fastworkflow",
-)
-def test_deferred_planner_skips_mixin_contexts_and_navigates_to_explorer():
-    import fastworkflow
-    from fastworkflow.command_metadata_api import CommandMetadataAPI
-
-    class Workflow:
-        folderpath = str(IDO_WORKFLOW)
-        current_command_context_name = "*"
-        current_command_context = None
-        root_command_context = None
-
-        def get_parent(self, obj):
-            return None
-
-    fastworkflow.init({"NOT_FOUND": "NOT_FOUND"})
-    text = CommandMetadataAPI.get_all_contexts_command_display_text(
-        subject_workflow_path=str(IDO_WORKFLOW),
-        cme_workflow_path=fastworkflow.get_internal_workflow_path(
-            "command_metadata_extraction"
-        ),
-        active_context_name="*",
-        navigation_workflow=Workflow(),
-    )
-    assert "after entering the Directory context" not in text
-    assert "after entering the DirectoryExplorer context" in text
-    assert (
-        "Before executing find_account, navigate to DirectoryExplorer as follows: "
-        "open_directory"
-    ) in text
-    assert "navigate to Directory as follows:" not in text
-
-
-def test_deferred_planner_command_matches_find_identity_shape():
-    import fastworkflow
-    from fastworkflow.command_metadata_api import CommandMetadataAPI
-
-    class Workflow:
-        folderpath = str(IDO_WORKFLOW)
-        current_command_context_name = "*"
-        current_command_context = None
-        root_command_context = None
-
-        def get_parent(self, obj):
-            return None
-
-    block = CommandMetadataAPI.format_deferred_planner_command(
-        subject_workflow_path=str(IDO_WORKFLOW),
-        cme_workflow_path=fastworkflow.get_internal_workflow_path(
-            "command_metadata_extraction"
-        ),
-        owning_context_name="DirectoryExplorer",
-        qualified_command_name="Directory/find_identity",
-        active_context_name="*",
-        navigation_workflow=Workflow(),
-    )
-    assert block.startswith("- find_identity\n")
-    assert "Find identities by name, login or email" in block
-    assert (
-        "Before executing find_identity, navigate to DirectoryExplorer as follows: "
-        "open_directory"
-    ) in block
 
 
 def _steps(path):
@@ -278,84 +207,6 @@ def test_the_agent_guard_reports_the_path(monkeypatch):
         _explicit_agent_command("find_person", _Workflow())
     assert "open_item_explorer" in str(caught.value)
     assert "go_up or reset_context" not in str(caught.value)
-
-
-@pytest.mark.skipif(
-    not IDO_WORKFLOW.is_dir(),
-    reason="ido workflow is not checked out beside fastworkflow",
-)
-def test_ido_global_find_identity_path_is_open_directory():
-    class Workflow:
-        folderpath = str(IDO_WORKFLOW)
-        current_command_context_name = "*"
-        current_command_context = None
-        root_command_context = None
-
-        def get_parent(self, obj):
-            return None
-
-    text = unavailable_command_message(
-        Workflow(), "find_identity", "*", ["DirectoryExplorer"])
-    assert "From here to 'DirectoryExplorer': open_directory." in text
-    assert "go_up or reset_context" not in text
-
-    class DirectoryExplorer:
-        pass
-
-    class Identity:
-        pass
-
-    class InIdentity:
-        folderpath = str(IDO_WORKFLOW)
-        current_command_context_name = "Identity"
-        current_command_context = Identity()
-        root_command_context = None
-
-        def get_parent(self, obj):
-            if isinstance(obj, Identity):
-                return DirectoryExplorer()
-            return None
-
-    from_identity = unavailable_command_message(
-        InIdentity(), "list_permissions", "Identity", ["Account"])
-    assert "list_accounts <account_uid>" in from_identity
-    assert "account_uid required to enter Account" in from_identity
-
-    edges = collect_descend_edges(str(IDO_WORKFLOW))
-    opened = plan_navigation("*", ["Account"], ("*",), edges)["Account"]
-    assert [step.command for step in opened] == ["open_directory", "open_account_by_uid"]
-    assert "account_uid" in opened[1].needs or "account_uid" in opened[1].required_to_enter
-
-
-@pytest.mark.skipif(
-    not IDO_WORKFLOW.is_dir(),
-    reason="ido workflow is not checked out beside fastworkflow",
-)
-def test_the_command_that_enters_the_current_context_says_you_are_already_there():
-    class Permission:
-        uid = "85cde168"
-        label = "Active Directory_Cloud Administrator"
-
-    class InPermission:
-        folderpath = str(IDO_WORKFLOW)
-        current_command_context_name = "Permission"
-        current_command_context = Permission()
-        root_command_context = None
-        is_current_command_context_root = False
-
-        def get_parent(self, obj):
-            return None
-
-    from fastworkflow.context_navigation import (
-        enters_current_context, render_already_in_context)
-
-    assert enters_current_context(InPermission(), "open_permission_by_uid", "Permission")
-    assert not enters_current_context(InPermission(), "find_permission", "Permission")
-    text = render_already_in_context("open_permission_by_uid", "Permission", InPermission())
-
-    assert text.startswith("You are already in context 'Permission'")
-    assert "show_properties" in text
-    assert "go_up first, then retry 'open_permission_by_uid'" in text
 
 
 def test_go_up_at_the_top_level_names_the_commands_to_use_instead():

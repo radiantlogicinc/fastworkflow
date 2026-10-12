@@ -1,6 +1,6 @@
 {
-  "schema": "ido-rating-v1",
-  "assignment_id": "assignment-ido",
+  "schema": "example-rating-v1",
+  "assignment_id": "assignment-example",
   "blinded": true,
   "rater_slots": ["alice", "bob"],
   "adjudicator_slots": ["carol"],

@@ -1,4 +1,4 @@
-"""UI tier 2 (bead fix-aou; ido-01b.15): the execution ledger, decision-signal
+"""UI tier 2 (bead fix-aou): the execution ledger, decision-signal
 chips and low-confidence filter, provenance and comparability, and cost
 roll-ups, all inside `#detail` and all derived in the read layer from store
 reads only.

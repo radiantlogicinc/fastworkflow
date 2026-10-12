@@ -181,7 +181,7 @@ class _InventoryRoutingDefinition:
 
 
 @pytest.fixture(scope="module")
-def ido_contexts() -> dict[str, list[str]]:
+def inventory_contexts() -> dict[str, list[str]]:
     return json.loads(INVENTORY_FIXTURE.read_text())["contexts"]
 
 
@@ -211,8 +211,8 @@ def todolist_workflows(tmp_path):
 
 
 @pytest.fixture
-def ido_predictor(todolist_workflows, ido_contexts, monkeypatch):
-    """A predictor whose app workflow reports the real IDO command inventory.
+def inventory_predictor(todolist_workflows, inventory_contexts, monkeypatch):
+    """A predictor whose app workflow reports the captured multi-context inventory.
 
     The CME workflow keeps its real routing definition; only the app workflow's
     is replaced, which is exactly the seam the guard reads.
@@ -221,11 +221,11 @@ def ido_predictor(todolist_workflows, ido_contexts, monkeypatch):
     predictor = CommandNamePrediction(cme_workflow)
     app_folderpath = predictor.app_workflow_folderpath
     real_get_definition = fastworkflow.RoutingRegistry.get_definition
-    ido_definition = _InventoryRoutingDefinition(ido_contexts)
+    inventory_definition = _InventoryRoutingDefinition(inventory_contexts)
 
     def get_definition(workflow_folderpath, *args, **kwargs):
         if str(workflow_folderpath) == str(app_folderpath):
-            return ido_definition
+            return inventory_definition
         return real_get_definition(workflow_folderpath, *args, **kwargs)
 
     monkeypatch.setattr(
@@ -238,15 +238,15 @@ def ido_predictor(todolist_workflows, ido_contexts, monkeypatch):
 # The fixture is the real inventory
 # ---------------------------------------------------------------------------
 
-def test_fixture_carries_the_topology_the_defect_needs(ido_contexts):
+def test_fixture_carries_the_topology_the_defect_needs(inventory_contexts):
     """`*` is a peer context that nothing inherits -- the structural exposure."""
-    assert "fetch_result_page" in ido_contexts["*"]
+    assert "fetch_result_page" in inventory_contexts["*"]
     assert not any(
         "fetch_result_page" in commands
-        for context, commands in ido_contexts.items() if context != "*"
+        for context, commands in inventory_contexts.items() if context != "*"
     )
-    assert "Permission/show_holders" in ido_contexts["Permission"]
-    assert "Permission/show_holders" not in ido_contexts["DirectoryExplorer"]
+    assert "Permission/show_holders" in inventory_contexts["Permission"]
+    assert "Permission/show_holders" not in inventory_contexts["DirectoryExplorer"]
 
 
 # ---------------------------------------------------------------------------
@@ -258,14 +258,14 @@ def test_fixture_carries_the_topology_the_defect_needs(ido_contexts):
     ids=[f"{c}:{u.split()[0]}" for c, u, _ in MISROUTE_TABLE],
 )
 def test_known_name_is_not_answered_by_a_foreign_context(
-    ido_predictor, monkeypatch, setup_test_environment, context, utterance, owners
+    inventory_predictor, monkeypatch, setup_test_environment, context, utterance, owners
 ):
     consulted: list[str] = []
     monkeypatch.setattr(
         intent_detection, "CommandRouter", _refusing_router(consulted))
 
     nlu_trace: dict = {}
-    result = ido_predictor._predict_impl(
+    result = inventory_predictor._predict_impl(
         context, utterance, INTENT_DETECTION, nlu_trace)
 
     assert result.command_name is None
@@ -281,7 +281,7 @@ def test_known_name_is_not_answered_by_a_foreign_context(
     ids=[f"{c}:{u.split()[0]}" for c, u, _ in MISROUTE_TABLE],
 )
 def test_the_owning_context_still_resolves_the_same_name(
-    ido_predictor, monkeypatch, setup_test_environment, context, utterance, owners
+    inventory_predictor, monkeypatch, setup_test_environment, context, utterance, owners
 ):
     """The other half of the walk: where the name lives, it resolves exactly."""
     consulted: list[str] = []
@@ -291,7 +291,7 @@ def test_the_owning_context_still_resolves_the_same_name(
 
     for owner in owners:
         nlu_trace: dict = {}
-        result = ido_predictor._predict_impl(
+        result = inventory_predictor._predict_impl(
             owner, utterance, INTENT_DETECTION, nlu_trace)
         assert result.command_name.split("/")[-1] == token, (owner, token)
         assert nlu_trace["matcher_layer"] == "exact_prefix"
@@ -299,7 +299,7 @@ def test_the_owning_context_still_resolves_the_same_name(
 
 
 def test_the_walk_lands_the_bead_case_on_the_root_context(
-    ido_predictor, monkeypatch, setup_test_environment
+    inventory_predictor, monkeypatch, setup_test_environment
 ):
     """`Permission -> DirectoryExplorer -> *`, the chain the misrouted call walked.
 
@@ -316,7 +316,7 @@ def test_the_walk_lands_the_bead_case_on_the_root_context(
     visited = []
     for context in ("Permission", "DirectoryExplorer", "*"):
         nlu_trace: dict = {}
-        output = ido_predictor._predict_impl(
+        output = inventory_predictor._predict_impl(
             context, utterance, INTENT_DETECTION, nlu_trace)
         visited.append((context, output.command_name, nlu_trace["matcher_layer"]))
         if output.command_name is not None:
@@ -353,7 +353,7 @@ SEPARATORS = [
 
 @pytest.mark.parametrize("name,separator", SEPARATORS, ids=[n for n, _ in SEPARATORS])
 def test_any_whitespace_ends_the_command_name_for_the_guard(
-    ido_predictor, monkeypatch, setup_test_environment, name, separator
+    inventory_predictor, monkeypatch, setup_test_environment, name, separator
 ):
     consulted: list[str] = []
     monkeypatch.setattr(
@@ -362,7 +362,7 @@ def test_any_whitespace_ends_the_command_name_for_the_guard(
     # `list_permissions` from Identity is row 6 of the misroute table: owned by
     # Account, 12 silent occurrences across 4 runs.
     nlu_trace: dict = {}
-    result = ido_predictor._predict_impl(
+    result = inventory_predictor._predict_impl(
         "Identity", f"list_permissions{separator}<scope>all</scope>",
         INTENT_DETECTION, nlu_trace)
 
@@ -375,7 +375,7 @@ def test_any_whitespace_ends_the_command_name_for_the_guard(
 
 @pytest.mark.parametrize("name,separator", SEPARATORS, ids=[n for n, _ in SEPARATORS])
 def test_the_owner_still_resolves_the_name_across_separators(
-    ido_predictor, monkeypatch, setup_test_environment, name, separator
+    inventory_predictor, monkeypatch, setup_test_environment, name, separator
 ):
     """The other half: the same parse must not break the owning context."""
     consulted: list[str] = []
@@ -383,7 +383,7 @@ def test_the_owner_still_resolves_the_name_across_separators(
         intent_detection, "CommandRouter", _refusing_router(consulted))
 
     nlu_trace: dict = {}
-    result = ido_predictor._predict_impl(
+    result = inventory_predictor._predict_impl(
         "Account", f"list_permissions{separator}<scope>all</scope>",
         INTENT_DETECTION, nlu_trace)
 
@@ -401,13 +401,13 @@ def test_the_owner_still_resolves_the_name_across_separators(
     ids=[f"{c}:{u.split()[0]}" for c, u, _ in NOT_A_COMMAND_ANYWHERE],
 )
 def test_a_token_that_is_not_a_command_still_reaches_the_lower_layers(
-    ido_predictor, monkeypatch, setup_test_environment, context, utterance, label
+    inventory_predictor, monkeypatch, setup_test_environment, context, utterance, label
 ):
     monkeypatch.setattr(
         intent_detection, "CommandRouter", _labelling_router(label))
 
     nlu_trace: dict = {}
-    result = ido_predictor._predict_impl(
+    result = inventory_predictor._predict_impl(
         context, utterance, INTENT_DETECTION, nlu_trace)
 
     # Whatever the lower layers decide, they decided it -- the guard did not.
@@ -417,14 +417,14 @@ def test_a_token_that_is_not_a_command_still_reaches_the_lower_layers(
 
 
 def test_free_text_still_reaches_the_classifier_and_its_label_wins(
-    ido_predictor, monkeypatch, setup_test_environment
+    inventory_predictor, monkeypatch, setup_test_environment
 ):
     monkeypatch.setattr(
         intent_detection, "CommandRouter",
         _labelling_router("find_permission"))
 
     nlu_trace: dict = {}
-    result = ido_predictor._predict_impl(
+    result = inventory_predictor._predict_impl(
         "DirectoryExplorer", "who can read the payroll repository",
         INTENT_DETECTION, nlu_trace)
 
@@ -433,7 +433,7 @@ def test_free_text_still_reaches_the_classifier_and_its_label_wins(
 
 
 def test_the_guard_is_scoped_to_intent_detection(
-    ido_predictor, monkeypatch, setup_test_environment
+    inventory_predictor, monkeypatch, setup_test_environment
 ):
     """Clarification stages match a constrained suggestion set, not this one.
 
@@ -444,7 +444,7 @@ def test_the_guard_is_scoped_to_intent_detection(
         intent_detection, "CommandRouter", _labelling_router("show_metadata"))
 
     nlu_trace: dict = {}
-    ido_predictor._predict_impl(
+    inventory_predictor._predict_impl(
         "Permission", "fetch_result_page <handle>O9</handle>",
         fastworkflow.NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
         nlu_trace)
@@ -595,12 +595,12 @@ def test_a_mixed_case_command_owned_elsewhere_is_still_foreign(
     assert "Sibling context" in result.routing_hint
 
 
-def test_the_current_context_is_never_its_own_foreign_owner(ido_predictor):
+def test_the_current_context_is_never_its_own_foreign_owner(inventory_predictor):
     """Defence beyond the case fold: whatever the candidate set says, the
     context being asked is dropped from the owners it reports."""
-    assert ido_predictor.foreign_owner_contexts(
+    assert inventory_predictor.foreign_owner_contexts(
         "show_holders", {}, "Permission") == []
-    assert ido_predictor.foreign_owner_contexts(
+    assert inventory_predictor.foreign_owner_contexts(
         "show_holders", {}, "Identity") == ["Permission"]
 
 
@@ -699,12 +699,12 @@ class TestTheHintTextItself:
 
 class TestTheHintIsComposedAndRecorded:
     def test_the_guard_records_the_hint_on_its_own_span(
-        self, ido_predictor, monkeypatch, setup_test_environment
+        self, inventory_predictor, monkeypatch, setup_test_environment
     ):
         monkeypatch.setattr(
             intent_detection, "CommandRouter", _refusing_router([]))
         nlu_trace: dict = {}
-        output = ido_predictor._predict_impl(
+        output = inventory_predictor._predict_impl(
             "Identity", "list_permissions", INTENT_DETECTION, nlu_trace)
 
         assert output.command_name is None
@@ -712,22 +712,21 @@ class TestTheHintIsComposedAndRecorded:
         assert nlu_trace["known_name_foreign_context_hint"] == output.routing_hint
         assert "Account context" in output.routing_hint
 
-    def test_the_ido_workflow_declares_no_entering_command_so_the_hint_names_the_context(
-        self, ido_predictor, monkeypatch, setup_test_environment
+    def test_the_inventory_declares_no_entering_command_so_the_hint_names_the_context(
+        self, inventory_predictor, monkeypatch, setup_test_environment
     ):
-        """Recorded rather than asserted as a wish: `ido_workflow` declares no
-        `enter_command` on any context, so its hints name the owning context
-        and stop there. Adding the declaration is a workflow change, and this
-        test is what would notice it."""
+        """Recorded rather than asserted as a wish: the captured inventory declares
+        no `enter_command` on any context, so its hints name the owning context
+        and stop there."""
         monkeypatch.setattr(
             intent_detection, "CommandRouter", _refusing_router([]))
         nlu_trace: dict = {}
-        ido_predictor._predict_impl(
+        inventory_predictor._predict_impl(
             "Identity", "list_permissions", INTENT_DETECTION, nlu_trace)
         assert "Enter it with" not in nlu_trace["known_name_foreign_context_hint"]
 
     def test_the_guard_declines_and_records_no_flag(
-        self, ido_predictor, monkeypatch, setup_test_environment
+        self, inventory_predictor, monkeypatch, setup_test_environment
     ):
         """There is no auto-navigation setting for the routing event to carry,
         so the guard's own record says only what the guard did: it declined, at
@@ -735,7 +734,7 @@ class TestTheHintIsComposedAndRecorded:
         monkeypatch.setattr(
             intent_detection, "CommandRouter", _refusing_router([]))
         nlu_trace: dict = {}
-        output = ido_predictor._predict_impl(
+        output = inventory_predictor._predict_impl(
             "Identity", "list_permissions", INTENT_DETECTION, nlu_trace)
 
         assert output.command_name is None
@@ -743,13 +742,13 @@ class TestTheHintIsComposedAndRecorded:
         assert nlu_trace["matcher_layer"] == MATCHER_LAYER_KNOWN_NAME_FOREIGN_CONTEXT
 
     def test_a_resolved_prediction_carries_no_hint(
-        self, ido_predictor, monkeypatch, setup_test_environment
+        self, inventory_predictor, monkeypatch, setup_test_environment
     ):
         """A root command is reached by the walk and needs no hint at all."""
         monkeypatch.setattr(
             intent_detection, "CommandRouter", _refusing_router([]))
         nlu_trace: dict = {}
-        output = ido_predictor._predict_impl(
+        output = inventory_predictor._predict_impl(
             "*", "fetch_result_page <handle>O9</handle>", INTENT_DETECTION, nlu_trace)
 
         assert output.command_name == "fetch_result_page"
@@ -964,7 +963,7 @@ MISUNDERSTANDING = fastworkflow.NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFI
     "list_holders <filter>Alan Cooper</filter>",
 ])
 def test_an_unmatched_clarification_reply_falls_back_to_what_can_i_do(
-    ido_predictor, monkeypatch, setup_test_environment, utterance
+    inventory_predictor, monkeypatch, setup_test_environment, utterance
 ):
     """Both clarification stages substitute 'what can i do?' when no matcher
     claims the reply. Only the ambiguity stage used to register that key, so in
@@ -974,7 +973,7 @@ def test_an_unmatched_clarification_reply_falls_back_to_what_can_i_do(
     monkeypatch.setattr(
         intent_detection, "CommandRouter", _refusing_router([]))
     nlu_trace: dict = {}
-    result = ido_predictor._predict_impl(
+    result = inventory_predictor._predict_impl(
         "Identity", utterance, MISUNDERSTANDING, nlu_trace)
 
     assert result.command_name == "IntentDetection/what_can_i_do"
@@ -987,7 +986,7 @@ def test_an_unmatched_clarification_reply_falls_back_to_what_can_i_do(
     ("list_permissions", ["Account"]),
 ])
 def test_a_foreign_name_in_the_misunderstanding_reply_is_declined_with_its_owner(
-    ido_predictor, monkeypatch, setup_test_environment, utterance, owners
+    inventory_predictor, monkeypatch, setup_test_environment, utterance, owners
 ):
     """The misunderstanding stage matches this context's full command set, so a
     real command owned elsewhere is the same misroute there as in intent
@@ -996,7 +995,7 @@ def test_a_foreign_name_in_the_misunderstanding_reply_is_declined_with_its_owner
     monkeypatch.setattr(
         intent_detection, "CommandRouter", _refusing_router([]))
     nlu_trace: dict = {}
-    result = ido_predictor._predict_impl(
+    result = inventory_predictor._predict_impl(
         "Identity", utterance, MISUNDERSTANDING, nlu_trace)
 
     assert result.command_name is None

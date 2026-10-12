@@ -1,5 +1,5 @@
 {
-  "assignment_id": "assignment-ido",
+  "assignment_id": "assignment-example",
   "rater_slots": ["alice", "bob"],
   "adjudicator_slots": ["carol"],
   "blinded": true,
@@ -45,14 +45,14 @@
     {"row_id": "row-1", "rater_slot_id": "alice", "question_id": "coverage"}
   ],
   "answer_revisions": [
-    {"assignment_id": "assignment-ido", "row_id": "row-1", "rater_slot_id": "alice", "question_id": "contributing_causes", "revision": 1, "answer": ["logic"], "created_at": "2026-09-04T01:00:00+00:00"},
-    {"assignment_id": "assignment-ido", "row_id": "row-1", "rater_slot_id": "alice", "question_id": "primary", "revision": 1, "answer": "needs-revision", "created_at": "2026-09-04T01:01:00+00:00"},
-    {"assignment_id": "assignment-ido", "row_id": "row-1", "rater_slot_id": "alice", "question_id": "primary", "revision": 2, "answer": "acceptable", "created_at": "2026-09-04T01:02:00+00:00"},
-    {"assignment_id": "assignment-ido", "row_id": "row-1", "rater_slot_id": "bob", "question_id": "coverage", "revision": 1, "answer": ["partial"], "created_at": "2026-09-04T01:03:00+00:00"},
-    {"assignment_id": "assignment-ido", "row_id": "row-1", "rater_slot_id": "bob", "question_id": "declines", "revision": 1, "answer": ["unsupported"], "created_at": "2026-09-04T01:04:00+00:00"},
-    {"assignment_id": "assignment-ido", "row_id": "row-1", "rater_slot_id": "bob", "question_id": "note", "revision": 1, "answer": "Needs source detail.", "created_at": "2026-09-04T01:05:00+00:00"}
+    {"assignment_id": "assignment-example", "row_id": "row-1", "rater_slot_id": "alice", "question_id": "contributing_causes", "revision": 1, "answer": ["logic"], "created_at": "2026-09-04T01:00:00+00:00"},
+    {"assignment_id": "assignment-example", "row_id": "row-1", "rater_slot_id": "alice", "question_id": "primary", "revision": 1, "answer": "needs-revision", "created_at": "2026-09-04T01:01:00+00:00"},
+    {"assignment_id": "assignment-example", "row_id": "row-1", "rater_slot_id": "alice", "question_id": "primary", "revision": 2, "answer": "acceptable", "created_at": "2026-09-04T01:02:00+00:00"},
+    {"assignment_id": "assignment-example", "row_id": "row-1", "rater_slot_id": "bob", "question_id": "coverage", "revision": 1, "answer": ["partial"], "created_at": "2026-09-04T01:03:00+00:00"},
+    {"assignment_id": "assignment-example", "row_id": "row-1", "rater_slot_id": "bob", "question_id": "declines", "revision": 1, "answer": ["unsupported"], "created_at": "2026-09-04T01:04:00+00:00"},
+    {"assignment_id": "assignment-example", "row_id": "row-1", "rater_slot_id": "bob", "question_id": "note", "revision": 1, "answer": "Needs source detail.", "created_at": "2026-09-04T01:05:00+00:00"}
   ],
   "adjudication_revisions": [
-    {"assignment_id": "assignment-ido", "row_id": "row-1", "adjudicator_slot_id": "carol", "question_id": "primary", "revision": 1, "answer": "needs-revision", "created_at": "2026-09-04T01:06:00+00:00"}
+    {"assignment_id": "assignment-example", "row_id": "row-1", "adjudicator_slot_id": "carol", "question_id": "primary", "revision": 1, "answer": "needs-revision", "created_at": "2026-09-04T01:06:00+00:00"}
   ]
 }

@@ -171,7 +171,7 @@ def test_the_writer_refuses_to_publish_a_collapsed_pair(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# ido-ik6 (F13): a tier threshold at or above the flat cap must still publish.
+# F13: a tier threshold at or above the flat cap must still publish.
 #
 # `find_optimal_threshold` sweeps `linspace(failed_mean, successful_mean, 20)` and
 # picks the best point, so a context whose tiny tier is confidently separated

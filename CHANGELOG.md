@@ -234,7 +234,7 @@ labels themselves.
   `JEV_API_KEY` are both set (it sends the request, the plan and a redacted
   summary of every step to TypeSafe); fails open to an unchecked finish; one
   `finish_check` offload event per finish and an `fw.finish_check` span.
-  Measured offline on 82 recorded ido attempts it was not tuned on (910
+  Measured offline on 82 recorded downstream-workflow attempts it was not tuned on (910
   labelled step x subject pairs, pre-registered): precision 0.77, recall 0.89.
   Install with the `jev` extra.
 - **Structured plan** (`fastworkflow.turn_plan`): with the finish check on, the
@@ -387,7 +387,7 @@ labels themselves.
   overrides the default of 3, clamped to `[0, 10]`; a non-integer is ignored,
   with a warning either way. `forced_replan` and `forced_replan_wall` events
   carry `reached_limit`, and `agent_installed` records the bound in force. The
-  default rests on one ido task, not on a measured tail across workflows.
+  default rests on one downstream-workflow task, not on a measured tail across workflows.
 - **Planner spans say which planner produced the plan** (fix-3x76):
   `fw.planner.plan` / `fw.planner.replan` v2 add `plan_source` (`structured`,
   `text`, `text_fallback`, `none`) and the structured plan's `subjects`,
@@ -528,8 +528,8 @@ labels themselves.
   `finish_check` event recorded after the plan is read carries
   `unchecked_for_effect`, the steps skipped this way; when that is every
   step the check would hold the agent to, the reason is the new
-  `no read-only steps` and nothing is sent. Replayed on the 82 recorded ido
-  attempts with ido's manifest (cached answers): write-step flags 7 to 0,
+  `no read-only steps` and nothing is sent. Replayed on the 82 recorded
+  downstream attempts with that workflow's manifest (cached answers): write-step flags 7 to 0,
   precision 0.80, recall 0.88 to 0.87. No span contract changes; with
   `FW_FINISH_CHECK` unset nothing changes.
 - **The listing parser is fail-closed** (fix-zoup, fix-36gv, fix-k56c; see
@@ -571,10 +571,10 @@ labels themselves.
 - **The finish check's identifier resolution is generic, and its calibration
   is stated** (fix-ft18): `refers_to` also resolves from aligned, markdown and
   tabbed listings (first 64 KiB of each response, block by block), parameter
-  values and clause tokens; recorded ido ledgers are unchanged. Every event
-  records `calibration` (`"ido-v7-2026-09"`), and a non-default
+  values and clause tokens; recorded downstream ledgers are unchanged. Every event
+  records `calibration` (the calibration tag), and a non-default
   `FW_FINISH_CHECK_MODEL` warns once per process. The structured planner's
-  `kind` description no longer uses ido examples.
+  `kind` description no longer uses workflow-specific examples.
 - **Decision-model features go through a provider interface** (fix-5uva,
   stages 1-2): `fastworkflow.observation_offloading.decision` (`YesNo`,
   `OneOf`, `DecisionProvider`, `ProviderFailure`, `StateTooLarge`,
@@ -621,7 +621,7 @@ labels themselves.
 - **The decision-model wording is pinned to its measurement** (fix-8ee5):
   `tests/fixtures/decision_measurements.json` records the offline measurement
   behind the finish check's and router's published figures (calibration
-  `ido-v7-2026-09`, model, thresholds; finish check precision 0.767
+  tag, model, thresholds; finish check precision 0.767
   [0.722, 0.810], recall 0.888 [0.832, 0.936] on 910 pairs over 82 attempts;
   router all-rows precision 1.0 [0.970, 1.0] on 126, recall 0.962
   [0.914, 0.984] on 131, at threshold 0.5; each with n and 95% interval) and
@@ -764,7 +764,7 @@ labels themselves.
 - A labelled last row -- first cell ending with `:`, or one word then `:` and a
   space (`Note:  2 items`) -- is a footer, not a row (fix-4riz): the strict
   parse refuses the listing, as for a `total`/`sum`/`count` row, and the lax
-  read drops it. Over 3,832 recorded ido texts, no accept/refuse decision
+  read drops it. Over 3,832 recorded downstream-workflow texts, no accept/refuse decision
   changed in either mode.
 - Test isolation (fix-4fw3): the SDK timeout contract asserts the private
   `_config.timeout` the pinned 0.7.2 SDK actually has, and tests that register a
@@ -902,7 +902,7 @@ labels themselves.
   window, which gave a 262,144-byte bound; the 131,072-byte ceiling now applies,
   so observations of 128-256 KB are searched as a disclosed prefix. Set
   `FW_SEARCH_OBSERVATION_MAX_BYTES=262144` to keep the old bound. No recorded
-  ido observation is over 5.4 KB.
+  downstream observation is over 5.4 KB.
 - **`listing.served_rows` returns `Optional[tuple]`**: `None` when not one row
   fits the bound. A caller outside the framework must handle it.
   `parse_table` keeps its return shape and returns `None` more often.
@@ -927,10 +927,9 @@ labels themselves.
   `tests/test_decision_measurements.py`** (fix-8ee5). Update the digests in
   `tests/fixtures/decision_measurements.json` only together with a new
   measurement recorded there. **The measurement evidence lives only in local
-  directories** -- `~/rl/4dsr-offline` (with the manifest-gate replay scripts
-  and the manifest generator in `~/rl/4dsr-offline/replay/`) and
-  `~/rl/ufot-offline` -- and must be archived somewhere durable; the manifest
-  holds only their sha256 and those paths.
+  directories outside this repository** (with the manifest-gate replay
+  scripts and the manifest generator) and must be archived somewhere durable;
+  the manifest holds only their sha256 and paths.
 - `fastworkflow.observation_offloading.related` is a new module (fix-vpe3);
   every moved name is still importable from `observation_offloading.search`.
 
