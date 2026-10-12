@@ -33,8 +33,8 @@ from fastworkflow import state_paths
 from fastworkflow.observability import control, selection
 from fastworkflow.observability.store import (
     STORE_IDENTITY_DIAGNOSTIC,
-    ObservabilityStore,
     open_live_store,
+    open_live_store_for_write,
 )
 
 
@@ -296,12 +296,7 @@ def _register(workflow_path, record):
     experiment is a POST, and a workflow nobody has chatted with yet has no DB
     to register it in. Reads still never create one.
     """
-    db_path = _live_db_path(workflow_path)
-    store = (
-        open_live_store(db_path, write=True)
-        if os.path.isfile(db_path)
-        else ObservabilityStore(db_path)
-    )
+    store = open_live_store_for_write(_live_db_path(workflow_path))
     with control.write(store) as conn:
         conn.execute(
             """INSERT INTO experiment_registrations

@@ -287,7 +287,7 @@ def test_delete_empty_registration_preserves_benchmark_and_refuses_stale_runner(
     record = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
     eid = record["experiment_id"]
     path = "/api/benchmark-experiments/" + eid
-    before = (folder / "benchmarks" / benchmark["benchmark_id"] / "v1.json").read_bytes()
+    before = load_version(folder, benchmark["benchmark_id"], "v1")
     assert _request(server, path)[1]["can_delete"] is True
     assert _request(server, path, "DELETE", token=None)[0] == 401
     assert setup.load_experiment(folder, eid)["store"] is None
@@ -299,7 +299,7 @@ def test_delete_empty_registration_preserves_benchmark_and_refuses_stale_runner(
     ]
     assert _request(server, path)[0] == 404
     assert _request(server, path, "DELETE")[0] == 404
-    assert (folder / "benchmarks" / benchmark["benchmark_id"] / "v1.json").read_bytes() == before
+    assert load_version(folder, benchmark["benchmark_id"], "v1") == before
     store = obs.ObservabilityStore(state_paths.observability_db(str(folder)))
     controller = ExperimentController(str(folder), store.store_identity(), external=False)
     with pytest.raises(setup.ExperimentDeleted):
@@ -469,16 +469,14 @@ def test_delete_and_runner_binding_are_serialized(tmp_path):
 
 def test_experiment_lifecycle_over_http_leaves_only_authored_files(setup_server):
     """Create, duplicate, edit and delete through the API: the project keeps
-    only authored benchmark files, the state dir no JSON or lock files."""
+    no benchmark files, the state dir no JSON or lock files."""
     server, folder = setup_server
     status, result = _request(server, "/api/benchmark-setup", "POST",
                               {"title": "Review", "tasks": [{}]})
     assert status == 201
     benchmark_id = result["version"]["benchmark_id"]
     base = "/api/benchmarks/" + benchmark_id
-    assert _request(server, base + "/analysis", "PUT", {"analysis": "Notes"})[0] == 200
     state_dir = Path(state_paths.workflow_state_dir(str(folder)))
-    assert not Path(state_paths.observability_db(str(folder))).exists()
 
     status, result = _request(server, base + "/experiments", "POST",
                               {"version": "v1", "description": "First"})
@@ -508,10 +506,8 @@ def test_experiment_lifecycle_over_http_leaves_only_authored_files(setup_server)
     assert [row["experiment_id"] for row in
             _request(server, base + "/experiments")[1]["experiments"]] == [first["experiment_id"]]
 
-    benchmarks = folder / "benchmarks"
-    assert sorted(p.relative_to(benchmarks).as_posix() for p in benchmarks.rglob("*")) == [
-        benchmark_id, benchmark_id + "/analysis.json", benchmark_id + "/v1.json",
-    ]
+    assert not (folder / "benchmarks").exists()
+    assert list_versions(folder, benchmark_id) == ["v1"]
     leftovers = [p.name for p in state_dir.rglob("*") if p.suffix in (".json", ".lock")]
     assert leftovers == []
 

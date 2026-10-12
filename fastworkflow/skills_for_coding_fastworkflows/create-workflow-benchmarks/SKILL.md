@@ -89,8 +89,7 @@ or automatic graders. Use the conventions implemented by the application's runne
 
 | Object | Location / contract |
 |---|---|
-| Benchmark version | `<workflow>/benchmarks/<benchmark_id>/vN.json`; schema `fastworkflow-benchmark/1` |
-| Benchmark analysis | Sibling `analysis.json`; mutable, outside the version digest |
+| Benchmark version | `benchmark_versions` row of the live `observability.sqlite3` (the only copy); schema `fastworkflow-benchmark/1`; immutable |
 | UI experiment registration | `experiment_registrations` table of the live `observability.sqlite3`; pin, task IDs, and bound/deleted state |
 | Execution evidence | `observability.sqlite3`; experiments, attempts, conversations, turns, spans and annotations |
 | Pre-run review, if used | `<workflow>/experiment_setups/reviews.sqlite3`; configuration revisions and review decisions |
@@ -130,9 +129,7 @@ observations into a controlled comparison. For complex multi-turn test design, r
 [build-task-benchmarks](../build-task-benchmarks/SKILL.md); a small regression need not become a
 20–100-step suite.
 
-Record run conclusions in experiment notes; record cross-experiment conclusions in benchmark
-analysis (`write_analysis`). Benchmark analysis accepts JSON-native values, including plain text
-from the UI. Keep original evidence, human comments, description and notes in their respective
-fields; notes can cite them and summarize metrics but do not replace scoring or change recorded
-outcomes.
+Record run conclusions in experiment notes. Keep original evidence, human comments, description
+and notes in their respective fields; notes can cite them and summarize metrics but do not replace
+scoring or change recorded outcomes.
 Sealed archives are read-only: author and annotate in the working workflow/store.

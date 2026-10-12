@@ -26,6 +26,10 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator, Optional
 
 FEATURE_CONTROL_V1 = "control_v1"
+# Benchmark versions (`fix-10vj.10`): the only stored copy of a manifest. Its
+# own marker, not a table appended to `CONTROL_SCHEMA`, so a store that already
+# carries `control_v1` still gets the table on its next control write.
+FEATURE_BENCHMARK_CATALOG_V1 = "benchmark_catalog_v1"
 
 CONTROL_SCHEMA = [
     """CREATE TABLE IF NOT EXISTS experiment_registrations (
@@ -128,6 +132,28 @@ CONTROL_SCHEMA = [
         released_at TEXT NOT NULL, actor TEXT NOT NULL, reason TEXT)""",
 ]
 
+BENCHMARK_CATALOG_SCHEMA = [
+    # `manifest_bytes` is the exact canonical JSON that `digest_sha256` hashes,
+    # so the digest a run pins is the digest of the bytes that were saved.
+    # Sealed copies keep this table (it is not in `CONTROL_TABLES`): sealed
+    # evidence stays self-contained.
+    """CREATE TABLE IF NOT EXISTS benchmark_versions (
+        benchmark_id TEXT NOT NULL,
+        version TEXT NOT NULL,
+        manifest_bytes BLOB NOT NULL,
+        digest_sha256 TEXT NOT NULL UNIQUE,
+        title TEXT,
+        task_count INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (benchmark_id, version))""",
+    """CREATE TRIGGER IF NOT EXISTS benchmark_versions_no_update
+        BEFORE UPDATE ON benchmark_versions
+        BEGIN SELECT RAISE(ABORT, 'benchmark versions are immutable'); END""",
+    """CREATE TRIGGER IF NOT EXISTS benchmark_versions_no_delete
+        BEFORE DELETE ON benchmark_versions
+        BEGIN SELECT RAISE(ABORT, 'benchmark versions are immutable'); END""",
+]
+
 CONTROL_TABLES = (
     "experiment_registrations", "comparison_groups", "comparison_group_members",
     "selection_pointers", "selection_decisions", "pair_reviews",
@@ -163,14 +189,24 @@ def _set_features(conn: sqlite3.Connection, features: Iterable[str]) -> None:
     )
 
 
+# Each feature marker with the statements that create its tables.
+_FEATURE_SCHEMAS = (
+    (FEATURE_CONTROL_V1, CONTROL_SCHEMA),
+    (FEATURE_BENCHMARK_CATALOG_V1, BENCHMARK_CATALOG_SCHEMA),
+)
+
+
 def ensure(conn: sqlite3.Connection) -> None:
-    """Create every control table and record the marker, in the caller's txn."""
+    """Create the tables of every marker this DB lacks, in the caller's txn."""
     features = _features(conn)
-    if FEATURE_CONTROL_V1 in features:
+    missing = [(name, statements) for name, statements in _FEATURE_SCHEMAS
+               if name not in features]
+    if not missing:
         return
-    for statement in CONTROL_SCHEMA:
-        conn.execute(statement)
-    _set_features(conn, [*features, FEATURE_CONTROL_V1])
+    for _name, statements in missing:
+        for statement in statements:
+            conn.execute(statement)
+    _set_features(conn, [*features, *(name for name, _ in missing)])
 
 
 def strip(conn: sqlite3.Connection) -> None:
@@ -189,12 +225,17 @@ def present(store: Any) -> bool:
         return FEATURE_CONTROL_V1 in _features(conn)
 
 
-def rows(store: Any, sql: str, params: Iterable[Any] = ()) -> list[dict[str, Any]]:
+def rows(
+    store: Any,
+    sql: str,
+    params: Iterable[Any] = (),
+    feature: str = FEATURE_CONTROL_V1,
+) -> list[dict[str, Any]]:
     """A control read; empty when the DB or the marker is absent. Never writes."""
     if store is None or not os.path.isfile(store.db_path):
         return []
     with store._connect() as conn:
-        if FEATURE_CONTROL_V1 not in _features(conn):
+        if feature not in _features(conn):
             return []
         return [dict(row) for row in conn.execute(sql, tuple(params))]
 

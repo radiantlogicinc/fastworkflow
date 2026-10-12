@@ -15,7 +15,7 @@ from fastworkflow.observability import store as obs
 from fastworkflow import state_paths
 from fastworkflow.benchmark.catalog import (
     SCHEMA,
-    benchmarks_root,
+    list_benchmarks,
     load_version,
     write_version,
 )
@@ -212,13 +212,10 @@ class TestBenchmarkWriteApi:
         assert status == 200
         assert listed["versions"] == ["v1", "v2"]
 
-        on_disk = json.loads(
-            (benchmarks_root(workflow_dir) / "smoke" / "v2.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        assert on_disk["version"] == "v2"
-        assert on_disk["tasks"][0]["task_id"] == "case-02"
+        stored = load_version(workflow_dir, "smoke", "v2")
+        assert stored["version"] == "v2"
+        assert stored["tasks"][0]["task_id"] == "case-02"
+        assert stored["digest_sha256"] == data["version"]["digest_sha256"]
 
     def test_post_root_creates_first_version_for_new_benchmark(
         self, live_server, workflow_dir
@@ -239,7 +236,7 @@ class TestBenchmarkWriteApi:
             "alpha",
             "smoke",
         }
-        assert (benchmarks_root(workflow_dir) / "alpha" / "v1.json").is_file()
+        assert list_benchmarks(workflow_dir) == ["alpha", "smoke"]
 
     def test_duplicate_version_is_409(self, live_server):
         spec = _sample_spec(version="v1")
@@ -253,59 +250,17 @@ class TestBenchmarkWriteApi:
         assert "immutable" in data["error"]
 
 
-class TestBenchmarkAnalysisApi:
-    def test_put_get_analysis_round_trip(self, live_server, workflow_dir):
-        payload = {"findings": ["latency on case-01"], "nested": {"a": 1}}
-        status, data = _request(
+class TestBenchmarkAnalysisRemoved:
+    def test_analysis_route_is_gone(self, live_server):
+        status, _data = _request(
             live_server,
             "/api/benchmarks/smoke/analysis",
             method="PUT",
-            body=payload,
+            body={"findings": ["latency on case-01"]},
         )
-        assert status == 200
-        assert data["analysis"] == payload
-
-        status, data = _request(live_server, "/api/benchmarks/smoke/analysis")
-        assert status == 200
-        assert data["analysis"] == payload
-        on_disk = json.loads(
-            (benchmarks_root(workflow_dir) / "smoke" / "analysis.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        assert on_disk == payload
-
-    def test_version_digest_unchanged_after_analysis_put(self, live_server, workflow_dir):
-        before = load_version(workflow_dir, "smoke", "v1")
-        version_path = benchmarks_root(workflow_dir) / "smoke" / "v1.json"
-        version_bytes_before = version_path.read_bytes()
-
-        status, _ = _request(
-            live_server,
-            "/api/benchmarks/smoke/analysis",
-            method="PUT",
-            body={"notes": "post-hoc"},
-        )
-        assert status == 200
-
-        after = load_version(workflow_dir, "smoke", "v1")
-        assert after["digest_sha256"] == before["digest_sha256"]
-        assert version_path.read_bytes() == version_bytes_before
-
-    def test_get_analysis_null_when_missing(self, live_server):
-        status, data = _request(live_server, "/api/benchmarks/smoke/analysis")
-        assert status == 200
-        assert data["analysis"] is None
-
-    def test_non_object_analysis_refused(self, live_server):
-        status, data = _request(
-            live_server,
-            "/api/benchmarks/smoke/analysis",
-            method="PUT",
-            body=["not", "an", "object"],
-        )
-        assert status == 400
-        assert "JSON object" in data["error"]
+        assert status in (404, 405)
+        status, _data = _request(live_server, "/api/benchmarks/smoke/analysis")
+        assert status == 404
 
 
 class TestExperimentNotesApi:
@@ -363,8 +318,9 @@ class TestSpaSurface:
         assert b'id="hierarchyCrumbs"' not in page
         assert b"showBenchmarks" in page
         assert b"/api/benchmarks" in page
-        assert b"/analysis" in page
-        assert b"Save analysis" in page
+        assert b"/analysis" not in page
+        assert b"Save analysis" not in page
+        assert b"Analysis (optional)" not in page
         assert b"Save notes" not in page
         assert b"Save postmortem" in page
         assert b"Postmortem saved" in page

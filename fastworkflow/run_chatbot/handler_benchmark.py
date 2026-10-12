@@ -12,9 +12,7 @@ from fastworkflow.benchmark.catalog import (
     BenchmarkManifestError,
     list_benchmarks,
     list_versions,
-    load_analysis,
     load_version,
-    write_analysis,
     write_version,
 )
 from fastworkflow.observability import control
@@ -61,9 +59,6 @@ class _BenchmarkRoutes:
     def _post_benchmark_version(self, path: str, body: Any, query: dict[str, list[str]]) -> None:
         self._handle_benchmark_post(path, body)
 
-    def _put_benchmark_analysis(self, path: str, body: Any, query: dict[str, list[str]]) -> None:
-        self._handle_benchmark_analysis_put(path, body)
-
     def _delete_benchmark_experiment(self, path: str, body: Any, query: dict[str, list[str]]) -> None:
         folder = self._benchmark_workflow_path()
         if folder is None:
@@ -90,7 +85,7 @@ class _BenchmarkRoutes:
         self._handle_registration_patch(path, body)
 
     def _benchmark_workflow_path(self) -> Optional[str]:
-        """Workflow folder for versioned benchmark corpus files."""
+        """Workflow folder whose live DB holds the benchmark versions."""
         workflow_path = (self.chatbot.workflow_path or "").strip()
         if not workflow_path:
             self._error(
@@ -247,7 +242,7 @@ class _BenchmarkRoutes:
         )
 
     def _handle_benchmarks(self, path: str) -> None:
-        """Read workflow-local benchmark catalogs from ``<workflow>/benchmarks/``."""
+        """Read the benchmark catalog from the workflow's live DB."""
         workflow_path = self._benchmark_workflow_path()
         if workflow_path is None:
             return
@@ -288,14 +283,6 @@ class _BenchmarkRoutes:
         if tail == "experiments":
             self._benchmark_experiments(benchmark_id)
             return
-        if tail == "analysis":
-            try:
-                analysis = load_analysis(workflow_path, benchmark_id)
-            except BenchmarkManifestError as exc:
-                self._error(400, str(exc))
-                return
-            self._send_json({"benchmark_id": benchmark_id, "analysis": analysis})
-            return
         version_prefix, _, version = tail.partition("/")
         if version_prefix != "versions" or not version:
             self._error(404, "not found")
@@ -309,7 +296,7 @@ class _BenchmarkRoutes:
         self._send_json({"version": manifest})
 
     def _handle_benchmark_post(self, path: str, body: Any) -> None:
-        """Create one immutable benchmark version file under the workflow folder."""
+        """Store one immutable benchmark version in the workflow's live DB."""
         workflow_path = self._benchmark_workflow_path()
         if workflow_path is None:
             return
@@ -339,37 +326,10 @@ class _BenchmarkRoutes:
         except BenchmarkManifestError as exc:
             self._error(400, str(exc))
             return
+        except IncompatibleObservabilityDB as exc:
+            self._error(409, str(exc))
+            return
+        except sqlite3.OperationalError as exc:
+            self._write_refused(exc)
+            return
         self._send_json({"version": written}, status=201)
-
-    @staticmethod
-    def _analysis_payload_from_body(body: dict[str, Any]) -> Any:
-        """Accept a bare object or ``{"analysis": ...}`` wrapper."""
-        if "analysis" in body:
-            if set(body) - {"analysis"}:
-                raise ValueError(
-                    "unexpected fields: this route updates analysis only"
-                )
-            return body["analysis"]
-        return body
-
-    def _handle_benchmark_analysis_put(self, path: str, body: dict[str, Any]) -> None:
-        """``PUT /api/benchmarks/<id>/analysis`` — mutable sibling analysis file."""
-        workflow_path = self._benchmark_workflow_path()
-        if workflow_path is None:
-            return
-        encoded_id = path[len("/api/benchmarks/") : -len("/analysis")].rstrip("/")
-        benchmark_id = unquote(encoded_id)
-        if not benchmark_id:
-            self._error(404, "not found")
-            return
-        try:
-            payload = self._analysis_payload_from_body(body)
-        except ValueError as exc:
-            self._error(400, str(exc))
-            return
-        try:
-            written = write_analysis(workflow_path, benchmark_id, payload)
-        except BenchmarkManifestError as exc:
-            self._error(400, str(exc))
-            return
-        self._send_json({"benchmark_id": benchmark_id, "analysis": written})

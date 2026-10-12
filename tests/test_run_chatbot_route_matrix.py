@@ -15,8 +15,7 @@ real token, so a 403 is the host/origin gate and not a missing token.
 
 Write bodies are the smallest JSON that stays off destructive work: clear
 sends a wrong confirm string, select/train name a path that does not exist,
-configure sends a non-string so it 400s before writing, and the analysis PUT
-sends an unexpected field so it 400s before ``write_analysis``.
+configure sends a non-string so it 400s before writing.
 """
 
 from __future__ import annotations
@@ -58,7 +57,6 @@ _LIVE_GETS = (
     "/api/benchmarks",
     "/api/benchmarks/missing",
     "/api/benchmarks/missing/experiments",
-    "/api/benchmarks/missing/analysis",
     "/api/benchmarks/missing/versions/v1",
     "/api/benchmarks/missing/nope",
     "/api/benchmark-experiments/missing",
@@ -135,7 +133,6 @@ _WRITES = (
     ("POST", "/not-a-page"),
     ("POST", "/api/not-a-route"),
     ("POST", "/api/experiments/e1/not-a-route"),
-    ("PUT", "/api/benchmarks/missing/analysis"),
     ("PUT", "/api/not-a-route"),
     ("PUT", "/not-a-page"),
     ("DELETE", "/api/experiments/e1/tasks/t1/best-run"),
@@ -165,8 +162,6 @@ def _body(method: str, path: str):
         return {"path": "/no/such/fastworkflow-dir"}
     if path == "/api/configure_env":
         return {"env_content": 1}
-    if method == "PUT":
-        return {"analysis": 1, "extra": True}
     return {}
 
 
@@ -399,10 +394,6 @@ PINNED_ROUTE_MATRIX: dict[tuple[str, str, str, str], int] = {
     ('live', 'GET', '/api/benchmarks/missing', 'bad_origin'): 403,
     ('live', 'GET', '/api/benchmarks/missing', 'no_token'): 401,
     ('live', 'GET', '/api/benchmarks/missing', 'valid'): 200,
-    ('live', 'GET', '/api/benchmarks/missing/analysis', 'bad_host'): 403,
-    ('live', 'GET', '/api/benchmarks/missing/analysis', 'bad_origin'): 403,
-    ('live', 'GET', '/api/benchmarks/missing/analysis', 'no_token'): 401,
-    ('live', 'GET', '/api/benchmarks/missing/analysis', 'valid'): 200,
     ('live', 'GET', '/api/benchmarks/missing/experiments', 'bad_host'): 403,
     ('live', 'GET', '/api/benchmarks/missing/experiments', 'bad_origin'): 403,
     ('live', 'GET', '/api/benchmarks/missing/experiments', 'no_token'): 401,
@@ -711,10 +702,6 @@ PINNED_ROUTE_MATRIX: dict[tuple[str, str, str, str], int] = {
     ('live', 'POST', '/post_feedback', 'bad_origin'): 403,
     ('live', 'POST', '/post_feedback', 'no_token'): 401,
     ('live', 'POST', '/post_feedback', 'valid'): 400,
-    ('live', 'PUT', '/api/benchmarks/missing/analysis', 'bad_host'): 403,
-    ('live', 'PUT', '/api/benchmarks/missing/analysis', 'bad_origin'): 403,
-    ('live', 'PUT', '/api/benchmarks/missing/analysis', 'no_token'): 401,
-    ('live', 'PUT', '/api/benchmarks/missing/analysis', 'valid'): 400,
     ('live', 'PUT', '/api/not-a-route', 'bad_host'): 403,
     ('live', 'PUT', '/api/not-a-route', 'bad_origin'): 403,
     ('live', 'PUT', '/api/not-a-route', 'no_token'): 401,

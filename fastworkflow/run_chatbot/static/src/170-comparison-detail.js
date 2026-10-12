@@ -1228,19 +1228,6 @@ function showBenchmark(benchmarkId, selectedVersion) {
       }).catch(function (e) { if (!benchNavStale(nav)) { experimentList.appendChild(el("p", "err", e.message)); } });
       sectionHeader(d, "Tasks", manifest.tasks.length);
       manifest.tasks.forEach(function (task, index) { taskPreview(d, task, index); });
-      var analysis = el("details", "card"); analysis.appendChild(el("summary", null, "Analysis (optional)")); d.appendChild(analysis);
-      analysis.addEventListener("toggle", function () {
-        if (!analysis.open || analysis.dataset.loaded) { return; } analysis.dataset.loaded = "1";
-        api("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/analysis").then(function (value) {
-          if (benchNavStale(nav)) { return; }
-          var area = benchmarkText(analysis, "Analysis", analysisText(value.analysis), true);
-          var save = el("button", null, "Save analysis"), note = el("p", "err fieldError");
-          save.addEventListener("click", function () {
-            apiPut("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/analysis", {analysis: area.value})
-              .then(function () { note.textContent = ""; }).catch(function (e) { note.textContent = e.message; });
-          }); analysis.appendChild(save); analysis.appendChild(note);
-        }).catch(function (e) { analysis.dataset.loaded = ""; analysis.appendChild(el("p", "err", e.message)); });
-      });
     });
   }).catch(function (e) { if (!benchNavStale(nav)) { clear(d); d.appendChild(el("p", "err fieldError", e.message)); } });
 }

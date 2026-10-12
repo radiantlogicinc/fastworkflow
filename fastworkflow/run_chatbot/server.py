@@ -914,10 +914,6 @@ def _setup_post(path: str) -> bool:
     )
 
 
-def _benchmark_analysis_put(path: str) -> bool:
-    return path.startswith("/api/benchmarks/") and path.endswith("/analysis")
-
-
 def _selection_delete(path: str) -> bool:
     return path.startswith(selection_api.EXPERIMENTS_PREFIX)
 
@@ -955,12 +951,6 @@ _WRITE_ROUTES = _checked_write_routes((
     _WriteRoute("POST", _exact("/api/train"), "_post_train"),
     _WriteRoute(
         "POST", _exact("/api/clear_conversations"), "_post_clear_conversations"
-    ),
-    _WriteRoute(
-        "PUT",
-        _benchmark_analysis_put,
-        "_put_benchmark_analysis",
-        require_object_body=True,
     ),
     _WriteRoute("DELETE", _selection_delete, "_delete_selection"),
     _WriteRoute(

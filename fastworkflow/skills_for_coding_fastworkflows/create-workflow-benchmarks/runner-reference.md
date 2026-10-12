@@ -126,7 +126,6 @@ programmatic UI requests. URL-encode IDs. These are `run_chatbot` APIs, not `/in
 | Register experiment | `POST /api/benchmarks/<benchmark_id>/experiments` with `{"version":"v1"}` |
 | Read registration and pinned tasks | `GET /api/benchmark-experiments/<experiment_id>` |
 | Read version | `GET /api/benchmarks/<benchmark_id>/versions/<version>` |
-| Read/write benchmark analysis | `GET` / `PUT /api/benchmarks/<benchmark_id>/analysis`; PUT body `{"analysis": value}` |
 | Read/write experiment notes | `GET /api/experiment/<experiment_id>` / `PATCH /api/experiment/<experiment_id>` with `{"notes": "..."}` |
 
 Execution reads/writes go to the workflow's one live database, so a registered experiment's

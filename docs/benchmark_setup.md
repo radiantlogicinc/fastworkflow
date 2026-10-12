@@ -53,7 +53,7 @@ labels, not substitutes for attempt bootstrap credentials or execution context
 binding. Supplying an experiment ID alone to a raw conversation call does not
 perform that lifecycle.
 
-Benchmark versions remain in `<workflow>/benchmarks/<id>/vN.json`. Experiment
+Benchmark versions are rows of `benchmark_versions` in the workflow's live evidence DB; that row is the only copy. Experiment
 registrations are rows of the workflow's live evidence DB
 (`experiment_registrations`); creating the first one creates that DB if nobody
 has chatted yet. Once a controller declares execution the registration is

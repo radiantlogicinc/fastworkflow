@@ -19,12 +19,13 @@ What these pin, in one sentence each:
 from __future__ import annotations
 
 import os
-from pathlib import Path
+import sqlite3
 
 import pytest
 
 from fastworkflow import state_paths
 from fastworkflow.benchmark import setup
+from fastworkflow.benchmark.catalog import BenchmarkManifestError
 from fastworkflow.experiment.runner import ExperimentController
 from fastworkflow.observability import store as obs
 
@@ -147,24 +148,20 @@ class TestRegistrationWinsAtCreation:
         assert _winner_id(folder, first["experiment_id"]) == first["experiment_id"]
         assert _winner_id(folder, other["experiment_id"]) == other["experiment_id"]
 
-    def test_creation_on_a_workflow_with_no_live_db_creates_it(self, tmp_path):
-        """Minting an identity must not fail because nobody has chatted yet.
+    def test_a_workflow_with_no_live_db_has_no_benchmark_to_register(self, tmp_path):
+        """The benchmark versions live in the live DB, so no DB means no version.
 
-        The registration lives in the live DB, so creating the first one (a
-        POST) creates that DB; reading still never does.
+        Reads answer empty and do not create the DB; creating an experiment
+        has no version to pin and is refused without creating anything.
         """
         wf = tmp_path / "unrecorded_workflow"
         wf.mkdir()
-        benchmark = _benchmark(wf)
-        assert setup.registered_experiments(wf, benchmark["benchmark_id"]) == []
+        assert setup.registered_experiments(wf, "missing") == []
         assert not os.path.exists(state_paths.observability_db(str(wf)))
 
-        record = setup.create_experiment(wf, benchmark["benchmark_id"], "v1")
-
-        assert record["experiment_id"].startswith("exp-")
-        assert setup.load_experiment(wf, record["experiment_id"]) == record
-        assert _winner_id(wf, record["experiment_id"]) == record["experiment_id"]
-        assert os.path.isfile(state_paths.observability_db(str(wf)))
+        with pytest.raises(BenchmarkManifestError, match="not found"):
+            setup.create_experiment(wf, "missing", "v1")
+        assert not os.path.exists(state_paths.observability_db(str(wf)))
 
 
 # ----------------------------------------------------------------------
@@ -275,14 +272,22 @@ class TestDuplicateExperiment:
         assert len(setup.registered_experiments(folder, benchmark["benchmark_id"])) == 1
 
     def test_duplicating_a_changed_benchmark_is_refused(self, folder):
-        """Duplicating a setup whose pinned contents moved is not the same setup."""
+        """Duplicating a setup whose pinned contents moved is not the same setup.
+
+        Stored versions are immutable, so the drift is simulated where it could
+        actually happen: the registration's pinned digest no longer matches the
+        stored version it names.
+        """
         benchmark = _benchmark(folder)
         source = setup.create_experiment(folder, benchmark["benchmark_id"], "v1")
-        version = Path(
-            folder, "benchmarks", benchmark["benchmark_id"], "v1.json"
+        conn = sqlite3.connect(state_paths.observability_db(str(folder)))
+        conn.execute(
+            "UPDATE experiment_registrations SET benchmark_digest_sha256=?"
+            " WHERE experiment_id=?",
+            ("0" * 64, source["experiment_id"]),
         )
-        payload = version.read_text().replace("Review the roster", "Something else")
-        version.write_text(payload)
+        conn.commit()
+        conn.close()
 
         with pytest.raises(setup.BenchmarkSetupConflict):
             setup.duplicate_experiment(folder, source["experiment_id"])

@@ -5819,6 +5819,18 @@ def open_live_store(db_path: str, *, write: bool = False) -> Optional[Observabil
     return ReadOnlyObservabilityStore(db_path)
 
 
+def open_live_store_for_write(db_path: str) -> ObservabilityStore:
+    """The live DB for a control write that may create it.
+
+    Creating an experiment or saving a benchmark version is a POST, and a
+    workflow nobody has chatted with yet has no DB to record it in, so this is
+    the one open that creates the file. Reads still use `open_live_store`.
+    """
+    if os.path.isfile(db_path):
+        return open_live_store(db_path, write=True)
+    return ObservabilityStore(db_path)
+
+
 # ----------------------------------------------------------------------
 # The sink: two queues + one daemon writer thread [R7][R8][R13]
 # ----------------------------------------------------------------------

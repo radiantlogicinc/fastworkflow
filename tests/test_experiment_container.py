@@ -2161,3 +2161,29 @@ class TestRuntimeSnapshotStamp:
 
         _, data = _request(experiment_server, "/api/experiment/exp-a/attempts?task=t1")
         assert [a["runtime_snapshot"] for a in data["attempts"]] == [None, None]
+
+
+class TestExperimentNotes:
+    """Notes are annotation: they never change a score (moved from the retired
+    benchmark analysis tests)."""
+
+    def test_notes_do_not_change_scores(self, store):
+        store.create_experiment("exp-1", "label-exp-1", declared_tasks=1, declared_attempts=1)
+        store.start_attempt("exp-1", "t0", 1, "chan:t0:1")
+        store.finish_attempt("exp-1", "t0", 1, outcome="pass", outcome_source="test")
+        store.complete_experiment("exp-1")
+        store.update_experiment_notes("exp-1", "would change scores if counted")
+
+        score = store.experiment_scores("exp-1")
+
+        assert score["reportable"] is True
+        assert score["pass_at_1"] == pytest.approx(1.0)
+        assert "notes" not in score
+
+    def test_read_only_store_refuses_notes_update(self, db_path):
+        live = obs.ObservabilityStore(db_path)
+        live.create_experiment("exp-1", "label", declared_tasks=1, declared_attempts=1)
+
+        readonly = obs.ReadOnlyObservabilityStore(db_path)
+        with pytest.raises(sqlite3.OperationalError):
+            readonly.update_experiment_notes("exp-1", "x")
