@@ -18,9 +18,9 @@ claimed the registration; a harness started through
 Once the experiment is bound to an evidence store the description belongs to the
 recorded run and the page shows it read-only.
 Recorded experiments drill down through tasks, attempts and turns. Analysis is
-optional and collapsed by default. Historical runs without a benchmark pin
-remain in the ordinary Experiments/conversation views; they are not guessed into
-a benchmark by name.
+optional and collapsed by default. Every experiment pins a benchmark version;
+one without a pin is refused when it is created. Ad-hoc work is plain
+conversations, which need no experiment.
 
 For an in-process harness (after your normal runtime initialization):
 
@@ -117,8 +117,7 @@ The conversation stays highlighted in the left tree during deeper inspection.
 
 Conversations outside experiments appear under **ad-hoc conversations**, grouped
 by UTC date. A conversation spanning dates appears under each relevant date with
-only that date's turns. Experiments without a benchmark are kept under
-**Experiments without a benchmark**. Empty registered experiments remain visible.
+only that date's turns. Empty registered experiments remain visible.
 The tree preserves source identity, including when conversation IDs repeat in
 different evidence stores. Sidebar filters and the old Experiments/Benchmarks
 buttons have been removed. Use the header's Benchmark setup action to create a

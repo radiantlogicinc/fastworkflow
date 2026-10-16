@@ -11,6 +11,7 @@ a fake store would not test that.
 
 from __future__ import annotations
 
+from tests.benchmark_pins import STORE_PIN
 import json
 from pathlib import Path
 
@@ -451,7 +452,8 @@ class TestDeclaredScope:
 
     def _seed_attempt(self, store: obs.ObservabilityStore) -> str:
         store.create_experiment(
-            "exp-scope", "scoped run", declared_tasks=1, declared_attempts=1
+            "exp-scope", "scoped run", declared_tasks=1, declared_attempts=1,
+            **STORE_PIN,
         )
         store.start_attempt("exp-scope", "task-a", 1, "channel-1")
         turn_key = "turn-scoped"
@@ -718,7 +720,8 @@ class TestProjection:
         # A real experiment attempt, because the reference declares that scope
         # and the projection now checks the declaration against the turn rows.
         store.create_experiment(
-            "exp-multi", "multi-turn attempt", declared_tasks=1, declared_attempts=1
+            "exp-multi", "multi-turn attempt", declared_tasks=1, declared_attempts=1,
+            **STORE_PIN,
         )
         store.start_attempt("exp-multi", "task-1", 1, "channel-1")
         for index in (1, 2, 3):

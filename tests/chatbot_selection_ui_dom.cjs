@@ -6,7 +6,8 @@
  * that every attempt of a repeated task is on screen INCLUDING the failed and
  * unfinished ones, that Reference and Best run are different badges, that a
  * failed attempt chosen as best keeps saying it failed, that choosing it does
- * not move the contest's winner, that an attempt with nothing recorded has a
+ * not move the version's winner, that the winner is set and removed with one
+ * button, that an attempt with nothing recorded has a
  * visibly disabled comparison, that a one-sided step is labelled as one rather
  * than paired up to make the two lists the same length, that a categorized
  * comment can be written on one step of the pair and is then found under the
@@ -134,48 +135,31 @@ console.on('jsdomError', e => { if (e.type !== 'css-parsing') errors.push(e.mess
    * The winner is a different decision
    * ================================================================ */
   w.showExperiment(ids.experiment);
-  await until(() => detail().includes('Winner of this contest'), 'the winner panel');
-  await until(() => detail().includes('automatic — first experiment'),
-    'the automatic-election badge');
+  await until(() => detail().includes('Winner of this benchmark version'), 'the winner panel');
+  await until(() => detail().includes('No winner yet'),
+    'a contest starts with no winner: ' + detail().slice(0, 700));
+  assert.ok(!detail().includes('automatic'), 'nobody is elected automatically');
   assert.ok(detail().includes('chosen separately and never move it'),
     'the two decisions are separated in words as well as in storage');
+  // One button: make it the winner, or remove it as the winner.
+  assert.ok(!button('Keep the current winner') && !button('Leave it undecided'),
+    'keep and undecided are gone');
+  button('Make this the winner').click();
+  await until(() => button('Remove as winner'), 'the panel after setting the winner');
   assert.ok(detail().includes('Winner'), detail().slice(0, 700));
 
-  // Promote / Keep / Undecided, each with an optional reason and no rubric.
-  assert.ok(button('Keep the current winner'), 'keep is offered');
-  assert.ok(button('Leave it undecided'), 'undecided is a recordable outcome');
-  const promote = button('Promote this experiment');
-  assert.ok(promote.disabled, 'this experiment already holds the contest');
-
-  /* A decision that loses a race. The candidate is promoted out of band --
-     exactly what a second reviewer in another tab would do -- and then the
-     button this page rendered before that happened is clicked. */
-  /* From the launch URL, not the page's address bar: the page drops the
-     token from its address once it has it. */
+  /* Another reviewer sets the candidate as winner out of band. The last write
+     wins; re-reading this page says it is no longer the winner. */
   const token = new URL(url).searchParams.get('token');
-  const winner = await (await w.fetch(
-    '/api/experiments/' + encodeURIComponent(ids.experiment) + '/winner',
-    {headers: {Authorization: 'Bearer ' + token}}
-  )).json();
   const raced = await w.fetch(
-    '/api/experiments/' + encodeURIComponent(ids.candidate) + '/winner/decisions',
+    '/api/experiments/' + encodeURIComponent(ids.candidate) + '/winner',
     {method: 'POST',
      headers: {Authorization: 'Bearer ' + token, 'Content-Type': 'application/json'},
-     body: JSON.stringify({actor: 'another reviewer', actor_kind: 'human',
-                           decision: 'promote',
-                           expected_selection_id: winner.expected_selection_id,
-                           candidate_experiment_id: ids.candidate})});
-  assert.equal(raced.status, 201, 'the other tab promoted the candidate');
-
-  button('Keep the current winner').click();
-  await until(() => detail().includes("Nobody's decision was overwritten"),
-    'the stale explanation');
-  assert.ok(detail().includes('It now names experiment ' + ids.candidate),
-    'the refusal names what is current: ' + detail().slice(0, 900));
-  assert.ok(button('Re-read and decide again'), 'and offers the mechanical retry');
-  button('Re-read and decide again').click();
-  await until(() => detail().includes('Not the winner'),
-    'the re-read panel, now that this experiment lost the contest');
+     body: JSON.stringify({actor: 'another reviewer', actor_kind: 'human'})});
+  assert.equal(raced.status, 200, 'the other tab set the candidate as winner');
+  w.showExperiment(ids.experiment);
+  await until(() => detail().includes('Not the winner') && button('Make this the winner'),
+    'the re-read panel, now that this experiment is not the winner');
 
   // Losing the contest did NOT move the task's best run.
   w.taskView = 'runs';

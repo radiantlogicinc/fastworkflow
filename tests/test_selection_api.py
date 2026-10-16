@@ -16,8 +16,9 @@ client meets them rather than as the module imagines them.
 
 The distinction most of these tests defend is that the experiment WINNER and a
 task's BEST RUN share storage and mean different things, and that a read never
-becomes a write: a GET must not create a database, must not elect anybody
-and must not mark anything reviewed.
+becomes a write: a GET must not create a database, must not set a winner
+and must not mark anything reviewed. A contest is one benchmark version and
+starts with no winner; `POST`/`DELETE .../winner` set and remove it.
 """
 
 from __future__ import annotations
@@ -245,36 +246,41 @@ def _task(world, suffix="", experiment=None):
 
 
 # ----------------------------------------------------------------------
-# The first experiment wins at creation, and nothing had to say so
+# A contest starts with no winner, and nothing elects one
 # ----------------------------------------------------------------------
 
 
+def _set_winner(world, experiment_id, **actor):
+    return _post(world, f"/api/experiments/{experiment_id}/winner", {**HUMAN, **actor})
+
+
+def _clear_winner(world, experiment_id, **actor):
+    return _delete(world, f"/api/experiments/{experiment_id}/winner", {**HUMAN, **actor})
+
+
 class TestWinnerRead:
-    def test_the_first_experiment_is_the_winner_and_is_labelled_automatic(self, world):
+    def test_a_new_contest_has_no_winner_and_nobody_is_elected(self, world):
         status, payload = _get(world, _experiment(world, "/winner"))
 
         assert status == 200
-        winner = payload["winner"]
-        assert winner["experiment_id"] == world["experiment_id"]
-        assert winner["automatic"] is True
-        assert winner["decision"] == selection.DECISION_INITIAL
-        assert payload["is_winner"] is True
-        assert payload["expected_selection_id"] == winner["selection_id"]
+        assert payload["winner"] is None
+        assert payload["is_winner"] is False
+        assert "expected_selection_id" not in payload
+        assert "automatic" not in payload
 
-    def test_a_later_experiment_joins_the_same_contest_without_taking_it(self, world):
+    def test_both_experiments_of_one_version_are_one_contest(self, world):
         payload = _get(world, f"/api/experiments/{world['candidate_id']}/winner")[1]
 
-        assert payload["is_winner"] is False
-        assert payload["winner"]["experiment_id"] == world["experiment_id"]
         members = {row["experiment_id"] for row in payload["members"]}
         assert members == {world["experiment_id"], world["candidate_id"]}
 
     def test_the_winner_reports_its_own_live_state_not_a_claim_of_success(self, world):
+        _set_winner(world, world["experiment_id"])
         winner = _get(world, _experiment(world, "/winner"))[1]["winner"]
 
-        # `initial` says nobody judged it; the experiment row says what it is.
         assert winner["experiment_resolved"] is True
         assert winner["experiment"]["status"] is not None
+        assert "automatic" not in winner
         assert "successful" not in json.dumps(winner["experiment"])
 
     def test_the_repeat_count_is_carried_on_the_registration(self, world):
@@ -302,10 +308,14 @@ class TestWinnerRead:
 
 class TestWinnerHistory:
     def test_history_is_bounded_and_pageable(self, world):
+        _set_winner(world, world["experiment_id"])
+        _set_winner(world, world["candidate_id"])
+
         status, payload = _get(world, _experiment(world, "/winner/history"), limit=1)
 
         assert status == 200 and payload["limit"] == 1
         assert len(payload["history"]) == 1
+        assert payload["history"][0]["new_experiment_id"] == world["candidate_id"]
 
     def test_an_absurd_limit_is_clamped_rather_than_served(self, world):
         payload = _get(world, _experiment(world, "/winner/history"), limit=100000)[1]
@@ -318,104 +328,120 @@ class TestWinnerHistory:
 
 
 # ----------------------------------------------------------------------
-# Deciding: promote, keep, undecided
+# Setting and removing the winner
 # ----------------------------------------------------------------------
 
 
 class TestWinnerDecisions:
-    def _decide(self, world, **body):
-        current = _get(world, _experiment(world, "/winner"))[1]
-        body.setdefault("expected_selection_id", current["expected_selection_id"])
-        return _post(world, _experiment(world, "/winner/decisions"), {**HUMAN, **body})
-
-    def test_promoting_a_candidate_moves_the_pointer_and_records_who(self, world):
-        status, payload = self._decide(
-            world,
-            decision="promote",
-            candidate_experiment_id=world["candidate_id"],
-            rationale="the candidate reads better",
+    def test_setting_the_winner_moves_the_pointer_and_records_who(self, world):
+        status, payload = _post(
+            world, f"/api/experiments/{world['candidate_id']}/winner",
+            {**HUMAN, "rationale": "the candidate reads better"},
         )
 
-        assert status == 201
-        assert payload["decision"]["decision"] == "promote"
-        assert payload["winner"]["winner"]["experiment_id"] == world["candidate_id"]
-        assert payload["winner"]["winner"]["automatic"] is False
+        assert status == 200
+        assert payload["is_winner"] is True
+        assert payload["winner"]["experiment_id"] == world["candidate_id"]
         latest = _get(world, _experiment(world, "/winner/history"))[1]["history"][0]
+        assert latest["decision"] == selection.DECISION_SET
         assert latest["actor"] == "dhar" and latest["actor_kind"] == "human"
         assert latest["rationale"] == "the candidate reads better"
 
-    def test_keeping_the_winner_records_the_challenger_it_passed_over(self, world):
-        before = _get(world, _experiment(world, "/winner"))[1]
+    def test_setting_another_experiment_replaces_the_winner(self, world):
+        _set_winner(world, world["experiment_id"])
 
-        payload = self._decide(
-            world, decision="keep", candidate_experiment_id=world["candidate_id"]
-        )[1]
+        payload = _set_winner(world, world["candidate_id"])[1]
 
-        assert payload["winner"]["winner"]["selection_id"] == \
-            before["winner"]["selection_id"]
+        assert payload["winner"]["experiment_id"] == world["candidate_id"]
         latest = _get(world, _experiment(world, "/winner/history"))[1]["history"][0]
-        assert latest["decision"] == "keep"
-        assert latest["candidate_experiment_id"] == world["candidate_id"]
+        assert latest["previous_experiment_id"] == world["experiment_id"]
 
-    def test_undecided_is_recorded_and_moves_nothing(self, world):
-        before = _get(world, _experiment(world, "/winner"))[1]
+    def test_setting_the_current_winner_again_records_nothing(self, world):
+        _set_winner(world, world["experiment_id"])
 
-        payload = self._decide(world, decision="undecided")[1]
+        status, _payload = _set_winner(world, world["experiment_id"])
 
-        assert payload["winner"]["expected_selection_id"] == \
-            before["expected_selection_id"]
-        assert _get(world, _experiment(world, "/winner/history"))[1]["history"][0][
-            "decision"
-        ] == "undecided"
+        assert status == 200
+        assert len(_get(world, _experiment(world, "/winner/history"))[1]["history"]) == 1
 
-    def test_a_decision_against_a_replaced_winner_is_refused_with_what_is_current(
-        self, world
-    ):
-        stale = _get(world, _experiment(world, "/winner"))[1]["expected_selection_id"]
-        self._decide(world, decision="promote",
-                     candidate_experiment_id=world["candidate_id"])
+    def test_removing_the_winner_leaves_the_contest_with_none(self, world):
+        _set_winner(world, world["experiment_id"])
 
-        status, payload = _post(
-            world,
-            _experiment(world, "/winner/decisions"),
-            {**HUMAN, "decision": "promote", "expected_selection_id": stale,
-             "candidate_experiment_id": world["experiment_id"]},
-        )
+        status, payload = _clear_winner(world, world["experiment_id"])
 
-        assert status == 409 and payload["stale"] is True
-        assert payload["expected_selection_id"] == stale
-        assert payload["current_experiment_id"] == world["candidate_id"]
-        # The refusal changed nothing.
-        assert _get(world, _experiment(world, "/winner"))[1]["winner"][
-            "experiment_id"
-        ] == world["candidate_id"]
+        assert status == 200
+        assert payload["winner"] is None and payload["is_winner"] is False
+        latest = _get(world, _experiment(world, "/winner/history"))[1]["history"][0]
+        assert latest["decision"] == selection.DECISION_CLEAR
+        assert latest["previous_experiment_id"] == world["experiment_id"]
 
-    def test_a_decision_that_saw_no_winner_is_stale_when_there_is_one(self, world):
-        # No `expected_selection_id` means "I read no winner"; one exists, so
-        # the decision was made against a contest that is not this one.
-        status, payload = _post(
+    def test_removing_from_another_member_clears_the_same_contest(self, world):
+        _set_winner(world, world["experiment_id"])
+
+        _clear_winner(world, world["candidate_id"])
+
+        assert _get(world, _experiment(world, "/winner"))[1]["winner"] is None
+
+    def test_removing_when_there_is_no_winner_is_a_quiet_no_op(self, world):
+        status, payload = _clear_winner(world, world["experiment_id"])
+
+        assert status == 200 and payload["winner"] is None
+        assert _get(world, _experiment(world, "/winner/history"))[1]["history"] == []
+
+    def test_an_unknown_experiment_cannot_be_made_the_winner(self, world):
+        assert _post(world, "/api/experiments/exp-nobody/winner", HUMAN)[0] == 404
+
+    def test_the_old_decisions_route_is_gone(self, world):
+        assert _post(
             world, _experiment(world, "/winner/decisions"),
-            {**HUMAN, "decision": "keep"},
-        )
-
-        assert status == 409 and payload["stale"] is True
-        assert payload["current_experiment_id"] == world["experiment_id"]
-
-    @pytest.mark.parametrize("decision", ["initial", "delete", "", "PROMOTE"])
-    def test_only_the_three_client_decisions_are_accepted(self, world, decision):
-        assert self._decide(world, decision=decision)[0] == 400
+            {**HUMAN, "decision": "promote"},
+        ) is None
 
     def test_a_client_cannot_file_its_decision_as_the_system_s_own(self, world):
-        status, payload = self._decide(
-            world, decision="keep", actor="fastworkflow", actor_kind="system"
+        status, payload = _set_winner(
+            world, world["experiment_id"], actor="fastworkflow", actor_kind="system"
         )
 
         assert status == 400 and "actor_kind" in payload["error"]
+        assert _get(world, _experiment(world, "/winner"))[1]["winner"] is None
+
+    def test_an_actor_is_required(self, world):
+        status, _payload = _post(world, _experiment(world, "/winner"), {})
+
+        assert status == 400
 
     def test_a_coding_agent_and_a_person_use_the_same_route(self, world):
-        assert self._decide(world, decision="undecided", **AGENT)[0] == 201
-        latest = _get(world, _experiment(world, "/winner/history"))[1]["history"][0]
-        assert latest["actor_kind"] == "coding_agent"
+        assert _set_winner(world, world["experiment_id"], **AGENT)[0] == 200
+        assert _clear_winner(world, world["experiment_id"])[0] == 200
+        history = _get(world, _experiment(world, "/winner/history"))[1]["history"]
+        assert [row["actor_kind"] for row in history] == ["human", "coding_agent"]
+
+
+class TestVersionsAreSeparateContests:
+    def test_an_experiment_on_another_version_has_its_own_winner(self, world):
+        folder = world["folder"]
+        manifest = setup.load_version(folder, world["benchmark_id"], "v1")
+        setup.save_benchmark(folder, {
+            "benchmark_id": world["benchmark_id"],
+            "expected_version": "v1",
+            "title": manifest.get("title") or "Roster review",
+            "tasks": [{"prompt": "Review the roster again"}],
+        })
+        versions = setup.list_versions(folder, world["benchmark_id"])
+        assert len(versions) == 2
+        other = setup.create_experiment(folder, world["benchmark_id"], versions[-1])
+        _set_winner(world, world["experiment_id"])
+
+        payload = _get(world, f"/api/experiments/{other['experiment_id']}/winner")[1]
+
+        assert payload["winner"] is None
+        assert {row["experiment_id"] for row in payload["members"]} == {
+            other["experiment_id"]
+        }
+        _set_winner(world, other["experiment_id"])
+        assert _get(world, _experiment(world, "/winner"))[1]["winner"][
+            "experiment_id"
+        ] == world["experiment_id"]
 
 
 # ----------------------------------------------------------------------
@@ -565,13 +591,22 @@ class TestBestRunDecisions:
         assert latest["candidate_attempt"] == 2
 
     def test_choosing_a_best_run_never_touches_the_experiment_winner(self, world):
-        before = _get(world, _experiment(world, "/winner"))[1]
+        _set_winner(world, world["candidate_id"])
+        before = _get(world, _experiment(world, "/winner"))[1]["winner"]
 
         _post(world, _task(world, "/best-run"), {**HUMAN, "attempt": 2})
 
-        after = _get(world, _experiment(world, "/winner"))[1]
-        assert after["expected_selection_id"] == before["expected_selection_id"]
-        assert after["winner"]["decision"] == selection.DECISION_INITIAL
+        after = _get(world, _experiment(world, "/winner"))[1]["winner"]
+        assert after["selection_id"] == before["selection_id"]
+        assert after["experiment_id"] == world["candidate_id"]
+
+    def test_clearing_the_winner_never_touches_a_best_run(self, world):
+        _set_winner(world, world["experiment_id"])
+        _post(world, _task(world, "/best-run"), {**HUMAN, "attempt": 2})
+
+        _clear_winner(world, world["experiment_id"])
+
+        assert _get(world, _task(world, "/runs"))[1]["best_run"]["attempt"] == 2
 
     def test_two_experiments_keep_separate_best_runs_for_the_same_task(self, world):
         _post(world, _task(world, "/best-run"), {**HUMAN, "attempt": 2})
@@ -1111,6 +1146,7 @@ class TestDuplication:
         assert record["runs_per_task"] == 4 and record["changed_fields"] == []
 
     def test_a_duplicate_joins_the_contest_without_taking_it(self, world):
+        _set_winner(world, world["experiment_id"])
         record = _post(
             world, f"/api/benchmark-experiments/{world['experiment_id']}/duplicate", {}
         )[1]["experiment"]
@@ -1119,6 +1155,9 @@ class TestDuplication:
 
         assert payload["is_winner"] is False
         assert payload["winner"]["experiment_id"] == world["experiment_id"]
+        assert record["experiment_id"] in {
+            row["experiment_id"] for row in payload["members"]
+        }
 
     def test_a_duplicate_starts_with_no_evidence_and_no_best_runs(self, world):
         record = _post(
@@ -1167,7 +1206,7 @@ class TestOverHttp:
         )[0] == 401
         assert _get(world, _task(world, "/runs"))[1]["best_run"] is None
 
-    def test_creating_an_experiment_over_http_elects_it_when_it_is_the_first(
+    def test_creating_an_experiment_over_http_elects_nobody(
         self, server, tmp_path, monkeypatch
     ):
         monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
@@ -1182,9 +1221,9 @@ class TestOverHttp:
         winner = _request(
             server, f"/api/experiments/{record['experiment_id']}/winner"
         )[1]
-        # The workflow already has a winner, so this one joins without taking it.
+        # Joining a contest never makes anybody its winner.
         assert winner["is_winner"] is False
-        assert winner["winner"]["automatic"] is True
+        assert winner["winner"] is None
 
     def test_an_impossible_repeat_count_is_refused_at_creation(self, server):
         status, payload = _request(
@@ -1202,6 +1241,12 @@ class TestOverHttp:
         )[1]
 
         assert payload["runs_per_task"] == 4
+        assert payload["is_winner"] is False and payload["winner"] is None
+
+        _request(server, _experiment(world, "/winner"), "POST", HUMAN)
+        payload = _request(
+            server, f"/api/benchmark-experiments/{world['experiment_id']}"
+        )[1]
         assert payload["is_winner"] is True
         assert payload["winner"]["experiment_id"] == world["experiment_id"]
 
@@ -1222,23 +1267,26 @@ class TestOverHttp:
         assert status == 200 and cleared["decision"]["best_run"] is None
         assert _request(server, _task(world, "/runs"))[1]["best_run"] is None
 
-    def test_a_stale_promotion_is_a_409_a_client_can_act_on(self, server, world):
-        stale = _request(server, _experiment(world, "/winner"))[1][
-            "expected_selection_id"
-        ]
-        _request(
-            server, _experiment(world, "/winner/decisions"), "POST",
-            {**HUMAN, "decision": "promote", "expected_selection_id": stale,
-             "candidate_experiment_id": world["candidate_id"]},
+    def test_setting_then_removing_the_winner_over_http(self, server, world):
+        status, payload = _request(
+            server, _experiment(world, "/winner"), "POST", {**HUMAN}
         )
+        assert status == 200 and payload["is_winner"] is True
 
         status, payload = _request(
-            server, _experiment(world, "/winner/decisions"), "POST",
-            {**HUMAN, "decision": "keep", "expected_selection_id": stale},
+            server, _experiment(world, "/winner"), "DELETE", {**HUMAN}
+        )
+        assert status == 200 and payload["winner"] is None
+        assert _request(server, _experiment(world, "/winner"))[1]["winner"] is None
+        history = _request(server, _experiment(world, "/winner/history"))[1]["history"]
+        assert [row["decision"] for row in history] == ["clear", "set"]
+
+    def test_removing_a_winner_nobody_set_is_a_200_no_op_over_http(self, server, world):
+        status, payload = _request(
+            server, _experiment(world, "/winner"), "DELETE", {**HUMAN}
         )
 
-        assert status == 409 and payload["stale"] is True
-        assert payload["current_experiment_id"] == world["candidate_id"]
+        assert status == 200 and payload["winner"] is None
 
     def test_a_comparison_is_a_get_and_records_nothing(self, server, world):
         before = _request(server, _task(world, "/runs/history"))[1]["history"]
@@ -1265,7 +1313,13 @@ class TestOverHttp:
         assert _request(server, path + "?reviewer=dhar")[1]["progress"]["reviewed"] == 1
 
     def test_a_method_the_route_does_not_offer_is_refused(self, server, world):
-        assert _request(server, _experiment(world, "/winner"), "POST", {})[0] == 405
+        assert _request(
+            server, _experiment(world, "/winner/history"), "POST", HUMAN
+        )[0] == 405
+        assert _request(
+            server, _experiment(world, "/winner/decisions"), "POST",
+            {**HUMAN, "decision": "promote"},
+        )[0] == 405
         assert _request(server, _task(world, "/runs"), "DELETE", {})[0] == 404
 
     def test_an_unknown_subroute_is_not_found(self, server, world):

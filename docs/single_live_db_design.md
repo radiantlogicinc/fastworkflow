@@ -464,7 +464,7 @@ Net line estimates are for production code; tests are given in parentheses.
 - **`selection.py` (2,560 lines → about 1,500):**
   - `SelectionControlStore` takes an `ObservabilityStore` and uses `control.write` / read connections;
   - decision, pointer, election and history logic is kept verbatim;
-  - `record_decision` / `apply_scoped_decision` call the existing join (`_register`) first when the named experiment exists in `experiments` but is not yet a member, inside the same transaction (§2.3);
+  - `set_winner` / `clear_winner` / `apply_scoped_decision` call the existing join (`_register`) first when the named experiment exists in `experiments` but is not yet a member, inside the same transaction (§2.3);
   - delete the modes, the evidence sources, bootstrap, adoption, `control_meta`, its own `_connect` / `_ensure_schema`, the module-level `control_mode_of`, `initialize_winner_for`, `selection_control_for`, `open_shared_control`, `SHARED_CONTROL_FILENAME`, `control_db_path_for`, `shared_control_db_path_for`, and the source exceptions;
   - `store_for(experiment_id)` replaces `store_for_source` (§2.6).
 - **`pair_review.py` (721 lines → about 250):** the same treatment. Delete `SHARED_PAIR_REVIEW_FILENAME`, `pair_review_db_path_for`, `shared_pair_review_db_path_for` and `_require_authorized`. The roughly 150 duplicated lines of `fix-90i7` go with them.

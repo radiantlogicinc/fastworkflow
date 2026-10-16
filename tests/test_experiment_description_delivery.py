@@ -27,6 +27,7 @@ where each one actually lives:
 
 from __future__ import annotations
 
+from tests.benchmark_pins import STORE_PIN
 import json
 import threading
 
@@ -54,6 +55,7 @@ def recorded_server(workflow_dir, tmp_path, monkeypatch):
         "",
         declared_tasks=1,
         declared_attempts=1,
+        **STORE_PIN,
     )
     server = run_chatbot_server.ChatbotServer(
         db_path=db_path,

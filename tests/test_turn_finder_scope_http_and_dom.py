@@ -22,6 +22,7 @@ The world is built so a scoped answer and an unscoped one CANNOT coincide:
 
 from __future__ import annotations
 
+from tests.benchmark_pins import create_pinned
 import json
 import os
 import subprocess
@@ -98,7 +99,7 @@ def finder_world(tmp_path, monkeypatch):
         str(folder), store.store_identity(), external=False,
     )
     workflow_name = setup.workflow_name_for(folder)
-    controller.create_experiment(
+    create_pinned(controller,
         ALPHA, "the run under the lens", declared_tasks=2, declared_attempts=2,
         # Four declared, three run: `task-two` attempt 2 is never started, which
         # is an ordinary unfinished attempt and keeps the store honest about
@@ -107,7 +108,7 @@ def finder_world(tmp_path, monkeypatch):
                       (TASK_TWO, 1, "ch-alpha-two-1"), (TASK_TWO, 2, "ch-alpha-two-2")],
         workflow_name=workflow_name,
     )
-    controller.create_experiment(
+    create_pinned(controller,
         BETA, "a second run of the same task", declared_tasks=1,
         declared_attempts=1, declarations=[(TASK_ONE, 1, "ch-beta-one-1")],
         workflow_name=workflow_name,

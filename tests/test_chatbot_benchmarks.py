@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from tests.benchmark_pins import STORE_PIN
 import json
 import threading
 import urllib.error
@@ -130,6 +131,7 @@ def experiment_server(workflow_dir, tmp_path, monkeypatch):
         "label-exp-1",
         declared_tasks=1,
         declared_attempts=1,
+        **STORE_PIN,
     )
     store.update_experiment_notes("exp-1", "original notes")
     srv = run_chatbot_server.ChatbotServer(
@@ -179,20 +181,55 @@ class TestBenchmarkReadApi:
         older = benchmark_setup.create_experiment(workflow_dir, "smoke", "v1")
         newer = benchmark_setup.create_experiment(workflow_dir, "smoke", "v1")
 
-        status, data = _request(live_server, "/api/benchmarks/smoke/experiments")
+        status, data = _request(
+            live_server, "/api/benchmarks/smoke/versions/v1/experiments"
+        )
 
         assert status == 200
+        assert data["benchmark_version"] == "v1"
         assert [row["experiment_id"] for row in data["experiments"]] == [
             newer["experiment_id"],
             older["experiment_id"],
         ]
-        # The first experiment holds the contest until somebody promotes
-        # another. The list stays newest-first; the pointer is a separate fact.
+        # Creating experiments sets no winner; none is a normal state.
+        assert data["winner_experiment_id"] is None
+        assert "winner_automatic" not in data
+        assert not any(row["is_winner"] for row in data["experiments"])
+
+        benchmark_setup.workflow_control(workflow_dir, write=True).set_winner(
+            older["experiment_id"], actor="tester", actor_kind="human",
+            provenance="human",
+        )
+        status, data = _request(
+            live_server, "/api/benchmarks/smoke/versions/v1/experiments"
+        )
         by_id = {row["experiment_id"]: row for row in data["experiments"]}
         assert data["winner_experiment_id"] == older["experiment_id"]
-        assert data["winner_automatic"] is True
         assert by_id[older["experiment_id"]]["is_winner"] is True
         assert by_id[newer["experiment_id"]]["is_winner"] is False
+
+    def test_experiments_are_partitioned_by_version(self, live_server, workflow_dir):
+        """Two versions ran different task sets: never one list, never one winner."""
+        obs.ObservabilityStore(state_paths.observability_db(str(workflow_dir)))
+        write_version(workflow_dir, _sample_spec(version="v2", task_id="case-02"))
+        on_v1 = benchmark_setup.create_experiment(workflow_dir, "smoke", "v1")
+        on_v2 = benchmark_setup.create_experiment(workflow_dir, "smoke", "v2")
+        benchmark_setup.workflow_control(workflow_dir, write=True).set_winner(
+            on_v1["experiment_id"], actor="tester", actor_kind="human",
+            provenance="human",
+        )
+
+        _, v1 = _request(live_server, "/api/benchmarks/smoke/versions/v1/experiments")
+        _, v2 = _request(live_server, "/api/benchmarks/smoke/versions/v2/experiments")
+
+        assert [r["experiment_id"] for r in v1["experiments"]] == [on_v1["experiment_id"]]
+        assert [r["experiment_id"] for r in v2["experiments"]] == [on_v2["experiment_id"]]
+        assert v1["winner_experiment_id"] == on_v1["experiment_id"]
+        assert v2["winner_experiment_id"] is None
+
+    def test_the_all_versions_listing_is_gone(self, live_server, workflow_dir):
+        status, _ = _request(live_server, "/api/benchmarks/smoke/experiments")
+        assert status == 404
 
 
 class TestBenchmarkWriteApi:

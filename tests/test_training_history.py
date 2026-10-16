@@ -23,6 +23,7 @@ What the tests are for, in order of how much they matter:
 
 from __future__ import annotations
 
+from tests.benchmark_pins import create_pinned
 import json
 import os
 import sqlite3
@@ -158,7 +159,7 @@ def _snapshot(version_id, *, legacy=False):
 def _seed_attempts(workflow_folder, store):
     """Two experiments: one ran on VERSION_A, one on a version nothing trained."""
     controller = _controller(workflow_folder, store)
-    controller.create_experiment(
+    create_pinned(controller,
         "exp-on-a",
         "ran on the first trained set",
         declared_tasks=1,
@@ -169,7 +170,7 @@ def _seed_attempts(workflow_folder, store):
     # Second attempt of the same experiment, same version: both must link.
     _stamped_attempt(controller, "exp-on-a", "task-1", 2, _snapshot(VERSION_A))
 
-    controller.create_experiment(
+    create_pinned(controller,
         "exp-unstamped",
         "a server that recorded no snapshot at all",
         declared_tasks=1,

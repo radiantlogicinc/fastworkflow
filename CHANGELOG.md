@@ -4,6 +4,60 @@
 
 ### Changed
 
+- **Every experiment pins a benchmark version** (`fix-ujat`): the store and
+  `ExperimentController.create_experiment` refuse an experiment without
+  `benchmark_id`, `benchmark_version` and `benchmark_digest_sha256`
+  (`MissingBenchmarkPin`). An unpinned experiment could carry any task ids
+  and sat in the Benchmarks tab beside the real benchmarks, with a contest
+  and a winner of its own. Ad-hoc work is plain conversations (`/initialize`
+  with no experiment bootstrap), listed under **ad-hoc conversations**.
+  Removed: the "Experiments without a benchmark" rail branch and the
+  ad-hoc comparison group (`selection.GROUP_ADHOC`);
+  `comparison_group_identity` refuses an unpinned row. An older store's
+  unpinned experiments are left off the rail and their turns list with the
+  ad-hoc conversations.
+
+- **Experiments driven by a user simulator** (`fix-va9v`): an experiment can
+  be created with `user_simulator: true` (UI registration
+  `POST /api/benchmarks/<id>/experiments`, duplicate, or
+  `ExperimentController.create_experiment(user_simulator=True)`). Its
+  simulator turns each task prompt into its own utterances, so its runs'
+  first messages are not checked against the prompts: validity reads
+  `simulated_user` instead of valid | invalid. Completeness is still checked.
+  The flag is set once, at creation; a registered experiment takes it from
+  its registration. It shows read-only on the experiment and registration
+  pages and in their API responses. **Schema v10** adds
+  `experiments.user_simulator` and `experiment_registrations.user_simulator`.
+  A v9 store is refused, as with every older schema, and is not migrated.
+
+- **Benchmark experiments are checked against their version** (`fix-mgoi`):
+  every experiment that names a benchmark version must declare exactly that
+  version's task IDs, whether or not it was registered in the UI (before, only
+  UI-registered ones were checked). Each recorded experiment now reports two
+  verdicts, derived from its attempts and recorded turns: **complete |
+  incomplete** (every benchmark task got its declared runs) and **valid |
+  invalid** (every run's first message matched its task's saved prompt; tasks
+  without a saved prompt are not checked). Both show on the benchmark page's
+  experiment cards with "N of M tasks", and on the experiment page with the
+  runs that are short or that sent another prompt. A store verdict of
+  `invalid` for missing runs (`attempt_shortfall`, `never_completed`) now
+  reads "incomplete" in the UI.
+
+- **Experiments and winners are partitioned by benchmark version**
+  (`fix-873a`): each version of a benchmark is its own contest, so the Studio
+  lists one version's experiments at a time (rail: benchmark → version →
+  experiments) and each version has its own winner. The winner is now plain:
+  `POST /api/experiments/<id>/winner` sets it, `DELETE` removes it, and having
+  no winner is normal. Removed: the automatic first-experiment winner, the
+  `keep`/`undecided` decisions and `expected_selection_id` on the winner,
+  `POST .../winner/decisions`, `GET /api/benchmarks/<id>/experiments` (now
+  `.../versions/<v>/experiments`), and the refusal to delete the current
+  winner (deleting it leaves the version with no winner). Existing live DBs
+  are not migrated: experiments already in a cross-version group stay there.
+  `create_experiment`'s
+  `initialize_winner` is renamed `join_comparison_group`. Per-task best runs
+  are unchanged.
+
 - **The observability record bounds itself in long-lived servers**
   (`fix-nczr`): the writer re-runs the retention prune hourly instead of only
   at recorder startup, and once only turn records are left over

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from tests.benchmark_pins import create_pinned
 import json
 import os
 import sqlite3
@@ -39,7 +40,7 @@ def _controller(installed_db, *, external=True):
 def _create(controller, declarations, *, evidence_segments=0):
     tasks = {task_id for task_id, _, _ in declarations}
     attempts = len(declarations) // len(tasks)
-    controller.create_experiment(
+    create_pinned(controller,
         "exp-1",
         "label",
         declared_tasks=len(tasks),

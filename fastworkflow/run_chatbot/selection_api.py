@@ -5,8 +5,10 @@ and a coding agent posting the same JSON over HTTP reach the same functions in
 `observability/selection.py`, `observability/best_run.py`,
 `observability/comparison.py` and `observability/pair_review.py`. There is no
 agent-only shortcut and no browser-only field: the wire shapes here ARE the
-agent API, which is why they carry `expected_selection_id`, `ref_id` and
-`review_pair_key` rather than screen state.
+agent API, which is why the best-run routes carry `expected_selection_id`,
+`ref_id` and `review_pair_key` rather than screen state. The experiment winner
+is plainer: `POST .../winner` sets it, `DELETE .../winner` removes it, and the
+last write wins (`fix-873a`).
 
 Why a separate module. `server.py` already carries the whole read layer; these
 routes are four new surfaces with their own error vocabulary, and folding them
@@ -22,9 +24,7 @@ immutable evidence:
   read-only and answers empty where it or its control tables are absent.
   Control tables conjured by a page load are indistinguishable, afterwards,
   from ones whose decisions were lost.
-- **Reads never move a pointer.** Nothing here writes on GET, including the
-  automatic first-experiment winner: that is elected by `setup.create_experiment`
-  at creation time, which is a write the user asked for.
+- **Reads never move a pointer.** Nothing here writes on GET.
 - **References are derived from recorded evidence, never from the request.**
   A client names an experiment, a task and an attempt NUMBER; the store, the
   turn keys and the `ExecutionRef` come from `best_run`'s projection of the
@@ -43,8 +43,8 @@ immutable evidence:
 Actor policy follows the one the feedback route already uses: a local,
 token-holding client declares who it is (`actor`, `actor_kind`), and
 `actor_kind` is restricted to the client kinds `FEEDBACK_PROVENANCES` defines.
-`system` -- the kind the automatic first winner is recorded under -- is refused
-from HTTP, so no client can forge a decision as the machine's own.
+`system` is refused from HTTP, so no client can forge a decision as the
+machine's own.
 """
 
 from __future__ import annotations
@@ -68,8 +68,7 @@ EXPERIMENTS_PREFIX = "/api/experiments/"
 REGISTRATIONS_PREFIX = "/api/benchmark-experiments/"
 
 # Which kinds a CLIENT may claim. `selection.SYSTEM_ACTOR_KIND` is deliberately
-# absent: it marks the winner nobody chose, and a decision that can be claimed
-# as automatic is a decision whose provenance means nothing.
+# absent: it marks changes no actor asked for.
 CLIENT_ACTOR_KINDS = frozenset(FEEDBACK_PROVENANCES)
 
 # Views of a projection, smallest first. The default is the product default --
@@ -253,7 +252,7 @@ def _actor(body: dict[str, Any]) -> dict[str, str]:
     The existing local/token policy is unchanged: there is no per-user session
     to read an identity from, and inventing one here would be inventing an auth
     architecture. What IS enforced is that the claim is a client kind -- a
-    request cannot file its decision as the system's automatic one.
+    request cannot file its decision as the system's own.
     """
     actor = _text(body.get("actor"), "actor")
     actor_kind = _text(body.get("actor_kind"), "actor_kind")
@@ -927,11 +926,7 @@ def _winner_payload(
         "experiment_id": experiment_id,
         "group": group,
         "winner": winner,
-        # Echo this into the next decision. A winner that moved while the page
-        # was open answers the write with 409 instead of overwriting silently.
-        "expected_selection_id": None if winner is None else winner["selection_id"],
         "is_winner": winner is not None and winner["experiment_id"] == experiment_id,
-        "automatic": bool(winner and winner.get("automatic")),
         "members": control.group_members(group_id),
         "registration": registration,
         "runs_per_task": None if registration is None else registration.get("runs_per_task"),
@@ -1448,44 +1443,32 @@ def _consistency_payload(
 # ----------------------------------------------------------------------
 
 
-def _post_winner_decision(
+def _post_winner(
     workflow_path: str, experiment_id: str, body: dict[str, Any]
 ) -> tuple[int, dict[str, Any]]:
+    """Make this experiment its contest's winner, replacing any other."""
     control = _open_control(workflow_path, write=True)
-    group = _require_member(workflow_path, control, experiment_id)
-    decision = _text(body.get("decision"), "decision")
-    if decision not in selection.CLIENT_DECISIONS:
-        raise ApiError(
-            400,
-            "decision must be one of " + ", ".join(sorted(selection.CLIENT_DECISIONS)),
-        )
-    who = _actor(body)
-    candidate = body.get("candidate_experiment_id")
-    if candidate is None and decision == selection.DECISION_PROMOTE:
-        # Promotion names what it promotes; without it the route would have to
-        # guess between "this experiment" and "whatever was on screen".
-        candidate = experiment_id
-    result = control.record_decision(
-        str(group["group_id"]),
-        decision,
-        # Null when the reader saw no winner: a promotion into an empty
-        # contest is still a compare-and-set, against "nobody".
-        expected_selection_id=_text(
-            body.get("expected_selection_id"), "expected_selection_id", required=False
-        ),
-        candidate_experiment_id=None if candidate is None else _text(
-            candidate, "candidate_experiment_id"
-        ),
+    _require_member(workflow_path, control, experiment_id)
+    control.set_winner(
+        experiment_id,
         rationale=_text(body.get("rationale"), "rationale", required=False),
-        **who,
+        **_actor(body),
     )
-    # `record_decision` answers with the winner state carrying the decision
-    # inside it. Split here so `decision` means the same thing on this route as
-    # it does on the best-run routes: the record of what was just filed.
-    return 201, {
-        "decision": result["decision"],
-        "winner": _winner_payload(workflow_path, control, experiment_id),
-    }
+    return 200, _winner_payload(workflow_path, control, experiment_id)
+
+
+def _delete_winner(
+    workflow_path: str, experiment_id: str, body: dict[str, Any]
+) -> tuple[int, dict[str, Any]]:
+    """Leave this experiment's contest with no winner."""
+    control = _open_control(workflow_path, write=True)
+    _require_member(workflow_path, control, experiment_id)
+    control.clear_winner(
+        experiment_id,
+        rationale=_text(body.get("rationale"), "rationale", required=False),
+        **_actor(body),
+    )
+    return 200, _winner_payload(workflow_path, control, experiment_id)
 
 
 def _post_best_run(
@@ -1625,6 +1608,7 @@ def _post_duplicate(
         source_experiment_id,
         description=body.get("description"),
         runs_per_task=runs_per_task,
+        user_simulator=body.get("user_simulator"),
     )
     return 201, {
         "experiment": record,
@@ -1658,7 +1642,7 @@ def owns_write(path: str) -> bool:
     if parts is not None:
         rest = parts[1:]
         return (
-            rest == ["winner", "decisions"]
+            rest == ["winner"]
             or (len(rest) >= 3 and rest[0] == "tasks" and rest[2] in
                 ("best-run", "review-pairs"))
         )
@@ -1708,8 +1692,6 @@ def _guard(fn: Callable[[], tuple[int, dict[str, Any]]]) -> tuple[int, dict[str,
     except best_run_module.NoBestRun as exc:
         return 409, {"error": str(exc)}
     except best_run_module.TaskBestUnavailable as exc:
-        return 409, {"error": str(exc)}
-    except selection.NoCurrentSelection as exc:
         return 409, {"error": str(exc)}
     except (selection.UnknownComparisonGroup, selection.ExperimentNotInGroup) as exc:
         return 404, {"error": str(exc.args[0] if exc.args else exc)}
@@ -1767,8 +1749,8 @@ def handle_post(
 
     parts = _segments(path, EXPERIMENTS_PREFIX) or []
     experiment_id, rest = parts[0], parts[1:]
-    if rest == ["winner", "decisions"]:
-        return _guard(lambda: _post_winner_decision(workflow_path, experiment_id, body))
+    if rest == ["winner"]:
+        return _guard(lambda: _post_winner(workflow_path, experiment_id, body))
     task_id = rest[1]
     if rest[2:] == ["best-run"]:
         return _guard(lambda: _post_best_run(workflow_path, experiment_id, task_id, body))
@@ -1785,6 +1767,10 @@ def handle_delete(
     workflow_path: str, path: str, body: Any
 ) -> Optional[tuple[int, dict[str, Any]]]:
     parts = _segments(path, EXPERIMENTS_PREFIX)
+    if parts is not None and parts[1:] == ["winner"]:
+        if not isinstance(body, dict):
+            return 400, {"error": "body must be a JSON object"}
+        return _guard(lambda: _delete_winner(workflow_path, parts[0], body))
     if parts is None or len(parts) != 4 or parts[1] != "tasks" or parts[3] != "best-run":
         return None
     if not isinstance(body, dict):

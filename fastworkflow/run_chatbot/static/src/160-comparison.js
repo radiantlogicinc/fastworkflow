@@ -1,19 +1,19 @@
 /* -- the experiment winner ------------------------------------------- */
 
-/* The contest this experiment is in, and the decision controls for it.
+/* The winner of this experiment's benchmark version, and the one control that
+   changes it.
 
-   Rendered on both the recorded-experiment page and the registration page,
-   because "which experiment is this workflow's current answer" is the same
-   question whether or not the run has finished -- the first experiment of a
-   contest wins at creation, before it has run anything.
+   Each benchmark version is its own contest with zero or one winner
+   (`fix-873a`). Nobody wins by being created; somebody makes an experiment the
+   winner, or removes it, and having no winner is a normal state.
 
    The badge and the STATUS are deliberately two things. Being the winner is a
-   pointer somebody (or the automatic first-experiment rule) set; whether the
-   experiment completed, is still running or is invalid is its own recorded
-   fact, and collapsing them would let a pointer read as a pass. */
+   pointer somebody set; whether the experiment completed, is still running or
+   is invalid is its own recorded fact, and collapsing them would let a pointer
+   read as a pass. */
 function renderWinnerPanel(container, experimentId, reload) {
   var card = el("div", "card");
-  sectionHeader(card, "Winner of this contest");
+  sectionHeader(card, "Winner of this benchmark version");
   var body = el("div");
   card.appendChild(body);
   container.appendChild(card);
@@ -27,23 +27,14 @@ function renderWinnerPanel(container, experimentId, reload) {
     var winner = data.winner;
     var badges = el("div", "diffToolbar");
     badges.appendChild(el("span", data.is_winner ? "pill ok" : "pill",
-                          data.is_winner ? "Winner" : "Not the winner"));
-    if (data.automatic && data.is_winner) {
-      badges.appendChild(el("span", "pill", "automatic — first experiment"));
-    }
+                          data.is_winner ? "Winner" : (winner ? "Not the winner" : "No winner yet")));
     if (winner && winner.experiment && winner.experiment.status) {
       badges.appendChild(expStatusPill(winner.experiment.status));
     }
     body.appendChild(badges);
-    /* The one distinction a reader cannot recover from the badge: this is a
-       pointer, and it is not the per-task best run. */
     body.appendChild(el("div", "sub",
-      "This workflow's current answer for the benchmark — a pointer, not a "
-      + "score. Task best runs are chosen separately and never move it."));
-    if (data.automatic && data.is_winner) {
-      body.appendChild(el("div", "sub",
-        "Held since it was created, before anything ran."));
-    }
+      "One winner per benchmark version, or none — a pointer, not a score. "
+      + "Task best runs are chosen separately and never move it."));
     var kv = el("dl", "kv");
     function pair(k, v) {
       kv.appendChild(el("dt", null, k));
@@ -52,22 +43,12 @@ function renderWinnerPanel(container, experimentId, reload) {
     }
     pair("current winner", winner ? winner.experiment_id : "nobody");
     pair("recorded status", winner && winner.experiment
-      ? winner.experiment.status : "not recorded");
-    pair("how it was decided", winner
-      ? (winner.decision || "—")
-        + (winner.decided_at ? " at " + winner.decided_at : "")
-      : "—");
-    pair("experiments in this contest", (data.members || []).length);
+      ? winner.experiment.status : "—");
+    pair("set at", winner ? winner.decided_at : "—");
+    pair("experiments in this version", (data.members || []).length);
     pair("runs per task", data.runs_per_task);
+    pair("user simulator", data.user_simulator ? "yes" : "no");
     body.appendChild(kv);
-    /* The pointer is a fact even when the run behind it cannot be read. Saying
-       so beats an empty status that would read as "no status was recorded". */
-    if (winner && winner.experiment_resolved === false) {
-      body.appendChild(el("div", "sub",
-        "The winner is recorded, but experiment " + winner.experiment_id
-        + " has no recorded run in this workflow yet, so its current state is "
-        + "unknown rather than absent."));
-    }
     if (winner && winner.experiment_id !== experimentId) {
       var goto_ = el("button", "evidenceLink",
                      "Open the winning experiment's records");
@@ -85,67 +66,36 @@ function renderWinnerPanel(container, experimentId, reload) {
   });
 }
 
-/* Promote, keep or stay undecided, with an optional reason and no rubric.
-
-   All three carry the selection id this panel was rendered from, which is what
-   the contest requires: a "keep" recorded against a winner that was replaced
-   while somebody was reading is a judgement about a different experiment than
-   the one it would be filed under. A contest with no winner yet (experiments
-   recorded before contests were kept in the live database) offers promotion
-   alone, recorded against "nobody", which makes this experiment its first. */
+/* Make this experiment the winner, or remove it as the winner. One button. */
 function renderWinnerDecision(body, experimentId, data, reload) {
-  var box = el("div");
-  box.appendChild(el("h2", null, "Decide"));
-  if (!data.expected_selection_id) {
-    box.appendChild(el("div", "sub",
-      "This contest has no winner yet. Promoting this experiment makes it the first."));
-  }
-  var reason = reasonField(box, "Reason (optional)");
-  var status = el("div", "sub", "");
   var row = el("div", "runDecision");
-  [["promote", "Promote this experiment", "primary"],
-   ["keep", "Keep the current winner", null],
-   ["undecided", "Leave it undecided", null]].filter(function (choice) {
-    return data.expected_selection_id || choice[0] === "promote";
-  }).forEach(function (choice) {
-    var button = el("button", choice[2], choice[1]);
-    button.type = "button";
-    if (choice[0] === "promote" && data.is_winner) {
-      button.disabled = true;
-      button.title = "This experiment already holds the contest.";
-    }
-    button.addEventListener("click", function () {
-      status.textContent = "recording…";
-      selectionWrite(selectionPath(experimentId, "/winner/decisions"), "POST",
-        decisionBody({
-          decision: choice[0],
-          expected_selection_id: data.expected_selection_id || null,
-          /* Named on every decision, not only on a promotion: without it the
-             history can say a winner was kept but not which challenger was
-             turned down. */
-          candidate_experiment_id: experimentId,
-          rationale: reason.value.trim() || undefined
-        })
-      ).then(function (result) {
-        if (result.ok) {
-          showNotice("Decision recorded: " + choice[0]);
-          if (reload) { reload(); }
-          return;
-        }
-        status.textContent = "";
-        renderSelectionRefusal(box, result, reload || function () {});
-      }).catch(function (e) { status.textContent = e.message; });
-    });
-    row.appendChild(button);
+  var status = el("div", "sub", "");
+  var remove = !!data.is_winner;
+  var button = el("button", remove ? null : "primary",
+                  remove ? "Remove as winner" : "Make this the winner");
+  button.type = "button";
+  button.addEventListener("click", function () {
+    button.disabled = true;
+    status.textContent = "saving…";
+    selectionWrite(selectionPath(experimentId, "/winner"), remove ? "DELETE" : "POST",
+                   decisionBody({})).then(function (result) {
+      if (result.ok) {
+        showNotice(remove ? "Winner removed" : "Winner set");
+        if (reload) { reload(); }
+        return;
+      }
+      button.disabled = false;
+      status.textContent = (result.data && result.data.error) || ("refused (" + result.status + ")");
+    }).catch(function (e) { button.disabled = false; status.textContent = e.message; });
   });
+  row.appendChild(button);
   row.appendChild(status);
-  box.appendChild(row);
-  body.appendChild(box);
+  body.appendChild(row);
 }
 
 function renderWinnerHistory(body, experimentId) {
   var box = el("details", "card");
-  box.appendChild(el("summary", null, "Decisions in this contest"));
+  box.appendChild(el("summary", null, "Winner history for this version"));
   body.appendChild(box);
   box.addEventListener("toggle", function () {
     if (!box.open || box.dataset.loaded) { return; }
@@ -157,7 +107,7 @@ function renderWinnerHistory(body, experimentId) {
           return;
         }
         renderDecisionHistory(box, data.history || [],
-                              "No decision has been recorded in this contest.");
+                              "Nobody has set or removed a winner for this version.");
       }).catch(function (e) {
         box.dataset.loaded = "";
         box.appendChild(el("div", "sub", e.message));
@@ -572,8 +522,9 @@ function renderTaskCompare(container, experimentId, taskId, nav) {
 
   /* `storeId` is THIS page's database, read off the task's own runs. A link on
      either side compares against it to decide whether opening a trace changes
-     the store scope at all — and an ad-hoc experiment with no authoring
-     registration keeps working because nothing is scoped that need not be. */
+     the store scope at all — and an experiment pinned by its runner with no
+     authoring registration keeps working because nothing is scoped that need
+     not be. */
   var context = { experimentId: experimentId, taskId: taskId, winnerId: null,
                   storeId: null, comparison: null,
                   reload: function () { paint(); } };

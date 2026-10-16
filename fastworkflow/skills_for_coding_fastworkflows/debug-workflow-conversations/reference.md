@@ -1,7 +1,7 @@
 # observability.sqlite3 — the read contract
 
 Reference for `debug-workflow-conversations` (see SKILL.md for the triage
-method). The current source uses `SCHEMA_VERSION = 8` in `observability/store.py`.
+method). The current source uses `SCHEMA_VERSION = 10` in `observability/store.py`.
 Readers check compatibility; older evidence is not migrated by this version. Preserve it and
 use its writer's framework version. Inspect `PRAGMA user_version` read-only when diagnosing a
 mismatch, rather than forcing a version number or adding columns.

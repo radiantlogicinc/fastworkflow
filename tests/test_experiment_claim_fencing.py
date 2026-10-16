@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from tests.benchmark_pins import create_pinned
 import hashlib
 import json
 import multiprocessing
@@ -37,7 +38,7 @@ def controller(tmp_path, monkeypatch):
     controller = ExperimentController(
         folder, store.store_identity(), migrate=False, external=True
     )
-    controller.create_experiment(
+    create_pinned(controller,
         "exp-1",
         "claim fencing",
         declared_tasks=1,

@@ -42,6 +42,7 @@ CONTROL_SCHEMA = [
         runs_per_task INTEGER NOT NULL,
         source_experiment_id TEXT,
         changed_fields_json TEXT NOT NULL DEFAULT '[]',
+        user_simulator INTEGER NOT NULL DEFAULT 0,
         state TEXT NOT NULL DEFAULT 'registered'
             CHECK (state IN ('registered', 'bound', 'deleted')),
         created_at TEXT NOT NULL,
@@ -49,10 +50,11 @@ CONTROL_SCHEMA = [
         deleted_at TEXT)""",
     """CREATE INDEX IF NOT EXISTS idx_registrations_benchmark
         ON experiment_registrations(benchmark_id, state)""",
-    # One group per (workflow, benchmark lineage). `benchmark_version` is NOT
-    # part of the identity: the winner is scoped to the lineage across versions
-    # (`fix-9eg.17`), and each member row records the version it ran so a
-    # version change is visible rather than silently starting a new contest.
+    # One group per (workflow, benchmark, benchmark version) (`fix-873a`): two
+    # versions of a benchmark ran different task sets, so they are two
+    # contests with two independent winners. The version is in the derived
+    # `group_id` and on every member row. Every experiment pins a version
+    # (`fix-ujat`), so every group names one.
     """CREATE TABLE IF NOT EXISTS comparison_groups (
         group_id TEXT PRIMARY KEY, group_kind TEXT NOT NULL,
         workflow_name TEXT, benchmark_id TEXT,
@@ -62,9 +64,7 @@ CONTROL_SCHEMA = [
         benchmark_version TEXT, benchmark_digest_sha256 TEXT,
         created_at TEXT, joined_at TEXT NOT NULL,
         PRIMARY KEY (group_id, experiment_id))""",
-    # An experiment belongs to exactly one group. Membership is first-write-wins
-    # (see `register_experiment`): a pin added on a later re-create must not move
-    # an experiment out from under a winner pointer that already references it.
+    # An experiment belongs to exactly one group.
     """CREATE UNIQUE INDEX IF NOT EXISTS idx_group_member_experiment
         ON comparison_group_members(experiment_id)""",
     # `task_id`/`attempt` are NULL at experiment scope and used by the

@@ -1107,11 +1107,9 @@ function benchmarkExperimentTitle(row) {
   return { shortId: shortId, described: described || "" };
 }
 
-/* Newest-first puts the winner, often the oldest registration, at the bottom
-   of a long list, and an archived winner is hidden until the rail asks for
-   it. The callout names the pointer where the list starts. It is the same
-   fact the experiment page reports, including when nobody chose and the first
-   experiment still holds the contest. */
+/* Newest-first can put the winner at the bottom of a long list, and an
+   archived winner is hidden until the rail asks for it. The callout names this
+   version's winner where the list starts; with no winner it shows nothing. */
 function renderBenchmarkWinner(host, result, benchmarkId) {
   clear(host);
   var winnerId = result.winner_experiment_id;
@@ -1125,18 +1123,15 @@ function renderBenchmarkWinner(host, result, benchmarkId) {
   var content = el("div");
   var badges = el("div", "diffToolbar");
   badges.appendChild(el("span", "pill ok", "Winner"));
-  if (result.winner_automatic) {
-    badges.appendChild(el("span", "pill", "automatic — first experiment"));
-  }
   content.appendChild(badges);
   var title = row ? benchmarkExperimentTitle(row) : { shortId: winnerId, described: "" };
   content.appendChild(el("strong", null, title.shortId));
   if (title.described) { content.appendChild(el("p", null, title.described)); }
-  var note = "This workflow's current answer for the benchmark.";
+  var note = "This workflow's current answer for this benchmark version.";
   if (hidden) {
     note += " It is archived, so the list hides it until archived experiments are shown.";
   } else if (!row) {
-    note = "Recorded as the winner, but it is not in this benchmark's experiment list.";
+    note = "Recorded as the winner, but it is not in this version's experiment list.";
   }
   content.appendChild(el("p", null, note));
   if (row) {
@@ -1175,7 +1170,13 @@ function showBenchmark(benchmarkId, selectedVersion) {
       [[manifest.tasks.length, "Tasks in this version"], [version, "Selected version"], [versions.length, "Published versions"]].forEach(function (item) {
         var stat = el("div"); stat.appendChild(el("strong", null, item[0])); stat.appendChild(el("span", null, item[1])); strip.appendChild(stat);
       }); d.appendChild(strip);
-      var experimentsHead = sectionHeader(d, "Experiments"), experimentList = el("div", "recordGrid"), msg = el("p", "err fieldError"); msg.setAttribute("role", "alert");
+      /* A version picked explicitly (its rail row, the picker, a card's crumb)
+         is the selected row; opening the benchmark itself keeps the benchmark
+         row selected while showing its latest version. */
+      if (selectedVersion) {
+        focusHierarchy(function (n) { return n.kind === "benchmark_version" && n.benchmark_id === benchmarkId && n.benchmark_version === version; });
+      }
+      var experimentsHead = sectionHeader(d, "Experiments on " + version), experimentList = el("div", "recordGrid"), msg = el("p", "err fieldError"); msg.setAttribute("role", "alert");
       var create = el("button", "primary", "New experiment");
       create.addEventListener("click", function () {
         apiPost("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/experiments", {version: version}).then(function (result) {
@@ -1189,7 +1190,7 @@ function showBenchmark(benchmarkId, selectedVersion) {
       d.appendChild(winnerHost);
       d.appendChild(experimentList);
       experimentList.appendChild(el("div", "empty", "Loading experiments…"));
-      api("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/experiments").then(function (result) {
+      api("/api/benchmarks/" + encodeURIComponent(benchmarkId) + "/versions/" + encodeURIComponent(version) + "/experiments").then(function (result) {
         if (benchNavStale(nav)) { return; }
         clear(experimentList);
         renderBenchmarkWinner(winnerHost, result, benchmarkId);
@@ -1202,9 +1203,9 @@ function showBenchmark(benchmarkId, selectedVersion) {
            so; repeating it over the cards told the reader nothing new. */
         if (!experiments.length) {
           if (archivedCount) {
-            emptyState(experimentList, "Archived experiments are hidden", "Use Show all experiments beside this benchmark in the left rail to include them.");
+            emptyState(experimentList, "Archived experiments are hidden", "Use Show all experiments beside this version in the left rail to include them.");
           } else {
-            emptyState(experimentList, "Ready for your first experiment", "Create an experiment to reserve the task IDs for a run. Your runner records the results here.");
+            emptyState(experimentList, "No experiments on this version yet", "Create an experiment to reserve this version's task IDs for a run. Your runner records the results here.");
           }
         }
         experiments.forEach(function (row, index) {
@@ -1221,7 +1222,13 @@ function showBenchmark(benchmarkId, selectedVersion) {
           var described = recordedNode ? recordedNode.label : row.description;
           b.appendChild(el("strong", null, "Experiment " + (index + 1)));
           if (described) { b.appendChild(el("span", "sub", described)); }
-          b.appendChild(el("span", "sub", recordedPath || !row.registered ? "Execution recorded" : row.store ? "Execution registered" : "Not yet run"));
+          if (row.conformance) {
+            var verdict = el("span", "marks");
+            conformancePills(verdict, row.conformance);
+            b.appendChild(verdict);
+          } else {
+            b.appendChild(el("span", "sub", recordedPath || !row.registered ? "Execution recorded" : row.store ? "Execution registered" : "Not yet run"));
+          }
           b.appendChild(el("span", "recordId", row.experiment_id));
           b.addEventListener("click", function () { openBenchmarkRecord(row); }); experimentList.appendChild(b);
         });
@@ -1307,9 +1314,9 @@ function showBenchmarkExperiment(id) {
       note.appendChild(saveNote); note.appendChild(noteMsg);
     }
     d.appendChild(note);
-    /* The contest this registration is in, on the page that exists before the
-       run does: the first experiment of a contest holds it from creation, so
-       this page has a winner to show even though nothing has executed. */
+    /* The winner of this registration's benchmark version, on the page that
+       exists before the run does: an experiment can be made the winner before
+       it has executed. */
     renderWinnerPanel(d, id, function () { showBenchmarkExperiment(id); });
     renderRepeatSetup(d, row, nav);
     var identity = el("div", "card"), idActions = sectionHeader(identity, "Runner handoff");

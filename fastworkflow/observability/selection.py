@@ -6,36 +6,31 @@ sealed copy: sealed copies carry no control table, so a decision recorded
 about an archived run never changes the archive's bytes, and pruning evidence
 does not retract a decision somebody made.
 
-Scope of a contest: WORKFLOW + BENCHMARK LINEAGE, never DB identity. There is
-one live DB per workflow, so there is one control location and nothing to
-authorize: the experiments it judges are the ones its own `experiments` table
-records, and `store_for` hands back a member's sealed archive instead once it
-has one (`sealed_archives`).
+Scope of a contest: WORKFLOW + BENCHMARK + BENCHMARK VERSION (`fix-873a`).
+Experiments run against two versions of a benchmark ran different task sets,
+so they are never in one contest and never share a winner. There is one live
+DB per workflow, so there is one control location; `store_for` hands back a
+member's sealed archive once it has one (`sealed_archives`).
 
-Registration can run BEFORE the experiment has evidence. ``register_experiment_
-reference`` records an experiment from an explicit ``ExperimentReference``
-(workflow, benchmark lineage, created_at) so a UI that creates an experiment
-can initialize the first winner at creation time rather than at execution time.
+The winner is deliberately plain. A contest has zero or one winner; somebody
+sets it (`set_winner`) or removes it (`clear_winner`), and no winner is a
+normal state. Nothing is elected automatically, and there is no stale-read
+token: the last write wins. Each change appends one row to the decision
+history, so who set or removed it, and when, stays readable.
 
-Membership is explicit. An experiment joins when it is registered or recorded
-(`create_experiment`), and an experiment recorded before this build joins only
-when a decision request names it (``record_decision`` /
-``apply_scoped_decision``). Nothing scans history and adopts it, and a read
-never enrols anything.
+Membership is explicit. An experiment joins its group when it is registered or
+recorded (`create_experiment`); one recorded before this build joins when a
+decision names it. Nothing scans history and adopts it, and a read never
+enrols anything.
 
-Scopes. This module implements the EXPERIMENT-level winner only. The tables
-carry ``scope_kind``/``scope_key`` and reserved ``task_id``/``attempt`` columns
-so the later per-task "best run" selection (`fix-9eg.17.4`) can reuse this
-machinery without a control-schema break. The two scopes live under different
-primary keys by construction, so neither can overwrite the other: selecting a
-best run for a task cannot promote its experiment, and promoting an experiment
-cannot touch a task's best-run history. ``TASK_BEST_SCOPE`` is declared but not
-wired: nothing in this module writes it yet.
+Scopes. The same tables carry the per-task "best run" (`best_run.py`,
+``TASK_BEST_SCOPE``) under different ``scope_kind``/``scope_key`` values, so the
+two can never overwrite each other: selecting a best run for a task cannot
+promote its experiment, and setting the winner cannot touch a task's best run.
 
 Selecting a winner records a reference. It does not deploy code, restore data,
 rerun anything, or claim the winner succeeded — ``current_winner()`` reports the
-experiment's ACTUAL status, which for the automatic first winner is usually
-``running``.
+experiment's ACTUAL status.
 """
 
 from __future__ import annotations
@@ -58,60 +53,29 @@ from fastworkflow.observability.store import (
 )
 
 EXPERIMENT_SCOPE = "experiment"
-# Reserved for `fix-9eg.17.4` (best run for one task within an experiment).
-# Declared here so the column vocabulary is fixed before two writers exist;
-# this module never writes it.
+# The per-task best run (`best_run.py`). Declared here so the column vocabulary
+# is fixed in one place; only `best_run` writes it.
 TASK_BEST_SCOPE = "task_best"
 
-DECISION_INITIAL = "initial"
-DECISION_PROMOTE = "promote"
-DECISION_KEEP = "keep"
-DECISION_UNDECIDED = "undecided"
-# What `retire_experiment` appends when a registration leaves the contest. Like
-# `initial` it is written by the system, never offered to clients: withdrawing
-# an experiment is a consequence of deleting it, not a verdict about it.
-DECISION_RETIRE = "retire"
-# `initial` is not offered to clients: it is what registration writes once, for
-# the first experiment in a group.
-CLIENT_DECISIONS = frozenset({DECISION_PROMOTE, DECISION_KEEP, DECISION_UNDECIDED})
+# The two winner decisions. History rows written by older builds may carry
+# other words (`initial`, `promote`, `keep`, `undecided`, `retire`); they stay
+# readable, nothing writes them any more.
+DECISION_SET = "set"
+DECISION_CLEAR = "clear"
 
 GROUP_BENCHMARK = "benchmark"
-GROUP_ADHOC = "adhoc"
 
 # Who decided. Shares the feedback vocabulary so a human comment and an agent's
-# structured decision describe their origin the same way, plus `system` for the
-# automatic first-experiment initialization, which no actor asked for.
+# structured decision describe their origin the same way, plus `system` for
+# changes no actor asked for (a deleted registration leaving its contest).
 SYSTEM_ACTOR_KIND = "system"
 SELECTION_ACTOR_KINDS = frozenset(FEEDBACK_PROVENANCES | {SYSTEM_ACTOR_KIND})
 
-_AUTOMATIC_PROVENANCE = "automatic_first_experiment"
-_RETIREMENT_PROVENANCE = "registration_deleted"
 _MAX_TEXT = 4000
 
 
 class SelectionControlError(RuntimeError):
     """Base class for control-metadata failures."""
-
-
-class SelectionRetirementRefused(SelectionControlError):
-    """This experiment cannot leave the contest. Two reasons, kept apart:
-
-    - ``is_current_winner`` — the group's pointer names it and the group has
-      other members (or the caller did not pass ``allow_sole_winner``).
-      Withdrawing it would either leave the pointer naming something that is
-      gone, or make this module pick a successor nobody asked it to pick.
-      Neither is a deletion's business, so the caller is refused and told to
-      select a different winner first.
-    - ``has_evidence`` — a run was recorded under it. Retirement is for a
-      registration that never happened; evidence is history, and history stays
-      in the contest it was part of.
-    """
-
-    def __init__(self, experiment_id: str, group_id: Optional[str], reason: str, detail: str) -> None:
-        self.experiment_id = experiment_id
-        self.group_id = group_id
-        self.reason = reason
-        super().__init__(detail)
 
 
 class UnknownComparisonGroup(KeyError):
@@ -134,17 +98,8 @@ class ExperimentNotInGroup(ValueError):
         )
 
 
-class NoCurrentSelection(ValueError):
-    """A decision was recorded about a scope that has no current selection.
-
-    For the experiment winner that is a group nobody has joined with an
-    election yet; the message says how one is elected, because "no current
-    winner" alone reads like a bug rather than a state.
-    """
-
-
 class StaleSelection(ValueError):
-    """The decision was made against a winner that has since been replaced.
+    """A best-run decision was made against a selection that has since moved.
 
     Carries what the caller expected and what is actually current so a UI or an
     agent can say which decision won, rather than reporting a generic conflict.
@@ -183,35 +138,35 @@ class StaleSelection(ValueError):
 def comparison_group_identity(experiment: Mapping[str, Any]) -> dict[str, Any]:
     """Derive the comparison group an experiment row belongs to.
 
-    Pinned experiments group by (workflow, benchmark lineage) across versions.
-    Unpinned ("ad-hoc") experiments group by workflow alone, which is the
-    automatically created local comparison group the epic asks for: two ad-hoc
-    runs of the same workflow are the things a user would actually compare, and
-    a group per experiment would make every experiment its own winner.
+    Experiments group by (workflow, benchmark, benchmark version): two
+    versions of a benchmark are two contests (`fix-873a`). Every experiment
+    pins a benchmark version (`fix-ujat`); a row without one has no contest
+    and is refused here.
 
-    The evidence store is deliberately absent from the key. Two runs of one
-    lineage recorded in two different stores are one contest; if DB identity
-    were part of this, every store would grow its own uncontested winner.
+    The evidence store is deliberately absent from the key: two runs of one
+    benchmark version recorded in two stores are one contest.
 
     Deterministic by construction — the id is derived, never minted — so two
-    processes creating the first two experiments at the same moment compute the
-    same group id and contend for one pointer row instead of creating two
-    groups, each with its own "first" winner.
+    processes registering experiments at the same moment compute the same
+    group id instead of creating two groups.
     """
     workflow_name = _clean(experiment.get("workflow_name")) or ""
     benchmark_id = _clean(experiment.get("benchmark_id")) or ""
-    if benchmark_id:
-        kind = GROUP_BENCHMARK
-        parts = (GROUP_BENCHMARK, workflow_name, benchmark_id)
-    else:
-        kind = GROUP_ADHOC
-        parts = (GROUP_ADHOC, workflow_name)
+    benchmark_version = _clean(experiment.get("benchmark_version")) or ""
+    if not benchmark_id:
+        raise ValueError(
+            f"experiment {experiment.get('experiment_id')!r} names no benchmark "
+            "version, so it belongs to no contest"
+        )
+    kind = GROUP_BENCHMARK
+    parts = (GROUP_BENCHMARK, workflow_name, benchmark_id, benchmark_version)
     digest = hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()[:16]
     return {
         "group_id": f"{kind}-{digest}",
         "group_kind": kind,
         "workflow_name": workflow_name or None,
         "benchmark_id": benchmark_id or None,
+        "benchmark_version": benchmark_version or None,
     }
 
 
@@ -219,10 +174,8 @@ def comparison_group_identity(experiment: Mapping[str, Any]) -> dict[str, Any]:
 class ExperimentReference:
     """An experiment named before it has recorded any evidence.
 
-    Carries exactly the fields a contest is scoped by, plus the ordering key.
-    ``created_at`` matters: it is what the oldest-member election compares, so
-    a reference registered with no timestamp is treated as created now, which
-    is the truth at UI-creation time.
+    Carries exactly the fields a contest is scoped by, plus ``created_at``; a
+    reference registered with no timestamp is treated as created now.
     """
 
     experiment_id: str
@@ -257,11 +210,6 @@ def _require_text(value: Any, field: str) -> str:
     if len(text) > _MAX_TEXT:
         raise ValueError(f"{field} must be at most {_MAX_TEXT} characters")
     return text
-
-
-def _order_key(created_at: Any, experiment_id: Any) -> tuple[str, str]:
-    """The one ordering rule for "older", stated once so two callers agree."""
-    return (str(created_at or ""), str(experiment_id or ""))
 
 
 def _require_actor(actor: str, actor_kind: str, provenance: str) -> tuple[str, str]:
@@ -329,82 +277,34 @@ class SelectionControlStore:
         experiment_id: str,
         *,
         experiment: Optional[Mapping[str, Any]] = None,
-        allow_initial_winner: bool = True,
-        actor: str = "fastworkflow",
-        actor_kind: str = SYSTEM_ACTOR_KIND,
-        provenance: str = _AUTOMATIC_PROVENANCE,
     ) -> dict[str, Any]:
-        """Record an experiment in its group; the first one wins automatically.
+        """Record an experiment in its group. Idempotent; elects nobody.
 
-        Idempotent, because ``create_experiment`` is re-run on every resume: a
-        second call adds no member row and no decision, and cannot re-run the
-        automatic initialization against a group whose winner has since moved.
-
-        The initial winner is recorded while the experiment is still RUNNING and
-        is never annotated as successful. ``current_winner`` reports the live
-        status, so a first experiment that fails stays visibly failed until
-        somebody explicitly replaces it.
+        ``create_experiment`` re-runs on every resume, so a second call adds no
+        member row.
         """
         row = experiment
         if row is None and self.store is not None:
             row = self.store.get_experiment(experiment_id)
         if row is None:
             raise ExperimentNotFound(experiment_id)
-        return self._register(
-            experiment_id,
-            row,
-            allow_initial_winner=allow_initial_winner,
-            actor=actor,
-            actor_kind=actor_kind,
-            provenance=provenance,
-        )
+        return self._register(experiment_id, row)
 
-    def register_experiment_reference(
-        self,
-        reference: ExperimentReference,
-        *,
-        allow_initial_winner: bool = True,
-        actor: str = "fastworkflow",
-        actor_kind: str = SYSTEM_ACTOR_KIND,
-        provenance: str = _AUTOMATIC_PROVENANCE,
-    ) -> dict[str, Any]:
+    def register_experiment_reference(self, reference: ExperimentReference) -> dict[str, Any]:
         """Register an experiment that has recorded no evidence yet.
 
-        This is the UI-creation path: an experiment exists as a decision to run
-        something long before a runner records anything for it, and the first
-        winner of a brand-new group should be initialized then, not on first
-        execution. The reference carries the lineage fields the contest is
-        scoped by.
+        The UI-creation path: an experiment exists as a decision to run
+        something long before a runner records anything for it. The reference
+        carries the fields the contest is scoped by.
         """
         return self._register(
             _require_text(reference.experiment_id, "experiment_id"),
             reference.as_row(),
-            allow_initial_winner=allow_initial_winner,
-            actor=actor,
-            actor_kind=actor_kind,
-            provenance=provenance,
         )
 
-    def _register(
-        self,
-        experiment_id: str,
-        row: Mapping[str, Any],
-        *,
-        allow_initial_winner: bool,
-        actor: str,
-        actor_kind: str,
-        provenance: str,
-    ) -> dict[str, Any]:
+    def _register(self, experiment_id: str, row: Mapping[str, Any]) -> dict[str, Any]:
         with control.write(self.store) as conn:
-            joined = self.join_in_txn(
-                conn,
-                experiment_id,
-                row,
-                allow_initial_winner=allow_initial_winner,
-                actor=actor,
-                actor_kind=actor_kind,
-                provenance=provenance,
-            )
+            joined = self.join_in_txn(conn, experiment_id, row)
         return {**joined, "winner": self.current_winner(joined["group_id"])}
 
     def join_in_txn(
@@ -412,37 +312,23 @@ class SelectionControlStore:
         conn: sqlite3.Connection,
         experiment_id: str,
         row: Mapping[str, Any],
-        *,
-        allow_initial_winner: bool = True,
-        actor: str = "fastworkflow",
-        actor_kind: str = SYSTEM_ACTOR_KIND,
-        provenance: str = _AUTOMATIC_PROVENANCE,
     ) -> dict[str, Any]:
         """The one join path, inside the caller's ``BEGIN IMMEDIATE``.
 
-        Registration, `create_experiment` and the explicit enrolment of a
-        decision request all come through here, so they share one membership
-        and election rule.
+        Registration, `create_experiment` and the enrolment of a decision
+        request all come through here. Joining never sets a winner.
         """
         experiment_id = _require_text(experiment_id, "experiment_id")
-        actor, provenance = _require_actor(actor, actor_kind, provenance)
         control.ensure(conn)
         identity = comparison_group_identity(row)
         group_id = identity["group_id"]
         now = _utcnow_iso()
-        created_at = _clean(row.get("created_at")) or now
         registered = False
-        initialized = False
         member = conn.execute(
             "SELECT group_id FROM comparison_group_members WHERE experiment_id=?",
             (experiment_id,),
         ).fetchone()
         if member is None:
-            # The group row is created only when this registration is
-            # actually going to join it. Creating it first would leave an
-            # empty group behind every time a re-registration derived a
-            # different id and then kept its sticky membership — a contest
-            # with no members, visible in `list_groups`.
             conn.execute(
                 """INSERT INTO comparison_groups
                    (group_id, group_kind, workflow_name, benchmark_id,
@@ -468,92 +354,28 @@ class SelectionControlStore:
                     experiment_id,
                     _clean(row.get("benchmark_version")),
                     _clean(row.get("benchmark_digest_sha256")),
-                    created_at,
+                    _clean(row.get("created_at")) or now,
                     now,
                 ),
             )
             registered = True
         else:
-            # Membership is sticky. An experiment created unpinned and
-            # re-created with a benchmark pin would derive a different
-            # group; moving it would orphan a pointer that already
-            # names it, so the first group it joined keeps it.
+            # Membership is sticky: an experiment's benchmark pin is
+            # write-once, so the group it first joined is the right one.
             group_id = str(member["group_id"])
-        if _pointer(conn, group_id) is None and allow_initial_winner:
-            # The OLDEST member takes the pointer, not the caller. A group can
-            # hold members before it has a winner -- one registered with
-            # `allow_initial_winner=False`, or a sole winner retired under
-            # `allow_sole_winner` -- and the registration that finally elects
-            # may be a newer one than the history already sitting in the group
-            # (`fix-kkod`). `_order_key`, earliest wins.
-            elected = min(
-                conn.execute(
-                    """SELECT experiment_id, created_at
-                         FROM comparison_group_members WHERE group_id=?""",
-                    (group_id,),
-                ).fetchall(),
-                key=lambda m: _order_key(m["created_at"], m["experiment_id"]),
-            )
-            elected_id = str(elected["experiment_id"])
-            selection_id = uuid.uuid4().hex
-            # NOT a hardcoded 1. A group can have history BEFORE it has a
-            # winner: a member deleted in the meantime appends `retire` at
-            # seq 1 (`fix-jfy5`). The election that finally arrives is the
-            # next sequence number; reusing 1 violated the UNIQUE (scope,
-            # group, scope_key, seq) and lost the election to a swallowed
-            # IntegrityError, leaving the group winner-less for good.
-            seq = _next_seq(conn, EXPERIMENT_SCOPE, group_id, "")
-            conn.execute(
-                """INSERT INTO selection_pointers
-                   (scope_kind, group_id, scope_key, experiment_id,
-                    task_id, attempt, selection_id, decision,
-                    decision_seq, decided_at)
-                   VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)""",
-                (
-                    EXPERIMENT_SCOPE,
-                    group_id,
-                    "",
-                    elected_id,
-                    selection_id,
-                    DECISION_INITIAL,
-                    seq,
-                    now,
-                ),
-            )
-            self._append_decision_in_txn(
-                conn,
-                group_id=group_id,
-                seq=seq,
-                decision=DECISION_INITIAL,
-                previous_experiment_id=None,
-                previous_selection_id=None,
-                candidate_experiment_id=elected_id,
-                new_experiment_id=elected_id,
-                new_selection_id=selection_id,
-                actor=actor,
-                actor_kind=actor_kind,
-                provenance=provenance,
-                rationale=None,
-                created_at=now,
-            )
-            initialized = True
         return {
             "group_id": group_id,
             "experiment_id": experiment_id,
             "registered": registered,
-            "initialized": initialized,
         }
 
     def _enrol_in_txn(
         self, conn: sqlite3.Connection, group_id: str, experiment_id: Optional[str]
     ) -> bool:
-        """Join a recorded, not-yet-enrolled experiment a decision names (§2.3).
+        """Join a recorded, not-yet-enrolled experiment a decision names.
 
-        The explicit enrolment of an experiment recorded before this build:
-        it joins only because a decide, keep or promote request named it, and
-        through the same join and election as any member. One that is not in
-        `experiments`, or whose lineage is another group's, is left alone and
-        refused by the caller's own membership check.
+        One that is not in `experiments`, or whose group is another one, is
+        left alone and refused by the caller's own membership check.
         """
         experiment_id = _clean(experiment_id)
         if experiment_id is None or conn.execute(
@@ -569,374 +391,154 @@ class SelectionControlStore:
         self.join_in_txn(conn, experiment_id, dict(row))
         return True
 
-    def retire_experiment(
-        self,
-        experiment_id: str,
-        *,
-        actor: str = "fastworkflow",
-        actor_kind: str = SYSTEM_ACTOR_KIND,
-        provenance: str = _RETIREMENT_PROVENANCE,
-        rationale: Optional[str] = None,
-        allow_sole_winner: bool = False,
-    ) -> dict[str, Any]:
-        """Withdraw a registration that is being deleted (`fix-jfy5`).
+    def leave_in_txn(self, conn: sqlite3.Connection, experiment_id: str) -> None:
+        """A deleted registration leaves its contest, inside the caller's txn.
 
-        The bug this closes: registration and election happen together at
-        creation, deletion only tombstoned the registration, so a group could
-        be left naming a winner nobody could open -- unresolvable, listed as a
-        member, and impossible to duplicate, which is the one action the winner
-        screen offers.
-
-        The policy is deliberately small. A member that is NOT the current
-        winner leaves, membership row and all, in ONE transaction that also
-        appends the `retire` row. The current winner does not leave while the
-        group has anybody else in it:
-
-        - Clearing the pointer and stopping would leave the group with no
-          winner while members remain, which is a judgement about the contest
-          that nobody made.
-        - Clearing it and electing a successor would be this module deciding
-          the contest while somebody was deleting something else.
-
-        So it refuses, and the refusal is the whole feature: the caller selects
-        a different winner first and then deletes. That is one user action
-        more, in exchange for a pointer that can never name a tombstone. The
-        refusal covers the AUTOMATIC first winner too -- it is still the
-        experiment every read currently reports, and "nobody chose it" is not
-        the same as "anybody may remove it".
-
-        The one exception is ``allow_sole_winner=True`` with the winner as the
-        group's ONLY member (`fix-65ik`). There is nobody to select instead, so
-        the refusal had no way out: promoting a second experiment and deleting
-        the first only moved the problem onto the second. Neither objection
-        above applies -- a contest with no entrants has no verdict to withhold
-        and no successor to pick -- so the member row AND the pointer go, and
-        the `retire` row records the winner it removed (`new_experiment_id`
-        empty). The next experiment of that lineage is elected automatically,
-        like the first one was. Any other member present means refusal as
-        before; that is checked inside the same transaction, so a registration
-        that joins first turns this into the ordinary refusal.
-
-        The check and the removal are one `BEGIN IMMEDIATE` transaction, which
-        is what makes the interesting race safe in both directions: a promotion
-        that lands first makes this refuse, and a retirement that lands first
-        makes the promotion fail its membership check. Neither order can leave
-        the pointer naming a withdrawn experiment.
-
-        An experiment with evidence is refused as well. Retirement is for a
-        registration nobody ran; a recorded run stays in the contest it was
-        part of.
-
-        History is append-only throughout: a `retire` row is added naming what
-        left and the pointer before and after (the same pointer, except in the
-        sole-winner case), and nothing is rewritten. An experiment nobody
-        registered here is not an error -- retirement is idempotent, so a
-        deletion path can call it without first asking whether it applies.
-
-        The GROUP row stays even when its last member leaves, because the
-        decisions made in it name it and an append-only history must not end up
-        referring to a contest that no longer exists. A group with no members
-        and no pointer reads as "nobody has won this yet", which is what it is;
-        the next experiment of that lineage rejoins it. Two paths produce one:
-        the last NON-winner leaving a group that never elected, and the sole
-        winner leaving under ``allow_sole_winner``.
+        Its membership row goes, and so does the winner pointer when it names
+        it: the contest then simply has no winner. History is untouched.
         """
-        with control.write(self.store) as conn:
-            retired = self.retire_in_txn(
-                conn,
-                experiment_id,
-                actor=actor,
-                actor_kind=actor_kind,
-                provenance=provenance,
-                rationale=rationale,
-                allow_sole_winner=allow_sole_winner,
-            )
-        if not retired["retired"]:
-            return retired
-        return {**retired, "winner": self.current_winner(retired["group_id"])}
+        member = conn.execute(
+            "SELECT group_id FROM comparison_group_members WHERE experiment_id=?",
+            (experiment_id,),
+        ).fetchone()
+        if member is None:
+            return
+        conn.execute(
+            "DELETE FROM comparison_group_members WHERE experiment_id=?",
+            (experiment_id,),
+        )
+        conn.execute(
+            """DELETE FROM selection_pointers
+                WHERE scope_kind=? AND group_id=? AND scope_key='' AND experiment_id=?""",
+            (EXPERIMENT_SCOPE, str(member["group_id"]), experiment_id),
+        )
 
-    def retire_in_txn(
+    # -- the winner --------------------------------------------------------
+
+    def _group_in_txn(self, conn: sqlite3.Connection, experiment_id: str) -> str:
+        """The group this experiment is in, enrolling a recorded one first."""
+        member = conn.execute(
+            "SELECT group_id FROM comparison_group_members WHERE experiment_id=?",
+            (experiment_id,),
+        ).fetchone()
+        if member is not None:
+            return str(member["group_id"])
+        row = conn.execute(
+            "SELECT * FROM experiments WHERE experiment_id=?", (experiment_id,)
+        ).fetchone()
+        if row is None:
+            raise ExperimentNotFound(experiment_id)
+        return self.join_in_txn(conn, experiment_id, dict(row))["group_id"]
+
+    def set_winner(
         self,
-        conn: sqlite3.Connection,
         experiment_id: str,
         *,
-        actor: str = "fastworkflow",
-        actor_kind: str = SYSTEM_ACTOR_KIND,
-        provenance: str = _RETIREMENT_PROVENANCE,
+        actor: str,
+        actor_kind: str,
+        provenance: str,
         rationale: Optional[str] = None,
-        allow_sole_winner: bool = False,
-    ) -> dict[str, Any]:
-        """`retire_experiment` inside the caller's ``BEGIN IMMEDIATE``.
+    ) -> Optional[dict[str, Any]]:
+        """Make this experiment the winner of its contest.
 
-        Deleting a registration tombstones it in the same transaction, so a
-        refusal here leaves both exactly as they were.
+        Replaces whatever winner the contest had. Setting the experiment that
+        already wins changes nothing and records nothing.
         """
         experiment_id = _require_text(experiment_id, "experiment_id")
         actor, provenance = _require_actor(actor, actor_kind, provenance)
         rationale = _clean(rationale)
         if rationale is not None and len(rationale) > _MAX_TEXT:
             raise ValueError(f"rationale must be at most {_MAX_TEXT} characters")
-
         now = _utcnow_iso()
-        member = conn.execute(
-            "SELECT * FROM comparison_group_members WHERE experiment_id=?",
-            (experiment_id,),
-        ).fetchone()
-        group_id = None if member is None else str(member["group_id"])
-        if conn.execute(
-            "SELECT 1 FROM experiments WHERE experiment_id=?", (experiment_id,)
-        ).fetchone() is not None:
-            raise SelectionRetirementRefused(
-                experiment_id,
-                group_id,
-                "has_evidence",
-                f"experiment {experiment_id!r} has recorded evidence and cannot "
-                "be withdrawn from its comparison group",
-            )
-        if member is None:
-            return {
-                "retired": False,
-                "experiment_id": experiment_id,
-                "group_id": None,
-                "seq": None,
-            }
-        pointer = _pointer(conn, group_id)
-        winner_retired = False
-        if pointer is not None and str(pointer["experiment_id"]) == experiment_id:
-            others = conn.execute(
-                """SELECT 1 FROM comparison_group_members
-                    WHERE group_id=? AND experiment_id<>? LIMIT 1""",
-                (group_id, experiment_id),
-            ).fetchone()
-            if not allow_sole_winner or others is not None:
-                raise SelectionRetirementRefused(
-                    experiment_id,
-                    group_id,
-                    "is_current_winner",
-                    f"experiment {experiment_id!r} is the current winner of "
-                    f"comparison group {group_id!r}; select a different winner "
-                    "before withdrawing it",
-                )
-            winner_retired = True
-        seq = _next_seq(conn, EXPERIMENT_SCOPE, group_id, "")
-        conn.execute(
-            "DELETE FROM comparison_group_members WHERE group_id=? AND experiment_id=?",
-            (group_id, experiment_id),
-        )
-        if winner_retired:
+        with control.write(self.store) as conn:
+            group_id = self._group_in_txn(conn, experiment_id)
+            current = _pointer(conn, group_id)
+            if current is not None and str(current["experiment_id"]) == experiment_id:
+                return self.current_winner(group_id)
+            seq = _next_seq(conn, EXPERIMENT_SCOPE, group_id, "")
+            selection_id = uuid.uuid4().hex
             conn.execute(
-                """DELETE FROM selection_pointers
-                    WHERE scope_kind=? AND group_id=? AND scope_key=?""",
-                (EXPERIMENT_SCOPE, group_id, ""),
+                """INSERT INTO selection_pointers
+                   (scope_kind, group_id, scope_key, experiment_id, task_id,
+                    attempt, selection_id, decision, decision_seq, decided_at)
+                   VALUES (?, ?, '', ?, NULL, NULL, ?, ?, ?, ?)
+                   ON CONFLICT(scope_kind, group_id, scope_key) DO UPDATE SET
+                     experiment_id=excluded.experiment_id,
+                     selection_id=excluded.selection_id,
+                     decision=excluded.decision,
+                     decision_seq=excluded.decision_seq,
+                     decided_at=excluded.decided_at""",
+                (EXPERIMENT_SCOPE, group_id, experiment_id, selection_id,
+                 DECISION_SET, seq, now),
             )
-        current_experiment_id = (
-            None if pointer is None else str(pointer["experiment_id"])
-        )
-        current_selection_id = (
-            None if pointer is None else str(pointer["selection_id"])
-        )
-        self._append_decision_in_txn(
-            conn,
-            group_id=group_id,
-            seq=seq,
-            decision=DECISION_RETIRE,
-            previous_experiment_id=current_experiment_id,
-            previous_selection_id=current_selection_id,
-            candidate_experiment_id=experiment_id,
-            # The winner is the same before and after, which is the point --
-            # unless the sole winner itself left, and then there is none.
-            new_experiment_id=None if winner_retired else current_experiment_id,
-            new_selection_id=None if winner_retired else current_selection_id,
-            actor=actor,
-            actor_kind=actor_kind,
-            provenance=provenance,
-            rationale=rationale,
-            created_at=now,
-        )
-        return {
-            "retired": True,
-            "experiment_id": experiment_id,
-            "group_id": group_id,
-            "seq": seq,
-            "winner_retired": winner_retired,
-        }
+            self._append_decision_in_txn(
+                conn,
+                group_id=group_id,
+                seq=seq,
+                decision=DECISION_SET,
+                previous_experiment_id=(
+                    None if current is None else str(current["experiment_id"])
+                ),
+                previous_selection_id=(
+                    None if current is None else str(current["selection_id"])
+                ),
+                candidate_experiment_id=experiment_id,
+                new_experiment_id=experiment_id,
+                new_selection_id=selection_id,
+                actor=actor,
+                actor_kind=actor_kind,
+                provenance=provenance,
+                rationale=rationale,
+                created_at=now,
+            )
+        return self.current_winner(group_id)
 
-    # -- decisions -------------------------------------------------------
-
-    def record_decision(
+    def clear_winner(
         self,
-        group_id: str,
-        decision: str,
+        experiment_id: str,
         *,
-        expected_selection_id: Optional[str],
         actor: str,
         actor_kind: str,
         provenance: str,
-        candidate_experiment_id: Optional[str] = None,
         rationale: Optional[str] = None,
-    ) -> dict[str, Any]:
-        """Promote a candidate, keep the current winner, or stay undecided.
+    ) -> None:
+        """Remove the winner of this experiment's contest, whichever it is.
 
-        Every decision appends to history; ONLY ``promote`` moves the pointer.
-        ``expected_selection_id`` is checked for all three: a "keep" recorded
-        against a winner that was replaced while the reviewer was reading is a
-        judgement about a different experiment than the one it will be filed
-        under, which is the same wrong answer a stale promotion gives. ``None``
-        states "I read this contest and it had no winner".
-
-        ``candidate_experiment_id`` is REQUIRED for ``promote`` and OPTIONAL for
-        ``keep``/``undecided``, where it names the experiment that was being
-        reviewed when the decision was made. Without it the history can say a
-        winner was kept but not which challenger was rejected or deferred, which
-        is most of what a reviewer wants back. It is validated for membership
-        and round-tripped verbatim; on keep/undecided it moves nothing. A keep
-        naming the current winner is allowed and means "re-reviewed, still it".
-
-        A candidate recorded in this live DB before this build, and not yet a
-        member, is enrolled first, in this same transaction and through the
-        ordinary join — which elects it when it is the group's first member.
-        A promotion that enrolment has already satisfied records nothing more.
+        A contest with no winner is left as it is and nothing is recorded.
         """
-        if decision not in CLIENT_DECISIONS:
-            raise ValueError(
-                "decision must be one of " + ", ".join(sorted(CLIENT_DECISIONS))
-            )
+        experiment_id = _require_text(experiment_id, "experiment_id")
         actor, provenance = _require_actor(actor, actor_kind, provenance)
-        expected_selection_id = _clean(expected_selection_id)
         rationale = _clean(rationale)
         if rationale is not None and len(rationale) > _MAX_TEXT:
             raise ValueError(f"rationale must be at most {_MAX_TEXT} characters")
-        if decision == DECISION_PROMOTE:
-            candidate_experiment_id = _require_text(
-                candidate_experiment_id, "candidate_experiment_id"
-            )
-        else:
-            candidate_experiment_id = _clean(candidate_experiment_id)
         now = _utcnow_iso()
         with control.write(self.store) as conn:
-            read = _pointer(conn, group_id)
-            enrolled = self._enrol_in_txn(conn, group_id, candidate_experiment_id)
-            if conn.execute(
-                "SELECT 1 FROM comparison_groups WHERE group_id=?", (group_id,)
-            ).fetchone() is None:
-                raise UnknownComparisonGroup(group_id)
-            if read is None and expected_selection_id is not None:
-                raise NoCurrentSelection(
-                    f"comparison group {group_id!r} has no current winner yet, "
-                    "so there is nothing to promote over, keep or defer. A "
-                    "group elects its earliest member when one joins; a "
-                    "decision naming an experiment this workflow recorded "
-                    "enrols it."
-                )
-            if read is not None and str(read["selection_id"]) != expected_selection_id:
-                raise StaleSelection(
-                    group_id=group_id,
-                    expected_selection_id=expected_selection_id,
-                    current_selection_id=str(read["selection_id"]),
-                    current_experiment_id=str(read["experiment_id"]),
-                )
-            pointer = _pointer(conn, group_id) if enrolled else read
-            if pointer is None:
-                raise NoCurrentSelection(
-                    f"comparison group {group_id!r} has no current winner yet, "
-                    "so there is nothing to promote over, keep or defer."
-                )
-            current_selection_id = str(pointer["selection_id"])
-            current_experiment_id = str(pointer["experiment_id"])
-            # The enrolment just elected the experiment this promotes.
-            elected = (
-                read is None
-                and decision == DECISION_PROMOTE
-                and candidate_experiment_id == current_experiment_id
+            group_id = self._group_in_txn(conn, experiment_id)
+            current = _pointer(conn, group_id)
+            if current is None:
+                return
+            seq = _next_seq(conn, EXPERIMENT_SCOPE, group_id, "")
+            conn.execute(
+                """DELETE FROM selection_pointers
+                    WHERE scope_kind=? AND group_id=? AND scope_key=''""",
+                (EXPERIMENT_SCOPE, group_id),
             )
-            if candidate_experiment_id is not None:
-                if conn.execute(
-                    """SELECT 1 FROM comparison_group_members
-                        WHERE group_id=? AND experiment_id=?""",
-                    (group_id, candidate_experiment_id),
-                ).fetchone() is None:
-                    raise ExperimentNotInGroup(candidate_experiment_id, group_id)
-                if (
-                    decision == DECISION_PROMOTE
-                    and candidate_experiment_id == current_experiment_id
-                    and not elected
-                ):
-                    raise ValueError(
-                        f"experiment {candidate_experiment_id!r} is already the "
-                        f"current winner; record a {DECISION_KEEP!r} decision "
-                        "instead of promoting it again"
-                    )
-            new_experiment_id = current_experiment_id
-            new_selection_id = current_selection_id
-            if elected:
-                # Recorded as what it is: the group's election, not a promotion.
-                decision, seq = DECISION_INITIAL, int(pointer["decision_seq"])
-                current_experiment_id = None
-            else:
-                seq = _next_seq(conn, EXPERIMENT_SCOPE, group_id, "")
-            if decision == DECISION_PROMOTE:
-                new_experiment_id = candidate_experiment_id
-                new_selection_id = uuid.uuid4().hex
-                # Compare-and-set on the identity the caller read. The WHERE
-                # clause is the refusal: a promotion that lost the race
-                # updates nothing rather than overwriting the winner it
-                # never saw.
-                updated = conn.execute(
-                    """UPDATE selection_pointers
-                          SET experiment_id=?, selection_id=?, decision=?,
-                              decision_seq=?, decided_at=?
-                        WHERE scope_kind=? AND group_id=? AND scope_key=?
-                          AND selection_id=?""",
-                    (
-                        new_experiment_id,
-                        new_selection_id,
-                        DECISION_PROMOTE,
-                        seq,
-                        now,
-                        EXPERIMENT_SCOPE,
-                        group_id,
-                        "",
-                        current_selection_id,
-                    ),
-                ).rowcount
-                if updated != 1:
-                    raise StaleSelection(
-                        group_id=group_id,
-                        expected_selection_id=expected_selection_id,
-                        current_selection_id=current_selection_id,
-                        current_experiment_id=current_experiment_id,
-                    )
-            if not elected:
-                self._append_decision_in_txn(
-                    conn,
-                    group_id=group_id,
-                    seq=seq,
-                    decision=decision,
-                    previous_experiment_id=current_experiment_id,
-                    previous_selection_id=current_selection_id,
-                    candidate_experiment_id=candidate_experiment_id,
-                    new_experiment_id=new_experiment_id,
-                    new_selection_id=new_selection_id,
-                    actor=actor,
-                    actor_kind=actor_kind,
-                    provenance=provenance,
-                    rationale=rationale,
-                    created_at=now,
-                )
-        state = self.current_winner(group_id)
-        state["decision"] = {
-            "decision": decision,
-            "seq": seq,
-            "previous_experiment_id": current_experiment_id,
-            "candidate_experiment_id": candidate_experiment_id,
-            "new_experiment_id": new_experiment_id,
-            "actor": actor,
-            "actor_kind": actor_kind,
-            "provenance": provenance,
-            "rationale": rationale,
-            "created_at": now,
-        }
-        return state
+            self._append_decision_in_txn(
+                conn,
+                group_id=group_id,
+                seq=seq,
+                decision=DECISION_CLEAR,
+                previous_experiment_id=str(current["experiment_id"]),
+                previous_selection_id=str(current["selection_id"]),
+                candidate_experiment_id=None,
+                new_experiment_id=None,
+                new_selection_id=None,
+                actor=actor,
+                actor_kind=actor_kind,
+                provenance=provenance,
+                rationale=rationale,
+                created_at=now,
+            )
 
     def _append_decision_in_txn(
         self,
@@ -1006,14 +608,15 @@ class SelectionControlStore:
     # decision words mean, belong to the scope that owns them, not here. What
     # DOES belong here is the guarantee that no other scope can touch the
     # winner pointer, which is why `EXPERIMENT_SCOPE` and an empty `scope_key`
-    # are both refused below — the winner moves only through `record_decision`.
+    # are both refused below — the winner moves only through `set_winner` and
+    # `clear_winner`.
 
     def _require_other_scope(self, scope_kind: str, scope_key: str) -> tuple[str, str]:
         scope_kind = _require_text(scope_kind, "scope_kind")
         scope_key = _require_text(scope_key, "scope_key")
         if scope_kind == EXPERIMENT_SCOPE:
             raise ValueError(
-                "the experiment winner is moved only by record_decision; a "
+                "the experiment winner is moved only by set_winner/clear_winner; a "
                 "scoped decision must name a different scope_kind"
             )
         return scope_kind, scope_key
@@ -1087,8 +690,7 @@ class SelectionControlStore:
         passed over.
 
         The experiment the target or candidate names is enrolled first when it
-        was recorded here before this build and is not yet a member, exactly
-        as `record_decision` does.
+        was recorded here before this build and is not yet a member.
         """
         if clear and target is not None:
             raise ValueError("a decision either installs a selection or clears it")
@@ -1208,13 +810,11 @@ class SelectionControlStore:
     # -- reads -----------------------------------------------------------
 
     def current_winner(self, group_id: str) -> Optional[dict[str, Any]]:
-        """The current winner of one group, with the experiment's REAL state.
+        """The current winner of one group, or None, with the experiment's REAL state.
 
-        ``automatic`` marks the winner nobody chose — the first experiment in
-        the group — so a UI can label it as such instead of implying somebody
-        judged it. ``experiment`` carries the live status/invalid_reason: this
-        method never reports an experiment as successful, and a running or
-        failed winner reads as running or failed.
+        ``experiment`` carries the live status/invalid_reason: this method
+        never reports an experiment as successful, and a running or failed
+        winner reads as running or failed.
 
         ``experiment_resolved`` is False when the winner has no recorded row
         (a registration that has not run yet, or evidence that was pruned): the
@@ -1240,7 +840,6 @@ class SelectionControlStore:
             "decision": str(pointer["decision"]),
             "decision_seq": int(pointer["decision_seq"]),
             "decided_at": str(pointer["decided_at"]),
-            "automatic": str(pointer["decision"]) == DECISION_INITIAL,
             "experiment": state,
             "experiment_resolved": state is not None,
         }
@@ -1331,23 +930,16 @@ class SelectionControlStore:
 
 
 __all__ = [
-    "CLIENT_DECISIONS",
-    "DECISION_INITIAL",
-    "DECISION_KEEP",
-    "DECISION_PROMOTE",
-    "DECISION_RETIRE",
-    "DECISION_UNDECIDED",
+    "DECISION_CLEAR",
+    "DECISION_SET",
     "EXPERIMENT_SCOPE",
     "ExperimentNotInGroup",
     "ExperimentReference",
-    "GROUP_ADHOC",
     "GROUP_BENCHMARK",
-    "NoCurrentSelection",
     "SELECTION_ACTOR_KINDS",
     "SYSTEM_ACTOR_KIND",
     "SelectionControlError",
     "SelectionControlStore",
-    "SelectionRetirementRefused",
     "StaleSelection",
     "TASK_BEST_SCOPE",
     "ExperimentNotFound",

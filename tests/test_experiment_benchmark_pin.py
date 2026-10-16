@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from tests.benchmark_pins import STORE_PIN
 import os
 
 import pytest
@@ -76,6 +77,7 @@ def _seed_complete(store: obs.ObservabilityStore, experiment_id: str) -> None:
         f"label-{experiment_id}",
         declared_tasks=2,
         declared_attempts=2,
+        **STORE_PIN,
     )
     for task_index in range(2):
         task_id = f"t{task_index}"
@@ -128,21 +130,20 @@ def test_list_experiments_returns_benchmark_pin(db_path):
     assert listed[0]["benchmark_digest_sha256"] == pin["benchmark_digest_sha256"]
 
 
-def test_create_without_pin_still_works(workflow):
+def test_create_without_pin_is_refused(workflow):
+    """Every experiment is a run of one benchmark version (`fix-ujat`)."""
     controller = _controller(workflow)
 
-    controller.create_experiment(
-        "exp-1",
-        "label",
-        declared_tasks=1,
-        declared_attempts=1,
-        declarations=_declarations(),
-    )
+    with pytest.raises(obs.MissingBenchmarkPin):
+        controller.create_experiment(
+            "exp-1",
+            "label",
+            declared_tasks=1,
+            declared_attempts=1,
+            declarations=_declarations(),
+        )
 
-    experiment = controller.store.get_experiment("exp-1")
-    assert experiment["benchmark_id"] is None
-    assert experiment["benchmark_version"] is None
-    assert experiment["benchmark_digest_sha256"] is None
+    assert controller.store.get_experiment("exp-1") is None
 
 
 @pytest.mark.parametrize(
@@ -198,53 +199,26 @@ def test_recreate_with_different_pin_refused(workflow):
     assert experiment["benchmark_digest_sha256"] == first["benchmark_digest_sha256"]
 
 
-def test_recreate_unpinned_running_experiment_with_pin_stores_it(db_path):
-    """The resume path must not silently drop a pin the first create lacked.
-
-    The write-once guard only fires when a pin is already stored, so an
-    upsert that never assigns the pin columns would leave the row unpinned
-    with no error.
-    """
+def test_an_experiment_without_a_pin_is_refused(db_path):
+    """Every experiment is a run of one benchmark version (`fix-ujat`)."""
     store = obs.ObservabilityStore(db_path)
-    store.create_experiment("exp-1", "label", declared_tasks=1, declared_attempts=1)
-    assert store.get_experiment("exp-1")["benchmark_id"] is None
-
-    pin = _sample_pin()
-    store.create_experiment(
-        "exp-1", "label", declared_tasks=1, declared_attempts=1, **pin
-    )
-
-    experiment = store.get_experiment("exp-1")
-    assert experiment["benchmark_id"] == pin["benchmark_id"]
-    assert experiment["benchmark_version"] == pin["benchmark_version"]
-    assert experiment["benchmark_digest_sha256"] == pin["benchmark_digest_sha256"]
-
-    # Once taken, the pin is write-once like any other.
-    with pytest.raises(obs.BenchmarkPinIsWriteOnce):
-        store.create_experiment(
-            "exp-1",
-            "label",
-            declared_tasks=1,
-            declared_attempts=1,
-            **_sample_pin(benchmark_id="other", version="v2"),
-        )
-    experiment = store.get_experiment("exp-1")
-    assert experiment["benchmark_id"] == pin["benchmark_id"]
-    assert experiment["benchmark_version"] == pin["benchmark_version"]
-    assert experiment["benchmark_digest_sha256"] == pin["benchmark_digest_sha256"]
+    with pytest.raises(obs.MissingBenchmarkPin):
+        store.create_experiment("exp-1", "label", declared_tasks=1, declared_attempts=1)
+    assert store.get_experiment("exp-1") is None
 
 
-def test_recreate_without_pin_keeps_stored_pin(db_path):
+def test_recreate_without_pin_is_refused_and_keeps_stored_pin(db_path):
     store = obs.ObservabilityStore(db_path)
     pin = _sample_pin()
     store.create_experiment(
         "exp-1", "label", declared_tasks=1, declared_attempts=1, **pin
     )
 
-    store.create_experiment("exp-1", "label-2", declared_tasks=1, declared_attempts=1)
+    with pytest.raises(obs.MissingBenchmarkPin):
+        store.create_experiment("exp-1", "label-2", declared_tasks=1, declared_attempts=1)
 
     experiment = store.get_experiment("exp-1")
-    assert experiment["description"] == "label-2"
+    assert experiment["description"] == "label"
     assert experiment["benchmark_id"] == pin["benchmark_id"]
     assert experiment["benchmark_version"] == pin["benchmark_version"]
     assert experiment["benchmark_digest_sha256"] == pin["benchmark_digest_sha256"]
@@ -316,7 +290,8 @@ def test_controller_verifies_digest_when_workflow_folder_available(workflow):
         "label",
         declared_tasks=1,
         declared_attempts=1,
-        declarations=_declarations(),
+        # The benchmark's own task: a pinned run declares exactly its tasks.
+        declarations=[("case-01", 1, "channel:case-01:1")],
         benchmark_id="smoke",
         benchmark_version="v1",
         benchmark_digest_sha256=written["digest_sha256"],

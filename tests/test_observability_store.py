@@ -8,6 +8,7 @@ at the NLU/agent boundary).
 
 from __future__ import annotations
 
+from tests.benchmark_pins import STORE_PIN
 import json
 import os
 import inspect
@@ -877,7 +878,7 @@ class TestMaintenance:
         """fix-nczr.2: with nothing else left over the cap, the oldest finished
         non-experiment turns go; in-flight and experiment turns stay."""
         store = obs.ObservabilityStore(db_path)
-        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1)
+        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1, **STORE_PIN)
         self._turn(store, "20000101T000000-old")
         self._turn(store, "20000101T000001-running", status="running")
         self._turn(store, "20000101T000002-exp", experiment_id="exp-1")

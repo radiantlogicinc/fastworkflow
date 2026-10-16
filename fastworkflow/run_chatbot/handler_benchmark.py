@@ -15,6 +15,7 @@ from fastworkflow.benchmark.catalog import (
     load_version,
     write_version,
 )
+from fastworkflow.benchmark.conformance import experiment_conformance
 from fastworkflow.observability import control
 from fastworkflow.observability.store import IncompatibleObservabilityDB
 from fastworkflow.run_chatbot.http_common import STORE_UNAVAILABLE
@@ -40,6 +41,7 @@ class _BenchmarkRoutes:
                     folder, benchmark_id, body.get("version"),
                     body.get("description", ""),
                     runs_per_task=body.get("runs_per_task", 1),
+                    user_simulator=body.get("user_simulator", False),
                 )
                 self._send_json({"experiment": record}, status=201)
         except (benchmark_setup.BenchmarkSetupConflict, IncompatibleObservabilityDB) as exc:
@@ -126,29 +128,20 @@ class _BenchmarkRoutes:
         # currently names -- and `workflow_winner` never creates the control,
         # so a read of a workflow nobody has decided in leaves it untouched.
         winner = None
-        sole_member = False
         try:
             winner = benchmark_setup.workflow_winner(folder, experiment_id)
-            sole_member = benchmark_setup.is_sole_group_member(folder, experiment_id)
         except (OSError, sqlite3.Error, ValueError) as exc:
             warning = warning or str(exc)
         is_winner = bool(winner and winner.get("experiment_id") == experiment_id)
         self._send_json({"experiment": record, "benchmark": manifest,
                          "recorded": recorded, "warning": warning,
                          "runs_per_task": record.get("runs_per_task"),
+                         "user_simulator": record.get("user_simulator", False),
                          "winner": winner,
                          "is_winner": is_winner,
-                         # The SAME `is_winner`, because the two must agree:
-                         # deleting the current winner is refused while the
-                         # group has other members (`fix-jfy5`,
-                         # `ExperimentSelected` -> 409), so offering the action
-                         # would put a button on the one experiment that cannot
-                         # take it. A sole member may go (`fix-65ik`). This is
-                         # the honest answer, not the guard -- the winner can
-                         # move between this read and the DELETE, and that
-                         # refusal stays where it is.
-                         "can_delete": (record.get("store") is None
-                                        and (not is_winner or sole_member))})
+                         # A registration nobody has run may always go; when it
+                         # was the winner, its version simply has no winner.
+                         "can_delete": record.get("store") is None})
 
     def _handle_registration_patch(self, path: str, body: dict[str, Any]) -> None:
         """`PATCH /api/benchmark-experiments/<id>` -- the author's description.
@@ -186,17 +179,23 @@ class _BenchmarkRoutes:
             return
         self._send_json({"experiment": record})
 
-    def _benchmark_experiments(self, benchmark_id):
+    def _benchmark_experiments(self, benchmark_id, version):
+        """One benchmark VERSION's experiments and winner (`fix-873a`).
+
+        There is deliberately no all-versions listing: two versions ran
+        different task sets, so their experiments are never shown together.
+        """
         from .navigation import newest_experiments_first
 
         folder = self._benchmark_workflow_path()
         if folder is None:
             return
-        rows, warning = [], None
+        rows, warning, store = [], None, None
         try:
             registrations = benchmark_setup.registered_experiments(folder, benchmark_id)
             rows = [dict(row, registered=True, status="registered", archived=False)
-                    for row in registrations]
+                    for row in registrations
+                    if row.get("benchmark_version") == version]
             registered = {row["experiment_id"]: row for row in rows}
             store = self.chatbot.open_store()
             if store:
@@ -204,7 +203,8 @@ class _BenchmarkRoutes:
                 while True:
                     batch = store.list_experiments(limit=200, offset=offset)
                     for row in batch:
-                        if row.get("benchmark_id") == benchmark_id:
+                        if (row.get("benchmark_id") == benchmark_id
+                                and row.get("benchmark_version") == version):
                             known = registered.get(row["experiment_id"])
                             if known is None:
                                 rows.append(row)
@@ -219,25 +219,33 @@ class _BenchmarkRoutes:
         # not a property of any registration row, and the list is newest-first
         # so the experiment it names is often the oldest card on the page.
         winner_id = None
-        winner_automatic = False
         try:
-            winner = benchmark_setup.benchmark_winner(folder, benchmark_id)
+            winner = benchmark_setup.benchmark_winner(folder, benchmark_id, version)
         except (OSError, sqlite3.Error, ValueError) as exc:
             warning = warning or str(exc)
             winner = None
         if winner and winner.get("experiment_id"):
             winner_id = str(winner["experiment_id"])
-            winner_automatic = bool(winner.get("automatic"))
         for row in rows:
             row["is_winner"] = bool(
                 winner_id and row.get("experiment_id") == winner_id
             )
+        # Each recorded run, checked against this version (`fix-mgoi`).
+        try:
+            manifest = load_version(folder, benchmark_id, version)
+        except BenchmarkManifestError:
+            manifest = None
+        if manifest is not None and store:
+            for row in rows:
+                recorded = store.get_experiment(row["experiment_id"])
+                if recorded is not None:
+                    row["conformance"] = experiment_conformance(store, manifest, recorded)
         self._send_json(
             {
                 "experiments": newest_experiments_first(rows),
                 "warning": warning,
+                "benchmark_version": version,
                 "winner_experiment_id": winner_id,
-                "winner_automatic": winner_automatic,
             }
         )
 
@@ -280,14 +288,18 @@ class _BenchmarkRoutes:
                 }
             )
             return
-        if tail == "experiments":
-            self._benchmark_experiments(benchmark_id)
-            return
         version_prefix, _, version = tail.partition("/")
         if version_prefix != "versions" or not version:
             self._error(404, "not found")
             return
+        version, _, sub = version.partition("/")
         version = unquote(version)
+        if sub == "experiments":
+            self._benchmark_experiments(benchmark_id, version)
+            return
+        if sub:
+            self._error(404, "not found")
+            return
         try:
             manifest = load_version(workflow_path, benchmark_id, version)
         except BenchmarkManifestError as exc:

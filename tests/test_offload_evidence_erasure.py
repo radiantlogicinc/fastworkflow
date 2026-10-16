@@ -13,6 +13,7 @@ directory. Nothing in this module reads or writes a store it did not create.
 """
 from __future__ import annotations
 
+from tests.benchmark_pins import STORE_PIN
 import hashlib
 import importlib
 import os
@@ -442,7 +443,7 @@ class RetentionTests(EvidenceFixture):
         self.populate(bound, "confidential-exp")
         self.populate(chat, "confidential-chat")
         store = obs.ObservabilityStore(self.db_path)
-        store.create_experiment("exp-7", "L", declared_tasks=1, declared_attempts=1)
+        store.create_experiment("exp-7", "L", declared_tasks=1, declared_attempts=1, **STORE_PIN)
         with store._connect() as conn:
             store.upsert_turn_row(conn, dict(
                 turn_key="turn-exp", channel_id="exp-channel", conversation_id=None,

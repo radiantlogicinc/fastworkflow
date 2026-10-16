@@ -68,8 +68,11 @@ def test_hierarchy_separates_benchmarks_experiments_and_dates(hierarchy_server):
     root = data['root']
     benchmark = next(n for n in root['children'] if n.get('benchmark_id') == spec['benchmark_id'])
     assert benchmark['label'] == 'Tuning benchmark'
-    assert len(benchmark['children']) == 2
-    recorded = next(n for n in benchmark['children'] if n['experiment_id'] == eid)
+    # Experiments hang under their benchmark version (fix-873a).
+    [version] = benchmark['children']
+    assert (version['kind'], version['benchmark_version']) == ('benchmark_version', 'v1')
+    assert len(version['children']) == 2
+    recorded = next(n for n in version['children'] if n['experiment_id'] == eid)
     assert recorded['recorded']
     turn = next(n for n in walk(recorded) if n['kind'] == 'turn')
     assert turn['turn_key'] == 'experiment-turn'
@@ -91,20 +94,33 @@ def test_more_than_one_page_of_turns(tmp_path):
 
 def test_navigation_orders_benchmark_experiments_newest_first():
     rows = [
-        {'experiment_id': 'older', 'benchmark_id': 'bench',
+        {'experiment_id': 'older', 'benchmark_id': 'bench', 'benchmark_version': 'v1',
          'created_at': '2026-09-08T10:00:00+00:00'},
-        {'experiment_id': 'newer', 'benchmark_id': 'bench',
+        {'experiment_id': 'newer', 'benchmark_id': 'bench', 'benchmark_version': 'v1',
          'created_at': '2026-09-09T10:00:00+00:00'},
     ]
     root = build_navigation(
-        [{'benchmark_id': 'bench'}],
+        [{'benchmark_id': 'bench', 'versions': ['v1']}],
         rows,
     )
-    benchmark = root['children'][0]
-    assert [node['experiment_id'] for node in benchmark['children']] == [
+    [version] = root['children'][0]['children']
+    assert [node['experiment_id'] for node in version['children']] == [
         'newer',
         'older',
     ]
+
+
+def test_navigation_puts_each_version_s_experiments_under_its_own_node():
+    rows = [
+        {'experiment_id': 'on-v1', 'benchmark_id': 'bench', 'benchmark_version': 'v1'},
+        {'experiment_id': 'on-v2', 'benchmark_id': 'bench', 'benchmark_version': 'v2'},
+    ]
+    root = build_navigation([{'benchmark_id': 'bench', 'versions': ['v1', 'v2']}], rows)
+    benchmark = root['children'][0]
+    assert [(n['kind'], n['benchmark_version']) for n in benchmark['children']] == [
+        ('benchmark_version', 'v2'), ('benchmark_version', 'v1')]
+    assert {n['benchmark_version']: [c['experiment_id'] for c in n['children']]
+            for n in benchmark['children']} == {'v2': ['on-v2'], 'v1': ['on-v1']}
 
 
 def _navigation_http(server, *, etag=None):
@@ -303,3 +319,23 @@ def test_unreachable_and_clear_rotation_dom(hierarchy_server):
 def test_perf_render_dom(hierarchy_server):
     server, _spec, _eid, _default, _store = hierarchy_server
     _run_dom('chatbot_perf_render_dom.cjs', server)
+
+
+def test_an_older_stores_unpinned_experiment_is_left_off_the_rail(tmp_path):
+    """No "Experiments without a benchmark" branch (`fix-ujat`).
+
+    The store refuses an unpinned experiment now; one written before that
+    is not shown, and its turns list with the ad-hoc conversations.
+    """
+    store = obs.ObservabilityStore(str(tmp_path / 'a.sqlite3'))
+    with store._connect() as conn:
+        conn.execute(
+            "INSERT INTO experiments (experiment_id, description, status, "
+            "declared_tasks, declared_attempts, created_at) "
+            "VALUES ('exp-old', 'old', 'running', 1, 1, '2026-09-08T00:00:00+00:00')"
+        )
+    add_turn(store, 'old run turn', eid='exp-old')
+    root = build_navigation([], [], store)
+    assert [n for n in walk(root) if n['kind'] in ('experiment', 'benchmark')] == []
+    [adhoc] = [n for n in root['children'] if n['kind'] == 'adhoc']
+    assert [n['label'] for n in walk(adhoc) if n['kind'] == 'turn'] == ['old run turn']

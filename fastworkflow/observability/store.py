@@ -82,8 +82,10 @@ from fastworkflow.utils.logging import logger
 # lose capture_profile / capture_policy_version. The workspace viewer is gone
 # too, and with it the `sealed_turn_comments` control table.
 # v9 (fix-cws4.8): offload rows lose scope_id and offload_order; offload_subjects is gone and the context an observation ran in is a column of offload_evidence.
+# v10 (fix-va9v): experiments.user_simulator -- the experiment's runs were
+# driven by a user simulator, so their first message is not the task prompt.
 # Fresh schema only, with no migration of previously recorded evidence.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 TERMINAL_TURN_STATUSES = frozenset({"completed", "failed", "cancelled", "abandoned"})
 
@@ -680,6 +682,23 @@ class PartialBenchmarkPin(ValueError):
         )
 
 
+class MissingBenchmarkPin(ValueError):
+    """Every experiment is a run of one benchmark version (`fix-ujat`).
+
+    Ad-hoc work is plain conversations, which need no experiment. An
+    experiment without a benchmark would show beside the benchmarks with task
+    ids nobody wrote down, which is the back door this closes.
+    """
+
+    def __init__(self, experiment_id: str) -> None:
+        self.experiment_id = experiment_id
+        super().__init__(
+            f"experiment {experiment_id!r} names no benchmark version: every "
+            "experiment pins benchmark_id, benchmark_version and "
+            "benchmark_digest_sha256. Ad-hoc chat needs no experiment."
+        )
+
+
 class BenchmarkPinIsWriteOnce(ValueError):
     """A stored benchmark pin was rewritten to a different value."""
 
@@ -1067,6 +1086,7 @@ _SCHEMA_STATEMENTS = [
         benchmark_version TEXT,
         benchmark_digest_sha256 TEXT,
         workflow_name TEXT,
+        user_simulator INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         completed_at TEXT)""",
     """CREATE TABLE IF NOT EXISTS experiment_attempts (
@@ -3024,10 +3044,16 @@ class ObservabilityStore:
         benchmark_id: Optional[str] = None,
         benchmark_version: Optional[str] = None,
         benchmark_digest_sha256: Optional[str] = None,
-        initialize_winner: bool = True,
+        join_comparison_group: bool = True,
         declarations: Optional[Iterable[tuple[str, int, str]]] = None,
+        user_simulator: bool = False,
     ) -> None:
         """Pre-register an experiment. Written BEFORE any task runs.
+
+        `user_simulator` records that a user simulator drives every run: it
+        turns the task prompt into its own utterances, so a run's first message
+        is not the prompt (`fix-va9v`). Set at creation and write-once: a
+        resume that disagrees with the stored value is refused.
 
         `declarations`, when given, is the exact attempt plan
         (`declare_experiment_attempts`), written in the same transaction so a
@@ -3043,14 +3069,12 @@ class ObservabilityStore:
         `invalid_detail`: a resume must not be able to launder an `invalid`
         verdict back to `running`.
 
-        `initialize_winner` (`fix-9eg.17.1`) records the experiment in its
-        comparison group in the same transaction, where the FIRST experiment
-        of a group becomes its current winner automatically. That write lands
-        in this DB's control tables (`control.py`), which sealed copies never
-        carry: evidence is what happened, a winner is a judgement about it, and
-        sealed evidence must stay byte-identical while judgements about it keep
-        being made. Registration is idempotent, so the resume path above
-        re-registers without disturbing a winner that has since moved.
+        `join_comparison_group` records the experiment in its comparison group
+        (one per benchmark version, `fix-873a`) in the same transaction. Joining
+        sets no winner. That write lands in this DB's control tables
+        (`control.py`), which sealed copies never carry: evidence is what
+        happened, a winner is a judgement about it. Joining is idempotent, so
+        the resume path above re-joins without disturbing anything.
         """
         if not experiment_id:
             raise ValueError("experiment_id is required")
@@ -3077,18 +3101,27 @@ class ObservabilityStore:
             )
         except ValueError as exc:
             raise PartialBenchmarkPin(experiment_id) from exc
-        if benchmark_id is not None:
-            benchmark_id = self._scrub(benchmark_id)
-            benchmark_version = self._scrub(benchmark_version)
-            benchmark_digest_sha256 = self._scrub(benchmark_digest_sha256)
+        if benchmark_id is None:
+            raise MissingBenchmarkPin(experiment_id)
+        benchmark_id = self._scrub(benchmark_id)
+        benchmark_version = self._scrub(benchmark_version)
+        benchmark_digest_sha256 = self._scrub(benchmark_digest_sha256)
+        user_simulator = bool(user_simulator)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
                 """SELECT status, benchmark_id, benchmark_version,
-                          benchmark_digest_sha256
+                          benchmark_digest_sha256, user_simulator
                      FROM experiments WHERE experiment_id=?""",
                 (experiment_id,),
             ).fetchone()
+            if existing is not None and bool(existing["user_simulator"]) != user_simulator:
+                conn.rollback()
+                raise ValueError(
+                    f"experiment {experiment_id!r} was created with "
+                    f"user_simulator={bool(existing['user_simulator'])}; it is "
+                    "set once, at creation"
+                )
             if existing is not None and benchmark_id is not None:
                 stored_pin = (
                     existing["benchmark_id"],
@@ -3110,10 +3143,10 @@ class ObservabilityStore:
                     baseline_experiment_id, status, invalid_reason,
                     invalid_detail, declared_tasks, declared_attempts,
                     required_evidence_segments, benchmark_id, benchmark_version,
-                    benchmark_digest_sha256, workflow_name,
+                    benchmark_digest_sha256, workflow_name, user_simulator,
                     created_at, completed_at)
                    VALUES (?, ?, NULL, ?, ?, 'running', NULL, NULL,
-                           ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                           ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                    ON CONFLICT(experiment_id) DO UPDATE SET
                      description=excluded.description,
                      arm=excluded.arm,
@@ -3156,12 +3189,13 @@ class ObservabilityStore:
                     benchmark_version,
                     benchmark_digest_sha256,
                     self._scrub(workflow_name),
+                    int(user_simulator),
                     _utcnow_iso(),
                 ),
             )
             if declarations is not None:
                 self._declare_attempts_in_txn(conn, experiment_id, declarations)
-            if initialize_winner:
+            if join_comparison_group:
                 # Inline: `selection` imports this module.
                 from fastworkflow.observability import selection as selection_module
 
@@ -4587,6 +4621,7 @@ class ObservabilityStore:
                 return None
             experiment = dict(row)
             experiment["archived"] = bool(experiment["archived"])
+            experiment["user_simulator"] = bool(experiment["user_simulator"])
             segments = []
             for seg in conn.execute(
                 """SELECT * FROM experiment_evidence_runs
@@ -4626,7 +4661,7 @@ class ObservabilityStore:
             "e.baseline_experiment_id, e.declared_tasks, e.declared_attempts, "
             "e.invalid_reason, e.workflow_name, "
             "e.benchmark_id, e.benchmark_version, e.benchmark_digest_sha256, "
-            "e.archived, e.created_at, e.completed_at, "
+            "e.archived, e.user_simulator, e.created_at, e.completed_at, "
             "(SELECT COUNT(*) FROM experiment_attempts a "
             "  WHERE a.experiment_id=e.experiment_id) AS attempts_started, "
             "(SELECT COUNT(*) FROM experiment_attempts a "
@@ -4639,6 +4674,7 @@ class ObservabilityStore:
             rows = [dict(r) for r in conn.execute(query, params).fetchall()]
         for row in rows:
             row["archived"] = bool(row["archived"])
+            row["user_simulator"] = bool(row["user_simulator"])
         return rows
 
     def experiment_attempt_rows(
@@ -4660,6 +4696,28 @@ class ObservabilityStore:
                 params,
             ).fetchall()
             return [_decode_attempt_row(r) for r in rows]
+
+    def experiment_first_messages(self, experiment_id: str) -> dict[tuple[str, int], str]:
+        """The first user message each (task, attempt) of an experiment sent.
+
+        Read from the recorded turns, so it is what the run actually sent —
+        whichever runner drove it — not what it was configured to send. An
+        attempt whose turns were never recorded is absent.
+        """
+        if not self.has_feature(FEATURE_EXPERIMENTS_V1):
+            return {}
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT task_id, attempt, user_message FROM turns
+                    WHERE experiment_id=? AND task_id IS NOT NULL
+                      AND attempt IS NOT NULL AND continuation_of IS NULL
+                    ORDER BY task_id, attempt, started_at, ordinal""",
+                (experiment_id,),
+            ).fetchall()
+        first: dict[tuple[str, int], str] = {}
+        for row in rows:
+            first.setdefault((str(row["task_id"]), int(row["attempt"])), row["user_message"])
+        return first
 
     def experiment_attempt_declarations(
         self, experiment_id: str

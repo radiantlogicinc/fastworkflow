@@ -43,6 +43,22 @@ class _ExperimentRoutes:
     def _patch_experiment(self, path: str, body: Any, query: dict[str, list[str]]) -> None:
         self._handle_experiment_patch(path, body)
 
+    def _benchmark_conformance(self, store: Any, detail: dict[str, Any]) -> Optional[dict[str, Any]]:
+        """This experiment checked against its pinned benchmark version, if any."""
+        from fastworkflow.benchmark.catalog import BenchmarkManifestError, load_version
+        from fastworkflow.benchmark.conformance import experiment_conformance
+
+        workflow_path = (self.chatbot.workflow_path or "").strip()
+        if not (workflow_path and detail.get("benchmark_id") and detail.get("benchmark_version")):
+            return None
+        try:
+            manifest = load_version(
+                workflow_path, detail["benchmark_id"], detail["benchmark_version"]
+            )
+        except BenchmarkManifestError:
+            return None
+        return experiment_conformance(store, manifest, detail)
+
     @staticmethod
     def _training_limit(q: Any) -> int:
         """How many `train_runs` rows one read will look at.
@@ -217,6 +233,7 @@ class _ExperimentRoutes:
             detail["provenance"] = experiment_provenance(
                 detail, store.experiment_attempt_rows(experiment_id)
             )
+            detail["benchmark_conformance"] = self._benchmark_conformance(store, detail)
             self._send_json({"experiment": detail})
         elif sub == "tasks":
             if store.get_experiment(experiment_id) is None:

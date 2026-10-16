@@ -13,6 +13,8 @@ delete them as redundant.
 
 from __future__ import annotations
 
+from tests.benchmark_pins import create_pinned
+from tests.benchmark_pins import STORE_PIN, pin_for
 import hashlib
 import json
 import sqlite3
@@ -175,6 +177,7 @@ def _seed(store, experiment_id, tasks, attempts, outcomes, declared=None):
         f"label-{experiment_id}",
         declared_tasks=declared[0] if declared else tasks,
         declared_attempts=declared[1] if declared else attempts,
+        **STORE_PIN,
     )
     for task_index in range(tasks):
         task_id = f"t{task_index}"
@@ -247,7 +250,7 @@ class TestAdditiveSchema:
         obs.ObservabilityStore(db_path)
         conn = sqlite3.connect(db_path)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
             attempt_cols = {
                 r[1] for r in conn.execute("PRAGMA table_info(experiment_attempts)")
             }
@@ -256,7 +259,7 @@ class TestAdditiveSchema:
             }
         finally:
             conn.close()
-        assert obs.SCHEMA_VERSION == 9
+        assert obs.SCHEMA_VERSION == 10
         assert "runtime_snapshot_json" in attempt_cols
         assert "archived" in experiment_cols
         assert not {"capture_profile", "capture_policy_version"} & experiment_cols
@@ -457,28 +460,32 @@ class TestAdditiveSchema:
 class TestExperimentDescription:
     def test_the_description_is_free_text_a_recreate_may_revise(self, store):
         store.create_experiment(
-            "exp-1", "first", declared_tasks=1, declared_attempts=1
+            "exp-1", "first", declared_tasks=1, declared_attempts=1,
+            **STORE_PIN,
         )
         store.create_experiment(
-            "exp-1", "second", declared_tasks=1, declared_attempts=1
+            "exp-1", "second", declared_tasks=1, declared_attempts=1,
+            **STORE_PIN,
         )
         assert store.get_experiment("exp-1")["description"] == "second"
 
     def test_an_unwritten_description_is_empty_not_an_error(self, store):
-        store.create_experiment("exp-1", "", declared_tasks=1, declared_attempts=1)
+        store.create_experiment("exp-1", "", declared_tasks=1, declared_attempts=1, **STORE_PIN)
         assert store.get_experiment("exp-1")["description"] == ""
 
     def test_a_non_string_description_is_refused(self, store):
         with pytest.raises(ValueError):
             store.create_experiment(
-                "exp-1", None, declared_tasks=1, declared_attempts=1
+                "exp-1", None, declared_tasks=1, declared_attempts=1,
+                **STORE_PIN,
             )
 
 
 class TestExperimentArchive:
     def test_archive_is_durable_and_included_in_reads(self, store, db_path):
         store.create_experiment(
-            "exp-1", "first", declared_tasks=1, declared_attempts=1
+            "exp-1", "first", declared_tasks=1, declared_attempts=1,
+            **STORE_PIN,
         )
         store.update_experiment_archived("exp-1", True)
 
@@ -491,7 +498,8 @@ class TestExperimentArchive:
 
     def test_archive_requires_a_boolean_and_an_existing_experiment(self, store):
         store.create_experiment(
-            "exp-1", "first", declared_tasks=1, declared_attempts=1
+            "exp-1", "first", declared_tasks=1, declared_attempts=1,
+            **STORE_PIN,
         )
         with pytest.raises(ValueError):
             store.update_experiment_archived("exp-1", 1)
@@ -506,13 +514,14 @@ class TestInvalidIsTerminal:
         store.complete_experiment("exp-1", force_invalid="operator", detail="bad run")
         # re-create (the resume path) then try to complete again
         store.create_experiment(
-            "exp-1", "L", declared_tasks=1, declared_attempts=1
+            "exp-1", "L", declared_tasks=1, declared_attempts=1,
+            **STORE_PIN,
         )
         assert store.get_experiment("exp-1")["status"] == "invalid"
         assert store.complete_experiment("exp-1") == "invalid"
 
     def test_invalid_detail_is_append_only(self, store):
-        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1)
+        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1, **STORE_PIN)
         with store._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             store.invalidate_experiments_in_txn(conn, ["exp-1"], "turns_erased", "first cause")
@@ -539,7 +548,7 @@ class TestInvalidIsTerminal:
         A rewritable verdict is a verdict that can be revised after seeing the
         outcome, which is the thing this container exists to prevent.
         """
-        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1)
+        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1, **STORE_PIN)
         store.record_evidence_segment(
             "exp-1", 1, "evr-x", {"valid": False, "problems": ["dropped a record"]}
         )
@@ -566,9 +575,9 @@ class TestInvalidIsTerminal:
 class TestScoring:
     def test_declared_denominator_is_required_and_positive(self, store):
         with pytest.raises(ValueError):
-            store.create_experiment("e", "L", declared_tasks=0, declared_attempts=1)
+            store.create_experiment("e", "L", declared_tasks=0, declared_attempts=1, **STORE_PIN)
         with pytest.raises(ValueError):
-            store.create_experiment("e", "L", declared_tasks=1, declared_attempts=-2)
+            store.create_experiment("e", "L", declared_tasks=1, declared_attempts=-2, **STORE_PIN)
         with pytest.raises(TypeError):
             store.create_experiment("e", "L")  # both are required kwargs
 
@@ -635,7 +644,7 @@ class TestScoring:
         a declared denominator of 3 and reported **pass@1 = 1.33** with
         `reportable: True`. A score above 1.0 is worse than no score.
         """
-        store.create_experiment("exp-1", "L", declared_tasks=3, declared_attempts=1)
+        store.create_experiment("exp-1", "L", declared_tasks=3, declared_attempts=1, **STORE_PIN)
         for task_id in ("t0", "t1", "t2"):
             store.start_attempt("exp-1", task_id, 1, f"c:{task_id}")
         for task_id in ("t0", "t1"):
@@ -660,7 +669,7 @@ class TestScoring:
         denominator, so rows that outnumber it produce a ratio above 1.0 rather
         than an error. Force the inconsistent state past the completion gate and
         assert the score layer still refuses."""
-        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1)
+        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1, **STORE_PIN)
         store.start_attempt("exp-1", "t0", 1, "c0")
         store.finish_attempt("exp-1", "t0", 1, outcome="pass", outcome_source="g")
         assert store.complete_experiment("exp-1") == "complete"
@@ -756,7 +765,7 @@ class TestComparison:
         comparison that compared nothing.
         """
         self._complete(store, "exp-a")
-        store.create_experiment("exp-b", "B", declared_tasks=2, declared_attempts=2)
+        store.create_experiment("exp-b", "B", declared_tasks=2, declared_attempts=2, **STORE_PIN)
         for task_id in ("z0", "z1"):
             for n in (1, 2):
                 store.start_attempt("exp-b", task_id, n, f"c:{task_id}:{n}")
@@ -771,7 +780,7 @@ class TestComparison:
 
     def test_a_running_arm_is_refused(self, store):
         self._complete(store, "exp-a")
-        store.create_experiment("exp-b", "B", declared_tasks=2, declared_attempts=2)
+        store.create_experiment("exp-b", "B", declared_tasks=2, declared_attempts=2, **STORE_PIN)
         result = store.compare_experiments("exp-b", "exp-a")
         assert result["comparable"] is False
         assert any("not complete" in p for p in result["problems"])
@@ -946,6 +955,7 @@ class TestCredentialScrub:
             f"label {self._SECRET}",
             declared_tasks=1,
             declared_attempts=1,
+            **STORE_PIN,
         )
         store.update_experiment_notes("exp-1", f"notes {self._SECRET}")
         experiment = store.get_experiment("exp-1")
@@ -958,7 +968,7 @@ class TestCredentialScrub:
         assert experiment["notes"].startswith("notes ")
 
     def test_the_evidence_segment_record_is_scrubbed(self, store):
-        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1)
+        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1, **STORE_PIN)
         store.record_evidence_segment(
             "exp-1", 1, "evr-x",
             {"valid": True, "problems": [f"provider said {self._SECRET}"]},
@@ -975,7 +985,7 @@ class TestCredentialScrub:
         the two copies would stop being joinable.
         """
         dirty = f"task-{self._SECRET}"
-        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1)
+        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1, **STORE_PIN)
         conv = store.mint_conversation_id(
             "chan", experiment_id="exp-1", task_id=dirty, attempt=1
         )
@@ -1021,7 +1031,7 @@ class TestCredentialScrub:
             CommandExecutor, "invoke_command", classmethod(exploding)
         )
         harness = ExperimentHarness(
-            todo_workflow_path, description=f"L {self._SECRET}", run_as_agent=False,
+            todo_workflow_path, **pin_for(todo_workflow_path, ['t0']), description=f"L {self._SECRET}", run_as_agent=False,
         )
         harness.run(
             [ExperimentTask(task_id="t0", messages=["add milk"])],
@@ -1101,7 +1111,7 @@ class TestHarness:
         )
         tasks = [ExperimentTask(task_id=f"t{i}", messages=["add milk"]) for i in range(4)]
         harness = ExperimentHarness(
-            todo_workflow_path, description="concurrency",
+            todo_workflow_path, **pin_for(todo_workflow_path, ['t0', 't1', 't2', 't3']), description="concurrency",
             run_as_agent=False, max_workers=4,
         )
         result = harness.run(tasks, attempts=1, grader=lambda run: ("pass", "g", 1.0, None))
@@ -1119,7 +1129,7 @@ class TestHarness:
     ):
         """Task independence: two attempts must not see each other's context."""
         harness = ExperimentHarness(
-            todo_workflow_path, description="independence",
+            todo_workflow_path, **pin_for(todo_workflow_path, ['t0']), description="independence",
             run_as_agent=False, max_workers=2,
         )
         result = harness.run(
@@ -1142,7 +1152,7 @@ class TestHarness:
         self, store
     ):
         """`[XR3]`: uniqueness is enforced, not merely asserted."""
-        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1)
+        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1, **STORE_PIN)
         store.mint_conversation_id("c1", experiment_id="exp-1", task_id="t0", attempt=1)
         with pytest.raises(sqlite3.IntegrityError):
             store.mint_conversation_id(
@@ -1162,6 +1172,7 @@ class TestHarness:
         tasks = [ExperimentTask(task_id=f"t{i}", messages=["add milk"]) for i in range(2)]
         store.create_experiment(
             harness.experiment_id, "crash", declared_tasks=2, declared_attempts=1,
+            **STORE_PIN,
             )
         harness._prepare_process()
         harness._run_attempt(tasks[0], 1, lambda run: ("pass", "g", 1.0, None))
@@ -1188,6 +1199,7 @@ class TestHarness:
         )
         store.create_experiment(
             harness.experiment_id, "resume", declared_tasks=2, declared_attempts=1,
+            **STORE_PIN,
             )
         harness._prepare_process()
         harness._run_attempt(tasks[0], 1, lambda run: ("pass", "g", 1.0, None))
@@ -1227,7 +1239,7 @@ class TestHarness:
             return ("pass", "g", 1.0, None)
 
         harness = ExperimentHarness(
-            todo_workflow_path, description="grader", run_as_agent=False
+            todo_workflow_path, **pin_for(todo_workflow_path, ['t0', 't1', 't2']), description="grader", run_as_agent=False
         )
         tasks = [ExperimentTask(task_id=f"t{i}", messages=["add milk"]) for i in range(3)]
         result = harness.run(tasks, attempts=1, grader=flaky)
@@ -1248,7 +1260,7 @@ class TestHarness:
     ):
         """`[XR16]`: a run whose cache posture is unrecorded is uninterpretable."""
         harness = ExperimentHarness(
-            todo_workflow_path, description="evidence", run_as_agent=False
+            todo_workflow_path, **pin_for(todo_workflow_path, ['t0']), description="evidence", run_as_agent=False
         )
         harness.run(
             [ExperimentTask(task_id="t0", messages=["add milk"])],
@@ -1310,7 +1322,7 @@ class TestHarness:
     ):
         monkeypatch.setenv("FASTWORKFLOW_STATE_ROOT", str(tmp_path / "state"))
         harness = ExperimentHarness(
-            todo_workflow_path, description="dupes", run_as_agent=False
+            todo_workflow_path, **pin_for(todo_workflow_path, ['t0']), description="dupes", run_as_agent=False
         )
         with pytest.raises(ValueError):
             harness.run(
@@ -1339,7 +1351,7 @@ class TestHarness:
         """
         bundle = tmp_path / "bundle"
         harness = ExperimentHarness(
-            todo_workflow_path, description="archived",
+            todo_workflow_path, **pin_for(todo_workflow_path, ['t0']), description="archived",
             run_as_agent=False, archive_dir=str(bundle),
         )
         result = harness.run(
@@ -1396,7 +1408,7 @@ class TestHarness:
         of that check; it is the only thing that makes it pass for a reason.
         """
         harness = ExperimentHarness(
-            todo_workflow_path, description="stable", run_as_agent=False
+            todo_workflow_path, **pin_for(todo_workflow_path, ['t0']), description="stable", run_as_agent=False
         )
         harness.run(
             [ExperimentTask(task_id="t0", messages=["add milk"])],
@@ -1558,7 +1570,7 @@ class TestErasure:
         erasure test would pass against an implementation that wiped the whole
         experiment's attempt rows when one of its channels was forgotten.
         """
-        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=2)
+        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=2, **STORE_PIN)
         channels = []
         for n in (1, 2):
             channel = channel_for("exp-1", "t0", n)
@@ -1668,7 +1680,7 @@ class TestBoundEvidenceRetention:
 
     def _seeded(self, store):
         """One finished experiment attempt and one ordinary chat turn."""
-        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1)
+        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1, **STORE_PIN)
         channel = channel_for("exp-1", "t0", 1)
         store.start_attempt("exp-1", "t0", 1, channel)
         conv = store.mint_conversation_id(
@@ -1863,7 +1875,7 @@ class TestReadApi:
         """
         store = obs.ObservabilityStore(db_path)
         # A genuinely incomparable arm: same 2x2 shape, disjoint task set.
-        store.create_experiment("exp-b", "B", declared_tasks=2, declared_attempts=2)
+        store.create_experiment("exp-b", "B", declared_tasks=2, declared_attempts=2, **STORE_PIN)
         for task_id in ("z0", "z1"):
             for n in (1, 2):
                 store.start_attempt("exp-b", task_id, n, f"c:{task_id}:{n}")
@@ -1971,7 +1983,7 @@ class TestCrossLink:
         reason="distillation is intentionally excluded from fix-rj2.11"
     )
     def test_distillation_runs_can_be_filtered_by_experiment(self, store):
-        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1)
+        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1, **STORE_PIN)
         channel = channel_for("exp-1", "t0", 1)
         conv = store.mint_conversation_id(
             channel, experiment_id="exp-1", task_id="t0", attempt=1
@@ -1997,7 +2009,7 @@ class TestCrossLink:
         assert len(store.list_distillation_runs()) == 2
 
     def test_a_turn_resolves_back_to_its_experiment(self, store):
-        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1)
+        store.create_experiment("exp-1", "L", declared_tasks=1, declared_attempts=1, **STORE_PIN)
         channel = channel_for("exp-1", "t0", 1)
         conv = store.mint_conversation_id(
             channel, experiment_id="exp-1", task_id="t0", attempt=1
@@ -2075,7 +2087,7 @@ class TestRuntimeSnapshotStamp:
         controller = ExperimentController(
             workflow_path, store.store_identity(), migrate=False, external=True
         )
-        controller.create_experiment(
+        create_pinned(controller,
             "exp-stamp",
             "runtime snapshot stamp",
             declared_tasks=1,
@@ -2168,7 +2180,7 @@ class TestExperimentNotes:
     benchmark analysis tests)."""
 
     def test_notes_do_not_change_scores(self, store):
-        store.create_experiment("exp-1", "label-exp-1", declared_tasks=1, declared_attempts=1)
+        store.create_experiment("exp-1", "label-exp-1", declared_tasks=1, declared_attempts=1, **STORE_PIN)
         store.start_attempt("exp-1", "t0", 1, "chan:t0:1")
         store.finish_attempt("exp-1", "t0", 1, outcome="pass", outcome_source="test")
         store.complete_experiment("exp-1")
@@ -2182,7 +2194,7 @@ class TestExperimentNotes:
 
     def test_read_only_store_refuses_notes_update(self, db_path):
         live = obs.ObservabilityStore(db_path)
-        live.create_experiment("exp-1", "label", declared_tasks=1, declared_attempts=1)
+        live.create_experiment("exp-1", "label", declared_tasks=1, declared_attempts=1, **STORE_PIN)
 
         readonly = obs.ReadOnlyObservabilityStore(db_path)
         with pytest.raises(sqlite3.OperationalError):

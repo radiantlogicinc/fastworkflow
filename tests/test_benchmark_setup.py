@@ -134,7 +134,8 @@ def test_http_create_register_execute_drilldown_and_plain_conversations(
     benchmark = result["version"]
     benchmark_id, task_id = benchmark["benchmark_id"], benchmark["tasks"][0]["task_id"]
     base = "/api/benchmarks/" + benchmark_id + "/experiments"
-    assert _request(server, base)[1]["experiments"] == []
+    listing = "/api/benchmarks/" + benchmark_id + "/versions/v1/experiments"
+    assert _request(server, listing)[1]["experiments"] == []
     assert _request(server, base, "POST", {"version": "v1"}, token=None)[0] == 401
     status, result = _request(server, base, "POST", {"version": "v1"})
     assert status == 201
@@ -143,7 +144,7 @@ def test_http_create_register_execute_drilldown_and_plain_conversations(
         "experiment_id"
     ]
     assert experiment_id != second
-    assert len(_request(server, base)[1]["experiments"]) == 2
+    assert len(_request(server, listing)[1]["experiments"]) == 2
     detail_path = "/api/benchmark-experiments/" + experiment_id
     assert _request(server, detail_path)[1]["recorded"] is False
 
@@ -260,7 +261,9 @@ def test_registration_survives_incompatible_default_evidence(setup_server, tmp_p
     server.db_path = str(db)
     path = "/api/benchmarks/" + manifest["benchmark_id"] + "/experiments"
     assert _request(server, path, "POST", {"version": "v1"})[0] == 201
-    result = _request(server, path)[1]
+    result = _request(
+        server, "/api/benchmarks/" + manifest["benchmark_id"] + "/versions/v1/experiments"
+    )[1]
     assert len(result["experiments"]) == 1 and result["warning"]
 
 
@@ -491,12 +494,13 @@ def test_experiment_lifecycle_over_http_leaves_only_authored_files(setup_server)
     assert _request(server, copy_path, "PATCH", {"description": "Copy"})[0] == 200
 
     listed = {row["experiment_id"]: row
-              for row in _request(server, base + "/experiments")[1]["experiments"]}
+              for row in _request(server, base + "/versions/v1/experiments")[1]["experiments"]}
     assert set(listed) == {first["experiment_id"], copy["experiment_id"]}
     assert listed[copy["experiment_id"]]["description"] == "Copy"
     assert listed[copy["experiment_id"]]["runs_per_task"] == 2
     assert listed[copy["experiment_id"]]["source_experiment_id"] == first["experiment_id"]
-    assert listed[first["experiment_id"]]["is_winner"] is True
+    # Creating an experiment never makes it the winner (`fix-873a`).
+    assert not any(row["is_winner"] for row in listed.values())
     shown = _request(server, copy_path)[1]
     assert shown["experiment"] == dict(copy, description="Copy")
     assert shown["can_delete"] is True
@@ -504,7 +508,7 @@ def test_experiment_lifecycle_over_http_leaves_only_authored_files(setup_server)
     assert _request(server, copy_path, "DELETE")[0] == 200
     assert _request(server, copy_path)[0] == 404
     assert [row["experiment_id"] for row in
-            _request(server, base + "/experiments")[1]["experiments"]] == [first["experiment_id"]]
+            _request(server, base + "/versions/v1/experiments")[1]["experiments"]] == [first["experiment_id"]]
 
     assert not (folder / "benchmarks").exists()
     assert list_versions(folder, benchmark_id) == ["v1"]

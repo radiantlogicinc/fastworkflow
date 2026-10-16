@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.benchmark_pins import create_pinned
+from tests.benchmark_pins import STORE_PIN
 import hashlib
 import importlib
 import json
@@ -149,7 +151,7 @@ def loopback_observability(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             ("exp-race", "task-race"),
             ("exp-stale", "task-stale"),
         ):
-            controller.create_experiment(
+            create_pinned(controller,
                 experiment_id,
                 experiment_id,
                 declared_tasks=1,
@@ -376,6 +378,7 @@ def loopback_observability(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "native second store",
         declared_tasks=1,
         declared_attempts=1,
+        **STORE_PIN,
     )
     store_b.start_attempt(
         "exp-native-b", "task-native-b", 1, "channel-native-b"

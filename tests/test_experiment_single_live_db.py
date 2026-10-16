@@ -8,6 +8,7 @@ the one its experiment was registered in, and the experiment-scoped seal.
 
 from __future__ import annotations
 
+from tests.benchmark_pins import create_pinned
 import json
 import logging
 import os
@@ -187,6 +188,12 @@ def test_a_registered_experiment_run_elsewhere_lands_in_every_view_of_the_live_d
     status, winner = selection_api.handle_get(
         str(folder), f"/api/experiments/{experiment_id}/winner", {}
     )
+    # Recording a run never makes it the winner; setting it does, in this DB.
+    assert status == 200 and winner["is_winner"] is False
+    status, winner = selection_api.handle_post(
+        str(folder), f"/api/experiments/{experiment_id}/winner",
+        {"actor": "tester", "actor_kind": "human"},
+    )
     assert status == 200 and winner["is_winner"] is True
     status, runs = selection_api.handle_get(
         str(folder), f"/api/experiments/{experiment_id}/tasks/{task_id}/runs", {}
@@ -258,7 +265,7 @@ def test_an_ad_hoc_run_under_an_overridden_root_warns_once(tmp_path, caplog):
     controller = ExperimentController(folder, store.store_identity(), external=False)
 
     with caplog.at_level(logging.WARNING):
-        controller.create_experiment(
+        create_pinned(controller,
             "ad-hoc", "ad hoc", declared_tasks=1, declared_attempts=1,
             declarations=[("task-1", 1, "native-1")],
         )
@@ -281,7 +288,7 @@ def live(tmp_path, monkeypatch):
     store = obs.ObservabilityStore(db_path)
     controller = ExperimentController(folder, store.store_identity(), external=True)
     for experiment_id in ("exp-1", "exp-2"):
-        controller.create_experiment(
+        create_pinned(controller,
             experiment_id, experiment_id, declared_tasks=1, declared_attempts=1,
             declarations=[("task-1", 1, f"native-{experiment_id}")],
             required_evidence_segments=1,
