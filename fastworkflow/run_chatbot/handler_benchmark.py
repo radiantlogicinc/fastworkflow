@@ -83,6 +83,31 @@ class _BenchmarkRoutes:
             return
         self._send_json({"deleted": experiment_id, "benchmark_id": record["benchmark_id"]})
 
+    def _patch_benchmark_version(self, path: str, body: Any, query: dict[str, list[str]]) -> None:
+        """Edit the benchmark's title and this version's description; tasks stay frozen."""
+        folder = self._benchmark_workflow_path()
+        if folder is None:
+            return
+        _, _, _, benchmark_id, _, version = path.split("/")
+        try:
+            manifest = benchmark_setup.update_benchmark_details(
+                folder, unquote(benchmark_id), unquote(version),
+                body.get("title"), body.get("description", ""),
+            )
+        except IncompatibleObservabilityDB as exc:
+            self._error(409, str(exc))
+            return
+        except sqlite3.OperationalError as exc:
+            self._write_refused(exc)
+            return
+        except BenchmarkManifestError as exc:
+            self._error(404 if "not found" in str(exc) else 400, str(exc))
+            return
+        except (ValueError, TypeError) as exc:
+            self._error(400, str(exc))
+            return
+        self._send_json({"version": manifest})
+
     def _patch_registration(self, path: str, body: Any, query: dict[str, list[str]]) -> None:
         self._handle_registration_patch(path, body)
 

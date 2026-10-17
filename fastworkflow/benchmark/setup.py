@@ -25,6 +25,8 @@ from fastworkflow.benchmark.catalog import (
     BenchmarkAlreadyExistsError,
     list_versions,
     load_version,
+    replace_draft_version,
+    set_details,
     write_version,
     _safe_segment,
 )
@@ -138,7 +140,14 @@ def benchmark_winner(workflow_path, benchmark_id, benchmark_version):
 
 
 def save_benchmark(workflow_path, body):
-    """Generate benchmark/version/new task identities; retain existing task IDs."""
+    """Generate benchmark/version/new task identities; retain existing task IDs.
+
+    Only tasks are frozen with a version. A save that leaves the latest
+    version's tasks as they are updates the title (one per benchmark) and that
+    version's description in place. Blank task rows are skipped. A latest
+    version with no tasks is a draft: saving rewrites it in place instead of
+    creating the next version.
+    """
     if not isinstance(body, dict):
         raise ValueError("body must be an object")
     title, description = body.get("title"), body.get("description", "")
@@ -146,9 +155,9 @@ def save_benchmark(workflow_path, body):
         raise ValueError("title is required")
     if not isinstance(description, str):
         raise ValueError("description must be text")
-    raw = body.get("tasks")
-    if not isinstance(raw, list) or not raw:
-        raise ValueError("add at least one task")
+    raw = body.get("tasks", [])
+    if not isinstance(raw, list):
+        raise ValueError("tasks must be a list")
     benchmark_id = body.get("benchmark_id") or f"benchmark-{uuid.uuid4().hex}"
     _safe_segment(benchmark_id, "benchmark_id")
     versions = list_versions(workflow_path, benchmark_id)
@@ -156,6 +165,8 @@ def save_benchmark(workflow_path, body):
     if body.get("expected_version") != latest:
         raise BenchmarkSetupConflict("benchmark changed; reopen before saving")
     prior = load_version(workflow_path, benchmark_id, latest) if latest else None
+    if "description" not in body and prior is not None:
+        description = prior["description"]
     known = {t["task_id"]: t for t in prior["tasks"]} if prior else {}
     tasks, seen = [], set()
     for item in raw:
@@ -166,11 +177,14 @@ def save_benchmark(workflow_path, body):
         task_id = item.get("task_id")
         if task_id is not None and task_id not in known:
             raise ValueError("new task IDs are assigned automatically")
+        old = known.get(task_id, {})
+        # A blank row is skipped; a payload-only task (no prompt) is kept.
+        if not item.get("prompt", "").strip() and not old.get("payload"):
+            continue
         task_id = task_id or f"task_{uuid.uuid4().hex}"
         if task_id in seen:
             raise ValueError("duplicate task ID")
         seen.add(task_id)
-        old = known.get(task_id, {})
         tasks.append(
             {
                 "task_id": task_id,
@@ -179,23 +193,54 @@ def save_benchmark(workflow_path, body):
                 "payload": old.get("payload", {}),
             }
         )
-    numbers = [int(v[1:]) for v in versions if re.fullmatch(r"v\d+", v)]
-    version = f"v{max(numbers, default=0) + 1}"
-    # `write_version` creates the file exclusively, so of two saves against the
-    # same `expected_version` exactly one writes the next version.
-    try:
-        return write_version(
-            workflow_path,
-            {
-                "benchmark_id": benchmark_id,
-                "version": version,
-                "title": title.strip(),
-                "description": description,
-                "tasks": tasks,
-            },
+    spec = {
+        "benchmark_id": benchmark_id,
+        "title": title.strip(),
+        "description": description,
+        "tasks": tasks,
+    }
+    if prior is not None and _task_key(tasks) == _task_key(prior["tasks"]):
+        return update_benchmark_details(
+            workflow_path, benchmark_id, latest, spec["title"], description
         )
+    try:
+        if prior is not None and not prior["tasks"]:
+            version = latest
+            replace_draft_version(
+                workflow_path, {**spec, "version": version}, prior["digest_sha256"]
+            )
+        else:
+            numbers = [int(v[1:]) for v in versions if re.fullmatch(r"v\d+", v)]
+            version = f"v{max(numbers, default=0) + 1}"
+            # `write_version` inserts exclusively, so of two saves against the
+            # same `expected_version` exactly one writes the next version.
+            write_version(workflow_path, {**spec, "version": version})
     except BenchmarkAlreadyExistsError as exc:
         raise BenchmarkSetupConflict("benchmark changed; reopen before saving") from exc
+    return update_benchmark_details(
+        workflow_path, benchmark_id, version, spec["title"], description
+    )
+
+
+def _task_key(tasks):
+    return [(t["task_id"], t.get("prompt", ""), t.get("description", ""),
+             t.get("payload", {})) for t in tasks]
+
+
+def update_benchmark_details(workflow_path, benchmark_id, version, title, description):
+    """Set the benchmark's title and one version's description; tasks untouched.
+
+    Any version may be described, not only the latest. Returns that version
+    as it now reads.
+    """
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError("title is required")
+    if not isinstance(description, str):
+        raise ValueError("description must be text")
+    load_version(workflow_path, benchmark_id, version)  # it must exist
+    set_details(workflow_path, benchmark_id, title=title.strip(),
+                version=version, description=description)
+    return load_version(workflow_path, benchmark_id, version)
 
 
 # ----------------------------------------------------------------------
@@ -323,6 +368,8 @@ def create_experiment(
     paid or side-effecting starts; this mints an identity.
     """
     manifest = load_version(workflow_path, benchmark_id, version)
+    if not manifest["tasks"]:
+        raise ValueError("add tasks to this benchmark before creating an experiment")
     if not isinstance(description, str):
         raise ValueError("description must be text")
     runs_per_task = validate_runs_per_task(runs_per_task)

@@ -310,14 +310,15 @@ def test_slash_in_benchmark_id_refused(tmp_path):
     assert list_benchmarks(workflow) == []
 
 
-def test_empty_task_list_refused(tmp_path):
+def test_empty_task_list_is_stored_as_a_draft(tmp_path):
     workflow = tmp_path / "workflow"
     workflow.mkdir()
     spec = _sample_spec()
     spec["tasks"] = []
 
-    with pytest.raises(BenchmarkManifestError, match="non-empty array"):
-        write_version(workflow, spec)
+    written = write_version(workflow, spec)
+    assert written["tasks"] == []
+    assert load_version(workflow, spec["benchmark_id"], spec["version"]) == written
 
 
 def test_payload_tuple_refused(tmp_path):

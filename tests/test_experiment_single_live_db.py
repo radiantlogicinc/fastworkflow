@@ -234,7 +234,7 @@ def test_a_registered_experiment_under_another_state_root_is_refused_by_name(
     tmp_path, monkeypatch
 ):
     folder = tmp_path / "workflow"
-    benchmark = setup.save_benchmark(folder, {"title": "x", "tasks": [{}]})
+    benchmark = setup.save_benchmark(folder, {"title": "x", "tasks": [{"prompt": "x"}]})
     experiment_id = setup.create_experiment(
         folder, benchmark["benchmark_id"], "v1"
     )["experiment_id"]

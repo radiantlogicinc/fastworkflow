@@ -19,11 +19,14 @@ Use the printed authenticated local URL. Selecting a workflow normally starts it
 an existing session when only authoring or reviewing. Follow the project's runtime permissions.
 
 1. Choose **New benchmark**, enter a title and optional description, and add task rows.
-   Each task's prompt is optional: a runner can supply the actual messages later.
+   Rows without a prompt are skipped on save. A benchmark saved with no tasks is a draft
+   that later saves update in place; it cannot have experiments until it has tasks.
 2. **Save benchmark** assigns the benchmark ID, `v1`, and new task IDs. Keep those identities
    when adding execution code; do not derive task IDs from conversation topics.
-3. **Edit benchmark** saves a new immutable version. Existing task IDs are retained; new rows
-   receive new IDs. Removing a row removes it only from the new version.
+3. **Edit benchmark**: changing tasks saves a new version whose tasks are frozen. Existing task
+   IDs are retained; new rows receive new IDs. Removing a row removes it only from the new
+   version. The title (one per benchmark) and each version's description stay editable,
+   for older versions too; a save that changes only those updates the version in place.
 4. Select the intended version, then **New experiment**. Copy the generated experiment ID
    and task IDs to the driver. This creates a registration, initially without an evidence store.
 5. Once the driver records execution, use **Open execution records** to inspect it.
@@ -89,7 +92,7 @@ or automatic graders. Use the conventions implemented by the application's runne
 
 | Object | Location / contract |
 |---|---|
-| Benchmark version | `benchmark_versions` row of the live `observability.sqlite3` (the only copy); schema `fastworkflow-benchmark/1`; immutable |
+| Benchmark version | `benchmark_versions` row of the live `observability.sqlite3` (the only copy); schema `fastworkflow-benchmark/1`; tasks immutable once present. Title and per-version description live in `benchmark_titles` / `benchmark_version_descriptions` and are laid over the manifest by `load_version`; the digest is of the bytes first saved |
 | UI experiment registration | `experiment_registrations` table of the live `observability.sqlite3`; pin, task IDs, and bound/deleted state |
 | Execution evidence | `observability.sqlite3`; experiments, attempts, conversations, turns, spans and annotations |
 | Pre-run review, if used | `<workflow>/experiment_setups/reviews.sqlite3`; configuration revisions and review decisions |

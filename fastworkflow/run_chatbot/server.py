@@ -908,6 +908,13 @@ def _benchmark_version_post(path: str) -> bool:
     )
 
 
+def _benchmark_version_patch(path: str) -> bool:
+    """`/api/benchmarks/<id>/versions/<version>`: the title and description."""
+    parts = path.split("/")
+    return (len(parts) == 6 and path.startswith("/api/benchmarks/")
+            and parts[4] == "versions" and all(parts[3:]))
+
+
 def _setup_post(path: str) -> bool:
     return path == "/api/experiment-setups" or path.startswith(
         "/api/experiment-setups/"
@@ -963,6 +970,12 @@ _WRITE_ROUTES = _checked_write_routes((
         "PATCH",
         _benchmark_registration_prefix,
         "_patch_registration",
+        require_object_body=True,
+    ),
+    _WriteRoute(
+        "PATCH",
+        _benchmark_version_patch,
+        "_patch_benchmark_version",
         require_object_body=True,
     ),
     _WriteRoute(

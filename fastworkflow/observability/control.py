@@ -30,6 +30,10 @@ FEATURE_CONTROL_V1 = "control_v1"
 # own marker, not a table appended to `CONTROL_SCHEMA`, so a store that already
 # carries `control_v1` still gets the table on its next control write.
 FEATURE_BENCHMARK_CATALOG_V1 = "benchmark_catalog_v1"
+# Empty benchmark versions are editable drafts; applied after the catalog.
+FEATURE_BENCHMARK_DRAFTS_V1 = "benchmark_drafts_v1"
+# A benchmark's title and each version's description, editable after saving.
+FEATURE_BENCHMARK_DETAILS_V1 = "benchmark_details_v1"
 
 CONTROL_SCHEMA = [
     """CREATE TABLE IF NOT EXISTS experiment_registrations (
@@ -154,6 +158,35 @@ BENCHMARK_CATALOG_SCHEMA = [
         BEGIN SELECT RAISE(ABORT, 'benchmark versions are immutable'); END""",
 ]
 
+# A version with no tasks is a draft (`fix-twax`): nothing can run it, so it is
+# rewritten in place until it has tasks. Only a version with tasks is immutable.
+BENCHMARK_DRAFTS_SCHEMA = [
+    "DROP TRIGGER IF EXISTS benchmark_versions_no_update",
+    "DROP TRIGGER IF EXISTS benchmark_versions_no_delete",
+    """CREATE TRIGGER benchmark_versions_no_update
+        BEFORE UPDATE ON benchmark_versions WHEN OLD.task_count > 0
+        BEGIN SELECT RAISE(ABORT, 'benchmark versions are immutable'); END""",
+    """CREATE TRIGGER benchmark_versions_no_delete
+        BEFORE DELETE ON benchmark_versions WHEN OLD.task_count > 0
+        BEGIN SELECT RAISE(ABORT, 'benchmark versions are immutable'); END""",
+]
+
+# Only a version's tasks are frozen. The title (one per benchmark) and each
+# version's description live here and are laid over the stored manifest on
+# read; the digest stays the digest of the bytes first saved.
+BENCHMARK_DETAILS_SCHEMA = [
+    """CREATE TABLE IF NOT EXISTS benchmark_titles (
+        benchmark_id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        updated_at TEXT NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS benchmark_version_descriptions (
+        benchmark_id TEXT NOT NULL,
+        version TEXT NOT NULL,
+        description TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (benchmark_id, version))""",
+]
+
 CONTROL_TABLES = (
     "experiment_registrations", "comparison_groups", "comparison_group_members",
     "selection_pointers", "selection_decisions", "pair_reviews",
@@ -193,6 +226,8 @@ def _set_features(conn: sqlite3.Connection, features: Iterable[str]) -> None:
 _FEATURE_SCHEMAS = (
     (FEATURE_CONTROL_V1, CONTROL_SCHEMA),
     (FEATURE_BENCHMARK_CATALOG_V1, BENCHMARK_CATALOG_SCHEMA),
+    (FEATURE_BENCHMARK_DRAFTS_V1, BENCHMARK_DRAFTS_SCHEMA),
+    (FEATURE_BENCHMARK_DETAILS_V1, BENCHMARK_DETAILS_SCHEMA),
 )
 
 

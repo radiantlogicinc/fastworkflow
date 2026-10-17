@@ -3,9 +3,12 @@
 A benchmark version is one row of ``benchmark_versions`` in the workflow's live
 DB (``observability/control.py``, marker ``benchmark_catalog_v1``). The row is
 the ONLY copy: there is no file mirror and no fallback. ``manifest_bytes`` is
-the exact canonical JSON, and its sha256 is the digest a run pins. Rows are
-immutable (triggers abort UPDATE and DELETE). Reads never create the DB; saving
-a version may.
+the exact canonical JSON, and its sha256 is the digest a run pins. A row with
+tasks is immutable (triggers abort UPDATE and DELETE); a row with no tasks is a
+draft that ``replace_draft_version`` rewrites in place. Only tasks are frozen:
+the benchmark's title and each version's description are kept in their own
+tables (``set_details``) and laid over the manifest by ``load_version``. Reads
+never create the DB; saving a version may.
 """
 
 from __future__ import annotations
@@ -108,8 +111,6 @@ def _require_json_native(value: Any, field: str) -> None:
 def _validate_tasks(raw: Any, field: str = "tasks") -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         raise BenchmarkManifestError(f"{field} must be an array")
-    if not raw:
-        raise BenchmarkManifestError(f"{field} must be a non-empty array")
     seen: set[str] = set()
     tasks: list[dict[str, Any]] = []
     for index, item in enumerate(raw):
@@ -255,11 +256,73 @@ def load_version(
         raise BenchmarkManifestError(
             f"benchmark version not found: {safe_benchmark_id}/{safe_version}"
         )
-    return _parse_manifest(bytes(rows[0]["manifest_bytes"]), safe_benchmark_id, safe_version)
+    manifest = _parse_manifest(
+        bytes(rows[0]["manifest_bytes"]), safe_benchmark_id, safe_version
+    )
+    return _with_details(workflow_folderpath, manifest)
 
 
-def write_version(workflow_folderpath: str | Path, spec: dict[str, Any]) -> dict[str, Any]:
-    """Store a new immutable benchmark version in the live DB (created if absent)."""
+def _with_details(workflow_folderpath: str | Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    """The manifest with its benchmark's current title and its version's description."""
+
+    feature = control.FEATURE_BENCHMARK_DETAILS_V1
+    title = control.rows(
+        open_live_store(_db_path(workflow_folderpath)),
+        "SELECT title FROM benchmark_titles WHERE benchmark_id=?",
+        (manifest["benchmark_id"],), feature=feature,
+    )
+    description = control.rows(
+        open_live_store(_db_path(workflow_folderpath)),
+        "SELECT description FROM benchmark_version_descriptions "
+        "WHERE benchmark_id=? AND version=?",
+        (manifest["benchmark_id"], manifest["version"]), feature=feature,
+    )
+    if title:
+        manifest["title"] = title[0]["title"]
+    if description:
+        manifest["description"] = description[0]["description"]
+    return manifest
+
+
+def set_details(
+    workflow_folderpath: str | Path,
+    benchmark_id: str,
+    *,
+    title: str | None = None,
+    version: str | None = None,
+    description: str | None = None,
+) -> None:
+    """Set the benchmark's title and/or one version's description (not frozen)."""
+
+    benchmark_id = _safe_segment(benchmark_id, "benchmark_id")
+    if title is not None:
+        title = _required_text(title, "title")
+    if description is not None:
+        if not isinstance(description, str):
+            raise BenchmarkManifestError("description must be text")
+        version = _safe_segment(version, "version")
+    now = datetime.now(timezone.utc).isoformat()
+    store = open_live_store_for_write(_db_path(workflow_folderpath))
+    with control.write(store) as conn:
+        if title is not None:
+            conn.execute(
+                """INSERT INTO benchmark_titles (benchmark_id, title, updated_at)
+                   VALUES (?, ?, ?) ON CONFLICT(benchmark_id) DO UPDATE SET
+                     title=excluded.title, updated_at=excluded.updated_at""",
+                (benchmark_id, title, now),
+            )
+        if description is not None:
+            conn.execute(
+                """INSERT INTO benchmark_version_descriptions
+                     (benchmark_id, version, description, updated_at)
+                   VALUES (?, ?, ?, ?) ON CONFLICT(benchmark_id, version) DO UPDATE SET
+                     description=excluded.description, updated_at=excluded.updated_at""",
+                (benchmark_id, version, description, now),
+            )
+
+
+def _spec_manifest(spec: Any) -> tuple[str, str, dict[str, Any]]:
+    """Validate a version spec into its benchmark id, version and manifest."""
 
     if not isinstance(spec, dict):
         raise BenchmarkManifestError("spec must be a JSON object")
@@ -277,6 +340,13 @@ def write_version(workflow_folderpath: str | Path, spec: dict[str, Any]) -> dict
         expected_benchmark_id=benchmark_id,
         expected_version=version,
     )
+    return benchmark_id, version, manifest
+
+
+def write_version(workflow_folderpath: str | Path, spec: dict[str, Any]) -> dict[str, Any]:
+    """Store a new immutable benchmark version in the live DB (created if absent)."""
+
+    benchmark_id, version, manifest = _spec_manifest(spec)
     manifest_bytes = _canonical_json(manifest)
     digest = _sha256_bytes(manifest_bytes)
     store = open_live_store_for_write(_db_path(workflow_folderpath))
@@ -297,6 +367,44 @@ def write_version(workflow_folderpath: str | Path, spec: dict[str, Any]) -> dict
         raise BenchmarkAlreadyExistsError(
             f"benchmark version already exists and is immutable: {benchmark_id}/{version}"
         ) from exc
+    result = dict(manifest)
+    result["digest_sha256"] = digest
+    return result
+
+
+def replace_draft_version(
+    workflow_folderpath: str | Path, spec: dict[str, Any], expected_digest: str
+) -> dict[str, Any]:
+    """Rewrite a draft (a stored version with no tasks) in place.
+
+    The row is replaced only while it is still the draft the caller read
+    (`expected_digest`); anything else raises `BenchmarkAlreadyExistsError`.
+    """
+
+    benchmark_id, version, manifest = _spec_manifest(spec)
+    manifest_bytes = _canonical_json(manifest)
+    digest = _sha256_bytes(manifest_bytes)
+    store = open_live_store_for_write(_db_path(workflow_folderpath))
+    try:
+        with control.write(store) as conn:
+            changed = conn.execute(
+                """UPDATE benchmark_versions
+                   SET manifest_bytes=?, digest_sha256=?, title=?, task_count=?
+                   WHERE benchmark_id=? AND version=? AND task_count=0
+                     AND digest_sha256=?""",
+                (
+                    manifest_bytes, digest, manifest.get("title"),
+                    len(manifest["tasks"]), benchmark_id, version, expected_digest,
+                ),
+            ).rowcount
+    except sqlite3.IntegrityError as exc:
+        raise BenchmarkAlreadyExistsError(
+            f"another benchmark version has these exact contents: {benchmark_id}/{version}"
+        ) from exc
+    if changed != 1:
+        raise BenchmarkAlreadyExistsError(
+            f"benchmark version is no longer the draft that was read: {benchmark_id}/{version}"
+        )
     result = dict(manifest)
     result["digest_sha256"] = digest
     return result

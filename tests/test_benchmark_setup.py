@@ -10,7 +10,13 @@ import pytest
 from fastworkflow import state_paths
 from fastworkflow.benchmark import setup as setup
 from fastworkflow.observability import store as obs
-from fastworkflow.benchmark.catalog import list_versions, load_version, write_version
+from fastworkflow.benchmark.catalog import (
+    BenchmarkAlreadyExistsError,
+    list_versions,
+    load_version,
+    replace_draft_version,
+    write_version,
+)
 from fastworkflow.experiment.runner import ExperimentController, ExperimentHarness
 from tests.test_experiment_setup import setup_server  # noqa: F401
 from tests.test_chatbot_benchmarks import _request
@@ -20,14 +26,15 @@ from tests.test_experiment_container import _turn_row, _write_turn
 def create(folder):
     return setup.save_benchmark(
         folder,
-        {"title": "Roster review", "tasks": [{}, {"prompt": "Review the roster"}]},
+        {"title": "Roster review",
+         "tasks": [{"prompt": "Check the roster"}, {"prompt": "Review the roster"}]},
     )
 
 
 def test_generated_versions_ids_optional_text_and_frozen_experiment(tmp_path):
     first = create(tmp_path)
     assert first["version"] == "v1" and first["description"] == ""
-    assert first["tasks"][0]["prompt"] == ""
+    assert first["tasks"][0]["prompt"] == "Check the roster"
     ids = [t["task_id"] for t in first["tasks"]]
     assert len(set(ids)) == 2
     experiment = setup.create_experiment(tmp_path, first["benchmark_id"], "v1")
@@ -38,13 +45,19 @@ def test_generated_versions_ids_optional_text_and_frozen_experiment(tmp_path):
             "expected_version": "v1",
             "title": "Updated",
             "description": "New description",
-            "tasks": [{"task_id": ids[0], "prompt": "Updated prompt"}, {}],
+            "tasks": [{"task_id": ids[0], "prompt": "Updated prompt"}, {"prompt": "New"}],
         },
     )
     assert second["version"] == "v2" and second["tasks"][0]["task_id"] == ids[0]
     assert second["tasks"][1]["task_id"] not in ids
     record, pinned = setup.experiment_manifest(tmp_path, experiment["experiment_id"])
-    assert record["benchmark_version"] == "v1" and pinned == first
+    assert record["benchmark_version"] == "v1"
+    # Only tasks are frozen: the pinned version keeps its tasks and digest, and
+    # reads the benchmark's one current title and its own description.
+    assert pinned["tasks"] == first["tasks"]
+    assert pinned["digest_sha256"] == first["digest_sha256"]
+    assert pinned["title"] == "Updated" and pinned["description"] == ""
+    assert second["description"] == "New description"
     with pytest.raises(setup.BenchmarkSetupConflict):
         setup.save_benchmark(
             tmp_path,
@@ -52,7 +65,7 @@ def test_generated_versions_ids_optional_text_and_frozen_experiment(tmp_path):
                 "benchmark_id": first["benchmark_id"],
                 "expected_version": "v1",
                 "title": "Stale",
-                "tasks": [{}],
+                "tasks": [{"prompt": "Review the roster"}],
             },
         )
 
@@ -68,7 +81,7 @@ def test_concurrent_edit_has_one_winner(tmp_path):
                     "benchmark_id": first["benchmark_id"],
                     "expected_version": "v1",
                     "title": title,
-                    "tasks": [{}],
+                    "tasks": [{"prompt": "Review the roster"}],
                 },
             )["version"]
         except setup.BenchmarkSetupConflict:
@@ -104,7 +117,120 @@ def test_edit_preserves_existing_opaque_payload(tmp_path):
         },
     )
     assert new["tasks"][0]["payload"] == old["tasks"][0]["payload"]
-    assert load_version(tmp_path, "legacy", "v1") == old
+    # Same tasks: the title is set on v1 in place, and its description kept.
+    assert list_versions(tmp_path, "legacy") == ["v1"]
+    assert new == {**old, "title": "Title"}
+
+
+def test_blank_rows_are_skipped_and_payload_only_tasks_kept(tmp_path):
+    write_version(
+        tmp_path,
+        {
+            "benchmark_id": "legacy",
+            "version": "v1",
+            "description": "",
+            "tasks": [{"task_id": "driven", "payload": {"script": ["hi"]}}],
+        },
+    )
+    saved = setup.save_benchmark(
+        tmp_path,
+        {
+            "benchmark_id": "legacy",
+            "expected_version": "v1",
+            "title": "Title",
+            "tasks": [{}, {"task_id": "driven"}, {"prompt": "  \n"},
+                      {"prompt": "Review the roster"}, {"prompt": ""}],
+        },
+    )
+    assert [t["prompt"] for t in saved["tasks"]] == ["", "Review the roster"]
+    assert saved["tasks"][0]["task_id"] == "driven"
+
+
+def test_an_empty_benchmark_is_a_draft_edited_in_place(tmp_path):
+    draft = setup.save_benchmark(tmp_path, {"title": "Blank", "tasks": [{}, {"prompt": " "}]})
+    assert draft["version"] == "v1" and draft["tasks"] == []
+    bid = draft["benchmark_id"]
+    with pytest.raises(ValueError, match="add tasks"):
+        setup.create_experiment(tmp_path, bid, "v1")
+    renamed = setup.save_benchmark(
+        tmp_path, {"benchmark_id": bid, "expected_version": "v1", "title": "Renamed"}
+    )
+    assert renamed["version"] == "v1" and renamed["title"] == "Renamed"
+    filled = setup.save_benchmark(
+        tmp_path,
+        {"benchmark_id": bid, "expected_version": "v1", "title": "Renamed",
+         "tasks": [{"prompt": "Review the roster"}]},
+    )
+    assert filled["version"] == "v1" and len(filled["tasks"]) == 1
+    assert list_versions(tmp_path, bid) == ["v1"]
+    assert load_version(tmp_path, bid, "v1") == filled
+    setup.create_experiment(tmp_path, bid, "v1")
+    # With tasks the version is frozen: the next save is v2, and SQL refuses edits.
+    nxt = setup.save_benchmark(
+        tmp_path,
+        {"benchmark_id": bid, "expected_version": "v1", "title": "Renamed", "tasks": []},
+    )
+    assert nxt["version"] == "v2" and nxt["tasks"] == []
+    db = sqlite3.connect(state_paths.observability_db(str(tmp_path)))
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        db.execute("UPDATE benchmark_versions SET title='x' WHERE version='v1'")
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        db.execute("DELETE FROM benchmark_versions WHERE version='v1'")
+    db.close()
+
+
+def test_a_stale_draft_save_conflicts(tmp_path):
+    bid = setup.save_benchmark(tmp_path, {"title": "Blank"})["benchmark_id"]
+    first = setup.save_benchmark(
+        tmp_path, {"benchmark_id": bid, "expected_version": "v1", "title": "A"}
+    )
+    spec = {"benchmark_id": bid, "version": "v1", "title": "B",
+            "description": "", "tasks": []}
+    with pytest.raises(BenchmarkAlreadyExistsError, match="no longer the draft"):
+        replace_draft_version(tmp_path, spec, "a-digest-read-earlier")
+    assert load_version(tmp_path, bid, "v1") == first
+
+
+def test_title_and_descriptions_stay_editable_while_tasks_are_frozen(tmp_path):
+    first = create(tmp_path)
+    bid, tasks = first["benchmark_id"], [{"task_id": t["task_id"], "prompt": t["prompt"]}
+                                         for t in first["tasks"]]
+    experiment = setup.create_experiment(tmp_path, bid, "v1")
+    renamed = setup.save_benchmark(
+        tmp_path,
+        {"benchmark_id": bid, "expected_version": "v1", "title": "Renamed",
+         "description": "First pass", "tasks": tasks},
+    )
+    assert renamed["version"] == "v1" and list_versions(tmp_path, bid) == ["v1"]
+    assert renamed["title"] == "Renamed" and renamed["description"] == "First pass"
+    assert renamed["digest_sha256"] == first["digest_sha256"]
+    setup.experiment_manifest(tmp_path, experiment["experiment_id"])  # pin still holds
+
+    second = setup.save_benchmark(
+        tmp_path,
+        {"benchmark_id": bid, "expected_version": "v1", "title": "Renamed",
+         "description": "Second pass", "tasks": tasks + [{"prompt": "One more"}]},
+    )
+    assert second["version"] == "v2" and second["description"] == "Second pass"
+    older = setup.update_benchmark_details(tmp_path, bid, "v1", "One title", "First, edited")
+    assert older["description"] == "First, edited"
+    latest = load_version(tmp_path, bid, "v2")
+    assert latest["title"] == "One title" and latest["description"] == "Second pass"
+    with pytest.raises(ValueError, match="title"):
+        setup.update_benchmark_details(tmp_path, bid, "v1", " ", "x")
+
+
+def test_patch_version_details_over_http(setup_server):
+    server, folder = setup_server
+    first = create(folder)
+    path = "/api/benchmarks/" + first["benchmark_id"] + "/versions/v1"
+    body = {"title": "Renamed", "description": "Edited"}
+    assert _request(server, path, "PATCH", body, token=None)[0] == 401
+    status, result = _request(server, path, "PATCH", body)
+    assert status == 200 and result["version"]["title"] == "Renamed"
+    assert _request(server, path)[1]["version"]["description"] == "Edited"
+    missing = "/api/benchmarks/" + first["benchmark_id"] + "/versions/v9"
+    assert _request(server, missing, "PATCH", body)[0] == 404
 
 
 def test_new_task_identity_is_not_caller_supplied(tmp_path):
@@ -122,13 +248,13 @@ def test_http_create_register_execute_drilldown_and_plain_conversations(
         server,
         "/api/benchmark-setup",
         "POST",
-        {"title": "Review", "tasks": [{}]},
+        {"title": "Review", "tasks": [{"prompt": "Review the roster"}]},
         token=None,
     )
     assert status == 401
     assert not (folder / "benchmarks").exists()
     status, result = _request(
-        server, "/api/benchmark-setup", "POST", {"title": "Review", "tasks": [{}]}
+        server, "/api/benchmark-setup", "POST", {"title": "Review", "tasks": [{"prompt": "Review the roster"}]}
     )
     assert status == 201
     benchmark = result["version"]
@@ -475,7 +601,7 @@ def test_experiment_lifecycle_over_http_leaves_only_authored_files(setup_server)
     no benchmark files, the state dir no JSON or lock files."""
     server, folder = setup_server
     status, result = _request(server, "/api/benchmark-setup", "POST",
-                              {"title": "Review", "tasks": [{}]})
+                              {"title": "Review", "tasks": [{"prompt": "Review the roster"}]})
     assert status == 201
     benchmark_id = result["version"]["benchmark_id"]
     base = "/api/benchmarks/" + benchmark_id
@@ -521,7 +647,7 @@ def test_concurrent_saves_of_the_next_version_one_wins_one_conflicts(setup_serve
     first = create(folder)
     for n in range(4):
         body = {"benchmark_id": first["benchmark_id"], "expected_version": f"v{n + 1}",
-                "title": "Edit", "tasks": [{}]}
+                "title": "Edit", "tasks": [{"prompt": "Review the roster"}]}
         with ThreadPoolExecutor(max_workers=2) as pool:
             statuses = sorted(pool.map(
                 lambda _: _request(server, "/api/benchmark-setup", "POST", body)[0], range(2)

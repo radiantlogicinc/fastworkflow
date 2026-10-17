@@ -11,7 +11,7 @@ import pytest
 from fastworkflow import state_paths
 from fastworkflow.benchmark import setup
 from fastworkflow.benchmark.conformance import experiment_conformance
-from fastworkflow.benchmark.catalog import load_version
+from fastworkflow.benchmark.catalog import load_version, write_version
 from fastworkflow.experiment.runner import ExperimentController, channel_for
 from fastworkflow.observability import store as obs
 from tests.test_chatbot_benchmarks import _request
@@ -22,9 +22,19 @@ PROMPT = "Review the roster"
 
 
 def _benchmark(folder):
-    """Two tasks: the first saved without a prompt, the second with one."""
-    return setup.save_benchmark(
-        folder, {"title": "Roster review", "tasks": [{}, {"prompt": PROMPT}]}
+    """Two tasks: the first without a prompt (payload-driven), the second with one."""
+    return write_version(
+        folder,
+        {
+            "benchmark_id": "roster-review",
+            "version": "v1",
+            "title": "Roster review",
+            "description": "",
+            "tasks": [
+                {"task_id": "task_driven", "payload": {"script": ["hi"]}},
+                {"task_id": "task_prompted", "prompt": PROMPT, "payload": {}},
+            ],
+        },
     )
 
 

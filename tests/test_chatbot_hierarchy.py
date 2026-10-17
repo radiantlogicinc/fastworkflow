@@ -36,7 +36,7 @@ def hierarchy_server(experiment_server):
     for key, day in [('plain today', '2026-09-08'), ('plain yesterday', '2026-09-07')]:
         add_turn(default, key, day=day)
     add_turn(default, 'outside benchmark', eid='exp-1', channel='unassigned')
-    spec = setup.save_benchmark(server.workflow_path, {'title': 'Tuning benchmark', 'description': 'Review this benchmark', 'tasks': [{}]})
+    spec = setup.save_benchmark(server.workflow_path, {'title': 'Tuning benchmark', 'description': 'Review this benchmark', 'tasks': [{'prompt': 'Review'}]})
     registration = setup.create_experiment(server.workflow_path, spec['benchmark_id'], 'v1')
     store = default
     controller = ExperimentController(server.workflow_path, store.store_identity(), external=False)

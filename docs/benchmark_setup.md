@@ -1,10 +1,14 @@
 # Benchmark setup
 
 Select a workflow in `run_chatbot`, then open **Benchmark setup** in the header.
-Create a benchmark with a title, an optional description, and tasks with optional
-prompts. Benchmark IDs, task IDs and versions are generated automatically. Saving
-edits creates the next immutable version, retaining IDs for existing tasks. An
-experiment keeps the exact benchmark version it was created against.
+Create a benchmark with a title, an optional description, and tasks. Rows left
+without a prompt are skipped on save. Benchmark IDs, task IDs and versions are
+generated automatically. Only a version's tasks are frozen: changing the tasks
+saves the next version (retaining IDs for existing tasks, and starting from the
+prior version's description), while the title (one per benchmark) and each
+version's own description can be edited at any time. A version with no tasks yet
+is updated in place until it has tasks, and cannot have experiments. An
+experiment keeps the exact tasks of the version it was created against.
 
 Open a benchmark to see its tasks and experiments across versions. **New
 experiment** returns a unique experiment ID for the displayed version. It does
