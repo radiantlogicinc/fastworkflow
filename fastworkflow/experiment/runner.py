@@ -164,7 +164,8 @@ class ExperimentTask:
 
     `messages` are fed in order through `process_turn`. `startup_action` runs
     first when present, as its own logical turn — the shape
-    `_create_user_runtime` uses.
+    `_create_user_runtime` uses. `unattended` runs every message's turn with
+    no ask_user tool (default False, as for a chat turn).
 
     `task_id` must be stable across runs and across arms: it is the join key
     every score groups by, and it is never derived from the conversation topic
@@ -175,6 +176,7 @@ class ExperimentTask:
     messages: Sequence[str] = ()
     startup_action: Optional[Any] = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    unattended: bool = False
 
 
 @dataclass
@@ -1204,7 +1206,8 @@ class ExperimentHarness:
             if task.startup_action is not None:
                 run.turn_outputs.append(ctx.process_action_turn(task.startup_action))
             for message in task.messages:
-                run.turn_outputs.append(ctx.process_turn(message))
+                run.turn_outputs.append(
+                    ctx.process_turn(message, unattended=task.unattended))
             run.conversation_id = ctx.observability_conversation_id
         except BaseException as exc:  # noqa: BLE001 - one attempt, not the run
             run.error = exc

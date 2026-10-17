@@ -239,6 +239,9 @@ class WorkflowExecutionContext:
         self._suspend_began_at: Optional[datetime] = None
         self._turn_entry_workflow_name: str = ""
         self._turn_entry_context: str = ""
+        # Unattended turn: nobody is there to answer, so the agent has no
+        # ask_user for the whole logical turn. Set when the turn begins.
+        self._turn_unattended: bool = False
         self._turn_agent_result: Any = None
         self._turn_history_baseline: int = 0
         # turn_key of the newest turn that both completed and contributed a
@@ -544,7 +547,7 @@ class WorkflowExecutionContext:
     # Turn accumulator (v2.21: capture + TurnResult return type only)
     # ------------------------------------------------------------------
 
-    def _begin_turn(self, user_message: str) -> None:
+    def _begin_turn(self, user_message: str, unattended: bool = False) -> None:
         """Atomic turn start: reset accumulator, mint key, stamp started_at.
 
         Never called while awaiting_user — a message during suspension is the
@@ -556,6 +559,7 @@ class WorkflowExecutionContext:
         self._turn_key = mint_turn_key()
         self._turn_started_at = datetime.now(timezone.utc)
         self._turn_user_message = user_message
+        self._turn_unattended = bool(unattended)
         self._turn_refined_message = None
         self._turn_suspended_ms = 0
         self._suspend_began_at = None
@@ -604,6 +608,7 @@ class WorkflowExecutionContext:
                 "channel_id": self._channel_id,
                 "conversation_id": self._conversation_id,
                 "user_message": user_message,
+                "unattended": self._turn_unattended,
             },
             context=self._turn_entry_context or None,
             use_stack=False,
@@ -1351,9 +1356,16 @@ class WorkflowExecutionContext:
     # Public execution API
     # ------------------------------------------------------------------
 
-    def process_turn(self, message: str) -> "fastworkflow.TurnOutput":
+    def process_turn(
+        self, message: str, *, unattended: bool = False
+    ) -> "fastworkflow.TurnOutput":
         """
         Execute one user message synchronously and return the public TurnOutput.
+
+        ``unattended=True`` runs the turn with no one to answer: the agent's
+        ask_user tool is removed for the whole logical turn. It applies to the
+        turn this message begins; a message answering a suspended turn
+        continues that turn as it began.
 
         Shares dispatch with _execute_message(); additionally captures every
         command execution of the logical turn (including ask_user exchanges). The
@@ -1361,7 +1373,7 @@ class WorkflowExecutionContext:
         TurnOutput (see docs/turn_result_design_final.md section 1a).
         """
         try:
-            command_output = self._execute_message(message)
+            command_output = self._execute_message(message, unattended=unattended)
         except Exception as exc:
             # A turn that raised is still a turn: record it as failed, with its
             # spans closed under it, before the error propagates. Without this
@@ -1377,7 +1389,9 @@ class WorkflowExecutionContext:
         return turn_result.turn_output
 
     @dspy_logger.observe_dspy_calls
-    def _execute_message(self, message: str) -> fastworkflow.CommandOutput:
+    def _execute_message(
+        self, message: str, unattended: bool = False
+    ) -> fastworkflow.CommandOutput:
         """Shared message dispatch for _execute_message()/process_turn()."""
         self.assert_experiment_claim_current()
         if self._app_workflow is None:
@@ -1387,7 +1401,7 @@ class WorkflowExecutionContext:
 
         if not self._awaiting_user:
             # A message during suspension is the resume answer — never a reset.
-            self._begin_turn(message)
+            self._begin_turn(message, unattended=unattended)
 
         self.push_active_workflow(self._app_workflow)
         try:
@@ -1803,9 +1817,14 @@ class WorkflowExecutionContext:
         self._enable_all_tools()
 
     def _enable_all_tools(self) -> None:
-        """Lift any tool restriction a reply left on the agent (see _apply_reply_intent)."""
+        """Lift any tool restriction a reply left on the agent (see _apply_reply_intent).
+
+        An unattended turn keeps ask_user off: its baseline has no one to ask.
+        """
         if self._workflow_tool_agent is not None:
-            self._workflow_tool_agent.disabled_tools = frozenset()
+            self._workflow_tool_agent.disabled_tools = (
+                frozenset({"ask_user"}) if self._turn_unattended else frozenset()
+            )
 
     def _agent_dspy_context(self):
         """Return (lm, adapter) for agent-mode dspy.context blocks."""

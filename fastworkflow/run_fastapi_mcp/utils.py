@@ -226,6 +226,9 @@ class InvokeRequest(BaseModel):
     timeout_seconds: int = 60
     # None leaves the process's DSPy cache setting as it is.
     use_dspy_cache: Optional[bool] = None
+    # This turn runs with nobody to answer: the agent gets no ask_user tool.
+    # Per turn, never sticky; omitted means attended.
+    unattended: bool = False
 
 
 _dspy_cache_enabled: Optional[bool] = None
@@ -1107,6 +1110,7 @@ async def run_process_turn(
     message: str,
     timeout_seconds: int,
     session_manager: "ChannelSessionManager",
+    unattended: bool = False,
 ) -> fastworkflow.TurnOutput:
     """Run one logical turn in a thread pool with timeout (Topology B)."""
     loop = asyncio.get_running_loop()
@@ -1115,7 +1119,7 @@ async def run_process_turn(
     def _run() -> fastworkflow.TurnOutput:
         # process_turn() is the public execution API: it returns the TurnOutput
         # the whole transport edge speaks (and captures the full turn).
-        return ctx.process_turn(message)
+        return ctx.process_turn(message, unattended=unattended)
 
     try:
         output = await asyncio.wait_for(
@@ -1200,6 +1204,7 @@ async def run_process_message_with_trace_stream(
     on_trace: Callable[[dict[str, Any]], Any],
     user_id: Optional[str] = None,
     on_timeout: Optional[Callable[[str], Any]] = None,
+    unattended: bool = False,
 ) -> fastworkflow.TurnOutput:
     """
     Run one logical turn in an executor while draining command_trace_queue concurrently.
@@ -1215,11 +1220,12 @@ async def run_process_message_with_trace_stream(
     trace_queue = ctx.command_trace_queue
     if trace_queue is None:
         return await run_process_turn(
-            runtime, message, timeout_seconds, session_manager
+            runtime, message, timeout_seconds, session_manager,
+            unattended=unattended,
         )
 
     exec_future = loop.run_in_executor(
-        None, lambda: ctx.process_turn(message)
+        None, lambda: ctx.process_turn(message, unattended=unattended)
     )
     start = time.time()
     timed_out = False

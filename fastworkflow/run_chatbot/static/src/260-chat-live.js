@@ -229,7 +229,8 @@ function tmStreamTurn(text, pending) {
 
   activity.setState("running");
   tmFetch("/invoke_agent_stream", { user_query: text, timeout_seconds: 300,
-                                   use_dspy_cache: document.getElementById("useDspyCache").checked })
+                                   use_dspy_cache: document.getElementById("useDspyCache").checked,
+                                   unattended: document.getElementById("unattended").checked })
     .then(function (r) {
       turnKey = r.headers.get("X-FW-Turn-Key") || null;
       if (r.status === 202) {
@@ -815,7 +816,8 @@ function tmSend() {
     return;
   }
   tmFetch(path, { user_query: text, timeout_seconds: 60,
-                  use_dspy_cache: document.getElementById("useDspyCache").checked })
+                  use_dspy_cache: document.getElementById("useDspyCache").checked,
+                  unattended: document.getElementById("unattended").checked })
     .then(function (r) {
       return r.json().then(function (data) { return { status: r.status, data: data }; });
     })
@@ -898,3 +900,13 @@ function selectTurnWithRetry(turnKey, attemptsLeft, spanId, level) {
   });
 }
 
+
+/* Unattended is the user's to set and clear: it is sent with every prompt and
+   kept across reloads until unchecked. The server applies it per turn. */
+(function () {
+  var box = document.getElementById("unattended");
+  try { box.checked = localStorage.getItem("fw-unattended") === "1"; } catch (error) {}
+  box.addEventListener("change", function () {
+    try { localStorage.setItem("fw-unattended", box.checked ? "1" : "0"); } catch (error) {}
+  });
+})();

@@ -244,7 +244,11 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # the planner spans are no longer written (the finish check and structured
 # planning were removed). fw.search.route is no longer declared: nothing emits
 # it, so it has no contract left to version.
-SPAN_CONTRACT_VERSION = 12
+#
+# v13: fw.turn v2 -- the turn records `unattended`: whether it ran with no
+# ask_user tool. A turn recorded before this carries no flag, which reads as
+# "not recorded", not as attended.
+SPAN_CONTRACT_VERSION = 13
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -364,14 +368,16 @@ class SpanContract:
 
 
 SPAN_CONTRACTS: dict[str, SpanContract] = {
+    # v2: `unattended` (the turn ran with no ask_user tool).
     SPAN_TURN: SpanContract(
-        version=1,
+        version=2,
         attributes=frozenset(
             {
                 "turn_key",
                 "channel_id",
                 "conversation_id",
                 "user_message",
+                "unattended",
                 "status",
                 "success",
                 "failure_reason",

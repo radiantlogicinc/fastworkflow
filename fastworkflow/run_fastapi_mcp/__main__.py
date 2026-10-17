@@ -1640,8 +1640,10 @@ async def invoke_agent(
             execn = await _submit_turn_endpoint(
                 runtime,
                 kind="invoke_agent",
-                work_fn=lambda: ctx.process_turn(user_query),
-                idempotency_args=(user_query,),
+                work_fn=lambda: ctx.process_turn(
+                    user_query, unattended=request.unattended),
+                # A retry differing only in `unattended` is a different turn.
+                idempotency_args=(user_query, *(("unattended",) if request.unattended else ())),
                 wait_seconds=request.timeout_seconds,
                 user_id=user_id,
                 http_bearer_token=session.http_bearer_token,
@@ -1791,6 +1793,7 @@ async def invoke_agent_stream(
                 on_trace,
                 user_id=user_id,
                 on_timeout=on_timeout,
+                unattended=request.unattended,
             )
             await stream.emit("output", turn_output.model_dump(mode="json"))
             return turn_output
@@ -1863,7 +1866,8 @@ async def invoke_agent_stream(
                 channel_id,
                 kind="invoke_agent_stream",
                 idempotency_key=compute_idempotency_key(
-                    channel_id, "invoke_agent_stream", request.user_query
+                    channel_id, "invoke_agent_stream", request.user_query,
+                    *(("unattended",) if request.unattended else ()),
                 ),
                 user_id=user_id,
                 http_bearer_token=session.http_bearer_token,
@@ -1972,7 +1976,8 @@ async def invoke_assistant(
                     assistant_query = request.user_query
                 else:
                     assistant_query = f"/{request.user_query.lstrip('/')}"
-                return ctx.process_turn(assistant_query)
+                return ctx.process_turn(
+                    assistant_query, unattended=request.unattended)
 
             execn = await _submit_turn_endpoint(
                 runtime,
