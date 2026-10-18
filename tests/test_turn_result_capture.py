@@ -388,7 +388,7 @@ class TestAgentTurn:
     ):
         ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch)
         # Every executor run hits the step cap: the hand-offs run out, and the
-        # last run's partial answer is what the turn returns.
+        # turn returns every run's partial answer; identical repeats collapse to one.
         monkeypatch.setattr("fastworkflow.workflow_agent.run_progress_check",
                             lambda *args, **kwargs: "done so far")
 

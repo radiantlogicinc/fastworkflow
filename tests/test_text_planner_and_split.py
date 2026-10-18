@@ -252,13 +252,91 @@ def test_a_visibly_broken_split_is_retried_once_then_left_whole():
 def test_a_split_that_refers_back_to_the_request_is_retried_once():
     from fastworkflow.workflow_agent import split_into_subtasks
 
-    referring = {"reasoning": "r", "subtasks": "1. Audit each of them.\n2. Sweep Hubbard."}
+    referring = {"reasoning": "r", "subtasks": "1. Audit each of them in Finance.\n2. Sweep Hubbard."}
     named = {"reasoning": "r", "subtasks": "1. Audit Alice and Bob.\n2. Sweep Hubbard."}
     assert split_into_subtasks("the request", planner_lm=DummyLM([referring, named])) == [
         "Audit Alice and Bob.", "Sweep Hubbard."]
     # Not fixed by the retry: a split with a leftover reference beats no split.
     assert split_into_subtasks("the request", planner_lm=DummyLM([referring, referring])) == [
-        "Audit each of them.", "Sweep Hubbard."]
+        "Audit each of them in Finance.", "Sweep Hubbard."]
+
+
+def test_the_split_goes_through_the_merge():
+    from fastworkflow.workflow_agent import split_into_subtasks
+
+    query = "How risky is Zoe Hale, and which findings are driving that?"
+    follow_up = {"reasoning": "r", "subtasks": "1. How risky is Zoe Hale?\n2. Which findings are driving that?"}
+    assert split_into_subtasks(query, planner_lm=DummyLM([follow_up])) == [query]
+
+
+def test_identifier_patterns_come_from_the_workflows_file(tmp_path):
+    from fastworkflow.workflow_agent import identifier_patterns
+
+    assert identifier_patterns(str(tmp_path / "no_file")) == ()
+    (tmp_path / "_skills").mkdir()
+    (tmp_path / "_skills" / "identifier_patterns.txt").write_text(
+        "# case numbers\n\\bcase_[A-Za-z0-9]+\n\n[unclosed\n")
+    patterns = identifier_patterns(str(tmp_path))
+    assert [p.pattern for p in patterns] == [r"\bcase_[A-Za-z0-9]+"]  # comment, blank, invalid skipped
+
+
+def test_the_merge_gets_the_workflows_identifier_patterns(tmp_path, monkeypatch):
+    import fastworkflow.workflow_agent as agent
+
+    (tmp_path / "_skills").mkdir()
+    (tmp_path / "_skills" / "identifier_patterns.txt").write_text("\\bcase_[A-Za-z0-9]+\n")
+    seen = {}
+
+    def merge(user_query, subtasks, identifiers=()):
+        seen["identifiers"] = [p.pattern for p in identifiers]
+        return subtasks
+
+    monkeypatch.setattr(agent, "merge_subtasks", merge)
+    agent.split_into_subtasks("the request", planner_lm=DummyLM([
+        {"reasoning": "r", "subtasks": "1. Explain case_X7kQ2Lm9.\n2. Explain case_B4nW8Rt2."}]),
+        workflow_folderpath=str(tmp_path))
+    assert seen["identifiers"] == [r"\bcase_[A-Za-z0-9]+"]
+
+
+def test_a_split_sub_task_gets_the_referent_jev_chooses_written_in(tmp_path, monkeypatch):
+    import fastworkflow.workflow_agent as agent
+
+    (tmp_path / "_skills").mkdir()
+    (tmp_path / "_skills" / "subject_hints.md").write_text("Tag names are not records.")
+    asked = []
+
+    def choose(user_query, text, candidates, notes, jev_lm):
+        asked.append((text, candidates, notes))
+        return "Ann Lee" if "on-leave" in text else None
+
+    monkeypatch.setattr(agent, "_jev_lm", lambda: object())
+    monkeypatch.setattr(agent, "_choose_referent", choose)
+    q = "Ann Lee leaves on Friday: sweep her reach. Then tag the identity `on-leave` and show its tags."
+    assert agent.resolve_referents(q, ["Ann Lee leaves on Friday: sweep her reach.",
+                                       "Tag the identity `on-leave` and show its tags."], str(tmp_path)) == [
+        "Ann Lee leaves on Friday: sweep her reach.", "Tag the identity `on-leave` and show Ann Lee's tags."]
+    # Jev is asked about each sub-task that leaves request subjects unnamed, with the workflow's notes
+    assert asked == [("Ann Lee leaves on Friday: sweep her reach.", ["on-leave"], "Tag names are not records."),
+                     ("Tag the identity `on-leave` and show its tags.", ["Ann Lee"], "Tag names are not records.")]
+
+
+def test_without_jev_the_sub_tasks_are_left_as_they_are(monkeypatch):
+    import fastworkflow.workflow_agent as agent
+
+    monkeypatch.setattr(agent, "_jev_lm", lambda: None)
+    assert agent.resolve_referents("Ann Lee leaves. Tag the identity `x`.", ["Ann Lee leaves.", "Tag the identity `x`."],
+                                   None) == ["Ann Lee leaves.", "Tag the identity `x`."]
+
+
+def test_a_failing_merge_keeps_the_models_split(monkeypatch):
+    import fastworkflow.workflow_agent as agent
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("merge bug")
+
+    monkeypatch.setattr(agent, "merge_subtasks", broken)
+    assert _split({"reasoning": "r", "subtasks": "1. Audit right A.\n2. Sweep Hubbard."}) == [
+        "Audit right A.", "Sweep Hubbard."]
 
 
 def test_a_clean_split_is_not_retried():
@@ -285,6 +363,67 @@ def test_skills_are_read_as_plain_lines_and_all_are_shown(tmp_path):
         "- unit-walk: Walk a whole unit roster. The unit is one job.",
     ]
     assert _job_types_for(str(tmp_path / "missing")) == "(none)"
+
+
+def _write_skills(tmp_path, skills):
+    for name, text in skills.items():
+        (tmp_path / "_skills" / name).mkdir(parents=True)
+        (tmp_path / "_skills" / name / "SKILL.md").write_text(text)
+    return str(tmp_path)
+
+
+def test_a_skill_include_line_is_replaced_by_the_included_steps_recursively(tmp_path):
+    from fastworkflow.workflow_agent import _job_types_for, load_skills
+
+    folder = _write_skills(tmp_path, {
+        "audit": "Audit one person.\nfind them\n  @reach  \nwrite it up\n",
+        "reach": "What a person can reach.\nlist groups\n@shares\nlist roles\n",
+        "shares": "Shares of a person.\nlist shares\n",
+        "plain": "No includes.\nsay @someone here\n@ spaced\n",
+    })
+
+    assert dict((name, steps) for name, _, steps in load_skills(folder)) == {
+        "audit": ("find them", "list groups", "list shares", "list roles", "write it up"),
+        "plain": ("say @someone here", "@ spaced"),
+        "reach": ("list groups", "list shares", "list roles"),
+        "shares": ("list shares",),
+    }
+    assert _job_types_for(folder).splitlines() == [
+        "- audit: Audit one person.", "- plain: No includes.",
+        "- reach: What a person can reach.", "- shares: Shares of a person."]
+
+
+def test_an_included_skill_is_expanded_wherever_it_is_named(tmp_path):
+    from fastworkflow.workflow_agent import load_skills
+
+    folder = _write_skills(tmp_path, {"twice": "Twice.\n@one\nmiddle\n@one\n", "one": "One.\nstep\n"})
+    assert load_skills(folder)[1] == ("twice", "Twice.", ("step", "middle", "step"))
+
+
+def test_an_unknown_or_cyclic_skill_include_fails_the_load_naming_the_chain(tmp_path):
+    from fastworkflow.workflow_agent import load_skills
+
+    unknown = _write_skills(tmp_path / "unknown", {"a": "A.\n@b\n", "b": "B.\n@nope\n"})
+    with pytest.raises(ValueError, match=r"'b' includes unknown skill 'nope' \(a -> b -> nope\)"):
+        load_skills(unknown)
+
+    cycle = _write_skills(tmp_path / "cycle", {"a": "A.\n@b\n", "b": "B.\nstep\n@a\n"})
+    with pytest.raises(ValueError, match=r"'b' includes 'a' in a cycle \(a -> b -> a\)"):
+        load_skills(cycle)
+
+    itself = _write_skills(tmp_path / "itself", {"a": "A.\n@a\n"})
+    with pytest.raises(ValueError, match=r"\(a -> a\)"):
+        load_skills(itself)
+
+
+def test_the_planner_template_gets_the_expanded_steps(tmp_path, monkeypatch):
+    from fastworkflow import workflow_agent
+
+    folder = _write_skills(tmp_path, {"leaver": "Someone is leaving.\nfind them\n@close\n",
+                                      "close": "Close an account.\nclose it\n"})
+    monkeypatch.setattr(workflow_agent, "_skill_matcher", lambda f: _fake_matcher("leaver", 0.9))
+    assert workflow_agent.match_skill("Pat is leaving", folder) == ("leaver", ("find them", "close it"))
+    assert "- find them\n- close it\n" in workflow_agent.plan_template_for("Pat is leaving", folder)
 
 
 def test_a_workflow_split_instructions_file_replaces_the_default_instructions(tmp_path):
@@ -377,3 +516,5 @@ def test_a_workflow_file_is_read_from_its_skills_folder_only(tmp_path):
 
     assert _skill_file_text(str(tmp_path), "split_instructions.md") == "Split it my way."
     assert _skill_file_text(str(tmp_path / "missing"), "split_instructions.md") is None
+
+

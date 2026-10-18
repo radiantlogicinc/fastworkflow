@@ -67,6 +67,17 @@ def _opened_part(trajectory: dict[str, Any]) -> str:
     return "Opened in this sub-task:\n" + "\n".join(lines)
 
 
+def _join_parts(parts: list[str]) -> str:
+    """One sub-task's answers, one per run in hand-off order; a lone answer is unlabelled.
+
+    A run that repeats the previous run's answer word for word adds nothing, so it is dropped.
+    """
+    parts = [part for i, part in enumerate(parts) if i == 0 or part != parts[i - 1]]
+    if len(parts) == 1:
+        return parts[0]
+    return "\n\n".join(f"Part {i} of {len(parts)}:\n{part}" for i, part in enumerate(parts, 1))
+
+
 def _agent_result_attributes(result: Any, attempts: int) -> dict[str, Any]:
     """Close-out attributes for fw.agent.execute — what the executor returned.
 
@@ -2026,20 +2037,23 @@ class WorkflowExecutionContext:
             f"{done}"
             + (f"\n\n{opened}" if opened else "")))
         self._origins.insert(k + 1, origin)
-        # The continuation replaces this capped run's answer, which was written without finishing.
-        self._subtask_answers[k] = ""
+        # This capped run's answer is kept: _combined_answer joins it with the continuation's.
 
     def _combined_answer(self) -> str:
-        """Answers grouped under their original sub-task; a single-origin turn is its answers with no heading."""
+        """Answers grouped under their original sub-task; a single-origin turn is its answers with no heading.
+
+        A sub-task that was handed off has one answer per run, kept in order and labelled as parts.
+        """
         answers: dict[int, list[str]] = {}
         for origin, answer in zip(self._origins, self._subtask_answers):
             if answer:
                 answers.setdefault(origin, []).append(answer)
-        if len(answers) == 1:
-            return "\n\n".join(next(iter(answers.values())))
+        joined = {origin: _join_parts(parts) for origin, parts in answers.items()}
+        if len(joined) == 1:
+            return next(iter(joined.values()))
         return "\n\n".join(
-            f"### {origin + 1}. {self._original_text(origin)}\n" + "\n\n".join(parts)
-            for origin, parts in answers.items()
+            f"### {origin + 1}. {self._original_text(origin)}\n{text}"
+            for origin, text in joined.items()
         )
 
     def _record_subtask_answer(self, result) -> None:

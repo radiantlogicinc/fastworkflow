@@ -2,6 +2,62 @@
 
 ## Unreleased
 
+### Added
+
+- **Deterministic split merge** (`fastworkflow/split_merge.py`): the
+  splitter's sub-tasks now go through `merge_subtasks(user_query, subtasks)`,
+  code only, after the model (and its one retry). It drops meta lines ("(No
+  tag action is requested.)") and sub-tasks contained in another, joins a
+  sub-task that names no subject, or the same subjects as the one before it,
+  to that one ("How risky is Ann Lee?" + "Which findings are driving that?"),
+  and joins per-record sub-tasks that the request asks to compare ("the
+  riskier of Billing and Shipping") into the request's own sentence. When one
+  job is left, the request itself runs, verbatim, so qualifiers the model
+  dropped ("Do not apply anything") are back. Subjects are found in the text
+  alone (names, quoted and back-ticked spans, uids, and the identifiers the
+  workflow declares in an optional `_skills/identifier_patterns.txt`, one
+  regular expression per line, since identifier formats are the workflow's
+  own; "X and Y Ltd" is one unit). A failing merge keeps the model's split.
+  Limits on the request that the model dropped ("Apply none of them.", "I do
+  not need the full population.") are appended to the sub-tasks they apply to
+  (all of them, or the ones carrying the sentence a pointing-back limit
+  qualifies), and a name extending another name of the request
+  ("Payroll_Approver" of "Payroll") joins that name's sub-task when it points
+  back ("among them", in the sub-task or in the request sentence naming it,
+  since the model may drop it). A sub-task naming part of the subjects before
+  it joins them when it checks a change ("Show me the tags on Ann Lee before
+  and after" after "Put `on-leave` on Ann Lee").
+
+- **Split merge, more clean-ups** (`split_merge.py`, code only): a sub-task
+  quoting a value the request never gives ("Apply the tag 'offboarding'") is
+  dropped; a request sentence naming a record no sub-task names (a job the
+  model dropped) is put back, verbatim, in place; a name of a sub-task that is
+  a run of words of exactly one request name ("Sons" of "Hart and Sons and
+  Sons") stands for that name.
+
+- **Referents written into sub-tasks** (`workflow_agent.resolve_referents`):
+  after the merge, a sub-task that leaves some of the request's records
+  unnamed gets one Jev call choosing which of them, if any, its "it", "its",
+  "that unit" or "the identity" stands for, told what the workflow counts as a
+  record by its optional `_skills/subject_hints.md` (natural language). The
+  choice is written in (`split_merge.with_referent`): the one pointing phrase
+  is replaced ("its holders" -> "Payroll_Approver's holders"), or the record is
+  appended ("(for Ann Lee)") when there are none or several. Without a Jev key
+  nothing changes.
+
+- **The repeat block covers the same call only**: a command that returned
+  the same result twice in a row is refused in the next step only when it is
+  sent with the same text again; it stays in the available commands, and with
+  other arguments (`start=42`, the next page) it runs. Before, the whole
+  command was blocked for that step, so its next page could not be read.
+
+- **Composite skills**: a step line in `_skills/<name>/SKILL.md` that is
+  exactly `@<other-skill>` is replaced, when the skills load, by that skill's
+  steps (recursively, in order; its description is not included). The
+  splitter's job types, the skill matcher and the planner template see only
+  the expanded steps. An unknown skill or a cycle raises `ValueError` naming
+  the include chain. A skill without `@` lines loads as before.
+
 ### Changed
 
 - **Every experiment pins a benchmark version** (`fix-ujat`): the store and

@@ -17,6 +17,7 @@ from dspy.experimental import Choice, TypeSafe
 
 import fastworkflow
 from fastworkflow import tracing
+from fastworkflow.split_merge import merge_subtasks, unnamed_subjects, with_referent
 from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_execution_context import CommandCancelledError
 from fastworkflow.utils import dspy_utils
@@ -188,14 +189,15 @@ class _RepeatGuard:
     """One executor run's repeat memory; lives in the agent's ``run_state``.
 
     ``pending`` is set by a repeat in the step now running and becomes
-    ``blocked_command`` (name, reason) at the end of that step, so it governs
-    exactly the next step.
+    ``blocked_command`` (name, reason, command text) at the end of that step, so it
+    governs exactly the next step. Only that same command text is blocked: the
+    command with other arguments (its next page) still runs.
     """
 
     def __init__(self) -> None:
         self.last_results: dict[tuple[str, str], str] = {}
-        self.pending: tuple[str, str] | None = None
-        self.blocked_command: tuple[str, str] | None = None
+        self.pending: tuple[str, str, str] | None = None
+        self.blocked_command: tuple[str, str, str] | None = None
 
 
 def _repeat_guard(chat_session_obj) -> _RepeatGuard | None:
@@ -205,9 +207,8 @@ def _repeat_guard(chat_session_obj) -> _RepeatGuard | None:
     return run_state.setdefault("repeat", _RepeatGuard())
 
 
-def _set_blocked_command(chat_session_obj, guard: _RepeatGuard, block: tuple[str, str] | None) -> None:
+def _set_blocked_command(chat_session_obj, guard: _RepeatGuard, block: tuple[str, str, str] | None) -> None:
     guard.blocked_command = block
-    _refresh_agent_available_commands(chat_session_obj, exclude=frozenset({block[0]}) if block else frozenset())
 
 
 def _end_repeat_step(chat_session_obj) -> None:
@@ -330,8 +331,8 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     # A command blocked for this step (it just repeated its own result) is refused unrun.
     guard = _repeat_guard(chat_session_obj)
     token = (command.split() or [""])[0].lstrip("/").split("/")[-1].lower()
-    if guard is not None and guard.blocked_command and token == guard.blocked_command[0].lower():
-        return (f"{guard.blocked_command[0]} is unavailable for this step: "
+    if guard is not None and guard.blocked_command and " ".join(command.split()) == guard.blocked_command[2]:
+        return (f"{guard.blocked_command[0]} with these arguments is unavailable for this step: "
                 f"{guard.blocked_command[1]}. Use what it returned, or do something else.")
     ran_in = active.current_command_context_name if active is not None else None
 
@@ -502,7 +503,7 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     if guard is not None:
         key = (ran_in, " ".join(command.split()))
         if guard.last_results.get(key) == response_text:
-            guard.pending = ((name or token).split("/")[-1], _REPEAT_REASON)
+            guard.pending = ((name or token).split("/")[-1], _REPEAT_REASON, key[1])
         guard.last_results[key] = response_text
 
     tracing.end_span(
@@ -886,7 +887,9 @@ def load_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ..
     """``(name, description, steps)`` for each ``_skills/<name>/SKILL.md`` of the workflow.
 
     A skill file is plain text: its first line describes the job, every other
-    non-empty line is one step. The folder name is the skill's name.
+    non-empty line is one step. The folder name is the skill's name. A step
+    that is exactly ``@<name>`` stands for the steps of skill ``<name>``, expanded in place;
+    an unknown skill or a cycle raises ValueError.
     """
     root = os.path.join(workflow_folderpath, "_skills")
     skills = []
@@ -897,7 +900,26 @@ def load_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ..
                 lines = [line.strip() for line in handle if line.strip()]
             if lines:
                 skills.append((name, lines[0], tuple(lines[1:])))
-    return tuple(skills)
+    raw_steps = {name: steps for name, _, steps in skills}
+
+    def expand(name: str, chain: tuple[str, ...]) -> tuple[str, ...]:
+        expanded = []
+        for step in raw_steps[name]:
+            include = re.fullmatch(r"@(\S+)", step)
+            if include is None:
+                expanded.append(step)
+                continue
+            included = include.group(1)
+            if included not in raw_steps:
+                raise ValueError(f"skill {name!r} includes unknown skill {included!r} "
+                                 f"({' -> '.join(chain + (included,))}) in {root}")
+            if included in chain:
+                raise ValueError(f"skill {name!r} includes {included!r} in a cycle "
+                                 f"({' -> '.join(chain + (included,))}) in {root}")
+            expanded.extend(expand(included, chain + (included,)))
+        return tuple(expanded)
+
+    return tuple((name, description, expand(name, (name,))) for name, description, _ in skills)
 
 
 @functools.lru_cache(maxsize=None)
@@ -908,6 +930,28 @@ def _skill_file_text(workflow_folderpath: str, filename: str) -> str | None:
         return None
     with open(path, encoding="utf-8") as handle:
         return handle.read()
+
+
+@functools.lru_cache(maxsize=None)
+def identifier_patterns(workflow_folderpath: str) -> tuple[re.Pattern, ...]:
+    """The workflow's identifier patterns, from its optional ``_skills/identifier_patterns.txt``.
+
+    One regular expression per line; blank lines and lines starting with ``#`` are skipped.
+    Each match in a request is a subject for the split merge (``split_merge.merge_subtasks``),
+    like a quoted name: the framework knows no workflow's identifier formats. A line that is not
+    a valid expression is skipped with a warning.
+    """
+    text = _skill_file_text(workflow_folderpath, "identifier_patterns.txt")
+    patterns = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            patterns.append(re.compile(line))
+        except re.error:
+            logger.warning(f"identifier_patterns.txt: skipping invalid pattern {line!r}")
+    return tuple(patterns)
 
 
 @functools.lru_cache(maxsize=None)
@@ -1058,7 +1102,9 @@ def split_into_subtasks(user_query: str, planner_lm=None,
     request, not about how to carry it out. It is shown the workflow's skills
     (``_skills``), as the kinds of job it may contain.
     Any failure, an empty answer, or more than MAX_SUBTASKS sub-tasks leaves the
-    request whole.
+    request whole. The model's split then goes through ``split_merge.merge_subtasks``
+    (code only), which joins parts that are not independent jobs and returns the
+    request whole when one job is left.
     """
     if planner_lm is None:
         planner_lm = dspy_utils.get_lm("LLM_PLANNER", "LITELLM_API_KEY_PLANNER")
@@ -1083,10 +1129,74 @@ def split_into_subtasks(user_query: str, planner_lm=None,
         if not subtasks or len(subtasks) > MAX_SUBTASKS:
             return [user_query]
         if not _visibly_broken(subtasks):
-            return subtasks
+            return _merged(user_query, subtasks, workflow_folderpath)
         if usable is None and len(set(subtasks)) == len(subtasks):
             usable = subtasks
-    return usable or [user_query]
+    return _merged(user_query, usable, workflow_folderpath) if usable else [user_query]
+
+
+def _merged(user_query: str, subtasks: list[str], workflow_folderpath: str | None = None) -> list[str]:
+    """``split_merge.merge_subtasks`` on the model's split; the split unchanged if the merge fails."""
+    try:
+        identifiers = identifier_patterns(workflow_folderpath) if workflow_folderpath else ()
+        merged = merge_subtasks(user_query, subtasks, identifiers)
+    except Exception:  # noqa: BLE001 - the merge is a clean-up; never fail the turn
+        logger.warning("could not merge the split; keeping it as the model gave it", exc_info=True)
+        return subtasks
+    return resolve_referents(user_query, merged, workflow_folderpath) if len(merged) > 1 else merged
+
+
+#: A sub-task's referent is written in only at or above this Jev probability.
+REFERENT_THRESHOLD = 0.5
+
+
+def resolve_referents(user_query: str, subtasks: list[str], workflow_folderpath: str | None) -> list[str]:
+    """Each sub-task with the request's record it acts on but does not name written in (one Jev call each).
+
+    A cut sub-task can lose the record its words point back to: "Tag the identity `x`" after "Ann Lee
+    leaves", "Confirm whether Raj Patel is among its holders". For a sub-task that leaves some of
+    the request's subjects unnamed, Jev chooses which of them, if any, it is about
+    (``split_merge.unnamed_subjects``), told what the workflow counts as a record by its optional
+    ``_skills/subject_hints.md``; ``split_merge.with_referent`` writes the choice in. Without a Jev
+    key, or on any failure, the sub-tasks are returned unchanged.
+    """
+    jev_lm = _jev_lm()
+    if jev_lm is None:
+        return subtasks
+    identifiers = identifier_patterns(workflow_folderpath) if workflow_folderpath else ()
+    notes = (_skill_file_text(workflow_folderpath, "subject_hints.md") if workflow_folderpath else None) or "(none)"
+    out = []
+    for text in subtasks:
+        try:
+            candidates = unnamed_subjects(user_query, text, identifiers)
+            subject = _choose_referent(user_query, text, candidates, notes, jev_lm) if candidates else None
+            out.append(with_referent(text, subject) if subject else text)
+        except Exception:  # noqa: BLE001 - resolving a referent is a clean-up; never fail the turn
+            logger.warning("could not resolve the sub-task's referent", exc_info=True)
+            out.append(text)
+    return out
+
+
+def _choose_referent(user_query: str, text: str, candidates: list[str], notes: str, jev_lm) -> str | None:
+    options = tuple((name, f"The sub-task acts on or asks about {name} without naming it.") for name in candidates) + (
+        ("none", "The sub-task names every record it is about, or is about none of these."),)
+
+    class ChooseReferent(dspy.Signature):
+        """Decide which record of the request a sub-task is about without naming it."""
+
+        request: str = dspy.InputField(desc="the user's whole request")
+        subtask: str = dspy.InputField(desc="one sub-task cut from the request, run on its own")
+        notes: str = dspy.InputField(desc="what this workflow counts as a record, and what it does not")
+        record: Choice[options] = dspy.OutputField(
+            desc="Which record named in the request, but not in the sub-task, is the sub-task about "
+                 "(through words like 'it', 'its', 'that unit', 'the identity')? 'none' if it names "
+                 "every record it is about.")
+
+    with dspy.context(lm=jev_lm):
+        choice = dspy.Predict(ChooseReferent)(request=user_query, subtask=text, notes=notes).record
+    value, probability = _choice_value_and_probability(choice)
+    logger.info(f"referent for {text!r}: {value} (confidence {probability:.2f})")
+    return value if value in candidates and probability >= REFERENT_THRESHOLD else None
 
 
 def build_query_with_next_steps(user_query: str,
