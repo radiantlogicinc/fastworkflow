@@ -96,6 +96,74 @@ def test_a_skill_file_gives_typed_params_and_the_description(tmp_path):
     assert workflow_agent._job_types_for(folder) == f"- lookup: {command.description}"
 
 
+def _with_utterances(text: str, utterances: list[str]) -> str:
+    """``text`` (a skill file) with ``Signature.plain_utterances`` declared after the docstring."""
+    head, sep, rest = text.partition("class Signature:\n")
+    doc_end = rest.index('"""', rest.index('"""') + 3) + 3 if '"""' in rest else rest.index("\n") + 1
+    return f"{head}{sep}{rest[:doc_end]}\n    plain_utterances = {utterances!r}\n{rest[doc_end:]}"
+
+
+def test_the_matcher_lists_a_skills_plain_utterances_as_capped_examples(tmp_path):
+    many = ["who belongs to this group", "is  someone\n in that feed", "list a group's members",
+            "how many people are in it", "a fifth one never shown"]
+    folder = _write(tmp_path, {
+        "lookup": _with_utterances(LOOKUP, many),
+        "plain": _with_utterances(_plain("Close an account.", ["close it"]), ["shut this account down"]),
+        "quiet": _plain("Say hello.", ["greet"]),
+    })
+
+    assert workflow_agent.skill_utterances(folder) == {
+        "lookup": tuple(many), "plain": ("shut this account down",), "quiet": ()}
+    lines = workflow_agent._matcher_job_types(folder).splitlines()
+    description = workflow_agent.load_skill_commands(folder)["lookup"].description
+    assert lines == [
+        f'- lookup: {description} e.g. "who belongs to this group", "is someone in that feed", '
+        '"list a group\'s members", "how many people are in it"',
+        '- plain: Close an account. e.g. "shut this account down"',
+        "- quiet: Say hello.",
+    ]
+    assert workflow_agent.MATCHER_EXAMPLES == 4
+    assert workflow_agent._matcher_job_types(folder, examples=1).splitlines()[0].endswith(
+        'e.g. "who belongs to this group"')
+    # the splitter's job types stay description-only
+    assert workflow_agent._job_types_for(folder).splitlines()[1] == "- plain: Close an account."
+
+
+def test_without_utterances_the_matcher_listing_is_the_description_only(tmp_path):
+    folder = _write(tmp_path, {"lookup": LOOKUP, "quiet": _plain("Say hello.", ["greet"])})
+    assert workflow_agent._matcher_job_types(folder) == workflow_agent._job_types_for(folder)
+
+
+def test_match_skill_sends_the_listing_with_examples_to_the_matcher(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    folder = _write(tmp_path, {"plain": _with_utterances(_plain("Close an account.", ["close it"]),
+                                                         ["shut this account down"])})
+    seen = {}
+
+    def predict(**inputs):
+        seen.update(inputs)
+        return SimpleNamespace(job=SimpleNamespace(value="plain", probabilities={"plain": 0.9}, confidence=0.9))
+
+    monkeypatch.setattr(workflow_agent, "_skill_matcher", lambda f: (predict, DummyLM([])))
+    assert workflow_agent.match_skill("please shut it", folder) == ("plain", ("close it",))
+    assert seen["job_types"] == '- plain: Close an account. e.g. "shut this account down"'
+
+
+def test_the_matcher_signature_mentions_examples_only_when_a_skill_has_them(tmp_path, monkeypatch):
+    monkeypatch.setattr(workflow_agent, "_jev_lm", lambda: object())
+    with_examples = _write(tmp_path / "a", {"plain": _with_utterances(_plain("Close it.", ["x"]), ["shut it"])})
+    without = _write(tmp_path / "b", {"plain": _plain("Close it.", ["x"])})
+
+    def desc(folder):
+        return workflow_agent._skill_matcher(folder)[0].signature.input_fields["job_types"].json_schema_extra["desc"]
+    try:
+        assert "example requests" in desc(with_examples)
+        assert desc(without) == "the available job types, one per line as '- name: description'"
+    finally:
+        workflow_agent._skill_matcher.cache_clear()
+
+
 def test_a_skill_with_params_offers_its_steps_as_template_text(tmp_path):
     folder = _write(tmp_path, {"lookup": LOOKUP})
     (_name, _desc, steps), = workflow_agent.load_skills(folder)

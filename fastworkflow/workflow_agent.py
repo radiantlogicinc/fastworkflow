@@ -5,6 +5,7 @@ Provides workflow tool agent functionality for intelligent tool selection.
 
 import dataclasses
 import functools
+import json
 import os
 import re
 import time
@@ -903,8 +904,10 @@ def _load_skill_file(name: str, path: str, workflow_folderpath: str):
 
 
 @functools.lru_cache(maxsize=None)
-def _parsed_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ...], "SkillCommand | None"], ...]:
-    """``(name, description, template steps, command or None)`` per skill; see ``load_skills``."""
+def _parsed_skills(workflow_folderpath: str) -> tuple[
+        tuple[str, str, tuple[str, ...], "SkillCommand | None", tuple[str, ...]], ...]:
+    """``(name, description, template steps, command or None, plain_utterances)`` per skill;
+    see ``load_skills``."""
     root = os.path.join(workflow_folderpath, "_skills")
     files = []   # (name, SkillFile)
     for name in sorted(os.listdir(root)) if os.path.isdir(root) else ():
@@ -943,13 +946,13 @@ def _parsed_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str,
     out = []
     for name, loaded in files:
         if loaded.command is None:
-            out.append((name, loaded.description, plain[name], None))
+            out.append((name, loaded.description, plain[name], None, loaded.plain_utterances))
             continue
         # the template's @<skill> lines are expanded here; steps() output's at each call
         template = expand(name, (name,))
         command = dataclasses.replace(loaded.command, template=template, identifiers=identifiers,
                                       includes=tuple(plain.items()))
-        out.append((name, loaded.description, template, command))
+        out.append((name, loaded.description, template, command, loaded.plain_utterances))
     return tuple(out)
 
 
@@ -967,12 +970,17 @@ def load_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ..
     skill (``_skills`` also holds the workflow's ``split_instructions.md``,
     ``subject_hints.md`` and ``identifier_patterns.txt``).
     """
-    return tuple((name, description, steps) for name, description, steps, _ in _parsed_skills(workflow_folderpath))
+    return tuple((name, description, steps) for name, description, steps, *_ in _parsed_skills(workflow_folderpath))
 
 
 def load_skill_commands(workflow_folderpath: str) -> dict[str, SkillCommand]:
     """The workflow's skills that have params, by name."""
-    return {name: command for name, _, _, command in _parsed_skills(workflow_folderpath) if command is not None}
+    return {name: command for name, _, _, command, _ in _parsed_skills(workflow_folderpath) if command is not None}
+
+
+def skill_utterances(workflow_folderpath: str) -> dict[str, tuple[str, ...]]:
+    """Each skill's ``Signature.plain_utterances`` (empty when it declares none), by name."""
+    return {name: utterances for name, _, _, _, utterances in _parsed_skills(workflow_folderpath)}
 
 
 @functools.lru_cache(maxsize=None)
@@ -1024,6 +1032,24 @@ def _job_types_for(workflow_folderpath: str | None) -> str:
     return "\n".join(f"- {name}: {description}" for name, description, _ in skills)
 
 
+#: The skill matcher shows at most this many of a skill's ``plain_utterances`` (its first
+#: ones) after its description, to bound the prompt.
+MATCHER_EXAMPLES = 4
+
+
+def _matcher_job_types(workflow_folderpath: str, examples: int = MATCHER_EXAMPLES) -> str:
+    """The skill matcher's job types: one ``- name: description`` line per skill, followed by
+    ``e.g. "...", "..."`` when the skill declares ``plain_utterances`` (at most ``examples``)."""
+    utterances = skill_utterances(workflow_folderpath)
+    lines = []
+    for name, description, _ in load_skills(workflow_folderpath):
+        shown = [" ".join(u.split()) for u in utterances.get(name, ())[:max(0, examples)]]
+        shown = [u for u in shown if u]
+        lines.append(f"- {name}: {description}" + (
+            f" e.g. {', '.join(json.dumps(u, ensure_ascii=False) for u in shown)}" if shown else ""))
+    return "\n".join(lines)
+
+
 #: A matched skill's steps are offered to the planner only at or above this Jev
 #: probability (measured offline: at 0.5, 96.6% of sub-tasks get a template, 1.1% a wrong one).
 SKILL_MATCH_THRESHOLD = 0.5
@@ -1050,12 +1076,15 @@ def _skill_matcher(workflow_folderpath: str):
         return None
     options = tuple((name, description) for name, description, _ in skills) + (
         ("none", "None of the job types fits this sub-task."),)
+    listing = "the available job types, one per line as '- name: description'"
+    if any(skill_utterances(workflow_folderpath).values()):
+        listing += ", some followed by example requests for that job (e.g. ...)"
 
     class MatchSkill(dspy.Signature):
         """Decide which job type a sub-task asks for."""
 
         subtask: str = dspy.InputField(desc="one sub-task from a user request")
-        job_types: str = dspy.InputField(desc="the available job types, one per line as '- name: description'")
+        job_types: str = dspy.InputField(desc=listing)
         job: Choice[options] = dspy.OutputField(
             desc="Which job type does this sub-task ask for? 'none' if none of them fits.")
 
@@ -1073,7 +1102,7 @@ def match_skill(text: str, workflow_folderpath: str) -> tuple[str, tuple[str, ..
             return None
         predictor, jev_lm = matcher
         skills = load_skills(workflow_folderpath)
-        job_types = "\n".join(f"- {name}: {description}" for name, description, _ in skills)
+        job_types = _matcher_job_types(workflow_folderpath)
         with dspy.context(lm=jev_lm):
             choice = predictor(subtask=text, job_types=job_types).job
         value, probability = _choice_value_and_probability(choice)

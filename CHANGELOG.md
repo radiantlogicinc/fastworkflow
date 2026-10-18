@@ -4,6 +4,17 @@
 
 ### Added
 
+- **The skill matcher reads a skill's `plain_utterances` as examples**
+  (`workflow_agent._matcher_job_types`, `MATCHER_EXAMPLES = 4`): in the
+  `MatchSkill` job-type listing a skill's line is followed by
+  `e.g. "...", "..."` with its first four `Signature.plain_utterances`
+  (whitespace collapsed); a skill that declares none keeps its plain
+  `- name: description` line, and the `job_types` field description mentions
+  examples only when some skill has them. Skills without params now carry
+  their utterances too (`SkillFile.plain_utterances`;
+  `workflow_agent.skill_utterances(folder)` gives them by name). The
+  splitter's job types (`_job_types_for`) stay description-only. No span
+  fields change.
 - **Skills as Python skill files** (`fastworkflow/skill_commands.py`,
   `workflow_agent.load_skills`): a skill is now `_skills/<name>/skill.py`,
   written like a command file. `class Signature` carries the description (its

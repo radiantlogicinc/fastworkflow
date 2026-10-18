@@ -99,8 +99,11 @@ A skill file::
   plain text inside this one; a skill with parameters cannot be included). Lookup tables are
   plain module-level dicts. For a skill without parameters ``steps()`` takes no argument and
   returns its fixed steps.
-- ``plain_utterances`` (optional): example requests for the skill, kept on the parsed
-  command (``SkillCommand.plain_utterances``); the matcher does not read them yet.
+- ``plain_utterances`` (optional, with or without params): example requests for the
+  skill, written the way people ask for that job. The skill matcher shows the first
+  ``workflow_agent.MATCHER_EXAMPLES`` of them after the description ("e.g. ..."); a skill
+  with params also keeps them on its command (``SkillCommand.plain_utterances``). Write
+  them generically: they are in every matcher prompt.
 - ``template`` (optional): the template text of the skill, shown to the planner in the
   skill call's "expands to:" and used as the text planner's template when a skill call
   fails. Without it the template is ``steps()`` rendered on placeholder inputs
@@ -422,6 +425,8 @@ class SkillFile:
     description: str
     steps: tuple[str, ...]
     command: SkillCommand | None
+    #: ``Signature.plain_utterances``: example requests for the skill (with or without params).
+    plain_utterances: tuple[str, ...] = ()
 
 
 def _call_steps(fn: Callable, instance, where: str) -> list[str]:
@@ -759,7 +764,8 @@ def command_from_module(name: str, module, path: str) -> SkillFile:
             raise SkillFormatError(str(exc)) from None
         if not lines:
             raise SkillFormatError(f"{path}: steps() returns no steps")
-        return SkillFile(description=description, steps=tuple(lines), command=None)
+        return SkillFile(description=description, steps=tuple(lines), command=None,
+                         plain_utterances=tuple(utterances))
 
     command = SkillCommand(name=name, description=description, params=tuple(params.values()), path=path, input_model=input_model, steps_fn=steps_fn, validate=validate,
                            plain_utterances=tuple(utterances))
@@ -772,7 +778,8 @@ def command_from_module(name: str, module, path: str) -> SkillFile:
         template = placeholder_template(command)
     if not template:
         raise SkillFormatError(f"{path}: a skill with params needs steps")
-    return SkillFile(description=description, steps=tuple(template), command=replace(command, template=tuple(template)))
+    return SkillFile(description=description, steps=tuple(template), command=replace(command, template=tuple(template)),
+                     plain_utterances=tuple(utterances))
 
 
 def expand(command: SkillCommand, args: dict) -> list[str]:
