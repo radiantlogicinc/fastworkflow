@@ -17,7 +17,7 @@ from dspy.experimental import Choice, TypeSafe
 
 import fastworkflow
 from fastworkflow import tracing
-from fastworkflow.split_merge import merge_subtasks, unnamed_subjects, with_referent
+from fastworkflow.split_merge import definite_descriptions, merge_subtasks, unnamed_subjects, with_referent
 from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_execution_context import CommandCancelledError
 from fastworkflow.utils import dspy_utils
@@ -1153,12 +1153,18 @@ REFERENT_THRESHOLD = 0.5
 def resolve_referents(user_query: str, subtasks: list[str], workflow_folderpath: str | None) -> list[str]:
     """Each sub-task with the request's record it acts on but does not name written in (one Jev call each).
 
-    A cut sub-task can lose the record its words point back to: "Tag the identity `x`" after "Ann Lee
+    A cut sub-task can lose the record its words point back to: "Tag the customer `x`" after "Ann Lee
     leaves", "Confirm whether Raj Patel is among its holders". For a sub-task that leaves some of
     the request's subjects unnamed, Jev chooses which of them, if any, it is about
     (``split_merge.unnamed_subjects``), told what the workflow counts as a record by its optional
     ``_skills/subject_hints.md``; ``split_merge.with_referent`` writes the choice in. Without a Jev
     key, or on any failure, the sub-tasks are returned unchanged.
+
+    When a record is chosen and the sub-task holds definite descriptions ("the customer", see
+    ``split_merge.definite_descriptions``), a second Jev call chooses which of them, if any, stands
+    for it, and the record is written in right after it ("Tag the customer Ann Lee `x`"). Code cannot
+    tell "the customer `x`" (a person, `x` a tag put on her) from "the report 'x'" (`x` its title)
+    without knowing the workflow's kinds of record; the model, given the hints, can.
     """
     jev_lm = _jev_lm()
     if jev_lm is None:
@@ -1170,7 +1176,10 @@ def resolve_referents(user_query: str, subtasks: list[str], workflow_folderpath:
         try:
             candidates = unnamed_subjects(user_query, text, identifiers)
             subject = _choose_referent(user_query, text, candidates, notes, jev_lm) if candidates else None
-            out.append(with_referent(text, subject) if subject else text)
+            descriptions = definite_descriptions(text) if subject else []
+            description = _choose_description(user_query, text, subject, descriptions, notes, jev_lm) \
+                if descriptions else None
+            out.append(with_referent(text, subject, description) if subject else text)
         except Exception:  # noqa: BLE001 - resolving a referent is a clean-up; never fail the turn
             logger.warning("could not resolve the sub-task's referent", exc_info=True)
             out.append(text)
@@ -1189,7 +1198,7 @@ def _choose_referent(user_query: str, text: str, candidates: list[str], notes: s
         notes: str = dspy.InputField(desc="what this workflow counts as a record, and what it does not")
         record: Choice[options] = dspy.OutputField(
             desc="Which record named in the request, but not in the sub-task, is the sub-task about "
-                 "(through words like 'it', 'its', 'that unit', 'the identity')? 'none' if it names "
+                 "(through words like 'it', 'its', 'that team', 'the customer')? 'none' if it names "
                  "every record it is about.")
 
     with dspy.context(lm=jev_lm):
@@ -1197,6 +1206,32 @@ def _choose_referent(user_query: str, text: str, candidates: list[str], notes: s
     value, probability = _choice_value_and_probability(choice)
     logger.info(f"referent for {text!r}: {value} (confidence {probability:.2f})")
     return value if value in candidates and probability >= REFERENT_THRESHOLD else None
+
+
+def _choose_description(user_query: str, text: str, subject: str, descriptions: list[str], notes: str,
+                        jev_lm) -> str | None:
+    """Which of the sub-task's definite descriptions ("the customer") stands for ``subject``, if any."""
+    options = tuple((phrase, f"'{phrase}' in the sub-task means {subject}.") for phrase in descriptions) + (
+        ("none", f"None of these phrases means {subject}; each means something else."),)
+
+    class ChooseDescription(dspy.Signature):
+        """Decide which phrase of a sub-task stands for a record the sub-task does not name."""
+
+        request: str = dspy.InputField(desc="the user's whole request")
+        subtask: str = dspy.InputField(desc="one sub-task cut from the request, run on its own")
+        record: str = dspy.InputField(desc="the record of the request the sub-task is about without naming it")
+        notes: str = dspy.InputField(desc="what this workflow counts as a record, and what it does not")
+        phrase: Choice[options] = dspy.OutputField(
+            desc="Which 'the ...' phrase of the sub-task means the record (as 'the customer' can mean "
+                 "a customer named earlier)? 'none' if each phrase means something else, such as a tag, a "
+                 "request, another record or a record the work is to find.")
+
+    with dspy.context(lm=jev_lm):
+        choice = dspy.Predict(ChooseDescription)(request=user_query, subtask=text, record=subject,
+                                                 notes=notes).phrase
+    value, probability = _choice_value_and_probability(choice)
+    logger.info(f"description of {subject!r} in {text!r}: {value} (confidence {probability:.2f})")
+    return value if value in descriptions and probability >= REFERENT_THRESHOLD else None
 
 
 def build_query_with_next_steps(user_query: str,

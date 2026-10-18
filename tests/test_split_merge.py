@@ -287,20 +287,68 @@ def test_a_request_sentence_whose_record_no_sub_task_names_is_put_back_in_place(
 # ------------------------------------------------------------------ referents (chosen by the caller)
 def test_the_unnamed_subjects_are_the_request_subjects_a_sub_task_leaves_out():
     from fastworkflow.split_merge import unnamed_subjects
-    q = "Ann Lee leaves on Friday. Then tag the identity `on-leave`."
-    assert unnamed_subjects(q, "Tag the identity `on-leave`.") == ["Ann Lee"]
+    q = "Ann Lee leaves on Friday. Then tag the customer `on-leave`."
+    assert unnamed_subjects(q, "Tag the customer `on-leave`.") == ["Ann Lee"]
 
 
 def test_a_referent_replaces_the_one_pointing_phrase_or_is_appended():
     from fastworkflow.split_merge import with_referent
-    assert with_referent("Raj Patel from that unit is leaving.", "Hart Mills Ltd") == \
+    assert with_referent("Raj Patel from that team is leaving.", "Hart Mills Ltd") == \
         "Raj Patel from Hart Mills Ltd is leaving."
     assert with_referent("Confirm whether Raj Patel is among its holders.", "Payroll_Approver") == \
         "Confirm whether Raj Patel is among Payroll_Approver's holders."
     # two pointing phrases: which one means the subject is unknown, so it is appended
-    assert with_referent("Triage that request: who holds it, its risk, and that unit's roster.", "Hart Mills Ltd") == \
-        "Triage that request: who holds it, its risk, and that unit's roster (for Hart Mills Ltd)."
+    assert with_referent("Triage that request: who holds it, its risk, and that team's roster.", "Hart Mills Ltd") == \
+        "Triage that request: who holds it, its risk, and that team's roster (for Hart Mills Ltd)."
     # "those rights" is plural: not a pointer to one record
     assert with_referent("Compare them on the systems those rights belong to.", "Payroll_Approver") == \
         "Compare them on the systems those rights belong to (for Payroll_Approver)."
     assert with_referent("Open Ann Lee.", "Ann Lee") == "Open Ann Lee."
+
+
+def test_a_definite_description_of_the_referent_gets_the_record_written_after_it():
+    from fastworkflow.split_merge import with_referent
+    text = "Tag the customer `on-leave` and show me its tags before and after."
+    # the caller found that "the customer" stands for the record: written in there, and the one "its" too
+    assert with_referent(text, "Ann Lee", "the customer") == \
+        "Tag the customer Ann Lee `on-leave` and show me Ann Lee's tags before and after."
+    assert with_referent("Tag the customer `on-leave`.", "Ann Lee", "the customer") == \
+        "Tag the customer Ann Lee `on-leave`."
+    # several pointing phrases: the description names the record, so nothing is appended
+    assert with_referent("Show me the customer's tags, its risk and its logins.", "Ann Lee", "the customer") == \
+        "Show me the customer Ann Lee's tags, its risk and its logins."
+    # without a description the old behaviour holds
+    assert with_referent("Tag the customer `on-leave`.", "Ann Lee") == "Tag the customer `on-leave` (for Ann Lee)."
+
+
+def test_definite_descriptions_leave_out_plurals_common_words_of_phrases_and_named_ones():
+    from fastworkflow.split_merge import definite_descriptions
+    assert definite_descriptions("Tag the customer `on-leave` and show me its tags.") == ["the customer"]
+    assert definite_descriptions("Show me the customer's tags.") == ["the customer"]
+    assert definite_descriptions(
+        "Open the riskier of NORTHFEED and SOUTHFEED and show me the controls it trips.") == []
+    assert definite_descriptions("Open the unit Payroll and the first login listed.") == []
+    assert definite_descriptions("Show me the full list.") == []
+
+
+# ------------------------------------------------------------------ rule 6a: a sentence's subjects stay with it
+def test_a_subject_cut_from_its_sentence_is_restored_though_another_sub_task_names_it():
+    q = ("Feed review. List the logins nobody owns on NORTHFEED and on SOUTHFEED, with a count for each. "
+         "Confirm whether the HR feed carries any logins at all. "
+         "Then open the riskier of NORTHFEED and SOUTHFEED and show me the controls it trips.")
+    split = ["List the logins nobody owns on NORTHFEED, with a count for each.",
+             "Confirm whether the HR feed carries any logins at all.",
+             "Open the riskier of NORTHFEED and SOUTHFEED and show me the controls it trips."]
+    assert merge_subtasks(q, split) == [
+        "List the logins nobody owns on NORTHFEED and on SOUTHFEED, with a count for each.",
+        "Confirm whether the HR feed carries any logins at all.",
+        "Open the riskier of NORTHFEED and SOUTHFEED and show me the controls it trips."]
+
+
+def test_a_sentence_split_per_subject_or_kept_whole_is_left_alone():
+    q = ("Feed review. List the logins nobody owns on NORTHFEED and on SOUTHFEED, with a count for each. "
+         "Then open the riskier of NORTHFEED and SOUTHFEED and show me the controls it trips.")
+    split = ["List the logins nobody owns on NORTHFEED, with a count for each.",
+             "List the logins nobody owns on SOUTHFEED, with a count for each.",
+             "Open the riskier of NORTHFEED and SOUTHFEED and show me the controls it trips."]
+    assert merge_subtasks(q, split) == split

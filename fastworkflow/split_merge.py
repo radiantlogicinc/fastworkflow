@@ -345,13 +345,60 @@ def _invents_value(text: str, user_query: str, known: list[str]) -> bool:
     return False
 
 
+def _source_sentence(text: str, sentences: list[str], subj: frozenset[str]) -> int | None:
+    """The request sentence ``text`` is taken from: the one holding the largest share (at least half)
+    of its content words once the subjects are blanked out of both; None when no sentence does."""
+    words = _template(text, subj)
+    if not words:
+        return None
+    cover = [len(words & _template(s, subj)) / len(words) for s in sentences]
+    best = max(range(len(sentences)), key=lambda i: cover[i])
+    return best if cover[best] >= SOURCE_COVERAGE else None
+
+
+def _restore_cut_subjects(user_query: str, texts: list[str], known: list[str],
+                          identifiers: tuple[re.Pattern, ...]) -> list[str]:
+    """Rule 6a: the sub-tasks taken from a job sentence carry all of that sentence's subjects.
+
+    "List the logins nobody owns on NORTHFEED and on SOUTHFEED" cut to "... on NORTHFEED" loses the
+    SOUTHFEED job even when a later sub-task ("Open the riskier of NORTHFEED and SOUTHFEED") names
+    SOUTHFEED, so a request-wide check does not see it. Per sentence: when a subject of the sentence is
+    named by none of the sub-tasks taken from it (``_source_sentence``), the first of them becomes the
+    sentence verbatim and the others are dropped. Only sub-tasks made of the sentence's own words are
+    replaced (one that also carries another sentence's words is left alone, as is a limit sentence),
+    and a sub-task that is already the whole sentence is never touched, so nothing is duplicated.
+    """
+    sentences = _sentences(user_query)
+    subj = [subjects_in(t, known, identifiers) for t in texts]
+    sources = [_source_sentence(t, sentences, s) for t, s in zip(texts, subj)]
+    replace: dict[int, str] = {}
+    drop: set[int] = set()
+    for k, sentence in enumerate(sentences):
+        if _is_limit(sentence):
+            continue
+        own = subjects_in(sentence, known, identifiers)
+        taken = [i for i, src in enumerate(sources) if src == k]
+        if not own or not taken:
+            continue
+        missing = own - frozenset().union(*(subj[i] for i in taken))
+        if not missing or not all(_content(texts[i]) <= _content(sentence) for i in taken):
+            continue
+        text = _LEADING_LINK.sub("", sentence.strip())
+        replace[taken[0]] = text[:1].upper() + text[1:]
+        drop |= set(taken[1:])
+    return [replace.get(i, t) for i, t in enumerate(texts) if i not in drop]
+
+
 def _restore_dropped(user_query: str, texts: list[str], known: list[str],
                      identifiers: tuple[re.Pattern, ...]) -> list[str]:
     """Rule 6: a request sentence naming a subject that no sub-task names is a job the model dropped.
 
     It is put back, verbatim, after the last sub-task that comes from an earlier sentence. A limit
-    sentence is not a job (rule 5 carries it). Only subjects of the request count.
+    sentence is not a job (rule 5 carries it). Only subjects of the request count. First, a sub-task
+    cut from a sentence that left out some of that sentence's subjects is given the whole sentence
+    back (``_restore_cut_subjects``), even when another sub-task names the subjects it left out.
     """
+    texts = _restore_cut_subjects(user_query, texts, known, identifiers)
     named = set().union(*(subjects_in(t, known, identifiers) for t in texts))
     sentences = _sentences(user_query)
     out = list(texts)
@@ -688,28 +735,79 @@ _ITS = re.compile(r"\bits\b")
 
 def unnamed_subjects(user_query: str, text: str, identifiers: tuple[re.Pattern, ...] = ()) -> list[str]:
     """The request's subjects that ``text`` does not name: what a sub-task's "it", "its" or
-    "that unit" may stand for. Choosing among them is the caller's (a model); this is code only."""
+    "that team" may stand for. Choosing among them is the caller's (a model); this is code only."""
     known = request_subjects(user_query, identifiers)
     named = subjects_in(text, known, identifiers)
     return [k for k in known if _norm(k) not in named]
 
 
-def with_referent(text: str, subject: str) -> str:
+#: "the <word>": a definite description that may stand for a record named earlier ("the customer").
+_DEFINITE = re.compile(r"\b[Tt]he\s+([a-z][a-z-]*)\b(?!\s+of\b)")
+#: Words after "the" that open a longer description rather than name a kind of record ("the full list").
+_NOT_KINDS = frozenset("""same whole full entire rest latter former following above below current latest new old
+main top bottom one ones""".split())
+
+
+def definite_descriptions(text: str) -> list[str]:
+    """The "the <word>" phrases of ``text`` that may stand for one record named earlier, in order.
+
+    Which of them, if any, stands for the sub-task's referent is the caller's choice (a model):
+    "the customer" in "Tag the customer `x`" stands for a person, "the label" in "Put the label `x`
+    on her" does not, and nothing in the words alone tells the two apart. Left out, as they cannot
+    stand for one record named earlier: a plural ("the logins"), a common word ("the first", "the
+    other", "the full"), "the <word> of ..." ("the riskier of"), and a phrase followed by a name
+    ("the unit Payroll").
+    """
+    out: list[str] = []
+    for m in _DEFINITE.finditer(text):
+        word = m.group(1)
+        if word in _COMMON or word in _STOP or word in _NOT_KINDS or (word.endswith("s") and not word.endswith("ss")):
+            continue
+        after = text[m.end():].lstrip()
+        if after[:1].isupper() or _UID.match(after):
+            continue
+        phrase = f"the {word}"
+        if phrase not in out:
+            out.append(phrase)
+    return out
+
+
+def _write_after(text: str, description: str, subject: str) -> str | None:
+    """``text`` with ``subject`` written right after the first ``description`` ("the customer Ann Lee")."""
+    m = re.search(r"\b" + re.escape(description) + r"\b(?!'s\b)", text, flags=re.IGNORECASE)
+    if m is None:
+        m = re.search(r"\b" + re.escape(description) + r"'s\b", text, flags=re.IGNORECASE)
+        if m is None:
+            return None
+        # "the customer's tags" -> "the customer Ann Lee's tags"
+        return f"{text[:m.end() - 2]} {subject}'s{text[m.end():]}"
+    return f"{text[:m.end()]} {subject}{text[m.end():]}"
+
+
+def with_referent(text: str, subject: str, description: str | None = None) -> str:
     """``text`` with the record its pointing-back words stand for written in.
 
-    When the sub-task has exactly one pointing phrase, it is replaced: "that unit" becomes the
-    subject, "its holders" becomes "<subject>'s holders" (a plural "those rights" may mean something
-    else and does not count). With none or several, which one means the subject is unknown, so the
-    subject is appended instead: "Tag the identity `x` (for Ann Lee)."
+    ``description`` is the definite description standing for the record, when the caller found one
+    (see ``definite_descriptions``): the subject is written right after it, "Tag the customer Ann Lee
+    `x`", so a value after it is not read as the record's name. When the sub-task has exactly one
+    pointing phrase, it is replaced as well: "that team" becomes the subject, "its holders" becomes
+    "<subject>'s holders" (a plural "those rights" may mean something else and does not count).
+    With no description and none or several pointing phrases, which one means the subject is
+    unknown, so the subject is appended instead: "Triage that request and that team's roster (for
+    Ann Lee)."
     """
     if _contains(text, subject):
         return text
+    described = _write_after(text, description, subject) if description else None
     demonstratives = _DEMONSTRATIVE.findall(text)
     possessives = _ITS.findall(text)
     if len(demonstratives) + len(possessives) == 1:
+        text = described or text
         if demonstratives:
             return _DEMONSTRATIVE.sub(subject, text, count=1)
         return _ITS.sub(f"{subject}'s", text, count=1)
+    if described:
+        return described
     body = text.rstrip()
     end = body[-1] if body and body[-1] in ".?!" else ""
     return f"{body[:len(body) - len(end)]} (for {subject}){end or '.'}"

@@ -36,6 +36,94 @@ INVALID_INT_VALUE = -sys.maxsize
 INVALID_FLOAT_VALUE = -sys.float_info.max
 
 
+# --- Angle-bracketed parameter values ------------------------------------------
+#
+# A command's usage text writes arguments as ``<field_name>``, and an agent copies
+# that shape: sometimes around a real value it read from an earlier output
+# (``<9a1b2c3d...>``), sometimes with no value at all (``<item_uid>``). The first
+# is the right value in the wrong wrapper and is unwrapped; the second is a
+# placeholder the agent never filled in, and running the command with it would
+# only produce a not-found or an empty result that reads like an answer.
+
+# The whole value is one bracketed token, possibly doubled (``<<x>>``). A value
+# with brackets inside it, or text outside them, is left alone.
+_BRACKETED_VALUE = re.compile(r"^\s*<+\s*([^<>]*?)\s*>+\s*$")
+
+# Lowercase words joined by ``_`` or ``-``, no digits: the shape of a variable
+# name, which is what a usage-text placeholder is.
+_IDENTIFIER_SHAPE = re.compile(r"[a-z]+(?:[_\-][a-z]+)*")
+
+# Words a placeholder is made of when it does not repeat the field's own name.
+_PLACEHOLDER_WORDS = frozenset({
+    "uid", "uuid", "id", "ids", "key", "code", "value", "values", "name",
+    "placeholder", "param", "parameter", "arg", "argument",
+})
+
+
+def _is_placeholder_text(inner: str, field_name: str) -> bool:
+    """Whether *inner* (the text between the brackets) names a value instead of
+    being one.
+
+    Placeholder: empty, punctuation only, or variable-name shaped (lowercase
+    words, no digits, all one case) and either snake_case or made of the field's
+    own words / generic placeholder words: ``repo_uid``, ``uid``,
+    ``first_order_uid``, ``&_catalog_uid_``, ``filter`` for a ``filter``
+    field. Anything carrying a digit, a space, or mixed case is a value:
+    ``9a1b2c3d...``, ``Ann Lee``, ``PayHub``.
+    """
+    core = re.sub(r"^[^A-Za-z0-9]+|[^A-Za-z0-9]+$", "", inner)
+    if not core:
+        return True
+    if not (core.islower() or core.isupper()):
+        return False
+    lowered = core.lower()
+    if not _IDENTIFIER_SHAPE.fullmatch(lowered):
+        return False
+    if "_" in lowered:
+        return True
+    words = set(re.split(r"[_\-]", lowered))
+    field_words = set(field_name.lower().split("_"))
+    return bool(words & (field_words | _PLACEHOLDER_WORDS))
+
+
+def classify_bracketed_value(value: Any, field_name: str) -> Tuple[str, Any]:
+    """Classify one parameter value for angle brackets around it.
+
+    Returns ``("unchanged", value)``, ``("unwrapped", inner_value)`` for a real
+    value inside brackets, or ``("placeholder", value)`` for bracketed text that
+    holds no value. Only strings are inspected; a list is checked item by item
+    and is a placeholder if any item is.
+    """
+    if isinstance(value, list):
+        changed = False
+        items = []
+        for item in value:
+            kind, new_item = classify_bracketed_value(item, field_name)
+            if kind == "placeholder":
+                return "placeholder", value
+            changed = changed or kind == "unwrapped"
+            items.append(new_item)
+        return ("unwrapped", items) if changed else ("unchanged", value)
+    if not isinstance(value, str) or isinstance(value, Enum):
+        return "unchanged", value
+    match = _BRACKETED_VALUE.match(value)
+    if not match:
+        return "unchanged", value
+    inner = match[1]
+    if _is_placeholder_text(inner, field_name):
+        return "placeholder", value
+    return "unwrapped", inner
+
+
+def placeholder_value_message(field_name: str, field_value: Any) -> str:
+    """What the caller is told when *field_name* was given a placeholder."""
+    return (
+        f"{field_name} {field_value!r} is a placeholder, not a value: pass the real "
+        f"{field_name} copied from an earlier command's output (run the command "
+        f"that lists it first if no output has shown it yet)."
+    )
+
+
 def get_trainset(subject_command_name,workflow_folderpath) -> List[Dict[str, Any]]:
         """Load labeled trainset from the command specific JSON file for LabeledFewShot"""
 
@@ -380,7 +468,34 @@ Today's date is {today}.
         invalid_fields = []
         all_suggestions = {}
 
+        # Angle brackets first, before type coercion, patterns, db_lookup and the
+        # workflow's hook see the value: every extraction method (stored merge,
+        # XML regex, LLM) and the direct-action path reach the command through
+        # here, so this is where a copied usage-text wrapper is caught.
+        placeholder_fields: Dict[str, Any] = {}
+        unwrapped_fields: Dict[str, Any] = {}
+        for field_name in type(cmd_parameters).model_fields:
+            field_value = getattr(cmd_parameters, field_name, None)
+            kind, new_value = classify_bracketed_value(field_value, field_name)
+            if kind == "unwrapped":
+                setattr(cmd_parameters, field_name, new_value)
+                unwrapped_fields[field_name] = field_value
+            elif kind == "placeholder":
+                placeholder_fields[field_name] = field_value
+                invalid_fields.append(f"{field_name} '{field_value}'")
+                is_valid = False
+        if diagnostics is not None and unwrapped_fields:
+            diagnostics["unwrapped_bracketed_values"] = {
+                name: str(value) for name, value in unwrapped_fields.items()
+            }
+        if diagnostics is not None and placeholder_fields:
+            diagnostics["placeholder_values"] = {
+                name: str(value) for name, value in placeholder_fields.items()
+            }
+
         for field_name, field_info in type(cmd_parameters).model_fields.items():
+                if field_name in placeholder_fields:
+                    continue
                 field_value = getattr(cmd_parameters, field_name, None)
 
                 if field_value not in [NOT_FOUND, None, INVALID_INT_VALUE, INVALID_FLOAT_VALUE]:
@@ -663,7 +778,7 @@ Today's date is {today}.
         for field_name, field_info in type(cmd_parameters).model_fields.items():
             field_value = getattr(cmd_parameters, field_name, None)
 
-            if field_value in [NOT_FOUND, None]:
+            if field_value in [NOT_FOUND, None] or field_name in placeholder_fields:
                 continue
 
             is_db_lookup = None
@@ -772,6 +887,9 @@ Today's date is {today}.
 
         if invalid_fields:
             message += f"{INVALID_INFORMATION_ERRMSG}" + ", ".join(invalid_fields) + "\n"
+
+        for field, value in placeholder_fields.items():
+            message += placeholder_value_message(field, value) + "\n"
 
         for field, suggestions in all_suggestions.items():
             if suggestions:

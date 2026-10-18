@@ -311,21 +311,43 @@ def test_a_split_sub_task_gets_the_referent_jev_chooses_written_in(tmp_path, mon
 
     monkeypatch.setattr(agent, "_jev_lm", lambda: object())
     monkeypatch.setattr(agent, "_choose_referent", choose)
-    q = "Ann Lee leaves on Friday: sweep her reach. Then tag the identity `on-leave` and show its tags."
+    monkeypatch.setattr(agent, "_choose_description", lambda *args: None)
+    q = "Ann Lee leaves on Friday: sweep her reach. Then tag the customer `on-leave` and show its tags."
     assert agent.resolve_referents(q, ["Ann Lee leaves on Friday: sweep her reach.",
-                                       "Tag the identity `on-leave` and show its tags."], str(tmp_path)) == [
-        "Ann Lee leaves on Friday: sweep her reach.", "Tag the identity `on-leave` and show Ann Lee's tags."]
+                                       "Tag the customer `on-leave` and show its tags."], str(tmp_path)) == [
+        "Ann Lee leaves on Friday: sweep her reach.", "Tag the customer `on-leave` and show Ann Lee's tags."]
     # Jev is asked about each sub-task that leaves request subjects unnamed, with the workflow's notes
     assert asked == [("Ann Lee leaves on Friday: sweep her reach.", ["on-leave"], "Tag names are not records."),
-                     ("Tag the identity `on-leave` and show its tags.", ["Ann Lee"], "Tag names are not records.")]
+                     ("Tag the customer `on-leave` and show its tags.", ["Ann Lee"], "Tag names are not records.")]
+
+
+def test_the_record_is_written_after_the_definite_description_jev_chooses(tmp_path, monkeypatch):
+    import fastworkflow.workflow_agent as agent
+
+    asked = []
+
+    def describe(user_query, text, subject, descriptions, notes, jev_lm):
+        asked.append((text, subject, descriptions))
+        return "the customer"
+
+    monkeypatch.setattr(agent, "_jev_lm", lambda: object())
+    monkeypatch.setattr(agent, "_choose_referent", lambda q, text, *a: "Ann Lee" if "on-leave" in text else None)
+    monkeypatch.setattr(agent, "_choose_description", describe)
+    q = "Ann Lee leaves on Friday: sweep her reach. Then tag the customer `on-leave` and show its tags."
+    assert agent.resolve_referents(q, ["Ann Lee leaves on Friday: sweep her reach.",
+                                       "Tag the customer `on-leave` and show its tags."], str(tmp_path)) == [
+        "Ann Lee leaves on Friday: sweep her reach.",
+        "Tag the customer Ann Lee `on-leave` and show Ann Lee's tags."]
+    # asked only for the sub-task whose referent was chosen, with its definite descriptions
+    assert asked == [("Tag the customer `on-leave` and show its tags.", "Ann Lee", ["the customer"])]
 
 
 def test_without_jev_the_sub_tasks_are_left_as_they_are(monkeypatch):
     import fastworkflow.workflow_agent as agent
 
     monkeypatch.setattr(agent, "_jev_lm", lambda: None)
-    assert agent.resolve_referents("Ann Lee leaves. Tag the identity `x`.", ["Ann Lee leaves.", "Tag the identity `x`."],
-                                   None) == ["Ann Lee leaves.", "Tag the identity `x`."]
+    assert agent.resolve_referents("Ann Lee leaves. Tag the customer `x`.", ["Ann Lee leaves.", "Tag the customer `x`."],
+                                   None) == ["Ann Lee leaves.", "Tag the customer `x`."]
 
 
 def test_a_failing_merge_keeps_the_models_split(monkeypatch):

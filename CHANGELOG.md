@@ -38,12 +38,29 @@
 - **Referents written into sub-tasks** (`workflow_agent.resolve_referents`):
   after the merge, a sub-task that leaves some of the request's records
   unnamed gets one Jev call choosing which of them, if any, its "it", "its",
-  "that unit" or "the identity" stands for, told what the workflow counts as a
+  "that team" or "the customer" stands for, told what the workflow counts as a
   record by its optional `_skills/subject_hints.md` (natural language). The
   choice is written in (`split_merge.with_referent`): the one pointing phrase
   is replaced ("its holders" -> "Payroll_Approver's holders"), or the record is
   appended ("(for Ann Lee)") when there are none or several. Without a Jev key
   nothing changes.
+
+- **Referents next to their description, and cut subjects put back**
+  (`split_merge.py`, `workflow_agent.resolve_referents`): when Jev has chosen
+  the record a sub-task points back to and the sub-task holds a description
+  of it ("the customer `on-leave`"), a second Jev call picks that phrase and
+  the record is written right after it ("Tag the customer Ann Lee
+  `on-leave`"), instead of only into "its tags". A sub-task taken from a
+  request sentence that lost one of that sentence's subjects is replaced by
+  the sentence itself, even when another sub-task names the subject.
+
+- **Placeholder arguments refused** (`utils/signatures.py`,
+  `InputForParamExtraction.validate_parameters`): a parameter value that is
+  one bracketed token is unwrapped when it holds a real value
+  (`<9a1b2c3d...>`) and refused, with an error telling the agent to pass the
+  real value from an earlier output, when it is only a placeholder
+  (`<item_uid>`, `<uid>`). Every way a command gets its parameters passes
+  through this check.
 
 - **The repeat block covers the same call only**: a command that returned
   the same result twice in a row is refused in the next step only when it is
