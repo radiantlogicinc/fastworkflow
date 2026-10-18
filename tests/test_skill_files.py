@@ -1,5 +1,5 @@
-"""Skills as Python skill files (``_skills/<name>/skill.py``): loading, expansion, argument
-screen, validation hook, the planner path, and the SKILL.md migration path."""
+"""Skills as Python skill files (``_skills/<name>/skill.py``): loading, expansion, the
+template text, argument screen, validation hook and the planner path."""
 from __future__ import annotations
 
 import logging
@@ -61,10 +61,9 @@ def test_the_documented_example_loads_as_a_skill_with_params(tmp_path):
         ("group", "unit"), True, (("group", "a group of people"), ("unit", "an organisation unit")))
     assert person.subject and risk.verify and count.in_request
     assert command.plain_utterances == ("who is in the Payroll group", "is Ann Lee in Billing")
-    assert command.maps == () and command.body == ()
-    # the declared template is what the planner sees; it is not checked against steps()
-    assert sc.template_steps(command)[0] == "<find_group or find_unit, by kind> query=<name>"
-    assert "expands to:" in command.signature_text()
+    # the template is steps() rendered on placeholder inputs; the planner sees it under "expands to:"
+    assert command.template[0] == "<find_group or find_unit, by kind> query=<name>"
+    assert "expands to:\n    1. <find_group or find_unit, by kind> query=<name>" in command.signature_text()
 
 
 def test_load_skills_gives_the_description_and_template_and_a_plain_skill_its_steps(tmp_path):
@@ -72,8 +71,14 @@ def test_load_skills_gives_the_description_and_template_and_a_plain_skill_its_st
     skills = {name: (desc, steps) for name, desc, steps in workflow_agent.load_skills(folder)}
     assert skills["close-out"] == ("Close out a record: note what was done.",
                                    ("write a short summary", "say what is left open"))
-    assert skills["show-record"][1][-3:] == ("repeat count times (n = 1 to count): open member <n>",
-                                             "write a short summary", "say what is left open")
+    # steps() rendered on placeholder inputs, the included plain skill expanded
+    assert skills["show-record"][1] == (
+        "<find_group or find_unit, by kind> query=<name>",
+        "list_members filter=<person> (only when person is given)",
+        "list_members (only when person is empty)",
+        "assess_risk (only when include_risk)",
+        "open member 1", "open member 2",
+        "write a short summary", "say what is left open")
     assert workflow_agent.load_skill_commands(folder).keys() == {"show-record"}
     assert "- close-out: Close out a record" in workflow_agent._job_types_for(folder)
 
@@ -93,26 +98,82 @@ def test_a_repeat_beyond_the_limit_and_a_failing_steps_are_skill_call_errors(tmp
     with pytest.raises(SkillCallError, match="more than"):
         sc.expand(command, _args(count=sc.REPEAT_LIMIT + 1))
     assert list(sc.repeat(3, 1)) == [2, 3] and list(sc.repeat(0)) == []
-    broken = EXAMPLE.replace('out = [f"{FIND[input.kind]} query={input.name}"]', 'out = [FIND[input.name]]')
+    # fails for one argument only (on the placeholder inputs it renders): the call fails, not the load
+    broken = EXAMPLE.replace('out = [f"{FIND[input.kind]} query={input.name}"]',
+                             'out = [FIND[input.name] if input.name == "Payroll" else input.name]')
     with pytest.raises(SkillCallError, match="steps\\(\\) of show-record failed: KeyError"):
         sc.expand(_example(tmp_path / "broken", broken), _args())
 
 
-def test_an_include_of_an_unknown_skill_fails_the_call(tmp_path):
+def test_an_include_of_an_unknown_skill_fails_the_load_or_the_call(tmp_path):
+    # written for every argument: the rendered template holds it and the load fails
     text = EXAMPLE.replace('out.append("@close-out")', 'out.append("@nowhere")')
-    folder = _write(tmp_path, {"show-record": text, "close-out": CLOSE_OUT})
+    folder = _write(tmp_path / "always", {"show-record": text, "close-out": CLOSE_OUT})
+    with pytest.raises(ValueError, match="includes unknown skill 'nowhere'"):
+        workflow_agent.load_skills(folder)
+    # written for an argument the template does not render (count 0): the call fails
+    text = EXAMPLE.replace('out.append("@close-out")', 'out.append("@close-out" if input.count else "@nowhere")')
+    folder = _write(tmp_path / "sometimes", {"show-record": text, "close-out": CLOSE_OUT})
     with pytest.raises(SkillCallError, match="includes 'nowhere'"):
-        sc.expand(workflow_agent.load_skill_commands(folder)["show-record"], _args())
+        sc.expand(workflow_agent.load_skill_commands(folder)["show-record"], _args(count=0))
 
 
-def test_without_a_declared_template_steps_are_rendered_with_placeholder_inputs(tmp_path):
-    text = EXAMPLE.replace("    template = [", "    template_ = [")
-    folder = _write(tmp_path, {"show-record": text, "close-out": CLOSE_OUT})
-    (_n, _d, steps), = [s for s in workflow_agent.load_skills(folder) if s[0] == "show-record"]
-    # every enum value's steps, merged; a str reads <name>; a bool is true; an int its default
-    assert steps == ("find_group query=<name>", "find_unit query=<name>", "list_members filter=<person>",
-                     "assess_risk", "open member 1", "open member 2",
-                     "write a short summary", "say what is left open")
+def test_a_declared_template_is_the_planner_template_as_written(tmp_path):
+    declared = (
+        '    template = [\n'
+        '        "<find_group or find_unit, by kind> query=<name>",\n'
+        '        "repeat count times (n = 1 to count): open member <n>",\n'
+        '        "@close-out",\n'
+        '    ]\n\n'
+        '    @staticmethod')
+    text = EXAMPLE.replace("    @staticmethod", declared, 1)
+    assert text != EXAMPLE
+    command = _example(tmp_path, text)
+    assert command.template == ("<find_group or find_unit, by kind> query=<name>",
+                                "repeat count times (n = 1 to count): open member <n>",
+                                "write a short summary", "say what is left open")
+    assert sc.expand(command, _args(count=1))[-3:] == ["open member 1", "write a short summary",
+                                                       "say what is left open"]
+
+
+LABEL = '''from typing import Literal
+
+from pydantic import BaseModel, Field
+
+
+class Signature:
+    """Put a label on one record or take it off."""
+
+    class Input(BaseModel):
+        name: str
+        action: Literal["add", "remove"]
+        list_all: bool = False
+        detail: bool = Field(default=False, json_schema_extra={"requires": "list_all"})
+
+
+def steps(input):
+    out = [f"open {input.name}"]
+    if input.action == "add":
+        out.append("add_label (change nothing else; the label must exist already)")
+    else:
+        out.append("remove_label (change nothing else)")
+    if input.detail or not input.list_all:
+        out.append("show_labels")
+    if input.list_all:
+        out.append("list_labels")
+    return out
+'''
+
+
+def test_the_rendered_template_says_when_each_step_is_written(tmp_path):
+    (_n, _d, steps), = workflow_agent.load_skills(_write(tmp_path, {"label": LABEL}))
+    # different steps per enum value stay apart; a condition may be an "or"; a combination a
+    # requires would reset (detail without list_all) is not rendered
+    assert steps == ("open <name>",
+                     "add_label (change nothing else; the label must exist already) (only when action is add)",
+                     "remove_label (change nothing else) (only when action is remove)",
+                     "show_labels (only when not list_all or detail)",
+                     "list_labels (only when list_all)")
 
 
 def test_a_skill_file_without_input_may_take_the_empty_input(tmp_path):
@@ -184,7 +245,7 @@ def steps(input):
     ("name: str = Field(json_schema_extra={'subject': 'yes'})", "subject must be true or false"),
     ("count: int = Field(default=1, json_schema_extra={'requires': 'nmae'})", "unknown parameter 'nmae'"),
     ("kind: Literal['a', 'b'] = Field(json_schema_extra={'means': {'c': 'x'}})", "'c' is not a value of it"),
-    ("n: int = 1", "bad parameter name 'n'"),
+    ("reasoning: int = 1", "bad parameter name 'reasoning'"),
 ])
 def test_a_malformed_input_field_fails_the_load(tmp_path, field, message):
     folder = _write(tmp_path, {"bad": FIELD.format(field=field)})
@@ -198,44 +259,16 @@ def test_steps_that_fail_on_placeholder_inputs_need_a_declared_template(tmp_path
         workflow_agent.load_skills(_write(tmp_path, {"bad": text}))
 
 
-# ---------------------------------------------------------------- SKILL.md migration path
+# ---------------------------------------------------------------- folders that are not skills
 
-MD = "---\nparams:\n  name:\n    type: str\n---\nShow one record.\nfind_record query={name}\n"
-
-
-def test_skill_md_is_read_with_a_deprecation_warning(tmp_path, caplog):
-    folder = _write(tmp_path, {"show": MD}, name="SKILL.md")
+def test_a_folder_without_a_skill_file_is_not_a_skill(tmp_path, caplog):
+    (tmp_path / "_skills" / "notes").mkdir(parents=True)
+    (tmp_path / "_skills" / "notes" / "README.md").write_text("Show one record.\nfind_record\n")
+    folder = _write(tmp_path, {"close-out": CLOSE_OUT})
+    (tmp_path / "_skills" / "split_instructions.md").write_text("Split it my way.")
     with caplog.at_level(logging.WARNING):
-        command = workflow_agent.load_skill_commands(folder)["show"]
-    assert "SKILL.md is deprecated" in caplog.text
-    # a SKILL.md skill gets an Input model too, for the argument screen
-    assert list(command.input_model.model_fields) == ["name"]
-
-
-def test_a_skill_file_wins_over_a_skill_md_in_the_same_folder(tmp_path, caplog):
-    _write(tmp_path, {"show-record": MD}, name="SKILL.md")
-    with caplog.at_level(logging.WARNING):
-        command = _example(tmp_path)
-    assert command.path.endswith("skill.py")
-    assert "is ignored" in caplog.text
-
-
-def test_with_the_switch_off_a_skill_md_is_not_read(tmp_path, monkeypatch):
-    monkeypatch.setattr(sc, "READ_SKILL_MD", False)
-    folder = _write(tmp_path, {"show": MD}, name="SKILL.md")
-    _write(tmp_path, {"close-out": CLOSE_OUT})
-    assert [s[0] for s in workflow_agent.load_skills(folder)] == ["close-out"]
-
-
-def test_a_skill_md_may_include_a_plain_skill_file_but_not_one_with_params(tmp_path):
-    _write(tmp_path, {"close-out": CLOSE_OUT, "show-record": EXAMPLE})
-    folder = _write(tmp_path, {"audit": MD + "@close-out\n"}, name="SKILL.md")
-    command = workflow_agent.load_skill_commands(folder)["audit"]
-    assert sc.expand(command, {"name": "Ann Lee"})[1:] == ["write a short summary", "say what is left open"]
-    _write(tmp_path, {"outer": "Outer.\n@show-record\n"}, name="SKILL.md")
-    workflow_agent._parsed_skills.cache_clear()
-    with pytest.raises(SkillFormatError, match="which has params"):
-        workflow_agent.load_skills(folder)
+        assert [s[0] for s in workflow_agent.load_skills(folder)] == ["close-out"]
+    assert "notes holds no skill.py" in caplog.text
 
 
 # ---------------------------------------------------------------- argument screen (shared with commands)
@@ -265,13 +298,6 @@ def test_a_required_int_holding_the_not_given_marker_is_missing(tmp_path):
     command = workflow_agent.load_skill_commands(_write(tmp_path, {"take": text}))["take"]
     with pytest.raises(SkillCallError, match="missing required argument count"):
         sc.check_arguments(command, {"count": -sys.maxsize}, "take some")
-
-
-def test_the_screen_applies_to_skill_md_arguments_too(tmp_path):
-    folder = _write(tmp_path, {"show": MD}, name="SKILL.md")
-    command = workflow_agent.load_skill_commands(folder)["show"]
-    with pytest.raises(SkillCallError, match="is a placeholder"):
-        sc.check_arguments(command, {"name": "<name>"}, "Show the record <name>")
 
 
 def test_a_unicode_dash_in_the_request_matches_a_plain_one(tmp_path):

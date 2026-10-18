@@ -19,9 +19,7 @@ from dspy.experimental import Choice, TypeSafe
 import fastworkflow
 from fastworkflow import tracing
 from fastworkflow import skill_commands
-from fastworkflow.skill_commands import (
-    SkillCommand, SkillFormatError, build_command, has_front_matter, plan_skill_call, split_front_matter,
-    template_steps)
+from fastworkflow.skill_commands import SkillCommand, SkillFormatError, plan_skill_call
 from fastworkflow.split_merge import definite_descriptions, merge_subtasks, unnamed_subjects, with_referent
 from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_execution_context import CommandCancelledError
@@ -908,42 +906,24 @@ def _load_skill_file(name: str, path: str, workflow_folderpath: str):
 def _parsed_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ...], "SkillCommand | None"], ...]:
     """``(name, description, template steps, command or None)`` per skill; see ``load_skills``."""
     root = os.path.join(workflow_folderpath, "_skills")
-    # (name, description, raw steps, SKILL.md front matter or None, skill-file command or None, path)
-    files = []
+    files = []   # (name, SkillFile)
     for name in sorted(os.listdir(root)) if os.path.isdir(root) else ():
-        py_path = os.path.join(root, name, skill_commands.SKILL_FILE)
-        path = os.path.join(root, name, skill_commands.LEGACY_SKILL_FILE)
-        if os.path.isfile(py_path):
-            if os.path.isfile(path):
-                logger.warning(f"{path} is ignored: {py_path} defines skill {name!r} (delete the SKILL.md)")
-            loaded = _load_skill_file(name, py_path, workflow_folderpath)
+        path = os.path.join(root, name, skill_commands.SKILL_FILE)
+        if os.path.isfile(path):
+            loaded = _load_skill_file(name, path, workflow_folderpath)
             if loaded is not None:
-                files.append((name, loaded.description, loaded.steps, None, loaded.command, py_path))
-            continue
-        # SKILL.md: read only while workflows migrate (skill_commands.READ_SKILL_MD); delete
-        # this branch with the switch.
-        if skill_commands.READ_SKILL_MD and os.path.isfile(path):
-            logger.warning(f"{path}: SKILL.md is deprecated; convert it to {skill_commands.SKILL_FILE}")
-            with open(path, encoding="utf-8") as handle:
-                raw_lines = handle.readlines()
-            front = None
-            if has_front_matter(raw_lines):
-                front, raw_lines = split_front_matter(raw_lines, path)
-            lines = [line.strip() for line in raw_lines if line.strip()]
-            if lines:
-                files.append((name, lines[0], tuple(lines[1:]), front, None, path))
-            elif front is not None:
-                raise SkillFormatError(f"{path}: a skill with params needs a description line and steps")
-    raw_steps = {name: steps for name, _, steps, _, _, _ in files}
-    has_params = {name for name, _, _, front, command, _ in files if front is not None or command is not None}
+                files.append((name, loaded))
+        elif os.path.isdir(os.path.join(root, name)) and not name.startswith(("_", ".")):
+            logger.warning(f"{os.path.join(root, name)} holds no {skill_commands.SKILL_FILE}: not a skill")
+    raw_steps = {name: loaded.steps for name, loaded in files}
+    has_params = {name for name, loaded in files if loaded.command is not None}
 
-    def expand(name: str, chain: tuple[str, ...]) -> tuple[tuple[str, bool], ...]:
-        # (step, literal): an included step is plain text inside a skill with params
-        expanded = []
+    def expand(name: str, chain: tuple[str, ...]) -> tuple[str, ...]:
+        expanded: list[str] = []
         for step in raw_steps[name]:
             include = re.fullmatch(r"@(\S+)", step)
             if include is None:
-                expanded.append((step, len(chain) > 1))
+                expanded.append(step)
                 continue
             included = include.group(1)
             if included not in raw_steps:
@@ -959,24 +939,17 @@ def _parsed_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str,
         return tuple(expanded)
 
     identifiers = identifier_patterns(workflow_folderpath)
-    plain = {name: tuple(step for step, _ in expand(name, (name,)))
-             for name, _, _, front, command, _ in files if name not in has_params}
+    plain = {name: expand(name, (name,)) for name, _ in files if name not in has_params}
     out = []
-    for name, description, _, front, command, path in files:
-        if name in plain:
-            out.append((name, description, plain[name], None))
+    for name, loaded in files:
+        if loaded.command is None:
+            out.append((name, loaded.description, plain[name], None))
             continue
-        if command is not None:
-            # the template's @<skill> lines are expanded here; steps() output's at each call
-            template = tuple(step for step, _ in expand(name, (name,)))
-            command = dataclasses.replace(command, template=template, identifiers=identifiers,
-                                          includes=tuple(plain.items()))
-            out.append((name, description, template, command))
-            continue
-        items = expand(name, (name,))
-        command = build_command(name, description, front, list(items), path)
-        command = dataclasses.replace(command, identifiers=identifiers)
-        out.append((name, description, template_steps(command), command))
+        # the template's @<skill> lines are expanded here; steps() output's at each call
+        template = expand(name, (name,))
+        command = dataclasses.replace(loaded.command, template=template, identifiers=identifiers,
+                                      includes=tuple(plain.items()))
+        out.append((name, loaded.description, template, command))
     return tuple(out)
 
 
@@ -990,12 +963,9 @@ def load_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ..
     ``@<name>`` stands for the steps of skill ``<name>``, expanded in place; only a skill
     without params can be included, and an unknown skill or a cycle raises ValueError. A skill
     file that cannot be imported is logged and skipped; a malformed one raises
-    SkillFormatError (a ValueError) naming its file.
-
-    Migration: a folder without ``skill.py`` is read from its SKILL.md while
-    ``skill_commands.READ_SKILL_MD`` is set (deprecated; a warning names the file): plain text
-    whose first line describes the job and every other non-empty line is one step, or front
-    matter with typed parameters and step templates. When both files exist, ``skill.py`` wins.
+    SkillFormatError (a ValueError) naming its file. A folder without ``skill.py`` holds no
+    skill (``_skills`` also holds the workflow's ``split_instructions.md``,
+    ``subject_hints.md`` and ``identifier_patterns.txt``).
     """
     return tuple((name, description, steps) for name, description, steps, _ in _parsed_skills(workflow_folderpath))
 

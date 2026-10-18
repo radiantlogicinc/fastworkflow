@@ -1,4 +1,4 @@
-"""Skills as parameterized commands: SKILL.md front matter, expansion, guards, planner path."""
+"""Skills as parameterized commands: skill files with params, expansion, guards, planner path."""
 from __future__ import annotations
 
 import pytest
@@ -10,66 +10,58 @@ from fastworkflow.skill_commands import SkillCallError, SkillFormatError
 from tests.test_text_planner_and_split import (  # noqa: F401 - workflow_env is a fixture
     RecordingTraceSink, _fake_matcher, _plan, _prompt, _session, _text_answer, workflow_env)
 
-LOOKUP = """---
-params:
-  name:
-    type: str
-    strip: group, feed
-    desc: the record's name exactly as the request writes it
-  kind:
-    type: enum[group, feed]
-    desc: group, or feed (a source of logins)
-  person:
-    type: str
-    default: ""
-    desc: one named person to check for; empty lists everyone
-  include_risk:
-    type: bool
-    desc: the request asks how risky it is
-  count:
-    type: int
-    default: 2
-    desc: how many members to open
-  owner:
-    type: str
-    default: ""
-    requires: include_risk
-    desc: the owner to compare the risk with
-maps:
-  find:
-    by: kind
-    values:
-      group: find_group
-      feed: find_feed
-  listing:
-    by: kind
-    values:
-      group: list_members
-    default: list_logins of {name}
-  count_word:
-    by: count
-    values:
-      1: one
-      2: two
----
-Who is in one named group or feed, or whether one person is. One job per record.
-open_directory
-{find} query={name}
-[if person] {listing} filter={person}
-[if not person] {listing}
-[if include_risk] assess_risk{{owner={owner}}}
-[if kind == "group" and not (person or include_risk)] open_group_by_uid with the uid of the {name} match
-[repeat count - 1]
-open member {n}
-[end]
-stop after the first {count_word} members
-"""
+LOOKUP = '''
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+from fastworkflow.skill_commands import repeat
+
+FIND = {"group": "find_group", "feed": "find_feed"}
+COUNT_WORD = {1: "one", 2: "two"}
+
+
+def listing(input):
+    return "list_members" if input.kind == "group" else f"list_logins of {input.name}"
+
+
+class Signature:
+    """Who is in one named group or feed, or whether one person is. One job per record."""
+
+    class Input(BaseModel):
+        name: str = Field(description="the record's name exactly as the request writes it",
+                          json_schema_extra={"strip": ["group", "feed"]})
+        kind: Literal["group", "feed"] = Field(description="group, or feed (a source of logins)")
+        person: str = Field(default="", description="one named person to check for; empty lists everyone")
+        include_risk: bool = Field(default=False, description="the request asks how risky it is")
+        count: int = Field(default=2, description="how many members to open")
+        owner: str = Field(default="", description="the owner to compare the risk with",
+                           json_schema_extra={"requires": "include_risk"})
+
+
+def steps(input):
+    out = ["open_directory", f"{FIND[input.kind]} query={input.name}"]
+    out.append(f"{listing(input)} filter={input.person}" if input.person else listing(input))
+    if input.include_risk:
+        out.append(f"assess_risk{{owner={input.owner}}}")
+    if input.kind == "group" and not (input.person or input.include_risk):
+        out.append(f"open_group_by_uid with the uid of the {input.name} match")
+    for n in repeat(input.count, 1):
+        out.append(f"open member {n}")
+    out.append(f"stop after the first {COUNT_WORD.get(input.count, input.count)} members")
+    return out
+'''
+
+
+def _plain(description: str, steps: list[str]) -> str:
+    """The skill file of a skill without params."""
+    return f"class Signature:\n    __doc__ = {description!r}\n\n\ndef steps():\n    return {steps!r}\n"
 
 
 def _write(tmp_path, skills: dict[str, str]) -> str:
     for name, text in skills.items():
         (tmp_path / "_skills" / name).mkdir(parents=True)
-        (tmp_path / "_skills" / name / "SKILL.md").write_text(text)
+        (tmp_path / "_skills" / name / "skill.py").write_text(text)
     return str(tmp_path)
 
 
@@ -82,9 +74,9 @@ def _args(**overrides):
             "owner": "", **overrides}
 
 
-# ---------------------------------------------------------------- parsing
+# ---------------------------------------------------------------- loading
 
-def test_front_matter_gives_typed_params_maps_and_the_description_line(tmp_path):
+def test_a_skill_file_gives_typed_params_and_the_description(tmp_path):
     folder = _write(tmp_path, {"lookup": LOOKUP})
     command = workflow_agent.load_skill_commands(folder)["lookup"]
 
@@ -95,30 +87,32 @@ def test_front_matter_gives_typed_params_maps_and_the_description_line(tmp_path)
     assert command.param("kind").values == ("group", "feed")
     assert command.param("name").strip == ("group", "feed")
     assert command.param("owner").requires.source == "include_risk"
-    assert command.value_map("count_word").values == ((1, "one"), (2, "two"))
-    assert command.value_map("listing").default == "list_logins of {name}"
-    # what the matcher sees is the description line, as for a plain skill
+    # what the matcher sees is the description, as for a plain skill
     assert workflow_agent._job_types_for(folder) == f"- lookup: {command.description}"
 
 
 def test_a_skill_with_params_offers_its_steps_as_template_text(tmp_path):
     folder = _write(tmp_path, {"lookup": LOOKUP})
     (_name, _desc, steps), = workflow_agent.load_skills(folder)
+    # steps() on placeholder inputs: each step says when it is written, an enum's steps are
+    # joined, a step whose str may be empty is one step; a repeat shows the int's default
     assert steps == (
         "open_directory",
         "<find_group or find_feed, by kind> query=<name>",
         "<list_members or list_logins of <name>, by kind> filter=<person> (only when person is given)",
         "<list_members or list_logins of <name>, by kind> (only when person is empty)",
         "assess_risk{owner=<owner>} (only when include_risk)",
-        "open_group_by_uid with the uid of the <name> match (only when kind is group and not (person is given or include_risk))",
-        "repeat count - 1 times (n = 2 to count): open member <n>",
-        "stop after the first <one or two, by count> members",
+        "open_group_by_uid with the uid of the <name> match (only when kind is group and person is empty "
+        "and not include_risk)",
+        "open member 2",
+        "stop after the first two members",
     )
 
 
-def test_a_skill_without_params_is_read_exactly_as_before(tmp_path):
-    text = "Someone is leaving. One job per person.\nfind {them} [if asked]\n[repeat x]\n@close\n"
-    folder = _write(tmp_path, {"leaver": text, "close": "Close an account.\nclose it\n"})
+def test_a_skill_without_params_is_read_as_its_fixed_steps(tmp_path):
+    folder = _write(tmp_path, {"leaver": _plain("Someone is leaving. One job per person.",
+                                                 ["find {them} [if asked]", "[repeat x]", "@close"]),
+                               "close": _plain("Close an account.", ["close it"])})
     assert workflow_agent.load_skills(folder) == (
         ("close", "Close an account.", ("close it",)),
         ("leaver", "Someone is leaving. One job per person.", ("find {them} [if asked]", "[repeat x]", "close it")),
@@ -126,53 +120,32 @@ def test_a_skill_without_params_is_read_exactly_as_before(tmp_path):
     assert workflow_agent.load_skill_commands(folder) == {}
 
 
+AUDIT = '''
+from pydantic import BaseModel
+
+
+class Signature:
+    """Audit one person."""
+
+    class Input(BaseModel):
+        name: str
+
+
+def steps(input):
+    return [f"find_person query={input.name}", "@notes"]
+'''
+
+
 def test_an_included_plain_skill_is_literal_text_inside_a_skill_with_params(tmp_path):
-    folder = _write(tmp_path, {
-        "audit": "---\nparams:\n  name:\n    type: str\n---\nAudit one person.\nfind_person query={name}\n@notes\n",
-        "notes": "Notes.\nwrite {braces} and [if kept] as they are\n",
-    })
+    folder = _write(tmp_path, {"audit": AUDIT,
+                               "notes": _plain("Notes.", ["write {braces} and [if kept] as they are"])})
     command = workflow_agent.load_skill_commands(folder)["audit"]
     assert sc.expand(command, {"name": "Ann Lee"}) == [
         "find_person query=Ann Lee", "write {braces} and [if kept] as they are"]
 
 
-@pytest.mark.parametrize("text, message", [
-    ("---\nparams:\n  name:\n    type: str\nOne.\nstep\n", "no closing '---'"),
-    ("---\n---\nOne.\nstep\n", "params must be a non-empty block"),
-    ("---\nparams:\n  name:\n    type: text\n---\nOne.\nstep\n", "unknown type 'text'"),
-    ("---\nparams:\n  flag:\n    type: bool\n    default: true\n---\nOne.\nstep\n", "must default to false"),
-    ("---\nparams:\n  n:\n    type: int\n---\nOne.\nstep\n", "bad parameter name 'n'"),
-    ("---\nparams:\n  name:\n    type: str\n    colour: red\n---\nOne.\nstep\n", "unknown key(s) colour"),
-    ("---\nparams:\n  name:\n    type: str\n   desc: x\n---\nOne.\nstep\n", "inconsistent indentation"),
-    ("---\nparams:\n  kind:\n    type: enum[a, b]\n    default: c\n---\nOne.\nstep\n", "not one of its values"),
-    ("---\nparams:\n  name:\n    type: str\n---\nOne.\nfind {nmae}\n", "unknown placeholder {nmae}"),
-    ("---\nparams:\n  name:\n    type: str\n---\nOne.\nfind {name\n", "stray brace"),
-    ("---\nparams:\n  name:\n    type: str\n---\nOne.\n[if nmae] find\n", "unknown parameter 'nmae'"),
-    ("---\nparams:\n  kind:\n    type: enum[a, b]\n---\nOne.\n[if kind] find\n", "compare enum 'kind'"),
-    ("---\nparams:\n  kind:\n    type: enum[a, b]\n---\nOne.\n[if kind == \"c\"] find\n", "'c' is not a value"),
-    ("---\nparams:\n  flag:\n    type: bool\n---\nOne.\n[if flag and] find\n", "bad condition"),
-    ("---\nparams:\n  flag:\n    type: bool\n---\nOne.\n[if flag]\n", "malformed marker"),
-    ("---\nparams:\n  flag:\n    type: bool\n---\nOne.\n[repeat flag]\nstep\n[end]\n", "must repeat an int"),
-    ("---\nparams:\n  k:\n    type: int\n---\nOne.\n[repeat k]\n[repeat k]\nstep\n[end]\n[end]\n", "do not nest"),
-    ("---\nparams:\n  k:\n    type: int\n---\nOne.\n[repeat k]\nstep\n", "without [end]"),
-    ("---\nparams:\n  k:\n    type: int\n---\nOne.\nstep\n[end]\n", "[end] without [repeat]"),
-    ("---\nparams:\n  name:\n    type: str\nmaps:\n  m:\n    by: name\n    values:\n      a: b\n---\nOne.\n{m}\n",
-     "must be by an enum, bool or int"),
-    ("---\nparams:\n  kind:\n    type: enum[a, b]\nmaps:\n  m:\n    by: kind\n    values:\n      c: x\n---\nOne.\n{m}\n",
-     "'c' is not a value of 'kind'"),
-    ("---\nparams:\n  kind:\n    type: enum[a, b]\nmaps:\n  m:\n    by: kind\n    values:\n      a: \"{w}\"\n"
-     "  w:\n    by: kind\n    values:\n      a: \"{m}\"\n---\nOne.\n{m}\n", "cycle"),
-])
-def test_a_malformed_skill_fails_the_load_naming_its_file(tmp_path, text, message):
-    folder = _write(tmp_path, {"bad": text})
-    with pytest.raises(SkillFormatError) as err:
-        workflow_agent.load_skills(folder)
-    assert message in str(err.value)
-    assert "bad/SKILL.md" in str(err.value) or "_skills" in str(err.value)
-
-
 def test_a_skill_with_params_cannot_be_included(tmp_path):
-    folder = _write(tmp_path, {"outer": "Outer.\n@lookup\n", "lookup": LOOKUP})
+    folder = _write(tmp_path, {"outer": _plain("Outer.", ["@lookup"]), "lookup": LOOKUP})
     with pytest.raises(SkillFormatError, match=r"includes 'lookup', which has params"):
         workflow_agent.load_skills(folder)
 
@@ -422,22 +395,25 @@ def test_the_execution_context_passes_the_matched_command_except_to_a_continuati
 
 # ---------------------------------------------------------------- checks against the request (verify, in_request)
 
-CHECKED = LOOKUP.replace("""    desc: group, or feed (a source of logins)
-""", """    desc: group, or feed (a source of logins)
-    verify: true
-    means:
-      group: a group of people
-      feed: a feed that logins arrive on
-""").replace("""    desc: the request asks how risky it is
-""", """    desc: the request asks how risky it is
-    verify: true
-""").replace("""    desc: how many members to open
-""", """    desc: how many members to open
-    in_request: true
-""")
+CHECKED = LOOKUP.replace(
+    '''kind: Literal["group", "feed"] = Field(description="group, or feed (a source of logins)")''',
+    '''kind: Literal["group", "feed"] = Field(
+            description="group, or feed (a source of logins)",
+            json_schema_extra={"verify": True, "means": {"group": "a group of people",
+                                                         "feed": "a feed that logins arrive on"}})''',
+).replace(
+    '''include_risk: bool = Field(default=False, description="the request asks how risky it is")''',
+    '''include_risk: bool = Field(default=False, description="the request asks how risky it is",
+                                    json_schema_extra={"verify": True})''',
+).replace(
+    '''count: int = Field(default=2, description="how many members to open")''',
+    '''count: int = Field(default=2, description="how many members to open",
+                             json_schema_extra={"in_request": True})''',
+)
 
 
-def test_verify_means_and_in_request_are_read_from_the_front_matter(tmp_path):
+def test_verify_means_and_in_request_are_read_from_the_input_fields(tmp_path):
+    assert CHECKED.count("json_schema_extra") == LOOKUP.count("json_schema_extra") + 3
     command = _command(tmp_path, CHECKED)
     kind, risk, count = command.param("kind"), command.param("include_risk"), command.param("count")
     assert (kind.verify, kind.means) == (True, (("group", "a group of people"), ("feed", "a feed that logins arrive on")))
@@ -449,16 +425,33 @@ def test_verify_means_and_in_request_are_read_from_the_front_matter(tmp_path):
     assert [v for v, _ in sc._check_options(risk)] == ["true", "false"]
 
 
-@pytest.mark.parametrize("spec, message", [
-    ("  name:\n    type: str\n    verify: true\n", "only a bool, enum or subject parameter takes verify"),
-    ("  flag:\n    type: bool\n    subject: true\n", "only a str parameter takes subject"),
-    ("  flag:\n    type: bool\n    verify: yes\n", "verify must be true or false"),
-    ("  flag:\n    type: bool\n    means:\n      true: asked\n", "means of 'flag' must be a block of its enum values"),
-    ("  kind:\n    type: enum[a, b]\n    means:\n      c: x\n", "'c' is not a value of it"),
-    ("  kind:\n    type: enum[a, b]\n    in_request: true\n", "only an int parameter takes in_request"),
+CHECK_FIELD = '''from typing import Literal
+from pydantic import BaseModel, Field
+
+
+class Signature:
+    """One."""
+
+    class Input(BaseModel):
+        {field}
+
+
+def steps(input):
+    return ["step"]
+'''
+
+
+@pytest.mark.parametrize("field, message", [
+    ("name: str = Field(json_schema_extra={'verify': True})", "only a bool, enum or subject parameter takes verify"),
+    ("flag: bool = Field(default=False, json_schema_extra={'subject': True})", "only a str parameter takes subject"),
+    ("flag: bool = Field(default=False, json_schema_extra={'verify': 'yes'})", "verify must be true or false"),
+    ("flag: bool = Field(default=False, json_schema_extra={'means': {'true': 'asked'}})",
+     "means of 'flag' must be a block of its enum values"),
+    ("kind: Literal['a', 'b'] = Field(json_schema_extra={'means': {'c': 'x'}})", "'c' is not a value of it"),
+    ("kind: Literal['a', 'b'] = Field(json_schema_extra={'in_request': True})", "only an int parameter takes in_request"),
 ])
-def test_a_malformed_check_fails_the_load(tmp_path, spec, message):
-    folder = _write(tmp_path, {"bad": f"---\nparams:\n{spec}---\nOne.\nstep\n"})
+def test_a_malformed_check_fails_the_load(tmp_path, field, message):
+    folder = _write(tmp_path, {"bad": CHECK_FIELD.replace("{field}", field)})
     with pytest.raises(SkillFormatError, match=message):
         workflow_agent.load_skills(folder)
 
@@ -563,28 +556,26 @@ def test_the_planner_path_checks_verified_params_with_jev(tmp_path, workflow_env
 
 # ---------------------------------------------------------------- record names (subject), identifiers, extra steps
 
-NAMED = """---
-params:
-  right:
-    type: str
-    subject: true
-    strip: right
-    desc: the right's name
-  person:
-    type: str
-    subject: true
-    default: ""
-    verify: true
-    desc: the person asking for it
-  note:
-    type: str
-    default: ""
-    desc: free text
----
-A person asks for a right.
-find_right query={right}
-[if person] find_person query={person}
-"""
+NAMED = '''
+from pydantic import BaseModel, Field
+
+
+class Signature:
+    """A person asks for a right."""
+
+    class Input(BaseModel):
+        right: str = Field(description="the right's name", json_schema_extra={"strip": ["right"], "subject": True})
+        person: str = Field(default="", description="the person asking for it",
+                            json_schema_extra={"subject": True, "verify": True})
+        note: str = Field(default="", description="free text")
+
+
+def steps(input):
+    out = [f"find_right query={input.right}"]
+    if input.person:
+        out.append(f"find_person query={input.person}")
+    return out
+'''
 
 
 def _named(tmp_path, identifiers=()):
@@ -592,7 +583,7 @@ def _named(tmp_path, identifiers=()):
     return replace(_command(tmp_path, NAMED, "ask"), identifiers=identifiers)
 
 
-def test_subject_is_read_from_the_front_matter(tmp_path):
+def test_subject_is_read_from_the_input_fields(tmp_path):
     command = _named(tmp_path)
     assert [p.subject for p in command.params] == [True, True, False]
     assert command.param("person").verify

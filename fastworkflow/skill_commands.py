@@ -8,7 +8,7 @@ The planner fills the parameters from the request (one typed dspy call), the arg
 checked, and ``steps()`` expands them into the numbered plan. A skill without parameters
 gives fixed steps the text planner adapts (see ``workflow_agent.load_skills``). The folder
 name is the skill's name; the file name is always ``skill.py`` (``SKILL_FILE``), so a
-folder name need not be a Python identifier and the file sits where SKILL.md did.
+folder name need not be a Python identifier.
 
 A skill file::
 
@@ -40,15 +40,6 @@ A skill file::
 
         plain_utterances = ["who is in the Payroll group", "is Ann Lee in Billing"]
 
-        template = [   # optional: the text the planner falls back to (see below)
-            "<find_group or find_unit, by kind> query=<name>",
-            "list_members filter=<person> (only when person is given)",
-            "list_members (only when person is empty)",
-            "assess_risk (only when include_risk)",
-            "repeat count times (n = 1 to count): open member <n>",
-            "@close-out",
-        ]
-
         @staticmethod
         def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
             if cmd_parameters.kind == "unit" and cmd_parameters.person:
@@ -71,27 +62,60 @@ A skill file::
   without parameters leaves it out or empty. A field's type is ``str``, ``bool``, ``int``
   or ``Literal[...]`` of text values (an enum). ``Field(default=...)`` makes it optional (no
   default: required; a ``bool`` always defaults to false, a ``default=True`` fails the
-  load); ``description`` is what the planner and a ``verify`` check read; ``ge``/``le``
-  bounds are enforced by the argument screen (see ``check_arguments``). The skill options
-  go in ``json_schema_extra`` (each optional; unknown keys fail the load): ``strip`` (a list
-  of words), ``subject``, ``verify``, ``in_request`` (``True``/``False``), ``means`` (a dict
-  of enum values to meanings) and ``requires`` (a condition in the language below, e.g.
-  ``'kind == "group" and include_risk'``). Their meaning is the same as in a SKILL.md.
+  load: the model sets it true only when the request asks for that part); ``description``
+  is what the planner and a ``verify`` check read; ``ge``/``le`` bounds are enforced by the
+  argument screen (see ``check_arguments``). The skill options go in ``json_schema_extra``
+  (each optional; unknown keys fail the load):
+
+  - ``strip`` (a ``str``; a list of words): removed from either end of the argument, with a
+    possessive ``'s`` before a trailing one: a kind word the model appends to a name ("HR
+    feed" -> "HR").
+  - ``requires`` (a condition): when it is false for the other arguments, the argument is
+    reset to its default. A condition combines ``param``, ``param == "value"`` and
+    ``param != "value"`` (an int compares with a number) with ``not``, ``and``, ``or`` and
+    parentheses; a bare str is true when non-empty, an int when non-zero, an enum must be
+    compared (``'kind == "group" and include_risk'``).
+  - ``subject: True`` (a ``str``): the argument names a record of the request (a person, a
+    group, a product, a code). Besides being written in the request it must hold one of the
+    request's subjects whole (``split_merge.request_subjects``, with the workflow's identifier
+    patterns) or a name-like word (capitalised and not a common word, or holding a digit or
+    ``_``), and cut no subject: "I" of "Before I approve" and "Payroll" of "Payroll_Approver"
+    are refused (an optional argument takes its default; a required one fails the call). One
+    cut short, mid-word or at a space, at the start or end of exactly one subject becomes
+    that subject ("Payroll_Admin" of "Payroll_Administrator", "Ann" of "Ann Lee").
+  - ``verify: True`` (a ``bool``, an enum or a ``subject`` str): a classifier model decides
+    the argument again from the request alone, when the planner path has one
+    (``plan_skill_call``'s ``check_lm``); its answer replaces the planner's when it is at least
+    ``VERIFY_THRESHOLD`` sure. It reads the field's ``description``, and an enum's ``means``:
+    a dict giving each value's meaning (``{"group": "a group, people are its members"}``).
+    For a subject it chooses among the request's subjects (at most ``MAX_SUBJECT_OPTIONS``)
+    or ``NO_SUBJECT`` ("none": the default, or a failed call for a required parameter); a
+    request naming no subject is not checked.
+  - ``in_request: True`` (an ``int``): when the request writes numbers (digits or the words
+    zero to twenty) outside the text of the other arguments, the argument must be one of
+    them; otherwise it takes the only one written, or its default when that is written, and
+    with several others the call fails ("the first two" never runs as 3).
+
 - ``steps(input)`` (required) returns the steps as a list of str, one per step (empty
   ones are dropped). It builds text only: it must not call a backend or read state; it may
   raise SkillCallError (the call then falls back). ``repeat(count, offset=0)`` gives the
   iteration numbers ``offset+1 .. count`` and refuses more than ``REPEAT_LIMIT``. A step that
-  is exactly ``@<skill>`` stands for the steps of a skill without parameters. Lookup
-  tables (what a SKILL.md's ``maps`` were) are plain module-level dicts. For a skill without
-  parameters ``steps()`` takes no argument and returns its fixed steps.
+  is exactly ``@<skill>`` stands for the steps of a skill without parameters (they are
+  plain text inside this one; a skill with parameters cannot be included). Lookup tables are
+  plain module-level dicts. For a skill without parameters ``steps()`` takes no argument and
+  returns its fixed steps.
 - ``plain_utterances`` (optional): example requests for the skill, kept on the parsed
   command (``SkillCommand.plain_utterances``); the matcher does not read them yet.
 - ``template`` (optional): the template text of the skill, shown to the planner in the
   skill call's "expands to:" and used as the text planner's template when a skill call
-  fails. Without it the template is ``steps()`` rendered with placeholder inputs
-  (``placeholder_template``): a str reads ``<name>``, a bool is true, an int its default,
-  and the steps of every enum value are merged; a part only a false bool or an empty str
-  produces is then missing, so declare ``template`` when that matters.
+  fails. Without it the template is ``steps()`` rendered on placeholder inputs
+  (``placeholder_template``): every combination of a ``<name>`` for a str (and "" when that
+  is its default), true and false for a bool, the default of an int and each value of an
+  enum, merged into one list in which a step not every combination writes says when it is
+  written (``(only when person is given)``) and the steps of an enum's values are joined
+  (``<find_group or find_unit, by kind> query=<name>``). A repeated part shows only its
+  steps for the int's default: declare ``template`` when the planner should see how it
+  repeats ("repeat count times (n = 1 to count): open member <n>").
 - ``validate_extracted_parameters`` (optional, the signature of a command's): called with
   the checked arguments as an ``Input`` (``validate_call``); ``(False, message)`` or an
   exception fails the call (the planner falls back), and a field it corrects in place is
@@ -100,100 +124,6 @@ A skill file::
 The file is imported as a command file is (``python_utils.get_module`` under the workflow's
 package, so package-relative imports work); one that fails to import is logged and skipped;
 a malformed declaration fails the load with a ``SkillFormatError`` naming the file.
-
-SKILL.md (deprecated): until a workflow is migrated (``READ_SKILL_MD``; the converter is
-``tools/skill_md_to_py.py`` in the fastworkflow repository, not installed with the
-package), a folder without ``skill.py`` is read from ``_skills/<name>/SKILL.md``. A SKILL.md
-may declare typed parameters in front matter; one without front matter is plain text (its
-first line the description, every other line one step). Format::
-
-    ---
-    params:
-      name:
-        type: str
-        strip: group, unit
-        desc: the record's name exactly as the request writes it
-      kind:
-        type: enum[group, unit]
-        desc: what the request is about
-      person:
-        type: str
-        default: ""
-        desc: one named person to check for; empty for everyone
-      include_risk:
-        type: bool
-        desc: the request asks how risky it is
-      count:
-        type: int
-        default: 2
-        desc: how many members to open
-    maps:
-      find:
-        by: kind
-        values:
-          group: find_group
-          unit: find_unit
-    ---
-    Show one named group or unit. One job per record.
-    {find} query={name}
-    [if person] list_members filter={person}
-    [if not person] list_members
-    [if include_risk] assess_risk
-    [repeat count]
-    open member {n}
-    [end]
-
-- Front matter sits between two ``---`` lines at the very top. It is a small,
-  strict, indentation-based subset of YAML: ``key: value`` lines and ``key:`` blocks;
-  a value is the rest of the line, or a JSON string when written in double quotes
-  (``""`` is the empty string). Top-level keys: ``params`` (required) and ``maps``.
-- A parameter has ``type`` (``str``, ``bool``, ``int`` or ``enum[a, b, ...]``), and
-  optionally ``default``, ``desc``, ``requires`` (a condition: when it is false the
-  argument is reset to its default) and, for a ``str``, ``strip`` (words removed from
-  either end of the argument, with a possessive ``'s`` before a trailing one: a kind
-  word the model appends to a name, "HR feed" -> "HR"). A parameter without a default
-  is required. A ``bool`` always defaults to false (a ``default: true`` fails the load):
-  the model sets it true only when the request asks for that part.
-- Optional checks of an argument against the request (each key may be left out):
-
-  - ``subject: true`` (a ``str``): the argument names a record of the request (a person, a
-    group, a product, a code). Besides being written in the request it must hold one of the
-    request's subjects whole (``split_merge.request_subjects``, with the workflow's identifier
-    patterns) or a name-like word (capitalised and not a common word, or holding a digit or
-    ``_``), and cut no subject: "I" of "Before I approve" and "Payroll" of "Payroll_Approver"
-    are refused (an optional argument takes its default, so an ``[if not x]`` branch runs; a
-    required one fails the call). One cut short, mid-word or at a space, at the start or end of
-    exactly one subject becomes that subject ("Payroll_Admin" of "Payroll_Administrator",
-    "Ann" of "Ann Lee").
-  - ``verify: true`` (a ``bool``, an ``enum`` or a ``subject`` str): a classifier model decides
-    the argument again from the request alone, when the planner path has one
-    (``plan_skill_call``'s ``check_lm``); its answer replaces the planner's when it is at least
-    ``VERIFY_THRESHOLD`` sure. It reads the parameter's ``desc``, and an enum's ``means``:
-    a block giving each value's meaning (``group: a group, people are its members``). For a
-    subject it chooses among the request's subjects (at most ``MAX_SUBJECT_OPTIONS``) or
-    ``NO_SUBJECT`` ("none": the default, or a failed call for a required parameter); a request
-    naming no subject is not checked.
-  - ``in_request: true`` (an ``int``): when the request writes numbers (digits or the words
-    zero to twenty) outside the text of the other arguments, the argument must be one of
-    them; otherwise it takes the only one written, or its default when that is written,
-    and with several others the call fails ("the first two" never runs as 3).
-
-- A map turns the argument of one ``enum``, ``bool`` or ``int`` parameter (``by``) into
-  text: ``values`` maps each argument to its text, ``default`` covers the rest; an
-  argument with neither renders as itself. Map texts may hold placeholders.
-- The body's first line is the description (what the skill matcher sees); every
-  other non-empty line is one step. ``{param}`` or ``{map}`` is replaced by its value
-  (``{{`` and ``}}`` are literal braces). A step may start with a condition
-  ``[if <cond>]``: ``<cond>`` combines ``param``, ``param == "value"``, ``param != "value"``
-  (an int compares with a number) with ``not``, ``and``, ``or`` and parentheses; a bare
-  str is true when non-empty, an int when non-zero, an enum must be compared.
-  ``[repeat <int param>]`` or ``[repeat <int param> - <k>]`` on its own line opens a block
-  closed by ``[end]``; its steps run that many times (at most ``REPEAT_LIMIT``), and
-  ``{n}`` in them numbers the iterations ``k+1 .. <param>``. Blocks do not nest.
-- ``@<skill>`` lines are included as plain text (no placeholders or markers are read in
-  them); a skill with front matter cannot be included.
-
-For both forms:
 
 Any ``str`` argument that lies inside a match of one of the workflow's identifier patterns
 (``_skills/identifier_patterns.txt``, e.g. ``\bacct_[0-9]+``) without being all of it becomes the
@@ -208,8 +138,6 @@ A skill call's ``str`` and ``int`` arguments first go through the screen a comma
 parameters go through (``utils.signatures.screen_parameter_values``: quotes and brackets
 removed, placeholders and out-of-range numbers refused), and a str argument is looked up in
 the request with Unicode dashes folded to "-" (see ``check_arguments``).
-
-Any malformed skill fails the load with a ``SkillFormatError`` naming the file.
 '''
 from __future__ import annotations
 
@@ -217,9 +145,9 @@ import json
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from typing import Callable, Literal, Union, get_args, get_origin
+from typing import Callable, Literal, get_args, get_origin
 
-#: The most iterations one ``[repeat]`` block may expand to.
+#: The most iterations one ``repeat()`` may give.
 REPEAT_LIMIT = 20
 #: A ``verify`` check replaces the planner's argument only at or above this probability.
 VERIFY_THRESHOLD = 0.65
@@ -230,12 +158,11 @@ NUMBER_WORDS = {w: i for i, w in enumerate(
 NO_SUBJECT = "none"
 #: A ``verify`` check of a ``subject`` parameter chooses among at most this many of the request's subjects.
 MAX_SUBJECT_OPTIONS = 8
-#: Names a parameter or map may not take (they are signature fields or the repeat index).
+#: Names a parameter may not take (they are fields of the planner's typed call).
 RESERVED_NAMES = frozenset({"user_query", "available_commands", "steps_before", "steps_after",
-                            "reasoning", "n"})
+                            "reasoning"})
 
 _NAME = r"[A-Za-z_][A-Za-z0-9_]*"
-_PLACEHOLDER = re.compile(r"\{\{|\}\}|\{(" + _NAME + r")\}|[{}]")
 _COMMAND_LINE = re.compile(r"^- ([A-Za-z_][A-Za-z0-9_]*)\s*$", re.M)
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _NUMBER = re.compile(r"\b(\d+|" + "|".join(NUMBER_WORDS) + r")\b", re.I)
@@ -247,8 +174,8 @@ _BARE_PLACEHOLDER = re.compile(r"\s*<[^<>]*>")
 
 
 class SkillFormatError(ValueError):
-    """A malformed skill: a skill file's declaration, or a SKILL.md's front matter, condition,
-    repeat block or placeholder."""
+    """A malformed skill file: its ``Signature``, an ``Input`` field or a ``requires``
+    condition."""
 
 
 class SkillCallError(ValueError):
@@ -277,62 +204,32 @@ class Param:
 
 
 @dataclass(frozen=True)
-class ValueMap:
-    name: str
-    by: str
-    values: tuple[tuple[object, str], ...]
-    default: str | None = None
-
-    def text_for(self, value) -> str | None:
-        for key, text in self.values:
-            if key == value:
-                return text
-        return self.default
-
-
-@dataclass(frozen=True)
 class Cond:
     source: str
     tree: tuple
 
 
 @dataclass(frozen=True)
-class Step:
-    text: str
-    cond: Cond | None = None
-    literal: bool = False
-
-
-@dataclass(frozen=True)
-class Repeat:
-    count: str
-    offset: int
-    steps: tuple[Step, ...]
-
-
-@dataclass(frozen=True)
 class SkillCommand:
-    """A skill with parameters: its signature, maps and step templates."""
+    """A skill with parameters: its signature and its ``steps()``."""
 
     name: str
     description: str
     params: tuple[Param, ...]
-    maps: tuple[ValueMap, ...]
-    body: tuple[Union[Step, Repeat], ...]
     path: str = field(default="", compare=False)
     #: The workflow's identifier patterns (``workflow_agent.identifier_patterns``), set at load.
     identifiers: tuple = field(default=(), compare=False)
-    #: The skill's pydantic ``Input`` (a skill file's own; one built from the front matter of a
-    #: SKILL.md). Skill-call arguments are screened through it like a command's parameters.
+    #: The skill's pydantic ``Input``. Skill-call arguments are screened through it like a
+    #: command's parameters.
     input_model: type | None = field(default=None, compare=False)
-    #: A skill file's ``steps(input)``; None for a SKILL.md, whose ``body`` holds its step templates.
+    #: The skill file's ``steps(input)``.
     steps_fn: Callable | None = field(default=None, compare=False)
-    #: A skill file's template text (``Signature.template``, or ``steps()`` rendered with
-    #: placeholder inputs), includes expanded at load; ``template_steps`` reads it.
+    #: The template text (``Signature.template``, or ``steps()`` rendered on placeholder
+    #: inputs), includes expanded at load.
     template: tuple[str, ...] = field(default=(), compare=False)
-    #: A skill file's ``Signature.validate_extracted_parameters``, or None.
+    #: ``Signature.validate_extracted_parameters``, or None.
     validate: Callable | None = field(default=None, compare=False)
-    #: A skill file's ``Signature.plain_utterances``: example requests for the skill.
+    #: ``Signature.plain_utterances``: example requests for the skill.
     plain_utterances: tuple[str, ...] = field(default=(), compare=False)
     #: ``(name, steps)`` of the workflow's skills without params, for an ``@<skill>`` line
     #: that ``steps()`` returns; set at load.
@@ -340,9 +237,6 @@ class SkillCommand:
 
     def param(self, name: str) -> Param | None:
         return next((p for p in self.params if p.name == name), None)
-
-    def value_map(self, name: str) -> ValueMap | None:
-        return next((m for m in self.maps if m.name == name), None)
 
     def signature_text(self) -> str:
         """``name(p: type = default, ...)`` with the description, parameter docs and steps."""
@@ -355,64 +249,11 @@ class SkillCommand:
         lines = [f"{self.name}({', '.join(parts)})", f"  {self.description}"]
         lines += [f"  - {p.name}: {p.desc}" for p in self.params]
         lines.append("  expands to:")
-        lines += [f"    {i}. {s}" for i, s in enumerate(template_steps(self), 1)]
+        lines += [f"    {i}. {s}" for i, s in enumerate(self.template, 1)]
         return "\n".join(lines)
 
 
-# ---------------------------------------------------------------- front matter
-
-def _scalar(text: str, where: str):
-    text = text.strip()
-    if text.startswith('"'):
-        try:
-            value = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise SkillFormatError(f"{where}: bad quoted value {text!r} ({exc.msg})") from None
-        if not isinstance(value, str):
-            raise SkillFormatError(f"{where}: bad quoted value {text!r}")
-        return value
-    return text
-
-
-def parse_front_matter(lines: list[tuple[int, str]], where: str) -> dict:
-    """The nested mapping of indented ``key: value`` / ``key:`` lines (see the module doc)."""
-    root: dict = {}
-    # (indent of the block's key, the block, indent of its children or None)
-    stack: list[list] = [[-1, root, None]]
-    for lineno, raw in lines:
-        if not raw.strip() or raw.lstrip().startswith("#"):
-            continue
-        lead = raw[:len(raw) - len(raw.lstrip())]
-        if "\t" in lead:
-            raise SkillFormatError(f"{where} line {lineno}: indent with spaces, not tabs")
-        indent = len(lead)
-        m = re.fullmatch(r"([A-Za-z0-9_][\w-]*)\s*:(?:\s+(.*?))?\s*", raw.strip())
-        if m is None:
-            raise SkillFormatError(f"{where} line {lineno}: expected 'key: value' or 'key:', got {raw.strip()!r}")
-        while indent <= stack[-1][0]:
-            stack.pop()
-        top = stack[-1]
-        if top[2] is None:
-            top[2] = indent
-        elif indent != top[2]:
-            raise SkillFormatError(f"{where} line {lineno}: inconsistent indentation")
-        key, value = m.group(1), m.group(2)
-        if key in top[1]:
-            raise SkillFormatError(f"{where} line {lineno}: duplicate key {key!r}")
-        if value is None or value == "":
-            child: dict = {}
-            top[1][key] = child
-            stack.append([indent, child, None])
-        else:
-            top[1][key] = _scalar(value, f"{where} line {lineno}")
-    return root
-
-
-def _need_block(value, what: str, where: str) -> dict:
-    if not isinstance(value, dict) or not value:
-        raise SkillFormatError(f"{where}: {what} must be a non-empty block")
-    return value
-
+# ---------------------------------------------------------------- parameters
 
 def _check_keys(block: dict, allowed: set[str], what: str, where: str) -> None:
     unknown = sorted(set(block) - allowed)
@@ -506,41 +347,6 @@ def _flag(spec: dict, key: str, name: str, where: str) -> bool:
     if value not in ("true", "false"):
         raise SkillFormatError(f"{where}: parameter {name!r} {key} must be true or false")
     return value == "true"
-
-
-def _map_key(param: Param, key: str, where: str):
-    if param.type == "enum":
-        if key not in param.values:
-            raise SkillFormatError(f"{where}: map key {key!r} is not a value of {param.name!r}")
-        return key
-    if param.type == "bool":
-        if key not in ("true", "false"):
-            raise SkillFormatError(f"{where}: map key {key!r} of bool {param.name!r} must be true or false")
-        return key == "true"
-    if not re.fullmatch(r"-?\d+", key):
-        raise SkillFormatError(f"{where}: map key {key!r} of int {param.name!r} is not an int")
-    return int(key)
-
-
-def _parse_map(name: str, spec, params: dict[str, Param], where: str) -> ValueMap:
-    if not re.fullmatch(_NAME, name) or name in RESERVED_NAMES or name in params:
-        raise SkillFormatError(f"{where}: bad map name {name!r} (a parameter or reserved name?)")
-    if not isinstance(spec, dict):
-        raise SkillFormatError(f"{where}: map {name!r} must be a block with by and values")
-    _check_keys(spec, {"by", "values", "default"}, f"map {name!r}", where)
-    by = spec.get("by")
-    if by not in params or params[by].type == "str":
-        raise SkillFormatError(f"{where}: map {name!r} must be by an enum, bool or int parameter")
-    values = _need_block(spec.get("values"), f"map {name!r} values", where)
-    entries = []
-    for key, text in values.items():
-        if not isinstance(text, str):
-            raise SkillFormatError(f"{where}: map {name!r} value for {key!r} must be text")
-        entries.append((_map_key(params[by], key, where), text))
-    default = spec.get("default")
-    if default is not None and not isinstance(default, str):
-        raise SkillFormatError(f"{where}: map {name!r} default must be text")
-    return ValueMap(name=name, by=by, values=tuple(entries), default=default)
 
 
 # ---------------------------------------------------------------- conditions
@@ -656,260 +462,10 @@ def evaluate(cond: Cond | None, env: dict) -> bool:
     return True if cond is None else ev(cond.tree)
 
 
-def _condition_words(cond: Cond, command: "SkillCommand") -> str:
-    def is_str(node) -> bool:
-        param = command.param(node[1]) if node[0] == "var" else None
-        return param is not None and param.type == "str"
-
-    def words(node) -> str:
-        op = node[0]
-        if op == "var":
-            return f"{node[1]} is given" if is_str(node) else node[1]
-        if op in ("eq", "ne"):
-            return f"{node[1]} is {'' if op == 'eq' else 'not '}{node[2]}"
-        if op == "not":
-            return f"{node[1][1]} is empty" if is_str(node[1]) else f"not {words(node[1])}"
-        return f"({words(node[1])} {op} {words(node[2])})"
-    text = words(cond.tree)
-    return text[1:-1] if text.startswith("(") and text.endswith(")") else text
-
-
-# ---------------------------------------------------------------- body
-
-def _placeholders(text: str, names: set[str], where: str) -> None:
-    for m in _PLACEHOLDER.finditer(text):
-        token = m.group(0)
-        if token in ("{{", "}}"):
-            continue
-        if m.group(1) is None:
-            raise SkillFormatError(f"{where}: stray brace in {text!r} (write {{{{ or }}}} for a literal one)")
-        if m.group(1) not in names:
-            raise SkillFormatError(f"{where}: unknown placeholder {{{m.group(1)}}} in {text!r}")
-
-
-def _parse_body(items: list[tuple[str, bool]], params: dict[str, Param], map_names: set[str],
-                where: str) -> tuple[Union[Step, Repeat], ...]:
-    body: list = []
-    block: list | None = None
-    block_head: tuple[str, int] | None = None
-    names = set(params) | map_names
-    for text, literal in items:
-        if literal:
-            (block if block is not None else body).append(Step(text=text, literal=True))
-            continue
-        if text.startswith("[repeat") or text.startswith("[end") or text.startswith("[if"):
-            m_rep = re.fullmatch(r"\[repeat\s+(" + _NAME + r")(?:\s*-\s*(\d+))?\s*\]", text)
-            m_end = re.fullmatch(r"\[end\]", text)
-            m_if = re.fullmatch(r"\[if\s+([^\]]+)\]\s*(.*)", text)
-            if m_rep:
-                if block is not None:
-                    raise SkillFormatError(f"{where}: [repeat] blocks do not nest ({text!r})")
-                param = params.get(m_rep.group(1))
-                if param is None or param.type != "int":
-                    raise SkillFormatError(f"{where}: {text!r} must repeat an int parameter")
-                block, block_head = [], (param.name, int(m_rep.group(2) or 0))
-                continue
-            if m_end:
-                if block is None:
-                    raise SkillFormatError(f"{where}: [end] without [repeat]")
-                if not block:
-                    raise SkillFormatError(f"{where}: empty [repeat] block")
-                body.append(Repeat(count=block_head[0], offset=block_head[1], steps=tuple(block)))
-                block, block_head = None, None
-                continue
-            if m_if and m_if.group(2).strip():
-                cond = parse_condition(m_if.group(1), params, where)
-                step_text = m_if.group(2).strip()
-                _placeholders(step_text, names | ({"n"} if block is not None else set()), where)
-                (block if block is not None else body).append(Step(text=step_text, cond=cond))
-                continue
-            raise SkillFormatError(f"{where}: malformed marker line {text!r}")
-        _placeholders(text, names | ({"n"} if block is not None else set()), where)
-        (block if block is not None else body).append(Step(text=text))
-    if block is not None:
-        raise SkillFormatError(f"{where}: [repeat] without [end]")
-    if not body:
-        raise SkillFormatError(f"{where}: a skill with params needs steps")
-    return tuple(body)
-
-
-def has_front_matter(lines: list[str]) -> bool:
-    return bool(lines) and lines[0].strip() == "---"
-
-
-def split_front_matter(raw_lines: list[str], where: str) -> tuple[list[tuple[int, str]], list[str]]:
-    """``(front matter lines with numbers, body lines)`` of a file that starts with ``---``."""
-    for i in range(1, len(raw_lines)):
-        if raw_lines[i].strip() == "---":
-            front = [(n + 1, raw_lines[n].rstrip("\n")) for n in range(1, i)]
-            return front, raw_lines[i + 1:]
-    raise SkillFormatError(f"{where}: front matter has no closing '---'")
-
-
-def build_command(name: str, description: str, front: list[tuple[int, str]],
-                  items: list[tuple[str, bool]], where: str) -> SkillCommand:
-    """The SkillCommand of a skill with front matter; ``items`` are its steps, (text, literal)."""
-    spec = parse_front_matter(front, where)
-    _check_keys(spec, {"params", "maps"}, "front matter", where)
-    raw_params = _need_block(spec.get("params"), "params", where)
-    conds: list[tuple[str, str]] = []
-    params = {n: _parse_param(n, s, where, conds) for n, s in raw_params.items()}
-    raw_maps = spec.get("maps", {})
-    if not isinstance(raw_maps, dict):
-        raise SkillFormatError(f"{where}: maps must be a block")
-    maps = {n: _parse_map(n, s, params, where) for n, s in raw_maps.items()}
-    names = set(params) | set(maps)
-    for m in maps.values():
-        for text in [t for _k, t in m.values] + ([m.default] if m.default is not None else []):
-            _placeholders(text, names | {"n"}, where)
-    _check_map_cycles(maps, where)
-    for n, source in conds:
-        params[n] = replace(params[n], requires=parse_condition(source, params, where))
-    body = _parse_body(items, params, set(maps), where)
-    return SkillCommand(name=name, description=description, params=tuple(params.values()),
-                        maps=tuple(maps.values()), body=body, path=where,
-                        input_model=input_model_for(name, tuple(params.values())))
-
-
-def _check_map_cycles(maps: dict[str, ValueMap], where: str) -> None:
-    def refs(m: ValueMap) -> set[str]:
-        texts = [t for _k, t in m.values] + ([m.default] if m.default is not None else [])
-        return {g for t in texts for g in re.findall(r"(?<!\{)\{(" + _NAME + r")\}", t) if g in maps}
-
-    def visit(name, chain):
-        if name in chain:
-            raise SkillFormatError(f"{where}: maps refer to each other in a cycle ({' -> '.join(chain + (name,))})")
-        for r in refs(maps[name]):
-            visit(r, chain + (name,))
-    for name in maps:
-        visit(name, ())
-
-
-# ---------------------------------------------------------------- expansion
-
-def _text(value) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    return str(value)
-
-
-def _render(command: SkillCommand, text: str, env: dict) -> str:
-    def sub(m):
-        token = m.group(0)
-        if token == "{{":
-            return "{"
-        if token == "}}":
-            return "}"
-        name = m.group(1)
-        if name in env:
-            return _text(env[name])
-        vmap = command.value_map(name)
-        value = vmap.text_for(env[vmap.by])
-        return _render(command, value, env) if value is not None else _text(env[vmap.by])
-    return _PLACEHOLDER.sub(sub, text)
-
-
-def expand(command: SkillCommand, args: dict) -> list[str]:
-    """The skill's command steps for ``args`` (complete, checked arguments), unnumbered.
-
-    Values are substituted, steps whose condition is false are dropped, repeat blocks are
-    unrolled. Raises SkillCallError when a repeat would exceed REPEAT_LIMIT.
-
-    A skill file's steps are what its ``steps(input)`` returns for ``args`` (see
-    ``expand_skill_file``).
-    """
-    if command.steps_fn is not None:
-        return expand_skill_file(command, args)
-    env = dict(args)
-    out: list[str] = []
-
-    def emit(step: Step, env: dict) -> None:
-        if step.literal:
-            out.append(step.text)
-        elif evaluate(step.cond, env):
-            out.append(_render(command, step.text, env))
-
-    for node in command.body:
-        if isinstance(node, Repeat):
-            times = int(env[node.count]) - node.offset
-            if times > REPEAT_LIMIT:
-                raise SkillCallError(f"{node.count}={env[node.count]} repeats more than {REPEAT_LIMIT} times")
-            for i in range(max(times, 0)):
-                for step in node.steps:
-                    emit(step, {**env, "n": node.offset + 1 + i})
-        else:
-            emit(node, env)
-    return out
-
-
-def number(steps: list[str]) -> str:
-    """Steps as the planner writes them: a numbered list, one per line."""
-    return "\n".join(f"{i}. {s}" for i, s in enumerate(steps, 1))
-
-
-def template_steps(command: SkillCommand) -> tuple[str, ...]:
-    """The skill's steps as plain text, for the planner template (``plan_template_for``).
-
-    Placeholders read ``<param>``; a map reads its texts joined with "or" (``<find_a or
-    find_b, by kind>``), a map by a bool its true text (``<text, when flag>``); a condition is
-    a trailing "(only when ...)"; a repeat block is one line. A skill file's template is its
-    ``template`` (see ``template_lines``).
-    """
-    if command.steps_fn is not None:
-        return command.template
-
-    def show(text: str) -> str:
-        def sub(m):
-            token = m.group(0)
-            if token in ("{{", "}}"):
-                return token[0]
-            name = m.group(1)
-            if name == "n":
-                return "<n>"
-            vmap = command.value_map(name)
-            if vmap is None:
-                return f"<{name}>"
-            if command.param(vmap.by).type == "bool":
-                shown = show(vmap.text_for(True) or "").strip(" ;,")
-                return f" <{shown}, when {vmap.by}>" if shown else ""
-            texts = []
-            for _key, value in vmap.values + (((None, vmap.default),) if vmap.default is not None else ()):
-                shown = show(value).strip()
-                if shown and shown not in texts:
-                    texts.append(shown)
-            return "<" + " or ".join(texts) + f", by {vmap.by}>" if texts else ""
-        return _PLACEHOLDER.sub(sub, text)
-
-    def line(step: Step) -> str:
-        if step.literal:
-            return step.text
-        text = show(step.text)
-        return f"{text} (only when {_condition_words(step.cond, command)})" if step.cond else text
-
-    out = []
-    for node in command.body:
-        if isinstance(node, Repeat):
-            count = node.count + (f" - {node.offset}" if node.offset else "")
-            out.append(f"repeat {count} times (n = {node.offset + 1} to {node.count}): "
-                       + "; then ".join(line(s) for s in node.steps))
-        else:
-            out.append(line(node))
-    return tuple(out)
-
-
 # ---------------------------------------------------------------- skill files (skill.py)
 
 #: The file that defines a skill: ``_skills/<name>/skill.py``.
 SKILL_FILE = "skill.py"
-#: The file a skill was defined in before skill files: ``_skills/<name>/SKILL.md``.
-LEGACY_SKILL_FILE = "SKILL.md"
-#: Migration switch: a skill folder without ``skill.py`` is still read from its SKILL.md
-#: (with a deprecation warning). Once no workflow ships SKILL.md, set this to False and
-#: delete what it guards: the SKILL.md branch of ``workflow_agent._parsed_skills``, and here
-#: the front-matter parser (``parse_front_matter`` .. ``build_command``) and the step-template
-#: expansion (``_parse_body``, ``_render``, the template branch of ``expand`` and
-#: ``template_steps``).
-READ_SKILL_MD = True
 
 #: Keys a skill file's ``Input`` field may set in ``json_schema_extra``.
 SKILL_FIELD_KEYS = frozenset({"strip", "subject", "verify", "means", "in_request", "requires"})
@@ -921,7 +477,7 @@ def repeat(count: int, offset: int = 0) -> range:
 
     For a skill file's ``steps()``: ``for n in repeat(input.count): ...``. Raises
     SkillCallError when that is more than REPEAT_LIMIT iterations (the call falls back to the
-    template path), as a ``[repeat]`` block of a SKILL.md does.
+    template path).
     """
     times = int(count) - int(offset)
     if times > REPEAT_LIMIT:
@@ -929,22 +485,9 @@ def repeat(count: int, offset: int = 0) -> range:
     return range(int(offset) + 1, int(offset) + 1 + max(times, 0))
 
 
-def input_model_for(name: str, params: tuple[Param, ...]):
-    """A pydantic model with one field per parameter (``Literal`` for an enum), for the
-    argument screen of a SKILL.md skill; a skill file declares its own ``Input``."""
-    from pydantic import Field, create_model
-
-    fields = {}
-    for p in params:
-        kind = Literal[p.values] if p.type == "enum" else {"str": str, "bool": bool, "int": int}[p.type]
-        default = ... if p.required else p.default
-        fields[p.name] = (kind, Field(default=default, description=p.desc or None))
-    model_name = re.sub(r"\W", "_", name).strip("_").title().replace("_", "") or "Skill"
-    return create_model(f"{model_name}Input", **fields)
-
-
 def _spec_from_field(name: str, info, where: str) -> dict:
-    """The front-matter spec of one ``Input`` field, for ``_parse_param`` (one set of rules)."""
+    """The spec of one ``Input`` field (its type, default, description and skill options, as
+    text), for ``_parse_param``."""
     from pydantic_core import PydanticUndefined
 
     annotation = info.annotation
@@ -1017,36 +560,275 @@ def _call_steps(fn: Callable, instance, where: str) -> list[str]:
     return [line.strip() for line in lines if line.strip()]
 
 
-def placeholder_template(command: SkillCommand) -> list[str]:
-    """A skill file's template text when it declares none: ``steps()`` with placeholder inputs.
+#: ``placeholder_template`` renders ``steps()`` on every combination of placeholder inputs, or
+#: on this many sampled ones when there are more.
+TEMPLATE_GRID_LIMIT = 4096
 
-    A str reads ``<name>``, a bool is true (every optional part shows), an int takes its
-    default (1 when required or 0); the steps of each enum value are merged, in order, each
-    line once. A part only a false bool or an empty str shows ("[if not x]") is not seen:
-    declare ``Signature.template`` when the fallback needs it.
+
+def _template_values(p: Param) -> tuple:
+    """The inputs ``placeholder_template`` gives one parameter; the first is its base input.
+
+    A str reads ``<name>`` (and "" too when that is its default), a bool is true and false, an
+    int takes its default (or 1 and 0 when that is 0), an enum each value (its default first).
     """
-    base: dict = {}
+    if p.type == "str":
+        return (f"<{p.name}>",) if p.required or p.default != "" else (f"<{p.name}>", "")
+    if p.type == "bool":
+        return (True, False)
+    if p.type == "int":
+        return (p.default,) if p.default else (1, 0)
+    if p.default is None:
+        return tuple(p.values)
+    return (p.default,) + tuple(v for v in p.values if v != p.default)
+
+
+def _template_grid(command: SkillCommand) -> list[dict]:
+    """The argument sets ``placeholder_template`` renders: the base first, then every other
+    combination (sampled past TEMPLATE_GRID_LIMIT), leaving out a set a ``requires`` would
+    reset (the argument check never passes one)."""
+    import itertools
+    import random
+
+    choices = [[(p.name, v) for v in _template_values(p)] for p in command.params]
+    total = 1
+    for c in choices:
+        total *= len(c)
+    if total <= TEMPLATE_GRID_LIMIT:
+        grid = [dict(c) for c in itertools.product(*choices)]
+    else:
+        rng = random.Random(0)
+        base = dict(c[0] for c in choices)
+        grid = [base] + [{**base, n: v} for c in choices for n, v in c[1:]]
+        grid += [dict(rng.choice(c) for c in choices) for _ in range(TEMPLATE_GRID_LIMIT)]
+    out, seen = [], set()
+    for env in grid:
+        key = tuple(env.items())
+        if key in seen or any(p.requires is not None and env[p.name] != p.default
+                              and not evaluate(p.requires, env) for p in command.params):
+            continue
+        seen.add(key)
+        out.append(env)
+    return out
+
+
+def _merge_runs(runs: list[list[str]]) -> list[list]:
+    """``[[line, {grid index, ...}], ...]``: the steps of every grid point in one order. Each
+    run is aligned with the lines so far (a line a run writes twice is kept twice); a line
+    only some runs write is placed where they write it."""
+    import difflib
+
+    merged: list[list] = []
+    for i, lines in enumerate(runs):
+        ops = difflib.SequenceMatcher(None, [m[0] for m in merged], lines, autojunk=False).get_opcodes()
+        new: list[list] = []
+        for tag, a0, a1, b0, b1 in ops:
+            if tag == "equal":
+                for k in range(a0, a1):
+                    merged[k][1].add(i)
+                new.extend(merged[a0:a1])
+            else:
+                new.extend(merged[a0:a1])
+                new.extend([line, {i}] for line in lines[b0:b1])
+        merged = new
+    return merged
+
+
+def _literal_words(p: Param, allowed: frozenset) -> str:
+    if p.type == "bool":
+        return p.name if True in allowed else f"not {p.name}"
+    if p.type == "str":
+        return f"{p.name} is empty" if "" in allowed else f"{p.name} is given"
+    if p.type == "int":
+        return f"not {p.name}" if 0 in allowed else p.name
+    shown = [v for v in p.values if v in allowed]
+    if len(p.values) > 2 and len(shown) == len(p.values) - 1:
+        return f"{p.name} is not {next(v for v in p.values if v not in allowed)}"
+    return f"{p.name} is " + " or ".join(shown)
+
+
+def _condition_text(command: SkillCommand, present: set, grid: list[dict]) -> str | None:
+    """The words of a simple condition true exactly on the grid points ``present``: "" when
+    that is all of them, else an ``and`` of up to three parameter tests or an ``or`` of up
+    to three ``and``s of up to two; None when none fits."""
+    import itertools
+
+    want = tuple(i in present for i in range(len(grid)))
+    if all(want):
+        return ""
+    index = {tuple(env.items()): i for i, env in enumerate(grid)}
+    relevant = []   # the parameters whose value alone can change whether the line is written
     for p in command.params:
-        if p.type == "str":
-            base[p.name] = f"<{p.name}>"
-        elif p.type == "bool":
-            base[p.name] = True
-        elif p.type == "int":
-            base[p.name] = p.default if p.default else 1
-        else:
-            base[p.name] = p.default if p.default is not None else p.values[0]
-    variants = [base] + [{**base, p.name: v} for p in command.params if p.type == "enum"
-                         for v in p.values if v != base[p.name]]
-    out: list[str] = []
-    for env in variants:
+        if any(want[i] != want[j] for i, env in enumerate(grid) for v in _template_values(p)
+               if v != env[p.name] for j in [index.get(tuple({**env, p.name: v}.items()))] if j is not None):
+            relevant.append(p)
+    literals = [(p, frozenset(s)) for p in relevant for k in range(1, len(_template_values(p)))
+                for s in itertools.combinations(_template_values(p), k)]
+
+    def truth(conj) -> tuple:
+        return tuple(all(env[p.name] in allowed for p, allowed in conj) for env in grid)
+
+    def words(conj) -> str:
+        return " and ".join(_literal_words(p, allowed) for p, allowed in conj)
+
+    small: list[tuple] = []
+    for size in (1, 2, 3):
+        for conj in itertools.combinations(literals, size):
+            if len({p.name for p, _ in conj}) < size:
+                continue
+            t = truth(conj)
+            if t == want:
+                return words(conj)
+            if size < 3 and not any(a and not b for a, b in zip(t, want)):
+                small.append((conj, t))
+    for k in (2, 3):
+        for terms in itertools.combinations(small, k):
+            if tuple(any(x) for x in zip(*(t for _, t in terms))) == want:
+                return " or ".join(f"({words(c)})" if len(c) > 1 else words(c) for c, _ in terms)
+    return None
+
+
+def _alternatives(texts: list[str], by: str) -> str | None:
+    """One line for the lines ``texts`` (one per value of enum ``by``, in its order) that differ
+    only in a middle part: ``<find_group or find_unit, by kind> query=<name>``; None when every
+    one differs in more than a few words and in more than they share (different steps)."""
+    pieces = [re.split(r"(?<=[ =])", t) for t in texts]   # words, and "key=" apart from its value
+    pre = 0
+    while all(len(w) > pre for w in pieces) and len({w[pre] for w in pieces}) == 1:
+        pre += 1
+    suf = 0
+    while all(len(w) - pre > suf for w in pieces) and len({w[-1 - suf] for w in pieces}) == 1:
+        suf += 1
+    raw = ["".join(w[pre:len(w) - suf]) for w in pieces]
+    middles = list(dict.fromkeys(m.strip() for m in raw))
+    if len(middles) == 1:
+        return texts[0]
+    sizes = [len(m.split()) for m in middles]
+    if min(sizes) > 3 and max(sizes) > pre + suf:
+        return None
+    gap = " " if suf and any(m.endswith(" ") for m in raw) else ""
+    head, tail = "".join(pieces[0][:pre]), "".join(pieces[0][len(pieces[0]) - suf:])
+    return head + "<" + " or ".join(m for m in middles if m) + f", by {by}>" + gap + tail
+
+
+def _merge_enum_lines(p: Param, merged: list[list], grid: list[dict]) -> list[list]:
+    """``merged`` with the branches of enum ``p`` joined where they line up: consecutive blocks
+    of lines, each written for its own values of ``p`` alone (the other arguments alike), of
+    one length; their n-th lines become one line with ``<a or b, by p>``."""
+    def others(i: int) -> tuple:
+        return tuple((k, v) for k, v in grid[i].items() if k != p.name)
+
+    info = []   # per line: (values of p it is written for, the other arguments it is written for)
+    for _line, points in merged:
+        values = frozenset(grid[i][p.name] for i in points)
+        rest = frozenset(others(i) for i in points)
+        alone = {i for i, env in enumerate(grid) if env[p.name] in values and others(i) in rest} == points
+        info.append((values, rest) if alone and len(values) < len(p.values) else None)
+
+    def joinable(blocks: list[list[int]]) -> bool:
+        sets = [info[b[0]][0] for b in blocks]
+        return (sum(len(s) for s in sets) == len(frozenset().union(*sets))
+                and len({len(b) for b in blocks}) == 1
+                and all(len({info[b[n]][1] for b in blocks}) == 1 for n in range(len(blocks[0]))))
+
+    out: list[list] = []
+    i = 0
+    while i < len(merged):
+        if info[i] is None:
+            out.append(merged[i])
+            i += 1
+            continue
+        j = i
+        while j < len(merged) and info[j] is not None:
+            j += 1
+        blocks: list[list[int]] = []
+        for k in range(i, j):
+            if blocks and info[blocks[-1][-1]][0] == info[k][0]:
+                blocks[-1].append(k)
+            else:
+                blocks.append([k])
+        if joinable(blocks):   # the branches in the enum's order
+            blocks.sort(key=lambda b: min(p.values.index(v) for v in info[b[0]][0]))
+        start = 0
+        while start < len(blocks):
+            end = start + 1
+            while end < len(blocks) and joinable(blocks[start:end + 1]):
+                end += 1
+            segment = blocks[start:end]
+            if len(segment) == 1:
+                out.extend(merged[k] for k in segment[0])
+            else:
+                segment.sort(key=lambda b: min(p.values.index(v) for v in info[b[0]][0]))
+                for n in range(len(segment[0])):
+                    members = [merged[b[n]] for b in segment]
+                    text = _alternatives([m[0] for m in members], p.name)
+                    if text is None:   # different steps, one line each
+                        out.extend(members)
+                    else:
+                        out.append([text, set().union(*(m[1] for m in members))])
+            start = end
+        i = j
+    return out
+
+
+def _merge_empty_str_lines(p: Param, merged: list[list], grid: list[dict]) -> list[list]:
+    """``merged`` with each line written for an empty ``p`` joined to its neighbour written for
+    ``<p>`` when it is that line with ``<p>`` left out (``assess_risk{owner=}`` of
+    ``assess_risk{owner=<owner>}``): one step whose value may be empty."""
+    shown = f"<{p.name}>"
+
+    def written_for(points: set) -> set:
+        return {grid[i][p.name] for i in points}
+
+    out: list[list] = []
+    for line, points in merged:
+        if out and written_for(points) == {""} and written_for(out[-1][1]) == {shown} \
+                and shown in out[-1][0] and out[-1][0].replace(shown, "") == line:
+            out[-1] = [out[-1][0], out[-1][1] | points]
+            continue
+        out.append([line, points])
+    return out
+
+
+def placeholder_template(command: SkillCommand) -> list[str]:
+    """A skill file's template text when it declares none: ``steps()`` rendered on placeholder
+    inputs.
+
+    ``steps()`` runs on every combination of the inputs ``_template_values`` gives (a str
+    reads ``<name>``, and "" when that is its default; a bool true and false; an int its
+    default, or 1 and 0; an enum each value), and the runs are merged in order. A line not
+    every run writes ends with ``(only when ...)``, the condition on the arguments under which
+    it is written (``kind is group``, ``person is given``, ``not flag``); lines that differ only
+    by an enum's value become one (``<find_group or find_unit, by kind> query=<name>``). A
+    repeated part shows its steps for the int's default; declare ``Signature.template`` when
+    the planner needs more than that.
+
+    Raises SkillFormatError when ``steps()`` fails on the base inputs (the first of each).
+    """
+    grid, runs = [], []
+    for env in _template_grid(command):
         try:
             lines = _call_steps(command.steps_fn, command.input_model.model_construct(**env), command.path)
-        except Exception as exc:  # noqa: BLE001 - the author must declare the template instead
-            raise SkillFormatError(f"{command.path}: steps() fails on placeholder inputs ({type(exc).__name__}: "
-                                   f"{exc}); declare Signature.template") from None
-        for i, line in enumerate(lines):
-            if line not in out:   # before the next of this variant's lines already merged
-                out.insert(next((out.index(x) for x in lines[i + 1:] if x in out), len(out)), line)
+        except Exception as exc:  # noqa: BLE001 - a set steps() refuses is left out of the template
+            if not grid and not runs:
+                raise SkillFormatError(f"{command.path}: steps() fails on placeholder inputs "
+                                       f"({type(exc).__name__}: {exc}); declare Signature.template") from None
+            continue
+        grid.append(env)
+        runs.append(lines)
+    merged = _merge_runs(runs)
+    for p in command.params:
+        if p.type == "str" and len(_template_values(p)) > 1:
+            merged = _merge_empty_str_lines(p, merged, grid)
+    for p in command.params:
+        if p.type == "enum":
+            merged = _merge_enum_lines(p, merged, grid)
+    out = []
+    for line, points in merged:
+        condition = _condition_text(command, points, grid)
+        if condition is None:
+            out.append(f"{line} (only for some of the arguments)")
+        else:
+            out.append(f"{line} (only when {condition})" if condition else line)
     return out
 
 
@@ -1096,8 +878,7 @@ def command_from_module(name: str, module, path: str) -> SkillFile:
             raise SkillFormatError(f"{path}: steps() returns no steps")
         return SkillFile(description=description, steps=tuple(lines), command=None)
 
-    command = SkillCommand(name=name, description=description, params=tuple(params.values()), maps=(), body=(),
-                           path=path, input_model=input_model, steps_fn=steps_fn, validate=validate,
+    command = SkillCommand(name=name, description=description, params=tuple(params.values()), path=path, input_model=input_model, steps_fn=steps_fn, validate=validate,
                            plain_utterances=tuple(utterances))
     declared = getattr(signature, "template", None)
     if declared is not None:
@@ -1111,10 +892,11 @@ def command_from_module(name: str, module, path: str) -> SkillFile:
     return SkillFile(description=description, steps=tuple(template), command=replace(command, template=tuple(template)))
 
 
-def expand_skill_file(command: SkillCommand, args: dict) -> list[str]:
-    """A skill file's steps for ``args``: ``steps(input)`` with an ``@<skill>`` line replaced
-    by that skill's steps (a skill without params). Raises SkillCallError when ``steps()``
-    fails or returns something else than a list of text."""
+def expand(command: SkillCommand, args: dict) -> list[str]:
+    """The skill's command steps for ``args`` (complete, checked arguments), unnumbered:
+    ``steps(input)`` with an ``@<skill>`` line replaced by that skill's steps (a skill without
+    params). Raises SkillCallError when ``steps()`` fails, returns something else than a list
+    of text, or repeats more than REPEAT_LIMIT times."""
     instance = command.input_model.model_construct(**args)
     try:
         lines = _call_steps(command.steps_fn, instance, command.path)
@@ -1134,6 +916,11 @@ def expand_skill_file(command: SkillCommand, args: dict) -> list[str]:
             raise SkillCallError(f"steps() of {command.name} includes {m.group(1)!r}, "
                                  "which is not a skill without params")
     return out
+
+
+def number(steps: list[str]) -> str:
+    """Steps as the planner writes them: a numbered list, one per line."""
+    return "\n".join(f"{i}. {s}" for i, s in enumerate(steps, 1))
 
 
 def validate_call(command: SkillCommand, args: dict, request: str, workflow=None,

@@ -370,13 +370,20 @@ def test_a_clean_split_is_not_retried():
         "Audit as well as sweep Alice.", "Sweep Hubbard."]
 
 
-def test_skills_are_read_as_plain_lines_and_all_are_shown(tmp_path):
+def skill_file(text: str) -> str:
+    """The ``skill.py`` of a skill without params: ``text``'s first line is its description,
+    every other non-empty line one step."""
+    description, *steps = [line.strip() for line in text.splitlines() if line.strip()]
+    return f"class Signature:\n    __doc__ = {description!r}\n\n\ndef steps():\n    return {steps!r}\n"
+
+
+def test_skills_without_params_give_their_steps_and_all_are_shown(tmp_path):
     from fastworkflow.workflow_agent import _job_types_for, load_skills
 
     for name, text in {"leaver-sweep": "One person is leaving: their reach. One job per person.\nfind them\nopen them",
                        "unit-walk": "Walk a whole unit roster. The unit is one job.\nopen the unit"}.items():
         (tmp_path / "_skills" / name).mkdir(parents=True)
-        (tmp_path / "_skills" / name / "SKILL.md").write_text(text + "\n\n")
+        (tmp_path / "_skills" / name / "skill.py").write_text(skill_file(text))
 
     assert load_skills(str(tmp_path))[0] == (
         "leaver-sweep", "One person is leaving: their reach. One job per person.", ("find them", "open them"))
@@ -390,7 +397,7 @@ def test_skills_are_read_as_plain_lines_and_all_are_shown(tmp_path):
 def _write_skills(tmp_path, skills):
     for name, text in skills.items():
         (tmp_path / "_skills" / name).mkdir(parents=True)
-        (tmp_path / "_skills" / name / "SKILL.md").write_text(text)
+        (tmp_path / "_skills" / name / "skill.py").write_text(skill_file(text))
     return str(tmp_path)
 
 
@@ -463,7 +470,7 @@ def test_a_workflow_split_instructions_file_replaces_the_default_instructions(tm
 
 def _skill_folder(tmp_path):
     (tmp_path / "_skills" / "leaver").mkdir(parents=True)
-    (tmp_path / "_skills" / "leaver" / "SKILL.md").write_text("Someone is leaving.\nfind them\nopen them\n")
+    (tmp_path / "_skills" / "leaver" / "skill.py").write_text(skill_file("Someone is leaving.\nfind them\nopen them\n"))
     return str(tmp_path)
 
 

@@ -14,14 +14,21 @@
   `plain_utterances`, a `template` (the text the planner falls back to) and
   `validate_extracted_parameters(workflow, command, cmd_parameters,
   command_text=None)`. A module-level `steps(input) -> list[str]` returns the
-  steps with Python f-strings, `if` and `for n in repeat(input.count)` in place
-  of the `{param}` / `[if]` / `[repeat]` step language; lookup tables are plain
-  dicts; a step `@<skill>` still includes a skill without params. A skill
+  steps, written with Python f-strings, `if` and `for n in repeat(input.count)`
+  (`repeat` refuses more than `REPEAT_LIMIT`); lookup tables are plain dicts; a
+  step `@<skill>` includes a skill without params. A skill
   without params is a file whose `steps()` returns its fixed lines. Without a
-  declared `template`, `steps()` rendered with placeholder inputs is the
-  template. The file is imported like a command file (package-relative imports
-  work); one that fails to import is logged and skipped. The one file replaces
-  SKILL.md; when both exist the skill file wins (with a warning).
+  declared `template`, the template is `steps()` rendered on placeholder inputs
+  (`skill_commands.placeholder_template`): every combination of `<name>` for a
+  str (and "" when that is its default), true and false for a bool, an int's
+  default and each enum value, merged into one list where a step not every
+  combination writes ends with `(only when ...)` (`person is given`,
+  `kind is group`, `not flag`) and the steps of an enum's values are joined
+  (`<find_group or find_unit, by kind> query=<name>`); a repeated part shows
+  its steps for the int's default, so a skill declares `template` when the
+  planner should see how it repeats. The file is imported like a command file
+  (package-relative imports work); one that fails to import is logged and
+  skipped. The one file replaces SKILL.md (see Removed).
 - **Skill arguments go through the command parameter screen**
   (`utils.signatures.screen_parameter_values`, factored out of
   `InputForParamExtraction.validate_parameters`, which calls it unchanged): a
@@ -34,23 +41,17 @@
   file's `validate_extracted_parameters` sees the checked arguments
   (`skill_commands.validate_call`; `plan_skill_call` takes `workflow=`) and can
   refuse the call (the planner falls back to the template) or correct a field.
-- **SKILL.md converter** (`tools/skill_md_to_py.py`, a development tool in the
-  repository, not part of the package): converts each SKILL.md to `skill.py`
-  (`--write`), and with `--check` loads every skill of a `_skills` folder in
-  both forms and compares the description, parameters, template text and the
-  expanded steps over a grid of arguments; `--remove-md` deletes a SKILL.md
-  once its conversion is written and checked.
 - **Skill-call argument checks** (`fastworkflow/skill_commands.py`), all optional
-  per parameter in a skill's front matter, so existing skills read and plan
-  exactly as before:
+  per parameter (in a skill file, an `Input` field's `json_schema_extra`), so a
+  skill without them plans as before:
   - `verify: true` on a `bool` or `enum` parameter: when Jev is configured, the
     planner path (`plan_skill_call(..., check_lm=...)`, passed by
     `build_query_with_next_steps`) has Jev decide that argument again from the
     request alone (one `Choice` call per verified parameter, in parallel with the
     planner's typed call); a verdict at or above `VERIFY_THRESHOLD` (0.65)
     replaces the planner's argument and stands in for a missing or invalid enum.
-    An enum's `means` block gives Jev each value's meaning (`group: a group,
-    which people are members of`). A failed check leaves the planner's argument.
+    An enum's `means` (a dict) gives Jev each value's meaning (`"group": "a
+    group, which people are members of"`). A failed check leaves the planner's argument.
     This targets a wrong record kind for a name ("Payroll" planned as a feed) and
     flags set or left unset against what the request asks.
   - `in_request: true` on an `int` parameter: when the request writes numbers
@@ -82,15 +83,11 @@
     lookup steps the model adds around the expansion are dropped.
 
 - **Skills as parameterized commands** (`fastworkflow/skill_commands.py`): a
-  `_skills/<name>/SKILL.md` may start with front matter between `---` lines
-  declaring typed `params` (`str`, `bool`, `int`, `enum[...]`, with `default`,
-  `desc`, `requires` and, for a string, `strip` words) and value `maps` (an
-  enum, bool or int argument to text). Its steps may hold `{param}` / `{map}`
-  placeholders, a leading `[if <cond>]` (`==`, `!=`, `not`, `and`, `or`,
-  parentheses) and `[repeat <int param>]` / `[repeat <int param> - k]` ...
-  `[end]` blocks (`{n}` numbers the iterations). The first body line is still
-  the description the skill matcher sees; a skill without front matter is read
-  exactly as before. `@<skill>` includes are plain text and cannot name a skill
+  skill may declare typed parameters (its skill file's `Input`: `str`, `bool`,
+  `int` or an enum, with a default, a description, a `requires` condition and,
+  for a string, `strip` words) that `steps(input)` expands into its steps. The
+  description is still what the skill matcher sees; a skill without parameters
+  is read as before. An `@<skill>` include is plain text and cannot name a skill
   with params. A malformed skill fails the load with a `SkillFormatError`
   naming its file. On a turn's initial plan, when the sub-task's matched skill
   has params, `build_query_with_next_steps(..., skill_command=...)` asks the
@@ -200,18 +197,22 @@
   other arguments (`start=42`, the next page) it runs. Before, the whole
   command was blocked for that step, so its next page could not be read.
 
-- **Composite skills**: a step line in `_skills/<name>/SKILL.md` that is
-  exactly `@<other-skill>` is replaced, when the skills load, by that skill's
-  steps (recursively, in order; its description is not included). The
+- **Composite skills**: a step that is exactly `@<other-skill>` is replaced,
+  when the skills load, by that skill's steps (recursively, in order; its
+  description is not included). The
   splitter's job types, the skill matcher and the planner template see only
   the expanded steps. An unknown skill or a cycle raises `ValueError` naming
   the include chain. A skill without `@` lines loads as before.
 
-### Deprecated
+### Removed
 
-- **SKILL.md** skills are read only while workflows migrate to skill files
-  (`skill_commands.READ_SKILL_MD`, a warning per file); the SKILL.md parser and
-  its step-template language will be removed.
+- **SKILL.md skills**: `_skills/<name>/SKILL.md` is no longer read; a skill is
+  `_skills/<name>/skill.py` only. This covers the plain form of 3.6.0 (the
+  description on the first line, one step per line), which becomes a file with
+  `class Signature` (the description as its docstring) and
+  `def steps(): return [...]` (the step lines), and the front-matter form with
+  its `{param}` / `[if]` / `[repeat]` step language, which was never released.
+  A folder under `_skills` without `skill.py` is skipped with a warning.
 
 ### Changed
 
