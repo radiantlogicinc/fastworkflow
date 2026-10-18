@@ -5,6 +5,7 @@ import litellm  # noqa: F401  (must precede dspy; see fastworkflow/utils/dspy_ut
 import dspy
 import os
 from contextlib import suppress
+from dataclasses import dataclass, field as dataclass_field
 from typing import Optional, Tuple, Union, Dict, Any, Type, List, get_args, get_origin
 from enum import Enum
 from datetime import date
@@ -337,6 +338,113 @@ def out_of_range_value_message(field_name: str, field_value: Any, problem: str) 
         f"{field_name} {field_value} is out of range ({problem}): pass the number "
         f"the request asks for, or leave {field_name} out if it does not give one."
     )
+
+
+# --- One pass over a call's values, shared by commands and skill calls -----------------
+
+
+@dataclass
+class ParameterScreen:
+    """What ``screen_parameter_values`` found and changed, per field name.
+
+    ``invalid_fields`` lists ``"<field> '<value>'"`` for each refused field, in field
+    order; a refused field is a placeholder or an out-of-range number. The other dicts map
+    a field to the value it had before the change (``defaulted_fields``: a made-up number
+    replaced by the field's default; the framework's own "not given" marker is replaced
+    without being recorded).
+    """
+
+    placeholder_fields: Dict[str, Any] = dataclass_field(default_factory=dict)
+    unwrapped_fields: Dict[str, Any] = dataclass_field(default_factory=dict)
+    quoted_fields: Dict[str, Any] = dataclass_field(default_factory=dict)
+    defaulted_fields: Dict[str, Any] = dataclass_field(default_factory=dict)
+    out_of_range_fields: Dict[str, Any] = dataclass_field(default_factory=dict)
+    out_of_range_problems: Dict[str, str] = dataclass_field(default_factory=dict)
+    invalid_fields: List[str] = dataclass_field(default_factory=list)
+
+    @property
+    def refused_fields(self) -> Dict[str, Any]:
+        return {**self.placeholder_fields, **self.out_of_range_fields}
+
+
+def screen_parameter_values(cmd_parameters: BaseModel, quote_texts: Optional[str],
+                            grounding_text: Optional[str],
+                            field_names: Optional[Any] = None) -> ParameterScreen:
+    """Check each value of *cmd_parameters* for wrappers, placeholders and made-up numbers.
+
+    Writes the corrected values back onto *cmd_parameters*: a quote pair around a whole
+    str value is removed (``unwrap_quoted_value``; *quote_texts* is the text the value was
+    taken from), a real value inside angle brackets is unwrapped, and a sentinel or made-up
+    number (``is_sentinel_number``) becomes the field's default when it has one. A
+    bracketed placeholder, a placeholder-shaped value *grounding_text* does not write
+    (``is_ungrounded_placeholder``) and a number out of its declared or implied range are
+    refused (left in place, listed in ``invalid_fields``). A required number holding the
+    "not given" marker is left as it is, for the caller to report as missing.
+
+    *field_names*, when given, limits the pass to those fields. ``validate_parameters``
+    runs this before any other check of a command's parameters; a skill call runs it on its
+    ``str`` and ``int`` arguments (``fastworkflow.skill_commands.check_arguments``).
+    """
+    screen = ParameterScreen()
+    placeholder_fields = screen.placeholder_fields
+    unwrapped_fields = screen.unwrapped_fields
+    quoted_fields = screen.quoted_fields
+    defaulted_fields = screen.defaulted_fields
+    out_of_range_fields = screen.out_of_range_fields
+    out_of_range_problems = screen.out_of_range_problems
+    invalid_fields = screen.invalid_fields
+    for field_name, field_info in type(cmd_parameters).model_fields.items():
+        if field_names is not None and field_name not in field_names:
+            continue
+        field_value = getattr(cmd_parameters, field_name, None)
+        original_value = field_value
+
+        quoted, field_value = unwrap_quoted_value(field_value, quote_texts)
+        kind, new_value = classify_bracketed_value(field_value, field_name)
+        if kind == "unwrapped":
+            unwrapped_fields[field_name] = original_value
+            inner_quoted, new_value = unwrap_quoted_value(new_value, quote_texts)
+            quoted = quoted or inner_quoted
+            field_value = new_value
+        if quoted:
+            quoted_fields[field_name] = original_value
+        if field_value is not original_value:
+            setattr(cmd_parameters, field_name, field_value)
+        if kind == "placeholder" or (
+            kind == "unchanged"
+            and is_ungrounded_placeholder(field_value, field_name, grounding_text)
+        ):
+            placeholder_fields[field_name] = field_value
+            invalid_fields.append(f"{field_name} '{field_value}'")
+            continue
+
+        numeric_kind = _numeric_kind(field_info.annotation)
+        number = _numeric_view(field_value, numeric_kind) if numeric_kind else None
+        if number is None:
+            continue
+        if is_sentinel_number(number):
+            is_optional_field = type(None) in get_args(field_info.annotation)
+            default = field_info.get_default(call_default_factory=True)
+            if default is PydanticUndefined and is_optional_field:
+                default = None
+            if default is not PydanticUndefined:
+                setattr(cmd_parameters, field_name, default)
+                # The framework's own "not given" marker is routine; only a
+                # number the model made up is worth recording.
+                if number not in (INVALID_INT_VALUE, INVALID_FLOAT_VALUE):
+                    defaulted_fields[field_name] = original_value
+                continue
+            if number in (INVALID_INT_VALUE, INVALID_FLOAT_VALUE):
+                continue  # a required field not given: the caller reports it missing
+            problem = "not a real value"
+        else:
+            problem = numeric_range_problem(field_name, field_info, number)
+            if problem is None:
+                continue
+        out_of_range_fields[field_name] = field_value
+        out_of_range_problems[field_name] = problem
+        invalid_fields.append(f"{field_name} '{field_value}'")
+    return screen
 
 
 def get_trainset(subject_command_name,workflow_folderpath) -> List[Dict[str, Any]]:
@@ -699,65 +807,18 @@ Today's date is {today}.
         )
         quote_texts = " \n ".join(t for t in (self.command, user_request) if t)
 
-        placeholder_fields: Dict[str, Any] = {}
-        unwrapped_fields: Dict[str, Any] = {}
-        quoted_fields: Dict[str, Any] = {}
-        defaulted_fields: Dict[str, Any] = {}
-        out_of_range_fields: Dict[str, Any] = {}
-        out_of_range_problems: Dict[str, str] = {}
-        for field_name, field_info in type(cmd_parameters).model_fields.items():
-            field_value = getattr(cmd_parameters, field_name, None)
-            original_value = field_value
-
-            quoted, field_value = unwrap_quoted_value(field_value, quote_texts)
-            kind, new_value = classify_bracketed_value(field_value, field_name)
-            if kind == "unwrapped":
-                unwrapped_fields[field_name] = original_value
-                inner_quoted, new_value = unwrap_quoted_value(new_value, quote_texts)
-                quoted = quoted or inner_quoted
-                field_value = new_value
-            if quoted:
-                quoted_fields[field_name] = original_value
-            if field_value is not original_value:
-                setattr(cmd_parameters, field_name, field_value)
-            if kind == "placeholder" or (
-                kind == "unchanged"
-                and is_ungrounded_placeholder(field_value, field_name, grounding_text)
-            ):
-                placeholder_fields[field_name] = field_value
-                invalid_fields.append(f"{field_name} '{field_value}'")
-                is_valid = False
-                continue
-
-            numeric_kind = _numeric_kind(field_info.annotation)
-            number = _numeric_view(field_value, numeric_kind) if numeric_kind else None
-            if number is None:
-                continue
-            if is_sentinel_number(number):
-                is_optional_field = type(None) in get_args(field_info.annotation)
-                default = field_info.get_default(call_default_factory=True)
-                if default is PydanticUndefined and is_optional_field:
-                    default = None
-                if default is not PydanticUndefined:
-                    setattr(cmd_parameters, field_name, default)
-                    # The framework's own "not given" marker is routine; only a
-                    # number the model made up is worth recording.
-                    if number not in (INVALID_INT_VALUE, INVALID_FLOAT_VALUE):
-                        defaulted_fields[field_name] = original_value
-                    continue
-                if number in (INVALID_INT_VALUE, INVALID_FLOAT_VALUE):
-                    continue  # a required field not given: reported as missing below
-                problem = "not a real value"
-            else:
-                problem = numeric_range_problem(field_name, field_info, number)
-                if problem is None:
-                    continue
-            out_of_range_fields[field_name] = field_value
-            out_of_range_problems[field_name] = problem
-            invalid_fields.append(f"{field_name} '{field_value}'")
+        screen = screen_parameter_values(cmd_parameters, quote_texts, grounding_text)
+        placeholder_fields = screen.placeholder_fields
+        unwrapped_fields = screen.unwrapped_fields
+        quoted_fields = screen.quoted_fields
+        defaulted_fields = screen.defaulted_fields
+        out_of_range_fields = screen.out_of_range_fields
+        out_of_range_problems = screen.out_of_range_problems
+        if screen.invalid_fields:
+            invalid_fields.extend(screen.invalid_fields)
             is_valid = False
 
-        refused_fields = {**placeholder_fields, **out_of_range_fields}
+        refused_fields = screen.refused_fields
         if diagnostics is not None:
             def _as_text(fields: Dict[str, Any]) -> Dict[str, str]:
                 return {name: str(value) for name, value in fields.items()}

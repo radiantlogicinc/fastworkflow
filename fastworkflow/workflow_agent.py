@@ -18,6 +18,7 @@ from dspy.experimental import Choice, TypeSafe
 
 import fastworkflow
 from fastworkflow import tracing
+from fastworkflow import skill_commands
 from fastworkflow.skill_commands import (
     SkillCommand, SkillFormatError, build_command, has_front_matter, plan_skill_call, split_front_matter,
     template_steps)
@@ -886,14 +887,43 @@ class SplitIntoSubtasks(dspy.Signature):
     subtasks: str = dspy.OutputField(desc="the sub-tasks as a numbered list, one per line")
 
 
+def _load_skill_file(name: str, path: str, workflow_folderpath: str):
+    """The ``SkillFile`` of ``_skills/<name>/skill.py``, or None when it cannot be imported.
+
+    The file is imported as a command file is (``python_utils.get_module`` under the
+    workflow's package, so package-relative imports work); an import that fails is logged
+    and the skill skipped. A malformed declaration raises SkillFormatError.
+    """
+    from fastworkflow.utils import python_utils
+
+    try:
+        module = python_utils.get_module(path, workflow_folderpath)
+    except Exception:  # noqa: BLE001 - a broken skill file costs that skill, not the workflow
+        logger.error(f"skipping skill {name!r}: could not import {path}", exc_info=True)
+        return None
+    return skill_commands.command_from_module(name, module, path)
+
+
 @functools.lru_cache(maxsize=None)
 def _parsed_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ...], "SkillCommand | None"], ...]:
     """``(name, description, template steps, command or None)`` per skill; see ``load_skills``."""
     root = os.path.join(workflow_folderpath, "_skills")
+    # (name, description, raw steps, SKILL.md front matter or None, skill-file command or None, path)
     files = []
     for name in sorted(os.listdir(root)) if os.path.isdir(root) else ():
-        path = os.path.join(root, name, "SKILL.md")
-        if os.path.isfile(path):
+        py_path = os.path.join(root, name, skill_commands.SKILL_FILE)
+        path = os.path.join(root, name, skill_commands.LEGACY_SKILL_FILE)
+        if os.path.isfile(py_path):
+            if os.path.isfile(path):
+                logger.warning(f"{path} is ignored: {py_path} defines skill {name!r} (delete the SKILL.md)")
+            loaded = _load_skill_file(name, py_path, workflow_folderpath)
+            if loaded is not None:
+                files.append((name, loaded.description, loaded.steps, None, loaded.command, py_path))
+            continue
+        # SKILL.md: read only while workflows migrate (skill_commands.READ_SKILL_MD); delete
+        # this branch with the switch.
+        if skill_commands.READ_SKILL_MD and os.path.isfile(path):
+            logger.warning(f"{path}: SKILL.md is deprecated; convert it to {skill_commands.SKILL_FILE}")
             with open(path, encoding="utf-8") as handle:
                 raw_lines = handle.readlines()
             front = None
@@ -901,11 +931,11 @@ def _parsed_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str,
                 front, raw_lines = split_front_matter(raw_lines, path)
             lines = [line.strip() for line in raw_lines if line.strip()]
             if lines:
-                files.append((name, lines[0], tuple(lines[1:]), front, path))
+                files.append((name, lines[0], tuple(lines[1:]), front, None, path))
             elif front is not None:
                 raise SkillFormatError(f"{path}: a skill with params needs a description line and steps")
-    raw_steps = {name: steps for name, _, steps, _, _ in files}
-    has_params = {name for name, _, _, front, _ in files if front is not None}
+    raw_steps = {name: steps for name, _, steps, _, _, _ in files}
+    has_params = {name for name, _, _, front, command, _ in files if front is not None or command is not None}
 
     def expand(name: str, chain: tuple[str, ...]) -> tuple[tuple[str, bool], ...]:
         # (step, literal): an included step is plain text inside a skill with params
@@ -928,31 +958,44 @@ def _parsed_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str,
             expanded.extend(expand(included, chain + (included,)))
         return tuple(expanded)
 
+    identifiers = identifier_patterns(workflow_folderpath)
+    plain = {name: tuple(step for step, _ in expand(name, (name,)))
+             for name, _, _, front, command, _ in files if name not in has_params}
     out = []
-    for name, description, _, front, path in files:
-        items = expand(name, (name,))
-        if front is None:
-            out.append((name, description, tuple(step for step, _ in items), None))
+    for name, description, _, front, command, path in files:
+        if name in plain:
+            out.append((name, description, plain[name], None))
             continue
+        if command is not None:
+            # the template's @<skill> lines are expanded here; steps() output's at each call
+            template = tuple(step for step, _ in expand(name, (name,)))
+            command = dataclasses.replace(command, template=template, identifiers=identifiers,
+                                          includes=tuple(plain.items()))
+            out.append((name, description, template, command))
+            continue
+        items = expand(name, (name,))
         command = build_command(name, description, front, list(items), path)
-        command = dataclasses.replace(command, identifiers=identifier_patterns(workflow_folderpath))
+        command = dataclasses.replace(command, identifiers=identifiers)
         out.append((name, description, template_steps(command), command))
     return tuple(out)
 
 
 def load_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
-    """``(name, description, steps)`` for each ``_skills/<name>/SKILL.md`` of the workflow.
+    """``(name, description, steps)`` for each skill of the workflow (``_skills/<name>/``).
 
-    A skill file is plain text: its first line describes the job, every other
-    non-empty line is one step. The folder name is the skill's name. A step
-    that is exactly ``@<name>`` stands for the steps of skill ``<name>``, expanded in place;
-    an unknown skill or a cycle raises ValueError.
+    A skill is defined by ``_skills/<name>/skill.py`` (format: ``fastworkflow.skill_commands``);
+    the folder name is the skill's name and the ``Signature`` docstring its description. A
+    skill without parameters gives its fixed ``steps()``; a skill with parameters gives its
+    template text, and ``load_skill_commands`` holds its parsed form. A step that is exactly
+    ``@<name>`` stands for the steps of skill ``<name>``, expanded in place; only a skill
+    without params can be included, and an unknown skill or a cycle raises ValueError. A skill
+    file that cannot be imported is logged and skipped; a malformed one raises
+    SkillFormatError (a ValueError) naming its file.
 
-    A skill may start with front matter declaring typed parameters (format:
-    ``fastworkflow.skill_commands``); its steps here are the template text of its step
-    templates, and ``load_skill_commands`` holds its parsed form. Included skills are
-    plain text and cannot have params. A malformed skill raises SkillFormatError (a
-    ValueError) naming its file.
+    Migration: a folder without ``skill.py`` is read from its SKILL.md while
+    ``skill_commands.READ_SKILL_MD`` is set (deprecated; a warning names the file): plain text
+    whose first line describes the job and every other non-empty line is one step, or front
+    matter with typed parameters and step templates. When both files exist, ``skill.py`` wins.
     """
     return tuple((name, description, steps) for name, description, steps, _ in _parsed_skills(workflow_folderpath))
 
@@ -1419,7 +1462,8 @@ def build_query_with_next_steps(user_query: str,
         with dspy.context(lm=planner_lm, adapter=agent_adapter):
             if skill_command is not None and initial_plan:
                 try:
-                    call = plan_skill_call(skill_command, request_text, available_commands, check_lm=_jev_lm())
+                    call = plan_skill_call(skill_command, request_text, available_commands, check_lm=_jev_lm(),
+                                           workflow=current_workflow)
                     prediction, plan_text, skill_args = call.prediction, call.plan, call.args
                     plan_source = "skill_call"
                     logger.info(f"skill call {skill_command.name}{call.args}"

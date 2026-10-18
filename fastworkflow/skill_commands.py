@@ -1,11 +1,111 @@
-"""Skills as parameterized commands.
+r'''Skills as parameterized commands.
 
-A skill (``_skills/<name>/SKILL.md``) may declare typed parameters in front matter.
-The planner then fills the parameters from the request (one typed dspy call) and
-code expands the skill into its numbered command steps; a skill without front matter
-is plain text, exactly as before (see ``workflow_agent.load_skills``).
+A skill is one Python file, ``_skills/<name>/skill.py``, written with the abstractions of a
+command file: a ``Signature`` whose docstring describes the job (what the skill matcher and
+the text planner read) and whose pydantic ``Input`` declares typed parameters, and a
+function ``steps(input)`` that returns the skill's command steps for one set of arguments.
+The planner fills the parameters from the request (one typed dspy call), the arguments are
+checked, and ``steps()`` expands them into the numbered plan. A skill without parameters
+gives fixed steps the text planner adapts (see ``workflow_agent.load_skills``). The folder
+name is the skill's name; the file name is always ``skill.py`` (``SKILL_FILE``), so a
+folder name need not be a Python identifier and the file sits where SKILL.md did.
 
-Format::
+A skill file::
+
+    from typing import Literal
+
+    from pydantic import BaseModel, Field
+
+    from fastworkflow.skill_commands import repeat
+
+    FIND = {"group": "find_group", "unit": "find_unit"}
+
+
+    class Signature:
+        """Show one named group or unit and its members. One job per record."""
+
+        class Input(BaseModel):
+            name: str = Field(description="the record's name exactly as the request writes it",
+                              json_schema_extra={"strip": ["group", "unit"], "subject": True})
+            kind: Literal["group", "unit"] = Field(
+                description="what the request is about",
+                json_schema_extra={"verify": True,
+                                   "means": {"group": "a group of people", "unit": "an organisation unit"}})
+            person: str = Field(default="", description="one named person to check for; empty for everyone",
+                                json_schema_extra={"subject": True})
+            include_risk: bool = Field(default=False, description="the request asks how risky it is",
+                                       json_schema_extra={"verify": True})
+            count: int = Field(default=2, ge=0, description="how many members to open",
+                               json_schema_extra={"in_request": True})
+
+        plain_utterances = ["who is in the Payroll group", "is Ann Lee in Billing"]
+
+        template = [   # optional: the text the planner falls back to (see below)
+            "<find_group or find_unit, by kind> query=<name>",
+            "list_members filter=<person> (only when person is given)",
+            "list_members (only when person is empty)",
+            "assess_risk (only when include_risk)",
+            "repeat count times (n = 1 to count): open member <n>",
+            "@close-out",
+        ]
+
+        @staticmethod
+        def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
+            if cmd_parameters.kind == "unit" and cmd_parameters.person:
+                return False, "a unit is listed whole; name the person's group instead"
+            return True, ""
+
+
+    def steps(input: Signature.Input) -> list[str]:
+        out = [f"{FIND[input.kind]} query={input.name}"]
+        out.append(f"list_members filter={input.person}" if input.person else "list_members")
+        if input.include_risk:
+            out.append("assess_risk")
+        for n in repeat(input.count):
+            out.append(f"open member {n}")
+        out.append("@close-out")   # the steps of the skill "close-out" (one without params)
+        return out
+
+- ``Signature`` (required) with a docstring (required; its whitespace is collapsed to one
+  line). ``Input`` (a pydantic ``BaseModel``) declares the parameters in order; a skill
+  without parameters leaves it out or empty. A field's type is ``str``, ``bool``, ``int``
+  or ``Literal[...]`` of text values (an enum). ``Field(default=...)`` makes it optional (no
+  default: required; a ``bool`` always defaults to false, a ``default=True`` fails the
+  load); ``description`` is what the planner and a ``verify`` check read; ``ge``/``le``
+  bounds are enforced by the argument screen (see ``check_arguments``). The skill options
+  go in ``json_schema_extra`` (each optional; unknown keys fail the load): ``strip`` (a list
+  of words), ``subject``, ``verify``, ``in_request`` (``True``/``False``), ``means`` (a dict
+  of enum values to meanings) and ``requires`` (a condition in the language below, e.g.
+  ``'kind == "group" and include_risk'``). Their meaning is the same as in a SKILL.md.
+- ``steps(input)`` (required) returns the steps as a list of str, one per step (empty
+  ones are dropped). It builds text only: it must not call a backend or read state; it may
+  raise SkillCallError (the call then falls back). ``repeat(count, offset=0)`` gives the
+  iteration numbers ``offset+1 .. count`` and refuses more than ``REPEAT_LIMIT``. A step that
+  is exactly ``@<skill>`` stands for the steps of a skill without parameters. Lookup
+  tables (what a SKILL.md's ``maps`` were) are plain module-level dicts. For a skill without
+  parameters ``steps()`` takes no argument and returns its fixed steps.
+- ``plain_utterances`` (optional): example requests for the skill, kept on the parsed
+  command (``SkillCommand.plain_utterances``); the matcher does not read them yet.
+- ``template`` (optional): the template text of the skill, shown to the planner in the
+  skill call's "expands to:" and used as the text planner's template when a skill call
+  fails. Without it the template is ``steps()`` rendered with placeholder inputs
+  (``placeholder_template``): a str reads ``<name>``, a bool is true, an int its default,
+  and the steps of every enum value are merged; a part only a false bool or an empty str
+  produces is then missing, so declare ``template`` when that matters.
+- ``validate_extracted_parameters`` (optional, the signature of a command's): called with
+  the checked arguments as an ``Input`` (``validate_call``); ``(False, message)`` or an
+  exception fails the call (the planner falls back), and a field it corrects in place is
+  used.
+
+The file is imported as a command file is (``python_utils.get_module`` under the workflow's
+package, so package-relative imports work); one that fails to import is logged and skipped;
+a malformed declaration fails the load with a ``SkillFormatError`` naming the file.
+
+SKILL.md (deprecated): until a workflow is migrated (``READ_SKILL_MD``; the converter is
+``tools/skill_md_to_py.py`` in the fastworkflow repository, not installed with the
+package), a folder without ``skill.py`` is read from ``_skills/<name>/SKILL.md``. A SKILL.md
+may declare typed parameters in front matter; one without front matter is plain text (its
+first line the description, every other line one step). Format::
 
     ---
     params:
@@ -93,6 +193,8 @@ Format::
 - ``@<skill>`` lines are included as plain text (no placeholders or markers are read in
   them); a skill with front matter cannot be included.
 
+For both forms:
+
 Any ``str`` argument that lies inside a match of one of the workflow's identifier patterns
 (``_skills/identifier_patterns.txt``, e.g. ``\bacct_[0-9]+``) without being all of it becomes the
 whole match ("4421" of "acct_4421"); inside several, it is refused.
@@ -102,15 +204,20 @@ The model's ``steps_before`` / ``steps_after`` lose any ``<...>`` placeholder (a
 dropped, and so is a step whose commands outside the expansion no open part of the request
 asks for (``filter_extra_steps``).
 
+A skill call's ``str`` and ``int`` arguments first go through the screen a command's
+parameters go through (``utils.signatures.screen_parameter_values``: quotes and brackets
+removed, placeholders and out-of-range numbers refused), and a str argument is looked up in
+the request with Unicode dashes folded to "-" (see ``check_arguments``).
+
 Any malformed skill fails the load with a ``SkillFormatError`` naming the file.
-"""
+'''
 from __future__ import annotations
 
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from typing import Literal, Union
+from typing import Callable, Literal, Union, get_args, get_origin
 
 #: The most iterations one ``[repeat]`` block may expand to.
 REPEAT_LIMIT = 20
@@ -140,7 +247,8 @@ _BARE_PLACEHOLDER = re.compile(r"\s*<[^<>]*>")
 
 
 class SkillFormatError(ValueError):
-    """A malformed SKILL.md (front matter, condition, repeat block or placeholder)."""
+    """A malformed skill: a skill file's declaration, or a SKILL.md's front matter, condition,
+    repeat block or placeholder."""
 
 
 class SkillCallError(ValueError):
@@ -214,6 +322,21 @@ class SkillCommand:
     path: str = field(default="", compare=False)
     #: The workflow's identifier patterns (``workflow_agent.identifier_patterns``), set at load.
     identifiers: tuple = field(default=(), compare=False)
+    #: The skill's pydantic ``Input`` (a skill file's own; one built from the front matter of a
+    #: SKILL.md). Skill-call arguments are screened through it like a command's parameters.
+    input_model: type | None = field(default=None, compare=False)
+    #: A skill file's ``steps(input)``; None for a SKILL.md, whose ``body`` holds its step templates.
+    steps_fn: Callable | None = field(default=None, compare=False)
+    #: A skill file's template text (``Signature.template``, or ``steps()`` rendered with
+    #: placeholder inputs), includes expanded at load; ``template_steps`` reads it.
+    template: tuple[str, ...] = field(default=(), compare=False)
+    #: A skill file's ``Signature.validate_extracted_parameters``, or None.
+    validate: Callable | None = field(default=None, compare=False)
+    #: A skill file's ``Signature.plain_utterances``: example requests for the skill.
+    plain_utterances: tuple[str, ...] = field(default=(), compare=False)
+    #: ``(name, steps)`` of the workflow's skills without params, for an ``@<skill>`` line
+    #: that ``steps()`` returns; set at load.
+    includes: tuple[tuple[str, tuple[str, ...]], ...] = field(default=(), compare=False)
 
     def param(self, name: str) -> Param | None:
         return next((p for p in self.params if p.name == name), None)
@@ -644,7 +767,8 @@ def build_command(name: str, description: str, front: list[tuple[int, str]],
         params[n] = replace(params[n], requires=parse_condition(source, params, where))
     body = _parse_body(items, params, set(maps), where)
     return SkillCommand(name=name, description=description, params=tuple(params.values()),
-                        maps=tuple(maps.values()), body=body, path=where)
+                        maps=tuple(maps.values()), body=body, path=where,
+                        input_model=input_model_for(name, tuple(params.values())))
 
 
 def _check_map_cycles(maps: dict[str, ValueMap], where: str) -> None:
@@ -690,7 +814,12 @@ def expand(command: SkillCommand, args: dict) -> list[str]:
 
     Values are substituted, steps whose condition is false are dropped, repeat blocks are
     unrolled. Raises SkillCallError when a repeat would exceed REPEAT_LIMIT.
+
+    A skill file's steps are what its ``steps(input)`` returns for ``args`` (see
+    ``expand_skill_file``).
     """
+    if command.steps_fn is not None:
+        return expand_skill_file(command, args)
     env = dict(args)
     out: list[str] = []
 
@@ -723,8 +852,12 @@ def template_steps(command: SkillCommand) -> tuple[str, ...]:
 
     Placeholders read ``<param>``; a map reads its texts joined with "or" (``<find_a or
     find_b, by kind>``), a map by a bool its true text (``<text, when flag>``); a condition is
-    a trailing "(only when ...)"; a repeat block is one line.
+    a trailing "(only when ...)"; a repeat block is one line. A skill file's template is its
+    ``template`` (see ``template_lines``).
     """
+    if command.steps_fn is not None:
+        return command.template
+
     def show(text: str) -> str:
         def sub(m):
             token = m.group(0)
@@ -762,6 +895,272 @@ def template_steps(command: SkillCommand) -> tuple[str, ...]:
         else:
             out.append(line(node))
     return tuple(out)
+
+
+# ---------------------------------------------------------------- skill files (skill.py)
+
+#: The file that defines a skill: ``_skills/<name>/skill.py``.
+SKILL_FILE = "skill.py"
+#: The file a skill was defined in before skill files: ``_skills/<name>/SKILL.md``.
+LEGACY_SKILL_FILE = "SKILL.md"
+#: Migration switch: a skill folder without ``skill.py`` is still read from its SKILL.md
+#: (with a deprecation warning). Once no workflow ships SKILL.md, set this to False and
+#: delete what it guards: the SKILL.md branch of ``workflow_agent._parsed_skills``, and here
+#: the front-matter parser (``parse_front_matter`` .. ``build_command``) and the step-template
+#: expansion (``_parse_body``, ``_render``, the template branch of ``expand`` and
+#: ``template_steps``).
+READ_SKILL_MD = True
+
+#: Keys a skill file's ``Input`` field may set in ``json_schema_extra``.
+SKILL_FIELD_KEYS = frozenset({"strip", "subject", "verify", "means", "in_request", "requires"})
+_INCLUDE = re.compile(r"@(\S+)")
+
+
+def repeat(count: int, offset: int = 0) -> range:
+    """The iteration numbers ``offset + 1 .. count`` of a repeated part of a skill's steps.
+
+    For a skill file's ``steps()``: ``for n in repeat(input.count): ...``. Raises
+    SkillCallError when that is more than REPEAT_LIMIT iterations (the call falls back to the
+    template path), as a ``[repeat]`` block of a SKILL.md does.
+    """
+    times = int(count) - int(offset)
+    if times > REPEAT_LIMIT:
+        raise SkillCallError(f"{count} repeats more than {REPEAT_LIMIT} times")
+    return range(int(offset) + 1, int(offset) + 1 + max(times, 0))
+
+
+def input_model_for(name: str, params: tuple[Param, ...]):
+    """A pydantic model with one field per parameter (``Literal`` for an enum), for the
+    argument screen of a SKILL.md skill; a skill file declares its own ``Input``."""
+    from pydantic import Field, create_model
+
+    fields = {}
+    for p in params:
+        kind = Literal[p.values] if p.type == "enum" else {"str": str, "bool": bool, "int": int}[p.type]
+        default = ... if p.required else p.default
+        fields[p.name] = (kind, Field(default=default, description=p.desc or None))
+    model_name = re.sub(r"\W", "_", name).strip("_").title().replace("_", "") or "Skill"
+    return create_model(f"{model_name}Input", **fields)
+
+
+def _spec_from_field(name: str, info, where: str) -> dict:
+    """The front-matter spec of one ``Input`` field, for ``_parse_param`` (one set of rules)."""
+    from pydantic_core import PydanticUndefined
+
+    annotation = info.annotation
+    if annotation is str or annotation is bool or annotation is int:
+        type_text = annotation.__name__
+    elif get_origin(annotation) is Literal:
+        values = get_args(annotation)
+        if not values or not all(isinstance(v, str) for v in values):
+            raise SkillFormatError(f"{where}: field {name!r}: a Literal of text values only")
+        type_text = f"enum[{', '.join(values)}]"
+    else:
+        raise SkillFormatError(f"{where}: field {name!r} has type {annotation!r}; a skill field is "
+                               "str, bool, int or Literal[...] of text values")
+    spec: dict = {"type": type_text}
+    if info.description:
+        spec["desc"] = info.description
+    if info.default_factory is not None:
+        raise SkillFormatError(f"{where}: field {name!r}: give a plain default, not a default_factory")
+    if info.default is not PydanticUndefined:
+        default = info.default
+        if default is None or isinstance(default, (dict, list, tuple)):
+            raise SkillFormatError(f"{where}: field {name!r} default must be a value of its type "
+                                   "(leave the default out for a required parameter)")
+        spec["default"] = ("true" if default else "false") if isinstance(default, bool) else str(default)
+    extra = info.json_schema_extra
+    if extra is None:
+        return spec
+    if not isinstance(extra, dict):
+        raise SkillFormatError(f"{where}: field {name!r} json_schema_extra must be a dict")
+    _check_keys(extra, set(SKILL_FIELD_KEYS), f"field {name!r} json_schema_extra", where)
+    for key in ("subject", "verify", "in_request"):
+        if key in extra:
+            if not isinstance(extra[key], bool):
+                raise SkillFormatError(f"{where}: parameter {name!r} {key} must be true or false")
+            spec[key] = "true" if extra[key] else "false"
+    if "strip" in extra:
+        words = extra["strip"]
+        if isinstance(words, str) or not isinstance(words, (list, tuple)) or \
+                not all(isinstance(w, str) for w in words):
+            raise SkillFormatError(f"{where}: parameter {name!r} strip must be a list of words")
+        spec["strip"] = ", ".join(words)
+    if "means" in extra:
+        spec["means"] = extra["means"]
+    if "requires" in extra:
+        spec["requires"] = extra["requires"]
+    return spec
+
+
+@dataclass(frozen=True)
+class SkillFile:
+    """What a skill file declares: its description and either a parsed command (a skill with
+    params) or its fixed steps (a skill without params, ``command`` None).
+
+    ``steps`` and ``command.template`` may hold ``@<skill>`` lines; the loader expands them.
+    """
+
+    description: str
+    steps: tuple[str, ...]
+    command: SkillCommand | None
+
+
+def _call_steps(fn: Callable, instance, where: str) -> list[str]:
+    import inspect
+
+    takes_input = bool(inspect.signature(fn).parameters)
+    lines = fn(instance) if takes_input else fn()
+    if isinstance(lines, str) or not isinstance(lines, (list, tuple)) or \
+            not all(isinstance(line, str) for line in lines):
+        raise SkillCallError(f"{where}: steps() must return a list of str")
+    return [line.strip() for line in lines if line.strip()]
+
+
+def placeholder_template(command: SkillCommand) -> list[str]:
+    """A skill file's template text when it declares none: ``steps()`` with placeholder inputs.
+
+    A str reads ``<name>``, a bool is true (every optional part shows), an int takes its
+    default (1 when required or 0); the steps of each enum value are merged, in order, each
+    line once. A part only a false bool or an empty str shows ("[if not x]") is not seen:
+    declare ``Signature.template`` when the fallback needs it.
+    """
+    base: dict = {}
+    for p in command.params:
+        if p.type == "str":
+            base[p.name] = f"<{p.name}>"
+        elif p.type == "bool":
+            base[p.name] = True
+        elif p.type == "int":
+            base[p.name] = p.default if p.default else 1
+        else:
+            base[p.name] = p.default if p.default is not None else p.values[0]
+    variants = [base] + [{**base, p.name: v} for p in command.params if p.type == "enum"
+                         for v in p.values if v != base[p.name]]
+    out: list[str] = []
+    for env in variants:
+        try:
+            lines = _call_steps(command.steps_fn, command.input_model.model_construct(**env), command.path)
+        except Exception as exc:  # noqa: BLE001 - the author must declare the template instead
+            raise SkillFormatError(f"{command.path}: steps() fails on placeholder inputs ({type(exc).__name__}: "
+                                   f"{exc}); declare Signature.template") from None
+        for i, line in enumerate(lines):
+            if line not in out:   # before the next of this variant's lines already merged
+                out.insert(next((out.index(x) for x in lines[i + 1:] if x in out), len(out)), line)
+    return out
+
+
+def command_from_module(name: str, module, path: str) -> SkillFile:
+    """The skill a skill file (``_skills/<name>/skill.py``, already imported) defines.
+
+    Raises SkillFormatError for a malformed declaration (see the module doc).
+    """
+    import inspect
+
+    from pydantic import BaseModel
+
+    signature = getattr(module, "Signature", None)
+    if not inspect.isclass(signature):
+        raise SkillFormatError(f"{path}: a skill file needs a class Signature")
+    description = " ".join(inspect.cleandoc(signature.__doc__ or "").split())
+    if not description:
+        raise SkillFormatError(f"{path}: Signature needs a docstring (the skill's description)")
+    steps_fn = getattr(module, "steps", None)
+    if not callable(steps_fn):
+        raise SkillFormatError(f"{path}: a skill file needs a function steps(input) -> list[str]")
+    if len(inspect.signature(steps_fn).parameters) > 1:
+        raise SkillFormatError(f"{path}: steps() takes one argument, the Input")
+    input_model = getattr(signature, "Input", None)
+    if input_model is None:
+        input_model = type(f"{signature.__name__}Input", (BaseModel,), {})
+    if not (inspect.isclass(input_model) and issubclass(input_model, BaseModel)):
+        raise SkillFormatError(f"{path}: Signature.Input must be a pydantic BaseModel")
+    utterances = getattr(signature, "plain_utterances", ())
+    if isinstance(utterances, str) or not all(isinstance(u, str) for u in utterances):
+        raise SkillFormatError(f"{path}: plain_utterances must be a list of str")
+    validate = getattr(signature, "validate_extracted_parameters", None)
+    if validate is not None and not callable(validate):
+        raise SkillFormatError(f"{path}: validate_extracted_parameters must be a function")
+
+    conds: list[tuple[str, str]] = []
+    params = {n: _parse_param(n, _spec_from_field(n, info, path), path, conds)
+              for n, info in input_model.model_fields.items()}
+    for n, source in conds:
+        params[n] = replace(params[n], requires=parse_condition(source, params, path))
+    if not params:
+        try:
+            lines = _call_steps(steps_fn, input_model(), path)
+        except SkillCallError as exc:
+            raise SkillFormatError(str(exc)) from None
+        if not lines:
+            raise SkillFormatError(f"{path}: steps() returns no steps")
+        return SkillFile(description=description, steps=tuple(lines), command=None)
+
+    command = SkillCommand(name=name, description=description, params=tuple(params.values()), maps=(), body=(),
+                           path=path, input_model=input_model, steps_fn=steps_fn, validate=validate,
+                           plain_utterances=tuple(utterances))
+    declared = getattr(signature, "template", None)
+    if declared is not None:
+        if isinstance(declared, str) or not all(isinstance(t, str) for t in declared):
+            raise SkillFormatError(f"{path}: Signature.template must be a list of str")
+        template = list(declared)   # as written: it is text for the planner
+    else:
+        template = placeholder_template(command)
+    if not template:
+        raise SkillFormatError(f"{path}: a skill with params needs steps")
+    return SkillFile(description=description, steps=tuple(template), command=replace(command, template=tuple(template)))
+
+
+def expand_skill_file(command: SkillCommand, args: dict) -> list[str]:
+    """A skill file's steps for ``args``: ``steps(input)`` with an ``@<skill>`` line replaced
+    by that skill's steps (a skill without params). Raises SkillCallError when ``steps()``
+    fails or returns something else than a list of text."""
+    instance = command.input_model.model_construct(**args)
+    try:
+        lines = _call_steps(command.steps_fn, instance, command.path)
+    except SkillCallError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - workflow code; the planner falls back to the template
+        raise SkillCallError(f"steps() of {command.name} failed: {type(exc).__name__}: {exc}") from None
+    included = dict(command.includes)
+    out: list[str] = []
+    for line in lines:
+        m = _INCLUDE.fullmatch(line)
+        if m is None:
+            out.append(line)
+        elif m.group(1) in included:
+            out.extend(included[m.group(1)])
+        else:
+            raise SkillCallError(f"steps() of {command.name} includes {m.group(1)!r}, "
+                                 "which is not a skill without params")
+    return out
+
+
+def validate_call(command: SkillCommand, args: dict, request: str, workflow=None,
+                  notes: list[str] | None = None) -> dict:
+    """``args`` after the skill's ``validate_extracted_parameters`` hook (a skill file's), as for
+    a command: ``hook(workflow, skill_name, input, command_text=request)`` returns ``(ok,
+    message)`` and may correct fields of ``input`` in place. Raises SkillCallError when it
+    refuses the call or raises; without a hook ``args`` come back unchanged."""
+    import inspect
+
+    if command.validate is None:
+        return args
+    instance = command.input_model.model_construct(**args)
+    hook = command.validate
+    kwargs = {"command_text": request} if "command_text" in inspect.signature(hook).parameters else {}
+    try:
+        result = hook(workflow, command.name, instance, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - workflow code; the planner falls back to the template
+        raise SkillCallError(f"validate_extracted_parameters raised {type(exc).__name__}: {exc}") from None
+    ok, message = result if isinstance(result, tuple) else (bool(result), "")
+    if not ok:
+        raise SkillCallError(f"validate_extracted_parameters: {message}")
+    checked = {p.name: getattr(instance, p.name, args.get(p.name)) for p in command.params}
+    for p in command.params:
+        if checked[p.name] != args.get(p.name) and notes is not None:
+            notes.append(f"{p.name}={args.get(p.name)!r} -> {checked[p.name]!r} (validate_extracted_parameters)")
+    return checked
 
 
 # ---------------------------------------------------------------- arguments and guards
@@ -823,8 +1222,8 @@ def _spans(request: str, text: str) -> list[tuple[int, int]]:
     """Where ``text`` occurs in ``request`` (case-insensitive; any run of spaces, either apostrophe)."""
     if not text:
         return []
-    pattern = re.escape(text).replace(r"\ ", r"\s+").replace("'", "['’]")
-    return [(m.start(), m.end()) for m in re.finditer(pattern, request, re.I)]
+    pattern = re.escape(_fold(text)).replace(r"\ ", r"\s+").replace("'", "['’]")
+    return [(m.start(), m.end()) for m in re.finditer(pattern, _fold(request), re.I)]
 
 
 def _whole_identifier(request: str, text: str, identifiers: tuple) -> tuple[str | None, bool]:
@@ -904,15 +1303,48 @@ def _request_subjects(command: SkillCommand, request: str) -> list[str]:
     return request_subjects(request, command.identifiers)
 
 
+#: Dashes folded to "-" when an argument is looked up in the request (non-breaking hyphen etc.).
+_DASHES = str.maketrans({c: "-" for c in "\u2010\u2011\u2012\u2013\u2014\u2015\u2212\ufe58\ufe63\uff0d"})
+
+
+def _fold(text: str) -> str:
+    """``text`` with each Unicode dash as "-" (one character for one: positions are kept)."""
+    return text.translate(_DASHES)
+
+
+def _screen(command: SkillCommand, raw: dict, request: str) -> tuple[dict, dict[str, str]]:
+    """``(values, refused)``: the ``str`` and ``int`` arguments through the command parameter
+    screen (``utils.signatures.screen_parameter_values``): quotes and angle brackets around a
+    value removed, a made-up number replaced by the default; ``refused`` says why a placeholder
+    or an out-of-range number is refused."""
+    from fastworkflow.utils.signatures import screen_parameter_values
+
+    names = [p.name for p in command.params if p.type in ("str", "int") and raw.get(p.name) is not None]
+    if not names or command.input_model is None:
+        return {}, {}
+    values = command.input_model.model_construct(**{n: raw[n] for n in names})
+    screen = screen_parameter_values(values, request, request, names)
+    refused = {n: "is a placeholder, not a value" for n in screen.placeholder_fields}
+    refused.update({n: f"is out of range ({why})" for n, why in screen.out_of_range_problems.items()})
+    return {n: getattr(values, n) for n in names}, refused
+
+
 def check_arguments(command: SkillCommand, raw: dict, request: str,
                     verdicts: dict | None = None) -> tuple[dict, list[str]]:
     """The guarded, complete arguments of a skill call; ``(args, notes)``.
 
+    - a ``str`` or ``int`` argument first goes through the command parameter screen
+      (``utils.signatures.screen_parameter_values``, as a command's parameters do): quotes
+      or angle brackets around the whole value are removed, a placeholder (``<name>``,
+      ``desired-name`` the request does not write) or an out-of-range number (a negative
+      ``count``, a declared ``ge``/``le`` bound) is refused (an optional argument takes its
+      default, a required one fails the call), and the extractor's "not given" number or a
+      made-up extreme counts as missing;
     - a missing or empty argument takes its default; a required one fails the call;
     - an enum must be one of its values, an int an integer, a bool true/false;
     - a str argument loses surrounding quotes and its strip words, and must then be a
-      verbatim (case-insensitive) substring of ``request``; it takes the request's own
-      spelling. One that is not: an optional argument takes its default, a required one
+      verbatim (case-insensitive; any Unicode dash matches "-") substring of ``request``;
+      it takes the request's own spelling. One that is not: an optional argument takes its default, a required one
       fails the call (the planner falls back to the template path);
     - a str argument inside an identifier match of the request (``command.identifiers``)
       becomes the whole match; a ``subject`` one must name a record of the request
@@ -927,10 +1359,13 @@ def check_arguments(command: SkillCommand, raw: dict, request: str,
 
     ``notes`` says what a guard changed. Raises SkillCallError.
     """
+    from fastworkflow.utils.signatures import is_sentinel_number
+
     notes: list[str] = []
     args: dict = {}
-    lowered = request.lower()
+    folded = _fold(request).lower()
     subjects = _request_subjects(command, request) if any(p.subject for p in command.params) else []
+    screened, refused = _screen(command, raw, request)
 
     def refuse(p: Param, value, why: str) -> None:
         if p.required:
@@ -939,23 +1374,28 @@ def check_arguments(command: SkillCommand, raw: dict, request: str,
         args[p.name] = p.default
 
     for p in command.params:
-        value = raw.get(p.name)
+        shown = raw.get(p.name)   # the model's argument, as the notes show it
+        value = screened.get(p.name, shown)
+        compared = shown          # what a changed spelling is noted against
         sure = _confident(verdicts, p.name) if p.verify else None
         if sure is not None and p.type == "enum" and (_empty(value) or _clean_str(value).lower() not in p.values):
-            notes.append(f"{p.name}={value!r} -> {sure[0]!r} (check {sure[1]:.2f})")
+            notes.append(f"{p.name}={shown!r} -> {sure[0]!r} (check {sure[1]:.2f})")
             args[p.name] = sure[0]
             continue
         if sure is not None and p.type == "str":
             chosen = None if sure[0] == NO_SUBJECT else sure[0]
-            given = "" if _empty(value) else _strip_words(_clean_str(value), p.strip)
+            given = "" if _empty(value) or p.name in refused else _strip_words(_clean_str(value), p.strip)
             if (chosen or "").lower() != given.lower():
-                notes.append(f"{p.name}={value!r} -> {chosen or p.default!r} (check {sure[1]:.2f})")
+                notes.append(f"{p.name}={shown!r} -> {chosen or p.default!r} (check {sure[1]:.2f})")
             if chosen is None:
                 if p.required:
-                    raise SkillCallError(f"{p.name}={value!r}: the check finds no {p.name} in the request")
+                    raise SkillCallError(f"{p.name}={shown!r}: the check finds no {p.name} in the request")
                 args[p.name] = p.default
                 continue
-            value = chosen
+            value = compared = chosen
+        elif p.name in refused:
+            refuse(p, shown, refused[p.name])
+            continue
         if _empty(value):
             if p.required:
                 raise SkillCallError(f"missing required argument {p.name}")
@@ -964,42 +1404,47 @@ def check_arguments(command: SkillCommand, raw: dict, request: str,
         if p.type == "bool":
             if isinstance(value, str):
                 if value.strip().lower() not in ("true", "false"):
-                    raise SkillCallError(f"{p.name}={value!r} is not true or false")
+                    raise SkillCallError(f"{p.name}={shown!r} is not true or false")
                 value = value.strip().lower() == "true"
             args[p.name] = bool(value)
         elif p.type == "int":
             try:
-                args[p.name] = int(str(value).strip())
+                number = int(str(value).strip())
             except ValueError:
-                raise SkillCallError(f"{p.name}={value!r} is not an integer") from None
+                raise SkillCallError(f"{p.name}={shown!r} is not an integer") from None
+            if is_sentinel_number(number):   # the extractor's "not given" marker or a made-up extreme
+                if p.required:
+                    raise SkillCallError(f"missing required argument {p.name}")
+                number = p.default
+            args[p.name] = number
         elif p.type == "enum":
             text = _clean_str(value).lower()
             if text not in p.values:
-                raise SkillCallError(f"{p.name}={value!r} is not one of {', '.join(p.values)}")
+                raise SkillCallError(f"{p.name}={shown!r} is not one of {', '.join(p.values)}")
             args[p.name] = text
         else:
             text = _strip_words(_clean_str(value), p.strip)
-            at = lowered.find(text.lower()) if text else -1
+            at = folded.find(_fold(text).lower()) if text else -1
             if at < 0:
                 if p.required:
-                    raise SkillCallError(f"{p.name}={value!r} is not written in the request")
-                notes.append(f"{p.name}={value!r} is not in the request: default")
+                    raise SkillCallError(f"{p.name}={shown!r} is not written in the request")
+                notes.append(f"{p.name}={shown!r} is not in the request: default")
                 args[p.name] = p.default
                 continue
             exact = request[at:at + len(text)]
             whole, cut = _whole_identifier(request, exact, command.identifiers)
             if cut and whole is None:
-                refuse(p, value, "is part of more than one identifier the request writes")
+                refuse(p, shown, "is part of more than one identifier the request writes")
                 continue
             exact = whole or exact
             if p.subject:
                 named, why = _as_subject(request, exact, subjects)
                 if named is None:
-                    refuse(p, value, why)
+                    refuse(p, shown, why)
                     continue
                 exact = named
-            if exact != str(value):
-                notes.append(f"{p.name}={value!r} -> {exact!r}")
+            if exact != str(compared):
+                notes.append(f"{p.name}={shown!r} -> {exact!r}")
             args[p.name] = exact
     for p in command.params:
         if not p.in_request:
@@ -1239,14 +1684,16 @@ class SkillCallPlan:
 
 
 def plan_skill_call(command: SkillCommand, request: str, available_commands: str,
-                    check_lm=None) -> SkillCallPlan:
+                    check_lm=None, workflow=None) -> SkillCallPlan:
     """Plan ``request`` as a call of ``command``: the typed call, the guards, the expansion.
 
     Runs under the caller's dspy context (the planner LM and adapter); ``available_commands``
     reaches the adapter as extra input, as for the text planner. With ``check_lm`` (a
     classifier LM) the skill's ``verify`` parameters are decided again from the request,
-    alongside the typed call (``check_verdicts``). Raises on any failure (the caller falls
-    back to the template path).
+    alongside the typed call (``check_verdicts``). A skill file's
+    ``validate_extracted_parameters`` then sees the checked arguments (``validate_call``;
+    ``workflow`` is passed to it). Raises on any failure (the caller falls back to the
+    template path).
     """
     import dspy
 
@@ -1257,6 +1704,7 @@ def plan_skill_call(command: SkillCommand, request: str, available_commands: str
         verdicts = checks.result()
     raw = {p.name: getattr(prediction, p.name, None) for p in command.params}
     args, notes = check_arguments(command, raw, request, verdicts)
+    args = validate_call(command, args, request, workflow, notes)
     steps = expand(command, args)
     names = command_names(available_commands)
     before, dropped_before = filter_extra_steps(getattr(prediction, "steps_before", None), steps, names,

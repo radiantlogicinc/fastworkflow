@@ -4,6 +4,42 @@
 
 ### Added
 
+- **Skills as Python skill files** (`fastworkflow/skill_commands.py`,
+  `workflow_agent.load_skills`): a skill is now `_skills/<name>/skill.py`,
+  written like a command file. `class Signature` carries the description (its
+  docstring, what the skill matcher and the text planner read), a pydantic
+  `Input` (`str`, `bool`, `int`, `Literal[...]` for an enum; `Field(default=...,
+  description=...)`; the skill options `strip`, `subject`, `verify`, `means`,
+  `in_request` and `requires` in `json_schema_extra`), and optionally
+  `plain_utterances`, a `template` (the text the planner falls back to) and
+  `validate_extracted_parameters(workflow, command, cmd_parameters,
+  command_text=None)`. A module-level `steps(input) -> list[str]` returns the
+  steps with Python f-strings, `if` and `for n in repeat(input.count)` in place
+  of the `{param}` / `[if]` / `[repeat]` step language; lookup tables are plain
+  dicts; a step `@<skill>` still includes a skill without params. A skill
+  without params is a file whose `steps()` returns its fixed lines. Without a
+  declared `template`, `steps()` rendered with placeholder inputs is the
+  template. The file is imported like a command file (package-relative imports
+  work); one that fails to import is logged and skipped. The one file replaces
+  SKILL.md; when both exist the skill file wins (with a warning).
+- **Skill arguments go through the command parameter screen**
+  (`utils.signatures.screen_parameter_values`, factored out of
+  `InputForParamExtraction.validate_parameters`, which calls it unchanged): a
+  skill call's `str` and `int` arguments lose quotes and angle brackets around
+  the whole value, a placeholder or an out-of-range number (a negative count,
+  a declared `ge`/`le` bound) is refused (an optional argument takes its
+  default, a required one fails the call), and the extractor's "not given"
+  number or a made-up extreme counts as not given. A str argument is found in
+  the request with Unicode dashes (a non-breaking hyphen) folded to `-`. A skill
+  file's `validate_extracted_parameters` sees the checked arguments
+  (`skill_commands.validate_call`; `plan_skill_call` takes `workflow=`) and can
+  refuse the call (the planner falls back to the template) or correct a field.
+- **SKILL.md converter** (`tools/skill_md_to_py.py`, a development tool in the
+  repository, not part of the package): converts each SKILL.md to `skill.py`
+  (`--write`), and with `--check` loads every skill of a `_skills` folder in
+  both forms and compares the description, parameters, template text and the
+  expanded steps over a grid of arguments; `--remove-md` deletes a SKILL.md
+  once its conversion is written and checked.
 - **Skill-call argument checks** (`fastworkflow/skill_commands.py`), all optional
   per parameter in a skill's front matter, so existing skills read and plan
   exactly as before:
@@ -170,6 +206,12 @@
   splitter's job types, the skill matcher and the planner template see only
   the expanded steps. An unknown skill or a cycle raises `ValueError` naming
   the include chain. A skill without `@` lines loads as before.
+
+### Deprecated
+
+- **SKILL.md** skills are read only while workflows migrate to skill files
+  (`skill_commands.READ_SKILL_MD`, a warning per file); the SKILL.md parser and
+  its step-template language will be removed.
 
 ### Changed
 
