@@ -3,6 +3,7 @@ Agent integration module for fastWorkflow.
 Provides workflow tool agent functionality for intelligent tool selection.
 """
 
+import dataclasses
 import functools
 import os
 import re
@@ -934,6 +935,7 @@ def _parsed_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str,
             out.append((name, description, tuple(step for step, _ in items), None))
             continue
         command = build_command(name, description, front, list(items), path)
+        command = dataclasses.replace(command, identifiers=identifier_patterns(workflow_folderpath))
         out.append((name, description, template_steps(command), command))
     return tuple(out)
 

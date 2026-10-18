@@ -27,6 +27,23 @@
     `list_logins`, which the agent runs on the record in context instead of
     passing the placeholder on as a value. A step holding a uid-shaped token the
     request does not write is dropped; their descriptions now say so.
+  - `subject: true` on a `str` parameter: the argument must name a record of
+    the request: hold one of its subjects (`split_merge.request_subjects`, with
+    the workflow's identifier patterns) whole, or a name-like word, and cut no
+    subject. "I" of "Before I approve" or "Payroll" of "Payroll_Approver" is
+    refused (an optional argument takes its default, a required one falls back);
+    a name cut short mid-word or at a space at a subject's start or end
+    ("Payroll_Admin", "Ann" of "Ann Lee") becomes the whole subject. `verify: true` on a subject has Jev choose among the
+    request's subjects or "none" (a name/person swap, a right's name planned as
+    a group's).
+  - Any `str` argument inside a match of the workflow's identifier patterns
+    becomes the whole match ("4421" of "acct_4421"); commands loaded by
+    `load_skill_commands` carry the patterns (`SkillCommand.identifiers`).
+  - An extra step naming a command outside the expansion is kept only when a
+    part of the request the expansion leaves open asks for it: a word of the
+    command's name (not `open`, `list`, `find`, `uid`, ...) shares a stem with a
+    request word no word of the expansion's text shares one with. Navigation and
+    lookup steps the model adds around the expansion are dropped.
 
 - **Skills as parameterized commands** (`fastworkflow/skill_commands.py`): a
   `_skills/<name>/SKILL.md` may start with front matter between `---` lines
@@ -121,6 +138,25 @@
   real value from an earlier output, when it is only a placeholder
   (`<item_uid>`, `<uid>`). Every way a command gets its parameters passes
   through this check.
+  - A value wholly inside one quote pair (straight, typographic, guillemet or
+    backtick) loses the quotes: a filter of `"Ann Lee"` runs as `Ann Lee`.
+    Quotes the request itself writes inside quotes are kept.
+    `unwrap_quoted_value` is public for other callers.
+  - A placeholder-shaped value without brackets (`desired-tag`, `your_uid`,
+    `uid` for an `item_uid`) that the request never writes is refused the same
+    way. In agent mode it is checked against the user's message, not the
+    agent's command.
+  - The extractor's "not given" marker for an int (`-sys.maxsize`) no longer
+    reaches the command on a field with a default or an Optional one: the
+    field gets its default (`None`). The same goes for a number the model
+    made up (int32/int64 limits, beyond 2**53, inf/nan); on a field with no
+    default it is a parameter error. Declared `ge`/`gt`/`le`/`lt` bounds are
+    enforced, and a field named as a position, count or size (`start`,
+    `offset`, `limit`, `page_size`...) with no declared lower bound may not
+    be negative.
+  - `fw.nlu.param_extraction` v4 records `unwrapped_quoted_values`,
+    `defaulted_sentinel_values` and `out_of_range_values` (aggregate span
+    contract 15).
 
 - **The repeat block covers the same call only**: a command that returned
   the same result twice in a row is refused in the next step only when it is

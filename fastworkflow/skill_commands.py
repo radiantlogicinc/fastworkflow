@@ -56,11 +56,23 @@ Format::
   the model sets it true only when the request asks for that part.
 - Optional checks of an argument against the request (each key may be left out):
 
-  - ``verify: true`` (a ``bool`` or ``enum``): a classifier model decides the argument
-    again from the request alone, when the planner path has one (``plan_skill_call``'s
-    ``check_lm``); its answer replaces the planner's when it is at least
+  - ``subject: true`` (a ``str``): the argument names a record of the request (a person, a
+    group, a product, a code). Besides being written in the request it must hold one of the
+    request's subjects whole (``split_merge.request_subjects``, with the workflow's identifier
+    patterns) or a name-like word (capitalised and not a common word, or holding a digit or
+    ``_``), and cut no subject: "I" of "Before I approve" and "Payroll" of "Payroll_Approver"
+    are refused (an optional argument takes its default, so an ``[if not x]`` branch runs; a
+    required one fails the call). One cut short, mid-word or at a space, at the start or end of
+    exactly one subject becomes that subject ("Payroll_Admin" of "Payroll_Administrator",
+    "Ann" of "Ann Lee").
+  - ``verify: true`` (a ``bool``, an ``enum`` or a ``subject`` str): a classifier model decides
+    the argument again from the request alone, when the planner path has one
+    (``plan_skill_call``'s ``check_lm``); its answer replaces the planner's when it is at least
     ``VERIFY_THRESHOLD`` sure. It reads the parameter's ``desc``, and an enum's ``means``:
-    a block giving each value's meaning (``group: a group, people are its members``).
+    a block giving each value's meaning (``group: a group, people are its members``). For a
+    subject it chooses among the request's subjects (at most ``MAX_SUBJECT_OPTIONS``) or
+    ``NO_SUBJECT`` ("none": the default, or a failed call for a required parameter); a request
+    naming no subject is not checked.
   - ``in_request: true`` (an ``int``): when the request writes numbers (digits or the words
     zero to twenty) outside the text of the other arguments, the argument must be one of
     them; otherwise it takes the only one written, or its default when that is written,
@@ -81,9 +93,14 @@ Format::
 - ``@<skill>`` lines are included as plain text (no placeholders or markers are read in
   them); a skill with front matter cannot be included.
 
+Any ``str`` argument that lies inside a match of one of the workflow's identifier patterns
+(``_skills/identifier_patterns.txt``, e.g. ``\bacct_[0-9]+``) without being all of it becomes the
+whole match ("4421" of "acct_4421"); inside several, it is refused.
+
 The model's ``steps_before`` / ``steps_after`` lose any ``<...>`` placeholder (and the
 ``key=`` that holds one); a step holding a uid-shaped token the request does not write is
-dropped (``filter_extra_steps``).
+dropped, and so is a step whose commands outside the expansion no open part of the request
+asks for (``filter_extra_steps``).
 
 Any malformed skill fails the load with a ``SkillFormatError`` naming the file.
 """
@@ -102,6 +119,10 @@ VERIFY_THRESHOLD = 0.65
 NUMBER_WORDS = {w: i for i, w in enumerate(
     "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
     "sixteen seventeen eighteen nineteen twenty".split())}
+#: The value a ``verify`` check of a ``subject`` parameter gives when the request names none.
+NO_SUBJECT = "none"
+#: A ``verify`` check of a ``subject`` parameter chooses among at most this many of the request's subjects.
+MAX_SUBJECT_OPTIONS = 8
 #: Names a parameter or map may not take (they are signature fields or the repeat index).
 RESERVED_NAMES = frozenset({"user_query", "available_commands", "steps_before", "steps_after",
                             "reasoning", "n"})
@@ -141,6 +162,7 @@ class Param:
     verify: bool = False
     means: tuple[tuple[str, str], ...] = ()
     in_request: bool = False
+    subject: bool = False
 
     def type_text(self) -> str:
         return "|".join(self.values) if self.type == "enum" else self.type
@@ -190,6 +212,8 @@ class SkillCommand:
     maps: tuple[ValueMap, ...]
     body: tuple[Union[Step, Repeat], ...]
     path: str = field(default="", compare=False)
+    #: The workflow's identifier patterns (``workflow_agent.identifier_patterns``), set at load.
+    identifiers: tuple = field(default=(), compare=False)
 
     def param(self, name: str) -> Param | None:
         return next((p for p in self.params if p.name == name), None)
@@ -278,7 +302,8 @@ def _parse_param(name: str, spec, where: str, conds: list) -> Param:
         raise SkillFormatError(f"{where}: bad parameter name {name!r}")
     if not isinstance(spec, dict):
         raise SkillFormatError(f"{where}: parameter {name!r} must be a block with a type")
-    _check_keys(spec, {"type", "default", "desc", "requires", "strip", "verify", "means", "in_request"},
+    _check_keys(spec, {"type", "default", "desc", "requires", "strip", "verify", "means", "in_request",
+                       "subject"},
                 f"parameter {name!r}", where)
     type_text = spec.get("type")
     if not isinstance(type_text, str):
@@ -327,9 +352,12 @@ def _parse_param(name: str, spec, where: str, conds: list) -> Param:
     requires = spec.get("requires")
     if requires is not None and not isinstance(requires, str):
         raise SkillFormatError(f"{where}: parameter {name!r} requires must be a condition")
+    subject = _flag(spec, "subject", name, where)
+    if subject and kind != "str":
+        raise SkillFormatError(f"{where}: only a str parameter takes subject ({name!r})")
     verify = _flag(spec, "verify", name, where)
-    if verify and kind not in ("bool", "enum"):
-        raise SkillFormatError(f"{where}: only a bool or enum parameter takes verify ({name!r})")
+    if verify and kind not in ("bool", "enum") and not subject:
+        raise SkillFormatError(f"{where}: only a bool, enum or subject parameter takes verify ({name!r})")
     means: tuple[tuple[str, str], ...] = ()
     if "means" in spec:
         block = spec["means"]
@@ -343,7 +371,8 @@ def _parse_param(name: str, spec, where: str, conds: list) -> Param:
     if in_request and kind != "int":
         raise SkillFormatError(f"{where}: only an int parameter takes in_request ({name!r})")
     param = Param(name=name, type=kind, values=values, default=default, required=required,
-                  desc=desc, strip=strip, verify=verify, means=means, in_request=in_request)
+                  desc=desc, strip=strip, verify=verify, means=means, in_request=in_request,
+                  subject=subject)
     if requires:
         conds.append((name, requires))
     return param
@@ -790,6 +819,91 @@ def _request_numbers(request: str, args: dict, command: SkillCommand) -> set[int
     return found
 
 
+def _spans(request: str, text: str) -> list[tuple[int, int]]:
+    """Where ``text`` occurs in ``request`` (case-insensitive; any run of spaces, either apostrophe)."""
+    if not text:
+        return []
+    pattern = re.escape(text).replace(r"\ ", r"\s+").replace("'", "['’]")
+    return [(m.start(), m.end()) for m in re.finditer(pattern, request, re.I)]
+
+
+def _whole_identifier(request: str, text: str, identifiers: tuple) -> tuple[str | None, bool]:
+    """``(match, cut)`` of a str argument against the workflow's identifier matches in ``request``.
+
+    ``cut`` is true when every occurrence of ``text`` lies inside an identifier match without
+    being all of it ("4421" of "acct_4421"); ``match`` is then the whole match when exactly one
+    match holds it, else None.
+    """
+    matches = [(m.start(), m.end()) for p in identifiers for m in p.finditer(request) if m.group(0)]
+    occurrences = _spans(request, text)
+    if not matches or not occurrences:
+        return None, False
+    holders = set()
+    for a, b in occurrences:
+        inside = [(s, e) for s, e in matches if s <= a and b <= e and (s, e) != (a, b)]
+        if not inside:
+            return None, False
+        holders |= {request[s:e] for s, e in inside}
+    return (holders.pop() if len(holders) == 1 else None), True
+
+
+def _name_like_word(word: str) -> bool:
+    """A capitalised word that is not a common one ("I", "Before"), or one holding a digit or ``_``."""
+    from fastworkflow.split_merge import _COMMON
+    w = word.strip(".,;:!?()'\"`")
+    return bool(w) and (any(c.isdigit() for c in w) or "_" in w
+                        or (w[:1].isupper() and w != "I" and w.lower() not in _COMMON))
+
+
+def _as_subject(request: str, text: str, subjects: list[str]) -> tuple[str | None, str]:
+    """``(argument, why)`` of a ``subject`` argument: ``text`` when it names a record of the
+    request, the whole subject when it is one cut short, else None with ``why``.
+
+    An occurrence of the argument (on word boundaries) names a record when it is a subject, or
+    the tail of a sentence-opening one ("Ledger" of "Treat Ledger as ..."), or when it cuts no subject (each subject it overlaps it holds whole) and
+    holds a subject or a name-like word (``_name_like_word``): "I" of "Before I approve" names
+    nothing. Otherwise an occurrence inside exactly one subject, at its start or end and cut
+    there mid-word or at a space ("Payroll_Admin" of "Payroll_Administrator", "Ann" of "Ann
+    Lee"), is that subject cut short; one cut at ``_`` or ``-`` ("Payroll" of "Payroll_Approver")
+    may be a record of its own and is refused.
+    """
+    spans = [(s, e) for subject in subjects for s, e in _spans(request, subject)]
+    # a sentence-opening subject may hold the word that opens the sentence ("Treat Ledger"): its tail stands for it
+    parts = set()
+    for s, e in spans:
+        first = re.match(r"\S+\s+", request[s:e])
+        if first and (s == 0 or re.search(r"[.?!:;]\s*$", request[:s])):
+            parts.add((s + first.end(), e))
+
+    def joined(i: int) -> bool:   # request[i - 1] and request[i] are letters or digits of one word
+        return 0 < i < len(request) and request[i - 1].isalnum() and request[i].isalnum()
+
+    occurrences = _spans(request, text)
+    whole_words = [(a, b) for a, b in occurrences if not joined(a) and not joined(b)]
+    for a, b in whole_words:
+        if (a, b) in parts:
+            return text, ""
+        cut = [(s, e) for s, e in spans if s < b and a < e and not (a <= s and e <= b)]
+        if not cut and (any(a <= s and e <= b for s, e in spans) or any(_name_like_word(w) for w in text.split())):
+            return text, ""
+    snaps = set()
+    for a, b in occurrences:
+        for s, e in spans:
+            if s <= a and b <= e and (s, e) != (a, b) and (s == a or e == b):
+                # the subject is cut between request[edge - 1] and request[edge]
+                edge, beyond = (b, request[b]) if s == a else (a, request[a - 1])
+                if joined(edge) or beyond.isspace():
+                    snaps.add(request[s:e])
+    if len(snaps) == 1:
+        return snaps.pop(), ""
+    return None, "names no record of the request (none of its subjects, whole)"
+
+
+def _request_subjects(command: SkillCommand, request: str) -> list[str]:
+    from fastworkflow.split_merge import request_subjects
+    return request_subjects(request, command.identifiers)
+
+
 def check_arguments(command: SkillCommand, raw: dict, request: str,
                     verdicts: dict | None = None) -> tuple[dict, list[str]]:
     """The guarded, complete arguments of a skill call; ``(args, notes)``.
@@ -800,11 +914,14 @@ def check_arguments(command: SkillCommand, raw: dict, request: str,
       verbatim (case-insensitive) substring of ``request``; it takes the request's own
       spelling. One that is not: an optional argument takes its default, a required one
       fails the call (the planner falls back to the template path);
+    - a str argument inside an identifier match of the request (``command.identifiers``)
+      becomes the whole match; a ``subject`` one must name a record of the request
+      (``_as_subject``); one that does not is reset or fails the call as above;
     - an ``in_request`` int must be a number the request writes, when it writes any
       (see the module doc);
     - ``verdicts`` (``{param: (value, probability)}``, from ``check_verdicts``): a sure
       verdict on a ``verify`` parameter replaces its argument, and stands in for a missing
-      or invalid enum;
+      or invalid enum (for a subject, ``NO_SUBJECT`` resets it, or fails a required one);
     - an optional str argument equal to another str argument takes its default;
     - an argument whose ``requires`` condition is false takes its default.
 
@@ -813,6 +930,14 @@ def check_arguments(command: SkillCommand, raw: dict, request: str,
     notes: list[str] = []
     args: dict = {}
     lowered = request.lower()
+    subjects = _request_subjects(command, request) if any(p.subject for p in command.params) else []
+
+    def refuse(p: Param, value, why: str) -> None:
+        if p.required:
+            raise SkillCallError(f"{p.name}={value!r} {why}")
+        notes.append(f"{p.name}={value!r} {why}: default")
+        args[p.name] = p.default
+
     for p in command.params:
         value = raw.get(p.name)
         sure = _confident(verdicts, p.name) if p.verify else None
@@ -820,6 +945,17 @@ def check_arguments(command: SkillCommand, raw: dict, request: str,
             notes.append(f"{p.name}={value!r} -> {sure[0]!r} (check {sure[1]:.2f})")
             args[p.name] = sure[0]
             continue
+        if sure is not None and p.type == "str":
+            chosen = None if sure[0] == NO_SUBJECT else sure[0]
+            given = "" if _empty(value) else _strip_words(_clean_str(value), p.strip)
+            if (chosen or "").lower() != given.lower():
+                notes.append(f"{p.name}={value!r} -> {chosen or p.default!r} (check {sure[1]:.2f})")
+            if chosen is None:
+                if p.required:
+                    raise SkillCallError(f"{p.name}={value!r}: the check finds no {p.name} in the request")
+                args[p.name] = p.default
+                continue
+            value = chosen
         if _empty(value):
             if p.required:
                 raise SkillCallError(f"missing required argument {p.name}")
@@ -851,6 +987,17 @@ def check_arguments(command: SkillCommand, raw: dict, request: str,
                 args[p.name] = p.default
                 continue
             exact = request[at:at + len(text)]
+            whole, cut = _whole_identifier(request, exact, command.identifiers)
+            if cut and whole is None:
+                refuse(p, value, "is part of more than one identifier the request writes")
+                continue
+            exact = whole or exact
+            if p.subject:
+                named, why = _as_subject(request, exact, subjects)
+                if named is None:
+                    refuse(p, value, why)
+                    continue
+                exact = named
             if exact != str(value):
                 notes.append(f"{p.name}={value!r} -> {exact!r}")
             args[p.name] = exact
@@ -870,7 +1017,7 @@ def check_arguments(command: SkillCommand, raw: dict, request: str,
         notes.append(f"{p.name}={args[p.name]} -> {only} (the number the request writes)")
         args[p.name] = only
     for p in command.params:
-        sure = _confident(verdicts, p.name) if p.verify else None
+        sure = _confident(verdicts, p.name) if p.verify and p.type != "str" else None
         if sure is not None and args[p.name] != sure[0]:
             notes.append(f"{p.name}={args[p.name]!r} -> {sure[0]!r} (check {sure[1]:.2f})")
             args[p.name] = sure[0]
@@ -900,6 +1047,46 @@ def _without_placeholders(text: str) -> str:
     return re.sub(r"\s{2,}", " ", cleaned).strip(" ,;:")
 
 
+#: Words of a command name that say what it does, not what it is about ("open", "list", "uid").
+GENERIC_COMMAND_WORDS = frozenset("""open list show find get go up by uid id set add run view read all of to for from
+with in on at the a an new next first back current""".split())
+_WORD = re.compile(r"[a-z]+")
+_STOPWORDS = frozenset("""about also and any are been but can did does each else every have here how into its just
+like many more most much not now only other over same some such than that the their them then there these they this
+those too very was were what when where which while who whom whose why will with would you your""".split())
+
+
+_SUFFIXES = ("ities", "ity", "ions", "ion", "ings", "ing", "ers", "er", "ies", "ive", "ed", "es", "e", "s", "y")
+
+
+def _stem(word: str) -> str:
+    for suffix in _SUFFIXES:
+        if word.endswith(suffix) and len(word) - len(suffix) >= 4:
+            return word[:-len(suffix)]
+    return word
+
+
+def _same_stem(a: str, b: str) -> bool:
+    """Two words of one stem once a common ending is cut off ("holders"/"hold", "nesting"/"nested",
+    "sensitivity"/"sensitive"): one stem starts the other and is at least four letters long."""
+    x, y = sorted((_stem(a), _stem(b)), key=len)
+    return len(x) >= 4 and y.startswith(x)
+
+
+def _open_request_words(request: str, expanded: list[str]) -> set[str]:
+    """The request's content words that no word of the expansion's text shares a stem with: the
+    parts of the request the expansion does not cover."""
+    covered = {w for s in expanded for w in _WORD.findall(s.lower())}
+    return {w for w in _WORD.findall(request.lower())
+            if len(w) >= 3 and w not in _STOPWORDS and not any(_same_stem(w, c) for c in covered)}
+
+
+def _supported(command: str, open_words: set[str]) -> bool:
+    """A word of the command's name (not a generic one) shares a stem with an open request word."""
+    words = [w for w in command.lower().split("_") if len(w) >= 3 and w not in GENERIC_COMMAND_WORDS]
+    return any(_same_stem(w, r) for w in words for r in open_words)
+
+
 def filter_extra_steps(extra, expanded: list[str], names: frozenset[str], skill_name: str,
                        request: str = "", notes: list[str] | None = None) -> tuple[list[str], list[str]]:
     """``(kept, dropped)`` of the model's steps_before/steps_after entries.
@@ -909,12 +1096,18 @@ def filter_extra_steps(extra, expanded: list[str], names: frozenset[str], skill_
     (``list_logins login_id=<the person's uid>`` becomes ``list_logins``). Dropped: empty
     entries, entries holding a uid-shaped token ``request`` does not write, entries naming
     the skill itself (the expansion already runs it), entries naming no available command,
-    and entries whose every command the expansion already runs. With no command names
-    known only the first three rules apply. ``notes`` (when given) gets one line per
-    placeholder removed.
+    and entries whose every command the expansion already runs. With ``request`` given, an
+    entry is also dropped unless one of the commands it names outside the expansion is asked
+    for by a part of the request the expansion leaves open: a word of the command's name
+    (``GENERIC_COMMAND_WORDS`` aside) shares a stem with a request word that no word of the
+    expansion's text shares one with ("show_tags" for "... and its tags" when the expansion
+    says nothing of tags; not a navigation or lookup step the model adds around the
+    expansion). With no command names known only the first three rules apply. ``notes``
+    (when given) gets one line per placeholder removed.
     """
     expanded_cmds = {w for s in expanded for w in _IDENT.findall(s) if w in names}
     lowered = (request or "").lower()
+    open_words = _open_request_words(request, expanded) if request else None
     kept, dropped = [], []
     for entry in extra or []:
         text = str(entry).strip()
@@ -931,6 +1124,8 @@ def filter_extra_steps(extra, expanded: list[str], names: frozenset[str], skill_
             notes.append(f"extra step {text!r} -> {cleaned!r} (placeholder removed)")
         cmds = {w for w in _IDENT.findall(cleaned) if w in names}
         if skill_name in cleaned or (names and (not cmds or cmds <= expanded_cmds)):
+            dropped.append(text)
+        elif names and open_words is not None and not any(_supported(c, open_words) for c in cmds - expanded_cmds):
             dropped.append(text)
         else:
             kept.append(cleaned)
@@ -978,15 +1173,11 @@ def typed_signature(command: SkillCommand):
     return dspy.make_signature(fields, instructions)
 
 
-@dataclass
-class SkillCallPlan:
-    plan: str
-    args: dict
-    notes: list[str]
-    prediction: object
-
-
-def _check_options(p: Param) -> tuple[tuple[str, str], ...]:
+def _check_options(p: Param, subjects: list[str] = ()) -> tuple[tuple[str, str], ...]:
+    if p.type == "str":
+        named = [s for s in subjects if s.lower() != NO_SUBJECT][:MAX_SUBJECT_OPTIONS]
+        return tuple((s, f"the request names {s} as the {p.name}") for s in named) + (
+            (NO_SUBJECT, f"the request names no {p.name}; each name it writes is something else"),)
     if p.type == "bool":
         return (("true", f"yes: {p.desc or p.name}"),
                 ("false", "no: the request does not ask for this, or says not to"))
@@ -998,12 +1189,17 @@ def _check_one(lm, command: SkillCommand, p: Param, request: str) -> tuple[objec
     import dspy
     from dspy.experimental import Choice
 
-    question = (f"Does the request ask for this: {p.desc or p.name}?" if p.type == "bool"
-                else f"Which {p.name} does the request mean? {p.desc}".strip())
+    if p.type == "bool":
+        question = f"Does the request ask for this: {p.desc or p.name}?"
+    elif p.type == "str":
+        question = f"Which record named in the request is the {p.name}? {p.desc}".strip()
+    else:
+        question = f"Which {p.name} does the request mean? {p.desc}".strip()
+    options = _check_options(p, _request_subjects(command, request) if p.type == "str" else ())
     signature = dspy.make_signature({
         "request": (str, dspy.InputField(desc="the user's request")),
         "job": (str, dspy.InputField(desc="the job the request is planned as")),
-        "value": (Choice[_check_options(p)], dspy.OutputField(desc=question)),
+        "value": (Choice[options], dspy.OutputField(desc=question)),
     }, "Decide one argument of the job from what the request says.")
     with dspy.context(lm=lm):
         choice = dspy.Predict(signature)(request=request, job=command.description).value
@@ -1019,6 +1215,8 @@ def check_verdicts(lm, command: SkillCommand, request: str) -> dict[str, tuple[o
     from fastworkflow.utils.logging import logger
 
     params = [p for p in command.params if p.verify]
+    if any(p.type == "str" for p in params) and not _request_subjects(command, request):
+        params = [p for p in params if p.type != "str"]   # nothing to choose from
     if lm is None or not params:
         return {}
 

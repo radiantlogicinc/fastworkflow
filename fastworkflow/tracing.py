@@ -252,7 +252,10 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # v14: fw.planner.plan / fw.planner.replan v4 -- `plan_source` may be
 # "skill_call", and the spans gain `skill`, `skill_args` and `skill_fallback`
 # (skills as parameterized commands).
-SPAN_CONTRACT_VERSION = 14
+#
+# v15: fw.nlu.param_extraction v4 -- `unwrapped_quoted_values`,
+# `defaulted_sentinel_values` and `out_of_range_values` (fix-7t0q).
+SPAN_CONTRACT_VERSION = 15
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -579,14 +582,25 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
         # v3 (fix-7t0q): `unwrapped_bracketed_values` and `placeholder_values`
         # record a value sent as one bracketed token: unwrapped to the real value
         # it held, or refused as a placeholder. Absent on earlier versions.
-        version=3,
+        # v4 (fix-7t0q): `unwrapped_quoted_values` records a value whose
+        # surrounding quotes were removed; `defaulted_sentinel_values` a made-up
+        # extreme number (int32/int64 limit, beyond 2**53) replaced by the
+        # field's default; `out_of_range_values` a number refused as a parameter
+        # error (declared ge/le bounds, a negative position or count, an extreme
+        # for a field with no default). `placeholder_values` may now also hold a
+        # placeholder-shaped value with no brackets that the request never
+        # writes (`desired-tag`). Absent on earlier versions.
+        version=4,
         attributes=frozenset(
             {
                 "command_name",
                 "retry_round",
                 "retry_round_ordinal",
                 "unwrapped_bracketed_values",
+                "unwrapped_quoted_values",
                 "placeholder_values",
+                "defaulted_sentinel_values",
+                "out_of_range_values",
                 "extraction_method",
                 "missing_fields",
                 "invalid_fields",

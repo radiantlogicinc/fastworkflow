@@ -450,7 +450,8 @@ def test_verify_means_and_in_request_are_read_from_the_front_matter(tmp_path):
 
 
 @pytest.mark.parametrize("spec, message", [
-    ("  name:\n    type: str\n    verify: true\n", "only a bool or enum parameter takes verify"),
+    ("  name:\n    type: str\n    verify: true\n", "only a bool, enum or subject parameter takes verify"),
+    ("  flag:\n    type: bool\n    subject: true\n", "only a str parameter takes subject"),
     ("  flag:\n    type: bool\n    verify: yes\n", "verify must be true or false"),
     ("  flag:\n    type: bool\n    means:\n      true: asked\n", "means of 'flag' must be a block of its enum values"),
     ("  kind:\n    type: enum[a, b]\n    means:\n      c: x\n", "'c' is not a value of it"),
@@ -512,7 +513,7 @@ def test_extra_steps_lose_placeholders_and_invented_ids():
         ["list_logins login_uid=<Ann Lee's identity uid>", "show_tags <tag>", "open_group_by_uid(<uid>)",
          "list_logins login_uid=3f2a9c0d4b5e6f708192a3b4c5d6e7f8", "show_tags for 0a1b2c3d4e5f60718293a4b5c6d7e8f9",
          "<the next step>"],
-        expanded, names, "lookup", request="Show the tags of 0a1b2c3d4e5f60718293a4b5c6d7e8f9", notes=notes)
+        expanded, names, "lookup", request="Show the logins and tags of 0a1b2c3d4e5f60718293a4b5c6d7e8f9", notes=notes)
     # a placeholder goes, the command stays; a uid the request writes stays
     assert kept == ["list_logins", "show_tags", "show_tags for 0a1b2c3d4e5f60718293a4b5c6d7e8f9"]
     # what the expansion runs once its placeholder is gone, an invented uid, nothing left
@@ -558,3 +559,127 @@ def test_the_planner_path_checks_verified_params_with_jev(tmp_path, workflow_env
     assert span.attributes["plan_source"] == "skill_call"
     assert span.attributes["skill_args"]["include_risk"] is True
     assert "assess_risk" in span.attributes["plan"]
+
+
+# ---------------------------------------------------------------- record names (subject), identifiers, extra steps
+
+NAMED = """---
+params:
+  right:
+    type: str
+    subject: true
+    strip: right
+    desc: the right's name
+  person:
+    type: str
+    subject: true
+    default: ""
+    verify: true
+    desc: the person asking for it
+  note:
+    type: str
+    default: ""
+    desc: free text
+---
+A person asks for a right.
+find_right query={right}
+[if person] find_person query={person}
+"""
+
+
+def _named(tmp_path, identifiers=()):
+    from dataclasses import replace
+    return replace(_command(tmp_path, NAMED, "ask"), identifiers=identifiers)
+
+
+def test_subject_is_read_from_the_front_matter(tmp_path):
+    command = _named(tmp_path)
+    assert [p.subject for p in command.params] == [True, True, False]
+    assert command.param("person").verify
+
+
+def test_a_subject_argument_must_name_a_record_of_the_request(tmp_path):
+    command = _named(tmp_path)
+    request = "Before I approve anything on the right Payroll_Approver 2: how risky is it?"
+    # "I" is written in the request but names no record: the optional argument takes its default
+    args, notes = sc.check_arguments(command, {"right": "Payroll_Approver 2", "person": "I"}, request)
+    assert args["person"] == "" and "names no record" in notes[0]
+    # a required one fails the call (the planner falls back to the template)
+    with pytest.raises(SkillCallError, match="names no record"):
+        sc.check_arguments(command, {"right": "approve", "person": ""}, request)
+    # a name the request writes whole stands; so does a capitalised name the subject finder misses
+    assert sc.check_arguments(command, {"right": "Payroll_Approver 2", "person": "Ann Lee"},
+                              "Ann Lee asks for the right Payroll_Approver 2.")[0]["person"] == "Ann Lee"
+    assert sc.check_arguments(command, {"right": "Billing"}, "Billing: who may approve it?")[0]["right"] == "Billing"
+    # a plain str parameter is not checked
+    assert sc.check_arguments(command, {"right": "Billing", "note": "approve"},
+                              "Billing: may I approve it?")[0]["note"] == "approve"
+
+
+def test_a_subject_cut_short_becomes_the_whole_name_and_a_part_of_a_compound_is_refused(tmp_path):
+    command = _named(tmp_path)
+    request = "Audit the right Payroll_Administrator wherever it appears, for Ann Lee."
+    args, notes = sc.check_arguments(command, {"right": "Payroll_Admin", "person": "Ann Lee"}, request)
+    assert args["right"] == "Payroll_Administrator" and notes == ["right='Payroll_Admin' -> 'Payroll_Administrator'"]
+    # a first name only is "Ann Lee" cut short at a space: completed
+    args, notes = sc.check_arguments(command, {"right": "Payroll_Administrator", "person": "Ann"}, request)
+    assert args["person"] == "Ann Lee"
+    # a part cut at "_" may be a record of its own ("Payroll" of "Payroll_Approver"): refused
+    with pytest.raises(SkillCallError, match="names no record"):
+        sc.check_arguments(command, {"right": "Payroll"}, "Who holds Payroll_Approver?")
+    # the tail of a name opening a sentence stands for it ("Treat Ledger" -> "Ledger")
+    assert sc.check_arguments(command, {"right": "Ledger"},
+                              "Treat Ledger as a right: who holds it?")[0]["right"] == "Ledger"
+
+
+def test_an_argument_inside_an_identifier_the_request_writes_becomes_the_whole_identifier(tmp_path):
+    import re
+    command = _named(tmp_path, (re.compile(r"\bacct_[0-9]+"),))
+    request = "Who may hold acct_4421 or acct_9972?"
+    args, notes = sc.check_arguments(command, {"right": "4421"}, request)
+    assert args["right"] == "acct_4421" and notes == ["right='4421' -> 'acct_4421'"]
+    assert sc.check_arguments(command, {"right": "acct_9972"}, request)[0]["right"] == "acct_9972"
+    # a part of two identifiers is not one of them: refused
+    with pytest.raises(SkillCallError, match="more than one identifier"):
+        sc.check_arguments(command, {"right": "acct_"}, request)
+
+
+def test_a_sure_check_of_a_subject_chooses_among_the_request_subjects_or_none(tmp_path):
+    command = _named(tmp_path)
+    request = "Ann Lee and Bo Diaz: may Bo Diaz have the right Billing?"
+    raw = {"right": "Billing", "person": "Ann Lee"}
+    args, notes = sc.check_arguments(command, raw, request, {"person": ("Bo Diaz", 0.9)})
+    assert args["person"] == "Bo Diaz" and notes == ["person='Ann Lee' -> 'Bo Diaz' (check 0.90)"]
+    assert sc.check_arguments(command, raw, request, {"person": (sc.NO_SUBJECT, 0.9)})[0]["person"] == ""
+    assert sc.check_arguments(command, raw, request, {"person": ("Bo Diaz", 0.5)})[0]["person"] == "Ann Lee"
+    options = sc._check_options(command.param("person"), ["Ann Lee", "Bo Diaz"])
+    assert [v for v, _ in options] == ["Ann Lee", "Bo Diaz", sc.NO_SUBJECT]
+
+
+def test_check_verdicts_skips_a_subject_check_when_the_request_names_nothing(tmp_path, monkeypatch):
+    command = _named(tmp_path)
+    monkeypatch.setattr(sc, "_check_one", lambda lm, cmd, p, request: ("Ann Lee", 0.9))
+    assert sc.check_verdicts(object(), command, "may ann have it?") == {}
+    assert sc.check_verdicts(object(), command, "May Ann Lee have Billing?") == {"person": ("Ann Lee", 0.9)}
+
+
+def test_load_skill_commands_gives_each_command_the_workflow_identifiers(tmp_path):
+    folder = _write(tmp_path, {"ask": NAMED})
+    (tmp_path / "_skills" / "identifier_patterns.txt").write_text("# codes\n\\bacct_[0-9]+\n")
+    command = workflow_agent.load_skill_commands(folder)["ask"]
+    assert [p.pattern for p in command.identifiers] == [r"\bacct_[0-9]+"]
+
+
+def test_an_extra_step_is_kept_only_for_a_part_of_the_request_the_expansion_leaves_open():
+    names = frozenset({"open_directory", "find_group", "list_members", "show_tags", "show_nesting", "list_controls",
+                       "open_account_by_uid", "browse_catalog"})
+    expanded = ["open_directory", "find_group query=Payroll", "list_members (its members and the controls it trips)"]
+    request = "Who is in Payroll, what is it nested under, and which tags does it carry? It trips controls."
+    kept, dropped = sc.filter_extra_steps(
+        ["show_tags", "show_nesting", "list_controls", "open_account_by_uid", "browse_catalog"],
+        expanded, names, "lookup", request=request)
+    # tags and nesting are asked and the expansion says nothing of them; controls it covers already
+    assert kept == ["show_tags", "show_nesting"]
+    assert dropped == ["list_controls", "open_account_by_uid", "browse_catalog"]
+    assert sc._same_stem("holders", "hold") and sc._same_stem("sensitivity", "sensitive")
+    assert not sc._same_stem("control", "contractor")
