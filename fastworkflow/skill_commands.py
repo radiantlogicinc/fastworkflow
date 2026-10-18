@@ -54,6 +54,18 @@ Format::
   word the model appends to a name, "HR feed" -> "HR"). A parameter without a default
   is required. A ``bool`` always defaults to false (a ``default: true`` fails the load):
   the model sets it true only when the request asks for that part.
+- Optional checks of an argument against the request (each key may be left out):
+
+  - ``verify: true`` (a ``bool`` or ``enum``): a classifier model decides the argument
+    again from the request alone, when the planner path has one (``plan_skill_call``'s
+    ``check_lm``); its answer replaces the planner's when it is at least
+    ``VERIFY_THRESHOLD`` sure. It reads the parameter's ``desc``, and an enum's ``means``:
+    a block giving each value's meaning (``group: a group, people are its members``).
+  - ``in_request: true`` (an ``int``): when the request writes numbers (digits or the words
+    zero to twenty) outside the text of the other arguments, the argument must be one of
+    them; otherwise it takes the only one written, or its default when that is written,
+    and with several others the call fails ("the first two" never runs as 3).
+
 - A map turns the argument of one ``enum``, ``bool`` or ``int`` parameter (``by``) into
   text: ``values`` maps each argument to its text, ``default`` covers the rest; an
   argument with neither renders as itself. Map texts may hold placeholders.
@@ -69,17 +81,27 @@ Format::
 - ``@<skill>`` lines are included as plain text (no placeholders or markers are read in
   them); a skill with front matter cannot be included.
 
+The model's ``steps_before`` / ``steps_after`` lose any ``<...>`` placeholder (and the
+``key=`` that holds one); a step holding a uid-shaped token the request does not write is
+dropped (``filter_extra_steps``).
+
 Any malformed skill fails the load with a ``SkillFormatError`` naming the file.
 """
 from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import Literal, Union
 
 #: The most iterations one ``[repeat]`` block may expand to.
 REPEAT_LIMIT = 20
+#: A ``verify`` check replaces the planner's argument only at or above this probability.
+VERIFY_THRESHOLD = 0.65
+NUMBER_WORDS = {w: i for i, w in enumerate(
+    "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
+    "sixteen seventeen eighteen nineteen twenty".split())}
 #: Names a parameter or map may not take (they are signature fields or the repeat index).
 RESERVED_NAMES = frozenset({"user_query", "available_commands", "steps_before", "steps_after",
                             "reasoning", "n"})
@@ -88,6 +110,12 @@ _NAME = r"[A-Za-z_][A-Za-z0-9_]*"
 _PLACEHOLDER = re.compile(r"\{\{|\}\}|\{(" + _NAME + r")\}|[{}]")
 _COMMAND_LINE = re.compile(r"^- ([A-Za-z_][A-Za-z0-9_]*)\s*$", re.M)
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_NUMBER = re.compile(r"\b(\d+|" + "|".join(NUMBER_WORDS) + r")\b", re.I)
+#: A 16+ hex-digit run with a digit in it, or a dashed uuid: an id only the run can know.
+_UID = re.compile(r"\b(?=[0-9a-f-]*\d)(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,})\b",
+                  re.I)
+_ARG_PLACEHOLDER = re.compile(r"\s*\b[A-Za-z_][\w.]*\s*[=:]\s*<[^<>]*>")
+_BARE_PLACEHOLDER = re.compile(r"\s*<[^<>]*>")
 
 
 class SkillFormatError(ValueError):
@@ -110,6 +138,9 @@ class Param:
     desc: str = ""
     requires: "Cond | None" = None
     strip: tuple[str, ...] = ()
+    verify: bool = False
+    means: tuple[tuple[str, str], ...] = ()
+    in_request: bool = False
 
     def type_text(self) -> str:
         return "|".join(self.values) if self.type == "enum" else self.type
@@ -247,7 +278,8 @@ def _parse_param(name: str, spec, where: str, conds: list) -> Param:
         raise SkillFormatError(f"{where}: bad parameter name {name!r}")
     if not isinstance(spec, dict):
         raise SkillFormatError(f"{where}: parameter {name!r} must be a block with a type")
-    _check_keys(spec, {"type", "default", "desc", "requires", "strip"}, f"parameter {name!r}", where)
+    _check_keys(spec, {"type", "default", "desc", "requires", "strip", "verify", "means", "in_request"},
+                f"parameter {name!r}", where)
     type_text = spec.get("type")
     if not isinstance(type_text, str):
         raise SkillFormatError(f"{where}: parameter {name!r} needs a type")
@@ -295,11 +327,33 @@ def _parse_param(name: str, spec, where: str, conds: list) -> Param:
     requires = spec.get("requires")
     if requires is not None and not isinstance(requires, str):
         raise SkillFormatError(f"{where}: parameter {name!r} requires must be a condition")
+    verify = _flag(spec, "verify", name, where)
+    if verify and kind not in ("bool", "enum"):
+        raise SkillFormatError(f"{where}: only a bool or enum parameter takes verify ({name!r})")
+    means: tuple[tuple[str, str], ...] = ()
+    if "means" in spec:
+        block = spec["means"]
+        if kind != "enum" or not isinstance(block, dict) or not block:
+            raise SkillFormatError(f"{where}: means of {name!r} must be a block of its enum values")
+        for key, text in block.items():
+            if key not in values or not isinstance(text, str):
+                raise SkillFormatError(f"{where}: means of {name!r}: {key!r} is not a value of it, or not text")
+        means = tuple((v, block[v]) for v in values if v in block)
+    in_request = _flag(spec, "in_request", name, where)
+    if in_request and kind != "int":
+        raise SkillFormatError(f"{where}: only an int parameter takes in_request ({name!r})")
     param = Param(name=name, type=kind, values=values, default=default, required=required,
-                  desc=desc, strip=strip)
+                  desc=desc, strip=strip, verify=verify, means=means, in_request=in_request)
     if requires:
         conds.append((name, requires))
     return param
+
+
+def _flag(spec: dict, key: str, name: str, where: str) -> bool:
+    value = spec.get(key, "false")
+    if value not in ("true", "false"):
+        raise SkillFormatError(f"{where}: parameter {name!r} {key} must be true or false")
+    return value == "true"
 
 
 def _map_key(param: Param, key: str, where: str):
@@ -711,7 +765,33 @@ def _empty(value) -> bool:
     return value is None or str(value).strip().strip("\"'`").lower() in ("", "none", "null")
 
 
-def check_arguments(command: SkillCommand, raw: dict, request: str) -> tuple[dict, list[str]]:
+def _confident(verdicts: dict | None, name: str):
+    """The ``(value, probability)`` check of ``name`` when it is sure enough, else None."""
+    verdict = (verdicts or {}).get(name)
+    return verdict if verdict is not None and verdict[1] >= VERIFY_THRESHOLD else None
+
+
+def _request_numbers(request: str, args: dict, command: SkillCommand) -> set[int]:
+    """The numbers ``request`` writes (digits or number words) outside the str arguments' text."""
+    lowered = request.lower()
+    taken: list[tuple[int, int]] = []
+    for p in command.params:
+        text = str(args.get(p.name) or "").lower() if p.type == "str" else ""
+        at = lowered.find(text) if text else -1
+        while at >= 0:
+            taken.append((at, at + len(text)))
+            at = lowered.find(text, at + 1)
+    found = set()
+    for m in _NUMBER.finditer(request):
+        if any(a <= m.start() < b for a, b in taken):
+            continue
+        word = m.group(1).lower()
+        found.add(int(word) if word.isdigit() else NUMBER_WORDS[word])
+    return found
+
+
+def check_arguments(command: SkillCommand, raw: dict, request: str,
+                    verdicts: dict | None = None) -> tuple[dict, list[str]]:
     """The guarded, complete arguments of a skill call; ``(args, notes)``.
 
     - a missing or empty argument takes its default; a required one fails the call;
@@ -720,6 +800,11 @@ def check_arguments(command: SkillCommand, raw: dict, request: str) -> tuple[dic
       verbatim (case-insensitive) substring of ``request``; it takes the request's own
       spelling. One that is not: an optional argument takes its default, a required one
       fails the call (the planner falls back to the template path);
+    - an ``in_request`` int must be a number the request writes, when it writes any
+      (see the module doc);
+    - ``verdicts`` (``{param: (value, probability)}``, from ``check_verdicts``): a sure
+      verdict on a ``verify`` parameter replaces its argument, and stands in for a missing
+      or invalid enum;
     - an optional str argument equal to another str argument takes its default;
     - an argument whose ``requires`` condition is false takes its default.
 
@@ -730,6 +815,11 @@ def check_arguments(command: SkillCommand, raw: dict, request: str) -> tuple[dic
     lowered = request.lower()
     for p in command.params:
         value = raw.get(p.name)
+        sure = _confident(verdicts, p.name) if p.verify else None
+        if sure is not None and p.type == "enum" and (_empty(value) or _clean_str(value).lower() not in p.values):
+            notes.append(f"{p.name}={value!r} -> {sure[0]!r} (check {sure[1]:.2f})")
+            args[p.name] = sure[0]
+            continue
         if _empty(value):
             if p.required:
                 raise SkillCallError(f"missing required argument {p.name}")
@@ -764,6 +854,26 @@ def check_arguments(command: SkillCommand, raw: dict, request: str) -> tuple[dic
             if exact != str(value):
                 notes.append(f"{p.name}={value!r} -> {exact!r}")
             args[p.name] = exact
+    for p in command.params:
+        if not p.in_request:
+            continue
+        written = _request_numbers(request, args, command)
+        if not written or args[p.name] in written:
+            continue
+        if len(written) == 1:
+            (only,) = written
+        elif p.default in written:
+            only = p.default
+        else:
+            raise SkillCallError(f"{p.name}={args[p.name]} is not a number the request writes "
+                                 f"({', '.join(map(str, sorted(written)))})")
+        notes.append(f"{p.name}={args[p.name]} -> {only} (the number the request writes)")
+        args[p.name] = only
+    for p in command.params:
+        sure = _confident(verdicts, p.name) if p.verify else None
+        if sure is not None and args[p.name] != sure[0]:
+            notes.append(f"{p.name}={args[p.name]!r} -> {sure[0]!r} (check {sure[1]:.2f})")
+            args[p.name] = sure[0]
     strs = [p for p in command.params if p.type == "str"]
     for p in strs:
         if p.required or args[p.name] == p.default:
@@ -783,25 +893,47 @@ def command_names(available_commands: str) -> frozenset[str]:
     return frozenset(_COMMAND_LINE.findall(available_commands or ""))
 
 
-def filter_extra_steps(extra, expanded: list[str], names: frozenset[str], skill_name: str
-                       ) -> tuple[list[str], list[str]]:
+def _without_placeholders(text: str) -> str:
+    """``text`` without ``<...>`` placeholders and the ``key=`` holding one."""
+    cleaned = _BARE_PLACEHOLDER.sub("", _ARG_PLACEHOLDER.sub("", text))
+    cleaned = re.sub(r"\(\s*\)", "", cleaned)
+    return re.sub(r"\s{2,}", " ", cleaned).strip(" ,;:")
+
+
+def filter_extra_steps(extra, expanded: list[str], names: frozenset[str], skill_name: str,
+                       request: str = "", notes: list[str] | None = None) -> tuple[list[str], list[str]]:
     """``(kept, dropped)`` of the model's steps_before/steps_after entries.
 
-    Dropped: empty entries, entries naming the skill itself (the expansion already runs it),
-    entries naming no available command, and entries whose every command the expansion
-    already runs. With no command names known only the first two rules apply.
+    An entry first loses its ``<...>`` placeholders (with the ``key=`` holding one): the
+    model cannot know a value the run finds, and the agent passes a placeholder on as one
+    (``list_logins login_id=<the person's uid>`` becomes ``list_logins``). Dropped: empty
+    entries, entries holding a uid-shaped token ``request`` does not write, entries naming
+    the skill itself (the expansion already runs it), entries naming no available command,
+    and entries whose every command the expansion already runs. With no command names
+    known only the first three rules apply. ``notes`` (when given) gets one line per
+    placeholder removed.
     """
     expanded_cmds = {w for s in expanded for w in _IDENT.findall(s) if w in names}
+    lowered = (request or "").lower()
     kept, dropped = [], []
     for entry in extra or []:
         text = str(entry).strip()
         if not text:
             continue
-        cmds = {w for w in _IDENT.findall(text) if w in names}
-        if skill_name in text or (names and (not cmds or cmds <= expanded_cmds)):
+        if any(uid.lower() not in lowered for uid in _UID.findall(text)):
+            dropped.append(text)
+            continue
+        cleaned = _without_placeholders(text)
+        if not cleaned:
+            dropped.append(text)
+            continue
+        if cleaned != text and notes is not None:
+            notes.append(f"extra step {text!r} -> {cleaned!r} (placeholder removed)")
+        cmds = {w for w in _IDENT.findall(cleaned) if w in names}
+        if skill_name in cleaned or (names and (not cmds or cmds <= expanded_cmds)):
             dropped.append(text)
         else:
-            kept.append(text)
+            kept.append(cleaned)
     return kept, dropped
 
 
@@ -828,9 +960,11 @@ def typed_signature(command: SkillCommand):
             kind = Literal[p.values]
         fields[p.name] = (kind, dspy.OutputField(desc=_field_desc(p)))
     fields["steps_before"] = (list[str], dspy.OutputField(
-        desc="plain command steps to run before the skill, only for parts of the request it does not cover; usually []"))
+        desc="plain command steps to run before the skill, only for parts of the request it does not cover; "
+             "only values the request writes, never a <placeholder> or an id; usually []"))
     fields["steps_after"] = (list[str], dspy.OutputField(
-        desc="plain command steps to run after the skill, only for parts of the request it does not cover; usually []"))
+        desc="plain command steps to run after the skill, only for parts of the request it does not cover; "
+             "only values the request writes, never a <placeholder> or an id; usually []"))
     instructions = (
         "Plan the user_query by calling one skill command and, only if needed, plain command steps.\n"
         "Fill the skill's parameters from the request: names and values exactly as the request writes them "
@@ -852,22 +986,84 @@ class SkillCallPlan:
     prediction: object
 
 
-def plan_skill_call(command: SkillCommand, request: str, available_commands: str) -> SkillCallPlan:
+def _check_options(p: Param) -> tuple[tuple[str, str], ...]:
+    if p.type == "bool":
+        return (("true", f"yes: {p.desc or p.name}"),
+                ("false", "no: the request does not ask for this, or says not to"))
+    means = dict(p.means)
+    return tuple((v, means.get(v, v)) for v in p.values)
+
+
+def _check_one(lm, command: SkillCommand, p: Param, request: str) -> tuple[object, float]:
+    import dspy
+    from dspy.experimental import Choice
+
+    question = (f"Does the request ask for this: {p.desc or p.name}?" if p.type == "bool"
+                else f"Which {p.name} does the request mean? {p.desc}".strip())
+    signature = dspy.make_signature({
+        "request": (str, dspy.InputField(desc="the user's request")),
+        "job": (str, dspy.InputField(desc="the job the request is planned as")),
+        "value": (Choice[_check_options(p)], dspy.OutputField(desc=question)),
+    }, "Decide one argument of the job from what the request says.")
+    with dspy.context(lm=lm):
+        choice = dspy.Predict(signature)(request=request, job=command.description).value
+    value = str(choice.value)
+    probability = float((choice.probabilities or {}).get(value, choice.confidence))
+    return (value == "true" if p.type == "bool" else value), probability
+
+
+def check_verdicts(lm, command: SkillCommand, request: str) -> dict[str, tuple[object, float]]:
+    """``{param: (value, probability)}``: ``lm`` (a classifier) decides each ``verify``
+    parameter from the request alone, the parameters in parallel. A failed check is left out
+    (the planner's argument then stands); never raises."""
+    from fastworkflow.utils.logging import logger
+
+    params = [p for p in command.params if p.verify]
+    if lm is None or not params:
+        return {}
+
+    def one(p):
+        try:
+            return p.name, _check_one(lm, command, p, request)
+        except Exception:  # noqa: BLE001 - a check is an extra; the planner's argument stands
+            logger.warning(f"could not check skill argument {command.name}.{p.name}", exc_info=True)
+            return None
+    with ThreadPoolExecutor(len(params)) as pool:
+        return dict(r for r in pool.map(one, params) if r is not None)
+
+
+@dataclass
+class SkillCallPlan:
+    plan: str
+    args: dict
+    notes: list[str]
+    prediction: object
+
+
+def plan_skill_call(command: SkillCommand, request: str, available_commands: str,
+                    check_lm=None) -> SkillCallPlan:
     """Plan ``request`` as a call of ``command``: the typed call, the guards, the expansion.
 
     Runs under the caller's dspy context (the planner LM and adapter); ``available_commands``
-    reaches the adapter as extra input, as for the text planner. Raises on any failure
-    (the caller falls back to the template path).
+    reaches the adapter as extra input, as for the text planner. With ``check_lm`` (a
+    classifier LM) the skill's ``verify`` parameters are decided again from the request,
+    alongside the typed call (``check_verdicts``). Raises on any failure (the caller falls
+    back to the template path).
     """
     import dspy
 
-    prediction = dspy.ChainOfThought(typed_signature(command))(
-        user_query=request, available_commands=available_commands)
+    with ThreadPoolExecutor(1) as pool:
+        checks = pool.submit(check_verdicts, check_lm, command, request)
+        prediction = dspy.ChainOfThought(typed_signature(command))(
+            user_query=request, available_commands=available_commands)
+        verdicts = checks.result()
     raw = {p.name: getattr(prediction, p.name, None) for p in command.params}
-    args, notes = check_arguments(command, raw, request)
+    args, notes = check_arguments(command, raw, request, verdicts)
     steps = expand(command, args)
     names = command_names(available_commands)
-    before, dropped_before = filter_extra_steps(getattr(prediction, "steps_before", None), steps, names, command.name)
-    after, dropped_after = filter_extra_steps(getattr(prediction, "steps_after", None), steps, names, command.name)
+    before, dropped_before = filter_extra_steps(getattr(prediction, "steps_before", None), steps, names,
+                                                command.name, request, notes)
+    after, dropped_after = filter_extra_steps(getattr(prediction, "steps_after", None), steps, names,
+                                              command.name, request, notes)
     notes += [f"dropped extra step {s!r}" for s in dropped_before + dropped_after]
     return SkillCallPlan(plan=number(before + steps + after), args=args, notes=notes, prediction=prediction)

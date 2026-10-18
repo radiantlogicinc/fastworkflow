@@ -4,6 +4,30 @@
 
 ### Added
 
+- **Skill-call argument checks** (`fastworkflow/skill_commands.py`), all optional
+  per parameter in a skill's front matter, so existing skills read and plan
+  exactly as before:
+  - `verify: true` on a `bool` or `enum` parameter: when Jev is configured, the
+    planner path (`plan_skill_call(..., check_lm=...)`, passed by
+    `build_query_with_next_steps`) has Jev decide that argument again from the
+    request alone (one `Choice` call per verified parameter, in parallel with the
+    planner's typed call); a verdict at or above `VERIFY_THRESHOLD` (0.65)
+    replaces the planner's argument and stands in for a missing or invalid enum.
+    An enum's `means` block gives Jev each value's meaning (`group: a group,
+    which people are members of`). A failed check leaves the planner's argument.
+    This targets a wrong record kind for a name ("Payroll" planned as a feed) and
+    flags set or left unset against what the request asks.
+  - `in_request: true` on an `int` parameter: when the request writes numbers
+    (digits or the words zero to twenty) outside the other arguments' text, the
+    argument must be one of them, else it takes the only one written (or its
+    default when written) and with several others the call falls back; "the
+    first two" no longer runs as the default 3.
+  - The model's `steps_before` / `steps_after` lose `<...>` placeholders (with
+    the `key=` holding one): `list_logins login_uid=<Ann Lee's uid>` becomes
+    `list_logins`, which the agent runs on the record in context instead of
+    passing the placeholder on as a value. A step holding a uid-shaped token the
+    request does not write is dropped; their descriptions now say so.
+
 - **Skills as parameterized commands** (`fastworkflow/skill_commands.py`): a
   `_skills/<name>/SKILL.md` may start with front matter between `---` lines
   declaring typed `params` (`str`, `bool`, `int`, `enum[...]`, with `default`,

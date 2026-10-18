@@ -1316,8 +1316,9 @@ def build_query_with_next_steps(user_query: str,
         skill_command: The matched skill's parsed form when it has params. On the
             turn's initial plan the planner then fills the skill's typed parameters
             and code expands its steps (``skill_commands.plan_skill_call``; span
-            ``plan_source`` "skill_call"); any failure falls back to the text planner
-            with ``plan_template``. Ignored on a replan.
+            ``plan_source`` "skill_call"); Jev, when configured, checks the skill's
+            ``verify`` parameters against the request. Any failure falls back to the
+            text planner with ``plan_template``. Ignored on a replan.
     """
     current_workflow = chat_session_obj.get_active_workflow()
     base_docstring = """
@@ -1416,7 +1417,7 @@ def build_query_with_next_steps(user_query: str,
         with dspy.context(lm=planner_lm, adapter=agent_adapter):
             if skill_command is not None and initial_plan:
                 try:
-                    call = plan_skill_call(skill_command, request_text, available_commands)
+                    call = plan_skill_call(skill_command, request_text, available_commands, check_lm=_jev_lm())
                     prediction, plan_text, skill_args = call.prediction, call.plan, call.args
                     plan_source = "skill_call"
                     logger.info(f"skill call {skill_command.name}{call.args}"

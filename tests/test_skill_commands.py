@@ -418,3 +418,143 @@ def test_the_execution_context_passes_the_matched_command_except_to_a_continuati
                                   template_text="Who is in Payroll?")
     assert seen == [("Who is in Payroll?", "TEMPLATE", sentinel),
                     ("Who is in Payroll?\n\nAlready done in this sub-task: ...", "TEMPLATE", None)]
+
+
+# ---------------------------------------------------------------- checks against the request (verify, in_request)
+
+CHECKED = LOOKUP.replace("""    desc: group, or feed (a source of logins)
+""", """    desc: group, or feed (a source of logins)
+    verify: true
+    means:
+      group: a group of people
+      feed: a feed that logins arrive on
+""").replace("""    desc: the request asks how risky it is
+""", """    desc: the request asks how risky it is
+    verify: true
+""").replace("""    desc: how many members to open
+""", """    desc: how many members to open
+    in_request: true
+""")
+
+
+def test_verify_means_and_in_request_are_read_from_the_front_matter(tmp_path):
+    command = _command(tmp_path, CHECKED)
+    kind, risk, count = command.param("kind"), command.param("include_risk"), command.param("count")
+    assert (kind.verify, kind.means) == (True, (("group", "a group of people"), ("feed", "a feed that logins arrive on")))
+    assert (risk.verify, risk.means, risk.in_request) == (True, (), False)
+    assert (count.verify, count.in_request) == (False, True)
+    # without the keys, nothing changes
+    assert not any(p.verify or p.means or p.in_request for p in _command(tmp_path / "plain").params)
+    assert sc._check_options(kind) == (("group", "a group of people"), ("feed", "a feed that logins arrive on"))
+    assert [v for v, _ in sc._check_options(risk)] == ["true", "false"]
+
+
+@pytest.mark.parametrize("spec, message", [
+    ("  name:\n    type: str\n    verify: true\n", "only a bool or enum parameter takes verify"),
+    ("  flag:\n    type: bool\n    verify: yes\n", "verify must be true or false"),
+    ("  flag:\n    type: bool\n    means:\n      true: asked\n", "means of 'flag' must be a block of its enum values"),
+    ("  kind:\n    type: enum[a, b]\n    means:\n      c: x\n", "'c' is not a value of it"),
+    ("  kind:\n    type: enum[a, b]\n    in_request: true\n", "only an int parameter takes in_request"),
+])
+def test_a_malformed_check_fails_the_load(tmp_path, spec, message):
+    folder = _write(tmp_path, {"bad": f"---\nparams:\n{spec}---\nOne.\nstep\n"})
+    with pytest.raises(SkillFormatError, match=message):
+        workflow_agent.load_skills(folder)
+
+
+def test_a_sure_check_replaces_the_argument_and_an_unsure_one_does_not(tmp_path):
+    command = _command(tmp_path, CHECKED)
+    request = "Who is in Payroll?"
+    raw = {"name": "Payroll", "kind": "feed", "include_risk": True}
+    args, notes = sc.check_arguments(command, raw, request,
+                                     {"kind": ("group", 0.9), "include_risk": (False, 0.95)})
+    assert (args["kind"], args["include_risk"]) == ("group", False)
+    assert notes == ["kind='feed' -> 'group' (check 0.90)", "include_risk=True -> False (check 0.95)"]
+    args, notes = sc.check_arguments(command, raw, request, {"kind": ("group", sc.VERIFY_THRESHOLD - 0.01)})
+    assert (args["kind"], notes) == ("feed", [])
+    # a sure check stands in for a missing or invalid enum; a param without verify is never checked
+    assert sc.check_arguments(command, {"name": "Payroll", "kind": "team"}, request,
+                              {"kind": ("group", 0.8)})[0]["kind"] == "group"
+    assert sc.check_arguments(_command(tmp_path / "plain"), raw, request,
+                              {"kind": ("group", 1.0)})[0]["kind"] == "feed"
+
+
+def test_a_dependent_argument_follows_the_checked_value(tmp_path):
+    command = _command(tmp_path, CHECKED)
+    raw = {"name": "Payroll", "kind": "group", "include_risk": True, "owner": "the customer"}
+    args, notes = sc.check_arguments(command, raw, "Who is in Payroll, next to the customer?",
+                                     {"include_risk": (False, 0.9)})
+    assert (args["include_risk"], args["owner"]) == (False, "")
+    assert "needs include_risk" in notes[-1]
+
+
+def test_an_in_request_count_must_be_a_number_the_request_writes(tmp_path):
+    command = _command(tmp_path, CHECKED)
+    raw = {"name": "Payroll 2", "kind": "group", "count": 3}
+    # "the first two": 3 is not written; the number inside the name does not count
+    args, notes = sc.check_arguments(command, raw, "Open the first two members of Payroll 2.")
+    assert args["count"] == 2 and notes == ["count=3 -> 2 (the number the request writes)"]
+    assert sc.check_arguments(command, raw, "Open 3 members of Payroll 2.")[0]["count"] == 3
+    # no number written: the argument (or its default) stands
+    assert sc.check_arguments(command, {"name": "Payroll 2", "kind": "group"}, "Open members of Payroll 2.")[0][
+        "count"] == 2
+    # several numbers, none of them the argument: the default when it is written, else the call fails
+    assert sc.check_arguments(command, raw, "Open two of the five members of Payroll 2.")[0]["count"] == 2
+    with pytest.raises(SkillCallError, match="not a number the request writes"):
+        sc.check_arguments(command, raw, "Open four of the five members of Payroll 2.")
+
+
+def test_extra_steps_lose_placeholders_and_invented_ids():
+    names = frozenset({"open_directory", "find_group", "list_members", "list_logins", "show_tags", "open_group_by_uid"})
+    expanded = ["open_directory", "find_group query=Payroll", "list_members", "open_group_by_uid with its uid"]
+    notes: list[str] = []
+    kept, dropped = sc.filter_extra_steps(
+        ["list_logins login_uid=<Ann Lee's identity uid>", "show_tags <tag>", "open_group_by_uid(<uid>)",
+         "list_logins login_uid=3f2a9c0d4b5e6f708192a3b4c5d6e7f8", "show_tags for 0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+         "<the next step>"],
+        expanded, names, "lookup", request="Show the tags of 0a1b2c3d4e5f60718293a4b5c6d7e8f9", notes=notes)
+    # a placeholder goes, the command stays; a uid the request writes stays
+    assert kept == ["list_logins", "show_tags", "show_tags for 0a1b2c3d4e5f60718293a4b5c6d7e8f9"]
+    # what the expansion runs once its placeholder is gone, an invented uid, nothing left
+    assert dropped == ["open_group_by_uid(<uid>)", "list_logins login_uid=3f2a9c0d4b5e6f708192a3b4c5d6e7f8",
+                       "<the next step>"]
+    assert notes[0] == "extra step \"list_logins login_uid=<Ann Lee's identity uid>\" -> 'list_logins' (placeholder removed)"
+
+
+def test_check_verdicts_runs_each_verified_param_and_skips_a_failed_one(tmp_path, monkeypatch):
+    command = _command(tmp_path, CHECKED)
+    seen = []
+
+    def fake(lm, cmd, p, request):
+        seen.append(p.name)
+        if p.name == "kind":
+            raise RuntimeError("classifier down")
+        return True, 0.9
+
+    monkeypatch.setattr(sc, "_check_one", fake)
+    assert sc.check_verdicts(object(), command, "Who is in Payroll?") == {"include_risk": (True, 0.9)}
+    assert sorted(seen) == ["include_risk", "kind"]
+    assert sc.check_verdicts(None, command, "Who is in Payroll?") == {}
+
+
+def test_the_planner_path_checks_verified_params_with_jev(tmp_path, workflow_env, monkeypatch):
+    workflow_env()
+    sink = RecordingTraceSink()
+    ctx, wf = _session(sink)
+    ctx._begin_turn(REQUEST)
+    jev = object()
+    calls = []
+
+    def fake_verdicts(lm, command, request):
+        calls.append((lm, command.name, request))
+        return {"include_risk": (True, 0.92)}
+
+    monkeypatch.setattr(workflow_agent, "_jev_lm", lambda: jev)
+    monkeypatch.setattr(sc, "check_verdicts", fake_verdicts)
+    lm = DummyLM([_typed_answer(include_risk=False)])
+    _plan_request(ctx, wf, lm, plan_template="TEMPLATE", skill_command=_command(tmp_path, CHECKED))
+    assert calls == [(jev, "lookup", REQUEST)]
+    span = _plan_span(sink)
+    assert span.attributes["plan_source"] == "skill_call"
+    assert span.attributes["skill_args"]["include_risk"] is True
+    assert "assess_risk" in span.attributes["plan"]
