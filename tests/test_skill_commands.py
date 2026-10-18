@@ -35,8 +35,13 @@ class Signature:
         person: str = Field(default="", description="one named person to check for; empty lists everyone")
         include_risk: bool = Field(default=False, description="the request asks how risky it is")
         count: int = Field(default=2, description="how many members to open")
-        owner: str = Field(default="", description="the owner to compare the risk with",
-                           json_schema_extra={"requires": "include_risk"})
+        owner: str = Field(default="", description="the owner to compare the risk with")
+
+    @staticmethod
+    def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
+        if not cmd_parameters.include_risk:   # an owner only for the risk comparison
+            cmd_parameters.owner = ""
+        return True, ""
 
 
 def steps(input):
@@ -86,7 +91,7 @@ def test_a_skill_file_gives_typed_params_and_the_description(tmp_path):
         ("include_risk", "bool", False, False), ("count", "int", False, 2), ("owner", "str", False, "")]
     assert command.param("kind").values == ("group", "feed")
     assert command.param("name").strip == ("group", "feed")
-    assert command.param("owner").requires.source == "include_risk"
+    assert callable(command.validate)
     # what the matcher sees is the description, as for a plain skill
     assert workflow_agent._job_types_for(folder) == f"- lookup: {command.description}"
 
@@ -204,14 +209,16 @@ def test_an_optional_argument_repeating_another_one_takes_its_default(tmp_path):
     assert args["person"] == ""
 
 
-def test_a_dependent_argument_is_reset_when_its_condition_is_false(tmp_path):
+def test_a_dependent_argument_is_reset_by_the_validation_hook(tmp_path):
     command = _command(tmp_path)
     request = "Who is in Payroll, compared with the customer?"
     args, notes = sc.check_arguments(command, {"name": "Payroll", "kind": "group", "owner": "the customer"}, request)
-    assert args["owner"] == "" and "needs include_risk" in notes[-1]
+    assert args["owner"] == "the customer"   # the argument check leaves it
+    args = sc.validate_call(command, args, request, None, notes)
+    assert args["owner"] == "" and notes[-1] == "owner='the customer' -> '' (validate_extracted_parameters)"
     args, _ = sc.check_arguments(command, {"name": "Payroll", "kind": "group", "owner": "the customer",
                                            "include_risk": True}, request)
-    assert args["owner"] == "the customer"
+    assert sc.validate_call(command, args, request)["owner"] == "the customer"
 
 
 def test_booleans_default_false_and_bad_values_fail_the_call(tmp_path):
@@ -476,10 +483,11 @@ def test_a_sure_check_replaces_the_argument_and_an_unsure_one_does_not(tmp_path)
 def test_a_dependent_argument_follows_the_checked_value(tmp_path):
     command = _command(tmp_path, CHECKED)
     raw = {"name": "Payroll", "kind": "group", "include_risk": True, "owner": "the customer"}
-    args, notes = sc.check_arguments(command, raw, "Who is in Payroll, next to the customer?",
-                                     {"include_risk": (False, 0.9)})
+    request = "Who is in Payroll, next to the customer?"
+    args, notes = sc.check_arguments(command, raw, request, {"include_risk": (False, 0.9)})
+    args = sc.validate_call(command, args, request, None, notes)
     assert (args["include_risk"], args["owner"]) == (False, "")
-    assert "needs include_risk" in notes[-1]
+    assert notes[-1] == "owner='the customer' -> '' (validate_extracted_parameters)"
 
 
 def test_an_in_request_count_must_be_a_number_the_request_writes(tmp_path):

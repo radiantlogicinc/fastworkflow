@@ -148,7 +148,13 @@ class Signature:
         name: str
         action: Literal["add", "remove"]
         list_all: bool = False
-        detail: bool = Field(default=False, json_schema_extra={"requires": "list_all"})
+        detail: bool = False
+
+        @staticmethod
+        def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
+            if not cmd_parameters.list_all:
+                cmd_parameters.detail = False
+            return True, ""
 
 
 def steps(input):
@@ -167,13 +173,23 @@ def steps(input):
 
 def test_the_rendered_template_says_when_each_step_is_written(tmp_path):
     (_n, _d, steps), = workflow_agent.load_skills(_write(tmp_path, {"label": LABEL}))
-    # different steps per enum value stay apart; a condition may be an "or"; a combination a
-    # requires would reset (detail without list_all) is not rendered
+    # different steps per enum value stay apart; a condition may be an "or"; a combination the
+    # validation hook resets (detail without list_all) is not rendered
     assert steps == ("open <name>",
                      "add_label (change nothing else; the label must exist already) (only when action is add)",
                      "remove_label (change nothing else) (only when action is remove)",
                      "show_labels (only when not list_all or detail)",
                      "list_labels (only when list_all)")
+
+
+def test_the_template_follows_what_the_validation_hook_changes_not_what_it_refuses(tmp_path):
+    # the documented example refuses a unit with a person: the template still shows those steps
+    assert _example(tmp_path / "refusing").template[0] == "<find_group or find_unit, by kind> query=<name>"
+    always = FIELD.format(field="name: str").replace(
+        '    class Input', '    @staticmethod\n    def validate_extracted_parameters(workflow, command, p):\n'
+        '        p.name = "x"\n        return True, ""\n\n    class Input')
+    with pytest.raises(SkillFormatError, match="changes every placeholder combination"):
+        workflow_agent.load_skills(_write(tmp_path / "always", {"bad": always}))
 
 
 def test_a_skill_file_without_input_may_take_the_empty_input(tmp_path):
@@ -243,7 +259,8 @@ def steps(input):
     ("name: str = Field(json_schema_extra={'verify': True})", "only a bool, enum or subject parameter takes verify"),
     ("name: str = Field(json_schema_extra={'strip': 'group'})", "strip must be a list of words"),
     ("name: str = Field(json_schema_extra={'subject': 'yes'})", "subject must be true or false"),
-    ("count: int = Field(default=1, json_schema_extra={'requires': 'nmae'})", "unknown parameter 'nmae'"),
+    ("count: int = Field(default=1, json_schema_extra={'requires': 'name'})",
+     "requires is not a skill option; .*Signature.validate_extracted_parameters"),
     ("kind: Literal['a', 'b'] = Field(json_schema_extra={'means': {'c': 'x'}})", "'c' is not a value of it"),
     ("reasoning: int = 1", "bad parameter name 'reasoning'"),
 ])

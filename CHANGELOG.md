@@ -10,7 +10,7 @@
   docstring, what the skill matcher and the text planner read), a pydantic
   `Input` (`str`, `bool`, `int`, `Literal[...]` for an enum; `Field(default=...,
   description=...)`; the skill options `strip`, `subject`, `verify`, `means`,
-  `in_request` and `requires` in `json_schema_extra`), and optionally
+  `in_request` in `json_schema_extra`), and optionally
   `plain_utterances`, a `template` (the text the planner falls back to) and
   `validate_extracted_parameters(workflow, command, cmd_parameters,
   command_text=None)`. A module-level `steps(input) -> list[str]` returns the
@@ -41,6 +41,14 @@
   file's `validate_extracted_parameters` sees the checked arguments
   (`skill_commands.validate_call`; `plan_skill_call` takes `workflow=`) and can
   refuse the call (the planner falls back to the template) or correct a field.
+  An argument that only applies when other arguments take some value is reset
+  there (`if not cmd_parameters.include_risk: cmd_parameters.owner = ""`); skill
+  files have no condition option of their own, and a field declaring `requires`
+  in `json_schema_extra` fails the load with a `SkillFormatError` pointing to
+  the hook. The rendered template runs the hook on each placeholder combination
+  and leaves out the ones it changes, so its `(only when ...)` conditions follow
+  the hook (a combination the hook refuses stays in: a refused call falls back
+  to the template).
 - **Skill-call argument checks** (`fastworkflow/skill_commands.py`), all optional
   per parameter (in a skill file, an `Input` field's `json_schema_extra`), so a
   skill without them plans as before:
@@ -84,8 +92,8 @@
 
 - **Skills as parameterized commands** (`fastworkflow/skill_commands.py`): a
   skill may declare typed parameters (its skill file's `Input`: `str`, `bool`,
-  `int` or an enum, with a default, a description, a `requires` condition and,
-  for a string, `strip` words) that `steps(input)` expands into its steps. The
+  `int` or an enum, with a default, a description and, for a string, `strip`
+  words) that `steps(input)` expands into its steps. The
   description is still what the skill matcher sees; a skill without parameters
   is read as before. An `@<skill>` include is plain text and cannot name a skill
   with params. A malformed skill fails the load with a `SkillFormatError`
@@ -101,8 +109,7 @@
   request's spelling is used) or the call falls back (an optional one takes its
   default); an optional string repeating another argument takes its default; a
   bool always defaults to false and the signature tells the model to set it only
-  when the request asks; an argument whose `requires` condition is false takes
-  its default; an enum must be one of its values; extra steps naming no
+  when the request asks; an enum must be one of its values; extra steps naming no
   available command, naming the skill, or naming only commands the expansion
   already runs are dropped; a repeat is capped at `REPEAT_LIMIT`. Any failure
   (bad arguments, a guard, an exception) falls back to the text planner with

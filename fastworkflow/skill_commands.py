@@ -70,11 +70,6 @@ A skill file::
   - ``strip`` (a ``str``; a list of words): removed from either end of the argument, with a
     possessive ``'s`` before a trailing one: a kind word the model appends to a name ("HR
     feed" -> "HR").
-  - ``requires`` (a condition): when it is false for the other arguments, the argument is
-    reset to its default. A condition combines ``param``, ``param == "value"`` and
-    ``param != "value"`` (an int compares with a number) with ``not``, ``and``, ``or`` and
-    parentheses; a bare str is true when non-empty, an int when non-zero, an enum must be
-    compared (``'kind == "group" and include_risk'``).
   - ``subject: True`` (a ``str``): the argument names a record of the request (a person, a
     group, a product, a code). Besides being written in the request it must hold one of the
     request's subjects whole (``split_merge.request_subjects``, with the workflow's identifier
@@ -119,7 +114,13 @@ A skill file::
 - ``validate_extracted_parameters`` (optional, the signature of a command's): called with
   the checked arguments as an ``Input`` (``validate_call``); ``(False, message)`` or an
   exception fails the call (the planner falls back), and a field it corrects in place is
-  used.
+  used. An argument that only means something when other arguments take some value is
+  normalised here: the hook writes its default back (``if not cmd_parameters.include_risk:
+  cmd_parameters.owner = ""``). ``placeholder_template`` runs the hook too, on each
+  placeholder combination (with no workflow and an empty ``command_text``): a combination it
+  changes is left out of the template (the planner never expands it), so the ``(only when
+  ...)`` conditions follow the hook. A combination it refuses stays in: a refused call falls
+  back to the template, which still shows those steps.
 
 The file is imported as a command file is (``python_utils.get_module`` under the workflow's
 package, so package-relative imports work); one that fails to import is logged and skipped;
@@ -174,8 +175,7 @@ _BARE_PLACEHOLDER = re.compile(r"\s*<[^<>]*>")
 
 
 class SkillFormatError(ValueError):
-    """A malformed skill file: its ``Signature``, an ``Input`` field or a ``requires``
-    condition."""
+    """A malformed skill file: its ``Signature`` or an ``Input`` field."""
 
 
 class SkillCallError(ValueError):
@@ -192,7 +192,6 @@ class Param:
     default: object = None
     required: bool = False
     desc: str = ""
-    requires: "Cond | None" = None
     strip: tuple[str, ...] = ()
     verify: bool = False
     means: tuple[tuple[str, str], ...] = ()
@@ -201,12 +200,6 @@ class Param:
 
     def type_text(self) -> str:
         return "|".join(self.values) if self.type == "enum" else self.type
-
-
-@dataclass(frozen=True)
-class Cond:
-    source: str
-    tree: tuple
 
 
 @dataclass(frozen=True)
@@ -261,12 +254,12 @@ def _check_keys(block: dict, allowed: set[str], what: str, where: str) -> None:
         raise SkillFormatError(f"{where}: {what} has unknown key(s) {', '.join(unknown)}")
 
 
-def _parse_param(name: str, spec, where: str, conds: list) -> Param:
+def _parse_param(name: str, spec, where: str) -> Param:
     if not re.fullmatch(_NAME, name) or name in RESERVED_NAMES:
         raise SkillFormatError(f"{where}: bad parameter name {name!r}")
     if not isinstance(spec, dict):
         raise SkillFormatError(f"{where}: parameter {name!r} must be a block with a type")
-    _check_keys(spec, {"type", "default", "desc", "requires", "strip", "verify", "means", "in_request",
+    _check_keys(spec, {"type", "default", "desc", "strip", "verify", "means", "in_request",
                        "subject"},
                 f"parameter {name!r}", where)
     type_text = spec.get("type")
@@ -313,9 +306,6 @@ def _parse_param(name: str, spec, where: str, conds: list) -> Param:
         if kind != "str" or not isinstance(spec["strip"], str):
             raise SkillFormatError(f"{where}: only a str parameter takes strip words ({name!r})")
         strip = tuple(w.strip() for w in spec["strip"].split(",") if w.strip())
-    requires = spec.get("requires")
-    if requires is not None and not isinstance(requires, str):
-        raise SkillFormatError(f"{where}: parameter {name!r} requires must be a condition")
     subject = _flag(spec, "subject", name, where)
     if subject and kind != "str":
         raise SkillFormatError(f"{where}: only a str parameter takes subject ({name!r})")
@@ -334,12 +324,9 @@ def _parse_param(name: str, spec, where: str, conds: list) -> Param:
     in_request = _flag(spec, "in_request", name, where)
     if in_request and kind != "int":
         raise SkillFormatError(f"{where}: only an int parameter takes in_request ({name!r})")
-    param = Param(name=name, type=kind, values=values, default=default, required=required,
-                  desc=desc, strip=strip, verify=verify, means=means, in_request=in_request,
-                  subject=subject)
-    if requires:
-        conds.append((name, requires))
-    return param
+    return Param(name=name, type=kind, values=values, default=default, required=required,
+                 desc=desc, strip=strip, verify=verify, means=means, in_request=in_request,
+                 subject=subject)
 
 
 def _flag(spec: dict, key: str, name: str, where: str) -> bool:
@@ -349,126 +336,13 @@ def _flag(spec: dict, key: str, name: str, where: str) -> bool:
     return value == "true"
 
 
-# ---------------------------------------------------------------- conditions
-
-_COND_TOKEN = re.compile(r'\s*(?:(\()|(\))|(==|!=)|("(?:[^"\\]|\\.)*")|(-?\d+)|(' + _NAME + r'))')
-
-
-def _tokens(source: str, where: str) -> list[tuple[str, object]]:
-    out, i = [], 0
-    while i < len(source):
-        if source[i:].strip() == "":
-            break
-        m = _COND_TOKEN.match(source, i)
-        if m is None:
-            raise SkillFormatError(f"{where}: cannot read condition {source!r} at {source[i:]!r}")
-        lp, rp, op, string, number, ident = m.groups()
-        if lp:
-            out.append(("(", None))
-        elif rp:
-            out.append((")", None))
-        elif op:
-            out.append(("op", op))
-        elif string:
-            out.append(("str", json.loads(string)))
-        elif number:
-            out.append(("int", int(number)))
-        elif ident in ("and", "or", "not"):
-            out.append((ident, None))
-        else:
-            out.append(("name", ident))
-        i = m.end()
-    return out
-
-
-def parse_condition(source: str, params: dict[str, Param], where: str) -> Cond:
-    tokens = _tokens(source, where)
-    pos = 0
-
-    def peek():
-        return tokens[pos][0] if pos < len(tokens) else None
-
-    def take(kind):
-        nonlocal pos
-        if peek() != kind:
-            raise SkillFormatError(f"{where}: bad condition {source!r}")
-        pos += 1
-        return tokens[pos - 1][1]
-
-    def disjunction():
-        node = conjunction()
-        while peek() == "or":
-            take("or")
-            node = ("or", node, conjunction())
-        return node
-
-    def conjunction():
-        node = negation()
-        while peek() == "and":
-            take("and")
-            node = ("and", node, negation())
-        return node
-
-    def negation():
-        if peek() == "not":
-            take("not")
-            return ("not", negation())
-        if peek() == "(":
-            take("(")
-            node = disjunction()
-            take(")")
-            return node
-        name = take("name")
-        param = params.get(name)
-        if param is None:
-            raise SkillFormatError(f"{where}: condition {source!r} names unknown parameter {name!r}")
-        if peek() != "op":
-            if param.type == "enum":
-                raise SkillFormatError(f"{where}: compare enum {name!r} with == or != in {source!r}")
-            return ("var", name)
-        op = take("op")
-        if param.type == "bool":
-            raise SkillFormatError(f"{where}: test bool {name!r} as '{name}' or 'not {name}' in {source!r}")
-        if param.type == "int":
-            value = take("int")
-        else:
-            value = take("str")
-            if param.type == "enum" and value not in param.values:
-                raise SkillFormatError(f"{where}: {value!r} is not a value of {name!r} in {source!r}")
-        return ("eq" if op == "==" else "ne", name, value)
-
-    if not tokens:
-        raise SkillFormatError(f"{where}: empty condition")
-    tree = disjunction()
-    if pos != len(tokens):
-        raise SkillFormatError(f"{where}: bad condition {source!r}")
-    return Cond(source=source.strip(), tree=tree)
-
-
-def evaluate(cond: Cond | None, env: dict) -> bool:
-    def ev(node) -> bool:
-        op = node[0]
-        if op == "var":
-            return bool(env[node[1]])
-        if op == "eq":
-            return env[node[1]] == node[2]
-        if op == "ne":
-            return env[node[1]] != node[2]
-        if op == "not":
-            return not ev(node[1])
-        if op == "and":
-            return ev(node[1]) and ev(node[2])
-        return ev(node[1]) or ev(node[2])
-    return True if cond is None else ev(cond.tree)
-
-
 # ---------------------------------------------------------------- skill files (skill.py)
 
 #: The file that defines a skill: ``_skills/<name>/skill.py``.
 SKILL_FILE = "skill.py"
 
 #: Keys a skill file's ``Input`` field may set in ``json_schema_extra``.
-SKILL_FIELD_KEYS = frozenset({"strip", "subject", "verify", "means", "in_request", "requires"})
+SKILL_FIELD_KEYS = frozenset({"strip", "subject", "verify", "means", "in_request"})
 _INCLUDE = re.compile(r"@(\S+)")
 
 
@@ -517,6 +391,9 @@ def _spec_from_field(name: str, info, where: str) -> dict:
         return spec
     if not isinstance(extra, dict):
         raise SkillFormatError(f"{where}: field {name!r} json_schema_extra must be a dict")
+    if "requires" in extra:
+        raise SkillFormatError(f"{where}: field {name!r}: requires is not a skill option; reset the "
+                               "argument (or refuse the call) in Signature.validate_extracted_parameters")
     _check_keys(extra, set(SKILL_FIELD_KEYS), f"field {name!r} json_schema_extra", where)
     for key in ("subject", "verify", "in_request"):
         if key in extra:
@@ -531,8 +408,6 @@ def _spec_from_field(name: str, info, where: str) -> dict:
         spec["strip"] = ", ".join(words)
     if "means" in extra:
         spec["means"] = extra["means"]
-    if "requires" in extra:
-        spec["requires"] = extra["requires"]
     return spec
 
 
@@ -584,8 +459,10 @@ def _template_values(p: Param) -> tuple:
 
 def _template_grid(command: SkillCommand) -> list[dict]:
     """The argument sets ``placeholder_template`` renders: the base first, then every other
-    combination (sampled past TEMPLATE_GRID_LIMIT), leaving out a set a ``requires`` would
-    reset (the argument check never passes one)."""
+    combination (sampled past TEMPLATE_GRID_LIMIT), leaving out a set the skill's
+    ``validate_extracted_parameters`` changes (``validate_call`` never passes one on to
+    ``steps()``; the set it changes to is another of the grid, or none). A set the hook
+    refuses is kept: a refused call falls back to the template."""
     import itertools
     import random
 
@@ -603,9 +480,14 @@ def _template_grid(command: SkillCommand) -> list[dict]:
     out, seen = [], set()
     for env in grid:
         key = tuple(env.items())
-        if key in seen or any(p.requires is not None and env[p.name] != p.default
-                              and not evaluate(p.requires, env) for p in command.params):
+        if key in seen:
             continue
+        if command.validate is not None:
+            try:
+                if _run_validate(command, env, "", None) != env:
+                    continue
+            except SkillCallError:
+                pass
         seen.add(key)
         out.append(env)
     return out
@@ -802,7 +684,8 @@ def placeholder_template(command: SkillCommand) -> list[str]:
     repeated part shows its steps for the int's default; declare ``Signature.template`` when
     the planner needs more than that.
 
-    Raises SkillFormatError when ``steps()`` fails on the base inputs (the first of each).
+    Raises SkillFormatError when ``steps()`` fails on the base inputs (the first of each, or
+    the first combination ``validate_extracted_parameters`` leaves in).
     """
     grid, runs = [], []
     for env in _template_grid(command):
@@ -815,6 +698,9 @@ def placeholder_template(command: SkillCommand) -> list[str]:
             continue
         grid.append(env)
         runs.append(lines)
+    if not grid:
+        raise SkillFormatError(f"{command.path}: validate_extracted_parameters changes every placeholder "
+                               "combination; declare Signature.template")
     merged = _merge_runs(runs)
     for p in command.params:
         if p.type == "str" and len(_template_values(p)) > 1:
@@ -864,11 +750,8 @@ def command_from_module(name: str, module, path: str) -> SkillFile:
     if validate is not None and not callable(validate):
         raise SkillFormatError(f"{path}: validate_extracted_parameters must be a function")
 
-    conds: list[tuple[str, str]] = []
-    params = {n: _parse_param(n, _spec_from_field(n, info, path), path, conds)
+    params = {n: _parse_param(n, _spec_from_field(n, info, path), path)
               for n, info in input_model.model_fields.items()}
-    for n, source in conds:
-        params[n] = replace(params[n], requires=parse_condition(source, params, path))
     if not params:
         try:
             lines = _call_steps(steps_fn, input_model(), path)
@@ -923,16 +806,11 @@ def number(steps: list[str]) -> str:
     return "\n".join(f"{i}. {s}" for i, s in enumerate(steps, 1))
 
 
-def validate_call(command: SkillCommand, args: dict, request: str, workflow=None,
-                  notes: list[str] | None = None) -> dict:
-    """``args`` after the skill's ``validate_extracted_parameters`` hook (a skill file's), as for
-    a command: ``hook(workflow, skill_name, input, command_text=request)`` returns ``(ok,
-    message)`` and may correct fields of ``input`` in place. Raises SkillCallError when it
-    refuses the call or raises; without a hook ``args`` come back unchanged."""
+def _run_validate(command: SkillCommand, args: dict, request: str, workflow) -> dict:
+    """``args`` as the skill's ``validate_extracted_parameters`` leaves them; raises
+    SkillCallError when it refuses them or raises."""
     import inspect
 
-    if command.validate is None:
-        return args
     instance = command.input_model.model_construct(**args)
     hook = command.validate
     kwargs = {"command_text": request} if "command_text" in inspect.signature(hook).parameters else {}
@@ -943,7 +821,18 @@ def validate_call(command: SkillCommand, args: dict, request: str, workflow=None
     ok, message = result if isinstance(result, tuple) else (bool(result), "")
     if not ok:
         raise SkillCallError(f"validate_extracted_parameters: {message}")
-    checked = {p.name: getattr(instance, p.name, args.get(p.name)) for p in command.params}
+    return {p.name: getattr(instance, p.name, args.get(p.name)) for p in command.params}
+
+
+def validate_call(command: SkillCommand, args: dict, request: str, workflow=None,
+                  notes: list[str] | None = None) -> dict:
+    """``args`` after the skill's ``validate_extracted_parameters`` hook (a skill file's), as for
+    a command: ``hook(workflow, skill_name, input, command_text=request)`` returns ``(ok,
+    message)`` and may correct fields of ``input`` in place. Raises SkillCallError when it
+    refuses the call or raises; without a hook ``args`` come back unchanged."""
+    if command.validate is None:
+        return args
+    checked = _run_validate(command, args, request, workflow)
     for p in command.params:
         if checked[p.name] != args.get(p.name) and notes is not None:
             notes.append(f"{p.name}={args.get(p.name)!r} -> {checked[p.name]!r} (validate_extracted_parameters)")
@@ -1141,8 +1030,10 @@ def check_arguments(command: SkillCommand, raw: dict, request: str,
     - ``verdicts`` (``{param: (value, probability)}``, from ``check_verdicts``): a sure
       verdict on a ``verify`` parameter replaces its argument, and stands in for a missing
       or invalid enum (for a subject, ``NO_SUBJECT`` resets it, or fails a required one);
-    - an optional str argument equal to another str argument takes its default;
-    - an argument whose ``requires`` condition is false takes its default.
+    - an optional str argument equal to another str argument takes its default.
+
+    An argument that only applies when others take some value is reset afterwards, by the
+    skill's ``validate_extracted_parameters`` (``validate_call``).
 
     ``notes`` says what a guard changed. Raises SkillCallError.
     """
@@ -1259,10 +1150,6 @@ def check_arguments(command: SkillCommand, raw: dict, request: str,
             continue
         if any(o is not p and str(args[o.name]).lower() == str(args[p.name]).lower() for o in strs):
             notes.append(f"{p.name}={args[p.name]!r} repeats another argument: default")
-            args[p.name] = p.default
-    for p in command.params:
-        if p.requires is not None and args[p.name] != p.default and not evaluate(p.requires, args):
-            notes.append(f"{p.name}={args[p.name]!r} needs {p.requires.source}: default")
             args[p.name] = p.default
     return args, notes
 
