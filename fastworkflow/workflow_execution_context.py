@@ -1954,10 +1954,16 @@ class WorkflowExecutionContext:
         ``template_text`` picks the skill template; it defaults to the query itself.
         """
         from fastworkflow.workflow_agent import (
-            build_query_with_next_steps, _what_can_i_do, plan_template_for)
+            build_query_with_next_steps, _what_can_i_do, planner_skill_for)
 
-        plan_template = (plan_template_for(template_text or query, self._app_workflow.folderpath)
-                         if self._app_workflow is not None else "")
+        # One skill match gives both the template and, for a skill with params, its parsed
+        # form; a hand-off continuation (query differs from its original text) plans from
+        # the template only, since the skill call would plan the whole job again.
+        plan_template, skill_command = (
+            planner_skill_for(template_text or query, self._app_workflow.folderpath)
+            if self._app_workflow is not None else ("", None))
+        if template_text is not None and template_text != query:
+            skill_command = None
         # Initial turn planning uses every prior turn summary, not the previous
         # turn's full agent trajectory (mid-turn replans still use trajectory).
         command_info_and_refined_message_with_todolist = build_query_with_next_steps(
@@ -1967,6 +1973,7 @@ class WorkflowExecutionContext:
             planner_lm=getattr(self, "_current_planner_lm", None),
             planner_user_query=planner_user_query,
             plan_template=plan_template or None,
+            skill_command=skill_command,
         )
         available_commands = _what_can_i_do(self)
         step_kwargs = {} if first_step is None else {"first_step": first_step}

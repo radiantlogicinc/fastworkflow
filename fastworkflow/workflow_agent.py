@@ -17,6 +17,9 @@ from dspy.experimental import Choice, TypeSafe
 
 import fastworkflow
 from fastworkflow import tracing
+from fastworkflow.skill_commands import (
+    SkillCommand, SkillFormatError, build_command, has_front_matter, plan_skill_call, split_front_matter,
+    template_steps)
 from fastworkflow.split_merge import definite_descriptions, merge_subtasks, unnamed_subjects, with_referent
 from fastworkflow.utils.logging import logger
 from fastworkflow.workflow_execution_context import CommandCancelledError
@@ -883,31 +886,33 @@ class SplitIntoSubtasks(dspy.Signature):
 
 
 @functools.lru_cache(maxsize=None)
-def load_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
-    """``(name, description, steps)`` for each ``_skills/<name>/SKILL.md`` of the workflow.
-
-    A skill file is plain text: its first line describes the job, every other
-    non-empty line is one step. The folder name is the skill's name. A step
-    that is exactly ``@<name>`` stands for the steps of skill ``<name>``, expanded in place;
-    an unknown skill or a cycle raises ValueError.
-    """
+def _parsed_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ...], "SkillCommand | None"], ...]:
+    """``(name, description, template steps, command or None)`` per skill; see ``load_skills``."""
     root = os.path.join(workflow_folderpath, "_skills")
-    skills = []
+    files = []
     for name in sorted(os.listdir(root)) if os.path.isdir(root) else ():
         path = os.path.join(root, name, "SKILL.md")
         if os.path.isfile(path):
             with open(path, encoding="utf-8") as handle:
-                lines = [line.strip() for line in handle if line.strip()]
+                raw_lines = handle.readlines()
+            front = None
+            if has_front_matter(raw_lines):
+                front, raw_lines = split_front_matter(raw_lines, path)
+            lines = [line.strip() for line in raw_lines if line.strip()]
             if lines:
-                skills.append((name, lines[0], tuple(lines[1:])))
-    raw_steps = {name: steps for name, _, steps in skills}
+                files.append((name, lines[0], tuple(lines[1:]), front, path))
+            elif front is not None:
+                raise SkillFormatError(f"{path}: a skill with params needs a description line and steps")
+    raw_steps = {name: steps for name, _, steps, _, _ in files}
+    has_params = {name for name, _, _, front, _ in files if front is not None}
 
-    def expand(name: str, chain: tuple[str, ...]) -> tuple[str, ...]:
+    def expand(name: str, chain: tuple[str, ...]) -> tuple[tuple[str, bool], ...]:
+        # (step, literal): an included step is plain text inside a skill with params
         expanded = []
         for step in raw_steps[name]:
             include = re.fullmatch(r"@(\S+)", step)
             if include is None:
-                expanded.append(step)
+                expanded.append((step, len(chain) > 1))
                 continue
             included = include.group(1)
             if included not in raw_steps:
@@ -916,10 +921,43 @@ def load_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ..
             if included in chain:
                 raise ValueError(f"skill {name!r} includes {included!r} in a cycle "
                                  f"({' -> '.join(chain + (included,))}) in {root}")
+            if included in has_params:
+                raise SkillFormatError(f"skill {name!r} includes {included!r}, which has params; only a "
+                                       f"skill without params can be included ({' -> '.join(chain + (included,))}) in {root}")
             expanded.extend(expand(included, chain + (included,)))
         return tuple(expanded)
 
-    return tuple((name, description, expand(name, (name,))) for name, description, _ in skills)
+    out = []
+    for name, description, _, front, path in files:
+        items = expand(name, (name,))
+        if front is None:
+            out.append((name, description, tuple(step for step, _ in items), None))
+            continue
+        command = build_command(name, description, front, list(items), path)
+        out.append((name, description, template_steps(command), command))
+    return tuple(out)
+
+
+def load_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+    """``(name, description, steps)`` for each ``_skills/<name>/SKILL.md`` of the workflow.
+
+    A skill file is plain text: its first line describes the job, every other
+    non-empty line is one step. The folder name is the skill's name. A step
+    that is exactly ``@<name>`` stands for the steps of skill ``<name>``, expanded in place;
+    an unknown skill or a cycle raises ValueError.
+
+    A skill may start with front matter declaring typed parameters (format:
+    ``fastworkflow.skill_commands``); its steps here are the template text of its step
+    templates, and ``load_skill_commands`` holds its parsed form. Included skills are
+    plain text and cannot have params. A malformed skill raises SkillFormatError (a
+    ValueError) naming its file.
+    """
+    return tuple((name, description, steps) for name, description, steps, _ in _parsed_skills(workflow_folderpath))
+
+
+def load_skill_commands(workflow_folderpath: str) -> dict[str, SkillCommand]:
+    """The workflow's skills that have params, by name."""
+    return {name: command for name, _, _, command in _parsed_skills(workflow_folderpath) if command is not None}
 
 
 @functools.lru_cache(maxsize=None)
@@ -1034,15 +1072,28 @@ def match_skill(text: str, workflow_folderpath: str) -> tuple[str, tuple[str, ..
         return None
 
 
-def plan_template_for(text: str, workflow_folderpath: str) -> str:
-    """The matched skill's steps as a planner template for ``text``; "" when no skill matches."""
-    matched = match_skill(text, workflow_folderpath)
-    if matched is None:
-        return ""
-    _name, steps = matched
+def _template_text(steps: tuple[str, ...]) -> str:
     lines = "\n".join(f"- {step}" for step in steps)
     return (f"A job like this is usually done as:\n{lines}\n"
             "Adapt this to the request: drop steps it does not need and add steps it asks for.")
+
+
+def planner_skill_for(text: str, workflow_folderpath: str) -> tuple[str, SkillCommand | None]:
+    """``(template, command)`` for the skill ``text`` asks for: one Jev match.
+
+    ``template`` is ``plan_template_for``'s text ("" when no skill matches); ``command`` is
+    the matched skill's parsed form when it has params, else None.
+    """
+    matched = match_skill(text, workflow_folderpath)
+    if matched is None:
+        return "", None
+    name, steps = matched
+    return _template_text(steps), load_skill_commands(workflow_folderpath).get(name)
+
+
+def plan_template_for(text: str, workflow_folderpath: str) -> str:
+    """The matched skill's steps as a planner template for ``text``; "" when no skill matches."""
+    return planner_skill_for(text, workflow_folderpath)[0]
 
 
 #: A reply's non-answer intent applies only at or above this Jev probability.
@@ -1240,7 +1291,8 @@ def build_query_with_next_steps(user_query: str,
     trace_trigger: str | None = None,
     planner_user_query: str | None = None,
     plan_template: str | None = None,
-    done_only: bool = False) -> str:
+    done_only: bool = False,
+    skill_command: SkillCommand | None = None) -> str:
     """
     Generate a todo list.
     Return a string that combine the user query and todo list
@@ -1261,6 +1313,11 @@ def build_query_with_next_steps(user_query: str,
             request in the planner prompt (not in the returned string). Used on
             the turn's initial plan, not on a replan.
         done_only: With a trajectory, return only the "what's done" summary.
+        skill_command: The matched skill's parsed form when it has params. On the
+            turn's initial plan the planner then fills the skill's typed parameters
+            and code expands its steps (``skill_commands.plan_skill_call``; span
+            ``plan_source`` "skill_call"); any failure falls back to the text planner
+            with ``plan_template``. Ignored on a replan.
     """
     current_workflow = chat_session_obj.get_active_workflow()
     base_docstring = """
@@ -1321,6 +1378,11 @@ def build_query_with_next_steps(user_query: str,
     def with_template(text: str) -> str:
         return f"{text}\n\n{plan_template}" if plan_template else text
 
+    initial_plan = trace_trigger is None and not with_agent_inputs_and_trajectory
+    previous_turn_summaries = _previous_turn_summaries_for_planner(chat_session_obj) if initial_plan else ""
+    request_text = (planner_user_query if previous_turn_summaries and planner_user_query is not None
+                    else user_query)
+
     def plan_with():
         if with_agent_inputs_and_trajectory:
             workflow_tool_agent = chat_session_obj.workflow_tool_agent
@@ -1332,22 +1394,12 @@ def build_query_with_next_steps(user_query: str,
                 agent_trajectory = agent_trajectory,
                 user_response = user_query,
                 available_commands=available_commands) # Note that this is not part of the signature. It is extra metadata that will be picked up by the CommandsSystemPreludeAdapter
-        previous_turn_summaries = (
-            _previous_turn_summaries_for_planner(chat_session_obj)
-            if trace_trigger is None
-            else ""
-        )
         if previous_turn_summaries:
             task_planner_func = dspy.ChainOfThought(
                 TaskPlannerTextWithPreviousTurnSummariesSignature
             )
-            planner_query = (
-                planner_user_query
-                if planner_user_query is not None
-                else user_query
-            )
             return task_planner_func(
-                user_query=with_template(planner_query),
+                user_query=with_template(request_text),
                 previous_turn_summaries=previous_turn_summaries,
                 available_commands=available_commands,
             )
@@ -1357,10 +1409,25 @@ def build_query_with_next_steps(user_query: str,
             available_commands=available_commands) # Note that this is not part of the signature. It is extra metadata that will be picked up by the CommandsSystemPreludeAdapter
 
     plan_text = ""
+    plan_source = None
+    skill_args = None
+    skill_fallback = None
     try:
         with dspy.context(lm=planner_lm, adapter=agent_adapter):
-            prediction = plan_with()
-            plan_text = prediction.next_steps or ""
+            if skill_command is not None and initial_plan:
+                try:
+                    call = plan_skill_call(skill_command, request_text, available_commands)
+                    prediction, plan_text, skill_args = call.prediction, call.plan, call.args
+                    plan_source = "skill_call"
+                    logger.info(f"skill call {skill_command.name}{call.args}"
+                                + (f" ({'; '.join(call.notes)})" if call.notes else ""))
+                except Exception as exc:  # noqa: BLE001 - the text planner with the template takes over
+                    skill_fallback = f"{type(exc).__name__}: {exc}"[:500]
+                    logger.info(f"skill call {skill_command.name} failed, planning from its template: {skill_fallback}")
+            if plan_source is None:
+                prediction = plan_with()
+                plan_text = prediction.next_steps or ""
+                plan_source = "text" if plan_text else "none"
     except BaseException:
         tracing.end_span(chat_session_obj, span, status=tracing.STATUS_ERROR)
         raise
@@ -1369,7 +1436,10 @@ def build_query_with_next_steps(user_query: str,
         span,
         attributes={
             "plan": plan_text,
-            "plan_source": "text" if plan_text else "none",
+            "plan_source": plan_source,
+            "skill": skill_command.name if skill_command is not None and initial_plan else None,
+            "skill_args": skill_args,
+            "skill_fallback": skill_fallback,
         },
     )
 

@@ -248,7 +248,11 @@ def call_scope(call_id: str, *, command_name: Optional[str] = None) -> Iterator[
 # v13: fw.turn v2 -- the turn records `unattended`: whether it ran with no
 # ask_user tool. A turn recorded before this carries no flag, which reads as
 # "not recorded", not as attended.
-SPAN_CONTRACT_VERSION = 13
+#
+# v14: fw.planner.plan / fw.planner.replan v4 -- `plan_source` may be
+# "skill_call", and the spans gain `skill`, `skill_args` and `skill_fallback`
+# (skills as parameterized commands).
+SPAN_CONTRACT_VERSION = 14
 
 # v1 — emitted at the agent↔workflow boundary (decision D3).
 SPAN_TURN = "fw.turn"
@@ -499,13 +503,20 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
     # `plan_source` "text" or "none"; older records may still hold "structured"
     # / "text_fallback" and a `subjects` list.
     # v3: `subjects` is no longer written (see SPAN_CONTRACT_VERSION v12).
+    # v4: skills as parameterized commands. `plan_source` may be "skill_call" (the
+    # planner filled a skill's typed parameters and code expanded its steps);
+    # `skill` names the matched skill with params (None otherwise, and on a replan),
+    # `skill_args` holds the arguments of a skill call, `skill_fallback` why a
+    # skill call fell back to the text planner.
     SPAN_PLANNER_PLAN: SpanContract(
-        version=3,
-        attributes=frozenset({"model", "replan_trigger", "plan", "plan_source"}),
+        version=4,
+        attributes=frozenset({"model", "replan_trigger", "plan", "plan_source",
+                              "skill", "skill_args", "skill_fallback"}),
     ),
     SPAN_PLANNER_REPLAN: SpanContract(
-        version=3,
-        attributes=frozenset({"model", "replan_trigger", "plan", "plan_source"}),
+        version=4,
+        attributes=frozenset({"model", "replan_trigger", "plan", "plan_source",
+                              "skill", "skill_args", "skill_fallback"}),
     ),
     # One distillation pass. `fw.pass` is the membership stamp every descendant
     # inherits through ancestry; the rest is the pass's OWN content, recorded
@@ -565,12 +576,17 @@ SPAN_CONTRACTS: dict[str, SpanContract] = {
         # guess by counting spans. A span carrying v1 has the flag only, and a
         # reader must keep treating its round as unrecorded rather than
         # inferring one.
-        version=2,
+        # v3 (fix-7t0q): `unwrapped_bracketed_values` and `placeholder_values`
+        # record a value sent as one bracketed token: unwrapped to the real value
+        # it held, or refused as a placeholder. Absent on earlier versions.
+        version=3,
         attributes=frozenset(
             {
                 "command_name",
                 "retry_round",
                 "retry_round_ordinal",
+                "unwrapped_bracketed_values",
+                "placeholder_values",
                 "extraction_method",
                 "missing_fields",
                 "invalid_fields",

@@ -4,6 +4,42 @@
 
 ### Added
 
+- **Skills as parameterized commands** (`fastworkflow/skill_commands.py`): a
+  `_skills/<name>/SKILL.md` may start with front matter between `---` lines
+  declaring typed `params` (`str`, `bool`, `int`, `enum[...]`, with `default`,
+  `desc`, `requires` and, for a string, `strip` words) and value `maps` (an
+  enum, bool or int argument to text). Its steps may hold `{param}` / `{map}`
+  placeholders, a leading `[if <cond>]` (`==`, `!=`, `not`, `and`, `or`,
+  parentheses) and `[repeat <int param>]` / `[repeat <int param> - k]` ...
+  `[end]` blocks (`{n}` numbers the iterations). The first body line is still
+  the description the skill matcher sees; a skill without front matter is read
+  exactly as before. `@<skill>` includes are plain text and cannot name a skill
+  with params. A malformed skill fails the load with a `SkillFormatError`
+  naming its file. On a turn's initial plan, when the sub-task's matched skill
+  has params, `build_query_with_next_steps(..., skill_command=...)` asks the
+  planner LM for the skill's typed arguments (one `ChainOfThought` over a
+  signature built from the params, plus `steps_before` / `steps_after` for parts
+  the skill does not cover; same adapter and catalog as the text planner),
+  applies the argument guards and expands the skill in code into the numbered
+  plan. Guards: a string argument loses quotes and its strip words (a kind word
+  appended to a name: "NORTHFEED feed" -> "NORTHFEED", "Ann Lee's login" ->
+  "Ann Lee") and must then be written in the request (case-insensitive; the
+  request's spelling is used) or the call falls back (an optional one takes its
+  default); an optional string repeating another argument takes its default; a
+  bool always defaults to false and the signature tells the model to set it only
+  when the request asks; an argument whose `requires` condition is false takes
+  its default; an enum must be one of its values; extra steps naming no
+  available command, naming the skill, or naming only commands the expansion
+  already runs are dropped; a repeat is capped at `REPEAT_LIMIT`. Any failure
+  (bad arguments, a guard, an exception) falls back to the text planner with
+  the skill's template; replans and hand-off continuations are unchanged.
+  `_call_agent_for_query` gets the template and the command from one skill
+  match (`workflow_agent.planner_skill_for`; `plan_template_for` is its
+  template half). Whether a chosen record kind fits what the find command
+  returns is not checked at execution time.
+  Span contract: `fw.planner.plan` / `fw.planner.replan` v4 (aggregate 14) add
+  `skill`, `skill_args` and `skill_fallback`; `plan_source` may be `skill_call`.
+
 - **Deterministic split merge** (`fastworkflow/split_merge.py`): the
   splitter's sub-tasks now go through `merge_subtasks(user_query, subtasks)`,
   code only, after the model (and its one retry). It drops meta lines ("(No
