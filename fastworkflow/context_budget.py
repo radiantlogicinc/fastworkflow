@@ -187,20 +187,6 @@ OFFLOAD_MIN_SAVING = BudgetSpec(
     what="minimum UTF-8 bytes an offload must free",
 )
 
-#: The finish check's one prompt (``observation_offloading.finish_check``): the
-#: plan steps it judges and the archived outputs attributed to them, each output
-#: cut to its head and tail. 24,576 / 524,288 (3/64) at the reference window --
-#: about 6k tokens, a quarter of the executor prompt it runs beside. The ceiling
-#: keeps a very large window from turning one check into a long, slow call.
-FINISH_CHECK = BudgetSpec(
-    name="finish_check_max_bytes",
-    fraction=Fraction(3, 64),
-    override_env="FW_FINISH_CHECK_MAX_BYTES",
-    floor=4_096,
-    what="finish-check prompt: judged plan steps and their outputs",
-    ceiling=65_536,
-)
-
 #: The model that reads a searched observation (``observation_offloading.search``).
 SEARCH_MODEL_ENV = "LLM_OBSERVATION_SEARCH"
 
@@ -210,7 +196,6 @@ BUDGETS: tuple[BudgetSpec, ...] = (
     TRAJECTORY,
     ANSWER_REHYDRATION,
     OFFLOAD_MIN_SAVING,
-    FINISH_CHECK,
 )
 
 #: The pinned values of the accepted stack, as constants, for the modules that
@@ -219,7 +204,6 @@ BUDGETS: tuple[BudgetSpec, ...] = (
 REFERENCE_TRAJECTORY_MAX_BYTES = TRAJECTORY.reference_bytes            # 28,000
 REFERENCE_ANSWER_REHYDRATION_MAX_BYTES = ANSWER_REHYDRATION.reference_bytes  # 250,000
 REFERENCE_OFFLOAD_MIN_SAVING_BYTES = OFFLOAD_MIN_SAVING.reference_bytes  # 1,024
-REFERENCE_FINISH_CHECK_MAX_BYTES = FINISH_CHECK.reference_bytes        # 24,576
 
 
 # ---------------------------------------------------------------------------
@@ -337,10 +321,6 @@ def offload_min_saving_bytes() -> int:
     return budget_bytes(OFFLOAD_MIN_SAVING)
 
 
-def finish_check_max_bytes() -> int:
-    return budget_bytes(FINISH_CHECK)
-
-
 # ---------------------------------------------------------------------------
 # Provenance
 # ---------------------------------------------------------------------------
@@ -377,12 +357,10 @@ __all__ = [
     "BUDGETS",
     "BYTES_PER_TOKEN",
     "BudgetSpec",
-    "FINISH_CHECK",
     "MIN_WINDOW_TOKENS",
     "MODEL_CONTEXT_TOKENS_ENV",
     "OFFLOAD_MIN_SAVING",
     "REFERENCE_ANSWER_REHYDRATION_MAX_BYTES",
-    "REFERENCE_FINISH_CHECK_MAX_BYTES",
     "REFERENCE_OFFLOAD_MIN_SAVING_BYTES",
     "REFERENCE_TRAJECTORY_MAX_BYTES",
     "REFERENCE_WINDOW_BYTES",
@@ -397,7 +375,6 @@ __all__ = [
     "budget_provenance",
     "context_window_tokens",
     "env_value",
-    "finish_check_max_bytes",
     "offload_min_saving_bytes",
     "reset_cache",
     "trajectory_max_bytes",

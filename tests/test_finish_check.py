@@ -1,9 +1,7 @@
-"""Finish check (fix-3xts): plan steps judged against what the run archived.
+"""Finish check (fix-3xts): plan steps checked against what the run archived.
 
-Offline: the model is a stub callable; the fixtures are a neutral library workflow.
+Offline, no model; the fixtures are a neutral library workflow.
 """
-import json
-
 import dspy
 
 from fastworkflow.observation_offloading import finish_check as fc
@@ -105,113 +103,32 @@ def test_the_command_is_read_from_qualified_and_odd_forms():
     assert fc.command_token("show_details<Dune>", names) == "show_details"
 
 
-def stub(reply):
-    calls = []
-
-    def ask(system, user):
-        calls.append(user)
-        return reply if isinstance(reply, str) else json.dumps(reply)
-
-    ask.calls = calls
-    return ask
-
-
-def test_the_model_is_asked_only_about_steps_that_ask_for_something():
-    ask = stub({"steps": []})
-    result = fc.check(PLAN, ROWS_DONE, COMMANDS, core_commands=CORE, ask=ask)
-    assert result.model_called and result.unmet == []
-    judged = [s.number for s in fc.judged_steps(result.steps)]
-    assert judged == [4, 6]
-    assert "### Step 4" in ask.calls[0] and "### Step 5" not in ask.calls[0]
-
-
-def test_an_unmet_part_the_output_lacks_is_kept_with_a_real_command():
-    rows = ROWS_DONE[:3] + [row(3, "show_details", "title: Dune\nauthor: Frank Herbert"),
-                           row(4, "list_loans", "0 loans")]
-    ask = stub({"steps": [{"step": 4, "verdict": "unmet", "missing": "its shelf location",
-                           "next_command": "list_loans"}]})
-    result = fc.check(PLAN, rows, COMMANDS, core_commands=CORE, ask=ask)
-    assert [(v.step, v.missing, v.next_command, v.source) for v in result.unmet] == [
-        (4, "its shelf location", "list_loans", "model")]
-    assert 'asks for "its shelf location" and O3 does not show it' in result.note
-
-
-def test_invented_unmets_are_refused():
-    ask = stub({"steps": [
-        {"step": 4, "verdict": "unmet", "missing": "the publisher", "next_command": ""},
-        {"step": 4, "verdict": "unmet", "missing": "author", "next_command": ""},
-    ]})
-    result = fc.check(PLAN, ROWS_DONE, COMMANDS, core_commands=CORE, ask=ask)
-    assert result.unmet == []
-    assert [v["reason"] for v in result.vetoes] == ["quote not in step", "words in output"]
-
-
-def test_a_quote_of_the_command_or_the_answer_is_refused():
-    plan = "1. show_details (the author and shelf)\n2. show_details and present the author as a list"
-    rows = [row(0, "show_details", "title: Dune"), row(1, "show_details", "title: Dune")]
-    ask = stub({"steps": [
-        {"step": 1, "verdict": "unmet", "missing": "show_details (the author and shelf)"},
-        {"step": 2, "verdict": "unmet", "missing": "present the author as a list"},
-    ]})
-    result = fc.check(plan, rows, COMMANDS, ask=ask)
-    assert [v["reason"] for v in result.vetoes] == [
-        "quote names the command", "quote is about the answer"]
-
-
-def test_a_suggestion_that_is_not_a_command_or_already_ran_is_blanked():
-    rows = ROWS_DONE[:3] + [row(3, "show_details", "title: Dune")]
-    for suggestion in ("fetch_shelf", "show_details"):
-        ask = stub({"steps": [{"step": 4, "verdict": "unmet", "missing": "shelf location",
-                               "next_command": suggestion}]})
-        result = fc.check(PLAN, rows, COMMANDS, core_commands=CORE, ask=ask)
-        model = [v for v in result.unmet if v.source == "model"]
-        assert model and model[0].next_command == ""
-
-
-def test_a_model_failure_leaves_the_command_pass_standing():
-    def broken(system, user):
-        raise TimeoutError("slow")
-
-    result = fc.check(PLAN, ROWS_DONE[:4], COMMANDS, core_commands=CORE, ask=broken)
-    assert result.error.startswith("TimeoutError")
-    assert [v.step for v in result.unmet] == [5]
-    garbled = fc.check(PLAN, ROWS_DONE, COMMANDS, core_commands=CORE, ask=stub("no json"))
-    assert garbled.error and garbled.unmet == [] and garbled.note is None
-
-
-def test_the_reply_may_wrap_its_json_in_reasoning():
-    reply = '<think>{"x": 1}</think>Here: {"steps": [{"step": 4, "verdict": "satisfied"}]}'
-    assert fc.parse_response(reply) == [{"step": 4, "verdict": "satisfied"}]
-
-
-def test_a_long_output_is_cut_to_head_tail_and_the_lines_naming_the_step():
-    body = "\n".join([f"row {i} filler text" for i in range(400)] + ["shelf: C4"]
-                     + [f"row {i} filler" for i in range(400)])
-    excerpt = fc.output_excerpt(body, "the shelf location", 2048)
-    assert "shelf: C4" in excerpt and len(excerpt.encode("utf-8")) < 2600
-
-
-def test_the_prompt_stays_near_its_budget():
-    rows = [row(3, "show_details", "x" * 50_000)] + ROWS_DONE[:3]
-    result = fc.check(PLAN, rows, COMMANDS, core_commands=CORE, ask=stub({"steps": []}),
-                      max_bytes=8192)
-    assert len(result.prompt.encode("utf-8")) < 8192 + 1024
-
-
-def test_the_mode_comes_from_the_switch(monkeypatch):
-    monkeypatch.delenv(fc.CHECK_ENV, raising=False)
-    assert fc.mode() is None
-    monkeypatch.setenv(fc.CHECK_ENV, "1")
-    assert fc.mode() == fc.MODE_FULL
-    monkeypatch.setenv(fc.CHECK_ENV, "commands")
-    assert fc.mode() == fc.MODE_COMMANDS
-    monkeypatch.setenv(fc.CHECK_ENV, "off")
-    assert fc.mode() is None
-
-
 def test_review_without_room_to_act_says_nothing():
-    assert fc.review_finish(plan_text=PLAN, request="", floor=0, iters_left=1,
-                            commands=COMMANDS) is None
+    assert fc.review_finish(plan_text=PLAN, floor=0, iters_left=1, commands=COMMANDS) is None
+
+
+def test_review_without_an_archive_says_nothing(monkeypatch):
+    from fastworkflow.observation_offloading import state
+
+    monkeypatch.setattr(state, "durable_archive", lambda: None)
+    monkeypatch.setattr(state, "record_event", lambda *a, **k: None)
+    assert fc.review_finish(plan_text=PLAN, floor=0, iters_left=5, commands=COMMANDS) is None
+
+
+def test_review_reads_the_runs_from_the_floor_on(monkeypatch):
+    from types import SimpleNamespace
+
+    from fastworkflow.observation_offloading import state
+
+    events = []
+    store = SimpleNamespace(list=lambda scope, timeout: ROWS_DONE[:4])
+    monkeypatch.setattr(state, "current_scope", lambda: "scope")
+    monkeypatch.setattr(state, "durable_archive", lambda: store)
+    monkeypatch.setattr(state, "record_event", lambda event, **k: events.append(event))
+    note = fc.review_finish(plan_text=PLAN, floor=1, iters_left=5, commands=COMMANDS,
+                            core_commands=CORE)
+    assert note.splitlines()[1] == "- Step 5 (list_loans) was not run: run it now."
+    assert events[-1]["reason"] == "checked" and events[-1]["unmet_not_executed"] == [5]
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +171,20 @@ def test_no_reviewer_or_no_note_finishes_at_once(monkeypatch):
         assert trajectory["observation_0"] == "Completed."
 
 
+def test_finish_with_arguments_ignores_them_and_is_reviewed(monkeypatch):
+    agent = fastWorkflowReAct("user_query -> answer", tools=[a_tool], max_iters=10)
+    seen = []
+    agent.finish_reviewer = lambda trajectory, left: seen.append(left) or "Step 2 was not run."
+    scripted(agent, monkeypatch, [("finish", {"analysis": "done", "command": ""}),
+                                  ("finish", {"final_answer": "x", "__args__": {}})])
+    trajectory = {}
+    assert agent._run_loop(trajectory, 0, {}, 10, 0) is None
+    assert seen == [10 - 0 - 1]
+    assert trajectory["observation_0"] == "Step 2 was not run."
+    assert trajectory["observation_1"] == "Completed."
+    assert "observation_2" not in trajectory
+
+
 def test_a_failing_reviewer_never_fails_the_run(monkeypatch):
     agent = fastWorkflowReAct("user_query -> answer", tools=[a_tool], max_iters=10)
 
@@ -271,7 +202,7 @@ def test_a_failing_reviewer_never_fails_the_run(monkeypatch):
 # The execution context attaches the check per run
 # ---------------------------------------------------------------------------
 
-def test_the_execution_context_attaches_a_check_only_when_switched_on(monkeypatch):
+def test_the_execution_context_attaches_a_check_whenever_the_run_has_a_plan(monkeypatch):
     from types import SimpleNamespace
 
     from fastworkflow.workflow_execution_context import WorkflowExecutionContext
@@ -281,11 +212,6 @@ def test_the_execution_context_attaches_a_check_only_when_switched_on(monkeypatc
     ctx._app_workflow = SimpleNamespace(folderpath="/nowhere")
     ctx._initial_plan_text = PLAN
 
-    monkeypatch.delenv(fc.CHECK_ENV, raising=False)
-    ctx._attach_finish_check("find Dune", 0)
-    assert ctx._workflow_tool_agent.finish_reviewer is None
-
-    monkeypatch.setenv(fc.CHECK_ENV, "commands")
     seen = {}
     monkeypatch.setattr(fc, "review_finish", lambda **kwargs: seen.update(kwargs) or "note")
     import fastworkflow
@@ -295,10 +221,10 @@ def test_the_execution_context_attaches_a_check_only_when_switched_on(monkeypatc
         get_definition=lambda folder: SimpleNamespace(
             routing_definition_map={c: set() for c in COMMANDS})))
     monkeypatch.setattr(workflow_agent, "core_command_names", lambda: frozenset(CORE))
-    ctx._attach_finish_check("find Dune", 3)
+    ctx._attach_finish_check(3)
     assert ctx._workflow_tool_agent.finish_reviewer({}, 7) == "note"
-    assert (seen["plan_text"], seen["floor"], seen["iters_left"], seen["use_model"]) == (PLAN, 3, 7, False)
+    assert (seen["plan_text"], seen["floor"], seen["iters_left"]) == (PLAN, 3, 7)
 
     ctx._initial_plan_text = ""
-    ctx._attach_finish_check("find Dune", 0)
+    ctx._attach_finish_check(0)
     assert ctx._workflow_tool_agent.finish_reviewer is None

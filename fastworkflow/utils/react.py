@@ -100,8 +100,10 @@ class fastWorkflowReAct(Module):
             ]
         )
 
+        # ``**_``: arguments the model passes to finish are ignored, so finish
+        # never fails and the finish reviewer always runs (fix-njhf).
         tools["finish"] = Tool(
-            func=lambda: "Completed.",
+            func=lambda **_: "Completed.",
             name="finish",
             desc=f"Marks the task as complete. That is, signals that all information for producing the outputs, i.e. {outputs}, are now available to be extracted.",
             args={},

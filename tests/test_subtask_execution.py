@@ -4,7 +4,6 @@ from unittest.mock import MagicMock
 
 import dspy
 
-import fastworkflow
 from fastworkflow.turn import TurnStatus
 from fastworkflow.utils.react import fastWorkflowReAct
 from fastworkflow.workflow_execution_context import MAX_HANDOFFS
@@ -142,7 +141,7 @@ def test_state_round_trips_the_subtask_fields(
     assert restored._subtask_exhausted is True
 
 
-def test_split_disabled_or_single_item_runs_the_old_single_call(
+def test_single_item_split_runs_the_old_single_call(
     initialized_fastworkflow, todo_workflow_path, monkeypatch
 ):
     ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch)
@@ -158,24 +157,6 @@ def test_split_disabled_or_single_item_runs_the_old_single_call(
         "user_query": "find X and find Y",
         "available_commands": "commands",
     }
-
-
-def test_env_switch_off_never_splits(
-    initialized_fastworkflow, todo_workflow_path, monkeypatch
-):
-    ctx, _wf = _make_agent_ctx(todo_workflow_path, monkeypatch)
-    split = MagicMock(return_value=["find X", "find Y"])
-    monkeypatch.setattr("fastworkflow.workflow_agent.split_into_subtasks", split)
-    # get_env_var reads the loaded env table first, so the switch is set there
-    monkeypatch.setitem(fastworkflow._env_vars, "FW_SPLIT_REQUESTS", "0")
-    agent = _agent_with_steps(["all of it"])
-    _set_agents(ctx, agent)
-
-    result = ctx.process_turn("find X and find Y")
-
-    split.assert_not_called()
-    assert result.answer == "all of it"
-    agent.assert_called_once()
 
 
 def test_react_forward_starts_numbering_at_first_step(monkeypatch):

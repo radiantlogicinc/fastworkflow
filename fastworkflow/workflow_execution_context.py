@@ -1928,18 +1928,17 @@ class WorkflowExecutionContext:
         self._turn_refined_message = refined_user_query
         self._clear_subtask_state()
 
-        if fastworkflow.get_env_var("FW_SPLIT_REQUESTS", default="1") != "0":
-            from fastworkflow.workflow_agent import split_into_subtasks
+        from fastworkflow.workflow_agent import split_into_subtasks
 
-            subtasks = split_into_subtasks(
-                refined_user_query,
-                planner_lm=getattr(self, "_current_planner_lm", None),
-                workflow_folderpath=self._app_workflow.folderpath if self._app_workflow else None,
-            )
-            if len(subtasks) > 1:
-                self._subtasks = subtasks
-                self._origins = list(range(len(subtasks)))
-                return self._run_subtasks_from(0)
+        subtasks = split_into_subtasks(
+            refined_user_query,
+            planner_lm=getattr(self, "_current_planner_lm", None),
+            workflow_folderpath=self._app_workflow.folderpath if self._app_workflow else None,
+        )
+        if len(subtasks) > 1:
+            self._subtasks = subtasks
+            self._origins = list(range(len(subtasks)))
+            return self._run_subtasks_from(0)
 
         # An unsplit request is one sub-task, so a run that hits the step cap is handed off the same way.
         self._subtasks = [refined_user_query]
@@ -1988,7 +1987,7 @@ class WorkflowExecutionContext:
         available_commands = _what_can_i_do(self)
         step_kwargs = {} if first_step is None else {"first_step": first_step}
         self._attach_finish_check(
-            query, evidence_floor if evidence_floor is not None else (first_step or 0))
+            evidence_floor if evidence_floor is not None else (first_step or 0))
 
         return self._call_agent_with_retry(
             lambda: self._workflow_tool_agent(
@@ -1999,8 +1998,8 @@ class WorkflowExecutionContext:
             trace_input=command_info_and_refined_message_with_todolist,
         )
 
-    def _attach_finish_check(self, query: str, floor: int) -> None:
-        """Give the agent this run's finish check, or none (``FW_FINISH_CHECK`` off).
+    def _attach_finish_check(self, floor: int) -> None:
+        """Give the agent this run's finish check, or none when the run has no plan.
 
         The plan is the one ``build_query_with_next_steps`` just made for this
         run. Set before every run, so a check never outlives the run it was made for.
@@ -2011,9 +2010,8 @@ class WorkflowExecutionContext:
         agent.finish_reviewer = None
         from fastworkflow.observation_offloading import finish_check
 
-        mode = finish_check.mode()
         plan_text = str(getattr(self, "_initial_plan_text", "") or "")
-        if mode is None or not plan_text.strip() or self._app_workflow is None:
+        if not plan_text.strip() or self._app_workflow is None:
             return
         folderpath = self._app_workflow.folderpath
 
@@ -2022,10 +2020,9 @@ class WorkflowExecutionContext:
 
             routing = fastworkflow.RoutingRegistry.get_definition(folderpath)
             return finish_check.review_finish(
-                plan_text=plan_text, request=query, floor=floor, iters_left=iters_left,
+                plan_text=plan_text, floor=floor, iters_left=iters_left,
                 commands=list(routing.routing_definition_map),
-                core_commands=core_command_names(),
-                use_model=(mode == finish_check.MODE_FULL))
+                core_commands=core_command_names())
 
         agent.finish_reviewer = review
 

@@ -4,21 +4,15 @@
 
 ### Added
 
-- **Finish check: each plan step judged satisfied, not only run** (fix-3xts,
-  `observation_offloading.finish_check`, off by default). When the agent picks
-  `finish`, the run's initial plan is read against the outputs it archived:
-  pass A (code) names every command step whose command never ran successfully;
-  pass B (one model call, `LLM_FINISH_CHECK`, else `LLM_AGENT`) judges the
-  steps that ask for something beyond running a command, and code refuses an
-  `unmet` whose quoted missing words are not in the step text, name the command
-  or the answer, or mostly appear in the step's output. Unmet steps become one
-  note (at most 1 KB) that replaces the finish observation, once per agent run
-  and only with two or more iterations left (`fastWorkflowReAct.finish_reviewer`).
-  `FW_FINISH_CHECK=1` (or `full`) runs both passes, `commands` pass A alone. The
-  prompt is bounded by the new `context_budget.FINISH_CHECK` budget
-  (`finish_check_max_bytes`, 3/64 of the window: 24,576 bytes at the reference
-  window, ceiling 65,536, override `FW_FINISH_CHECK_MAX_BYTES`). Every checked
-  finish records a `finish_check` offload event. It fails open.
+- **Finish check: every command step of the plan ran** (fix-3xts,
+  `observation_offloading.finish_check`). When the agent picks `finish`, the
+  run's initial plan is read against the outputs it archived, in code (no model
+  call): a command step whose command never ran successfully is unmet. Unmet
+  steps become one note (at most 1 KB, "Step N (cmd) was not run: run it now.")
+  that replaces the finish observation, once per agent run and only with two or
+  more iterations left (`fastWorkflowReAct.finish_reviewer`). Every checked
+  finish records a `finish_check` offload event. It fails open: no plan, no
+  archive or an error means no note.
 
 - **Split settings as one command-form file, `_skills/_split.py`**
   (`workflow_agent.split_settings`, `SplitSettings`): the split stage's
@@ -264,6 +258,24 @@
 
 ### Removed
 
+- **`FW_SPLIT_REQUESTS`**: request splitting is always on. The switch already
+  defaulted to `1` and was on in every evaluation run; `"0"` no longer turns
+  it off (the variable is not read), and the commented line is gone from
+  `examples/fastworkflow.env`.
+
+- **The finish check's model pass and its switch** (fix-3xts follow-up,
+  fix-uyab): the one model call that judged whether each executed step's
+  output held what the step asked for is gone, with its filters, prompt and
+  "Step N asks for ..." note lines. In a live run it helped alone 3 times, was
+  ignored as a false alarm 19 times and led to 1 made-up answer. Gone with it:
+  `FW_FINISH_CHECK` (the command check is always on when a run has a plan; no
+  `commands`/`full` modes and no off switch), the `LLM_FINISH_CHECK` model
+  role and `LITELLM_API_KEY_FINISH_CHECK`, and the `context_budget.FINISH_CHECK`
+  budget (`finish_check_max_bytes`, `FW_FINISH_CHECK_MAX_BYTES`), which sized
+  only that model's prompt. `finish_check` events no longer carry
+  `unmet_by_model`, `vetoes`, `model_called`, `prompt_bytes`, `error` or
+  `usage`.
+
 - **The split stage's text files**: `_skills/split_instructions.md`,
   `_skills/identifier_patterns.txt` and `_skills/subject_hints.md` are no
   longer read (nor `workflow_agent._skill_file_text`); their contents go in
@@ -279,6 +291,11 @@
   A folder under `_skills` is not a skill (see the skill-context note above).
 
 ### Changed
+
+- **The finish check runs on every run that has a plan** (fix-3xts follow-up):
+  it no longer waits for `FW_FINISH_CHECK`, and it reads plan steps against
+  their commands' runs only. A run with no durable archive gets no note
+  (`reason: "no archive"`) instead of every step reported as not run.
 
 - **A skill call's extra step is kept for a synonym its command uses**
   (`fix-9x93`; `skill_commands.command_texts`, `command_descriptions`,
@@ -464,6 +481,9 @@ does not backfill them.
   (`fix-u2zw`): a persisted `command_directory.json` whose recorded module
   paths no longer exist is rebuilt instead of failing with "Could not import
   module from path".
+- **`finish` called with arguments finishes** (`fix-njhf`): arguments the model
+  passes to `finish` (`analysis=...`, `command=...`) are ignored instead of
+  raising "Arg X is not in the tool's args", so the finish check runs.
 
 ## 3.5.0 — observability debug UI hardening and winner-selection fixes
 

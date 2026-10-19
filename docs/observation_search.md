@@ -210,11 +210,6 @@ bought.
 The in-process event buffer is capped at 2,000 events, so the residue is small and
 bounded.
 
-**The finish check's thresholds were calibrated on one workflow.** `FLAG_MIN`,
-`ASK_MIN`, the question wording and the published precision and recall come from
-attempts on a single workflow with the default model. Another workflow, model or
-provider is unmeasured.
-
 ## Validation
 
 - `tests/test_observation_offloading.py` covers the 1 KB rule (exact savings at
