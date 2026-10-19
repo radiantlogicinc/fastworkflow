@@ -103,6 +103,85 @@ def test_the_command_is_read_from_qualified_and_odd_forms():
     assert fc.command_token("show_details<Dune>", names) == "show_details"
 
 
+# A resolved alias, a "(skip when ...)" step, a bare run against a step with an argument
+
+def test_an_alias_counts_for_the_command_it_resolved_to():
+    plan = "1. open_book_by_uid with the uid\n2. show_details"
+    rows = [row(0, "open_book_by_uid b1", "Entered Book context."),
+            row(1, "describe_book", "author: Frank Herbert")]
+    assert [v.step for v in fc.check(plan, rows, COMMANDS).unmet] == [2]
+    log = [{"command": "open_book_by_uid b1", "command_name": "Library/open_book_by_uid",
+            "response": "Entered Book context."},
+           {"command": "describe_book", "command_name": "Book/show_details",
+            "response": "author: Frank Herbert"}]
+    resolved = fc.resolved_command_names(log)
+    assert resolved["describe_book"] == "show_details"
+    assert fc.check(plan, rows, COMMANDS, resolved=resolved).unmet == []
+
+
+def test_a_text_resolving_to_two_commands_keeps_its_own_name():
+    log = [{"command": "details", "command_name": "Book/show_details"},
+           {"command": "details", "command_name": "Library/find_book"},
+           {"command": "x", "command_name": None}]
+    assert fc.resolved_command_names(log) == {}
+
+
+def test_review_passes_the_resolved_names_on(monkeypatch):
+    from types import SimpleNamespace
+
+    from fastworkflow.observation_offloading import state
+
+    store = SimpleNamespace(list=lambda scope, timeout: [row(0, "describe_book", "author: X")])
+    monkeypatch.setattr(state, "current_scope", lambda: "scope")
+    monkeypatch.setattr(state, "durable_archive", lambda: store)
+    monkeypatch.setattr(state, "record_event", lambda *a, **k: None)
+    plan = "1. show_details\n2. list_loans"
+    kwargs = dict(plan_text=plan, floor=0, iters_left=5, commands=COMMANDS)
+    assert "Step 1" in fc.review_finish(**kwargs)
+    note = fc.review_finish(**kwargs, resolved={"describe_book": "show_details"})
+    assert "Step 1" not in note and "Step 2 (list_loans)" in note
+
+
+def test_a_step_with_skip_when_after_its_command_is_conditional():
+    plan = ("1. show_details\n"
+            "2. list_loans book_uid=<the uid> (skip when it has no loans)\n"
+            "3. add_note (skip if the book has a note already)")
+    steps = fc.parse_plan(plan, COMMANDS, CORE)
+    assert [(s.kind, s.command) for s in steps] == [
+        ("command", "show_details"), ("conditional", "list_loans"), ("conditional", "add_note")]
+    assert fc.check(plan, [row(0, "show_details", "a")], COMMANDS, core_commands=CORE).unmet == []
+
+
+def test_a_step_that_writes_an_argument_reads_it():
+    steps = fc.parse_plan("1. list_loans book_uid=<the first book>\n2. list_loans\n"
+                          "3. list_loans with the uid\n4. find_book query=Dune", COMMANDS)
+    assert [s.wants_arguments for s in steps] == [True, False, False, True]
+    assert fc.has_arguments("Book/list_loans", {"list_loans"}) is False
+    assert fc.has_arguments("list_loans book_uid=b1", {"list_loans"}) is True
+    assert fc.has_arguments("list_loans <book_uid>b1</book_uid>", {"list_loans"}) is True
+
+
+def test_a_bare_run_does_not_satisfy_a_step_that_names_an_argument():
+    plan = "1. list_loans (the roster)\n2. list_loans book_uid=<the first book's uid>\n3. show_details"
+    bare = [row(0, "list_loans", "2 loan(s)"), row(1, "show_details", "a"),
+            row(2, "list_loans", "2 loan(s)")]
+    result = fc.check(plan, bare, COMMANDS)
+    assert [(v.step, v.next_command) for v in result.unmet] == [(2, "list_loans")]
+    with_args = bare[:2] + [row(2, "list_loans book_uid=b1", "1 loan(s)")]
+    assert fc.check(plan, with_args, COMMANDS).unmet == []
+    # The run with arguments goes to the step that needs it, whatever the order.
+    swapped = [row(0, "list_loans book_uid=b1", "1 loan(s)"), row(1, "list_loans", "2 loan(s)"),
+               row(2, "show_details", "a")]
+    assert fc.check(plan, swapped, COMMANDS).unmet == []
+
+
+def test_a_bare_earlier_run_does_not_satisfy_a_setup_step_with_an_argument():
+    plan = "1. find_book query=Dune\n2. show_details"
+    rows = [row(5, "show_details", "a")]
+    assert fc.check(plan, rows, COMMANDS, earlier_rows=[row(0, "find_book", "x")]).unmet[0].step == 1
+    assert fc.check(plan, rows, COMMANDS, earlier_rows=[row(0, "find_book Dune", "x")]).unmet == []
+
+
 def test_review_without_room_to_act_says_nothing():
     assert fc.review_finish(plan_text=PLAN, floor=0, iters_left=1, commands=COMMANDS) is None
 
@@ -211,6 +290,8 @@ def test_the_execution_context_attaches_a_check_whenever_the_run_has_a_plan(monk
     ctx._workflow_tool_agent = SimpleNamespace(finish_reviewer="stale")
     ctx._app_workflow = SimpleNamespace(folderpath="/nowhere")
     ctx._initial_plan_text = PLAN
+    ctx._action_log = [{"command": "describe_book", "command_name": "Book/show_details",
+                        "response": "a"}]
 
     seen = {}
     monkeypatch.setattr(fc, "review_finish", lambda **kwargs: seen.update(kwargs) or "note")
@@ -224,6 +305,7 @@ def test_the_execution_context_attaches_a_check_whenever_the_run_has_a_plan(monk
     ctx._attach_finish_check(3)
     assert ctx._workflow_tool_agent.finish_reviewer({}, 7) == "note"
     assert (seen["plan_text"], seen["floor"], seen["iters_left"]) == (PLAN, 3, 7)
+    assert seen["resolved"] == {"describe_book": "show_details"}
 
     ctx._initial_plan_text = ""
     ctx._attach_finish_check(0)

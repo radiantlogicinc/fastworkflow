@@ -404,6 +404,7 @@ Rules:
 - **Exempt from both the horizon and the size cap.** Every prune delete gains `AND (experiment_id IS NULL OR experiment_id NOT IN <bound>)`. This covers spans, artifacts and the conversationless-turn sweep. `offload_*` deletes gain the same predicate through their turn's `experiment_id`. SQLite materialises the subquery once, and the bound set is small: no index and no measurable cost.
 - **Released by sealing, or explicitly.** Sealing releases by setting `evidence_sealed_at`; the archive now carries the evidence. Explicit release goes through `store.release_experiment_evidence(experiment_id, actor, reason)`, which inserts into `evidence_releases`. Invalid experiments are not auto-released, so their evidence stays inspectable.
 - **The size cap may be exceeded.** If bound evidence alone is over `max_bytes`, prune evicts everything unbound and records `prune_over_cap_bound_bytes` in diagnostics. It never deletes bound rows.
+- **In-flight offload evidence is exempt from the cap, not the horizon** (`fix-q2fy`). A turn's record is written when it ends and `offload_*` rows carry no `experiment_id`, so the cap evicts offload evidence only of turns with a finished (terminal-status) turn record. Evidence of any other turn, running, suspended or orphaned by a crash, goes by the horizon. Its bytes are reported as `in_flight_bytes` in the same diagnostic.
 - **`pruning_suppressed()` is unchanged.**
 
 ## 8. Older DB found by the writable store (`fix-10vj.9`)

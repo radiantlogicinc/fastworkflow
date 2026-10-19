@@ -8,10 +8,14 @@ with iterations left; a second ``finish`` is not checked.
 
 No model is called. Each numbered plan step is read for the workflow command
 it names (the first token that is a declared command). Conditional steps
-("only when ...", "if needed"), negated steps ("do not run X"), answer steps
+("only when ...", "if needed", "... (skip when ...)"), negated steps ("do not run X"), answer steps
 ("present ...", "say ...") and navigation-only steps (the framework's core
 commands) are not held to a command. A command step with no successful
 archived run of its command in this run's range is unmet: "not executed".
+An archived row counts for the command the router resolved its text to (from
+the session's action log) when that is known, else for the command its text
+names. A step that writes an argument right after its command
+(``command key=<...>``) is not satisfied by a run whose text has no arguments.
 
 On whenever the run has a plan; there is no switch. It fails open: any
 error -- no plan, no archive -- means no note and the turn finishes as it
@@ -62,7 +66,10 @@ _CONDITION_RE = re.compile(
     r"where (?:needed|applicable)|else)\b", re.IGNORECASE)
 #: Anywhere in a step, these make it conditional.
 _ANYWHERE_CONDITION_RE = re.compile(
-    r"\b(?:if needed|if necessary|if required|as needed|optional(?:ly)?)\b", re.IGNORECASE)
+    r"\b(?:if needed|if necessary|if required|as needed|optional(?:ly)?|"
+    r"skip (?:it )?(?:when|if|unless))\b", re.IGNORECASE)
+#: A step's command followed directly by an argument: ``key=<...>`` or ``key=value``.
+_STEP_ARGUMENT_RE = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_]*\s*=")
 #: Words that, before a step's command, negate it ("do not run X", "none of ...").
 _NEGATION_RE = re.compile(
     r"\b(?:do not|don't|dont|never|none|not|no|nor|without|avoid|skip)\b", re.IGNORECASE)
@@ -79,6 +86,9 @@ class PlanStep:
     text: str
     kind: str
     command: str = ""
+    #: The step writes an argument right after its command; a run of the
+    #: command with no arguments at all does not satisfy it.
+    wants_arguments: bool = False
     #: Archive rows attributed to this step (successful runs of its command).
     rows: list = field(default_factory=list)
 
@@ -182,9 +192,10 @@ def _classify(number: int, text: str, names: set, core: set) -> PlanStep:
         return PlanStep(number, text, KIND_SKIPPED, command)
     if command.lower() in core:
         return PlanStep(number, text, KIND_SKIPPED, command)
+    wants_arguments = bool(_STEP_ARGUMENT_RE.match(clean[position + len(command):]))
     if _CONDITION_RE.search(before) or _ANYWHERE_CONDITION_RE.search(clean):
-        return PlanStep(number, text, KIND_CONDITIONAL, command)
-    return PlanStep(number, text, KIND_COMMAND, command)
+        return PlanStep(number, text, KIND_CONDITIONAL, command, wants_arguments)
+    return PlanStep(number, text, KIND_COMMAND, command, wants_arguments)
 
 
 def run_failed(text: str) -> bool:
@@ -193,24 +204,84 @@ def run_failed(text: str) -> bool:
     return any(marker in body for marker in FAILURE_MARKERS)
 
 
-def _runs_by_command(rows: Sequence[Mapping[str, Any]], names: set) -> dict[str, list]:
+def _normalized(command_text: str) -> str:
+    return " ".join(str(command_text or "").split())
+
+
+def resolved_command_names(action_log: Iterable[Mapping[str, Any]]) -> dict[str, str]:
+    """Raw command text -> the plain command name it resolved to, from an action log.
+
+    Records carry ``command`` (the text as sent) and ``command_name`` (what the
+    router resolved it to). A text seen resolving to more than one command is
+    left out: its rows fall back to the name their text gives.
+    """
+    resolved: dict[str, str] = {}
+    conflicting: set[str] = set()
+    for record in action_log or ():
+        try:
+            raw = _normalized(record.get("command"))
+            name = plain_command_name(record.get("command_name") or "")
+        except AttributeError:
+            continue
+        if not raw or not name:
+            continue
+        if resolved.setdefault(raw, name).lower() != name.lower():
+            conflicting.add(raw)
+    for raw in conflicting:
+        resolved.pop(raw, None)
+    return resolved
+
+
+def has_arguments(command_text: str, names: Iterable[str] = ()) -> bool:
+    """Whether a command string carries anything after its command name.
+
+    When the command name cannot be found in the text, it is assumed to
+    (the conservative reading: the run is not ruled out).
+    """
+    text = str(command_text or "")
+    token = command_token(text, names)
+    if not token:
+        return False
+    match = re.search(r"(?<![A-Za-z0-9_])" + re.escape(token) + r"(?![A-Za-z0-9_])", text)
+    if match is None:
+        return True
+    return bool(text[match.end():].strip(" \t\r\n.,;:"))
+
+
+def _runs_by_command(rows: Sequence[Mapping[str, Any]], names: set,
+                     resolved: Optional[Mapping[str, str]] = None) -> dict[str, list]:
     runs: dict[str, list] = {}
+    resolved = {_normalized(k): v for k, v in (resolved or {}).items()}
     for row in sorted(rows, key=lambda r: int(r.get("step_index") or 0)):
         if run_failed(row.get("text", "")):
             continue
-        runs.setdefault(command_token(row.get("command", ""), names).lower(), []).append(row)
+        raw = row.get("command", "")
+        name = resolved.get(_normalized(raw)) or command_token(raw, names)
+        runs.setdefault(name.lower(), []).append(row)
     return runs
+
+
+def _satisfies(step: PlanStep, row: Mapping[str, Any], names: set) -> bool:
+    """A run with no arguments does not satisfy a step that writes one."""
+    return not step.wants_arguments or has_arguments(row.get("command", ""), names)
 
 
 def attribute_rows(steps: Sequence[PlanStep], rows: Sequence[Mapping[str, Any]],
                    commands: Iterable[str] = (),
-                   earlier_rows: Sequence[Mapping[str, Any]] = ()) -> None:
+                   earlier_rows: Sequence[Mapping[str, Any]] = (),
+                   resolved: Optional[Mapping[str, str]] = None) -> None:
     """Give each command (and conditional command) step the successful rows of its command.
 
     Steps naming the same command take its runs in order: the k-th such step
     gets the k-th run, and the last such step also gets any runs left over (a
     paged listing is one step run several times). Rows are archive rows:
     ``command`` (the command text as sent), ``step_index``, ``text``.
+
+    *resolved* maps a row's command text to the command it resolved to (see
+    ``resolved_command_names``); a row whose text it lacks counts for the
+    command its text names. A step that writes an argument after its command
+    takes only runs that carry arguments: those steps pick first, in order,
+    then the others take what is left, in order.
 
     *earlier_rows* are the turn's rows from before this run (an earlier
     sub-task). A step left without a row that comes before the run's first
@@ -219,26 +290,39 @@ def attribute_rows(steps: Sequence[PlanStep], rows: Sequence[Mapping[str, Any]],
     already done.
     """
     names = {plain_command_name(c).lower() for c in commands if c}
-    runs = _runs_by_command(rows, names)
+    runs = _runs_by_command(rows, names, resolved)
     by_command: dict[str, list[PlanStep]] = {}
     for step in steps:
         if step.kind in (KIND_COMMAND, KIND_CONDITIONAL) and step.command:
             by_command.setdefault(step.command.lower(), []).append(step)
     for command, group in by_command.items():
         available = runs.get(command, [])
-        for position, step in enumerate(group):
-            if position < len(available):
-                step.rows = [available[position]]
-        if len(available) > len(group) and group:
-            group[-1].rows.extend(available[len(group):])
+        used: set[int] = set()
+        # Steps that write an argument first, so a bare run never takes the
+        # place of a run with arguments they need; with none, this is the
+        # k-th step / k-th run pairing.
+        for picky in (True, False):
+            for step in group:
+                if step.wants_arguments != picky:
+                    continue
+                for position, row in enumerate(available):
+                    if position not in used and _satisfies(step, row, names):
+                        step.rows = [row]
+                        used.add(position)
+                        break
+        if group:
+            last = group[-1]
+            last.rows.extend(row for position, row in enumerate(available)
+                             if position not in used and _satisfies(last, row, names))
     first_done = next((s.number for s in steps if s.rows), None)
     if earlier_rows and first_done is not None:
-        earlier = _runs_by_command(earlier_rows, names)
+        earlier = _runs_by_command(earlier_rows, names, resolved)
         for step in steps:
             if step.number >= first_done:
                 break
             if step.kind in (KIND_COMMAND, KIND_CONDITIONAL) and step.command and not step.rows:
-                previous = earlier.get(step.command.lower())
+                previous = [row for row in earlier.get(step.command.lower(), [])
+                            if _satisfies(step, row, names)]
                 if previous:
                     step.rows = [previous[-1]]
 
@@ -272,12 +356,16 @@ def build_note(unmet: Sequence[Verdict]) -> Optional[str]:
 
 def check(plan_text: str, rows: Sequence[Mapping[str, Any]], commands: Iterable[str],
           *, core_commands: Iterable[str] = (),
-          earlier_rows: Sequence[Mapping[str, Any]] = ()) -> CheckResult:
-    """The plan's steps, the command steps left unmet, and the note naming them."""
+          earlier_rows: Sequence[Mapping[str, Any]] = (),
+          resolved: Optional[Mapping[str, str]] = None) -> CheckResult:
+    """The plan's steps, the command steps left unmet, and the note naming them.
+
+    *resolved*: raw command text -> resolved command name (``resolved_command_names``).
+    """
     commands = list(commands)
     core_commands = list(core_commands)
     steps = parse_plan(plan_text, commands, core_commands)
-    attribute_rows(steps, rows, commands + core_commands, earlier_rows)
+    attribute_rows(steps, rows, commands + core_commands, earlier_rows, resolved)
     unmet = unmet_steps(steps)
     return CheckResult(steps=steps, unmet=unmet, note=build_note(unmet))
 
@@ -287,8 +375,13 @@ def check(plan_text: str, rows: Sequence[Mapping[str, Any]], commands: Iterable[
 # ---------------------------------------------------------------------------
 
 def review_finish(*, plan_text: str, floor: int, iters_left: int,
-                  commands: Iterable[str], core_commands: Iterable[str] = ()) -> Optional[str]:
-    """The note for this run's finish, or None. Reads the run's archived rows; never raises."""
+                  commands: Iterable[str], core_commands: Iterable[str] = (),
+                  resolved: Optional[Mapping[str, str]] = None) -> Optional[str]:
+    """The note for this run's finish, or None. Reads the run's archived rows; never raises.
+
+    *resolved* maps raw command text to the command it resolved to; rows whose
+    text it lacks count for the command their text names.
+    """
     from fastworkflow.observation_offloading.state import (
         current_scope, durable_archive, record_event)
 
@@ -311,7 +404,7 @@ def review_finish(*, plan_text: str, floor: int, iters_left: int,
         rows = [r for r in stored if int(r.get("step_index") or 0) >= int(floor or 0)]
         earlier = [r for r in stored if int(r.get("step_index") or 0) < int(floor or 0)]
         result = check(plan_text, rows, commands, core_commands=core_commands,
-                       earlier_rows=earlier)
+                       earlier_rows=earlier, resolved=resolved)
         event.update({
             "reason": "checked",
             "plan_sha256": hashlib.sha256(str(plan_text).encode("utf-8")).hexdigest()[:16],

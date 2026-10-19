@@ -297,6 +297,15 @@
   their commands' runs only. A run with no durable archive gets no note
   (`reason: "no archive"`) instead of every step reported as not run.
 
+- **Finish check: fewer false "not run" notes** (fix-uyab, part):
+  an archived run counts for the command its text resolved to, read from the
+  session's action log (`resolved_command_names`; `check`, `attribute_rows`
+  and `review_finish` take `resolved=`), so an alias satisfies its command's
+  step; a step with "(skip when ...)", "(skip if ...)" or "(skip unless ...)"
+  after its command is conditional; and a step that writes an argument right
+  after its command (`command key=<...>`) is not satisfied by a run of the
+  command with no arguments at all.
+
 - **A skill call's extra step is kept for a synonym its command uses**
   (`fix-9x93`; `skill_commands.command_texts`, `command_descriptions`,
   `command_utterances`): `filter_extra_steps` (`texts=`) matches the request's
@@ -369,6 +378,17 @@
   whole, so the cap is a real bound. No new settings. A malformed `FW_OBS_*`
   integer now logs a warning, and so does an unsealed experiment holding the
   file over the cap.
+
+### Fixed
+
+- **The size-cap prune no longer deletes a running turn's offload evidence**
+  (fix-q2fy, `ObservabilityStore.prune`). A turn's record is written when it
+  ends, so the cap now evicts offload evidence only of turns with a finished
+  turn record; evidence of a turn that may still be running (or suspended)
+  goes only by the age horizon, which also clears a crashed turn's orphans.
+  The bytes it holds while the DB stays over the cap are reported as
+  `in_flight_bytes` in the `prune_over_cap_bound_bytes` diagnostic. No schema
+  change.
 
 ## 3.6.0 — DSPy 3.4, request splitting, workflow facts on classes
 

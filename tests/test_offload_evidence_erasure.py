@@ -16,6 +16,7 @@ from __future__ import annotations
 from tests.benchmark_pins import STORE_PIN
 import hashlib
 import importlib
+import json
 import os
 import sqlite3
 import stat
@@ -129,14 +130,16 @@ class EvidenceFixture(unittest.TestCase):
         )
         return archive
 
-    def seed_turn(self, scope: RuntimeHandleScope) -> None:
+    def seed_turn(
+        self, scope: RuntimeHandleScope, *, status: str = "completed"
+    ) -> None:
         """The turn record that names the same channel."""
         store = obs.ObservabilityStore(self.db_path)
         row = dict(
             turn_key=scope.turn_key, channel_id=scope.channel_id,
             conversation_id=None, ordinal=None, user_message="fixture",
             refined_user_message=None, entry_workflow_name="fixture",
-            entry_context="", status="completed", success=1,
+            entry_context="", status=status, success=1,
             failure_reason=None, answer="fixture answer",
             conversation_summary=None, conversation_traces=None,
             started_at=None, completed_at=None, suspended_ms=0,
@@ -407,6 +410,7 @@ class RetentionTests(EvidenceFixture):
                 scope, f"sized-{index:02d}",
                 text=f"sized-{index:02d}\n" + os.urandom(6_000).hex(),
             )
+            self.seed_turn(scope)
             self.age_rows(100 - index, turn_key=scope.turn_key)
         store = obs.ObservabilityStore(self.db_path)
         with store._connect() as conn:
@@ -421,6 +425,64 @@ class RetentionTests(EvidenceFixture):
         for scope in turns[:25]:
             self.assertIsNone(remaining.get(scope, "O1"))
         self.assertIn("sized-25", remaining.get(turns[25], "O1")["text"])
+
+    def _over_cap_diagnostic(self) -> dict | None:
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT value FROM diagnostics WHERE key=?",
+                (obs.PRUNE_OVER_CAP_BOUND_DIAGNOSTIC,),
+            ).fetchone()
+        return None if row is None else json.loads(row[0])
+
+    def test_the_size_cap_never_evicts_a_turn_that_may_still_be_running(self):
+        """No finished turn record means the turn may be running (fix-q2fy).
+
+        The running turn is the oldest evidence in the file and the cap is one
+        byte, yet only the finished turns go; the bytes it holds are reported
+        beside the bound ones, and the prune still ends.
+        """
+        running = chatbot_scope("chat", turn="turn-running")
+        suspended = chatbot_scope("chat", turn="turn-suspended")
+        finished = [chatbot_scope("chat", turn=f"turn-done-{i}") for i in range(3)]
+        self.populate(running, "confidential-running")
+        self.age_rows(100, turn_key=running.turn_key)
+        self.populate(suspended, "confidential-suspended")
+        self.seed_turn(suspended, status="suspended")
+        self.age_rows(90, turn_key=suspended.turn_key)
+        for index, scope in enumerate(finished):
+            self.populate(scope, f"confidential-done-{index}")
+            self.seed_turn(scope)
+            self.age_rows(80 - index, turn_key=scope.turn_key)
+
+        deleted = obs.ObservabilityStore(self.db_path).prune(
+            retention_days=3650, max_bytes=1
+        )
+
+        self.assertEqual(deleted["offload_evidence"], 3)
+        self.assert_readable(running, "confidential-running")
+        self.assert_readable(suspended, "confidential-suspended")
+        for index, scope in enumerate(finished):
+            self.assert_erased(scope, f"confidential-done-{index}")
+        recorded = self._over_cap_diagnostic()
+        self.assertEqual(recorded["bound_bytes"], 0)
+        self.assertGreater(recorded["in_flight_bytes"], 0)
+        self.assertEqual(recorded["max_bytes"], 1)
+
+    def test_the_horizon_still_removes_an_orphan_of_a_crashed_turn(self):
+        """Evidence with no turn record past the horizon goes, cap or not."""
+        orphan = chatbot_scope("chat", turn="turn-crashed")
+        running = chatbot_scope("chat", turn="turn-running")
+        self.populate(orphan, "confidential-orphan")
+        self.age_rows(400, turn_key=orphan.turn_key)
+        self.populate(running, "confidential-running")
+
+        deleted = obs.ObservabilityStore(self.db_path).prune(
+            retention_days=30, max_bytes=1
+        )
+
+        self.assertEqual(deleted["offload_evidence"], 1)
+        self.assert_erased(orphan, "confidential-orphan")
+        self.assert_readable(running, "confidential-running")
 
     def test_a_pruned_conversationless_turn_takes_its_evidence(self):
         """The operator opt-in that deletes turn records deletes their evidence too."""

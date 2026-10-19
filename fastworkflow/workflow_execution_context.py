@@ -2019,10 +2019,14 @@ class WorkflowExecutionContext:
             from fastworkflow.workflow_agent import core_command_names
 
             routing = fastworkflow.RoutingRegistry.get_definition(folderpath)
+            # The archive keeps the command text as sent; the action log says
+            # which command each text resolved to (an alias, a misspelling).
             return finish_check.review_finish(
                 plan_text=plan_text, floor=floor, iters_left=iters_left,
                 commands=list(routing.routing_definition_map),
-                core_commands=core_command_names())
+                core_commands=core_command_names(),
+                resolved=finish_check.resolved_command_names(
+                    getattr(self, "_action_log", None) or ()))
 
         agent.finish_reviewer = review
 

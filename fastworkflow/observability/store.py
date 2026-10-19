@@ -5331,6 +5331,11 @@ class ObservabilityStore:
         cap, the bytes it holds are recorded under
         `PRUNE_OVER_CAP_BOUND_DIAGNOSTIC`; nothing bound is deleted.
 
+        Offload evidence of a turn with no finished turn record -- one that
+        may still be running -- is exempt from the cap but not the horizon,
+        which is what removes a crashed turn's orphans. Its bytes are reported
+        beside the bound ones as ``in_flight_bytes`` (fix-q2fy).
+
         ``include_conversationless_turns`` (operator opt-in) also
         deletes conversation-less turn records (e.g. per-invocation CLI
         channels) older than the horizon, with their spans, artifacts and review
@@ -5363,6 +5368,15 @@ class ObservabilityStore:
         )
         unbound = f"(experiment_id IS NULL OR experiment_id NOT IN ({bound}))"
         bound_turns = f"SELECT turn_key FROM turns WHERE experiment_id IN ({bound})"
+        # A turn's record is written when it ends, and offload evidence carries
+        # no experiment id, so evidence with no finished turn record may belong
+        # to a turn still running: the cap never evicts it, only the horizon
+        # does (which is also what clears a crashed turn's orphans) (fix-q2fy).
+        finished_turns = (
+            "SELECT turn_key FROM turns WHERE status IN ("
+            + ",".join(f"'{status}'" for status in sorted(TERMINAL_TURN_STATUSES))
+            + ")"
+        )
 
         with self._connect() as conn:
             # As in `forget_channel`: retention deletes evidence text, and a
@@ -5452,7 +5466,7 @@ class ObservabilityStore:
                 )
                 oldest_turns = self._offload_turns_in_txn(
                     conn, before=None, limit=_OFFLOAD_PRUNE_BATCH_TURNS,
-                    exempt=bound_turns,
+                    exempt=bound_turns, only=finished_turns,
                 )
                 self._delete_offload_turns_in_txn(
                     conn, oldest_turns, deleted
@@ -5510,15 +5524,25 @@ class ObservabilityStore:
                 self._bound_evidence_bytes_in_txn(conn, bound, bound_turns)
                 if only_bound_left else 0
             )
-            if bound_bytes:
+            in_flight_bytes = (
+                self._in_flight_offload_bytes_in_txn(
+                    conn, bound_turns, finished_turns
+                )
+                if only_bound_left else 0
+            )
+            if bound_bytes or in_flight_bytes:
                 logger.warning(
                     f"Observability DB {self.db_path} is over FW_OBS_DB_MAX_BYTES "
                     f"({max_bytes}) and {bound_bytes} bytes of it belong to "
                     "unsealed experiments, which prune never evicts; seal them "
-                    "or call release_experiment_evidence (fix-nczr.3)"
+                    "or call release_experiment_evidence (fix-nczr.3); "
+                    f"{in_flight_bytes} bytes are offload evidence of turns "
+                    "with no finished record, which only the horizon evicts "
+                    "(fix-q2fy)"
                 )
                 self.set_diagnostic(conn, PRUNE_OVER_CAP_BOUND_DIAGNOSTIC, {
                     "bound_bytes": bound_bytes,
+                    "in_flight_bytes": in_flight_bytes,
                     "db_size_bytes": self.db_size_bytes(),
                     "max_bytes": max_bytes,
                 })
@@ -5586,14 +5610,34 @@ class ObservabilityStore:
         ).fetchone()[0])
 
     @staticmethod
+    def _in_flight_offload_bytes_in_txn(
+        conn: sqlite3.Connection, bound_turns: str, finished_turns: str
+    ) -> int:
+        """Offload evidence text held by unbound turns with no finished record,
+        which the cap leaves to the horizon (fix-q2fy)."""
+        if "offload_evidence" not in _present_offload_tables(conn):
+            return 0
+        return int(conn.execute(
+            "SELECT COALESCE(SUM(length(text_utf8)), 0) FROM offload_evidence "
+            f"WHERE turn_key NOT IN ({finished_turns}) "
+            f"AND turn_key NOT IN ({bound_turns})"
+        ).fetchone()[0])
+
+    @staticmethod
     def _offload_turns_in_txn(
-        conn: sqlite3.Connection, *, before: Optional[str], limit: int, exempt: str
+        conn: sqlite3.Connection,
+        *,
+        before: Optional[str],
+        limit: int,
+        exempt: str,
+        only: Optional[str] = None,
     ) -> list[str]:
         """The oldest offload-evidence turns, optionally only those begun before *before*.
 
         A turn's age is the earliest timestamp on any of its evidence,
         or event rows -- when the turn began -- so a turn is always dropped
         whole and never leaves an event whose evidence is gone. Turns *exempt* selects are never returned.
+        When *only* is given, only turns it selects are returned.
         """
         tables = _present_offload_tables(conn)
         if not tables:
@@ -5609,7 +5653,8 @@ class ObservabilityStore:
             str(row[0])
             for row in conn.execute(
                 f"SELECT turn_key FROM ({dated}) WHERE turn_key NOT IN ({exempt}) "
-                f"GROUP BY turn_key {having} "
+                + (f"AND turn_key IN ({only}) " if only is not None else "")
+                + f"GROUP BY turn_key {having} "
                 "ORDER BY MIN(at), turn_key LIMIT ?",
                 params,
             ).fetchall()
