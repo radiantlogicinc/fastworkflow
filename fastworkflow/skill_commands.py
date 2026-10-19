@@ -13,7 +13,27 @@ The ``_skills`` folder is laid out as the root of ``_commands`` is: a skill is t
 (snake_case: ``show_record.py``). A ``.py`` file whose name starts with ``_`` is a helper the
 skill files import (``from ._kinds import FIND``), not a skill. A subfolder is reserved for a
 skill context (as ``_commands/<Context>/`` is); its files are not loaded yet (it is logged and
-skipped). Other files are the workflow's skill texts (``split_instructions.md``, ...).
+skipped). ``_skills/_split.py`` is not a skill either: it configures the split stage (the
+splitter's instructions, the identifier patterns of the split merge, the referent step's subject
+hints; see ``workflow_agent.split_settings``). No other file is read.
+
+The split settings file, every attribute optional::
+
+    import re
+
+
+    class Signature:
+        """Split the user's request into the separate requests it bundles together. ..."""
+
+
+    # Account numbers, as the commands take them: acct_4421
+    identifier_patterns = [re.compile(r"\bacct_[0-9]+")]
+
+    subject_hints = """Records in this workflow are accounts and their owners."""
+
+The ``Signature`` docstring replaces the built-in splitter's instructions (``Signature.Input`` /
+``Signature.Output`` may describe the splitter fields ``job_types``, ``user_query`` and
+``subtasks``); a pattern that does not compile, or a file that does not import, fails the load.
 
 A skill file::
 
@@ -134,7 +154,7 @@ package, so package-relative imports work); one that fails to import is logged a
 a malformed declaration fails the load with a ``SkillFormatError`` naming the file.
 
 Any ``str`` argument that lies inside a match of one of the workflow's identifier patterns
-(``_skills/identifier_patterns.txt``, e.g. ``\bacct_[0-9]+``) without being all of it becomes the
+(``identifier_patterns`` in ``_skills/_split.py``, e.g. ``\bacct_[0-9]+``) without being all of it becomes the
 whole match ("4421" of "acct_4421"); inside several, it is refused.
 
 The model's ``steps_before`` / ``steps_after`` lose any ``<...>`` placeholder (and the

@@ -910,8 +910,8 @@ def _skill_files(root: str) -> list[tuple[str, str]]:
     As for command files at the root of ``_commands``: a skill is a file ``_skills/<name>.py``
     and its name is the file stem, a Python identifier (snake_case); a stem that is not one
     fails the load (SkillFormatError). A ``.py`` file whose name starts with ``_`` is a helper
-    the skill files may import, not a skill. Other files (``split_instructions.md``, ...) are
-    the workflow's skill texts. A subfolder is reserved for a skill context (as a
+    the skill files may import, not a skill; ``_split.py`` is the workflow's split settings
+    (``split_settings``). Other files are not read. A subfolder is reserved for a skill context (as a
     ``_commands/<Context>/`` folder is): its files are not loaded yet, and it is logged and
     skipped (one starting with ``_`` or ``.``, such as ``__pycache__``, silently).
     """
@@ -993,8 +993,7 @@ def load_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ..
     without params can be included, and an unknown skill or a cycle raises ValueError. A skill
     file that cannot be imported is logged and skipped; a malformed one raises
     SkillFormatError (a ValueError) naming its file. ``_skills`` also holds the workflow's
-    ``split_instructions.md``, ``subject_hints.md`` and ``identifier_patterns.txt``, and
-    helper modules named ``_<name>.py``.
+    split settings, ``_split.py`` (``split_settings``), and helper modules named ``_<name>.py``.
     """
     return tuple((name, description, steps) for name, description, steps, *_ in _parsed_skills(workflow_folderpath))
 
@@ -1009,45 +1008,133 @@ def skill_utterances(workflow_folderpath: str) -> dict[str, tuple[str, ...]]:
     return {name: utterances for name, _, _, _, utterances in _parsed_skills(workflow_folderpath)}
 
 
-@functools.lru_cache(maxsize=None)
-def _skill_file_text(workflow_folderpath: str, filename: str) -> str | None:
-    """Text of the optional ``_skills/<filename>`` of the workflow, or None when absent."""
-    path = os.path.join(workflow_folderpath, "_skills", filename)
-    if not os.path.isfile(path):
-        return None
-    with open(path, encoding="utf-8") as handle:
-        return handle.read()
+#: The workflow's split settings file, ``_skills/_split.py`` (see ``split_settings``).
+SPLIT_FILE = "_split.py"
+#: The fields of ``SplitIntoSubtasks`` a split settings file may describe, as ``Signature.Input``
+#: and ``Signature.Output``.
+_SPLIT_INPUTS, _SPLIT_OUTPUTS = frozenset({"job_types", "user_query"}), frozenset({"subtasks"})
 
 
-@functools.lru_cache(maxsize=None)
-def identifier_patterns(workflow_folderpath: str) -> tuple[re.Pattern, ...]:
-    """The workflow's identifier patterns, from its optional ``_skills/identifier_patterns.txt``.
+@dataclasses.dataclass(frozen=True)
+class SplitSettings:
+    """What a workflow's ``_skills/_split.py`` sets for the split stage; the defaults when absent."""
 
-    One regular expression per line; blank lines and lines starting with ``#`` are skipped.
-    Each match in a request is a subject for the split merge (``split_merge.merge_subtasks``),
-    like a quoted name: the framework knows no workflow's identifier formats. A line that is not
-    a valid expression is skipped with a warning.
-    """
-    text = _skill_file_text(workflow_folderpath, "identifier_patterns.txt")
-    patterns = []
-    for line in (text or "").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
+    #: Replaces ``SplitIntoSubtasks``'s instructions (``Signature``'s docstring), or None.
+    instructions: str | None = None
+    #: ``(field, description)`` for each splitter field the file describes.
+    field_descs: tuple[tuple[str, str], ...] = ()
+    #: The workflow's identifier formats (``identifier_patterns``).
+    identifier_patterns: tuple[re.Pattern, ...] = ()
+    #: What the workflow counts as a record, for the referent step (``resolve_referents``), or None.
+    subject_hints: str | None = None
+
+
+def _split_field_descs(signature, path: str) -> tuple[tuple[str, str], ...]:
+    """``(field, description)`` of the ``Signature.Input`` / ``Signature.Output`` fields that have one."""
+    import inspect
+
+    from pydantic import BaseModel
+
+    out = []
+    for block, allowed in (("Input", _SPLIT_INPUTS), ("Output", _SPLIT_OUTPUTS)):
+        model = getattr(signature, block, None)
+        if model is None:
             continue
-        try:
-            patterns.append(re.compile(line))
-        except re.error:
-            logger.warning(f"identifier_patterns.txt: skipping invalid pattern {line!r}")
-    return tuple(patterns)
+        if not (inspect.isclass(model) and issubclass(model, BaseModel)):
+            raise SkillFormatError(f"{path}: Signature.{block} must be a pydantic BaseModel")
+        for name, info in model.model_fields.items():
+            if name not in allowed:
+                raise SkillFormatError(f"{path}: Signature.{block}.{name} is not a splitter "
+                                       f"{block.lower()} (one of {', '.join(sorted(allowed))})")
+            if info.description is not None:
+                out.append((name, info.description))
+    return tuple(out)
+
+
+def split_settings_from_module(module, path: str) -> SplitSettings:
+    """The ``SplitSettings`` a split settings file (already imported) declares.
+
+    Every attribute is optional. Raises SkillFormatError for a malformed one (see ``split_settings``).
+    """
+    import inspect
+
+    instructions, field_descs = None, ()
+    signature = getattr(module, "Signature", None)
+    if signature is not None:
+        if not inspect.isclass(signature):
+            raise SkillFormatError(f"{path}: Signature must be a class")
+        instructions = inspect.cleandoc(signature.__doc__ or "") or None
+        field_descs = _split_field_descs(signature, path)
+    patterns = getattr(module, "identifier_patterns", ())
+    if isinstance(patterns, (str, re.Pattern)) or not isinstance(patterns, (list, tuple)):
+        raise SkillFormatError(f"{path}: identifier_patterns must be a list of compiled patterns (re.compile)")
+    for pattern in patterns:
+        if not isinstance(pattern, re.Pattern):
+            raise SkillFormatError(f"{path}: identifier_patterns holds {pattern!r}; write re.compile({pattern!r})")
+    hints = getattr(module, "subject_hints", None)
+    if hints is not None and not isinstance(hints, str):
+        raise SkillFormatError(f"{path}: subject_hints must be a str")
+    return SplitSettings(instructions=instructions, field_descs=field_descs,
+                         identifier_patterns=tuple(patterns), subject_hints=hints)
+
+
+@functools.lru_cache(maxsize=None)
+def split_settings(workflow_folderpath: str) -> SplitSettings:
+    """The workflow's split settings, from its optional ``_skills/_split.py``; the defaults without one.
+
+    The file configures the split stage (the splitter, the split merge and the referent step); it
+    is not a skill (its leading ``_`` keeps ``_skill_files`` from loading it as one). It is
+    written as a command file is, and every attribute is optional:
+
+    - ``class Signature``: its docstring replaces ``SplitIntoSubtasks``'s instructions (as
+      ``inspect.cleandoc`` gives it). ``Signature.Input`` (fields ``job_types``, ``user_query``)
+      and ``Signature.Output`` (field ``subtasks``) are optional pydantic models; a field's
+      ``description`` replaces that splitter field's description. A field the splitter does
+      not have fails the load.
+    - ``identifier_patterns``: a list of compiled regular expressions (``re.compile``), the
+      workflow's identifier formats (``identifier_patterns``).
+    - ``subject_hints``: a str telling the referent step what the workflow counts as a record
+      (``resolve_referents``).
+
+    The file is imported as a skill file is (``python_utils.get_module`` under the workflow's
+    package, so package-relative imports work). It is the whole split configuration, so a file
+    that cannot be imported (an invalid pattern raises in ``re.compile``) is not skipped, as a
+    skill file would be, but fails the load as a malformed skill file does: the error is logged
+    and SkillFormatError raised naming the file.
+    """
+    from fastworkflow.utils import python_utils
+
+    path = os.path.join(workflow_folderpath, "_skills", SPLIT_FILE)
+    if not os.path.isfile(path):
+        return SplitSettings()
+    try:
+        module = python_utils.get_module(path, workflow_folderpath)
+    except Exception as exc:  # noqa: BLE001 - reported as the file's error
+        logger.error(f"could not import the split settings {path}", exc_info=True)
+        raise SkillFormatError(f"{path}: could not import the split settings: {exc}") from exc
+    return split_settings_from_module(module, path)
+
+
+def identifier_patterns(workflow_folderpath: str) -> tuple[re.Pattern, ...]:
+    """The workflow's identifier patterns (``identifier_patterns`` of its optional ``_skills/_split.py``).
+
+    Each match in a request is a subject for the split merge (``split_merge.merge_subtasks``),
+    like a quoted name: the framework knows no workflow's identifier formats.
+    """
+    return split_settings(workflow_folderpath).identifier_patterns
 
 
 @functools.lru_cache(maxsize=None)
 def _split_signature(workflow_folderpath: str) -> type[dspy.Signature]:
-    """``SplitIntoSubtasks``, instructed by the workflow's ``_skills/split_instructions.md`` when it has one."""
-    instructions = _skill_file_text(workflow_folderpath, "split_instructions.md")
-    if instructions is None:
-        return SplitIntoSubtasks
-    return SplitIntoSubtasks.with_instructions(instructions)
+    """``SplitIntoSubtasks``, with the instructions and field descriptions of the workflow's
+    ``_skills/_split.py`` when it sets them."""
+    settings = split_settings(workflow_folderpath)
+    signature = SplitIntoSubtasks
+    if settings.instructions is not None:
+        signature = signature.with_instructions(settings.instructions)
+    for name, desc in settings.field_descs:
+        signature = signature.with_updated_fields(name, desc=desc)
+    return signature
 
 
 def _job_types_for(workflow_folderpath: str | None) -> str:
@@ -1278,7 +1365,7 @@ def resolve_referents(user_query: str, subtasks: list[str], workflow_folderpath:
     leaves", "Confirm whether Raj Patel is among its holders". For a sub-task that leaves some of
     the request's subjects unnamed, Jev chooses which of them, if any, it is about
     (``split_merge.unnamed_subjects``), told what the workflow counts as a record by its optional
-    ``_skills/subject_hints.md``; ``split_merge.with_referent`` writes the choice in. Without a Jev
+    ``subject_hints`` in ``_skills/_split.py``; ``split_merge.with_referent`` writes the choice in. Without a Jev
     key, or on any failure, the sub-tasks are returned unchanged.
 
     When a record is chosen and the sub-task holds definite descriptions ("the customer", see
@@ -1291,7 +1378,7 @@ def resolve_referents(user_query: str, subtasks: list[str], workflow_folderpath:
     if jev_lm is None:
         return subtasks
     identifiers = identifier_patterns(workflow_folderpath) if workflow_folderpath else ()
-    notes = (_skill_file_text(workflow_folderpath, "subject_hints.md") if workflow_folderpath else None) or "(none)"
+    notes = (split_settings(workflow_folderpath).subject_hints if workflow_folderpath else None) or "(none)"
     out = []
     for text in subtasks:
         try:

@@ -732,7 +732,8 @@ def test_check_verdicts_skips_a_subject_check_when_the_request_names_nothing(tmp
 
 def test_load_skill_commands_gives_each_command_the_workflow_identifiers(tmp_path):
     folder = _write(tmp_path, {"ask": NAMED})
-    (tmp_path / "_skills" / "identifier_patterns.txt").write_text("# codes\n\\bacct_[0-9]+\n")
+    (tmp_path / "_skills" / "_split.py").write_text(
+        "import re\n\n# codes\nidentifier_patterns = [re.compile(r'\\bacct_[0-9]+')]\n")
     command = workflow_agent.load_skill_commands(folder)["ask"]
     assert [p.pattern for p in command.identifiers] == [r"\bacct_[0-9]+"]
 

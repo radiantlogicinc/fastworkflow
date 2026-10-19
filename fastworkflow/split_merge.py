@@ -46,7 +46,7 @@ Fewer than two sub-tasks left means the request is one job: ``[user_query]``.
 
 Subjects are found without any catalog: back-ticked and quoted spans,
 uids, the identifiers the workflow declares (``identifiers``: compiled patterns, e.g. from
-its ``_skills/identifier_patterns.txt``), and capitalised name spans (common words that open a
+``identifier_patterns`` of its ``_skills/_split.py``), and capitalised name spans (common words that open a
 sentence, weekdays and months are not names). "X and Y Ltd", "X and Sons":
 a chain of names joined by "and" or commas whose last word is a company
 suffix is one name (a business unit). A sub-task mentions a subject when it

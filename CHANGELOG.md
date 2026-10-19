@@ -4,6 +4,22 @@
 
 ### Added
 
+- **Split settings as one command-form file, `_skills/_split.py`**
+  (`workflow_agent.split_settings`, `SplitSettings`): the split stage's
+  per-workflow settings are one Python file written like a command file, every
+  attribute optional (absent file: the built-in defaults). `class Signature`'s
+  docstring (`inspect.cleandoc`) replaces `SplitIntoSubtasks`'s instructions;
+  optional pydantic `Signature.Input` (`job_types`, `user_query`) and
+  `Signature.Output` (`subtasks`) give a splitter field a new description (a
+  field the splitter does not have fails the load); `identifier_patterns` is a
+  list of compiled patterns (`[re.compile(r"\bacct_[0-9]+")]`) for the split
+  merge and skill-call arguments; `subject_hints` is the referent step's text.
+  The file is imported as a skill file is (package-relative imports work); the
+  leading `_` keeps it from being loaded as a skill. A file that does not
+  import (an invalid pattern raises in `re.compile`) or declares a malformed
+  attribute fails the load with a `SkillFormatError` naming it, logged; an
+  invalid pattern is no longer skipped with a warning.
+
 - **The skill matcher reads a skill's `plain_utterances` as examples**
   (`workflow_agent._matcher_job_types`, `MATCHER_EXAMPLES = 4`): in the
   `MatchSkill` job-type listing a skill's line is followed by
@@ -228,6 +244,12 @@
   the include chain. A skill without `@` lines loads as before.
 
 ### Removed
+
+- **The split stage's text files**: `_skills/split_instructions.md`,
+  `_skills/identifier_patterns.txt` and `_skills/subject_hints.md` are no
+  longer read (nor `workflow_agent._skill_file_text`); their contents go in
+  `_skills/_split.py` (`Signature` docstring, `identifier_patterns`,
+  `subject_hints`), word for word.
 
 - **SKILL.md skills**: `_skills/<name>/SKILL.md` is no longer read; a skill is
   the file `_skills/<name>.py` only. This covers the plain form of 3.6.0 (the

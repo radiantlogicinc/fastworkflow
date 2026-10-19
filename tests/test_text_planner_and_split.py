@@ -269,22 +269,42 @@ def test_the_split_goes_through_the_merge():
     assert split_into_subtasks(query, planner_lm=DummyLM([follow_up])) == [query]
 
 
-def test_identifier_patterns_come_from_the_workflows_file(tmp_path):
-    from fastworkflow.workflow_agent import identifier_patterns
+def _split_file(folder, text):
+    (folder / "_skills").mkdir(parents=True, exist_ok=True)
+    (folder / "_skills" / "_split.py").write_text(text)
+    return str(folder)
+
+
+def test_identifier_patterns_come_from_the_workflows_split_file(tmp_path):
+    from fastworkflow.workflow_agent import SplitSettings, identifier_patterns, split_settings
 
     assert identifier_patterns(str(tmp_path / "no_file")) == ()
-    (tmp_path / "_skills").mkdir()
-    (tmp_path / "_skills" / "identifier_patterns.txt").write_text(
-        "# case numbers\n\\bcase_[A-Za-z0-9]+\n\n[unclosed\n")
-    patterns = identifier_patterns(str(tmp_path))
-    assert [p.pattern for p in patterns] == [r"\bcase_[A-Za-z0-9]+"]  # comment, blank, invalid skipped
+    assert split_settings(str(tmp_path / "no_file")) == SplitSettings()
+    folder = _split_file(tmp_path, "import re\n\n# case numbers\n"
+                                   "identifier_patterns = [re.compile(r'\\bcase_[A-Za-z0-9]+')]\n")
+    assert [p.pattern for p in identifier_patterns(folder)] == [r"\bcase_[A-Za-z0-9]+"]
+
+
+@pytest.mark.parametrize("text, match", [
+    ("import re\nidentifier_patterns = [re.compile('[unclosed')]\n", "could not import the split settings"),
+    ("identifier_patterns = [r'\\bcase_[0-9]+']\n", "write re.compile"),
+    ("import re\nidentifier_patterns = re.compile('x')\n", "must be a list of compiled patterns"),
+    ("subject_hints = ['not', 'text']\n", "subject_hints must be a str"),
+    ("Signature = 'text'\n", "Signature must be a class"),
+])
+def test_a_malformed_split_file_fails_the_load(tmp_path, text, match):
+    from fastworkflow.skill_commands import SkillFormatError
+    from fastworkflow.workflow_agent import load_skills
+
+    folder = _split_file(tmp_path, text)
+    with pytest.raises(SkillFormatError, match=match):
+        load_skills(folder)   # the skills carry the identifier patterns, so the split file loads with them
 
 
 def test_the_merge_gets_the_workflows_identifier_patterns(tmp_path, monkeypatch):
     import fastworkflow.workflow_agent as agent
 
-    (tmp_path / "_skills").mkdir()
-    (tmp_path / "_skills" / "identifier_patterns.txt").write_text("\\bcase_[A-Za-z0-9]+\n")
+    _split_file(tmp_path, "import re\nidentifier_patterns = [re.compile(r'\\bcase_[A-Za-z0-9]+')]\n")
     seen = {}
 
     def merge(user_query, subtasks, identifiers=()):
@@ -301,8 +321,7 @@ def test_the_merge_gets_the_workflows_identifier_patterns(tmp_path, monkeypatch)
 def test_a_split_sub_task_gets_the_referent_jev_chooses_written_in(tmp_path, monkeypatch):
     import fastworkflow.workflow_agent as agent
 
-    (tmp_path / "_skills").mkdir()
-    (tmp_path / "_skills" / "subject_hints.md").write_text("Tag names are not records.")
+    _split_file(tmp_path, 'subject_hints = """Tag names are not records."""\n')
     asked = []
 
     def choose(user_query, text, candidates, notes, jev_lm):
@@ -455,17 +474,46 @@ def test_the_planner_template_gets_the_expanded_steps(tmp_path, monkeypatch):
     assert "- find them\n- close it\n" in workflow_agent.plan_template_for("Pat is leaving", folder)
 
 
-def test_a_workflow_split_instructions_file_replaces_the_default_instructions(tmp_path):
+def test_the_split_files_signature_docstring_replaces_the_default_instructions(tmp_path):
     from fastworkflow.workflow_agent import SplitIntoSubtasks, _split_signature, load_skills
 
-    (tmp_path / "_skills").mkdir()
-    (tmp_path / "_skills" / "split_instructions.md").write_text("Split it my way.")
+    folder = _split_file(tmp_path, 'class Signature:\n    """Split it my way.\n\n    - one rule\n    """\n')
     other = tmp_path / "other"
     (other / "_skills").mkdir(parents=True)
 
-    assert _split_signature(str(tmp_path)).instructions == "Split it my way."
+    assert _split_signature(folder).instructions == "Split it my way.\n\n- one rule"
+    assert _split_signature(folder).fields["job_types"].json_schema_extra["desc"] == \
+        SplitIntoSubtasks.fields["job_types"].json_schema_extra["desc"]
     assert _split_signature(str(other)).instructions == SplitIntoSubtasks.instructions
-    assert load_skills(str(tmp_path)) == ()
+    assert load_skills(folder) == ()   # _split.py is not a skill
+
+
+def test_the_split_files_input_and_output_describe_the_splitter_fields(tmp_path):
+    from fastworkflow.skill_commands import SkillFormatError
+    from fastworkflow.workflow_agent import SplitIntoSubtasks, _split_signature
+
+    folder = _split_file(tmp_path / "ok", (
+        "from pydantic import BaseModel, Field\n\n"
+        "class Signature:\n"
+        "    class Input(BaseModel):\n"
+        "        job_types: str = Field(description='the kinds of job')\n"
+        "        user_query: str\n"
+        "    class Output(BaseModel):\n"
+        "        subtasks: str = Field(description='one sub-task per numbered line')\n"))
+    signature = _split_signature(folder)
+    assert signature.instructions == SplitIntoSubtasks.instructions   # no docstring: the default
+    assert signature.fields["job_types"].json_schema_extra["desc"] == "the kinds of job"
+    assert signature.fields["subtasks"].json_schema_extra["desc"] == "one sub-task per numbered line"
+    assert signature.fields["user_query"].json_schema_extra["desc"] == \
+        SplitIntoSubtasks.fields["user_query"].json_schema_extra["desc"]
+
+    bad = _split_file(tmp_path / "bad", (
+        "from pydantic import BaseModel\n\n"
+        "class Signature:\n"
+        "    class Input(BaseModel):\n"
+        "        request: str\n"))
+    with pytest.raises(SkillFormatError, match="Signature.Input.request is not a splitter input"):
+        _split_signature(bad)
 
 
 def _skill_folder(tmp_path):
@@ -535,15 +583,3 @@ def test_the_plan_template_reaches_the_planner_but_not_the_returned_query(workfl
 
     assert "TEMPLATE TEXT" in _prompt(lm, 0)
     assert "TEMPLATE TEXT" not in result
-
-
-def test_a_workflow_file_is_read_from_its_skills_folder_only(tmp_path):
-    from fastworkflow.workflow_agent import _skill_file_text
-
-    (tmp_path / "_skills").mkdir()
-    (tmp_path / "_skills" / "split_instructions.md").write_text("Split it my way.")
-
-    assert _skill_file_text(str(tmp_path), "split_instructions.md") == "Split it my way."
-    assert _skill_file_text(str(tmp_path / "missing"), "split_instructions.md") is None
-
-

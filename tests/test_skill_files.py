@@ -293,7 +293,8 @@ def test_steps_that_fail_on_placeholder_inputs_need_a_declared_template(tmp_path
 def test_only_the_python_files_of_the_skills_folder_not_starting_with_an_underscore_are_skills(tmp_path, caplog):
     folder = _write(tmp_path, {"close_out": CLOSE_OUT, "_helpers": "import no_such_module_anywhere\n"})
     skills = tmp_path / "_skills"
-    (skills / "split_instructions.md").write_text("Split it my way.")
+    (skills / "_split.py").write_text('class Signature:\n    """Split it my way."""\n')
+    (skills / "notes.md").write_text("Not read.")
     (skills / "__pycache__").mkdir()
     # a subfolder is reserved for a skill context: logged and skipped, its files not loaded
     (skills / "Record").mkdir()
