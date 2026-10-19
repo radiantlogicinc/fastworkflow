@@ -753,3 +753,39 @@ def test_an_extra_step_is_kept_only_for_a_part_of_the_request_the_expansion_leav
     assert dropped == ["list_controls", "open_account_by_uid", "browse_catalog"]
     assert sc._same_stem("holders", "hold") and sc._same_stem("sensitivity", "sensitive")
     assert not sc._same_stem("control", "contractor")
+
+
+def test_an_extra_step_is_kept_for_a_synonym_its_command_says_of_itself(monkeypatch):
+    catalog = ("Commands available in the current context (global):\n"
+               "- list_bills\n  List the customer's bills. Not for payments.\n"
+               "  Before executing list_bills, navigate to Customer as follows: open_customer\n"
+               "- list_orders\n  List the customer's orders.\n"
+               "- show_weather\n  Show the weather.\n")
+    texts = sc.command_texts(catalog)
+    # a single text (no utterances): its first sentence only, cautions and navigation lines aside
+    assert texts["list_bills"] == "bills customer"
+    utterances = {"list_bills": ["show every invoice this customer has", "which invoices are still open",
+                                 "check whether the bills are paid"],
+                  "show_weather": ["is it raining", "show the forecast"]}
+    assert sc.command_descriptions(catalog)["list_bills"] == "List the customer's bills."
+    names = sc.command_names(catalog) | {"open_customer", "find_customer"}
+    expanded = ["find_customer query=Ann Lee", "open_customer with its uid", "list_orders"]
+    request = "For the customer Ann Lee, list every order and every invoice, and check the forecast."
+
+    monkeypatch.setattr(sc, "command_utterances", lambda folder: utterances)
+    texts = sc.command_texts(catalog, "/some/workflow")
+    # "invoices" recurs in two of list_bills's texts; "check"/"whether" in one only
+    assert "invoices" in texts["list_bills"].split() and "check" not in texts["list_bills"].split()
+    extra = ["list_bills", "show_weather"]
+    # the name alone: no word of list_bills or show_weather shares a stem with the request
+    assert sc.filter_extra_steps(extra, expanded, names, "lookup", request=request) == ([], extra)
+    # with the texts: invoices keeps list_bills; "forecast" is said once only, show_weather still goes
+    assert sc.filter_extra_steps(extra, expanded, names, "lookup", request=request, texts=texts) == (
+        ["list_bills"], ["show_weather"])
+    # an unrelated request keeps nothing
+    assert sc.filter_extra_steps(extra, expanded, names, "lookup", request="List Ann Lee's orders.",
+                                 texts=texts) == ([], extra)
+
+
+def test_command_utterances_never_raises_on_an_unreadable_workflow(tmp_path):
+    assert sc.command_utterances(str(tmp_path / "missing")) == {}

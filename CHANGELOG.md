@@ -264,6 +264,17 @@
 
 ### Changed
 
+- **A skill call's extra step is kept for a synonym its command uses**
+  (`fix-9x93`; `skill_commands.command_texts`, `command_descriptions`,
+  `command_utterances`): `filter_extra_steps` (`texts=`) matches the request's
+  open words against a command's name and the words that recur in at least two
+  of its texts (the first sentence of its catalog description and each of its
+  `plain_utterances`; a command with one text gives that text's words), not
+  the name alone, so "every invoice" now keeps `list_bills` whose utterances
+  say "invoices". `plan_skill_call` builds the texts from the catalog and the
+  workflow's routing definition (no model call). "please", "want", "need" and
+  "has" joined the filter's stop words.
+
 - **Every experiment pins a benchmark version** (`fix-ujat`): the store and
   `ExperimentController.create_experiment` refuse an experiment without
   `benchmark_id`, `benchmark_version` and `benchmark_digest_sha256`

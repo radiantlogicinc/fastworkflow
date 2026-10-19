@@ -160,7 +160,8 @@ whole match ("4421" of "acct_4421"); inside several, it is refused.
 The model's ``steps_before`` / ``steps_after`` lose any ``<...>`` placeholder (and the
 ``key=`` that holds one); a step holding a uid-shaped token the request does not write is
 dropped, and so is a step whose commands outside the expansion no open part of the request
-asks for (``filter_extra_steps``).
+asks for, by a word of the command's name, catalog description or plain_utterances
+(``filter_extra_steps``, ``command_texts``).
 
 A skill call's ``str`` and ``int`` arguments first go through the screen a command's
 parameters go through (``utils.signatures.screen_parameter_values``: quotes and brackets
@@ -1197,9 +1198,11 @@ def _without_placeholders(text: str) -> str:
 GENERIC_COMMAND_WORDS = frozenset("""open list show find get go up by uid id set add run view read all of to for from
 with in on at the a an new next first back current""".split())
 _WORD = re.compile(r"[a-z]+")
-_STOPWORDS = frozenset("""about also and any are been but can did does each else every have here how into its just
-like many more most much not now only other over same some such than that the their them then there these they this
-those too very was were what when where which while who whom whose why will with would you your""".split())
+#: Words that say nothing of what a request asks for ("every", "please", "want").
+_STOPWORDS = frozenset("""about also and any are been but can did does each else every has have here how into its
+just like many more most much need not now only other over please same some such than that the their them then there
+these they this those too very want was were what when where which while who whom whose why will with would you
+your""".split())
 
 
 _SUFFIXES = ("ities", "ity", "ions", "ion", "ings", "ing", "ers", "er", "ies", "ive", "ed", "es", "e", "s", "y")
@@ -1227,14 +1230,85 @@ def _open_request_words(request: str, expanded: list[str]) -> set[str]:
             if len(w) >= 3 and w not in _STOPWORDS and not any(_same_stem(w, c) for c in covered)}
 
 
-def _supported(command: str, open_words: set[str]) -> bool:
-    """A word of the command's name (not a generic one) shares a stem with an open request word."""
-    words = [w for w in command.lower().split("_") if len(w) >= 3 and w not in GENERIC_COMMAND_WORDS]
+def _content_words(text: str) -> set[str]:
+    return {w for w in _WORD.findall(text.lower())
+            if len(w) >= 3 and w not in _STOPWORDS and w not in GENERIC_COMMAND_WORDS}
+
+
+def _supported(command: str, open_words: set[str], text: str = "") -> bool:
+    """A word of the command's name, or of ``text`` (what the command says it does: its
+    description, its sample utterances), shares a stem with an open request word
+    (``GENERIC_COMMAND_WORDS`` and stop words aside)."""
+    words = _content_words(command.replace("_", " ")) | _content_words(text)
     return any(_same_stem(w, r) for w in words for r in open_words)
 
 
+_CATALOG_ENTRY = re.compile(r"^- ([A-Za-z_][A-Za-z0-9_]*)\s*\n((?:[ \t]+\S.*(?:\n|$))*)", re.M)
+
+
+def command_descriptions(available_commands: str) -> dict[str, str]:
+    """``{name: description}`` of the planner's catalog text: each ``- <name>`` line's first
+    indented line, cut at its first sentence (what the command does, not the cautions and
+    navigation lines the catalog adds after it). A name listed more than once (one command
+    in several contexts) gets each description."""
+    out: dict[str, list[str]] = {}
+    for name, body in _CATALOG_ENTRY.findall(available_commands or ""):
+        first = body.strip().splitlines()[0].strip() if body.strip() else ""
+        if first and not first.endswith(":"):
+            out.setdefault(name, []).append(re.split(r"(?<=[.!?])\s", first, maxsplit=1)[0])
+    return {name: " ".join(texts) for name, texts in out.items()}
+
+
+def command_utterances(workflow_folderpath: str) -> dict[str, list[str]]:
+    """``{name: plain_utterances}`` of the workflow's commands, from its routing definition
+    (a name in several contexts gets the utterances of each). Empty when the definition
+    cannot be read; never raises."""
+    from fastworkflow.command_routing import RoutingRegistry
+
+    out: dict[str, list[str]] = {}
+    try:
+        crd = RoutingRegistry.get_definition(workflow_folderpath)
+        qualified = {q for names in crd.contexts.values() for q in names}
+        for q in sorted(qualified):
+            try:
+                meta = crd.command_directory.get_utterance_metadata(q)
+            except Exception:  # noqa: BLE001 - a command without utterances adds nothing
+                meta = None
+            if meta and meta.plain_utterances:
+                out.setdefault(q.split("/")[-1], []).extend(meta.plain_utterances)
+    except Exception:  # noqa: BLE001 - the command names alone then decide
+        from fastworkflow.utils.logging import logger
+        logger.warning(f"could not read command utterances of {workflow_folderpath}", exc_info=True)
+    return out
+
+
+def command_texts(available_commands: str, workflow_folderpath: str | None = None) -> dict[str, str]:
+    """``{name: words}`` for ``filter_extra_steps``: the words a command says of itself again
+    and again: those whose stem recurs in at least two of its texts (its catalog description,
+    ``command_descriptions``, and, with ``workflow_folderpath``, each of its plain_utterances).
+    A word one utterance happens to use ("check", "whether", "full picture") says nothing
+    of what the command is about; a word several do ("invoices" in "show every invoice
+    this customer has" and "which invoices are still open") does. A command with one text only
+    gives that text's words."""
+    sentences = {name: [desc] for name, desc in command_descriptions(available_commands).items()}
+    if workflow_folderpath:
+        for name, utterances in command_utterances(workflow_folderpath).items():
+            sentences.setdefault(name, []).extend(utterances)
+    out = {}
+    for name, texts in sentences.items():
+        words = [_content_words(t) for t in texts]
+        counts: dict[str, int] = {}
+        for ws in words:
+            for stem in {_stem(w) for w in ws}:
+                counts[stem] = counts.get(stem, 0) + 1
+        least = 2 if len(texts) > 1 else 1
+        out[name] = " ".join(sorted({w for ws in words for w in ws if counts[_stem(w)] >= least}))
+    return out
+
+
 def filter_extra_steps(extra, expanded: list[str], names: frozenset[str], skill_name: str,
-                       request: str = "", notes: list[str] | None = None) -> tuple[list[str], list[str]]:
+                       request: str = "", notes: list[str] | None = None,
+                       texts: dict[str, str] | None = None) -> tuple[list[str], list[str]]:
     """``(kept, dropped)`` of the model's steps_before/steps_after entries.
 
     An entry first loses its ``<...>`` placeholders (with the ``key=`` holding one): the
@@ -1248,13 +1322,17 @@ def filter_extra_steps(extra, expanded: list[str], names: frozenset[str], skill_
     (``GENERIC_COMMAND_WORDS`` aside) shares a stem with a request word that no word of the
     expansion's text shares one with ("show_tags" for "... and its tags" when the expansion
     says nothing of tags; not a navigation or lookup step the model adds around the
-    expansion). With no command names known only the first three rules apply. ``notes``
-    (when given) gets one line per placeholder removed.
+    expansion). ``texts`` (``{name: words}``, see ``command_texts``) widens a command's name
+    with what the command says of itself, so a request that names it by a synonym its
+    description or sample utterances use still asks for it ("every invoice" for
+    ``list_bills`` whose utterances say "invoices"). With no command names known only the
+    first three rules apply. ``notes`` (when given) gets one line per placeholder removed.
     """
     expanded_cmds = {w for s in expanded for w in _IDENT.findall(s) if w in names}
     lowered = (request or "").lower()
     open_words = _open_request_words(request, expanded) if request else None
     kept, dropped = [], []
+    texts = texts or {}
     for entry in extra or []:
         text = str(entry).strip()
         if not text:
@@ -1271,7 +1349,8 @@ def filter_extra_steps(extra, expanded: list[str], names: frozenset[str], skill_
         cmds = {w for w in _IDENT.findall(cleaned) if w in names}
         if skill_name in cleaned or (names and (not cmds or cmds <= expanded_cmds)):
             dropped.append(text)
-        elif names and open_words is not None and not any(_supported(c, open_words) for c in cmds - expanded_cmds):
+        elif names and open_words is not None and not any(_supported(c, open_words, texts.get(c, ""))
+                                                             for c in cmds - expanded_cmds):
             dropped.append(text)
         else:
             kept.append(cleaned)
@@ -1408,9 +1487,10 @@ def plan_skill_call(command: SkillCommand, request: str, available_commands: str
     args = validate_call(command, args, request, workflow, notes)
     steps = expand(command, args)
     names = command_names(available_commands)
+    texts = command_texts(available_commands, getattr(workflow, "folderpath", None))
     before, dropped_before = filter_extra_steps(getattr(prediction, "steps_before", None), steps, names,
-                                                command.name, request, notes)
+                                                command.name, request, notes, texts)
     after, dropped_after = filter_extra_steps(getattr(prediction, "steps_after", None), steps, names,
-                                              command.name, request, notes)
+                                              command.name, request, notes, texts)
     notes += [f"dropped extra step {s!r}" for s in dropped_before + dropped_after]
     return SkillCallPlan(plan=number(before + steps + after), args=args, notes=notes, prediction=prediction)
