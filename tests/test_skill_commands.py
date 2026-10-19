@@ -64,9 +64,9 @@ def _plain(description: str, steps: list[str]) -> str:
 
 
 def _write(tmp_path, skills: dict[str, str]) -> str:
+    (tmp_path / "_skills").mkdir(parents=True, exist_ok=True)
     for name, text in skills.items():
-        (tmp_path / "_skills" / name).mkdir(parents=True)
-        (tmp_path / "_skills" / name / "skill.py").write_text(text)
+        (tmp_path / "_skills" / f"{name}.py").write_text(text)
     return str(tmp_path)
 
 

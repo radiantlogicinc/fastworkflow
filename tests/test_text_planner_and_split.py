@@ -371,7 +371,7 @@ def test_a_clean_split_is_not_retried():
 
 
 def skill_file(text: str) -> str:
-    """The ``skill.py`` of a skill without params: ``text``'s first line is its description,
+    """The skill file (``_skills/<name>.py``) of a skill without params: ``text``'s first line is its description,
     every other non-empty line one step."""
     description, *steps = [line.strip() for line in text.splitlines() if line.strip()]
     return f"class Signature:\n    __doc__ = {description!r}\n\n\ndef steps():\n    return {steps!r}\n"
@@ -380,24 +380,24 @@ def skill_file(text: str) -> str:
 def test_skills_without_params_give_their_steps_and_all_are_shown(tmp_path):
     from fastworkflow.workflow_agent import _job_types_for, load_skills
 
-    for name, text in {"leaver-sweep": "One person is leaving: their reach. One job per person.\nfind them\nopen them",
-                       "unit-walk": "Walk a whole unit roster. The unit is one job.\nopen the unit"}.items():
-        (tmp_path / "_skills" / name).mkdir(parents=True)
-        (tmp_path / "_skills" / name / "skill.py").write_text(skill_file(text))
+    (tmp_path / "_skills").mkdir()
+    for name, text in {"leaver_sweep": "One person is leaving: their reach. One job per person.\nfind them\nopen them",
+                       "unit_walk": "Walk a whole unit roster. The unit is one job.\nopen the unit"}.items():
+        (tmp_path / "_skills" / f"{name}.py").write_text(skill_file(text))
 
     assert load_skills(str(tmp_path))[0] == (
-        "leaver-sweep", "One person is leaving: their reach. One job per person.", ("find them", "open them"))
+        "leaver_sweep", "One person is leaving: their reach. One job per person.", ("find them", "open them"))
     assert _job_types_for(str(tmp_path)).splitlines() == [
-        "- leaver-sweep: One person is leaving: their reach. One job per person.",
-        "- unit-walk: Walk a whole unit roster. The unit is one job.",
+        "- leaver_sweep: One person is leaving: their reach. One job per person.",
+        "- unit_walk: Walk a whole unit roster. The unit is one job.",
     ]
     assert _job_types_for(str(tmp_path / "missing")) == "(none)"
 
 
 def _write_skills(tmp_path, skills):
+    (tmp_path / "_skills").mkdir(parents=True)
     for name, text in skills.items():
-        (tmp_path / "_skills" / name).mkdir(parents=True)
-        (tmp_path / "_skills" / name / "skill.py").write_text(skill_file(text))
+        (tmp_path / "_skills" / f"{name}.py").write_text(skill_file(text))
     return str(tmp_path)
 
 
@@ -469,8 +469,8 @@ def test_a_workflow_split_instructions_file_replaces_the_default_instructions(tm
 
 
 def _skill_folder(tmp_path):
-    (tmp_path / "_skills" / "leaver").mkdir(parents=True)
-    (tmp_path / "_skills" / "leaver" / "skill.py").write_text(skill_file("Someone is leaving.\nfind them\nopen them\n"))
+    (tmp_path / "_skills").mkdir(parents=True)
+    (tmp_path / "_skills" / "leaver.py").write_text(skill_file("Someone is leaving.\nfind them\nopen them\n"))
     return str(tmp_path)
 
 

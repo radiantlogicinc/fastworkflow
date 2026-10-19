@@ -887,11 +887,12 @@ class SplitIntoSubtasks(dspy.Signature):
 
 
 def _load_skill_file(name: str, path: str, workflow_folderpath: str):
-    """The ``SkillFile`` of ``_skills/<name>/skill.py``, or None when it cannot be imported.
+    """The ``SkillFile`` of ``_skills/<name>.py``, or None when it cannot be imported.
 
     The file is imported as a command file is (``python_utils.get_module`` under the
-    workflow's package, so package-relative imports work); an import that fails is logged
-    and the skill skipped. A malformed declaration raises SkillFormatError.
+    workflow's package, so package-relative imports work: ``from ._helpers import ...`` reads
+    ``_skills/_helpers.py``); an import that fails is logged and the skill skipped. A
+    malformed declaration raises SkillFormatError.
     """
     from fastworkflow.utils import python_utils
 
@@ -903,6 +904,34 @@ def _load_skill_file(name: str, path: str, workflow_folderpath: str):
     return skill_commands.command_from_module(name, module, path)
 
 
+def _skill_files(root: str) -> list[tuple[str, str]]:
+    """``(name, path)`` of each skill file of a workflow's ``_skills`` folder, by name.
+
+    As for command files at the root of ``_commands``: a skill is a file ``_skills/<name>.py``
+    and its name is the file stem, a Python identifier (snake_case); a stem that is not one
+    fails the load (SkillFormatError). A ``.py`` file whose name starts with ``_`` is a helper
+    the skill files may import, not a skill. Other files (``split_instructions.md``, ...) are
+    the workflow's skill texts. A subfolder is reserved for a skill context (as a
+    ``_commands/<Context>/`` folder is): its files are not loaded yet, and it is logged and
+    skipped (one starting with ``_`` or ``.``, such as ``__pycache__``, silently).
+    """
+    out = []
+    for entry in sorted(os.listdir(root)) if os.path.isdir(root) else ():
+        path = os.path.join(root, entry)
+        if os.path.isdir(path):
+            if not entry.startswith(("_", ".")):
+                logger.warning(f"{path}: skill contexts (subfolders of _skills) are not loaded yet; skipped")
+            continue
+        stem, ext = os.path.splitext(entry)
+        if ext != ".py" or stem.startswith("_"):
+            continue
+        if not stem.isidentifier():
+            raise SkillFormatError(f"{path}: a skill's name is its file name, a Python identifier "
+                                   f"(snake_case): rename it to {re.sub(r'[^0-9A-Za-z_]', '_', stem)}.py")
+        out.append((stem, path))
+    return out
+
+
 @functools.lru_cache(maxsize=None)
 def _parsed_skills(workflow_folderpath: str) -> tuple[
         tuple[str, str, tuple[str, ...], "SkillCommand | None", tuple[str, ...]], ...]:
@@ -910,14 +939,10 @@ def _parsed_skills(workflow_folderpath: str) -> tuple[
     see ``load_skills``."""
     root = os.path.join(workflow_folderpath, "_skills")
     files = []   # (name, SkillFile)
-    for name in sorted(os.listdir(root)) if os.path.isdir(root) else ():
-        path = os.path.join(root, name, skill_commands.SKILL_FILE)
-        if os.path.isfile(path):
-            loaded = _load_skill_file(name, path, workflow_folderpath)
-            if loaded is not None:
-                files.append((name, loaded))
-        elif os.path.isdir(os.path.join(root, name)) and not name.startswith(("_", ".")):
-            logger.warning(f"{os.path.join(root, name)} holds no {skill_commands.SKILL_FILE}: not a skill")
+    for name, path in _skill_files(root):
+        loaded = _load_skill_file(name, path, workflow_folderpath)
+        if loaded is not None:
+            files.append((name, loaded))
     raw_steps = {name: loaded.steps for name, loaded in files}
     has_params = {name for name, loaded in files if loaded.command is not None}
 
@@ -957,18 +982,19 @@ def _parsed_skills(workflow_folderpath: str) -> tuple[
 
 
 def load_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
-    """``(name, description, steps)`` for each skill of the workflow (``_skills/<name>/``).
+    """``(name, description, steps)`` for each skill of the workflow (``_skills/<name>.py``).
 
-    A skill is defined by ``_skills/<name>/skill.py`` (format: ``fastworkflow.skill_commands``);
-    the folder name is the skill's name and the ``Signature`` docstring its description. A
+    A skill is defined by the file ``_skills/<name>.py`` (format: ``fastworkflow.skill_commands``;
+    which files are skills: ``_skill_files``); the file stem is the skill's name and the
+    ``Signature`` docstring its description. A
     skill without parameters gives its fixed ``steps()``; a skill with parameters gives its
     template text, and ``load_skill_commands`` holds its parsed form. A step that is exactly
     ``@<name>`` stands for the steps of skill ``<name>``, expanded in place; only a skill
     without params can be included, and an unknown skill or a cycle raises ValueError. A skill
     file that cannot be imported is logged and skipped; a malformed one raises
-    SkillFormatError (a ValueError) naming its file. A folder without ``skill.py`` holds no
-    skill (``_skills`` also holds the workflow's ``split_instructions.md``,
-    ``subject_hints.md`` and ``identifier_patterns.txt``).
+    SkillFormatError (a ValueError) naming its file. ``_skills`` also holds the workflow's
+    ``split_instructions.md``, ``subject_hints.md`` and ``identifier_patterns.txt``, and
+    helper modules named ``_<name>.py``.
     """
     return tuple((name, description, steps) for name, description, steps, *_ in _parsed_skills(workflow_folderpath))
 

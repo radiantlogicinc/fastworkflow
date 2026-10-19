@@ -1,14 +1,19 @@
 r'''Skills as parameterized commands.
 
-A skill is one Python file, ``_skills/<name>/skill.py``, written with the abstractions of a
+A skill is one Python file, ``_skills/<name>.py``, written with the abstractions of a
 command file: a ``Signature`` whose docstring describes the job (what the skill matcher and
 the text planner read) and whose pydantic ``Input`` declares typed parameters, and a
 function ``steps(input)`` that returns the skill's command steps for one set of arguments.
 The planner fills the parameters from the request (one typed dspy call), the arguments are
 checked, and ``steps()`` expands them into the numbered plan. A skill without parameters
-gives fixed steps the text planner adapts (see ``workflow_agent.load_skills``). The folder
-name is the skill's name; the file name is always ``skill.py`` (``SKILL_FILE``), so a
-folder name need not be a Python identifier.
+gives fixed steps the text planner adapts (see ``workflow_agent.load_skills``).
+
+The ``_skills`` folder is laid out as the root of ``_commands`` is: a skill is the file
+``_skills/<name>.py`` and the file stem is the skill's name, so it is a Python identifier
+(snake_case: ``show_record.py``). A ``.py`` file whose name starts with ``_`` is a helper the
+skill files import (``from ._kinds import FIND``), not a skill. A subfolder is reserved for a
+skill context (as ``_commands/<Context>/`` is); its files are not loaded yet (it is logged and
+skipped). Other files are the workflow's skill texts (``split_instructions.md``, ...).
 
 A skill file::
 
@@ -42,8 +47,8 @@ A skill file::
 
         @staticmethod
         def validate_extracted_parameters(workflow, command, cmd_parameters, command_text=None):
-            if cmd_parameters.kind == "unit" and cmd_parameters.person:
-                return False, "a unit is listed whole; name the person's group instead"
+            if cmd_parameters.include_risk and cmd_parameters.person:
+                return False, "the risk is assessed for the whole record, not for one person"
             return True, ""
 
 
@@ -54,7 +59,7 @@ A skill file::
             out.append("assess_risk")
         for n in repeat(input.count):
             out.append(f"open member {n}")
-        out.append("@close-out")   # the steps of the skill "close-out" (one without params)
+        out.append("@close_out")   # the steps of the skill "close_out" (one without params)
         return out
 
 - ``Signature`` (required) with a docstring (required; its whitespace is collapsed to one
@@ -121,9 +126,8 @@ A skill file::
   normalised here: the hook writes its default back (``if not cmd_parameters.include_risk:
   cmd_parameters.owner = ""``). ``placeholder_template`` runs the hook too, on each
   placeholder combination (with no workflow and an empty ``command_text``): a combination it
-  changes is left out of the template (the planner never expands it), so the ``(only when
-  ...)`` conditions follow the hook. A combination it refuses stays in: a refused call falls
-  back to the template, which still shows those steps.
+  changes or refuses is left out of the template (the planner never expands it), so the
+  ``(only when ...)`` conditions follow the hook.
 
 The file is imported as a command file is (``python_utils.get_module`` under the workflow's
 package, so package-relative imports work); one that fails to import is logged and skipped;
@@ -339,10 +343,7 @@ def _flag(spec: dict, key: str, name: str, where: str) -> bool:
     return value == "true"
 
 
-# ---------------------------------------------------------------- skill files (skill.py)
-
-#: The file that defines a skill: ``_skills/<name>/skill.py``.
-SKILL_FILE = "skill.py"
+# ---------------------------------------------------------------- skill files (_skills/<name>.py)
 
 #: Keys a skill file's ``Input`` field may set in ``json_schema_extra``.
 SKILL_FIELD_KEYS = frozenset({"strip", "subject", "verify", "means", "in_request"})
@@ -465,9 +466,8 @@ def _template_values(p: Param) -> tuple:
 def _template_grid(command: SkillCommand) -> list[dict]:
     """The argument sets ``placeholder_template`` renders: the base first, then every other
     combination (sampled past TEMPLATE_GRID_LIMIT), leaving out a set the skill's
-    ``validate_extracted_parameters`` changes (``validate_call`` never passes one on to
-    ``steps()``; the set it changes to is another of the grid, or none). A set the hook
-    refuses is kept: a refused call falls back to the template."""
+    ``validate_extracted_parameters`` changes or refuses (``validate_call`` never passes one
+    on to ``steps()``; the set it changes to is another of the grid, or none)."""
     import itertools
     import random
 
@@ -492,7 +492,7 @@ def _template_grid(command: SkillCommand) -> list[dict]:
                 if _run_validate(command, env, "", None) != env:
                     continue
             except SkillCallError:
-                pass
+                continue
         seen.add(key)
         out.append(env)
     return out
@@ -704,8 +704,8 @@ def placeholder_template(command: SkillCommand) -> list[str]:
         grid.append(env)
         runs.append(lines)
     if not grid:
-        raise SkillFormatError(f"{command.path}: validate_extracted_parameters changes every placeholder "
-                               "combination; declare Signature.template")
+        raise SkillFormatError(f"{command.path}: validate_extracted_parameters changes or refuses every "
+                               "placeholder combination; declare Signature.template")
     merged = _merge_runs(runs)
     for p in command.params:
         if p.type == "str" and len(_template_values(p)) > 1:
@@ -724,7 +724,7 @@ def placeholder_template(command: SkillCommand) -> list[str]:
 
 
 def command_from_module(name: str, module, path: str) -> SkillFile:
-    """The skill a skill file (``_skills/<name>/skill.py``, already imported) defines.
+    """The skill a skill file (``_skills/<name>.py``, already imported) defines.
 
     Raises SkillFormatError for a malformed declaration (see the module doc).
     """

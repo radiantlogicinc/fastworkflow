@@ -16,8 +16,14 @@
   splitter's job types (`_job_types_for`) stay description-only. No span
   fields change.
 - **Skills as Python skill files** (`fastworkflow/skill_commands.py`,
-  `workflow_agent.load_skills`): a skill is now `_skills/<name>/skill.py`,
-  written like a command file. `class Signature` carries the description (its
+  `workflow_agent.load_skills`): a skill is now a file `_skills/<name>.py`,
+  laid out and written like a command file at the root of `_commands`: the
+  file stem is the skill's name, so it is a Python identifier (snake_case; a
+  stem that is not one fails the load with a `SkillFormatError`), a `.py` file
+  whose name starts with `_` is a helper the skill files import
+  (`from ._kinds import ...`), not a skill, and a subfolder of `_skills` is
+  reserved for a future skill context (like `_commands/<Context>/`): it is
+  logged and skipped, its files not loaded. `class Signature` carries the description (its
   docstring, what the skill matcher and the text planner read), a pydantic
   `Input` (`str`, `bool`, `int`, `Literal[...]` for an enum; `Field(default=...,
   description=...)`; the skill options `strip`, `subject`, `verify`, `means`,
@@ -58,8 +64,7 @@
   in `json_schema_extra` fails the load with a `SkillFormatError` pointing to
   the hook. The rendered template runs the hook on each placeholder combination
   and leaves out the ones it changes, so its `(only when ...)` conditions follow
-  the hook (a combination the hook refuses stays in: a refused call falls back
-  to the template).
+  the hook; a combination the hook refuses is left out too.
 - **Skill-call argument checks** (`fastworkflow/skill_commands.py`), all optional
   per parameter (in a skill file, an `Input` field's `json_schema_extra`), so a
   skill without them plans as before:
@@ -225,12 +230,12 @@
 ### Removed
 
 - **SKILL.md skills**: `_skills/<name>/SKILL.md` is no longer read; a skill is
-  `_skills/<name>/skill.py` only. This covers the plain form of 3.6.0 (the
+  the file `_skills/<name>.py` only. This covers the plain form of 3.6.0 (the
   description on the first line, one step per line), which becomes a file with
   `class Signature` (the description as its docstring) and
   `def steps(): return [...]` (the step lines), and the front-matter form with
   its `{param}` / `[if]` / `[repeat]` step language, which was never released.
-  A folder under `_skills` without `skill.py` is skipped with a warning.
+  A folder under `_skills` is not a skill (see the skill-context note above).
 
 ### Changed
 

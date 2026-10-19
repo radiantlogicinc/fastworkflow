@@ -1,4 +1,4 @@
-"""Skills as Python skill files (``_skills/<name>/skill.py``): loading, expansion, the
+"""Skills as Python skill files (``_skills/<name>.py``): loading, expansion, the
 template text, argument screen, validation hook and the planner path."""
 from __future__ import annotations
 
@@ -29,17 +29,17 @@ def steps():
 '''
 
 
-def _write(tmp_path, skills: dict[str, str], name: str = "skill.py") -> str:
+def _write(tmp_path, skills: dict[str, str]) -> str:
+    folder = tmp_path / "_skills"
+    folder.mkdir(parents=True, exist_ok=True)
     for skill, text in skills.items():
-        folder = tmp_path / "_skills" / skill
-        folder.mkdir(parents=True, exist_ok=True)
-        (folder / name).write_text(text)
+        (folder / f"{skill}.py").write_text(text)
     return str(tmp_path)
 
 
 def _example(tmp_path, text: str = EXAMPLE) -> sc.SkillCommand:
-    folder = _write(tmp_path, {"show-record": text, "close-out": CLOSE_OUT})
-    return workflow_agent.load_skill_commands(folder)["show-record"]
+    folder = _write(tmp_path, {"show_record": text, "close_out": CLOSE_OUT})
+    return workflow_agent.load_skill_commands(folder)["show_record"]
 
 
 def _args(**overrides):
@@ -67,20 +67,20 @@ def test_the_documented_example_loads_as_a_skill_with_params(tmp_path):
 
 
 def test_load_skills_gives_the_description_and_template_and_a_plain_skill_its_steps(tmp_path):
-    folder = _write(tmp_path, {"show-record": EXAMPLE, "close-out": CLOSE_OUT})
+    folder = _write(tmp_path, {"show_record": EXAMPLE, "close_out": CLOSE_OUT})
     skills = {name: (desc, steps) for name, desc, steps in workflow_agent.load_skills(folder)}
-    assert skills["close-out"] == ("Close out a record: note what was done.",
+    assert skills["close_out"] == ("Close out a record: note what was done.",
                                    ("write a short summary", "say what is left open"))
     # steps() rendered on placeholder inputs, the included plain skill expanded
-    assert skills["show-record"][1] == (
+    assert skills["show_record"][1] == (
         "<find_group or find_unit, by kind> query=<name>",
         "list_members filter=<person> (only when person is given)",
         "list_members (only when person is empty)",
         "assess_risk (only when include_risk)",
         "open member 1", "open member 2",
         "write a short summary", "say what is left open")
-    assert workflow_agent.load_skill_commands(folder).keys() == {"show-record"}
-    assert "- close-out: Close out a record" in workflow_agent._job_types_for(folder)
+    assert workflow_agent.load_skill_commands(folder).keys() == {"show_record"}
+    assert "- close_out: Close out a record" in workflow_agent._job_types_for(folder)
 
 
 def test_steps_expand_the_arguments_and_includes(tmp_path):
@@ -101,21 +101,21 @@ def test_a_repeat_beyond_the_limit_and_a_failing_steps_are_skill_call_errors(tmp
     # fails for one argument only (on the placeholder inputs it renders): the call fails, not the load
     broken = EXAMPLE.replace('out = [f"{FIND[input.kind]} query={input.name}"]',
                              'out = [FIND[input.name] if input.name == "Payroll" else input.name]')
-    with pytest.raises(SkillCallError, match="steps\\(\\) of show-record failed: KeyError"):
+    with pytest.raises(SkillCallError, match="steps\\(\\) of show_record failed: KeyError"):
         sc.expand(_example(tmp_path / "broken", broken), _args())
 
 
 def test_an_include_of_an_unknown_skill_fails_the_load_or_the_call(tmp_path):
     # written for every argument: the rendered template holds it and the load fails
-    text = EXAMPLE.replace('out.append("@close-out")', 'out.append("@nowhere")')
-    folder = _write(tmp_path / "always", {"show-record": text, "close-out": CLOSE_OUT})
+    text = EXAMPLE.replace('out.append("@close_out")', 'out.append("@nowhere")')
+    folder = _write(tmp_path / "always", {"show_record": text, "close_out": CLOSE_OUT})
     with pytest.raises(ValueError, match="includes unknown skill 'nowhere'"):
         workflow_agent.load_skills(folder)
     # written for an argument the template does not render (count 0): the call fails
-    text = EXAMPLE.replace('out.append("@close-out")', 'out.append("@close-out" if input.count else "@nowhere")')
-    folder = _write(tmp_path / "sometimes", {"show-record": text, "close-out": CLOSE_OUT})
+    text = EXAMPLE.replace('out.append("@close_out")', 'out.append("@close_out" if input.count else "@nowhere")')
+    folder = _write(tmp_path / "sometimes", {"show_record": text, "close_out": CLOSE_OUT})
     with pytest.raises(SkillCallError, match="includes 'nowhere'"):
-        sc.expand(workflow_agent.load_skill_commands(folder)["show-record"], _args(count=0))
+        sc.expand(workflow_agent.load_skill_commands(folder)["show_record"], _args(count=0))
 
 
 def test_a_declared_template_is_the_planner_template_as_written(tmp_path):
@@ -123,7 +123,7 @@ def test_a_declared_template_is_the_planner_template_as_written(tmp_path):
         '    template = [\n'
         '        "<find_group or find_unit, by kind> query=<name>",\n'
         '        "repeat count times (n = 1 to count): open member <n>",\n'
-        '        "@close-out",\n'
+        '        "@close_out",\n'
         '    ]\n\n'
         '    @staticmethod')
     text = EXAMPLE.replace("    @staticmethod", declared, 1)
@@ -182,39 +182,51 @@ def test_the_rendered_template_says_when_each_step_is_written(tmp_path):
                      "list_labels (only when list_all)")
 
 
-def test_the_template_follows_what_the_validation_hook_changes_not_what_it_refuses(tmp_path):
-    # the documented example refuses a unit with a person: the template still shows those steps
-    assert _example(tmp_path / "refusing").template[0] == "<find_group or find_unit, by kind> query=<name>"
+def test_the_template_leaves_out_what_the_validation_hook_changes_or_refuses(tmp_path):
+    # a hook refusing a unit with a person: the template renders a unit without one only
+    refusing = EXAMPLE.replace(
+        "if cmd_parameters.include_risk and cmd_parameters.person:",
+        'if cmd_parameters.kind == "unit" and cmd_parameters.person:')
+    assert refusing != EXAMPLE
+    assert _example(tmp_path / "refusing", refusing).template[:4] == (
+        "find_group query=<name> (only when kind is group)",
+        "list_members filter=<person> (only when person is given)",
+        "find_unit query=<name> (only when kind is unit)",
+        "list_members (only when person is empty)")
     always = FIELD.format(field="name: str").replace(
         '    class Input', '    @staticmethod\n    def validate_extracted_parameters(workflow, command, p):\n'
         '        p.name = "x"\n        return True, ""\n\n    class Input')
-    with pytest.raises(SkillFormatError, match="changes every placeholder combination"):
+    with pytest.raises(SkillFormatError, match="changes or refuses every placeholder combination"):
         workflow_agent.load_skills(_write(tmp_path / "always", {"bad": always}))
 
 
 def test_a_skill_file_without_input_may_take_the_empty_input(tmp_path):
-    text = '"""x"""\nclass Signature:\n    """Plain."""\n\n\ndef steps(input):\n    return ["one", "@close-out"]\n'
-    folder = _write(tmp_path, {"plain": text, "close-out": CLOSE_OUT})
+    text = '"""x"""\nclass Signature:\n    """Plain."""\n\n\ndef steps(input):\n    return ["one", "@close_out"]\n'
+    folder = _write(tmp_path, {"plain": text, "close_out": CLOSE_OUT})
     assert ("plain", "Plain.", ("one", "write a short summary", "say what is left open")) in \
         workflow_agent.load_skills(folder)
 
 
-def test_a_skill_file_relative_import_and_a_folder_name_that_is_not_an_identifier(tmp_path):
+def test_a_skill_file_imports_a_helper_of_its_folder_and_of_its_package(tmp_path):
     package = tmp_path / "acme_flow"
     package.mkdir()
     (package / "__init__.py").write_text("")
-    (package / "texts.py").write_text('FIND = {"group": "find_group", "unit": "find_unit"}\n')
-    text = EXAMPLE.replace('FIND = {"group": "find_group", "unit": "find_unit"}', "from ...texts import FIND")
-    folder = _write(package, {"show-record": text, "close-out": CLOSE_OUT})
-    assert sc.expand(workflow_agent.load_skill_commands(folder)["show-record"], _args(count=0))[0] == \
+    (package / "texts.py").write_text('UNIT = "find_unit"\n')
+    text = EXAMPLE.replace('FIND = {"group": "find_group", "unit": "find_unit"}',
+                           "from ._kinds import FIND\nfrom ..texts import UNIT\nassert FIND['unit'] == UNIT")
+    folder = _write(package, {"show_record": text, "close_out": CLOSE_OUT})
+    (package / "_skills" / "_kinds.py").write_text('FIND = {"group": "find_group", "unit": "find_unit"}\n')
+    # the helper _kinds.py is not a skill
+    assert [s[0] for s in workflow_agent.load_skills(folder)] == ["close_out", "show_record"]
+    assert sc.expand(workflow_agent.load_skill_commands(folder)["show_record"], _args(count=0))[0] == \
         "find_group query=Payroll"
 
 
 def test_a_skill_file_that_cannot_be_imported_is_logged_and_skipped(tmp_path, caplog):
-    folder = _write(tmp_path, {"broken": "import no_such_module_anywhere\n", "close-out": CLOSE_OUT})
+    folder = _write(tmp_path, {"broken": "import no_such_module_anywhere\n", "close_out": CLOSE_OUT})
     with caplog.at_level(logging.ERROR):
         skills = workflow_agent.load_skills(folder)
-    assert [s[0] for s in skills] == ["close-out"]
+    assert [s[0] for s in skills] == ["close_out"]
     assert "skipping skill 'broken'" in caplog.text
 
 
@@ -276,16 +288,26 @@ def test_steps_that_fail_on_placeholder_inputs_need_a_declared_template(tmp_path
         workflow_agent.load_skills(_write(tmp_path, {"bad": text}))
 
 
-# ---------------------------------------------------------------- folders that are not skills
+# ---------------------------------------------------------------- files that are not skills
 
-def test_a_folder_without_a_skill_file_is_not_a_skill(tmp_path, caplog):
-    (tmp_path / "_skills" / "notes").mkdir(parents=True)
-    (tmp_path / "_skills" / "notes" / "README.md").write_text("Show one record.\nfind_record\n")
-    folder = _write(tmp_path, {"close-out": CLOSE_OUT})
-    (tmp_path / "_skills" / "split_instructions.md").write_text("Split it my way.")
+def test_only_the_python_files_of_the_skills_folder_not_starting_with_an_underscore_are_skills(tmp_path, caplog):
+    folder = _write(tmp_path, {"close_out": CLOSE_OUT, "_helpers": "import no_such_module_anywhere\n"})
+    skills = tmp_path / "_skills"
+    (skills / "split_instructions.md").write_text("Split it my way.")
+    (skills / "__pycache__").mkdir()
+    # a subfolder is reserved for a skill context: logged and skipped, its files not loaded
+    (skills / "Record").mkdir()
+    (skills / "Record" / "show_record.py").write_text(EXAMPLE)
     with caplog.at_level(logging.WARNING):
-        assert [s[0] for s in workflow_agent.load_skills(folder)] == ["close-out"]
-    assert "notes holds no skill.py" in caplog.text
+        assert [s[0] for s in workflow_agent.load_skills(folder)] == ["close_out"]
+    assert "Record: skill contexts (subfolders of _skills) are not loaded yet" in caplog.text
+    assert "__pycache__" not in caplog.text and "_helpers" not in caplog.text
+
+
+def test_a_skill_file_name_that_is_not_an_identifier_fails_the_load(tmp_path):
+    folder = _write(tmp_path, {"close-out": CLOSE_OUT})
+    with pytest.raises(SkillFormatError, match="a Python identifier \\(snake_case\\): rename it to close_out.py"):
+        workflow_agent.load_skills(folder)
 
 
 # ---------------------------------------------------------------- argument screen (shared with commands)
@@ -328,8 +350,8 @@ def test_a_unicode_dash_in_the_request_matches_a_plain_one(tmp_path):
 
 def test_the_validation_hook_can_refuse_or_correct_a_call(tmp_path):
     command = _example(tmp_path)
-    with pytest.raises(SkillCallError, match="a unit is listed whole"):
-        sc.validate_call(command, _args(kind="unit", person="Ann Lee"), "x")
+    with pytest.raises(SkillCallError, match="the risk is assessed for the whole record"):
+        sc.validate_call(command, _args(person="Ann Lee", include_risk=True), "x")
     assert sc.validate_call(command, _args(), "x") == _args()
 
     seen = []
@@ -342,7 +364,7 @@ def test_the_validation_hook_can_refuse_or_correct_a_call(tmp_path):
     from dataclasses import replace
     notes: list[str] = []
     args = sc.validate_call(replace(command, validate=correcting), _args(), "who is in Payroll", "WF", notes)
-    assert args["name"] == "PAYROLL" and seen == [("WF", "show-record", "who is in Payroll")]
+    assert args["name"] == "PAYROLL" and seen == [("WF", "show_record", "who is in Payroll")]
     assert notes == ["name='Payroll' -> 'PAYROLL' (validate_extracted_parameters)"]
 
     def raising(workflow, name, params):
@@ -378,18 +400,18 @@ def test_a_skill_file_is_planned_as_a_call_and_its_hook_refusal_falls_back(tmp_p
     lm = DummyLM([_typed(person="Ann Lee")])
     result = _plan_skill(ctx, wf, lm, request, command)
     span = sink.named("fw.planner.plan")[-1]
-    assert span.attributes["plan_source"] == "skill_call" and span.attributes["skill"] == "show-record"
+    assert span.attributes["plan_source"] == "skill_call" and span.attributes["skill"] == "show_record"
     assert span.attributes["plan"].splitlines()[:3] == [
         "1. find_group query=Payroll", "2. list_members filter=Ann Lee", "3. open member 1"]
-    assert "show-record(name: str, kind: group|unit" in _prompt(lm, 0)
+    assert "show_record(name: str, kind: group|unit" in _prompt(lm, 0)
     assert "Execute these next steps:\n1. find_group query=Payroll" in result
 
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)
     ctx._begin_turn(request)
-    lm = DummyLM([_typed(kind="unit", person="Ann Lee"), _text_answer()])
+    lm = DummyLM([_typed(person="Ann Lee", include_risk=True), _text_answer()])
     _plan_skill(ctx, wf, lm, request, command)
     span = sink.named("fw.planner.plan")[-1]
     assert span.attributes["plan_source"] == "text"
-    assert "a unit is listed whole" in span.attributes["skill_fallback"]
+    assert "the risk is assessed for the whole record" in span.attributes["skill_fallback"]
     assert "TEMPLATE TEXT" in _prompt(lm, 1)
