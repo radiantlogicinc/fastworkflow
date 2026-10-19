@@ -201,6 +201,10 @@ class WorkflowExecutionContext:
         # Set when a sub-task hit the step cap with no hand-off left: the turn is then exhausted.
         self._subtask_exhausted = False
         self._next_step = 0
+        # Finish check (fix-3xts): the first step each sub-task origin's outputs count from,
+        # and the run's initial plan as the planner wrote it.
+        self._evidence_floors: dict[int, int] = {}
+        self._initial_plan_text = ""
 
         # Insights-distillation (teacher/student) state — CLI/Topology-A only.
         self._generate_insights = generate_insights
@@ -1825,6 +1829,7 @@ class WorkflowExecutionContext:
         self._subtask_answers = []
         self._subtask_exhausted = False
         self._next_step = 0
+        self._evidence_floors = {}
         self._enable_all_tools()
 
     def _enable_all_tools(self) -> None:
@@ -1939,7 +1944,8 @@ class WorkflowExecutionContext:
         # An unsplit request is one sub-task, so a run that hits the step cap is handed off the same way.
         self._subtasks = [refined_user_query]
         self._origins = [0]
-        result = self._call_agent_for_query(refined_user_query, message)
+        self._evidence_floors = {0: 0}
+        result = self._call_agent_for_query(refined_user_query, message, evidence_floor=0)
         if getattr(result, "exhausted", None) is not True:
             return result
         self._record_subtask_answer(result)
@@ -1948,10 +1954,14 @@ class WorkflowExecutionContext:
 
     def _call_agent_for_query(self, query: str, planner_user_query: str, *,
                               first_step: int | None = None,
-                              template_text: str | None = None):
+                              template_text: str | None = None,
+                              evidence_floor: int | None = None):
         """Plan one query with the planner, then run the ReAct agent on it.
 
         ``template_text`` picks the skill template; it defaults to the query itself.
+        ``evidence_floor`` is the first step index whose archived outputs count as
+        this run's for the finish check (a hand-off continuation counts the runs
+        of its sub-task before it); it defaults to ``first_step``.
         """
         from fastworkflow.workflow_agent import (
             build_query_with_next_steps, _what_can_i_do, planner_skill_for)
@@ -1977,6 +1987,8 @@ class WorkflowExecutionContext:
         )
         available_commands = _what_can_i_do(self)
         step_kwargs = {} if first_step is None else {"first_step": first_step}
+        self._attach_finish_check(
+            query, evidence_floor if evidence_floor is not None else (first_step or 0))
 
         return self._call_agent_with_retry(
             lambda: self._workflow_tool_agent(
@@ -1986,6 +1998,36 @@ class WorkflowExecutionContext:
             ),
             trace_input=command_info_and_refined_message_with_todolist,
         )
+
+    def _attach_finish_check(self, query: str, floor: int) -> None:
+        """Give the agent this run's finish check, or none (``FW_FINISH_CHECK`` off).
+
+        The plan is the one ``build_query_with_next_steps`` just made for this
+        run. Set before every run, so a check never outlives the run it was made for.
+        """
+        agent = self._workflow_tool_agent
+        if agent is None:
+            return
+        agent.finish_reviewer = None
+        from fastworkflow.observation_offloading import finish_check
+
+        mode = finish_check.mode()
+        plan_text = str(getattr(self, "_initial_plan_text", "") or "")
+        if mode is None or not plan_text.strip() or self._app_workflow is None:
+            return
+        folderpath = self._app_workflow.folderpath
+
+        def review(trajectory, iters_left: int):
+            from fastworkflow.workflow_agent import core_command_names
+
+            routing = fastworkflow.RoutingRegistry.get_definition(folderpath)
+            return finish_check.review_finish(
+                plan_text=plan_text, request=query, floor=floor, iters_left=iters_left,
+                commands=list(routing.routing_definition_map),
+                core_commands=core_command_names(),
+                use_model=(mode == finish_check.MODE_FULL))
+
+        agent.finish_reviewer = review
 
     def _run_subtasks_from(self, start: int):
         """Run sub-tasks start.. one after another; the combined answer, or a suspension.
@@ -2003,9 +2045,14 @@ class WorkflowExecutionContext:
             if k == 0 or self._origins[k - 1] != origin:
                 self._enable_all_tools()
             query = self._subtasks[k]
+            floors = getattr(self, "_evidence_floors", None)
+            if not isinstance(floors, dict):
+                floors = self._evidence_floors = {}
+            floors.setdefault(origin, self._next_step)
             result = self._call_agent_for_query(
                 query, query, first_step=self._next_step,
                 template_text=self._original_text(origin),
+                evidence_floor=floors[origin],
             )
             if getattr(result, "suspended", None) is True:
                 return result

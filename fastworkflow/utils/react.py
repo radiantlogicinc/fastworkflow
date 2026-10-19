@@ -49,6 +49,10 @@ class NoSuspendedAgentStateError(RuntimeError):
 class fastWorkflowReAct(Module):
     # Called after each completed tool step (not on suspension); class default for agents built via __new__.
     on_step_end: Callable[[], None] | None = None
+    # Asked once per run when the agent picks ``finish``: ``(trajectory, iters_left)``
+    # -> a note that replaces the finish observation and sends the agent back to
+    # the loop, or None to finish. Set by the caller per run (the finish check).
+    finish_reviewer: Callable[[dict[str, Any], int], str | None] | None = None
 
     def __init__(self, signature: type["Signature"], tools: list[Callable], max_iters: int = 10,
                  on_step_complete: Callable[[int, dict], bool] | None = None):
@@ -318,6 +322,7 @@ class fastWorkflowReAct(Module):
                 attributes={"step_index": idx},
             )
             repaired_tool_name = None
+            reopened = False
             try:
                 pred = self._call_with_potential_trajectory_truncation(
                     self.react, trajectory, **input_args
@@ -394,6 +399,14 @@ class fastWorkflowReAct(Module):
                     observation = f"{pred.next_tool_name} is not available now."
                 else:
                     observation = self.tools[pred.next_tool_name](**pred.next_tool_args)
+                if pred.next_tool_name == "finish":
+                    note = self._review_finish(trajectory, max_iters)
+                    if note:
+                        observation = note
+                        # No span attribute of its own (that would be a span
+                        # contract change): the step's observation is the note,
+                        # and the finish_check offload event says why.
+                        reopened = True
                 trajectory[f"observation_{idx}"] = observation
                 step_attributes["observation"] = _as_text(observation)
             except AskUserSuspend as err:
@@ -455,7 +468,7 @@ class fastWorkflowReAct(Module):
             if on_step_complete and not on_step_complete(idx, trajectory):
                 break
 
-            if pred.next_tool_name == "finish":
+            if pred.next_tool_name == "finish" and not reopened:
                 break
 
             idx += 1
@@ -470,6 +483,25 @@ class fastWorkflowReAct(Module):
                 break
 
         return None
+
+    def _review_finish(self, trajectory: dict[str, Any], max_iters: int) -> str | None:
+        """The finish reviewer's note, at most once per run; None on any failure."""
+        reviewer = getattr(self, "finish_reviewer", None)
+        if reviewer is None:
+            return None
+        run_state = getattr(self, "run_state", None)
+        if not isinstance(run_state, dict):
+            run_state = self.run_state = {}
+        if run_state.get("finish_reviewed"):
+            return None
+        run_state["finish_reviewed"] = True
+        iters_left = max_iters - self.iteration_counter - 1
+        try:
+            note = reviewer(trajectory, iters_left)
+        except Exception as error:  # noqa: BLE001 - a review never fails the run
+            logger.warning("finish review skipped: %s: %s", type(error).__name__, error)
+            return None
+        return str(note) if note else None
 
     def _rehydrate_for_extract(self, trajectory):
         """``(trajectory_for_the_extractor, report, budget, scope)``.

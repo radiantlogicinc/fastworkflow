@@ -34,6 +34,7 @@ class Calibration(unittest.TestCase):
         "trajectory_max_bytes": 28_000,
         "answer_rehydration_max_bytes": 250_000,
         "offload_min_saving_bytes": 1_024,
+        "finish_check_max_bytes": 24_576,
     }
 
     def test_the_reference_window_is_the_gpt_oss_120b_window(self) -> None:

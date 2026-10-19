@@ -43,6 +43,7 @@ values exactly.
 | `trajectory_max_bytes` | executor prompt target: the whole executor ReAct prompt (instructions, inputs, command list, trajectory) | 875/16384 (≈ 5.34 %) | **28,000** | `FW_TRAJECTORY_MAX_BYTES` |
 | `answer_rehydration_max_bytes` | answer-time rehydration budget for the extract call | 15625/32768 (≈ 47.68 %) | **250,000** | `FW_ANSWER_REHYDRATION_MAX_BYTES` |
 | `offload_min_saving_bytes` | minimum UTF-8 bytes an offload must free | 1/512 (≈ 0.195 %) | **1,024** | `FW_OFFLOAD_MIN_SAVING_BYTES` |
+| `finish_check_max_bytes` | finish-check prompt: the judged plan steps and their outputs, each cut to head and tail (ceiling 65,536) | 3/64 (≈ 4.69 %) | **24,576** | `FW_FINISH_CHECK_MAX_BYTES` |
 
 The executor prompt target bounds the whole executor ReAct prompt, not the
 trajectory alone. When the prompt is over it, observations are offloaded
@@ -89,7 +90,8 @@ context_budget.budget_provenance()
   "budgets": {
     "trajectory_max_bytes": 28000,
     "answer_rehydration_max_bytes": 250000,
-    "offload_min_saving_bytes": 1024
+    "offload_min_saving_bytes": 1024,
+    "finish_check_max_bytes": 24576
   },
   "overrides": {}
 }

@@ -4,6 +4,22 @@
 
 ### Added
 
+- **Finish check: each plan step judged satisfied, not only run** (fix-3xts,
+  `observation_offloading.finish_check`, off by default). When the agent picks
+  `finish`, the run's initial plan is read against the outputs it archived:
+  pass A (code) names every command step whose command never ran successfully;
+  pass B (one model call, `LLM_FINISH_CHECK`, else `LLM_AGENT`) judges the
+  steps that ask for something beyond running a command, and code refuses an
+  `unmet` whose quoted missing words are not in the step text, name the command
+  or the answer, or mostly appear in the step's output. Unmet steps become one
+  note (at most 1 KB) that replaces the finish observation, once per agent run
+  and only with two or more iterations left (`fastWorkflowReAct.finish_reviewer`).
+  `FW_FINISH_CHECK=1` (or `full`) runs both passes, `commands` pass A alone. The
+  prompt is bounded by the new `context_budget.FINISH_CHECK` budget
+  (`finish_check_max_bytes`, 3/64 of the window: 24,576 bytes at the reference
+  window, ceiling 65,536, override `FW_FINISH_CHECK_MAX_BYTES`). Every checked
+  finish records a `finish_check` offload event. It fails open.
+
 - **Split settings as one command-form file, `_skills/_split.py`**
   (`workflow_agent.split_settings`, `SplitSettings`): the split stage's
   per-workflow settings are one Python file written like a command file, every

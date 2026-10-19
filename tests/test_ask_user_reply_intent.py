@@ -138,7 +138,8 @@ def test_each_subtask_starts_with_every_tool_enabled(monkeypatch):
     ctx._origins = [0, 1]
     seen = []
 
-    def call_agent(query, planner_user_query, *, first_step=None, template_text=None):
+    def call_agent(query, planner_user_query, *, first_step=None, template_text=None,
+                   evidence_floor=None):
         seen.append(set(agent.disabled_tools))
         agent.disabled_tools = {"ask_user"}
         return SimpleNamespace(final_answer="done", suspended=False)

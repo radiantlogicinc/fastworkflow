@@ -1602,6 +1602,10 @@ def build_query_with_next_steps(user_query: str,
         },
     )
 
+    if not with_agent_inputs_and_trajectory:
+        # The run's initial plan, with its line breaks, for the finish check.
+        chat_session_obj._initial_plan_text = plan_text
+
     # A mid-turn replan with nothing remaining still reports what's done and says to finish.
     if not plan_text and not with_agent_inputs_and_trajectory:
         return user_query
