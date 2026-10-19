@@ -105,7 +105,8 @@ def _with_utterances(text: str, utterances: list[str]) -> str:
 
 def test_the_matcher_lists_a_skills_plain_utterances_as_capped_examples(tmp_path):
     many = ["who belongs to this group", "is  someone\n in that feed", "list a group's members",
-            "how many people are in it", "a fifth one never shown"]
+            "how many people are in it", "is it empty", "who joined last", "list its owners",
+            "who manages it", "is a person in it", "a tenth one never shown"]
     folder = _write(tmp_path, {
         "lookup": _with_utterances(LOOKUP, many),
         "plain": _with_utterances(_plain("Close an account.", ["close it"]), ["shut this account down"]),
@@ -118,11 +119,12 @@ def test_the_matcher_lists_a_skills_plain_utterances_as_capped_examples(tmp_path
     description = workflow_agent.load_skill_commands(folder)["lookup"].description
     assert lines == [
         f'- lookup: {description} e.g. "who belongs to this group", "is someone in that feed", '
-        '"list a group\'s members", "how many people are in it"',
+        '"list a group\'s members", "how many people are in it", "is it empty", "who joined last", '
+        '"list its owners", "who manages it", "is a person in it"',
         '- plain: Close an account. e.g. "shut this account down"',
         "- quiet: Say hello.",
     ]
-    assert workflow_agent.MATCHER_EXAMPLES == 4
+    assert workflow_agent.MATCHER_EXAMPLES == 9
     assert workflow_agent._matcher_job_types(folder, examples=1).splitlines()[0].endswith(
         'e.g. "who belongs to this group"')
     # the splitter's job types stay description-only

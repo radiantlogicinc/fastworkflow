@@ -21,16 +21,19 @@
   invalid pattern is no longer skipped with a warning.
 
 - **The skill matcher reads a skill's `plain_utterances` as examples**
-  (`workflow_agent._matcher_job_types`, `MATCHER_EXAMPLES = 4`): in the
+  (`workflow_agent._matcher_job_types`, `MATCHER_EXAMPLES = 9`): in the
   `MatchSkill` job-type listing a skill's line is followed by
-  `e.g. "...", "..."` with its first four `Signature.plain_utterances`
+  `e.g. "...", "..."` with its first nine `Signature.plain_utterances`
   (whitespace collapsed); a skill that declares none keeps its plain
   `- name: description` line, and the `job_types` field description mentions
   examples only when some skill has them. Skills without params now carry
   their utterances too (`SkillFile.plain_utterances`;
   `workflow_agent.skill_utterances(folder)` gives them by name). The
   splitter's job types (`_job_types_for`) stay description-only. No span
-  fields change.
+  fields change. Nine, not four: measured offline on an 18-skill workflow
+  with nine utterances each, nine shown matched 0.863 of a tuning set against
+  0.834 with four (skill sub-tasks right 562 vs 552 of 567), for about 1.4k
+  more prompt tokens.
 - **Skills as Python skill files** (`fastworkflow/skill_commands.py`,
   `workflow_agent.load_skills`): a skill is now a file `_skills/<name>.py`,
   laid out and written like a command file at the root of `_commands`: the

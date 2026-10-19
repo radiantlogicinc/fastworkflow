@@ -1147,7 +1147,7 @@ def _job_types_for(workflow_folderpath: str | None) -> str:
 
 #: The skill matcher shows at most this many of a skill's ``plain_utterances`` (its first
 #: ones) after its description, to bound the prompt.
-MATCHER_EXAMPLES = 4
+MATCHER_EXAMPLES = 9
 
 
 def _matcher_job_types(workflow_folderpath: str, examples: int = MATCHER_EXAMPLES) -> str:
