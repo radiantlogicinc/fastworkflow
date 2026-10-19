@@ -228,3 +228,84 @@ def test_go_up_at_the_top_level_names_the_commands_to_use_instead():
     assert 0 < len(names) <= MAX_HINT_COMMANDS
     assert not {"go_up", "reset_context", "what_can_i_do", "what_is_current_context", "abort"} & set(names)
     assert all("/" not in name for name in names)
+
+
+# A command that enters a context, refused here, while a command of this
+# context enters the same one: name the in-context command before the climb.
+_SHELF_EDGES = (
+    DescendEdge("*", "open_library", "Library"),
+    DescendEdge("Library", "open_book_by_uid", "Book", needs=("book_uid",)),
+    DescendEdge("Library", "open_shelf", "Shelf", needs=("shelf_uid",)),
+    DescendEdge("Shelf", "list_books", "Book", required_to_enter=("book_uid",)),
+)
+
+
+def test_the_refusal_names_the_in_context_command_that_enters_the_same_context():
+    chain = ("Shelf", "Library", "*")
+    paths = plan_navigation("Shelf", ["Library"], chain, _SHELF_EDGES)
+    text = render_unavailable_command(
+        "open_book_by_uid", "Shelf", ["Library"], paths, _SHELF_EDGES)
+    assert text == (
+        "Command 'open_book_by_uid' is not available in the current context 'Shelf'. "
+        "It is available in: 'Library'. "
+        "To open 'Book' from here, run list_books book_uid=<book_uid> instead of "
+        "'open_book_by_uid'; that is how you enter 'Book' from 'Shelf'. "
+        "Without book_uid it does not enter 'Book'. "
+        "Otherwise, from here to 'Library': go_up. Then retry 'open_book_by_uid'."
+    )
+    assert text.index("list_books") < text.index("go_up")
+
+
+def test_no_in_context_alternative_keeps_the_plain_path():
+    chain = ("Shelf", "Library", "*")
+    paths = plan_navigation("Shelf", ["Library"], chain, _SHELF_EDGES)
+    text = render_unavailable_command(
+        "open_shelf", "Shelf", ["Library"], paths, _SHELF_EDGES)
+    assert "To open" not in text
+    assert "Otherwise" not in text
+    assert "From here to 'Library': go_up. Then retry 'open_shelf'." in text
+
+
+def test_a_command_that_enters_nothing_gets_no_alternative():
+    edges = (*_SHELF_EDGES, DescendEdge("Shelf", "open_book_quick", "Book"))
+    paths = plan_navigation("Shelf", ["Library"], ("Shelf", "Library", "*"), edges)
+    text = render_unavailable_command("count_books", "Shelf", ["Library"], paths, edges)
+    assert "To open" not in text
+
+
+def test_every_in_context_entry_is_named_with_its_parameters():
+    edges = (*_SHELF_EDGES, DescendEdge("Shelf", "open_book_quick", "Book"))
+    paths = plan_navigation("Shelf", ["Library"], ("Shelf", "Library", "*"), edges)
+    text = render_unavailable_command(
+        "Library/open_book_by_uid", "Shelf", ["Library"], paths, edges)
+    assert (
+        "run open_book_quick or list_books book_uid=<book_uid> instead of "
+        "'Library/open_book_by_uid'" in text
+    )
+    assert "Without" not in text
+
+
+def test_the_agent_message_passes_the_workflow_edges(monkeypatch):
+    class Shelf:
+        pass
+
+    class Library:
+        pass
+
+    library = Library()
+
+    class Workflow:
+        folderpath = "app"
+        current_command_context_name = "Shelf"
+        current_command_context = Shelf()
+        root_command_context = None
+
+        def get_parent(self, obj):
+            return library if isinstance(obj, Shelf) else None
+
+    monkeypatch.setattr(
+        context_navigation, "collect_descend_edges", lambda path: _SHELF_EDGES)
+    text = context_navigation.unavailable_command_message(
+        Workflow(), "open_book_by_uid", "Shelf", ["Library"])
+    assert "run list_books book_uid=<book_uid> instead of 'open_book_by_uid'" in text
+    assert "Otherwise, from here to 'Library': go_up." in text
