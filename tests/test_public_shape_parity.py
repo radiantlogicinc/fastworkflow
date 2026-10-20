@@ -80,6 +80,9 @@ COMMAND_RESPONSE_FIELDS = (
     "artifacts",
     "next_actions",
     "recommendations",
+    # Appended by fix-hia1.1, optional with a None default: the command's
+    # Signature.Output, archived as JSON beside the observation text.
+    "output",
 )
 
 COMMAND_OUTPUT_FIELDS = (

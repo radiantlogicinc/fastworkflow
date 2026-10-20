@@ -3,11 +3,104 @@ import importlib
 import re
 import importlib.util
 import sys
+import threading
+from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
 from fastworkflow.utils.logging import logger
+
+# Serialises loads where Python's per-module import lock is unavailable.
+_FALLBACK_LOAD_LOCK = threading.RLock()
+# Dotted name -> mtime_ns of the file when it was last executed or first reused.
+_LOADED_MTIMES: dict[str, int] = {}
+
+
+@contextmanager
+def _module_import_lock(name: str):
+    """Hold the same per-module lock Python's own ``import`` statement takes for
+    ``name``, so a load by path and an ordinary import of the same module (for
+    example a command module importing another command module) never execute it
+    at the same time, in any thread.  The lock is reentrant per thread and takes
+    part in importlib's deadlock detection."""
+    manager = getattr(getattr(importlib, "_bootstrap", None), "_ModuleLockManager", None)
+    if manager is None:  # pragma: no cover - CPython has always provided it
+        with _FALLBACK_LOAD_LOCK:
+            yield
+        return
+    with manager(name):
+        yield
+
+
+def _same_file(module: Any, abs_module_path: str) -> bool:
+    module_file = getattr(module, "__file__", None)
+    if not module_file:
+        return False
+    try:
+        return os.path.samefile(module_file, abs_module_path)
+    except OSError:
+        return os.path.normcase(os.path.abspath(module_file)) == os.path.normcase(abs_module_path)
+
+
+def _mtime_ns(path: str) -> Optional[int]:
+    try:
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return None
+
+
+def _load_module_once(name: str, abs_module_path: str) -> Any:
+    """Load ``abs_module_path`` as module ``name``, thread-safely and idempotently.
+
+    * A module already in ``sys.modules`` under ``name`` from the same file (loaded
+      earlier by path or by an ordinary import) is reused, not executed again;
+      it is re-executed in place only when the file changed on disk since then.
+    * While a fresh module executes it is marked initialising, as importlib does,
+      so a concurrent ordinary import waits for it instead of using it half done.
+    * A module whose execution fails is removed from ``sys.modules`` (the earlier
+      entry, if any, is restored), so later imports of it are not poisoned.
+    """
+    with _module_import_lock(name):
+        existing = sys.modules.get(name)
+        if existing is not None and _same_file(existing, abs_module_path):
+            current = _mtime_ns(abs_module_path)
+            recorded = _LOADED_MTIMES.setdefault(name, current)
+            if current is None or recorded is None or current == recorded:
+                return existing
+            # Edited on disk: re-execute in the same module object so code that
+            # already holds it keeps a fully populated module throughout.
+            spec = importlib.util.spec_from_file_location(name, abs_module_path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"Cannot create module spec for {abs_module_path}")
+            spec.loader.exec_module(existing)
+            _LOADED_MTIMES[name] = current
+            return existing
+
+        spec = importlib.util.spec_from_file_location(name, abs_module_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Cannot create module spec for {abs_module_path}")
+        module = importlib.util.module_from_spec(spec)
+        mtime = _mtime_ns(abs_module_path)
+        # Add to sys.modules before executing to support relative and circular
+        # imports; mark it initialising so other threads wait on the lock.
+        sys.modules[name] = module
+        spec._initializing = True
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            if sys.modules.get(name) is module:
+                if existing is not None:
+                    sys.modules[name] = existing
+                else:
+                    del sys.modules[name]
+            raise
+        finally:
+            spec._initializing = False
+        _LOADED_MTIMES[name] = mtime
+        # Like importlib, return what the module left in sys.modules.
+        return sys.modules.get(name, module)
+
 
 # Normalize arguments so logically identical calls share the same cache key
 @lru_cache(maxsize=128)
@@ -88,16 +181,7 @@ def get_module(module_path: str, search_root: Optional[str] = None) -> Any:
             pkg_name = Path(fw_pkg_root).name
             module_pythonic_path = f"{pkg_name}.{module_pythonic_path}"
 
-        # Use spec_from_file_location for dynamic loading from file paths
-        spec = importlib.util.spec_from_file_location(module_pythonic_path, abs_module_path)
-        if spec is None or spec.loader is None:
-            raise ImportError(f"Cannot create module spec for {abs_module_path}")
-        
-        module = importlib.util.module_from_spec(spec)
-        # Add to sys.modules before executing to support relative imports
-        sys.modules[module_pythonic_path] = module
-        spec.loader.exec_module(module)
-        return module
+        return _load_module_once(module_pythonic_path, abs_module_path)
 
     except Exception as e:
         logger.critical(f"Could not import module from path: {module_path}. Error: {e}")

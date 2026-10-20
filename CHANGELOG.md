@@ -4,6 +4,150 @@
 
 ### Added
 
+- **Phase facts: stand-in openers, re-bind to the planned record, plainer
+  step values; `name=value` parameters parsed in code** (fix-hia1.10).
+  In agent mode a command written as `cmd key=value key2=value2`, every key a
+  field of its Input, is parsed before the LLM fallback: a value runs to the
+  next ` key=` or the end, quotes and a trailing "(...)" note go, types come
+  from the Input model; any doubt falls back as before (the span records it as
+  `xml_regex`, so no contract changes). A plan step's value also ends at ", " prose, and
+  an identifier value at its first token (`step_arguments`). A planned opener
+  with concrete values (`list_x x_uid=U`) is done by a successful run of
+  another command that entered the phase's record with the same value under
+  the same name (`runs_standing_in_for_openers`); facts from the planned
+  command's Input take it. A non-fan-out phase whose step commands all ran on
+  one record, and that ended elsewhere, is filled on that record
+  (`planned_record`).
+- **A plural noun for a fan-out's items** (fix-hia1, `docs/skill_phases.md`).
+  `Phase(..., over=..., noun="people")` makes the answer's notes count in that
+  noun and leave out the internal phase name: "Note: only the first 3 of 5
+  people were covered." and "Note: the work stopped after 3 of 5 people
+  because its stop condition was met." (`cap_note` / `fan_out_note` take
+  `noun`). Without a noun the wording is unchanged. A noun on a phase that
+  does not fan out, or one that is not a non-empty str, fails the load. Skill
+  previews show it in the "fans out" column. A note already in the answer is
+  not repeated (two fan-outs over the same items with one noun say it once).
+- **Skill phases: flat for some inputs, conditions on earlier facts, fan-out
+  that stops on a condition** (fix-hia1.9, `docs/skill_phases.md`). `plan()`
+  may return `None` or `[]` to run that call flat, from the file's own
+  `steps()` (`is_flat_plan`; `phases_for` returns `None`). `Phase.when` may
+  be a callable bound by name to earlier outputs, decided when the phase is
+  reached (`runs_now`); a skipped phase counts as not run.
+  `Phase(..., over=..., until=callable)` stops a fan-out once the outputs so
+  far (its parameter named after the phase) meet a condition (`stops_after`);
+  `max_items` still caps, and `fan_out_note` says "stopped" or "capped".
+  `fw.skill.phase` v3 (span contract v18) adds `skipped` and
+  `stop_condition_met`. Skill previews show a callable `when` / `until` by its
+  source (`condition_text`), add a "fans out" column, mark phases whose steps
+  read earlier facts as rendered with placeholder facts, render a flat
+  variant's `steps()`, and pass a fan-out phase's output on as a list.
+- **Answer-only skill phases** (fix-hia1.7, `docs/skill_phases.md`). A phase
+  whose steps name no command (`skill_phases.is_answer_only`: no command,
+  conditional or navigation step as `finish_check.parse_plan` reads them) is
+  not an executor run: one model call with no tools (`write_answer`) writes its
+  answer from the request and its steps, told "Do not run any command; write
+  the answer from these facts only." It cannot call a workflow command. New
+  `facts_text(model)` (`observation_offloading.facts`, re-exported from
+  `skill_phases`) renders a facts model as `field: value` text for steps.
+  `fw.skill.phase` v2 (span contract v17) adds `answer_only`.
+- **Fan-out skill phases with record binding** (fix-hia1.3).
+  `Phase(..., over=<list> | "<phase>.<field>", item="item", max_items=None,
+  bind=True)` runs the phase once per item, each its own sub-plan; a later
+  phase gets the list of per-item outputs. At most `max_items` /
+  `FW_SKILL_FANOUT_MAX_ITEMS` (default 10) items run, and the answer says when
+  it was capped. Each item is bound to the record that names it: its output
+  is filled there, and its finish check flags a step on another item's record
+  and an item never opened (`item_record_issues`; span `record_issues`).
+  `fw.skill.phase` v2 adds `item`, `item_index`, `item_count`, `items_total`,
+  `record_issues`.
+- **Skill previews and a skill-file layout convention** (fix-553q,
+  `fastworkflow.skill_preview`, `docs/skill_file_layout.md`).
+  `fastworkflow skill preview <workflow_folder> [--out <dir>] [--check]` loads
+  every skill with the skill loader and writes `<dir>/<skill>.md` (default
+  `<workflow_folder>/../docs/skill_previews`): description, inputs (type,
+  default, sample value, `verify` / `subject` flags, description, other
+  options), `plain_utterances`, and the steps for sample inputs, rendered once
+  per combination of the inputs that change them; a phased skill also lists
+  its phases, when each runs, and the facts each output holds with their
+  `"from"` sources, with earlier facts rendered as placeholders
+  (`<find.item_uids[0]>`). Byte-stable; `--check` writes nothing and exits 1
+  when a preview is stale, missing or extra. The layout doc fixes one order
+  for a skill file (docstring, `Signature`, fact models, `plan()` / `steps()`
+  as the table of contents, then the step functions), naming, plain-string
+  steps, no step logic in helpers, and conditions in `plan()`.
+- **Skill previews that read alone** (fix-553q follow-up). Each different plan
+  is rendered once, titled by the fewest inputs that decide it ("Plan when
+  compare = true"); the "runs" column names the deciding input, and one line
+  says when `plan()` returns phases at all. Output models, `when` and fan-outs
+  that differ by input carry the inputs that give them. Past 16 plans, a
+  pairwise cover of the inputs plus one plan per phase layout is rendered.
+  Int inputs are varied (the sample and 0 or 3), and samples respect `ge` /
+  `le`. A fan-out renders each listed item (never `None`), or the first and a
+  later item of an earlier phase's list; an empty list says it runs nothing.
+  Placeholder facts are consistent (a uid fact is the entry of the earlier
+  uid list, a fan-out item's output carries its item), str placeholders
+  survive `split`, and a float fact is 999999 in arithmetic so `int()` /
+  `float()` never print a plausible 0. A callable `when` shows its closure
+  values and parameter defaults, joined without "( " gaps.
+- **Skill phases: a skill run as bounded sub-plans** (fix-hia1.2,
+  `fastworkflow.skill_phases`, `docs/skill_phases.md`). A skill file with params
+  may define `plan(input) -> list[Phase]`, with `Phase(name, steps_fn,
+  output=None, when=True)`; a skill without it is unchanged. `steps_fn`'s
+  parameters are bound by name to earlier phases' filled outputs (typed facts
+  models); `when=False` leaves a phase out; `steps(input)` stays the flat
+  concatenation (`concatenated_steps`) that matching and the template read, and
+  a file with only `plan()` gets it. The loader runs `plan()` on the placeholder
+  inputs: bad phases, unbindable parameters or a malformed `"from"` fail the
+  load; a `"from"` naming a command field the workflow lacks is a logged warning
+  (`check_phase_sources`). A skill call of a phased skill runs each phase as a
+  fresh executor run with a step budget of `FW_SKILL_PHASE_MAX_STEPS` (default
+  15), its own steps (not rewritten by the planner) and its own finish check;
+  after it, the phase's output is filled in code from the phase's own command
+  runs on the record it ended on (plus the run that entered that record). Only
+  runs that do one of the phase's own steps count (fix-hia1.5,
+  `runs_on_plan`, `finish_check.satisfies`): a step giving a concrete value
+  (`find_x query=Ann`) takes only runs carrying that value, after
+  normalisation, and each page of that query; a placeholder or prose argument
+  keeps the looser match. An off-plan lookup of another value never fills the
+  fact; with only that run, the fill fails saying the planned run was not
+  found. A planned opening step the workflow was already on (refused unrun
+  with "You are already in context ...", which archives no run; e.g. an
+  earlier phase opened the record) is done by the turn's earlier run that
+  satisfies the step, entered the phase's record, and whose parameters are
+  words of the record's clause (fix-hia1.6, `runs_that_entered_record`); the
+  opening command's Input and Output facts come from that run, and a run
+  that only read the record, or entered another one, never counts.
+  A phase's finish check applies the same value rule to its steps
+  (`values=True`); the finish check of any other run is unchanged. A
+  missing fact stops the call: no later phase runs, and the answer is what the
+  phases that ran found plus a line naming the failed phase and field. The
+  sub-task's answer is the last phase's. A phased skill is never handed off
+  (`_hand_off`); other sub-tasks keep the hand-off and the 25-step cap. A phase
+  suspended on ask_user resumes and the rest run (the call's state rides the
+  session state, `skill_phase_run`). New span `fw.skill.phase` (contract v1;
+  aggregate span contract 16) per phase run. `SkillCallPlan` gains `phases`,
+  `steps_before`, `steps_after`.
+
+- **Command outputs archived as JSON; facts filled from them** (fix-hia1.1,
+  `CommandResponse.output`, `observation_offloading.facts`). A command may
+  return its `Signature.Output` as `CommandResponse(response=..., output=...)`;
+  the field is optional and appended (default `None`), and the agent's
+  observation and prompt are unchanged. Each command an archived execute step
+  ran is stored beside the step's text in the new additive
+  `offload_command_runs` table (name, success, record context, parameters and
+  Output as JSON, redacted like the text), read with
+  `RuntimeHandleArchive.command_runs`; older stores gain the table on open and
+  their rows read as before. `facts_from_runs` / `facts_from_archive` fill a
+  pydantic model whose fields declare `json_schema_extra={"from":
+  "<command>.<field>"}` from the Output or Input of successful runs, with no
+  model call: latest run for a scalar, runs joined in order for a list, a
+  missing required field is a `MissingFactError`, an unknown or ambiguous
+  source a `FactSourceError` (`check_fact_sources`, `workflow_signatures`). A
+  plain command name resolves against the record's context; `Context/command`
+  is accepted. A scalar comes from the latest run of the broadest query (fewest
+  given parameters, page position ignored), as list pages do, so a later
+  filtered read no longer replaces the whole list's `total`.
+
 - **Finish check: every command step of the plan ran** (fix-3xts,
   `observation_offloading.finish_check`). When the agent picks `finish`, the
   run's initial plan is read against the outputs it archived, in code (no model
@@ -380,6 +524,18 @@
   file over the cap.
 
 ### Fixed
+
+- **Command modules that import other command modules load safely from
+  several threads** (fix-nhhq, `python_utils.get_module`). Loading a command
+  file by path always executed a fresh copy and swapped it into `sys.modules`
+  without Python's import lock, so a concurrent `from ..Ctx.mod import X` in
+  another command module could get the half-executed copy ("cannot import name
+  X"); and a load that failed left its broken module in `sys.modules`, so every
+  later import of it failed the same way for the rest of the process. The
+  loader now takes the module's import lock, reuses a module already imported
+  from the same file (re-executing it in place only if the file changed on
+  disk), marks a fresh module initialising while it runs, and removes it from
+  `sys.modules` if it fails.
 
 - **The size-cap prune no longer deletes a running turn's offload evidence**
   (fix-q2fy, `ObservabilityStore.prune`). A turn's record is written when it

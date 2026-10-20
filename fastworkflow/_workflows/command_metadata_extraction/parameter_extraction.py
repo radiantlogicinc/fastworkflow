@@ -3,7 +3,7 @@ import sys
 import re
 import json
 import ast
-from typing import Dict, List, Optional, Union, get_origin, get_args
+from typing import Any, Dict, List, Optional, Union, get_origin, get_args
 
 from pydantic import BaseModel
 from pydantic_core import PydanticUndefined
@@ -240,7 +240,15 @@ class ParameterExtraction:
 
         stored_params = self._get_stored_parameters(self.cme_workflow)
 
-        self.command = self.command.replace(self.command_name, "").strip()
+        # The caller prefixes "<command_name>: " (wildcard.py). Strip exactly that,
+        # so the parsers below see the text as sent ("cmd k=v", not ": cmd k=v")
+        # and a value that happens to contain the command name is left alone
+        # (fix-hia1.11).
+        prefix = f"{self.command_name}:"
+        self.command = (
+            self.command[len(prefix):] if self.command.startswith(prefix)
+            else self.command.replace(self.command_name, "")
+        ).strip()
 
         input_for_param_extraction = InputForParamExtraction.create(
             self.app_workflow, self.command_name, 
@@ -275,6 +283,21 @@ class ParameterExtraction:
                 new_params = self._extract_parameters_from_xml(self.command, command_parameters_class)
                 diagnostics["extraction_method"] = "xml_regex"
 
+                # Then the ``name=value`` form (fix-hia1.10) and the guarded
+                # positional form (fix-hia1.16), parsed in code. Both stay the
+                # deterministic regex source, so the slot-binding signal contract
+                # does not change; ``deterministic_form`` says which one bound.
+                if new_params is None:
+                    new_params = self._extract_parameters_from_key_values(
+                        self.command, command_parameters_class, self.command_name)
+                    if new_params is not None:
+                        diagnostics["deterministic_form"] = "key_value"
+                if new_params is None:
+                    new_params = self._extract_parameters_from_positional(
+                        self.command, command_parameters_class, self.command_name)
+                    if new_params is not None:
+                        diagnostics["deterministic_form"] = "positional"
+
                 # If regex extraction fails, fall back to LLM-based extraction
                 if new_params is None:
                     new_params = input_for_param_extraction.extract_parameters(
@@ -282,6 +305,21 @@ class ParameterExtraction:
                         self.command_name,
                         app_workflow_folderpath)
                     diagnostics["extraction_method"] = "llm"
+
+                # A lone value that bound to nothing is refused, not dropped: run
+                # with defaults, the command does something other than what was
+                # asked and reports success (fix-hia1.14).
+                if unbound := self._unbound_lone_value(
+                        self.command, new_params, command_parameters_class,
+                        self.command_name):
+                    diagnostics["unbound_value"] = unbound
+                    return self.Output(
+                        parameters_are_valid=False,
+                        error_msg=(
+                            self._unbound_value_message(unbound, command_parameters_class)
+                            + "\nCheck your command name if the wrong command was executed."
+                        ),
+                        cmd_parameters=new_params)
             else:
                 # Use LLM-based extraction for assistant mode
                 new_params = input_for_param_extraction.extract_parameters(
@@ -701,6 +739,254 @@ class ParameterExtraction:
             return command_parameters_class.model_construct(**params_data)
 
         return None
+
+    @staticmethod
+    def _is_own_command_token(token: str, command_name: str) -> bool:
+        """Whether *token* is this command's name, short or qualified (``Ctx/cmd``)."""
+        if not token or not command_name:
+            return False
+        token = token.lstrip("/").lower()
+        return token in (command_name.lower(), command_name.split("/")[-1].lower())
+
+    @staticmethod
+    def _bound_model(command_parameters_class: type[BaseModel],
+                     converted: dict[str, Any]) -> Optional[BaseModel]:
+        """The parameters model holding *converted* (already type-converted), or None.
+
+        The only validation errors allowed are fields that were not given and are
+        required: validation later reports those as missing. Fields not given take
+        their defaults.
+        """
+        from pydantic import ValidationError
+
+        try:
+            return command_parameters_class.model_validate(converted)
+        except ValidationError as exc:
+            if any(err.get("type") != "missing" or not err.get("loc")
+                   or err["loc"][0] in converted for err in exc.errors()):
+                return None
+        except Exception:
+            return None
+        params_data: dict[str, Any] = {}
+        for name, info in command_parameters_class.model_fields.items():
+            if name in converted:
+                params_data[name] = converted[name]
+            elif info.default is not PydanticUndefined:
+                params_data[name] = info.default
+            elif info.default_factory is not None:
+                params_data[name] = info.default_factory()
+            else:
+                params_data[name] = None
+        return command_parameters_class.model_construct(**params_data)
+
+    @staticmethod
+    def _extract_parameters_from_key_values(
+            command: str, command_parameters_class: type[BaseModel],
+            command_name: str = "") -> Optional[BaseModel]:
+        """Parameters from a ``name=value`` command (``query=Ann Lee start=2``), or None.
+
+        Parsed in code, before the LLM fallback, only when the form is plain:
+
+        - The text is an optional leading command token, then ``name=value``
+          pairs; every name is a field of the parameters class, each at most once.
+          The leading token must be *command_name* itself, short or qualified, so
+          the arguments of a call routed to some other command are not bound
+          here (fix-hia1.12).
+        - A value runs to the next `` name=`` whose name is a field, or to the
+          end. Surrounding quotes go, and so does a trailing parenthetical note
+          (``" (this opens it)"``). ``None``/``null`` is no value.
+        - Values are converted by the parameters class: the given fields must
+          validate, and the only errors allowed are fields that were not given
+          and are required (validation later reports those as missing).
+
+        Any doubt -- a ``word=`` that is not a field, an XML tag, a placeholder
+        (``<...>``), an example value, an empty value, a validation error --
+        returns None, and extraction goes on as before.
+        """
+        from pydantic import TypeAdapter, ValidationError
+
+        fields = command_parameters_class.model_fields
+        text = (command or "").strip()
+        if not fields or "=" not in text or re.search(r"</?[A-Za-z_][\w.-]*>", text):
+            return None
+        keys = list(re.finditer(r"(?:^|(?<=\s))([A-Za-z_][A-Za-z0-9_]*)\s*=", text))
+        if not keys:
+            return None
+        lead = text[:keys[0].start()].strip()
+        if lead and not ParameterExtraction._is_own_command_token(lead, command_name):
+            return None
+        # Every ``word=`` must name a field: a value holding ``x=y`` is not plain.
+        if any(m.group(1) not in fields for m in keys):
+            return None
+        names = [m.group(1) for m in keys]
+        if len(set(names)) != len(names):
+            return None
+
+        raw: dict[str, Any] = {}
+        for i, match in enumerate(keys):
+            end = keys[i + 1].start() if i + 1 < len(keys) else len(text)
+            value = text[match.end():end].strip()
+            if i + 1 == len(keys):
+                value = re.sub(r"\s*\([^()]*\)\s*\.?$", "", value)
+            value = value.strip().rstrip(",;").strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'`":
+                value = value[1:-1].strip()
+            if not value or re.search(r"[<>{}]|\.\.\.|\u2026", value):
+                return None
+            examples = getattr(fields[match.group(1)], "examples", None)
+            if examples and value in examples:
+                return None
+            raw[match.group(1)] = None if value in ("None", "null") else value
+
+        converted: dict[str, Any] = {}
+        for name, value in raw.items():
+            annotation = fields[name].annotation
+            _, origin = _unwrap_optional(annotation)
+            if origin in (list, List) and isinstance(value, str):
+                if value.startswith("["):
+                    try:
+                        value = json.loads(value)
+                    except ValueError:
+                        return None
+                else:
+                    value = [part.strip().strip("\"'") for part in value.split(",")
+                             if part.strip()]
+            try:
+                converted[name] = TypeAdapter(annotation).validate_python(value)
+            except (ValidationError, TypeError, ValueError):
+                return None
+        return ParameterExtraction._bound_model(command_parameters_class, converted)
+
+    @staticmethod
+    def _is_positional_field(field_info) -> bool:
+        """A field marked ``json_schema_extra={'positional': True}``."""
+        extra = getattr(field_info, "json_schema_extra", None)
+        return isinstance(extra, dict) and extra.get("positional") is True
+
+    @staticmethod
+    def _extract_parameters_from_positional(
+            command: str, command_parameters_class: type[BaseModel],
+            command_name: str) -> Optional[BaseModel]:
+        """Parameters from a bare ``command_name value`` command, or None (fix-hia1.16).
+
+        Parsed in code, before the LLM fallback, only when nothing is in doubt:
+
+        - The text has no ``=`` and no XML, its first token is *command_name*
+          itself (short or qualified), and a value follows.
+        - The value goes to one target field: the field marked
+          ``json_schema_extra={'positional': True}``, or else the class's only
+          ``str`` field (other types, such as an int ``start``, do not count).
+          Two marked fields, or two ``str`` fields and no mark, is no target.
+        - A leading word naming the target (``uid 203b``, ``query Ann Lee``) is
+          dropped; a leading word naming another field (``other_uid 2b55``)
+          declines.
+        - A value holding ``* ` ? \\``, `` / ``, ``<>{}`` or no letter or digit
+          declines. Matching surrounding quotes go. The whole remainder is the
+          value: a trailing number is not split off into another field.
+        - Only a marked field takes a value of several words; an unmarked field
+          takes a single token, so prose sent to a free-text field still goes to
+          the LLM.
+
+        The value is converted by the field's type; the usual validation runs
+        after, as for any other form.
+        """
+        from pydantic import TypeAdapter, ValidationError
+
+        fields = command_parameters_class.model_fields
+        text = (command or "").strip()
+        if not fields or "=" in text or re.search(r"</?[A-Za-z_][\w.-]*>", text):
+            return None
+        parts = text.split(None, 1)
+        if len(parts) < 2 or not ParameterExtraction._is_own_command_token(
+                parts[0], command_name):
+            return None
+        rest = parts[1].strip()
+
+        marked = [name for name, info in fields.items()
+                  if ParameterExtraction._is_positional_field(info)]
+        if marked:
+            if len(marked) != 1:
+                return None
+            target, multi_word = marked[0], True
+        else:
+            strings = [name for name, info in fields.items()
+                       if _unwrap_optional(info.annotation)[0] is str]
+            if len(strings) != 1:
+                return None
+            target, multi_word = strings[0], False
+
+        tail = target.rsplit("_", 1)[-1]
+        words = rest.split(None, 1)
+        first = words[0].rstrip(":").lower()
+        if first in (target.lower(), tail.lower()):
+            if len(words) < 2:
+                return None
+            rest = words[1].strip()
+        elif first in {name.lower() for name in fields} or (
+                len(words) > 1 and first.endswith(f"_{tail.lower()}")):
+            return None
+
+        if re.search(r"[*`?\\<>{}]| / ", rest) or not re.search(r"[A-Za-z0-9]", rest):
+            return None
+        if len(rest) >= 2 and rest[0] == rest[-1] and rest[0] in "\"'":
+            rest = rest[1:-1].strip()
+            if not re.search(r"[A-Za-z0-9]", rest):
+                return None
+        if not multi_word and len(rest.split()) > 1:
+            return None
+        examples = getattr(fields[target], "examples", None)
+        if examples and rest in examples:
+            return None
+
+        try:
+            value = TypeAdapter(fields[target].annotation).validate_python(rest)
+        except (ValidationError, TypeError, ValueError):
+            return None
+        return ParameterExtraction._bound_model(command_parameters_class, {target: value})
+
+    @staticmethod
+    def _unbound_lone_value(command: str, params: Optional[BaseModel],
+                            command_parameters_class: type[BaseModel],
+                            command_name: str) -> Optional[str]:
+        """The value of ``command_name value`` when it bound to no field, else None.
+
+        Only a single letters-and-digits token counts (``_`` and ``-`` allowed), and
+        only when every field of *params* is still unset: None, NOT_FOUND, an empty
+        list or its default, with the token in none of them (fix-hia1.14).
+        """
+        parts = (command or "").split()
+        if len(parts) != 2 or not ParameterExtraction._is_own_command_token(
+                parts[0], command_name):
+            return None
+        token = parts[1]
+        if not re.fullmatch(r"[A-Za-z0-9_-]*[A-Za-z0-9][A-Za-z0-9_-]*", token):
+            return None
+        if params is None:
+            return token
+        for name, info in command_parameters_class.model_fields.items():
+            value = getattr(params, name, None)
+            if value is None or value == NOT_FOUND or (isinstance(value, list) and not value):
+                continue
+            if info.default is not PydanticUndefined and value == info.default \
+                    and token.lower() not in str(value).lower():
+                continue
+            return None
+        return token
+
+    @staticmethod
+    def _unbound_value_message(token: str, command_parameters_class: type[BaseModel]) -> str:
+        """Names the parameters that could take *token*, as ``name=token``."""
+        from pydantic import TypeAdapter
+
+        fields = command_parameters_class.model_fields
+        takers = []
+        for name, info in fields.items():
+            with contextlib.suppress(Exception):
+                TypeAdapter(info.annotation).validate_python(token)
+                takers.append(name)
+        names = takers or list(fields)
+        return (f"'{token}' was not bound to any parameter; use "
+                + " or ".join(f"{name}={token}" for name in names))
 
     @staticmethod
     def _extract_and_merge_missing_parameters(stored_params: BaseModel, command: str):

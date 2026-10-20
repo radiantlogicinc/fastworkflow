@@ -297,6 +297,33 @@ def add_run_parser(subparsers):
     )
     parser_run.set_defaults(func=lambda args: run_with_defaults(args))
 
+def add_skill_parser(subparsers):
+    """Add the 'skill' command group: 'skill preview' renders a workflow's skills to markdown."""
+    parser_skill = subparsers.add_parser("skill", help="Work with a workflow's skills (_skills/<name>.py).")
+    skill_subparsers = parser_skill.add_subparsers(dest="action", required=True)
+    parser_preview = skill_subparsers.add_parser(
+        "preview",
+        help="Write one markdown preview per skill (inputs, phases, facts, steps for sample inputs).",
+    )
+    parser_preview.add_argument("workflow_folder", help="Path to the workflow folder")
+    parser_preview.add_argument(
+        "--out", default=None,
+        help="Folder for the previews (default: docs/skill_previews next to the workflow folder)",
+    )
+    parser_preview.add_argument(
+        "--check", action="store_true",
+        help="Write nothing; exit 1 when a preview is stale, missing or extra",
+    )
+
+    # Lazy-import the preview generator only if the user actually invokes the command
+    def _preview_main_wrapper(args):
+        from .skill_preview import preview_main
+        code = preview_main(args)
+        if code:
+            sys.exit(code)
+
+    parser_preview.set_defaults(func=_preview_main_wrapper)
+
 def add_run_chatbot_parser(subparsers):
     """Add subparser for the 'run_chatbot' command (browser chat + observability viewer)."""
     parser_run_chatbot = subparsers.add_parser(
@@ -572,6 +599,7 @@ def main():
     add_run_parser(subparsers)
     add_run_fastapi_mcp_parser(subparsers)
     add_run_chatbot_parser(subparsers)
+    add_skill_parser(subparsers)
 
     try:
         args = parser.parse_args()

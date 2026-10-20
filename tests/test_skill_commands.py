@@ -789,3 +789,183 @@ def test_an_extra_step_is_kept_for_a_synonym_its_command_says_of_itself(monkeypa
 
 def test_command_utterances_never_raises_on_an_unreadable_workflow(tmp_path):
     assert sc.command_utterances(str(tmp_path / "missing")) == {}
+
+
+# ---------------------------------------------------------------- phased skills (skill_phases)
+
+PHASED_LOOKUP = LOOKUP + '''
+
+from fastworkflow.skill_phases import Phase
+
+
+class Found(BaseModel):
+    uids: list[str] = Field(json_schema_extra={"from": "find_group.uids"})
+
+
+def plan(input):
+    flat = steps(input)
+    return [Phase("find", lambda: flat[:2], output=Found),
+            Phase("rest", lambda find: flat[2:])]
+'''
+
+
+def test_a_skill_file_with_plan_loads_and_keeps_its_flat_steps(tmp_path, caplog):
+    command = _command(tmp_path, PHASED_LOOKUP)
+    assert command.plan_fn is not None
+    assert [m.__name__ for m in command.phase_outputs] == ["Found"]
+    # The template (what matching and the fallback read) is the flat steps, as before.
+    assert command.template == _command(tmp_path / "flat", LOOKUP).template
+
+
+def test_a_phased_skill_call_hands_its_phases_to_the_runner(tmp_path, workflow_env):
+    workflow_env()
+    sink = RecordingTraceSink()
+    ctx, wf = _session(sink)
+    ctx._begin_turn(REQUEST)
+    lm = DummyLM([_typed_answer(include_risk=True)])
+    command = _command(tmp_path, PHASED_LOOKUP)
+
+    _plan_request(ctx, wf, lm, plan_template="TEMPLATE", skill_command=command)
+
+    assert _plan_span(sink).attributes["plan_source"] == "skill_call"
+    called, call = ctx._phased_skill_call
+    assert called is command
+    assert [phase.name for phase in call.phases] == ["find", "rest"]
+    assert call.args == _args(include_risk=True, count=1)
+    assert call.steps_before == [] and call.steps_after == []
+
+
+def test_an_unphased_skill_call_hands_nothing_to_the_runner(tmp_path, workflow_env):
+    workflow_env()
+    sink = RecordingTraceSink()
+    ctx, wf = _session(sink)
+    ctx._begin_turn(REQUEST)
+    lm = DummyLM([_typed_answer(include_risk=True)])
+    _plan_request(ctx, wf, lm, plan_template="TEMPLATE", skill_command=_command(tmp_path))
+    assert ctx._phased_skill_call is None
+
+
+PAIR = '''
+from typing import Literal
+
+from pydantic import BaseModel, Field, ValidationInfo, model_validator
+
+
+class Signature:
+    """Weigh two named groups or feeds against each other. One job for the pair."""
+
+    class Input(BaseModel):
+        first: str = Field(description="the first record's name exactly as the request writes it")
+        second: str = Field(description="the second record's name exactly as the request writes it")
+        kind: Literal["group", "feed"] = Field(description="group, or feed (a source of logins)")
+
+        @model_validator(mode="after")
+        def _two_records(self, info: ValidationInfo):
+            if self.first.casefold() == self.second.casefold():
+                raise ValueError(f"first and second are both {self.first!r}; second is the other record "
+                                 "the request names")
+            request = (info.context or {}).get("request", "")
+            if self.kind != "feed" and " feeds" in request:
+                raise ValueError(f"kind={self.kind!r}, but the request says feeds; kind is feed")
+            return self
+
+
+def steps(input):
+    return [f"open {input.kind} {input.first}", f"open {input.kind} {input.second}", "say which is riskier"]
+'''
+
+PAIR_REQUEST = "Which of Payroll and Billing is riskier?"
+
+
+def _pair_answer(**fields):
+    answer = {"reasoning": "r", "first": "Payroll", "second": "Billing", "kind": "group",
+              "steps_before": [], "steps_after": []}
+    answer.update(fields)
+    return answer
+
+
+def test_input_validators_refuse_a_call_with_a_message_that_says_what_to_fix(tmp_path):
+    command = _command(tmp_path, PAIR, "pair")
+    args, notes = sc.check_arguments(command, {"first": "Payroll", "second": "payroll", "kind": "group"},
+                                     PAIR_REQUEST)
+    with pytest.raises(sc.SkillInputError, match="rule of pair: first and second are both 'Payroll'; second is the other record") as refused:
+        sc.validate_call(command, args, PAIR_REQUEST, None, notes)
+    assert "Value error" not in str(refused.value)
+    assert isinstance(refused.value, SkillCallError)
+    # the request reaches the validators through the validation context
+    request = "Which of the Payroll and Billing feeds is riskier?"
+    args, _ = sc.check_arguments(command, {"first": "Payroll", "second": "Billing", "kind": "group"}, request)
+    with pytest.raises(sc.SkillInputError, match="kind is feed"):
+        sc.validate_call(command, args, request)
+    assert sc.validate_call(command, {**args, "kind": "feed"}, request)["kind"] == "feed"
+    # the template is rendered as before: the placeholders differ and the request is empty
+    assert command.template[:2] == ("open <group or feed, by kind> <first>",
+                                    "open <group or feed, by kind> <second>")
+
+
+def test_a_hook_refusal_is_an_input_error_and_a_hook_exception_is_not(tmp_path):
+    hooked = LOOKUP.replace('        return True, ""', '        if cmd_parameters.count > 5:\n'
+                            '            return False, "count is at most 5"\n'
+                            '        if cmd_parameters.count < 0:\n'
+                            '            raise RuntimeError("bug")\n'
+                            '        return True, ""')
+    command = _command(tmp_path, hooked)
+    with pytest.raises(sc.SkillInputError, match="count is at most 5"):
+        sc.validate_call(command, _args(count=9), "Who is in Payroll?")
+    with pytest.raises(SkillCallError) as raised:
+        sc.validate_call(command, _args(count=-1), "Who is in Payroll?")
+    assert not isinstance(raised.value, sc.SkillInputError)
+
+
+def _plan_pair(ctx, wf, lm, command):
+    ctx.push_active_workflow(wf)
+    try:
+        return workflow_agent.build_query_with_next_steps(PAIR_REQUEST, ctx, planner_lm=lm,
+                                                          plan_template="TEMPLATE", skill_command=command)
+    finally:
+        ctx.pop_active_workflow()
+
+
+def test_a_refused_skill_call_is_planned_again_with_the_refusal(tmp_path, workflow_env):
+    workflow_env()
+    sink = RecordingTraceSink()
+    ctx, wf = _session(sink)
+    ctx._begin_turn(PAIR_REQUEST)
+    lm = DummyLM([_pair_answer(second="Payroll"), _pair_answer()])
+
+    _plan_pair(ctx, wf, lm, _command(tmp_path, PAIR, "pair"))
+
+    assert len(lm.history) == 2
+    assert "was refused" not in _prompt(lm, 0)
+    assert "A first call of this skill was refused" in _prompt(lm, 1) and "second is the other record" in _prompt(lm, 1)
+    span = _plan_span(sink)
+    assert span.attributes["plan_source"] == "skill_call"
+    assert span.attributes["skill_args"] == {"first": "Payroll", "second": "Billing", "kind": "group"}
+
+
+def test_a_second_refusal_falls_back_to_the_template_path(tmp_path, workflow_env):
+    workflow_env()
+    sink = RecordingTraceSink()
+    ctx, wf = _session(sink)
+    ctx._begin_turn(PAIR_REQUEST)
+    lm = DummyLM([_pair_answer(second="Payroll"), _pair_answer(first="Billing"), _text_answer()])
+
+    _plan_pair(ctx, wf, lm, _command(tmp_path, PAIR, "pair"))
+
+    assert len(lm.history) == 3
+    span = _plan_span(sink)
+    assert span.attributes["plan_source"] == "text"
+    assert "break a rule of pair" in span.attributes["skill_fallback"]
+
+
+def test_a_guard_refusal_is_not_planned_again(tmp_path, workflow_env):
+    workflow_env()
+    sink = RecordingTraceSink()
+    ctx, wf = _session(sink)
+    ctx._begin_turn(PAIR_REQUEST)
+    lm = DummyLM([_pair_answer(second="Finance"), _text_answer()])
+
+    _plan_pair(ctx, wf, lm, _command(tmp_path, PAIR, "pair"))
+
+    assert len(lm.history) == 2   # the typed call, then the text planner
+    assert "not written in the request" in _plan_span(sink).attributes["skill_fallback"]

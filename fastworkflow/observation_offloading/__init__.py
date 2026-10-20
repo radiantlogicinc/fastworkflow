@@ -19,6 +19,7 @@ from fastworkflow.observation_offloading.archive import (
     RuntimeHandleArchive,
     RuntimeHandleScope,
     UnavailableHandleArchive,
+    command_run_record,
 )
 from fastworkflow.observation_offloading.compact import (
     MIN_OFFLOAD_SAVING_BYTES,
@@ -28,6 +29,16 @@ from fastworkflow.observation_offloading.compact import (
     compact_trajectory,
     execute_step_indexes,
     min_offload_saving_bytes_from_env,
+)
+from fastworkflow.observation_offloading.facts import (
+    AmbiguousFactSourceError,
+    FactSourceError,
+    FactsError,
+    MissingFactError,
+    check_fact_sources,
+    facts_from_archive,
+    facts_from_runs,
+    workflow_signatures,
 )
 from fastworkflow.observation_offloading.labels import (
     alias_line,
@@ -50,7 +61,11 @@ from fastworkflow.observation_offloading.state import (
 )
 
 __all__ = [
+    "AmbiguousFactSourceError",
     "DEFAULT_MAX_ITERS",
+    "FactSourceError",
+    "FactsError",
+    "MissingFactError",
     "MIN_OFFLOAD_SAVING_BYTES",
     "PACKED_TARGET_BYTES",
     "PersistenceError",
@@ -65,9 +80,13 @@ __all__ = [
     "durable_archive",
     "archive_step",
     "build_tool_agent",
+    "check_fact_sources",
     "classify_against_steps",
+    "command_run_record",
     "compact_trajectory",
     "execute_step_indexes",
+    "facts_from_archive",
+    "facts_from_runs",
     "install_span_policy",
     "min_offload_saving_bytes_from_env",
     "offload_label",
@@ -77,4 +96,5 @@ __all__ = [
     "printed_context",
     "strip_alias_line",
     "uninstall_span_policy",
+    "workflow_signatures",
 ]

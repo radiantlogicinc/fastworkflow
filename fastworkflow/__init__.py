@@ -38,6 +38,14 @@ class CommandResponse(BaseModel):
     artifacts: dict[str, Any] = {}
     next_actions: list[Action] = []
     recommendations: list[Recommendation] = []
+    #: The command's ``Signature.Output`` instance, when the command built one.
+    #: Optional and appended (arch §12.2): a command that does not set it behaves
+    #: exactly as before. It never reaches the agent's prompt -- the agent reads
+    #: ``response`` -- but the observation archive stores it as JSON beside the
+    #: text (``RuntimeHandleArchive.command_runs``), so later code can read exact
+    #: ids, labels and counts without parsing ``response``. A pydantic model in
+    #: memory; a dict once a record has been dumped and read back.
+    output: Any = None
 
 class MCPToolCall(BaseModel):
     """MCP-compliant tool call request format"""

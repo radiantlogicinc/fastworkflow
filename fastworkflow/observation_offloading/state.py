@@ -32,6 +32,16 @@ _default_archive: Optional[RuntimeHandleArchive] = None
 _archives_by_path: dict[str, RuntimeHandleArchive] = {}
 #: Database paths ``prune_once`` has already pruned in this process.
 _pruned_paths: set[str] = set()
+#: Commands an in-flight execute step has run, waiting for ``archive_step`` to
+#: store them beside that step's text. Keyed by (channel, turn, alias).
+_pending_command_runs: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+#: A bound on the waiting steps: a step whose archive never ran (its turn was
+#: cut short) must not keep its runs for the life of the process.
+PENDING_COMMAND_RUN_STEPS_MAX = 256
+#: The command text an in-flight execute step built from tool arguments passed
+#: beside ``command`` (fix-5jss), waiting for ``archive_step`` to store it as
+#: the step's command. Keyed and bounded like ``_pending_command_runs``.
+_pending_folded_commands: dict[tuple[str, str, str], str] = {}
 _default_scope = RuntimeHandleScope(
     channel_id=f"process-{os.getpid()}",
     turn_key=f"process-{os.getpid()}",
@@ -238,6 +248,45 @@ def current_execute_alias(agent: Any = None) -> Optional[str]:
     return f"O{latest}"
 
 
+def note_command_run(scope: RuntimeHandleScope, alias: str, run: Mapping[str, Any]) -> None:
+    """Hold one command run of the in-flight step *alias* until it is archived.
+
+    *run* is ``archive.command_run_record(...)``. ``archive_step`` takes the
+    held runs with ``take_command_runs`` and stores them beside the step's text.
+    """
+    key = (scope.channel_id, scope.turn_key, str(alias))
+    with _lock:
+        _pending_command_runs.setdefault(key, []).append(dict(run))
+        while len(_pending_command_runs) > PENDING_COMMAND_RUN_STEPS_MAX:
+            del _pending_command_runs[next(iter(_pending_command_runs))]
+
+
+def take_command_runs(scope: RuntimeHandleScope, alias: str) -> list[dict[str, Any]]:
+    """The runs held for *alias* in *scope*, in the order they ran, removed."""
+    with _lock:
+        return _pending_command_runs.pop(
+            (scope.channel_id, scope.turn_key, str(alias)), []
+        )
+
+
+def note_folded_command(scope: RuntimeHandleScope, alias: str, command: str) -> None:
+    """Hold the command text the in-flight step *alias* ran, folded from tool
+    arguments, so ``archive_step`` stores it rather than the bare ``command``."""
+    key = (scope.channel_id, scope.turn_key, str(alias))
+    with _lock:
+        _pending_folded_commands[key] = str(command)
+        while len(_pending_folded_commands) > PENDING_COMMAND_RUN_STEPS_MAX:
+            del _pending_folded_commands[next(iter(_pending_folded_commands))]
+
+
+def take_folded_command(scope: RuntimeHandleScope, alias: str) -> Optional[str]:
+    """The folded command text held for *alias* in *scope*, removed; None when none."""
+    with _lock:
+        return _pending_folded_commands.pop(
+            (scope.channel_id, scope.turn_key, str(alias)), None
+        )
+
+
 def record_event(
     event: Mapping[str, Any], *, scope: Optional[RuntimeHandleScope] = None,
     store: Any = None,
@@ -285,6 +334,7 @@ def reset_observation_state() -> None:
     global _default_archive
     with _lock:
         _events.clear()
+        _pending_command_runs.clear()
         _event_write_failures.clear()
         _default_archive = None
         _archives_by_path.clear()

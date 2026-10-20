@@ -182,6 +182,43 @@ def test_a_bare_earlier_run_does_not_satisfy_a_setup_step_with_an_argument():
     assert fc.check(plan, rows, COMMANDS, earlier_rows=[row(0, "find_book Dune", "x")]).unmet == []
 
 
+def test_a_step_value_must_be_the_one_the_run_carries():
+    steps = fc.parse_plan("1. find_book query=Dune Messiah (the sequel)\n"
+                          "2. open_book_by_uid book_uid=<the uid>\n3. list_loans start=<n>", COMMANDS)
+    assert [s.arguments for s in steps] == [{"query": "dune messiah"}, {}, {}]
+    find = steps[0]
+    # Archive rows: the value as a word of the command text, compared case-blind.
+    assert fc.satisfies(find, row(0, "find_book query='dune  messiah'", "x"), {"find_book"})
+    assert not fc.satisfies(find, row(0, "find_book query=Emma", "x"), {"find_book"})
+    # Command runs: the named parameter; another page of the same query still does it.
+    assert fc.satisfies(find, {"command": "Library/find_book", "input": {"query": "Dune Messiah"}})
+    assert fc.satisfies(find, {"command": "find_book", "input": {"query": "Dune Messiah", "start": 20}})
+    assert not fc.satisfies(find, {"command": "find_book", "input": {"query": "Emma", "start": None}})
+    assert not fc.satisfies(find, {"command": "find_book", "input": {"query": None}})
+    # A placeholder names no value: any run with arguments does.
+    assert fc.satisfies(steps[1], {"command": "open_book_by_uid", "input": {"book_uid": "b7"}})
+    assert not fc.satisfies(steps[1], {"command": "open_book_by_uid", "input": {"book_uid": None}})
+
+
+def test_in_a_phase_an_off_plan_lookup_does_not_meet_a_step_with_another_value():
+    plan = "1. find_book query=Dune\n2. show_details"
+    rows = [row(0, "find_book query=Emma", "1 book(s)"), row(1, "show_details", "a")]
+    assert [v.step for v in fc.check(plan, rows, COMMANDS, values=True).unmet] == [1]
+    rows.append(row(2, "find_book Dune", "1 book(s)"))
+    assert fc.check(plan, rows, COMMANDS, values=True).unmet == []
+
+
+def test_outside_a_phase_the_check_does_not_compare_values():
+    # The stage-7 rule: any run with arguments meets a step that writes one.
+    plan = "1. find_book query=Jesse Rodgers-ADM\n2. show_details"
+    rows = [row(0, "find_book query=Jesse Rodgers", "1 book(s)"), row(1, "show_details", "a")]
+    assert fc.check(plan, rows, COMMANDS).unmet == []
+    assert [v.step for v in fc.check(plan, rows, COMMANDS, values=True).unmet] == [1]
+    # The bare-run rule still holds.
+    bare = [row(0, "find_book", "1 book(s)"), row(1, "show_details", "a")]
+    assert [v.step for v in fc.check(plan, bare, COMMANDS).unmet] == [1]
+
+
 def test_review_without_room_to_act_says_nothing():
     assert fc.review_finish(plan_text=PLAN, floor=0, iters_left=1, commands=COMMANDS) is None
 
@@ -310,3 +347,22 @@ def test_the_execution_context_attaches_a_check_whenever_the_run_has_a_plan(monk
     ctx._initial_plan_text = ""
     ctx._attach_finish_check(0)
     assert ctx._workflow_tool_agent.finish_reviewer is None
+
+
+def test_a_step_value_ends_at_comma_prose_and_an_identifier_at_its_token():
+    uid = "902d138bd2eb570305bc1019007f4922"
+    args = fc.step_arguments
+    # An identifier value is its first token; prose after it is not the value.
+    assert args(f" scope=shelf scope_uid={uid}, no filter, no start") == {
+        "scope": "shelf", "scope_uid": uid}
+    assert args(f" book_uid={uid} with no filter") == {"book_uid": uid}
+    # A name of several words is kept whole, up to ", " prose.
+    assert args(" query=Ann Lee") == {"query": "ann lee"}
+    assert args(" query=Ann Lee, the second match") == {"query": "ann lee"}
+    assert args(" query=Shelf_Reading Room 2") == {"query": "shelf_reading room 2"}
+    assert args(" title=Dune, author=Herbert") == {"title": "dune", "author": "herbert"}
+    run = {"command": "list_loans", "success": True,
+           "input": {"scope": "shelf", "scope_uid": uid, "filter": None}}
+    step = fc.parse_plan(f"1. list_loans scope=shelf scope_uid={uid}, no filter, no start",
+                         COMMANDS)[0]
+    assert fc.satisfies(step, run)

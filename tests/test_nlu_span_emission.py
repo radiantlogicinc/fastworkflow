@@ -152,6 +152,15 @@ class TestParamExtractionSpan:
         assert span.attributes["validation_hook"]["ran"] is True
         assert span.attributes["validation_hook"]["is_valid"] is True
 
+    def test_key_value_extraction_valid(self, hello_ctx):
+        # ``name=value`` is parsed in code, not by the LLM (fix-hia1.10): the method
+        # stays the deterministic regex one (an LLM fallback would record "llm").
+        ctx, sink = hello_ctx
+        CommandExecutor.invoke_command(ctx, "add_two_numbers first_num=5 second_num=3")
+        span = sink.named(tracing.SPAN_NLU_PARAM_EXTRACTION)[-1]
+        assert span.attributes["extraction_method"] == "xml_regex"
+        assert span.attributes["parameters_valid"] is True
+
 
 class TestStructuredValidationDiagnostics:
     """validate_parameters(diagnostics=...) fills structured outcomes —

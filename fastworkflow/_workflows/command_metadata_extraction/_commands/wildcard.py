@@ -177,9 +177,25 @@ class ResponseGenerator:
             workflow.context = workflow_context
 
         command_name = cnp_output.command_name
+        extraction_text = None
+        if nlu_pipeline_stage == NLUPipelineStage.PARAMETER_EXTRACTION:
+            first_token = command.split(None, 1)[0].split("(", 1)[0] if command.strip() else ""
+            if ParameterExtraction._is_own_command_token(first_token, command_name):
+                # The pending command sent again in full is a new extraction, not
+                # an answer to the pending round: it replaces the stored command
+                # and the parameters collected for it (fix-hia1.17).
+                ParameterExtraction._clear_parameters(workflow)
+                workflow_context = workflow.context
+                workflow_context["command"] = command
+                workflow.context = workflow_context
+            else:
+                # An answer to the pending round: what gets merged is this text,
+                # not the stored command it answers.
+                extraction_text = f'{command_name}: {command}'
         # Use the preserved original command (with parameters) if available
         preserved_command = f'{command_name}: {workflow.context.get("command", command)}'
-        extractor = ParameterExtraction(workflow, app_workflow, command_name, preserved_command)
+        extractor = ParameterExtraction(
+            workflow, app_workflow, command_name, extraction_text or preserved_command)
         pe_output = extractor.extract()
         if not pe_output.parameters_are_valid:
             return CommandOutput(

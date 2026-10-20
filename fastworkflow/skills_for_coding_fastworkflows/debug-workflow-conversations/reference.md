@@ -81,16 +81,32 @@ Sibling of `fw.planner.plan` under the turn; NOT `fw.command.execute` (that is
 one command inside a tool call — this is the whole loop). Attributes include
 `agent_input`, `resumed`, `attempts`, `suspended`, `final_answer`.
 
+### `fw.skill.phase` (kind `internal`) — one phase of a phased skill call
+Added in aggregate span contract 16. A skill call whose skill file defines
+`plan()` runs each phase as its own executor run, so a turn has one
+`fw.skill.phase` span per phase run, each the parent of that run's
+`fw.agent.execute`. Opened with `skill`, `phase`, `phase_index` (0-based) of
+`phase_count`, `step_budget`, `first_step` and `resumed` (a run resumed after
+ask_user opens a new span); closed with `steps` (the phase's numbered plan),
+`steps_used`, `exhausted` (reached its budget), `suspended`, `record` (the
+`"<Context> <label>"` its output was filled on) and `facts` (the filled output,
+`null` for a phase with none). A failed phase has status `error` and
+`facts_error`: its steps could not be built, or a required fact had no source
+run; no later phase of that call ran.
+
 ### `fw.agent.step` (kind `internal`) — one reasoning step
 Child of `fw.agent.execute`; the step's reasoning `fw.llm.call` and its
 `fw.agent.tool_call` nest under it. Attributes: `step_index`, `thought`,
 `tool_name`, `tool_args`, `observation`; on failures `error_type`/`tool_error`
 and `recovered`; on suspension `clarification` (status `awaiting_user`);
+`folded_command` when the model passed parameters as tool arguments beside
+`command` and the tool folded them into the command text (`tool_args` keeps
+what was sent; the observation ends with a "(Ran as: ...)" note);
 `finish_check_note` (historical whitelist key; no longer set on new spans).
 
 ### `fw.agent.tool_call` (kind `tool`)
 One per agent → workflow invocation; `raw_command` is the exact command text
-the agent sent, with `response_text`/`success` (and `error_type` on failure)
+the agent sent (after any folding of extra tool arguments, see `fw.agent.step`), with `response_text`/`success` (and `error_type` on failure)
 added at close.
 
 ### `fw.command.execute` (kind `tool`)
@@ -120,6 +136,8 @@ Wraps parameter extraction + validation for the resolved command.
 | Attribute | Meaning |
 |---|---|
 | `command_name`, `extraction_method` | `xml_regex` (agent format), `llm` (DSPy), `stored_merge` (a NOT_FOUND retry round merging user corrections) |
+| `deterministic_form` | With `xml_regex`: `key_value` (`name=value` pairs) or `positional` (`command value`) when one of those code parsers bound the parameters; absent for XML tags |
+| `unbound_value` | A lone value (`command value`) that bound to no parameter and was refused instead of running with defaults |
 | `retry_round` | true when this turn continues a parameter-correction loop |
 | `parameters_valid` | The overall verdict (span `status` stays `ok`; only exceptions mark `error`) |
 | `missing_fields` / `invalid_fields` | Structured field lists (no prose parsing needed) |

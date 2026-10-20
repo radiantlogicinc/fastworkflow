@@ -34,13 +34,16 @@ from fastworkflow.utils.chat_adapter import CommandsSystemPreludeAdapter
 from fastworkflow.observation_offloading.agent import build_tool_agent
 from fastworkflow.observation_offloading.search import search_memory as search_observation
 from fastworkflow.observation_offloading.labels import annotated_observation
+from fastworkflow.observation_offloading.archive import command_run_record
 from fastworkflow.observation_offloading.state import (
     archive_for_path,
     current_execute_alias,
+    note_command_run,
+    note_folded_command,
     observability_db_path,
     scope_for_host,
 )
-from fastworkflow.context_identity import context_clause_for
+from fastworkflow.context_identity import context_clause_for, context_identity
 
 _FINAL_ANSWER_DESC = "The answer from the evidence gathered: one line for each part of the request, giving what was found with its names and uids, or saying plainly that it was not found or not reached. Never claim work the trajectory does not show, and do not say the task is complete."
 
@@ -84,6 +87,35 @@ def _append_action_record(chat_session_obj, record: dict) -> None:
     core = getattr(chat_session_obj, "_core", None)
     if core is not None and hasattr(core, "append_action_log"):
         core.append_action_log(record)
+
+
+def _hold_command_run(chat_session_obj, command_output, context_clause,
+                      context_name=None) -> None:
+    """Hold this command's run for the in-flight execute step's archive row.
+
+    Its name, success, context, parameters and ``Signature.Output``
+    (``CommandResponse.output``) are stored beside the step's text when the
+    step is archived; the observation the agent reads is not touched. Outside
+    an agent execute step there is no row to store it in, and nothing is held.
+    Never raises: this record must not be able to fail a command.
+    """
+    try:
+        name = command_output.command_name
+        if not name:
+            return
+        alias = current_execute_alias(getattr(chat_session_obj, "workflow_tool_agent", None))
+        if alias is None:
+            return
+        note_command_run(scope_for_host(chat_session_obj), alias, command_run_record(
+            command_name=name,
+            success=bool(command_output.success),
+            context_clause=context_clause,
+            context_name=context_name,
+            parameters=command_output.command_parameters,
+            output=command_output.command_response.output,
+        ))
+    except Exception:  # noqa: BLE001
+        logger.debug("could not hold the command run for its archive row", exc_info=True)
 
 
 def _append_turn_output(chat_session_obj, command_output) -> None:
@@ -311,12 +343,120 @@ def _commands_in(command: str, names: set[str]) -> list[str]:
     return found
 
 
-def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSession) -> str:
+# Keys a model nests a command's parameters under, and keys it puts the command
+# name under when ``command`` itself is missing (fix-5jss).
+_NESTED_ARG_KEYS = ("args", "arguments", "params", "parameters", "kwargs")
+_COMMAND_NAME_KEYS = ("command_name", "cmd", "action", "function", "tool")
+_COMMAND_NAME_TOKEN = re.compile(r"[A-Za-z_][\w./-]*")
+_XML_TAG = re.compile(r"</?[A-Za-z_][\w.-]*>")
+
+
+def _arg_text(value) -> str:
+    """A tool argument as command text: strings as they are, everything else JSON."""
+    if isinstance(value, str):
+        return value.strip()
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _key_value_text(key: str, value: str) -> str:
+    """``key=value``, quoted only where the key=value parser would otherwise cut
+    the value: it strips a trailing ``,``/``;`` and a trailing ``(note)``. A
+    `` word=`` inside a value ends it whatever the quoting, so ``=`` (or a
+    comma inside the value) is no reason to quote."""
+    if value[-1] in ",;" or re.search(r"\([^()]*\)\.?$", value):
+        quote = '"' if '"' not in value else "'"
+        if quote not in value:
+            return f"{key}={quote}{value}{quote}"
+    return f"{key}={value}"
+
+
+def fold_tool_kwargs(command, extra: dict,
+                     fields: frozenset[str] | None = None) -> tuple[str, list[str]]:
+    """Fold keyword arguments the model passed beside ``command`` into the command text.
+
+    The command tool takes one ``command`` string, but small models often pass a
+    command's parameters as tool arguments of their own
+    (``{"command": "find_item", "name": "Ann Lee"}``), and the tool's arg check
+    refused every such call with a traceback the model then repeated (fix-5jss).
+    Each extra argument is appended as `` key=value`` (as ``<key>value</key>``
+    when the command text already uses XML tags), so the usual parsers bind it
+    or the usual refusals say why not:
+
+    - a dict under ``args``/``arguments``/``params``/``parameters``/``kwargs`` is
+      unpacked into its keys; any other value there is a bare positional value;
+    - with no command text, the name may come from ``command_name``, ``cmd``,
+      ``action``, ``function`` or ``tool`` when that value is one token;
+    - lists and dicts become JSON text; ``None`` and empty strings carry no value;
+    - given the command's parameter *fields*, a lone argument whose key is none
+      of them is sent as a bare value (``uid=ab12`` for a ``item_uid`` field
+      becomes ``ab12``), for the positional parser and its guards.
+
+    Returns the folded command, and one note per argument that carried no value
+    so that nothing is dropped unrecorded.
+    """
+    text = command.strip() if isinstance(command, str) else _arg_text(command) if command else ""
+    pairs: list[tuple[str | None, object]] = []
+    for key, value in extra.items():
+        if key in _NESTED_ARG_KEYS and isinstance(value, dict):
+            pairs.extend(value.items())
+        elif key in _NESTED_ARG_KEYS:
+            pairs.append((None, value))
+        else:
+            pairs.append((key, value))
+    if not text:
+        for i, (key, value) in enumerate(pairs):
+            if (key in _COMMAND_NAME_KEYS and isinstance(value, str)
+                    and _COMMAND_NAME_TOKEN.fullmatch(value.strip())):
+                text = value.strip()
+                del pairs[i]
+                break
+    if fields is not None and len(pairs) == 1 and pairs[0][0] not in fields:
+        pairs = [(None, pairs[0][1])]
+    xml = bool(_XML_TAG.search(text))
+    parts = [text] if text else []
+    empty: list[str] = []
+    for key, value in pairs:
+        value_text = "" if value is None else _arg_text(value)
+        if not value_text:
+            empty.append(f"{key or 'args'} had no value")
+        elif key is None:
+            parts.append(value_text)
+        elif xml:
+            parts.append(f"<{key}>{value_text}</{key}>")
+        else:
+            parts.append(_key_value_text(key, value_text))
+    return " ".join(parts), empty
+
+
+def _parameter_fields(command: str, workflow) -> frozenset[str] | None:
+    """The parameter field names of the command *command* starts with, if it is one
+    command of the current context; None when that is not certain."""
+    token = (command.split() or [""])[0].lstrip("/")
+    if workflow is None or not _COMMAND_NAME_TOKEN.fullmatch(token):
+        return None
+    try:
+        app = fastworkflow.RoutingRegistry.get_definition(workflow.folderpath)
+        names = [name for name in app.get_command_names(workflow.current_command_context_name)
+                 if _command_name_matches(token, name)]
+        if len(names) != 1:
+            return None
+        parameters = app.get_command_class(names[0], fastworkflow.ModuleType.COMMAND_PARAMETERS_CLASS)
+    except Exception:  # noqa: BLE001 - a lookup aid, never a reason to fail the call
+        return None
+    return frozenset(parameters.model_fields) if parameters is not None else frozenset()
+
+
+def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSession,
+                            *, internal: bool = False) -> str:
     """
     Executes the command and returns either a response, or a clarification request.
     Use the "what_can_i_do" tool to get details on available commands, including their names and parameters. Fyi, values in the 'examples' field are fake and for illustration purposes only.
     Commands must be formatted using plain text for command name followed by XML tags enclosing parameter values (if any) as follows: command_name <param1_name>param1_value</param1_name> <param2_name>param2_value</param2_name> ...
     Don't use this tool to respond to a clarification requests in PARAMETER EXTRACTION ERROR state
+
+    ``internal`` marks the framework's own calls (the abort that ends an error
+    state): the repeat guard neither refuses nor records them, since a refused
+    abort leaves the session stuck in a stale parameter round (fix-hia1.13).
     """
     # Refuse a bundle of several commands before anything runs: intent detection
     # would execute only the first one and silently drop the rest.
@@ -335,10 +475,17 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
     # A command blocked for this step (it just repeated its own result) is refused unrun.
     guard = _repeat_guard(chat_session_obj)
     token = (command.split() or [""])[0].lstrip("/").split("/")[-1].lower()
+    if internal:
+        guard = None
     if guard is not None and guard.blocked_command and " ".join(command.split()) == guard.blocked_command[2]:
         return (f"{guard.blocked_command[0]} with these arguments is unavailable for this step: "
                 f"{guard.blocked_command[1]}. Use what it returned, or do something else.")
     ran_in = active.current_command_context_name if active is not None else None
+    try:
+        ran_in_clause = context_clause_for(active) if active is not None else ""
+        ran_in_name = context_identity(active)[0]
+    except Exception:  # noqa: BLE001 - a label hook must not stop the command
+        ran_in_clause = ran_in_name = None
 
     # Emit trace event before execution
     if chat_session_obj.command_trace_queue is not None:
@@ -547,6 +694,7 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
         "response": response_text
     }
     _append_action_record(chat_session_obj, record)
+    _hold_command_run(chat_session_obj, command_output, ran_in_clause, ran_in_name)
 
     # Check workflow context to determine if we're in an error state that needs specialized handling
     cme_workflow = chat_session_obj.cme_workflow
@@ -560,11 +708,13 @@ def _execute_workflow_query(command: str, chat_session_obj: fastworkflow.ChatSes
         fastworkflow.NLUPipelineStage.INTENT_AMBIGUITY_CLARIFICATION,
         fastworkflow.NLUPipelineStage.INTENT_MISUNDERSTANDING_CLARIFICATION,
     ):
-        abort_confirmation = _execute_workflow_query('abort', chat_session_obj=chat_session_obj)
+        abort_confirmation = _execute_workflow_query(
+            'abort', chat_session_obj=chat_session_obj, internal=True)
         return f'{response_text}\n{abort_confirmation}'
     # Handle parameter extraction errors with abort
     if nlu_stage == fastworkflow.NLUPipelineStage.PARAMETER_EXTRACTION:
-        abort_confirmation = _execute_workflow_query('abort', chat_session_obj=chat_session_obj)
+        abort_confirmation = _execute_workflow_query(
+            'abort', chat_session_obj=chat_session_obj, internal=True)
         # Thread the active planner LM so replanning uses the same planner LM
         # as the current turn (critical for distillation: otherwise
         # replans silently fall back to LLM_PLANNER instead of the teacher/student LM).
@@ -747,7 +897,10 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
         except CommandNotFoundError as again:
             return str(again)
 
-    def execute_workflow_query(command: str) -> str:
+    # ``command`` defaults and ``**extra`` collects anything else, so a call with
+    # parameters as tool arguments is folded instead of refused (fix-5jss). The
+    # Tool below still shows the model the one ``command`` argument.
+    def execute_workflow_query(command: str = "", **extra) -> str:
         """
         Takes just a single argument called 'command'.
         Executes the command and returns either a response, or a clarification request.
@@ -755,13 +908,37 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
         Commands must be formatted using plain text for command name followed by XML tags enclosing parameter values (if any) as follows: command_name <param1_name>param1_value</param1_name> <param2_name>param2_value</param2_name> ...
         Don't use this tool to respond to a clarification requests in PARAMETER EXTRACTION ERROR state
         """
+        folded_note = ""
+        if extra or not isinstance(command, str):
+            name = command if isinstance(command, str) else ""
+            for key in _COMMAND_NAME_KEYS:
+                name = name or (extra[key] if isinstance(extra.get(key), str) else "")
+            command, empty = fold_tool_kwargs(
+                command, extra, _parameter_fields(name, chat_session_obj.get_active_workflow()))
+            # Read by the ReAct loop into the step span's `folded_command`.
+            run_state = getattr(chat_session_obj.workflow_tool_agent, "run_state", None)
+            if isinstance(run_state, dict):
+                run_state["folded_command"] = command
+            # Parameters with no command name: refused here, since intent
+            # detection would guess a command from ``key=value`` text.
+            if not _COMMAND_NAME_TOKEN.fullmatch((command.split() or [""])[0].lstrip("/")):
+                return (f"No command name was given, so nothing ran. Put the command name "
+                        f"first in the command string, then its parameters: "
+                        f"<command_name> {command}".rstrip())
+            # The step's archive row keeps this text as its command: the finish
+            # check reads what ran, not the bare ``command`` the model sent.
+            folded_alias = current_execute_alias(chat_session_obj.workflow_tool_agent)
+            if folded_alias is not None:
+                note_folded_command(scope_for_host(chat_session_obj), folded_alias, command)
+            folded_note =(f"\n(Ran as: {command} -- parameters go inside the command string."
+                           + (f" Not used: {'; '.join(empty)}." if empty else "") + ")")
         # The context this command RUNS IN, taken before dispatch: a command that
         # moves the context is evidence about the context it ran in.
         alias = current_execute_alias(chat_session_obj.workflow_tool_agent)
         workflow = chat_session_obj.get_active_workflow()
         clause = context_clause_for(workflow)
         context_before = getattr(workflow, "current_command_context", None)
-        response = run_execute_workflow_query(command)
+        response = run_execute_workflow_query(command) + folded_note
         if alias is None:
             return response
         workflow_after = chat_session_obj.get_active_workflow()
@@ -804,7 +981,7 @@ def initialize_workflow_tool_agent(chat_session: fastworkflow.ChatSession, max_i
 
     tools = [
         Tool(what_can_i_do, args={}),
-        execute_workflow_query,
+        Tool(execute_workflow_query, args={"command": {"type": "string"}}),
         ask_user,
         # search_memory disabled 2026-10-09: in live runs it retrieved nothing useful; kept for later.
         # search_memory,
@@ -977,8 +1154,29 @@ def _parsed_skills(workflow_folderpath: str) -> tuple[
         template = expand(name, (name,))
         command = dataclasses.replace(loaded.command, template=template, identifiers=identifiers,
                                       includes=tuple(plain.items()))
+        if command.phase_outputs:
+            _warn_phase_sources(command, workflow_folderpath)
         out.append((name, loaded.description, template, command, loaded.plain_utterances))
     return tuple(out)
+
+
+def _warn_phase_sources(command: SkillCommand, workflow_folderpath: str) -> None:
+    """Log a warning for each phase output field whose ``"from"`` names no command field.
+
+    Not a load failure: the workflow may add the command's ``Output`` later
+    (``skill_commands.check_phase_sources``). A phase whose field is still missing
+    when it runs fails then, naming the field.
+    """
+    from fastworkflow.observation_offloading.facts import workflow_signatures
+
+    try:
+        signatures = workflow_signatures(workflow_folderpath)
+    except Exception as error:  # noqa: BLE001 - the check is advice; the skill still loads
+        logger.warning(f"skill {command.name!r}: could not read the workflow's command signatures "
+                       f"to check its phase outputs: {type(error).__name__}: {error}")
+        return
+    for warning in skill_commands.check_phase_sources(command, signatures):
+        logger.warning(f"skill {command.name!r}: phase output source not found (loaded anyway): {warning}")
 
 
 def load_skills(workflow_folderpath: str) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
@@ -1570,6 +1768,9 @@ def build_query_with_next_steps(user_query: str,
     plan_source = None
     skill_args = None
     skill_fallback = None
+    if initial_plan:
+        # A phased skill call (skill_phases): the runner reads it after this plan.
+        chat_session_obj._phased_skill_call = None
     try:
         with dspy.context(lm=planner_lm, adapter=agent_adapter):
             if skill_command is not None and initial_plan:
@@ -1578,6 +1779,8 @@ def build_query_with_next_steps(user_query: str,
                                            workflow=current_workflow)
                     prediction, plan_text, skill_args = call.prediction, call.plan, call.args
                     plan_source = "skill_call"
+                    if call.phases is not None:
+                        chat_session_obj._phased_skill_call = (skill_command, call)
                     logger.info(f"skill call {skill_command.name}{call.args}"
                                 + (f" ({'; '.join(call.notes)})" if call.notes else ""))
                 except Exception as exc:  # noqa: BLE001 - the text planner with the template takes over

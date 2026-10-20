@@ -411,6 +411,12 @@ class fastWorkflowReAct(Module):
                         reopened = True
                 trajectory[f"observation_{idx}"] = observation
                 step_attributes["observation"] = _as_text(observation)
+                # The command text a tool built from arguments passed beside
+                # ``command`` (fix-5jss); `tool_args` keeps what the model sent.
+                run_state = getattr(self, "run_state", None)
+                folded = run_state.pop("folded_command", None) if isinstance(run_state, dict) else None
+                if folded is not None:
+                    step_attributes["folded_command"] = folded
             except AskUserSuspend as err:
                 self._suspended = {
                     "trajectory": trajectory,

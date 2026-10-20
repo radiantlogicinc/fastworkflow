@@ -410,9 +410,12 @@ def test_a_skill_file_is_planned_as_a_call_and_its_hook_refusal_falls_back(tmp_p
     sink = RecordingTraceSink()
     ctx, wf = _session(sink)
     ctx._begin_turn(request)
-    lm = DummyLM([_typed(person="Ann Lee", include_risk=True), _text_answer()])
+    # the hook's refusal is shown to the planner once; refused again, the text planner plans
+    lm = DummyLM([_typed(person="Ann Lee", include_risk=True), _typed(person="Ann Lee", include_risk=True),
+                  _text_answer()])
     _plan_skill(ctx, wf, lm, request, command)
     span = sink.named("fw.planner.plan")[-1]
     assert span.attributes["plan_source"] == "text"
     assert "the risk is assessed for the whole record" in span.attributes["skill_fallback"]
-    assert "TEMPLATE TEXT" in _prompt(lm, 1)
+    assert "was refused: validate_extracted_parameters: the risk is assessed" in _prompt(lm, 1)
+    assert "TEMPLATE TEXT" in _prompt(lm, 2)

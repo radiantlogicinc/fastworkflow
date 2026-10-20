@@ -324,6 +324,11 @@ FEATURE_OFFLOAD_EVIDENCE_V1 = "offload_evidence_v1"
 # archived, offloaded, searched and rehydrated, keyed by turn like the evidence
 # and erased and aged with it.
 FEATURE_OFFLOAD_EVENTS_V1 = "offload_events_v1"
+# The commands each archived execute step ran (`offload_command_runs`): name,
+# success, the context it ran in, its parameters and its `Signature.Output`
+# as JSON. Keyed by turn and alias like the evidence and erased and aged with
+# it. Additive: a store created before it gains it on its next open.
+FEATURE_OFFLOAD_COMMAND_RUNS_V1 = "offload_command_runs_v1"
 # The prompt-slot table (`prompt_slots`): the pieces an over-cap fw.llm.call
 # prompt was split into (`observability.prompt_slots`), keyed by turn and
 # digest, and aged and erased with the turn like `artifacts`.
@@ -1199,6 +1204,32 @@ _SCHEMA_STATEMENTS = [
         recorded_at TEXT NOT NULL)""",
     "CREATE INDEX IF NOT EXISTS idx_offload_events_turn ON offload_events(turn_key, event_id)",
     "CREATE INDEX IF NOT EXISTS idx_offload_events_channel ON offload_events(channel_id)",
+    # Command runs (FEATURE_OFFLOAD_COMMAND_RUNS_V1), additive like the tables
+    # above: a store created before it gains it on its next open, and an older
+    # build ignores it. One row per command an archived execute step ran, in
+    # the order it ran (`ordinal`), beside that step's `offload_evidence` row
+    # (same `turn_key`, `alias`). `input_json` is the command's parameters and
+    # `output_json` its `Signature.Output`, each NULL when there was none; both
+    # are written through the same protection as evidence text (`redaction`
+    # says which mode produced them). `context_clause` is the record the
+    # command ran on ("" at the root) and `context_name` that context's name.
+    """CREATE TABLE IF NOT EXISTS offload_command_runs (
+        turn_key TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        alias TEXT NOT NULL,
+        ordinal INTEGER NOT NULL,
+        step_index INTEGER NOT NULL,
+        command_name TEXT NOT NULL,
+        success INTEGER NOT NULL,
+        context_clause TEXT,
+        context_name TEXT,
+        input_json TEXT,
+        output_json TEXT,
+        redaction TEXT NOT NULL,
+        redacted INTEGER NOT NULL,
+        persisted_at TEXT NOT NULL,
+        PRIMARY KEY (turn_key, alias, ordinal))""",
+    "CREATE INDEX IF NOT EXISTS idx_offload_command_runs_channel ON offload_command_runs(channel_id)",
     # Prompt slots (FEATURE_PROMPT_SLOTS_V1), additive like the offload tables:
     # a store created before it gains it on its next open, and an older build
     # ignores it. One row per distinct piece of the prompts one turn's LLM
@@ -1223,10 +1254,11 @@ _SCHEMA_STATEMENTS = [
 
 # The offload tables above, named once for the erasure and retention paths,
 # each with the column that dates its rows.
-_OFFLOAD_EVIDENCE_TABLES = ("offload_evidence", "offload_events")
+_OFFLOAD_EVIDENCE_TABLES = ("offload_evidence", "offload_events", "offload_command_runs")
 _OFFLOAD_TABLE_TIMESTAMPS = {
     "offload_evidence": "persisted_at",
     "offload_events": "recorded_at",
+    "offload_command_runs": "persisted_at",
 }
 # How many turns one retention batch drops from the offload evidence tables.
 _OFFLOAD_PRUNE_BATCH_TURNS = 25
@@ -1466,6 +1498,7 @@ class ObservabilityStore:
                     FEATURE_EXPERIMENT_SEALING_V1,
                     FEATURE_OFFLOAD_EVIDENCE_V1,
                     FEATURE_OFFLOAD_EVENTS_V1,
+                    FEATURE_OFFLOAD_COMMAND_RUNS_V1,
                     FEATURE_PROMPT_SLOTS_V1,
                 ],
             )

@@ -126,6 +126,59 @@ the text stays in the prompt; the text is always stored.
   observation that failed to persist is never replaced by a label.
 - An alias with no stored row is an explicit miss, never a guess at a nearby step.
 
+### Command outputs and facts
+
+A command may return its `Signature.Output` with its text:
+`CommandResponse(response=text, output=Signature.Output(...))`. The field is
+optional (default `None`); a command that does not set it behaves exactly as
+before. The agent never sees it -- the observation is `response`, unchanged --
+so the prompt does not grow.
+
+Each command an execute step ran is stored beside the step's text in the
+`offload_command_runs` table: command name, success, the record it ran on
+(`context_clause`, `context_name`), its parameters (`input_json`) and its
+Output (`output_json`, `NULL` when there was none), in run order, through the
+same redaction as the text. `RuntimeHandleArchive.command_runs(scope)` reads
+them back. The table is additive: a store opened by an earlier build gains it
+on its next open, rows archived before it read exactly as before (with no
+runs), and it is erased and aged with the turn's evidence.
+
+`facts_from_runs(model, runs, *, context=None, context_name=None, signatures=None)`
+(and `facts_from_archive(model, archive, scope, ...)`) fills a pydantic model in
+code from those runs. Each field names its source with
+`json_schema_extra={"from": "<command>.<field>"}`: a field of the command's
+Output, else of its Input. Only successful runs count, only those on the
+`context` record when one is given; a scalar takes the latest run of the
+broadest query holding the field; a list field joins the runs' values in order. Runs are compared on their
+*normalised* Input: a parameter that is `None`, empty/`none`/`null` text, the
+extractor's `NOT_FOUND` sentinel or invalid-number marker, or equal to its
+`Signature.Input` default (when `signatures` is given) is not given, and a paging
+parameter at `0` is the first page. The paging parameters are those a field names
+in `"page_by"` (`{"from": "list_items.item_uids", "page_by": "cursor"}`), else
+`start`, `offset` and `skip` (`PAGING_PARAMETERS`); the other given parameters
+form the run's query. A list value joins only the pages of the broadest query
+(fewest given parameters; between equally broad ones, the latest), one per
+paging position, a re-read replacing the earlier read in place: the same page
+read as `start=None` and `start=0` counts once, and a filtered read
+(`filter=...`) is never joined into the full list. A non-list value is appended
+once per distinct normalised Input. A scalar field (from the Output or the Input)
+follows the same broadest-query rule, so a whole-list read followed by a filtered
+read gives the whole list's `total`. Over that query's pages (each distinct page
+once) it comes from the page that carries it: a later page that listed no row
+carries nothing, `None` is not carried, a bool is true when any page says so, and
+any other value is the latest carrying page's. So a count only the first page
+computes survives reading later pages; when every run is one page, the latest run
+wins. A required field with no value raises
+`MissingFactError` naming field and source; a `"from"` that is malformed, or
+names a command or field `signatures` lacks (`check_fact_sources`,
+`workflow_signatures`), raises `FactSourceError`. The command may be qualified
+(`Context/command.field`); a plain name that several contexts define resolves
+against the record's context, and otherwise raises `AmbiguousFactSourceError`.
+Facts carry values, never `O<n>` aliases, which restart with each executor run.
+
+A phased skill (`docs/skill_phases.md`) fills each phase's output this way after
+the phase's run, from that phase's own runs on the record it ended on.
+
 ## Answer-time rehydration
 
 The extract step that writes the final answer has no tools, so an offload label

@@ -21,6 +21,8 @@ from fastworkflow.observation_offloading.state import (
     archive,
     default_scope,
     record_event,
+    take_command_runs,
+    take_folded_command,
 )
 
 #: An execute observation is worth offloading when replacing it with its own
@@ -91,6 +93,7 @@ def archive_step(
     *,
     scope: Optional[RuntimeHandleScope] = None,
     selected_archive: Optional[RuntimeHandleArchive] = None,
+    command_runs: Optional[list[Mapping[str, Any]]] = None,
 ) -> bool:
     """Persist one execute observation under its ``O{step_index}`` alias. True if stored.
 
@@ -98,6 +101,12 @@ def archive_step(
     written exactly once and before any label can replace it. A failure to
     persist is recorded as ``archive_refused`` and the observation stays inline;
     compaction then finds no stored row and does not offload it.
+
+    ``command_runs`` are the commands the step ran (``command_run_record``);
+    by default the ones the execute tool held for this alias
+    (``state.note_command_run``). They are stored beside the text, with each
+    command's parameters and ``Signature.Output`` as JSON. The observation
+    text, and so the agent's prompt, is the same either way.
     """
     if str(trajectory.get(f"tool_name_{step_index}") or "") != EXECUTE_TOOL_NAME:
         return False
@@ -107,13 +116,21 @@ def archive_step(
     selected_scope = scope or default_scope()
     store = selected_archive or archive()
     alias = f"O{step_index}"
+    held = take_command_runs(selected_scope, alias)
+    runs = list(command_runs) if command_runs is not None else held
     original = command_response(shown, alias)
     digest = hashlib.sha256(original.encode("utf-8")).hexdigest()
     args = trajectory.get(f"tool_args_{step_index}")
     command = ""
     if isinstance(args, Mapping):
         command = str(args.get("command") or "")
+    # The command that ran: arguments passed beside ``command`` were folded
+    # into its text (fix-5jss), which the finish check reads.
+    command = take_folded_command(selected_scope, alias) or command
     context_clause, context_changed = printed_subject(shown)
+    # Passed only when there are runs, so an archive written against the
+    # older ``persist`` signature keeps working unchanged.
+    extra: dict[str, Any] = {"command_runs": runs} if runs else {}
     try:
         store.persist(
             selected_scope,
@@ -124,6 +141,7 @@ def archive_step(
             text_sha256=digest,
             context_clause=context_clause,
             context_changed=context_changed,
+            **extra,
         )
     except Exception as error:  # noqa: BLE001
         record_event(
