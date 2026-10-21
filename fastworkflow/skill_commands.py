@@ -134,7 +134,9 @@ A skill file::
   fails. Without it the template is ``steps()`` rendered on placeholder inputs
   (``placeholder_template``): every combination of a ``<name>`` for a str (and "" when that
   is its default), true and false for a bool, the default of an int and each value of an
-  enum, merged into one list in which a step not every combination writes says when it is
+  enum (past ``MAX_GRID`` combinations, the defaults and each one or two changes of them,
+  ``input_grid``, and a warning at load), merged into one list in which a step not every
+  combination writes says when it is
   written (``(only when person is given)``) and the steps of an enum's values are joined
   (``<find_group or find_unit, by kind> query=<name>``). A repeated part shows only its
   steps for the int's default: declare ``template`` when the planner should see how it
@@ -498,9 +500,38 @@ def _call_steps(fn: Callable, instance, where: str) -> list[str]:
     return [line.strip() for line in lines if line.strip()]
 
 
-#: ``placeholder_template`` renders ``steps()`` on every combination of placeholder inputs, or
-#: on this many sampled ones when there are more.
-TEMPLATE_GRID_LIMIT = 4096
+#: A skill's input combinations are each tried up to this many; past it, a bounded set of
+#: them (``input_grid``). Shared by ``placeholder_template`` and the skill preview.
+MAX_GRID = 4096
+#: Skill files warned about once in this process (past ``MAX_GRID``).
+_warned_grids: set[str] = set()
+
+
+def input_grid(sizes: list[int], first: tuple | None = None) -> list[tuple]:
+    """The combinations (index tuples) of inputs with *sizes* values each that are tried,
+    *first* (default all 0) first: every one, in ``itertools.product`` order, up to
+    ``MAX_GRID``; past it, *first*, each single change of it and each pair of changes of it
+    (every two inputs' values together at least once, the other inputs as in *first*)."""
+    import itertools
+
+    first = tuple(0 for _ in sizes) if first is None else tuple(first)
+    total = 1
+    for size in sizes:
+        total *= size
+    if total <= MAX_GRID:
+        grid = list(itertools.product(*[range(s) for s in sizes]))
+        grid.remove(first)
+        return [first] + grid
+    changes = [[i for i in range(s) if i != first[k]] for k, s in enumerate(sizes)]
+    out = [first]
+    for k in range(len(sizes)):
+        out += [first[:k] + (i,) + first[k + 1:] for i in changes[k]]
+    for j, k in itertools.combinations(range(len(sizes)), 2):
+        for a, b in itertools.product(changes[j], changes[k]):
+            combo = list(first)
+            combo[j], combo[k] = a, b
+            out.append(tuple(combo))
+    return out
 
 
 def _template_values(p: Param) -> tuple:
@@ -521,24 +552,28 @@ def _template_values(p: Param) -> tuple:
 
 
 def _template_grid(command: SkillCommand) -> list[dict]:
-    """The argument sets ``placeholder_template`` renders: the base first, then every other
-    combination (sampled past TEMPLATE_GRID_LIMIT), leaving out a set the skill's
-    ``validate_extracted_parameters`` changes or refuses (``validate_call`` never passes one
-    on to ``steps()``; the set it changes to is another of the grid, or none)."""
-    import itertools
-    import random
-
-    choices = [[(p.name, v) for v in _template_values(p)] for p in command.params]
+    """The argument sets ``placeholder_template`` renders: the base first, then the other
+    combinations ``input_grid`` tries (past ``MAX_GRID``, a bounded set, logged once per
+    skill file), leaving out a set the skill's ``validate_extracted_parameters`` changes or
+    refuses (``validate_call`` never passes one on to ``steps()``; the set it changes to is
+    another of the grid, or none)."""
+    values = [_template_values(p) for p in command.params]
+    sizes = [len(v) for v in values]
     total = 1
-    for c in choices:
-        total *= len(c)
-    if total <= TEMPLATE_GRID_LIMIT:
-        grid = [dict(c) for c in itertools.product(*choices)]
-    else:
-        rng = random.Random(0)
-        base = dict(c[0] for c in choices)
-        grid = [base] + [{**base, n: v} for c in choices for n, v in c[1:]]
-        grid += [dict(rng.choice(c) for c in choices) for _ in range(TEMPLATE_GRID_LIMIT)]
+    for size in sizes:
+        total *= size
+    if total > MAX_GRID and command.path not in _warned_grids:
+        from fastworkflow.utils.logging import logger
+
+        _warned_grids.add(command.path)
+        logger.warning(f"skill {command.name!r}: {total} combinations of its inputs, past {MAX_GRID}: "
+                       "its template is rendered from its defaults and each one or two changes of them")
+    # past MAX_GRID the grid is centred on the defaults (a bool false, a str empty when that is
+    # its default), the inputs most calls have
+    first = None if total <= MAX_GRID else tuple(
+        v.index(p.default) if not p.required and p.default in v and p.type != "int" else 0
+        for p, v in zip(command.params, values))
+    grid = [{p.name: v[i] for p, v, i in zip(command.params, values, combo)} for combo in input_grid(sizes, first)]
     out, seen = [], set()
     for env in grid:
         key = tuple(env.items())
@@ -805,7 +840,8 @@ def placeholder_template(command: SkillCommand) -> list[str]:
 
     ``steps()`` runs on every combination of the inputs ``_template_values`` gives (a str
     reads ``<name>``, and "" when that is its default; a bool true and false; an int its
-    default, or 1 and 0; an enum each value), and the runs are merged in order. A line not
+    default, or 1 and 0; an enum each value; past ``MAX_GRID`` combinations, those
+    ``input_grid`` covers), and the runs are merged in order. A line not
     every run writes ends with ``(only when ...)``, the condition on the arguments under which
     it is written (``kind is group``, ``person is given``, ``not flag``); lines that differ only
     by an enum's value become one (``<find_group or find_unit, by kind> query=<name>``). A

@@ -663,3 +663,18 @@ def test_a_condition_shows_its_bound_values_on_one_line(shelf_workflow):
 
 
 LIMIT = 12
+
+
+def test_a_skill_past_max_grid_lists_every_phase(tmp_path):
+    """fix-6llp.16 (folds in .15): past MAX_GRID combinations the preview tries the grid
+    the template uses, so a phase only some inputs reach is still listed."""
+    from tests.test_skill_commands import WIDE
+
+    folder = tmp_path / "shelves_wf"
+    (folder / "_skills").mkdir(parents=True)
+    (folder / "_skills" / "survey_shelf.py").write_text(WIDE)
+    text = skill_preview.render_previews(str(folder))["survey_shelf.md"]
+    for phase in ["find", "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
+                  "iota", "kappa", "lambda_", "mu", "nu", "pair", "report"]:
+        assert f"| `{phase}` |" in text
+    assert "| `pair` | none | only when alpha = true, beta = true |" in text

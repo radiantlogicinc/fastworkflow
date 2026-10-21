@@ -8,6 +8,7 @@ import functools
 import json
 import os
 import re
+import threading
 import time
 import traceback
 from datetime import datetime, timezone
@@ -1103,11 +1104,21 @@ def _skill_files(root: str) -> list[tuple[str, str]]:
     return out
 
 
-@functools.lru_cache(maxsize=None)
+#: Held while a workflow's skills are read, so threads that start together build them once.
+_parsed_skills_lock = threading.RLock()
+
+
 def _parsed_skills(workflow_folderpath: str) -> tuple[
         tuple[str, str, tuple[str, ...], "SkillCommand | None", tuple[str, ...]], ...]:
     """``(name, description, template steps, command or None, plain_utterances)`` per skill;
-    see ``load_skills``."""
+    see ``load_skills``. Built once per process (``_build_parsed_skills``)."""
+    with _parsed_skills_lock:
+        return _build_parsed_skills(workflow_folderpath)
+
+
+@functools.lru_cache(maxsize=None)
+def _build_parsed_skills(workflow_folderpath: str) -> tuple[
+        tuple[str, str, tuple[str, ...], "SkillCommand | None", tuple[str, ...]], ...]:
     root = os.path.join(workflow_folderpath, "_skills")
     files = []   # (name, SkillFile)
     for name, path in _skill_files(root):

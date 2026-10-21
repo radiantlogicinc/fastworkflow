@@ -252,8 +252,13 @@ default of 0 under `ge=1` is rendered as 1); an enum its default, else its first
 **Conditions shown both ways.** The inputs that may change the steps are the bools, the
 enums, the optional strs whose default is empty (given, or left empty) and the ints (the
 sample, and the first of its examples, 0 and 3 that differs from it and is in bounds).
-Every combination of them is tried; an input that never changes the rendered steps stays
-at its sample value. The combinations of the others are grouped by the steps they give,
+Every combination of them is tried, up to 4096 (`MAX_GRID`); past that, the sample inputs
+and each one or two changes of them (every two inputs' values together, the others at their
+sample). The skill's template (when it declares none) is rendered from the same grid, from
+the defaults; a skill past 4096 logs one warning at load naming its combination count, and
+its template's conditions may then read "only for some of the arguments", so declare
+`Signature.template` or fewer plan-changing inputs if the planner needs more. An input that never changes the
+rendered steps stays at its sample value. The combinations of the others are grouped by the steps they give,
 and each different plan is rendered once, titled by the fewest inputs that tell it apart
 from the others ("Plan when compare_rights = true", "Plan unless kind = kit", "Plan when
 scope = every, people = 3"). The "runs" column is written the same way, so it names the

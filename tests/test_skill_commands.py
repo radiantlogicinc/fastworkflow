@@ -1030,3 +1030,112 @@ def test_a_one_element_list_argument_stands_for_its_element(tmp_path, workflow_e
     span = _plan_span(sink)
     assert span.attributes["plan_source"] == "skill_call"
     assert span.attributes["skill_args"] == {"first": "Payroll", "second": "Billing", "kind": "group"}
+
+
+# ---------------------------------------------------------------- the template's grid (fix-6llp.16)
+
+#: Thirteen bools: 8192 combinations, past MAX_GRID. Each bool adds a phase; "pair" needs two.
+WIDE = '''
+from pydantic import BaseModel, Field
+
+from fastworkflow.skill_phases import Phase
+
+FLAGS = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa", "lambda_",
+         "mu", "nu"]
+
+
+class Signature:
+    """Survey one named shelf, with each optional section the request asks for. One job per shelf."""
+
+    class Input(BaseModel):
+        name: str = Field(description="the shelf's name exactly as the request writes it")
+        alpha: bool = Field(default=False, description="asks for section alpha")
+        beta: bool = Field(default=False, description="asks for section beta")
+        gamma: bool = Field(default=False, description="asks for section gamma")
+        delta: bool = Field(default=False, description="asks for section delta")
+        epsilon: bool = Field(default=False, description="asks for section epsilon")
+        zeta: bool = Field(default=False, description="asks for section zeta")
+        eta: bool = Field(default=False, description="asks for section eta")
+        theta: bool = Field(default=False, description="asks for section theta")
+        iota: bool = Field(default=False, description="asks for section iota")
+        kappa: bool = Field(default=False, description="asks for section kappa")
+        lambda_: bool = Field(default=False, description="asks for section lambda")
+        mu: bool = Field(default=False, description="asks for section mu")
+        nu: bool = Field(default=False, description="asks for section nu")
+
+
+def plan(input):
+    phases = [Phase("find", lambda: [f"find_shelf query={input.name}"])]
+    for flag in FLAGS:
+        phases.append(Phase(flag, lambda flag=flag: [f"show_{flag}"], when=getattr(input, flag)))
+    phases.append(Phase("pair", lambda: ["compare_alpha_beta"], when=input.alpha and input.beta))
+    phases.append(Phase("report", lambda: ["say what the shelf holds"]))
+    return phases
+'''
+
+
+def test_the_grid_is_every_combination_up_to_max_grid_in_product_order():
+    import itertools
+
+    assert sc.MAX_GRID == 4096
+    assert sc.input_grid([2, 3, 2]) == list(itertools.product(range(2), range(3), range(2)))
+    assert sc.input_grid([2, 3, 2], (1, 0, 0))[0] == (1, 0, 0)
+    assert sc.input_grid([2] * 12) == list(itertools.product(*[range(2)] * 12))   # 4096: all
+    grid = sc.input_grid([2] * 13, (1,) + (0,) * 12)   # 8192: the first, one and two changes
+    assert grid[0] == (1,) + (0,) * 12 and len(grid) == 1 + 13 + 78 == len(set(grid))
+    assert all(sum(a != b for a, b in zip(c, grid[0])) <= 2 for c in grid)
+    for i, j in itertools.combinations(range(13), 2):
+        assert {(c[i], c[j]) for c in grid} == {(0, 0), (0, 1), (1, 0), (1, 1)}
+
+
+def test_a_skill_past_max_grid_loads_quickly_warns_once_and_its_template_uses_the_cover(
+        tmp_path, monkeypatch):
+    import time
+
+    from fastworkflow.utils.logging import logger
+
+    warnings = []
+    monkeypatch.setattr(logger, "warning", lambda message, *a, **k: warnings.append(message))
+    start = time.perf_counter()
+    command = _command(tmp_path, WIDE, "survey_shelf")
+    assert time.perf_counter() - start < 10
+    assert len([w for w in warnings if "survey_shelf" in w]) == 1
+    assert "8192 combinations" in warnings[0] and f"past {sc.MAX_GRID}" in warnings[0]
+    template = list(command.template)
+    assert template[0] == "find_shelf query=<name>" and template[-1] == "say what the shelf holds"
+    for flag in ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa",
+                 "lambda_", "mu", "nu"]:
+        assert f"show_{flag} (only when {flag})" in template
+    assert "compare_alpha_beta (only when alpha and beta)" in template   # two inputs: reached
+    sc.placeholder_template(command)   # a second render in this process: no second warning
+    assert len([w for w in warnings if "survey_shelf" in w]) == 1
+
+
+def test_threads_that_load_skills_together_build_them_once(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    folder = _write(tmp_path, {"lookup": LOOKUP})
+    built = []
+    load = workflow_agent._load_skill_file
+
+    def slow_load(name, path, workflow_folderpath):
+        built.append(name)
+        time.sleep(0.2)
+        return load(name, path, workflow_folderpath)
+
+    monkeypatch.setattr(workflow_agent, "_load_skill_file", slow_load)
+    barrier = threading.Barrier(6)
+    results = []
+
+    def worker():
+        barrier.wait()
+        results.append(workflow_agent.load_skills(folder))
+
+    threads = [threading.Thread(target=worker) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert built == ["lookup"]
+    assert len(results) == 6 and all(r == results[0] for r in results)
