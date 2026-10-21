@@ -594,41 +594,107 @@ def _condition_text(command: SkillCommand, present: set, grid: list[dict]) -> st
     """The words of a simple condition true exactly on the grid points ``present``: "" when
     that is all of them, else an ``and`` of up to three parameter tests or an ``or`` of up
     to three ``and``s of up to two; None when none fits."""
-    import itertools
+    return _Conditions(command, grid).text(present)
 
-    want = tuple(i in present for i in range(len(grid)))
-    if all(want):
-        return ""
-    index = {tuple(env.items()): i for i, env in enumerate(grid)}
-    relevant = []   # the parameters whose value alone can change whether the line is written
-    for p in command.params:
-        if any(want[i] != want[j] for i, env in enumerate(grid) for v in _template_values(p)
-               if v != env[p.name] for j in [index.get(tuple({**env, p.name: v}.items()))] if j is not None):
-            relevant.append(p)
-    literals = [(p, frozenset(s)) for p in relevant for k in range(1, len(_template_values(p)))
-                for s in itertools.combinations(_template_values(p), k)]
 
-    def truth(conj) -> tuple:
-        return tuple(all(env[p.name] in allowed for p, allowed in conj) for env in grid)
+class _Conditions:
+    """``_condition_text`` for the point sets of one grid. A set of points is a bit mask (bit
+    i for grid point i), each parameter test the mask of the points it holds on, and a text
+    is kept by its mask. The tests are tried in ``_condition_text``'s order, so the first
+    that fits is the same; an ``and`` that already misses a wanted point, or an ``or`` whose
+    remaining terms cannot cover them, is skipped with everything that extends it."""
 
-    def words(conj) -> str:
-        return " and ".join(_literal_words(p, allowed) for p, allowed in conj)
+    def __init__(self, command: SkillCommand, grid: list[dict]):
+        import itertools
 
-    small: list[tuple] = []
-    for size in (1, 2, 3):
-        for conj in itertools.combinations(literals, size):
-            if len({p.name for p, _ in conj}) < size:
+        self.size = len(grid)
+        self.full = (1 << self.size) - 1
+        self.cache: dict[int, str | None] = {}
+        index = {tuple(env.items()): i for i, env in enumerate(grid)}
+        # per parameter: (i, j) for each grid point i and each point j that is i with only
+        # that parameter's value changed
+        self.pairs = [(p, [(i, j) for i, env in enumerate(grid) for v in _template_values(p)
+                           if v != env[p.name] for j in [index.get(tuple({**env, p.name: v}.items()))]
+                           if j is not None])
+                      for p in command.params]
+        # per parameter: its tests, (p, allowed values, mask of the points it holds on)
+        self.tests = {p.name: [(p, allowed, sum(1 << i for i, env in enumerate(grid) if env[p.name] in allowed))
+                               for k in range(1, len(_template_values(p)))
+                               for allowed in map(frozenset, itertools.combinations(_template_values(p), k))]
+                      for p in command.params}
+
+    def text(self, present: set) -> str | None:
+        want = 0
+        for i in present:
+            if 0 <= i < self.size:
+                want |= 1 << i
+        if want not in self.cache:
+            self.cache[want] = self._text(want)
+        return self.cache[want]
+
+    def _text(self, want: int) -> str | None:
+        if want == self.full:
+            return ""
+        relevant = [p for p, pairs in self.pairs   # whose value alone can change whether the line is written
+                    if any((want >> i & 1) != (want >> j & 1) for i, j in pairs)]
+        literals = [test for p in relevant for test in self.tests[p.name]]
+        names = [p.name for p, _, _ in literals]
+        masks = [mask for _, _, mask in literals]
+        n = len(literals)
+
+        def words(conj) -> str:
+            return " and ".join(_literal_words(literals[k][0], literals[k][1]) for k in conj)
+
+        small: list[tuple] = []   # (literal indexes, mask): the ands of one or two that hold only within want
+        for a in range(n):
+            if masks[a] == want:
+                return words((a,))
+            if not masks[a] & ~want:
+                small.append(((a,), masks[a]))
+        for a in range(n):
+            for b in range(a + 1, n):
+                if names[a] == names[b]:
+                    continue
+                t = masks[a] & masks[b]
+                if t == want:
+                    return words((a, b))
+                if not t & ~want:
+                    small.append(((a, b), t))
+        for a in range(n):
+            if masks[a] & want != want:
                 continue
-            t = truth(conj)
-            if t == want:
-                return words(conj)
-            if size < 3 and not any(a and not b for a, b in zip(t, want)):
-                small.append((conj, t))
-    for k in (2, 3):
-        for terms in itertools.combinations(small, k):
-            if tuple(any(x) for x in zip(*(t for _, t in terms))) == want:
-                return " or ".join(f"({words(c)})" if len(c) > 1 else words(c) for c, _ in terms)
-    return None
+            for b in range(a + 1, n):
+                t = masks[a] & masks[b]
+                if t & want != want or names[a] == names[b]:
+                    continue
+                for c in range(b + 1, n):
+                    if t & masks[c] == want and names[c] != names[a] and names[c] != names[b]:
+                        return words((a, b, c))
+
+        def joined(terms) -> str:
+            return " or ".join(f"({words(c)})" if len(c) > 1 else words(c) for c in terms)
+
+        m = len(small)
+        rest = [0] * (m + 1)   # rest[k]: the points the terms from k on hold on
+        for k in range(m - 1, -1, -1):
+            rest[k] = rest[k + 1] | small[k][1]
+        for a in range(m):
+            if small[a][1] | rest[a + 1] != want:
+                continue
+            for b in range(a + 1, m):
+                if small[a][1] | small[b][1] == want:
+                    return joined((small[a][0], small[b][0]))
+        for a in range(m):
+            if small[a][1] | rest[a + 1] != want:
+                continue
+            for b in range(a + 1, m):
+                t = small[a][1] | small[b][1]
+                if t | rest[b + 1] != want:
+                    continue
+                for c in range(b + 1, m):
+                    if t | small[c][1] == want:
+                        return joined((small[a][0], small[b][0], small[c][0]))
+        return None
 
 
 def _alternatives(texts: list[str], by: str) -> str | None:
@@ -658,14 +724,14 @@ def _merge_enum_lines(p: Param, merged: list[list], grid: list[dict]) -> list[li
     """``merged`` with the branches of enum ``p`` joined where they line up: consecutive blocks
     of lines, each written for its own values of ``p`` alone (the other arguments alike), of
     one length; their n-th lines become one line with ``<a or b, by p>``."""
-    def others(i: int) -> tuple:
-        return tuple((k, v) for k, v in grid[i].items() if k != p.name)
+    own = [env[p.name] for env in grid]
+    others = [tuple((k, v) for k, v in env.items() if k != p.name) for env in grid]
 
     info = []   # per line: (values of p it is written for, the other arguments it is written for)
     for _line, points in merged:
-        values = frozenset(grid[i][p.name] for i in points)
-        rest = frozenset(others(i) for i in points)
-        alone = {i for i, env in enumerate(grid) if env[p.name] in values and others(i) in rest} == points
+        values = frozenset(own[i] for i in points)
+        rest = frozenset(others[i] for i in points)
+        alone = {i for i in range(len(grid)) if own[i] in values and others[i] in rest} == points
         info.append((values, rest) if alone and len(values) < len(p.values) else None)
 
     def joinable(blocks: list[list[int]]) -> bool:
@@ -770,9 +836,10 @@ def placeholder_template(command: SkillCommand) -> list[str]:
     for p in command.params:
         if p.type == "enum":
             merged = _merge_enum_lines(p, merged, grid)
+    conditions = _Conditions(command, grid)
     out = []
     for line, points in merged:
-        condition = _condition_text(command, points, grid)
+        condition = conditions.text(points)
         if condition is None:
             out.append(f"{line} (only for some of the arguments)")
         else:
