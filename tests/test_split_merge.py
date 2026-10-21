@@ -339,8 +339,10 @@ def test_a_subject_cut_from_its_sentence_is_restored_though_another_sub_task_nam
     split = ["List the logins nobody owns on NORTHFEED, with a count for each.",
              "Confirm whether the HR feed carries any logins at all.",
              "Open the riskier of NORTHFEED and SOUTHFEED and show me the controls it trips."]
+    # the sentence comes back whole, then rule 7 cuts it one sub-task per feed ("for each")
     assert merge_subtasks(q, split) == [
-        "List the logins nobody owns on NORTHFEED and on SOUTHFEED, with a count for each.",
+        "List the logins nobody owns on NORTHFEED, with a count for each.",
+        "List the logins nobody owns on SOUTHFEED, with a count for each.",
         "Confirm whether the HR feed carries any logins at all.",
         "Open the riskier of NORTHFEED and SOUTHFEED and show me the controls it trips."]
 
@@ -352,3 +354,92 @@ def test_a_sentence_split_per_subject_or_kept_whole_is_left_alone():
              "List the logins nobody owns on SOUTHFEED, with a count for each.",
              "Open the riskier of NORTHFEED and SOUTHFEED and show me the controls it trips."]
     assert merge_subtasks(q, split) == split
+
+
+# ------------------------------------------------------------------ rule 3a: statements are context
+def test_a_statement_subtask_is_context_for_the_job_after_it():
+    q = "Ann Lee's login is a standard account. Remove the `admin` tag from it."
+    assert merge_subtasks(q, ["Ann Lee's login is a standard account.",
+                              "Remove the `admin` tag from Ann Lee's login."]) == [q]
+
+
+def test_a_dropped_statement_is_written_before_the_job_pointing_back_to_its_record():
+    q = ("I am closing out Field Sales for the year. Walk the whole unit: every person on that roster. "
+         "Then explain the controls 'Stale badges' and 'Shared logins': why each was flagged.")
+    split = ["Walk the whole unit: every person on that roster.",
+             "Explain the control 'Stale badges': why it was flagged.",
+             "Explain the control 'Shared logins': why it was flagged."]
+    assert merge_subtasks(q, split) == [
+        "I am closing out Field Sales for the year. Walk the whole unit: every person on that roster.",
+        "Explain the control 'Stale badges': why it was flagged.",
+        "Explain the control 'Shared logins': why it was flagged."]
+
+
+def test_statements_and_asks():
+    from fastworkflow.split_merge import _asks, _is_statement
+    for statement in ("Ann Lee leaves at the end of the week.", "I am closing out Field Sales for the year.",
+                      "Field Sales and Sons 1 is being folded into another unit."):
+        assert _is_statement(statement)
+    for ask in ("Audit the right X across the systems it appears in.", "I want everything Ann Lee can reach.",
+                "Ann Lee leaves on Friday: what Ann Lee can reach.", "Quarterly review of Field Sales: the unit.",
+                "Ann Lee has asked for X, so triage that request.", "Who holds X?"):
+        assert not _is_statement(ask)
+
+
+# ------------------------------------------------------------------ rule 3b and 6: wrong and dropped records
+def test_a_subtask_putting_another_sentences_record_in_a_job_is_dropped():
+    q = ("I need the month-end picture of both BuildOps admin rights and of Field Sales together. "
+         "Audit BuildOps_Release Manager and BuildOps_Backup Administrator wherever they appear, each with the "
+         "system that publishes it. Then walk Field Sales end to end: every identity on the roster.")
+    split = ["Audit BuildOps admin rights wherever they appear, including the system that publishes it.",
+             "Audit Field Sales wherever it appears, including the system that publishes it.",
+             "Walk Field Sales end to end: every identity on the roster."]
+    assert merge_subtasks(q, split) == [
+        "Audit BuildOps_Release Manager wherever they appear, each with the system that publishes it.",
+        "Audit BuildOps_Backup Administrator wherever they appear, each with the system that publishes it.",
+        "Walk Field Sales end to end: every identity on the roster."]
+
+
+def test_an_asked_job_whose_record_only_other_jobs_name_is_put_back():
+    q = ("Audit the right Core Gateway_Network Administrator across the systems it appears in: holders, the "
+         "publishing system and the feed. While you are on it, confirm whether Iris Vance and Lena Marsh are "
+         "among its holders.")
+    split = ["Confirm whether Iris Vance is among the holders of the right Core Gateway_Network Administrator.",
+             "Confirm whether Lena Marsh is among the holders of the right Core Gateway_Network Administrator."]
+    assert merge_subtasks(q, split) == [
+        "Audit the right Core Gateway_Network Administrator across the systems it appears in: holders, the "
+        "publishing system and the feed."] + split
+
+
+def test_a_part_of_a_name_counts_only_written_as_a_name():
+    known = ["BuildOps_Backup Administrator", "Field Sales"]
+    assert subjects_in("Audit the administrator rights.", known) == frozenset()
+    assert subjects_in("Audit Administrator wherever it appears.", known) == {"buildops_backup administrator"}
+
+
+# ------------------------------------------------------------------ rule 7: one job per record
+def test_the_same_thing_asked_of_each_record_of_a_list_is_one_subtask_per_record():
+    q = ("Three people need the same look - Ann Lee, Bo Chan and Cy Dale - so I want each of them down to "
+         "their logins. Then explain the control 'Stale badges'.")
+    split = ["Three people need the same look - Ann Lee, Bo Chan and Cy Dale - so I want each of them down to "
+             "their logins.", "Explain the control 'Stale badges'."]
+    assert merge_subtasks(q, split) == [
+        f"Three people need the same look - {name} - so I want {name} down to their logins."
+        for name in ("Ann Lee", "Bo Chan", "Cy Dale")] + ["Explain the control 'Stale badges'."]
+
+
+def test_a_comparison_or_a_list_without_each_stays_one_subtask():
+    q = "Compare Ann Lee and Bo Chan side by side, each on logins. Then explain the control 'Stale badges'."
+    split = ["Compare Ann Lee and Bo Chan side by side, each on logins.", "Explain the control 'Stale badges'."]
+    assert merge_subtasks(q, split) == split
+    q = "Show the logins Ann Lee and Bo Chan share. Then explain the control 'Stale badges'."
+    split = ["Show the logins Ann Lee and Bo Chan share.", "Explain the control 'Stale badges'."]
+    assert merge_subtasks(q, split) == split
+
+
+def test_a_list_of_quoted_names_is_cut_too():
+    q = "Explain the controls 'Stale badges' and 'Shared logins': why each was flagged. Then walk Field Sales."
+    split = ["Explain the controls 'Stale badges' and 'Shared logins': why each was flagged.", "Walk Field Sales."]
+    assert merge_subtasks(q, split) == ["Explain the controls 'Stale badges': why each was flagged.",
+                                        "Explain the controls 'Shared logins': why each was flagged.",
+                                        "Walk Field Sales."]

@@ -26,6 +26,9 @@ feed, a control, a tag). The rules, applied in order:
    A sub-task naming only some of the subjects before it joins them when it
    checks a change ("before and after", "the change"): "Show me the tags on
    Ann Lee before and after" after "Put `on-leave` on Ann Lee".
+   Before that, **a statement is context, not a job** (3a): a request sentence that asks nothing
+   ("Ann Lee leaves on Friday.", "I am closing out Payroll.") is written before the job it is about,
+   and **a sub-task with the wrong record is dropped** (3b, see ``_restore_cut_subjects``).
 4. **A comparison is one job**: consecutive sub-tasks that each name one
    different subject and say the same thing about it ("Open Billing ...",
    "Open Shipping ...") are joined when the request sentence they come from
@@ -41,6 +44,10 @@ feed, a control, a tag). The rules, applied in order:
    ("them", "those", "it"), the ones carrying the job sentence before it. A
    limit clause ending a job sentence (", without applying any of them")
    goes to the sub-tasks carrying that sentence only.
+6. **Dropped jobs are put back**: a job sentence whose record no sub-task names, or whose records only
+   other jobs' sub-tasks name, is put back verbatim (``_restore_dropped``).
+7. **One job per record**: a sub-task asking the same thing of each record of a list ("each", "both")
+   is one sub-task per record (``_one_per_record``); a comparison is not cut.
 
 Fewer than two sub-tasks left means the request is one job: ``[user_query]``.
 
@@ -286,11 +293,13 @@ def subjects_in(text: str, request_subjects_: list[str],
             owners[_norm(run)] = owners.get(_norm(run), 0) + 1
     for s in request_subjects_:
         owners[_norm(s)] = owners.get(_norm(s), 0) + 1
+    written = _typographic(text)
     for subject in request_subjects_:
         if _norm(subject) in found:
             continue
         for run in parts[subject]:
-            if owners[_norm(run)] == 1 and _contains(rest, run):
+            # a part stands for the name only written as a name ("Administrator", not "administrator rights")
+            if owners[_norm(run)] == 1 and _contains(rest, run) and _written_as_is(written, run):
                 found.add(_norm(subject))
                 rest = _blank(rest, run)
     for name in request_subjects(text, identifiers):
@@ -298,6 +307,11 @@ def subjects_in(text: str, request_subjects_: list[str],
             found.add(_fragment_owner(name, request_subjects_) or _norm(name))
             rest = _blank(rest, name)
     return frozenset(found)
+
+
+def _written_as_is(text: str, run: str) -> bool:
+    """``run`` occurs in ``text`` with its own capitals, on word boundaries."""
+    return re.search(r"(?<![\w-])" + re.escape(run) + r"(?![\w-])", text) is not None
 
 
 def _fragment_owner(name: str, request_subjects_: list[str]) -> str | None:
@@ -345,19 +359,22 @@ def _invents_value(text: str, user_query: str, known: list[str]) -> bool:
     return False
 
 
-def _source_sentence(text: str, sentences: list[str], subj: frozenset[str]) -> int | None:
+def _source_sentence(text: str, sentences: list[str], subj: frozenset[str], sole: bool = False) -> int | None:
     """The request sentence ``text`` is taken from: the one holding the largest share (at least half)
-    of its content words once the subjects are blanked out of both; None when no sentence does."""
+    of its content words once the subjects are blanked out of both; None when no sentence does (or,
+    with ``sole``, when another sentence holds as large a share)."""
     words = _template(text, subj)
     if not words:
         return None
     cover = [len(words & _template(s, subj)) / len(words) for s in sentences]
     best = max(range(len(sentences)), key=lambda i: cover[i])
+    if sole and sum(c == cover[best] for c in cover) > 1:
+        return None
     return best if cover[best] >= SOURCE_COVERAGE else None
 
 
 def _restore_cut_subjects(user_query: str, texts: list[str], known: list[str],
-                          identifiers: tuple[re.Pattern, ...]) -> list[str]:
+                          identifiers: tuple[re.Pattern, ...], wrong_records_only: bool = False) -> list[str]:
     """Rule 6a: the sub-tasks taken from a job sentence carry all of that sentence's subjects.
 
     "List the logins nobody owns on NORTHFEED and on SOUTHFEED" cut to "... on NORTHFEED" loses the
@@ -367,6 +384,12 @@ def _restore_cut_subjects(user_query: str, texts: list[str], known: list[str],
     sentence verbatim and the others are dropped. Only sub-tasks made of the sentence's own words are
     replaced (one that also carries another sentence's words is left alone, as is a limit sentence),
     and a sub-task that is already the whole sentence is never touched, so nothing is duplicated.
+
+    A sub-task taken from a sentence that names none of the sentence's subjects but a record named
+    elsewhere in the request has the wrong record ("Audit Billing" made from "Audit Payroll_Admin and
+    Payroll_Clerk", Billing named in another sentence): it is the sentence verbatim when the other
+    sub-tasks taken from it leave some of its subjects out, else it is dropped. ``wrong_records_only``
+    does only this (rule 3b, before rule 3 can join such a sub-task to the one naming its record).
     """
     sentences = _sentences(user_query)
     subj = [subjects_in(t, known, identifiers) for t in texts]
@@ -380,11 +403,22 @@ def _restore_cut_subjects(user_query: str, texts: list[str], known: list[str],
         taken = [i for i, src in enumerate(sources) if src == k]
         if not own or not taken:
             continue
-        missing = own - frozenset().union(*(subj[i] for i in taken))
-        if not missing or not all(_content(texts[i]) <= _content(sentence) for i in taken):
-            continue
+        elsewhere = frozenset().union(*(subjects_in(s, known, identifiers) for j, s in enumerate(sentences) if j != k))
+        strays = [i for i in taken if subj[i] and not subj[i] & own and subj[i] <= elsewhere
+                  and _source_sentence(texts[i], sentences, subj[i], sole=True) == k]
+        kept = [i for i in taken if i not in strays]
+        missing = own - frozenset().union(*(subj[i] for i in kept))
         text = _LEADING_LINK.sub("", sentence.strip())
-        replace[taken[0]] = text[:1].upper() + text[1:]
+        text = text[:1].upper() + text[1:]
+        if strays:
+            if missing:             # the sentence takes the place of all the sub-tasks taken from it
+                replace[taken[0]] = text
+                strays = taken[1:]
+            drop |= set(strays)
+            continue
+        if wrong_records_only or not missing or not all(_content(texts[i]) <= _content(sentence) for i in taken):
+            continue
+        replace[taken[0]] = text
         drop |= set(taken[1:])
     return [replace.get(i, t) for i, t in enumerate(texts) if i not in drop]
 
@@ -397,16 +431,22 @@ def _restore_dropped(user_query: str, texts: list[str], known: list[str],
     sentence is not a job (rule 5 carries it). Only subjects of the request count. First, a sub-task
     cut from a sentence that left out some of that sentence's subjects is given the whole sentence
     back (``_restore_cut_subjects``), even when another sub-task names the subjects it left out.
+    A sentence that asks for something (``_asks``) is put back as well when its records are named only
+    by other jobs' sub-tasks (``_carried_job``): "Audit the right X across the systems it appears in"
+    is not done by "Confirm whether Ann Lee holds X".
     """
     texts = _restore_cut_subjects(user_query, texts, known, identifiers)
     named = set().union(*(subjects_in(t, known, identifiers) for t in texts))
     sentences = _sentences(user_query)
     out = list(texts)
-    for k, sentence in enumerate(sentences):
+    # last sentence first: a sentence naming the records of later ones ("the picture of X and Y") is not
+    # put back when a later sentence about them is
+    for k, sentence in reversed(list(enumerate(sentences))):
         if _is_limit(sentence):
             continue
         own = subjects_in(sentence, known, identifiers)
-        if not own or own & named:
+        if not own or (own & named and not (_asks(sentence) and not _carried_job(sentence, own, out, known,
+                                                                                   identifiers))):
             continue
         before = " ".join(sentences[:k])
         position = 0
@@ -572,6 +612,143 @@ def _is_limit(sentence: str) -> bool:
     return "?" not in s and _LIMIT_SENTENCE.match(s) is not None
 
 
+# ------------------------------------------------------------------ asks and statements (rules 3a, 6)
+#: Verbs that open a request or a clause of one ("Audit ...", ": work it through", ", so triage ...").
+_REQUEST_VERBS = frozenset("""add answer apply assess audit carry check clear close compare confirm count describe
+explain find finish flag get give go grab inspect list look make mark open pull put rank recertify remove review
+run see show start summarise summarize sweep tag take tell treat triage untag verify walk work""".split())
+#: Words that ask wherever they stand: a question, "I want", "can you", "please", "show me", "needs auditing".
+_ASK_WORDS = re.compile(
+    r"\?|\b(?:i|we)\s+(?:want|need|would\s+like|'d\s+like)\b|\b(?:can|could|would|will)\s+you\b|\bplease\b"
+    r"|\b(?:show|give|tell|send|get|let)\s+me\b|\bneeds?\s+(?:to|[a-z]+ing)\b", re.IGNORECASE)
+#: A clause opening on one of these asks for it: ": what Ann Lee can reach", ", who holds it".
+_WH = frozenset("what which who whom whose how why where when whether".split())
+_CLAUSE = re.compile(r"\s*[:;,]\s*|\s+-\s+|\s+(?:so|then|and|but)\s+", re.IGNORECASE)
+_CLAUSE_LINK = re.compile(r"^(?:(?:then|and|also|so|finally|next|separately|but|now|please|first|just)\b[\s,]*)+",
+                          re.IGNORECASE)
+#: A finite verb in a sentence's first clause makes it a statement when it asks nothing ("Ann Lee leaves
+#: on Friday.", "I am closing out Payroll."); a noun phrase ("Quarterly review of Payroll: ...") is not one.
+_FINITE = re.compile(r"\b(?:is|are|am|was|were|has|have|had|will|keeps?|leaves?|left|starts?|comes?|closes?|"
+                     r"holds?|joins?|moves?|names|asked)\b", re.IGNORECASE)
+
+
+def _asks(sentence: str) -> bool:
+    """The sentence asks for something: a question, a request phrase, or a clause opening on a request verb
+    or a question word."""
+    s = _typographic(sentence)
+    if _ASK_WORDS.search(s):
+        return True
+    for clause in _CLAUSE.split(s):
+        words = _CLAUSE_LINK.sub("", clause).split()
+        if words and (words[0].lower() in _REQUEST_VERBS or words[0].lower() in _WH):
+            return True
+    return False
+
+
+def _is_statement(sentence: str) -> bool:
+    """The sentence says something and asks nothing ("Ann Lee leaves on Friday."): context, not a job."""
+    s = _typographic(sentence)
+    return not _asks(s) and not _is_limit(s) and _FINITE.search(re.split(r"[:;,]|\s-\s", s)[0]) is not None
+
+
+def _carried_job(sentence: str, own: frozenset[str], texts: list[str], known: list[str],
+                 identifiers: tuple[re.Pattern, ...]) -> bool:
+    """Some sub-task does the sentence's job: it names a subject of the sentence and either names no record
+    of another job or holds SOURCE_COVERAGE of the sentence's words other than names. "Confirm whether Ann
+    Lee holds X" names X but is Ann Lee's job: it does not carry "Audit the right X across the systems"."""
+    words = _template(sentence, frozenset(_norm(k) for k in known))
+    for text in texts:
+        subj = subjects_in(text, known, identifiers)
+        if not subj & own:
+            continue
+        if subj <= own or not words or len(words & _content(text)) / len(words) >= SOURCE_COVERAGE:
+            return True
+    return False
+
+
+def _attach_context(user_query: str, items: list[str], known: list[str],
+                    identifiers: tuple[re.Pattern, ...]) -> list[str]:
+    """Rule 3a: a statement of the request is context for the jobs, never a job of its own.
+
+    - A sub-task that is a statement of the request ("Ann Lee's login is a standard account.") is written
+      before the sub-task after it when that one names no record or all of the statement's records.
+    - A statement naming a record no sub-task names ("I am closing out Payroll for the year.") is written
+      before the sub-tasks taken from the next sentence that has any ("Walk the whole unit: ..."), so they
+      keep the record they point back to. With none, rule 6 puts it back.
+    """
+    out: list[str] = []
+    for text in items:
+        if out and _is_statement(out[-1]) and _content(out[-1]) <= _content(user_query):
+            context = subjects_in(out[-1], known, identifiers)
+            subj = subjects_in(text, known, identifiers)
+            if not subj or context <= subj:
+                out[-1] = _join([out[-1], text])
+                continue
+        out.append(text)
+    sentences = _sentences(user_query)
+    named = set().union(*(subjects_in(t, known, identifiers) for t in out))
+    for k, sentence in enumerate(sentences):
+        own = subjects_in(sentence, known, identifiers)
+        if not own or own & named or not _is_statement(sentence):
+            continue
+        sources = [_source_sentence(t, sentences, subjects_in(t, known, identifiers)) for t in out]
+        later = sorted({s for s in sources if s is not None and s > k})
+        if not later:
+            continue
+        out = [_join([sentence, t]) if src == later[0] else t for t, src in zip(out, sources)]
+        named |= own
+    return out
+
+
+# ------------------------------------------------------------------ one job per record (rule 7)
+#: Words that ask the same thing of each record of a list: "each", "both", "every one".
+_DISTRIBUTIVE = re.compile(r"\b(?:each|both|every\s+one)\b", re.IGNORECASE)
+#: Words that point at the whole list; in a record's own sub-task they become its name.
+_EACH_OF = re.compile(r"\b(?:each|both|all)\s+of\s+(?:them|those|these)\b|\beach\s+one\b", re.IGNORECASE)
+#: What stands between two records of a list: ", ", " and ", ", and ", " and on ", "', '".
+_LIST_GAP = re.compile(r"^['\"`]?(?:\s*,\s*(?:and\s+)?|\s+and\s+)(?:on\s+|the\s+)?['\"`]?$", re.IGNORECASE)
+
+
+def _listed(text: str, known: list[str]) -> tuple[int, int, list[str]] | None:
+    """``(start, end, names)`` of the one list of two or more request subjects in ``text``, else None."""
+    spans: list[tuple[int, int, str]] = []
+    for name in known:                                   # longest first: "X and Sons Ltd" before "X"
+        for m in re.finditer(r"(?<![\w-])" + re.escape(name) + r"(?![\w-])", text, re.IGNORECASE):
+            if not any(a < m.end() and m.start() < b for a, b, _ in spans):
+                spans.append((m.start(), m.end(), m.group(0)))
+    spans.sort()
+    runs: list[list[tuple[int, int, str]]] = []
+    for span in spans:
+        if runs and _LIST_GAP.match(text[runs[-1][-1][1]:span[0]]):
+            runs[-1].append(span)
+        else:
+            runs.append([span])
+    lists = [r for r in runs if len(r) > 1]
+    if len(lists) != 1:
+        return None
+    return lists[0][0][0], lists[0][-1][1], [name for _, _, name in lists[0]]
+
+
+def _one_per_record(texts: list[str], known: list[str]) -> list[str]:
+    """Rule 7: a sub-task asking the same thing of each record of a list is one sub-task per record.
+
+    "Audit Payroll_Admin and Payroll_Clerk wherever they appear, each with its feed" becomes "Audit
+    Payroll_Admin wherever they appear, each with its feed" and the same for Payroll_Clerk: the list is
+    replaced by one record's name, and "each of them" by that name too. Only a sub-task with one such
+    list and a word that distributes ("each", "both", "every one") is cut, and never a comparison.
+    """
+    out: list[str] = []
+    for text in texts:
+        t = _typographic(text)
+        found = _listed(t, known) if _DISTRIBUTIVE.search(t) and not _COMPARES.search(t) else None
+        if found is None:
+            out.append(text)
+            continue
+        start, end, names = found
+        out += [_EACH_OF.sub(name, t[:start] + name + t[end:]) for name in names]
+    return out
+
+
 def _carried(text: str, limit: str) -> bool:
     words = _content(limit)
     return bool(words) and words <= _content(text)
@@ -676,6 +853,10 @@ def merge_subtasks(user_query: str, subtasks: list[str],
     items = _drop_contained(items, known, identifiers)
     if len(items) < 2:
         return [user_query]
+    # rule 3a: a statement is context for the jobs, not a job
+    items = _attach_context(user_query, items, known, identifiers)
+    # rule 3b: a sub-task that put another sentence's record into a sentence's job is not a job
+    items = _restore_cut_subjects(user_query, items, known, identifiers, wrong_records_only=True)
 
     # rule 3: no new subject, no new sub-task (a name extending one of the group's names, with a
     # back-reference, is no new subject either; nor is part of the group's subjects checking a change)
@@ -723,6 +904,8 @@ def merge_subtasks(user_query: str, subtasks: list[str],
         return [user_query]
     # rule 6: a job sentence of the request whose record no sub-task names is put back
     texts = _restore_dropped(user_query, [t for t, _ in out], known, identifiers)
+    # rule 7: the same thing asked of each record of a list is one sub-task per record
+    texts = _one_per_record(texts, known)
     # rule 5: limits on the whole request travel with every sub-task they apply to
     return _carry_limits(user_query, texts, known, identifiers)
 
